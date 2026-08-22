@@ -1,7 +1,7 @@
 import { describe, expect, test } from "@rstest/core";
 
 import {
-  findAdminModelProviderAdapterDescriptor,
+  consumeAdminModelEditorSubmission,
   selectAdminModelCatalogItems,
 } from "@/components/admin/settings/admin-model-settings-page";
 import {
@@ -43,16 +43,10 @@ const catalog: AdminModelCatalog = {
 };
 
 describe("admin model settings domain-owned API Key", () => {
-  test("catalog filtering and adapter lookup use stable model configs", () => {
-    expect(selectAdminModelCatalogItems(catalog.items, "flash", "active")).toEqual(
-      catalog.items,
-    );
+  test("catalog filtering uses stable model configs", () => {
     expect(
-      findAdminModelProviderAdapterDescriptor(
-        catalog.provider_adapters,
-        "deepseek",
-      )?.api_key_required,
-    ).toBe(true);
+      selectAdminModelCatalogItems(catalog.items, "flash", "active"),
+    ).toEqual(catalog.items);
   });
 
   test("catalog responses expose status only and reject plaintext", () => {
@@ -83,6 +77,13 @@ describe("admin model settings domain-owned API Key", () => {
       }).success,
     ).toBe(true);
     expect(
+      createAdminModelInputSchema.safeParse({
+        ...common,
+        status: "active",
+        api_key: null,
+      }).success,
+    ).toBe(true);
+    expect(
       testAdminModelConnectionInputSchema.safeParse({
         provider_adapter: common.provider_adapter,
         provider_model: common.provider_model,
@@ -91,5 +92,23 @@ describe("admin model settings domain-owned API Key", () => {
         api_key: "",
       }).success,
     ).toBe(false);
+  });
+
+  test("local settings validation clears the write-only API Key first", () => {
+    const form = new FormData();
+    form.set("settings", "{invalid-json");
+    let cleared = false;
+
+    expect(() =>
+      consumeAdminModelEditorSubmission(
+        form,
+        "deepseek",
+        "temporary-key",
+        () => {
+          cleared = true;
+        },
+      ),
+    ).toThrow("Provider settings 必须是 JSON 对象。");
+    expect(cleared).toBe(true);
   });
 });

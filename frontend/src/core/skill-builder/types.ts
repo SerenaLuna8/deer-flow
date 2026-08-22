@@ -442,6 +442,7 @@ export const skillBuilderBaseFileSchema = z
 export const skillBuilderSecretRequirementSchema = z
   .object({
     name: z.string().trim().min(1),
+    target_env: z.string().trim().min(1),
     optional: z.boolean(),
   })
   .strict();

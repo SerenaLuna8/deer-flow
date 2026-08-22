@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { useImperativeRequest } from "@/core/api/use-imperative-request";
 import { modelsQueryKey } from "@/core/models/hooks";
 
 import {
@@ -58,33 +59,33 @@ async function invalidateModelCatalogs(
 export function useCreateAdminModel(accountId: string) {
   const parsed = adminModelAccountIdSchema.parse(accountId);
   const queryClient = useQueryClient();
-  return useMutation({
-    mutationKey: adminModelMutationKey(parsed, "create"),
-    mutationFn: (input: CreateAdminModelInput) =>
-      runAbortableAdminModelMutation(parsed, (signal) =>
-        createAdminModel(parsed, input, signal),
-      ),
-    onSuccess: () => invalidateModelCatalogs(queryClient, parsed),
+  return useImperativeRequest(async (input: CreateAdminModelInput) => {
+    const result = await runAbortableAdminModelMutation(parsed, (signal) =>
+      createAdminModel(parsed, input, signal),
+    );
+    await invalidateModelCatalogs(queryClient, parsed);
+    return result;
   });
 }
 
 export function useReplaceAdminModel(accountId: string) {
   const parsed = adminModelAccountIdSchema.parse(accountId);
   const queryClient = useQueryClient();
-  return useMutation({
-    mutationKey: adminModelMutationKey(parsed, "replace"),
-    mutationFn: ({
+  return useImperativeRequest(
+    async ({
       modelId,
       input,
     }: {
       modelId: string;
       input: ReplaceAdminModelInput;
-    }) =>
-      runAbortableAdminModelMutation(parsed, (signal) =>
+    }) => {
+      const result = await runAbortableAdminModelMutation(parsed, (signal) =>
         replaceAdminModel(parsed, modelId, input, signal),
-      ),
-    onSuccess: () => invalidateModelCatalogs(queryClient, parsed),
-  });
+      );
+      await invalidateModelCatalogs(queryClient, parsed);
+      return result;
+    },
+  );
 }
 
 export function useClearAdminModelApiKey(accountId: string) {
@@ -102,13 +103,11 @@ export function useClearAdminModelApiKey(accountId: string) {
 
 export function useTestAdminModelConnection(accountId: string) {
   const parsed = adminModelAccountIdSchema.parse(accountId);
-  return useMutation({
-    mutationKey: adminModelMutationKey(parsed, "test_connection"),
-    mutationFn: (input: TestAdminModelConnectionInput) =>
-      runAbortableAdminModelMutation(parsed, (signal) =>
-        testAdminModelConnection(parsed, input, signal),
-      ),
-  });
+  return useImperativeRequest((input: TestAdminModelConnectionInput) =>
+    runAbortableAdminModelMutation(parsed, (signal) =>
+      testAdminModelConnection(parsed, input, signal),
+    ),
+  );
 }
 
 export function useSetAdminModelStatus(accountId: string) {

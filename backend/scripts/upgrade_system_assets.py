@@ -12,6 +12,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.audit.service import AuditService, _bind_operator_audit_process
+from app.reliability.owner_refs import (
+    AuditHmacKeyring,
+    AuditHmacKeyringInvalid,
+)
+from app.shared_assets.audit import DurableSharedAssetGovernanceEventSink
 from app.shared_assets.bootstrap import (
     BootstrapCatalogError,
     BootstrapConflict,
@@ -28,6 +34,20 @@ from deerflow.persistence.bootstrap import (
 
 class SystemAssetUpgradeError(RuntimeError):
     """A credential-safe packaged System Asset upgrade failure."""
+
+
+def _operator_audit_authority(session_factory):
+    try:
+        service = AuditService(
+            session_factory,
+            AuditHmacKeyring.from_environment(),
+        )
+    except AuditHmacKeyringInvalid:
+        raise SystemAssetUpgradeError("审计密钥配置无效；未应用任何 System Asset 变更") from None
+    return (
+        DurableSharedAssetGovernanceEventSink(service),
+        _bind_operator_audit_process(service),
+    )
 
 
 async def upgrade_system_assets(database_url: str) -> BootstrapResult:
@@ -81,11 +101,15 @@ async def upgrade_system_assets(database_url: str) -> BootstrapResult:
                     raise SystemAssetUpgradeError("目标库 schema 状态不受支持；未应用任何 System Asset 变更")
 
                 try:
+                    session_factory = async_sessionmaker(
+                        mutation_engine,
+                        expire_on_commit=False,
+                    )
+                    governance_sink, process_context = _operator_audit_authority(session_factory)
                     return await bootstrap_system_assets(
-                        async_sessionmaker(
-                            mutation_engine,
-                            expire_on_commit=False,
-                        )
+                        session_factory,
+                        governance_sink=governance_sink,
+                        process_context=process_context,
                     )
                 except BootstrapConflict:
                     raise SystemAssetUpgradeError("现有 System Asset 与打包定义冲突；未应用任何变更") from None

@@ -122,7 +122,9 @@ describe("Project Skill creation paths", () => {
   test("guides only imported Skills with declared secrets to secret setup", () => {
     expect(
       projectSkillImportNeedsSecretSetup({
-        secret_requirements: [{ name: "API_KEY", optional: false }],
+        secret_requirements: [
+          { name: "provider_key", target_env: "API_KEY", optional: false },
+        ],
       }),
     ).toBe(true);
     expect(

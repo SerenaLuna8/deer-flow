@@ -22,15 +22,20 @@ class SkillCategory(StrEnum):
 
 @dataclass(frozen=True)
 class SecretRequirement:
-    """A request-scoped secret a skill declares it needs (issue #3861).
+    """One logical Skill secret and its exact Sandbox environment target.
 
-    ``name`` is both the key looked up in the Skill-scoped internal secret
-    carrier (or the legacy flat ``context.secrets`` carrier) and the environment
-    variable name injected into the Skill's sandbox subprocess when activated.
+    ``name`` selects the Project-owned value. ``target_env`` is the only child
+    process environment variable that may receive it. Historical shorthand
+    declarations default the target to the logical name.
     """
 
     name: str
     optional: bool = False
+    target_env: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.target_env is None:
+            object.__setattr__(self, "target_env", self.name)
 
 
 @dataclass(frozen=True)

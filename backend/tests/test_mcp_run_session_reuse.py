@@ -504,7 +504,11 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
     from app.private_work.run_repository import PrivateRunCreate
     from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
     from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+    from app.shared_assets.mcp_secret_closure import lock_mcp_secret_closure
     from app.shared_assets.mcp_service import McpDefinition, McpService
+    from app.shared_assets.mcp_tool_inventory_repository import (
+        McpToolInventoryRepository,
+    )
     from app.shared_assets.models import AgentPayload
     from app.shared_assets.resolver import ProjectAssetResolver
     from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
@@ -687,6 +691,22 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
             await session.execute(
                 text("UPDATE agents SET current_version_id=:version_id WHERE id=:agent_id"),
                 {"version_id": agent_version_id, "agent_id": agent_id},
+            )
+            closure = await lock_mcp_secret_closure(
+                session,
+                project_id=seed.owner_a.project_id,
+                mcp_server_id=mcp_id,
+                mcp_server_version_id=mcp_version_id,
+                slots=(),
+                request_id=seed.owner_a.request_id,
+            )
+            await McpToolInventoryRepository(session).record_success(
+                project_id=seed.owner_a.project_id,
+                mcp_server_id=mcp_id,
+                mcp_server_version_id=mcp_version_id,
+                payload_checksum=mcp_checksum,
+                secret_digest=closure.digest,
+                tools=({"name": "echo", "description": ""},),
             )
 
         original_is_active = PrivateRunAuthorizationService.is_active

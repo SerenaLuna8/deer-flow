@@ -139,7 +139,13 @@ async def test_parse_route_returns_strict_projection_and_no_store_headers() -> N
         "valid": True,
         "patchable": True,
         "projection": {
-            "required_secrets": [{"name": "API_KEY", "optional": False}],
+            "required_secrets": [
+                {
+                    "name": "API_KEY",
+                    "target_env": "API_KEY",
+                    "optional": False,
+                }
+            ],
             "secrets_autonomous": False,
             "secrets_autonomous_explicit": True,
             "shorthand_count": 0,
@@ -151,7 +157,7 @@ async def test_parse_route_returns_strict_projection_and_no_store_headers() -> N
 
 
 @pytest.mark.asyncio
-async def test_patch_route_forwards_only_secret_names_and_returns_new_content() -> None:
+async def test_patch_route_forwards_secret_name_and_exact_target() -> None:
     service = _RecordingService([])
     content = "---\nname: route\ndescription: Route\n---\n"
     async with httpx.AsyncClient(
@@ -163,7 +169,13 @@ async def test_patch_route_forwards_only_secret_names_and_returns_new_content() 
             json={
                 "content": content,
                 "source_sha256": _sha(content),
-                "required_secrets": [{"name": "API_KEY", "optional": False}],
+                "required_secrets": [
+                    {
+                        "name": "provider_key",
+                        "target_env": "API_KEY",
+                        "optional": False,
+                    }
+                ],
                 "secrets_autonomous": False,
             },
         )
@@ -172,7 +184,13 @@ async def test_patch_route_forwards_only_secret_names_and_returns_new_content() 
     payload = response.json()
     assert payload["source_sha256"] == _sha(content)
     assert payload["result_sha256"] == _sha(payload["content"])
-    assert payload["projection"]["required_secrets"] == [{"name": "API_KEY", "optional": False}]
+    assert payload["projection"]["required_secrets"] == [
+        {
+            "name": "provider_key",
+            "target_env": "API_KEY",
+            "optional": False,
+        }
+    ]
     assert "secret_value" not in response.text
 
 

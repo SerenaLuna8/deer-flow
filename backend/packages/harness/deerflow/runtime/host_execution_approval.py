@@ -43,15 +43,17 @@ HostExecutionChannelIdentityMode = Literal["absent", "unset", "set"]
 class HostExecutionSkillSecretSource:
     """Secret-free identity of one Skill activation source.
 
-    The path and complete declared-name set select an exact admitted Skill in
-    the private Run. ``explicit`` preserves slash-activation precedence when
-    multiple active Skills declare the same environment name. Secret values
-    and Secret Generation identifiers never enter this frozen plan.
+    The path and complete logical-name/target-environment mapping select an
+    exact admitted Skill in the private Run. ``explicit`` preserves
+    slash-activation precedence when multiple active Skills declare the same
+    target environment name. Secret values and Secret Generation identifiers
+    never enter this frozen plan.
     """
 
     skill_path: str
     secret_names: tuple[str, ...]
     explicit: bool
+    target_envs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.skill_path, str) or not self.skill_path or not posixpath.isabs(self.skill_path) or posixpath.normpath(self.skill_path) != self.skill_path:
@@ -60,36 +62,59 @@ class HostExecutionSkillSecretSource:
             raise ValueError(
                 "skill secret source names must be non-empty, unique, and sorted",
             )
+        if not self.target_envs:
+            object.__setattr__(self, "target_envs", self.secret_names)
+        if len(self.target_envs) != len(self.secret_names) or any(not isinstance(target_env, str) or not target_env for target_env in self.target_envs) or len(set(self.target_envs)) != len(self.target_envs):
+            raise ValueError(
+                "skill secret source targets must align with names and be unique",
+            )
         if type(self.explicit) is not bool:
             raise ValueError("skill secret source explicit flag must be a boolean")
 
-    def to_payload(self) -> dict[str, object]:
-        return {
+    @property
+    def secret_bindings(self) -> tuple[tuple[str, str], ...]:
+        return tuple(zip(self.secret_names, self.target_envs, strict=True))
+
+    def to_payload(self, *, schema_version: int = 4) -> dict[str, object]:
+        payload: dict[str, object] = {
             "skill_path": self.skill_path,
             "secret_names": list(self.secret_names),
             "explicit": self.explicit,
         }
+        if schema_version >= 4:
+            payload["target_envs"] = list(self.target_envs)
+        return payload
 
     @classmethod
-    def from_payload(cls, payload: object) -> HostExecutionSkillSecretSource:
-        if not isinstance(payload, dict) or set(payload) != {
+    def from_payload(
+        cls,
+        payload: object,
+        *,
+        schema_version: int,
+    ) -> HostExecutionSkillSecretSource:
+        expected = {
             "skill_path",
             "secret_names",
             "explicit",
-        }:
+        }
+        if schema_version >= 4:
+            expected.add("target_envs")
+        if not isinstance(payload, dict) or set(payload) != expected:
             raise ValueError("invalid frozen skill secret source")
         names = payload.get("secret_names")
-        if not isinstance(names, list):
+        target_envs = payload.get("target_envs", names)
+        if not isinstance(names, list) or not isinstance(target_envs, list):
             raise ValueError("invalid frozen skill secret source")
         return cls(
             skill_path=payload.get("skill_path"),
             secret_names=tuple(names),
             explicit=payload.get("explicit"),
+            target_envs=tuple(target_envs),
         )
 
     @property
-    def sort_key(self) -> tuple[str, bool, tuple[str, ...]]:
-        return (self.skill_path, self.explicit, self.secret_names)
+    def sort_key(self) -> tuple[str, bool, tuple[tuple[str, str], ...]]:
+        return (self.skill_path, self.explicit, self.secret_bindings)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -111,7 +136,7 @@ class HostExecutionPlan:
     agent_path: tuple[str, ...] = ("lead",)
     channel_identity_mode: HostExecutionChannelIdentityMode = "absent"
     channel_user_id: str | None = None
-    schema_version: int = field(default=3, init=False)
+    schema_version: int = field(default=4, init=False)
     kind: Literal["local_shell"] = field(default="local_shell", init=False)
 
     def __post_init__(self) -> None:
@@ -194,7 +219,7 @@ class HostExecutionPlan:
             "channel_user_id": self.channel_user_id,
         }
         if self.schema_version >= 3:
-            payload["skill_secret_sources"] = [source.to_payload() for source in self.skill_secret_sources]
+            payload["skill_secret_sources"] = [source.to_payload(schema_version=self.schema_version) for source in self.skill_secret_sources]
             payload["legacy_environment_keys"] = list(
                 self.legacy_environment_keys,
             )
@@ -218,7 +243,7 @@ class HostExecutionPlan:
             "channel_user_id": self.channel_user_id,
         }
         if self.schema_version >= 3:
-            payload["skill_secret_sources"] = [source.to_payload() for source in self.skill_secret_sources]
+            payload["skill_secret_sources"] = [source.to_payload(schema_version=self.schema_version) for source in self.skill_secret_sources]
             payload["legacy_environment_keys"] = list(
                 self.legacy_environment_keys,
             )
@@ -256,7 +281,7 @@ class HostExecutionPlan:
         if not isinstance(payload, dict):
             raise ValueError("invalid frozen host execution payload")
         schema_version = payload.get("schema_version")
-        if (schema_version == 2 and set(payload) != v2_keys) or (schema_version == 3 and set(payload) != v3_keys) or schema_version not in {2, 3}:
+        if (schema_version == 2 and set(payload) != v2_keys) or (schema_version in {3, 4} and set(payload) != v3_keys) or schema_version not in {2, 3, 4}:
             raise ValueError("invalid frozen host execution payload")
         if payload.get("kind") != "local_bash":
             raise ValueError("unsupported frozen host execution payload")
@@ -266,7 +291,7 @@ class HostExecutionPlan:
             raise ValueError("invalid frozen host execution payload")
         skill_secret_sources: tuple[HostExecutionSkillSecretSource, ...] = ()
         legacy_environment_keys: tuple[str, ...] = ()
-        if schema_version == 3:
+        if schema_version in {3, 4}:
             raw_sources = payload.get("skill_secret_sources")
             raw_legacy_keys = payload.get("legacy_environment_keys")
             if not isinstance(raw_sources, list) or not isinstance(
@@ -274,7 +299,13 @@ class HostExecutionPlan:
                 list,
             ):
                 raise ValueError("invalid frozen host execution payload")
-            skill_secret_sources = tuple(HostExecutionSkillSecretSource.from_payload(source) for source in raw_sources)
+            skill_secret_sources = tuple(
+                HostExecutionSkillSecretSource.from_payload(
+                    source,
+                    schema_version=schema_version,
+                )
+                for source in raw_sources
+            )
             legacy_environment_keys = tuple(raw_legacy_keys)
         plan = cls(
             source_tool_call_id=source_tool_call_id,
@@ -293,8 +324,8 @@ class HostExecutionPlan:
             channel_identity_mode=payload.get("channel_identity_mode"),
             channel_user_id=payload.get("channel_user_id"),
         )
-        if schema_version == 2:
-            object.__setattr__(plan, "schema_version", 2)
+        if schema_version != 4:
+            object.__setattr__(plan, "schema_version", schema_version)
         return plan
 
     @property
@@ -310,13 +341,15 @@ class HostExecutionPlan:
         they lack an exact Skill source closure.
         """
 
-        if isinstance(schema_version, bool) or schema_version not in {2, 3}:
+        if isinstance(schema_version, bool) or schema_version not in {2, 3, 4}:
             raise ValueError("unsupported host execution schema version")
         payload = self.execution_payload()
         payload["schema_version"] = schema_version
         if schema_version == 2:
             payload.pop("skill_secret_sources", None)
             payload.pop("legacy_environment_keys", None)
+        elif schema_version == 3:
+            payload["skill_secret_sources"] = [source.to_payload(schema_version=3) for source in self.skill_secret_sources]
         encoded = json.dumps(
             payload,
             ensure_ascii=False,

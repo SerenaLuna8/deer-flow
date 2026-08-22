@@ -313,6 +313,12 @@ async def _prepare_clock_scenario(
         ),
     )
     async with seed.factory() as session, session.begin():
+        source_job = await session.get(JobRow, source.job.job_id)
+        assert source_job is not None
+        # The PostgreSQL core gate intentionally reuses one database across
+        # files. Make this scenario's newly admitted Job outrank unrelated
+        # queued fixtures so it exercises the exact approval clock under test.
+        source_job.priority = 32_767
         jobs = JobRepository(session)
         claim = await jobs.claim_next(
             worker_id=worker_id,

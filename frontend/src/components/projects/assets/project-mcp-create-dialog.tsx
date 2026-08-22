@@ -63,7 +63,7 @@ export function ProjectMcpCreateDialog({
       if (submission.secret) {
         setSavingSecret(true);
         try {
-          await replaceSecret.mutateAsync({
+          await replaceSecret.execute({
             assetId: result.item.id,
             versionId: result.version.id,
             slotName: submission.secret.slotName,

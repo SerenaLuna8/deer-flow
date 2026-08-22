@@ -351,6 +351,7 @@ class SkillDesignBaseFile:
 @dataclass(frozen=True, slots=True)
 class SkillDesignSecretRequirement:
     name: str
+    target_env: str
     optional: bool
 
 
@@ -4327,6 +4328,7 @@ class SkillDesignService:
             secret_requirements=tuple(
                 SkillDesignSecretRequirement(
                     name=item.name,
+                    target_env=item.target_env,
                     optional=item.optional,
                 )
                 for item in preview.secret_requirements
@@ -4357,7 +4359,14 @@ class SkillDesignService:
             "description": validation.description,
             "frontmatter": dict(validation.frontmatter),
             "compatibility": validation.compatibility,
-            "secret_requirements": [{"name": item.name, "optional": item.optional} for item in validation.secret_requirements],
+            "secret_requirements": [
+                {
+                    "name": item.name,
+                    "target_env": item.target_env,
+                    "optional": item.optional,
+                }
+                for item in validation.secret_requirements
+            ],
             "scan_decision": validation.scan_decision,
             "scan_rule_ids": list(validation.scan_rule_ids),
             "scan_summary": dict(validation.scan_summary),
@@ -4398,11 +4407,12 @@ class SkillDesignService:
             raise AssetValidationFailed(context.request_id)
         parsed_requirements: list[SkillDesignSecretRequirement] = []
         for item in requirements:
-            if not isinstance(item, dict) or not isinstance(item.get("name"), str) or type(item.get("optional")) is not bool:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not isinstance(item.get("target_env"), str) or type(item.get("optional")) is not bool:
                 raise AssetValidationFailed(context.request_id)
             parsed_requirements.append(
                 SkillDesignSecretRequirement(
                     name=item["name"],
+                    target_env=item["target_env"],
                     optional=item["optional"],
                 )
             )

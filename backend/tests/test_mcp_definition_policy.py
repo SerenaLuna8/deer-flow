@@ -536,3 +536,21 @@ def test_system_packaged_definition_read_remains_legacy_compatible() -> None:
 
     assert definition.transport == "stdio"
     assert definition.env == {"NODE_ENV": "production"}
+
+
+def test_system_stdio_mcp_definition_rejects_worker_environment_expansion() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = SystemAssetGovernanceContext(
+        user_id=uuid.uuid4(),
+        request_id="req-system-mcp-host-env",
+    )
+
+    with pytest.raises(AssetValidationFailed):
+        service_module.McpService._validate_definition(
+            actor,
+            service_module.McpDefinition(
+                transport="stdio",
+                command="mcp",
+                env={"API_KEY": "${ACT_WEAVE_SECRET_KEY}"},
+            ),
+        )

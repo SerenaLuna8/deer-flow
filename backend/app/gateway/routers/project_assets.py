@@ -576,11 +576,13 @@ class AgentVersionItemResponse(_StrictModel):
 
 class SkillSecretRequirementResponse(_StrictModel):
     name: str
+    target_env: str
     optional: bool
 
 
 class SkillSecretStatusResponse(_StrictModel):
     name: str
+    target_env: str
     optional: bool
     configured: bool
     revision: int = Field(ge=0)
@@ -597,6 +599,7 @@ class SkillSecretSetResponse(_StrictModel):
 
 class SkillSecretReadinessRequirementResponse(_StrictModel):
     name: str
+    target_env: str
     optional: bool
     configured: bool
 

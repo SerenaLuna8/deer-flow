@@ -16,6 +16,7 @@ from app.system_settings.models import (
 from app.system_settings.secrets import model_secret_recipient
 from app.system_settings.validation import (
     ModelSettingsInvalid,
+    materialize_effective_model_settings,
     provider_api_key_required,
     provider_class_path,
     validate_materialized_model_settings,
@@ -106,8 +107,11 @@ class SystemModelExecutionAdapter:
                 or type(supports_vision) is not bool
             ):
                 raise ValueError
-            settings = validate_materialized_model_settings(
-                settings_value,
+            settings = materialize_effective_model_settings(
+                validate_materialized_model_settings(
+                    settings_value,
+                    provider_adapter=provider_adapter,
+                ),
                 provider_adapter=provider_adapter,
             )
             api_key_required = provider_api_key_required(provider_adapter)
@@ -176,8 +180,11 @@ class SystemModelExecutionAdapter:
             if not isinstance(material, ConnectionTestSystemModelMaterial):
                 raise ValueError
             command = material.command
-            settings = validate_model_settings(
-                command.settings,
+            settings = materialize_effective_model_settings(
+                validate_model_settings(
+                    command.settings,
+                    provider_adapter=command.provider_adapter,
+                ),
                 provider_adapter=command.provider_adapter,
             )
             kwargs: dict[str, object] = {

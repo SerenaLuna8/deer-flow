@@ -134,7 +134,6 @@ class ProjectChannelSecretMaterializer:
                     instance.provider,
                     public_config=instance.public_config,
                     secrets=secrets,
-                    has_existing_secret=False,
                     request_id="channel-runtime",
                 )
             except ChannelInstanceValidationFailed:

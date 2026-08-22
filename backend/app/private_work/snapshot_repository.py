@@ -57,6 +57,9 @@ from app.shared_assets.mcp_secret_closure import (
     McpSecretClosure,
     lock_mcp_secret_closure,
 )
+from app.shared_assets.mcp_tool_inventory_repository import (
+    McpToolInventoryRepository,
+)
 from app.shared_assets.models import (
     AssetKind,
     AssetScope,
@@ -709,6 +712,39 @@ class RunSnapshotRepository:
             ):
                 raise RunSnapshotAssetStale from None
 
+    @staticmethod
+    async def _validate_mcp_discovery_readiness(
+        session: AsyncSession,
+        mcps: list[tuple[McpServerRow, McpServerVersionRow]],
+        closures: Mapping[uuid.UUID, McpSecretClosure],
+        *,
+        project_id: uuid.UUID,
+    ) -> None:
+        """Require discovery for the exact admitted Version and secret closure."""
+
+        inventory = McpToolInventoryRepository(session)
+        for asset, version in mcps:
+            version_id = uuid.UUID(str(version.id))
+            try:
+                record = await inventory.get(
+                    project_id=project_id,
+                    mcp_server_id=uuid.UUID(str(asset.id)),
+                    mcp_server_version_id=version_id,
+                )
+                closure = closures[version_id]
+            except (KeyError, TypeError, ValueError):
+                raise RunSnapshotAssetStale from None
+            if (
+                record is None
+                or record.attempt_status != "ready"
+                or record.attempt_payload_checksum != version.payload_checksum
+                or record.attempt_secret_digest != closure.digest
+                or record.tools_payload_checksum != version.payload_checksum
+                or record.tools_secret_digest != closure.digest
+                or record.last_success_at is None
+            ):
+                raise RunSnapshotAssetStale
+
     async def create_run_with_snapshot(
         self,
         context: PrivateWorkContext,
@@ -1298,6 +1334,12 @@ class RunSnapshotRepository:
             closures,
             endpoint_policy=self._endpoint_policy,
         )
+        await self._validate_mcp_discovery_readiness(
+            session,
+            mcps,
+            closures,
+            project_id=context.project_id,
+        )
         return skills, mcps, closures, skill_secret_closures
 
     async def validate_agent_closure_in_session(
@@ -1362,6 +1404,12 @@ class RunSnapshotRepository:
             mcps,
             closures,
             endpoint_policy=self._endpoint_policy,
+        )
+        await self._validate_mcp_discovery_readiness(
+            session,
+            mcps,
+            closures,
+            project_id=context.project_id,
         )
         return skills, mcps, closures, skill_secret_closures
 

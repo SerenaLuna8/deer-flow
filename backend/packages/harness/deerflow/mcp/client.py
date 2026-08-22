@@ -1,11 +1,43 @@
 """MCP client using langchain-mcp-adapters."""
 
 import logging
+import sys
 from typing import Any
 
 from deerflow.mcp.config import ExtensionsConfig, McpServerConfig
 
 logger = logging.getLogger(__name__)
+
+_HOST_ENV_REFERENCE_PREFIX = "${"
+_POSIX_STDIO_ENV = {
+    "HOME": "/tmp",
+    "LOGNAME": "actweave-mcp",
+    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    "SHELL": "/bin/sh",
+    "TERM": "dumb",
+    "USER": "actweave-mcp",
+}
+_WINDOWS_STDIO_ENV = {
+    "APPDATA": r"C:\Windows\Temp",
+    "HOMEDRIVE": "C:",
+    "HOMEPATH": r"\Windows\Temp",
+    "LOCALAPPDATA": r"C:\Windows\Temp",
+    "PATH": r"C:\Windows\System32;C:\Windows",
+    "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+    "PROCESSOR_ARCHITECTURE": "",
+    "SYSTEMDRIVE": "C:",
+    "SYSTEMROOT": r"C:\Windows",
+    "TEMP": r"C:\Windows\Temp",
+    "USERNAME": "actweave-mcp",
+    "USERPROFILE": r"C:\Windows\Temp",
+}
+
+
+def _isolated_stdio_environment(values: dict[str, str]) -> dict[str, str]:
+    if any(_HOST_ENV_REFERENCE_PREFIX in value for value in values.values()):
+        raise ValueError("stdio MCP environment cannot reference Worker host variables")
+    base = _WINDOWS_STDIO_ENV if sys.platform == "win32" else _POSIX_STDIO_ENV
+    return {**base, **values}
 
 
 def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, Any]:
@@ -26,9 +58,12 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
             raise ValueError(f"MCP server '{server_name}' with stdio transport requires 'command' field")
         params["command"] = config.command
         params["args"] = config.args
-        # Add environment variables if present
-        if config.env:
-            params["env"] = config.env
+        # The MCP SDK otherwise inherits a host allowlist (including HOME and
+        # PATH), while langchain-mcp-adapters expands `${VAR}` from the Worker
+        # process.  Always provide a complete, fixed child environment and
+        # reject expansion syntax so only the admitted definition plus its
+        # execution-boundary secret injection can reach the child process.
+        params["env"] = _isolated_stdio_environment(config.env)
     elif transport_type in ("sse", "http"):
         if not config.url:
             raise ValueError(f"MCP server '{server_name}' with {transport_type} transport requires 'url' field")

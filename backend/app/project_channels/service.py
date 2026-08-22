@@ -265,9 +265,18 @@ class ProjectChannelInstanceService:
                 provider,
                 public_config=command.public_config,
                 secrets=command.secrets,
-                has_existing_secret=(secret_status is not None and secret_status.configured),
                 request_id=context.request_id,
             )
+            will_have_secret = normalized.secret_payload is not None or (secret_status is not None and secret_status.configured)
+            if will_have_secret:
+                desired_enabled = command.enabled
+            elif instance is None:
+                desired_enabled = False
+            else:
+                # Configure never adds special side effects for a missing
+                # secret.  Preserve the persisted intent after an explicit
+                # clear; set_enabled remains the sole enable/disable action.
+                desired_enabled = instance.desired_status == "enabled"
             digest = self._identity_digest(
                 context,
                 spec,
@@ -289,7 +298,7 @@ class ProjectChannelInstanceService:
                     public_config=normalized.public_config,
                     provider_identity_digest=digest,
                     actor_user_id=str(context.user_id),
-                    desired_status=("enabled" if command.enabled else "disabled"),
+                    desired_status=("enabled" if desired_enabled else "disabled"),
                 )
             else:
                 instance = await self._repository.update_instance(
@@ -301,7 +310,7 @@ class ProjectChannelInstanceService:
                     display_name=display_name,
                     public_config=normalized.public_config,
                     provider_identity_digest=digest,
-                    desired_status=("enabled" if command.enabled else "disabled"),
+                    desired_status=("enabled" if desired_enabled else "disabled"),
                 )
             if identity_changed:
                 await self._freeze_connections(session, instance.id)
@@ -312,6 +321,7 @@ class ProjectChannelInstanceService:
                     context,
                     instance=instance,
                     payload=normalized.secret_payload,
+                    reason=("recipient_change" if identity_changed else "replace"),
                 )
                 await self._record_secret_event(
                     session,
@@ -321,7 +331,7 @@ class ProjectChannelInstanceService:
                     generation_id=secret_status.generation_id,
                     revision=secret_status.revision,
                     result="configured",
-                    reason="replaced" if had_secret else "created",
+                    reason=("recipient_changed" if had_secret and identity_changed else "replaced" if had_secret else "created"),
                 )
             elif secret_status is None:
                 secret_status = await secrets.status(
@@ -331,7 +341,7 @@ class ProjectChannelInstanceService:
             await self._repository.set_observed_status(
                 session,
                 channel_instance_id=instance.id,
-                observed_status=("starting" if command.enabled else "stopped"),
+                observed_status=("starting" if desired_enabled else "stopped"),
                 last_error_code=None,
                 expected_revision=instance.revision,
             )
@@ -581,7 +591,7 @@ class ProjectChannelInstanceService:
             display_name=row.display_name,
             status=status_value,
             enabled=enabled,
-            configured=secret_status.configured,
+            configured=True,
             secret_configured=secret_status.configured,
             secret_readiness=("ready" if secret_status.configured else "unready"),
             secret_revision=secret_status.revision,

@@ -255,11 +255,12 @@ class SkillSecretStore:
         source_requirements: Sequence[tuple[str, bool]],
         target_version_id: uuid.UUID,
         target_requirements: Sequence[tuple[str, bool]],
+        compatible_names: frozenset[str],
         actor_user_id: str,
         request_id: str,
     ) -> tuple[ProjectSkillSecretStateRow, ...]:
         source_by_name = dict(source_requirements)
-        compatible = tuple((name, optional) for name, optional in target_requirements if source_by_name.get(name) is optional)
+        compatible = tuple((name, optional) for name, optional in target_requirements if name in compatible_names and source_by_name.get(name) is optional)
         if not compatible:
             return ()
         source = await self.load_materials(

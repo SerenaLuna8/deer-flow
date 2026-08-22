@@ -31,11 +31,9 @@ class ToolGroupCatalog(Protocol):
 class ActiveModelCatalog(Protocol):
     """Subset of ``SystemModelRepository`` needed by Agent governance."""
 
-    async def resolve_active_model(
+    async def resolve_admissible_active_model(
         self,
         model_ref: str | None,
-        *,
-        load_envelope: bool,
     ) -> object | None: ...
 
 
@@ -128,9 +126,8 @@ class AgentCatalogValidator:
 
         model_catalog = self.model_catalog_factory(session)
         try:
-            material = await model_catalog.resolve_active_model(
+            material = await model_catalog.resolve_admissible_active_model(
                 model_ref,
-                load_envelope=False,
             )
         except SystemModelRepositoryInvariant:
             raise AssetStorageUnavailable(safe_request_id) from None

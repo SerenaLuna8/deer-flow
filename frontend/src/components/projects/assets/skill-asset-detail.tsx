@@ -55,6 +55,43 @@ export function skillSecretConfigurationVisible(
   });
 }
 
+export function resolveSkillSecretConfigurationAccess({
+  scope,
+  selectedVersionId,
+  currentVersionId,
+  relation,
+  canManageSecrets,
+  systemBindingEnabled,
+  systemBindingVersionId,
+}: {
+  scope: "project" | "system";
+  selectedVersionId: string;
+  currentVersionId: string | null;
+  relation: SkillAssetVersion["relation"];
+  canManageSecrets: boolean;
+  systemBindingEnabled: boolean;
+  systemBindingVersionId: string | null;
+}): { visible: boolean; canReplace: boolean; canClear: boolean } {
+  const projectVersion = scope === "project";
+  const projectReplaceable =
+    projectVersion &&
+    (selectedVersionId === currentVersionId || relation === "candidate");
+  const projectClearable =
+    projectVersion &&
+    (relation === "current" ||
+      relation === "candidate" ||
+      relation === "historical");
+  const boundSystemVersion =
+    scope === "system" &&
+    systemBindingEnabled &&
+    systemBindingVersionId === selectedVersionId;
+  return {
+    visible: projectVersion || boundSystemVersion,
+    canReplace: canManageSecrets && (projectReplaceable || boundSystemVersion),
+    canClear: canManageSecrets && (projectClearable || boundSystemVersion),
+  };
+}
+
 function SkillMetadata({ version }: { version: SkillAssetVersion }) {
   const snapshotFiles = version.file_views.slice(0, SKILL_FILE_SNAPSHOT_LIMIT);
   const remainingFileCount = version.file_views.length - snapshotFiles.length;
@@ -186,23 +223,25 @@ export function SkillAssetDetail({
   } = workspace;
   let secretConfiguration: ReactNode = null;
   if (!workspace.editing) {
-    const current = version.id === workspace.item.current_version_id;
-    const projectOwnedWritable =
-      workspace.item.scope === "project" &&
-      (current || version.relation === "candidate");
-    const boundSystemVersion =
-      workspace.item.scope === "system" &&
-      workspace.item.binding?.enabled === true &&
-      workspace.item.binding.current_version_id === version.id;
-    const visible = workspace.item.scope === "project" || boundSystemVersion;
-    secretConfiguration = visible ? (
+    const access = resolveSkillSecretConfigurationAccess({
+      scope: workspace.item.scope,
+      selectedVersionId: version.id,
+      currentVersionId: workspace.item.current_version_id,
+      relation: version.relation,
+      canManageSecrets,
+      systemBindingEnabled: workspace.item.binding?.enabled === true,
+      systemBindingVersionId:
+        workspace.item.binding?.current_version_id ?? null,
+    });
+    secretConfiguration = access.visible ? (
       <SkillSecretConfiguration
         key={`${workspace.item.id}:${version.id}`}
         accountId={workspace.accountId}
         projectId={workspace.projectId}
         skillId={workspace.item.id}
         versionId={version.id}
-        canManage={canManageSecrets && (projectOwnedWritable || boundSystemVersion)}
+        canReplace={access.canReplace}
+        canClear={access.canClear}
         onDirtyChange={onSecretsDirtyChange}
       />
     ) : null;

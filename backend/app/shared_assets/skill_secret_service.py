@@ -28,6 +28,7 @@ from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
 from app.shared_assets.models import AssetScope, VersionRelation
 from app.shared_assets.skill_secret_policy import (
     normalize_skill_secret_values,
+    parse_skill_secret_declarations,
     parse_skill_secret_requirements,
 )
 from app.shared_assets.skill_secret_store import SkillSecretStore
@@ -52,6 +53,7 @@ class SkillSecretTarget:
 @dataclass(frozen=True, slots=True)
 class SkillSecretRequirementStatus:
     name: str
+    target_env: str
     optional: bool
     configured: bool
     revision: int
@@ -69,6 +71,7 @@ class SkillSecretSetView:
 @dataclass(frozen=True, slots=True)
 class SkillSecretReadinessRequirementView:
     name: str
+    target_env: str
     optional: bool
     configured: bool
 
@@ -95,6 +98,13 @@ def aggregate_skill_secret_revision(
 
 def _requirements(version: SkillVersionRow, request_id: str) -> tuple[tuple[str, bool], ...]:
     return parse_skill_secret_requirements(
+        version.secret_requirements,
+        request_id=request_id,
+    )
+
+
+def _declarations(version: SkillVersionRow, request_id: str):
+    return parse_skill_secret_declarations(
         version.secret_requirements,
         request_id=request_id,
     )
@@ -155,6 +165,7 @@ async def copy_compatible_skill_secrets_in_transaction(
         source_requirements=_requirements(source, actor.request_id),
         target_version_id=target.id,
         target_requirements=_requirements(target, actor.request_id),
+        compatible_names=frozenset(target_item.name for target_item in _declarations(target, actor.request_id) if target_item in frozenset(_declarations(source, actor.request_id))),
         actor_user_id=str(actor.user_id),
         request_id=actor.request_id,
     )
@@ -250,6 +261,7 @@ class SkillSecretService:
                 requirements=tuple(
                     SkillSecretReadinessRequirementView(
                         name=item.name,
+                        target_env=item.target_env,
                         optional=item.optional,
                         configured=item.configured,
                     )
@@ -354,7 +366,7 @@ class SkillSecretService:
         async def operation(session: AsyncSession) -> SkillSecretSetView:
             await self._lock_project(session, actor)
             target = await self._target(session, actor, skill_id, version_id)
-            await self._require_replaceable(session, actor, target)
+            await self._require_clearable(session, actor, target)
             requirements = _requirements(target.version, actor.request_id)
             if secret_name not in {name for name, _optional in requirements}:
                 raise SkillSecretConfigurationInvalid(actor.request_id)
@@ -409,6 +421,7 @@ class SkillSecretService:
         for_update: bool = False,
     ) -> SkillSecretSetView:
         requirements = _requirements(target.version, actor.request_id)
+        targets = {item.name: item.target_env for item in _declarations(target.version, actor.request_id)}
         states = await SkillSecretStore(session).list_states(
             project_id=actor.project_id,
             skill_id=target.asset.id,
@@ -421,6 +434,7 @@ class SkillSecretService:
         views = tuple(
             SkillSecretRequirementStatus(
                 name=name,
+                target_env=targets[name],
                 optional=optional,
                 configured=(name in by_name and by_name[name].current_generation_id is not None),
                 revision=0 if name not in by_name else int(by_name[name].revision),
@@ -548,6 +562,24 @@ class SkillSecretService:
             return
         relation = (await self._relations(session, target.asset)).get(target.version.id)
         if relation not in {VersionRelation.CURRENT, VersionRelation.CANDIDATE}:
+            raise AssetConflict(actor.request_id)
+
+    async def _require_clearable(
+        self,
+        session: AsyncSession,
+        actor: ProjectContext,
+        target: SkillSecretTarget,
+    ) -> None:
+        if target.asset.scope == AssetScope.SYSTEM.value:
+            if target.version.id != target.asset.current_version_id:
+                raise AssetConflict(actor.request_id)
+            return
+        relation = (await self._relations(session, target.asset)).get(target.version.id)
+        if relation not in {
+            VersionRelation.CURRENT,
+            VersionRelation.CANDIDATE,
+            VersionRelation.HISTORICAL,
+        }:
             raise AssetConflict(actor.request_id)
 
     @staticmethod

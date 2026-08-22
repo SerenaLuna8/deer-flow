@@ -239,10 +239,14 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     async def projects(_engine):
         calls.append("projects")
 
+    async def finalize(_engine):
+        calls.append("finalize")
+
     bootstrap_material = MagicMock(
         spec=setup_postgres.DefaultSystemModelBootstrapMaterial,
     )
-    monkeypatch.setattr(setup_postgres, "bootstrap_schema", bootstrap)
+    monkeypatch.setattr(setup_postgres, "stage_schema_for_setup", bootstrap)
+    monkeypatch.setattr(setup_postgres, "finalize_staged_schema", finalize)
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", builtin)
     monkeypatch.setattr(
         setup_postgres,
@@ -273,6 +277,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
         "runtime-policy",
         "langgraph",
         "projects",
+        "finalize",
         "lock:exit",
         "dispose",
     ]
@@ -295,7 +300,8 @@ async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) ->
         yield
 
     monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
-    monkeypatch.setattr(setup_postgres, "bootstrap_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "stage_schema_for_setup", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "finalize_staged_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_model_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_runtime_policy_schema", AsyncMock())
@@ -331,7 +337,7 @@ async def test_bootstrap_existing_rejects_unknown_schema_without_mutation(monkey
     monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
     monkeypatch.setattr(
         setup_postgres,
-        "bootstrap_schema",
+        "stage_schema_for_setup",
         AsyncMock(side_effect=setup_postgres.SchemaRecreateRequired()),
     )
 
@@ -365,7 +371,7 @@ async def test_bootstrap_existing_preserves_setup_required_state(
     monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
     monkeypatch.setattr(
         setup_postgres,
-        "bootstrap_schema",
+        "stage_schema_for_setup",
         AsyncMock(side_effect=setup_postgres.SchemaSetupRequired()),
     )
 
@@ -393,7 +399,8 @@ async def test_bootstrap_existing_cleanup_failure_does_not_override_bootstrap_co
         yield
 
     monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
-    monkeypatch.setattr(setup_postgres, "bootstrap_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "stage_schema_for_setup", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "finalize_staged_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_model_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_runtime_policy_schema", AsyncMock())
@@ -672,6 +679,50 @@ async def test_setup_validates_explicit_database_and_always_closes_engine(monkey
 
 
 @pytest.mark.asyncio
+async def test_setup_against_current_schema_is_read_only(monkeypatch) -> None:
+    validate = AsyncMock(return_value=setup_postgres.CURRENT_SCHEMA_REVISION)
+    ensure = AsyncMock()
+    bootstrap = AsyncMock()
+    prepare = MagicMock()
+    monkeypatch.setattr(setup_postgres, "_database_exists", AsyncMock(return_value=True))
+
+    @asynccontextmanager
+    async def coordination_lock(_database_url):
+        yield
+
+    monkeypatch.setattr(
+        setup_postgres,
+        "_complete_bootstrap_lock",
+        coordination_lock,
+    )
+    monkeypatch.setattr(
+        setup_postgres,
+        "_validate_existing_schema",
+        validate,
+        raising=False,
+    )
+    monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
+    monkeypatch.setattr(setup_postgres, "_bootstrap_existing", bootstrap)
+    monkeypatch.setattr(
+        setup_postgres,
+        "prepare_default_system_model_bootstrap",
+        prepare,
+    )
+
+    result = await setup_postgres.setup_postgres(
+        "postgresql://admin:secret@localhost/postgres",
+        "postgresql://owner:secret@localhost/deerflow_test_1_abc",
+    )
+
+    assert result.created is False
+    assert result.revision == setup_postgres.CURRENT_SCHEMA_REVISION
+    validate.assert_awaited_once()
+    ensure.assert_not_awaited()
+    bootstrap.assert_not_awaited()
+    prepare.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_setup_preflights_default_model_before_creating_database(
     monkeypatch,
 ) -> None:
@@ -708,7 +759,8 @@ async def test_bootstrap_cleanup_failure_is_sanitized(monkeypatch) -> None:
     engine.connect.return_value = connection_context
     engine.dispose = AsyncMock(side_effect=RuntimeError("postgresql://owner:cleanup-secret@host/db"))
     monkeypatch.setattr(setup_postgres, "_create_setup_engine", lambda _config: engine)
-    monkeypatch.setattr(setup_postgres, "bootstrap_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "stage_schema_for_setup", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "finalize_staged_schema", AsyncMock())
 
     with pytest.raises(setup_postgres.PostgresSetupError) as exc_info:
         await setup_postgres.setup_postgres(
@@ -884,3 +936,32 @@ async def test_real_postgres_concurrent_setup_owner_bootstrap_and_check(
         finally:
             await inspector.close()
         assert coordination_state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_failed_bootstrap_never_publishes_schema_v1_marker(
+    uncreated_setup_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url, database_url, _database, _owner = uncreated_setup_database
+    monkeypatch.setattr(
+        setup_postgres,
+        "_bootstrap_default_project_schema",
+        AsyncMock(side_effect=ProjectBootstrapFailed("BOOTSTRAP_FAILED")),
+    )
+
+    with pytest.raises(setup_postgres.PostgresSetupError, match="BOOTSTRAP_FAILED"):
+        await setup_postgres.setup_postgres(admin_url, database_url)
+
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            marker_count = await connection.scalar(
+                text("SELECT count(*) FROM alembic_version"),
+            )
+    finally:
+        await engine.dispose()
+    assert marker_count == 0
+
+    with pytest.raises(setup_postgres.PostgresSetupError, match="SCHEMA_RECREATE_REQUIRED"):
+        await setup_postgres._validate_existing_schema(database_url)

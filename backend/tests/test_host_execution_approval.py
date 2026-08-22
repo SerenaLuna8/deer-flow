@@ -961,13 +961,13 @@ async def test_local_bash_plan_freezes_secret_free_exact_skill_sources(
         (
             "demo",
             "/mnt/skills/demo/SKILL.md",
-            ("TOKEN",),
+            (("provider_key", "TOKEN"),),
             True,
         ),
     )
     carrier = {
         "/mnt/skills/demo/SKILL.md": {
-            "TOKEN": "credential-exact-v7",
+            "provider_key": "credential-exact-v7",
         },
     }
 
@@ -1004,8 +1004,9 @@ async def test_local_bash_plan_freezes_secret_free_exact_skill_sources(
     assert plan.skill_secret_sources == (
         HostExecutionSkillSecretSource(
             skill_path="/mnt/skills/demo/SKILL.md",
-            secret_names=("TOKEN",),
+            secret_names=("provider_key",),
             explicit=True,
+            target_envs=("TOKEN",),
         ),
     )
     serialized = repr(plan.to_private_payload())

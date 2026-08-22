@@ -6,11 +6,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.audit.models import (
+    AUDIT_ACTION_CONTRACTS,
     AUDIT_METADATA_MODELS,
     AuditAction,
     AuditAuthorityRejected,
+    AuditProcess,
+    AuditScope,
 )
-from app.audit.service import AuditService
+from app.audit.service import AuditService, _bind_operator_audit_process
+from app.reliability.owner_refs import AuditHmacKeyring
 from app.shared_assets.audit import (
     _ACTIONS,
     DurableSharedAssetGovernanceEventSink,
@@ -58,6 +62,21 @@ def _sink() -> tuple[DurableSharedAssetGovernanceEventSink, AsyncMock]:
     append = AsyncMock()
     service.append = append  # type: ignore[method-assign]
     return DurableSharedAssetGovernanceEventSink(service), append
+
+
+def _operator_sink() -> tuple[
+    DurableSharedAssetGovernanceEventSink,
+    object,
+    AsyncMock,
+]:
+    service = AuditService(
+        None,
+        AuditHmacKeyring("test", {"test": b"a" * 32}),
+    )
+    context = _bind_operator_audit_process(service)
+    append = AsyncMock()
+    service.append = append  # type: ignore[method-assign]
+    return DurableSharedAssetGovernanceEventSink(service), context, append
 
 
 @pytest.mark.asyncio
@@ -243,6 +262,55 @@ async def test_system_override_audit_uses_the_same_safe_agent_coordinates() -> N
         "version_number": 7,
     }
     assert str(version_id) not in repr(append.await_args.args[5])
+
+
+@pytest.mark.asyncio
+async def test_operator_mcp_definition_invalidation_keeps_exact_secret_coordinates() -> None:
+    sink, context, append = _operator_sink()
+    project_id = uuid.uuid4()
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    slot_id = uuid.uuid4()
+    generation_id = uuid.uuid4()
+
+    await sink.append_process(
+        _Session(),  # type: ignore[arg-type]
+        process_context=context,
+        project_id=project_id,
+        asset_id=asset_id,
+        version_id=version_id,
+        action="mcp.secret.invalidate",
+        request_id="system-mcp-definition-invalidation",
+        asset_kind="mcp",
+        secret_metadata={
+            "version_id": version_id,
+            "slot_id": slot_id,
+            "secret_name": "oauth",
+            "generation_id": generation_id,
+            "revision": 2,
+            "result": "invalidated",
+            "reason": "definition_change",
+            "readiness": "unready",
+        },
+    )
+
+    actor = append.await_args.args[1]
+    assert actor.process is AuditProcess.OPERATOR
+    assert append.await_args.args[2] is AuditAction.ASSET_UPDATED
+    assert append.await_args.args[5] == {
+        "asset_kind": "mcp",
+        "operation": "mcp.secret.invalidate",
+        "version_id": version_id,
+        "slot_id": slot_id,
+        "secret_name": "oauth",
+        "generation_id": generation_id,
+        "revision": 2,
+        "result": "invalidated",
+        "reason": "definition_change",
+        "readiness": "unready",
+    }
+    contract = AUDIT_ACTION_CONTRACTS[AuditAction.ASSET_UPDATED]
+    assert any(variant.scope is AuditScope.PROJECT and variant.actor == "process" and variant.processes == frozenset({AuditProcess.OPERATOR}) for variant in contract.variants)
 
 
 @pytest.mark.asyncio

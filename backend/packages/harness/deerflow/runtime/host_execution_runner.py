@@ -412,7 +412,10 @@ def _frozen_skill_secret_request(
 ) -> (
     tuple[
         dict[str, frozenset[str]],
-        tuple[tuple[str, str, tuple[str, ...], bool], ...],
+        tuple[
+            tuple[str, str, tuple[tuple[str, str], ...], bool],
+            ...,
+        ],
     ]
     | None
 ):
@@ -420,18 +423,18 @@ def _frozen_skill_secret_request(
 
     if frozen.legacy_environment_keys:
         return None
-    expected_names: set[str] = set()
-    names_by_path: dict[str, tuple[str, ...]] = {}
+    expected_targets: set[str] = set()
+    bindings_by_path: dict[str, tuple[tuple[str, str], ...]] = {}
     requested: dict[str, set[str]] = {}
-    activation_sources: list[tuple[str, str, tuple[str, ...], bool]] = []
+    activation_sources: list[tuple[str, str, tuple[tuple[str, str], ...], bool]] = []
     for source in frozen.skill_secret_sources:
-        prior = names_by_path.setdefault(
+        prior = bindings_by_path.setdefault(
             source.skill_path,
-            source.secret_names,
+            source.secret_bindings,
         )
-        if prior != source.secret_names:
+        if prior != source.secret_bindings:
             return None
-        expected_names.update(source.secret_names)
+        expected_targets.update(source.target_envs)
         requested.setdefault(source.skill_path, set()).update(
             source.secret_names,
         )
@@ -439,11 +442,11 @@ def _frozen_skill_secret_request(
             (
                 "frozen-skill",
                 source.skill_path,
-                source.secret_names,
+                source.secret_bindings,
                 source.explicit,
             ),
         )
-    if frozen.environment_keys != tuple(sorted(expected_names)):
+    if frozen.environment_keys != tuple(sorted(expected_targets)):
         # v2 approvals, request-scoped secrets, and GitHub token carriers have
         # names but no exact Skill source closure. They remain fail closed.
         return None
@@ -636,7 +639,7 @@ async def execute_frozen_host_execution_continuation(
             (
                 "frozen-skill",
                 source.skill_path,
-                source.secret_names,
+                source.secret_bindings,
                 source.explicit,
             )
             for source in frozen.skill_secret_sources

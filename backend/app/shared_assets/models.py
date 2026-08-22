@@ -70,6 +70,7 @@ class SkillArchiveFile:
 @dataclass(frozen=True)
 class SkillSecretRequirementSnapshot:
     name: str
+    target_env: str
     optional: bool
 
 

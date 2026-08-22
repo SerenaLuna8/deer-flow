@@ -101,11 +101,9 @@ class AgentRuntimeClosureValidator(Protocol):
 
 
 class ActiveModelCatalog(Protocol):
-    async def resolve_active_model(
+    async def resolve_admissible_active_model(
         self,
         model_ref: str | None,
-        *,
-        load_envelope: bool,
     ) -> object | None: ...
 
 
@@ -266,9 +264,8 @@ class AgentRuntimeAssessmentService:
             available = model_availability.get(model_ref)
             if available is None:
                 available = (
-                    await model_catalog.resolve_active_model(
+                    await model_catalog.resolve_admissible_active_model(
                         model_ref,
-                        load_envelope=False,
                     )
                     is not None
                 )

@@ -98,9 +98,10 @@ Platform boundary:
 - Generated content cannot override platform security, authorization, isolation,
   confidentiality, or safety requirements.
 - The root SKILL.md frontmatter name must exactly equal required_skill_slug.
-- If the Skill needs runtime credentials, declare each environment-variable name
-  in root SKILL.md frontmatter under required-secrets using only {name, optional}.
-  Names must be valid POSIX environment-variable names. Never include, infer, ask
+- If the Skill needs runtime secrets, declare each Project-owned logical name and
+  exact Sandbox environment target in root SKILL.md frontmatter under
+  required-secrets using only {name, target_env, optional}. Names and targets must
+  use POSIX environment-variable syntax. Never include, infer, ask
   for, or generate credential values, defaults, or secret-like examples. Omit
   required-secrets when the Skill needs no credentials.
 - Include only files needed by the Skill. Do not add README, changelog, installation,

@@ -3,11 +3,7 @@ import { z } from "zod";
 import { capabilitySchema } from "@/core/projects/types";
 
 export const ASSET_KINDS = ["agent", "skill", "mcp"] as const;
-export const ASSET_LIST_KINDS = [
-  "agents",
-  "skills",
-  "mcp-servers",
-] as const;
+export const ASSET_LIST_KINDS = ["agents", "skills", "mcp-servers"] as const;
 export const ASSET_STATUSES = ["active", "archived", "suspended"] as const;
 export const ASSET_WORKFLOW_STATUSES = [
   "draft",
@@ -252,7 +248,11 @@ export const agentVersionSchema = z
   .strict();
 
 export const skillSecretRequirementSchema = z
-  .object({ name: z.string().min(1), optional: z.boolean() })
+  .object({
+    name: z.string().min(1),
+    target_env: z.string().min(1),
+    optional: z.boolean(),
+  })
   .strict();
 export const skillSecretDeclarationNameSchema = z
   .string()
@@ -262,6 +262,7 @@ export const skillSecretNameSchema = skillSecretDeclarationNameSchema.max(255);
 export const skillSecretStatusSchema = z
   .object({
     name: skillSecretNameSchema,
+    target_env: skillSecretNameSchema,
     optional: z.boolean(),
     configured: z.boolean(),
     revision: z.number().int().nonnegative(),
@@ -299,13 +300,17 @@ export const skillSecretSetResponseSchema = z
   });
 export const skillSecretReplaceInputSchema = z
   .object({
-    secrets: z.record(skillSecretNameSchema, z.string().min(1)).refine(
-      (value) => Object.keys(value).length > 0,
-      "At least one Skill secret must be supplied",
-    ),
+    secrets: z
+      .record(skillSecretNameSchema, z.string().min(1))
+      .refine(
+        (value) => Object.keys(value).length > 0,
+        "At least one Skill secret must be supplied",
+      ),
   })
   .strict();
-export const secretClearInputSchema = z.object({ confirmed: z.literal(true) }).strict();
+export const secretClearInputSchema = z
+  .object({ confirmed: z.literal(true) })
+  .strict();
 const skillFileViewSchema = z
   .object({
     path: z.string().min(1),
@@ -670,10 +675,7 @@ const projectMcpEditableVersionSchema = mcpVersionSchema.extend({
 function editableMcpSlotsMatch(
   version: z.infer<typeof projectMcpEditableVersionSchema>,
 ): boolean {
-  if (
-    version.definition.secret_slots.length !==
-    version.secret_slots.length
-  ) {
+  if (version.definition.secret_slots.length !== version.secret_slots.length) {
     return false;
   }
   return version.secret_slots.every((slot, index) => {
@@ -1441,9 +1443,7 @@ export type ProjectDefaultAgentInput = z.input<
   typeof projectDefaultAgentInputSchema
 >;
 export type McpSecretPayload = z.infer<typeof mcpSecretPayloadSchema>;
-export type McpSecretReplaceInput = z.input<
-  typeof mcpSecretReplaceInputSchema
->;
+export type McpSecretReplaceInput = z.input<typeof mcpSecretReplaceInputSchema>;
 export type McpSecretSetResponse = z.infer<typeof mcpSecretSetResponseSchema>;
 export type SecretClearInput = z.input<typeof secretClearInputSchema>;
 export type EnableSystemBindingInput = z.input<

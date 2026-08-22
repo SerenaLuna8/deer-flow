@@ -11,6 +11,7 @@ export const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 const skillFrontmatterSecretRequirementSchema = z
   .object({
     name: skillSecretDeclarationNameSchema,
+    target_env: skillSecretDeclarationNameSchema,
     optional: z.boolean(),
   })
   .strict();
@@ -120,6 +121,7 @@ export const skillFrontmatterPatchResponseSchema = z
 export const skillActivationRequirementSchema = z
   .object({
     name: skillSecretDeclarationNameSchema,
+    target_env: skillSecretDeclarationNameSchema,
     optional: z.boolean(),
     configured: z.boolean(),
   })
@@ -219,8 +221,7 @@ export function missingRequiredSkillActivationRequirements(
   readiness: SkillActivationReadinessResponse,
 ): SkillActivationRequirement[] {
   return readiness.requirements.filter(
-    (requirement) =>
-      !requirement.optional && !requirement.configured,
+    (requirement) => !requirement.optional && !requirement.configured,
   );
 }
 

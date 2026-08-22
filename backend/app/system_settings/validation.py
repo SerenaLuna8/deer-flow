@@ -107,11 +107,21 @@ class ProviderAdapterSpec:
     class_path: str
     api_key_required: bool
     fields: tuple[ProviderSettingFieldSpec, ...] = ()
+    default_base_url: str | None = None
 
     def __post_init__(self) -> None:
         names = [field.name for field in self.fields]
         if len(set(names)) != len(names):
             raise ValueError("Provider setting fields must be unique")
+        if self.default_base_url is not None:
+            try:
+                parsed = urlsplit(self.default_base_url)
+                valid_default = parsed.scheme in {"http", "https"} and parsed.hostname is not None and parsed.username is None and parsed.password is None and not parsed.query and not parsed.fragment
+                _ = parsed.port
+            except (TypeError, ValueError):
+                valid_default = False
+            if not valid_default:
+                raise ValueError("Provider default base URL invalid")
 
     @property
     def setting_fields(self) -> frozenset[str]:
@@ -423,31 +433,37 @@ BUILTIN_PROVIDER_ADAPTERS: Mapping[str, ProviderAdapterSpec] = MappingProxyType(
             "langchain_anthropic:ChatAnthropic",
             True,
             fields=_ANTHROPIC_FIELDS,
+            default_base_url="https://api.anthropic.com",
         ),
         "deepseek": ProviderAdapterSpec(
             "langchain_deepseek:ChatDeepSeek",
             True,
             fields=_OPENAI_COMPATIBLE_FIELDS,
+            default_base_url="https://api.deepseek.com/v1",
         ),
         "openai": ProviderAdapterSpec(
             "langchain_openai:ChatOpenAI",
             True,
             fields=_OPENAI_COMPATIBLE_FIELDS + (_OUTPUT_VERSION_FIELD, _USE_RESPONSES_API_FIELD),
+            default_base_url="https://api.openai.com/v1",
         ),
         "patched_deepseek": ProviderAdapterSpec(
             "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
             True,
             fields=_OPENAI_COMPATIBLE_FIELDS,
+            default_base_url="https://api.deepseek.com/v1",
         ),
         "patched_openai": ProviderAdapterSpec(
             "deerflow.models.patched_openai:PatchedChatOpenAI",
             True,
             fields=_OPENAI_COMPATIBLE_FIELDS + (_OUTPUT_VERSION_FIELD, _USE_RESPONSES_API_FIELD),
+            default_base_url="https://api.openai.com/v1",
         ),
         "vllm": ProviderAdapterSpec(
             "deerflow.models.vllm_provider:VllmChatModel",
             True,
             fields=_OPENAI_COMPATIBLE_FIELDS + (_CUMULATIVE_STREAM_USAGE_FIELD,),
+            default_base_url="https://api.openai.com/v1",
         ),
     }
 )
@@ -575,6 +591,23 @@ def provider_adapter_descriptor(
 
 def provider_class_path(provider_adapter: str) -> str:
     return provider_adapter_descriptor(provider_adapter).class_path
+
+
+def materialize_effective_model_settings(
+    settings: Mapping[str, object],
+    *,
+    provider_adapter: str,
+) -> dict[str, object]:
+    """Pin a provider's real default endpoint instead of consulting host env."""
+
+    result = dict(settings)
+    if "base_url" not in result:
+        descriptor = provider_adapter_descriptor(provider_adapter)
+        if descriptor.api_key_required and descriptor.default_base_url is None:
+            raise ModelSettingsInvalid()
+        if descriptor.default_base_url is not None:
+            result["base_url"] = descriptor.default_base_url
+    return result
 
 
 def is_provider_adapter_authorable(provider_adapter: object) -> bool:
@@ -817,6 +850,7 @@ __all__ = [
     "is_provider_adapter_supported",
     "provider_adapter_descriptor",
     "provider_class_path",
+    "materialize_effective_model_settings",
     "provider_api_key_required",
     "validate_materialized_model_settings",
     "validate_create_system_model",

@@ -42,15 +42,13 @@ class _Session:
 class _ModelCatalog:
     def __init__(self, active_refs: set[str]) -> None:
         self.active_refs = active_refs
-        self.calls: list[tuple[str | None, bool]] = []
+        self.calls: list[str | None] = []
 
-    async def resolve_active_model(
+    async def resolve_admissible_active_model(
         self,
         model_ref: str | None,
-        *,
-        load_envelope: bool,
     ) -> object | None:
-        self.calls.append((model_ref, load_envelope))
+        self.calls.append(model_ref)
         return object() if model_ref in self.active_refs else None
 
 
@@ -197,7 +195,7 @@ async def test_catalog_validator_accepts_exact_groups_and_active_default_model()
         tool_groups=("file:read", "task"),
     )
 
-    assert models.calls == [("default", False)]
+    assert models.calls == ["default"]
     assert models.factory_sessions == [session]  # type: ignore[attr-defined]
 
 
@@ -249,7 +247,7 @@ async def test_catalog_validator_rejects_inactive_or_missing_model() -> None:
         )
 
     assert caught.value.request_id == "catalog-inactive-model"
-    assert models.calls == [(RETIRED_MODEL_REF, False)]
+    assert models.calls == [RETIRED_MODEL_REF]
 
 
 @pytest.mark.asyncio
@@ -327,7 +325,7 @@ async def test_builder_package_rejects_inactive_model_before_writing(
         )
 
     repository.create_project_asset.assert_not_awaited()
-    assert models.calls == [(RETIRED_MODEL_REF, False)]
+    assert models.calls == [RETIRED_MODEL_REF]
 
 
 @pytest.mark.asyncio
@@ -386,7 +384,7 @@ async def test_activate_version_revalidates_the_candidate_model_catalog(
 
     assert asset.current_version_id == live_version_id
     assert asset.revision == 8
-    assert models.calls == [(RETIRED_MODEL_REF, False)]
+    assert models.calls == [RETIRED_MODEL_REF]
 
 
 @pytest.mark.asyncio

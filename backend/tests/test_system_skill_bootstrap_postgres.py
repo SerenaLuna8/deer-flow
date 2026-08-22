@@ -48,6 +48,15 @@ from scripts.upgrade_system_assets import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _audit_hmac_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ACT_WEAVE_AUDIT_ACTIVE_KEY_ID", "test-audit-v1")
+    monkeypatch.setenv(
+        "ACT_WEAVE_AUDIT_KEYRING_JSON",
+        '{"test-audit-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}',
+    )
+
+
 def _skill_archive(
     name: str,
     description: str,

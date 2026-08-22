@@ -1462,10 +1462,14 @@ export interface Translations {
       addTitle: string;
       nameLabel: string;
       namePlaceholder: string;
+      targetEnvLabel: string;
+      targetEnvPlaceholder: string;
       newOptional: string;
       add: string;
       invalidName: string;
+      invalidTargetEnv: string;
       duplicateName: string;
+      duplicateTargetEnv: string;
       autonomousTitle: string;
       autonomousDescription: string;
       autonomousAria: string;

@@ -87,6 +87,8 @@ def _canonical_payload(
                 value = values.get(name)
                 if not isinstance(name, str) or not isinstance(value, str) or not value or "\x00" in value:
                     raise ValueError
+                if section == "env" and "${" in value:
+                    raise ValueError
                 section_values[name] = value
             normalized[section] = section_values
         encoded = json.dumps(

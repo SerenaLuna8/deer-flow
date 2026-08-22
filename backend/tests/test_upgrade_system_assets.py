@@ -201,11 +201,21 @@ def _wire_operator(
             raise classify_error
         return database_state
 
-    async def bootstrap(session_factory: object) -> BootstrapResult:
+    governance_sink = object()
+    process_context = object()
+
+    async def bootstrap(
+        session_factory: object,
+        **kwargs: object,
+    ) -> BootstrapResult:
         assert lock_engine.connection.open is True
         assert lock_engine.connection.locked is True
         assert getattr(session_factory, "kw")["bind"] is mutation_engine
         assert getattr(session_factory, "kw")["expire_on_commit"] is False
+        assert kwargs == {
+            "governance_sink": governance_sink,
+            "process_context": process_context,
+        }
         lock_engine.events.append("bootstrap")
         bootstrap_calls.append(session_factory)
         if bootstrap_error is not None:
@@ -219,6 +229,11 @@ def _wire_operator(
     monkeypatch.setattr(module, "create_async_engine", create_engine)
     monkeypatch.setattr(module, "classify_database", classify)
     monkeypatch.setattr(module, "bootstrap_system_assets", bootstrap)
+    monkeypatch.setattr(
+        module,
+        "_operator_audit_authority",
+        lambda _session_factory: (governance_sink, process_context),
+    )
     return _Wiring(
         lock_engine=lock_engine,
         mutation_engine=mutation_engine,

@@ -486,7 +486,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 (
                     skill_name,
                     skill_path,
-                    tuple(requirement.name for requirement in requirements),
+                    tuple((requirement.name, requirement.target_env) for requirement in requirements),
                     is_explicit,
                 )
                 for skill_name, skill_path, requirements, is_explicit in sources
@@ -502,15 +502,23 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         for skill_name, skill_path, requirements, is_explicit in sources:
             source_secrets = skill_scoped_secrets[skill_path] if skill_path in skill_scoped_secrets else request_secrets
             for req in requirements:
+                target_env = req.target_env or req.name
                 if req.name in source_secrets:
-                    claims.setdefault(req.name, []).append((skill_name, source_secrets[req.name], True, is_explicit))
+                    claims.setdefault(target_env, []).append(
+                        (
+                            skill_name,
+                            source_secrets[req.name],
+                            True,
+                            is_explicit,
+                        )
+                    )
                 else:
-                    claims.setdefault(req.name, []).append((skill_name, None, False, is_explicit))
+                    claims.setdefault(target_env, []).append((skill_name, None, False, is_explicit))
                     if not req.optional:
                         missing.setdefault(skill_name, []).append(req.name)
 
         conflicts: dict[str, list[str]] = {}
-        for secret_name, secret_claims in claims.items():
+        for target_env, secret_claims in claims.items():
             explicit_claims = [claim for claim in secret_claims if claim[3]]
             if explicit_claims:
                 # At most one slash Skill is current. Its declaration reserves
@@ -518,7 +526,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 # loaded autonomous Skill's value from crossing into it.
                 skill_name, value, supplied, _ = explicit_claims[-1]
                 if supplied:
-                    injected[secret_name] = value or ""
+                    injected[target_env] = value or ""
                     bound_skills.add(skill_name)
                 continue
 
@@ -530,10 +538,10 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 # autonomous Skills that claim the same name with different
                 # (or partially missing) scoped bindings. Drop that name rather
                 # than expose one Skill's secret to another.
-                conflicts[secret_name] = skill_names
+                conflicts[target_env] = skill_names
                 continue
             if all_supplied and supplied_values:
-                injected[secret_name] = next(iter(supplied_values)) or ""
+                injected[target_env] = next(iter(supplied_values)) or ""
                 bound_skills.update(skill_names)
 
         if injected:

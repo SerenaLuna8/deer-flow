@@ -208,11 +208,13 @@ or downgrade an application database.
   runtime consumers use the canonical parser; form edits patch only those
   managed frontmatter fields and preserve the rest of the document.
 - Project Skill secrets belong to one exact Skill Version and declared target
-  environment name. Candidate and Current values use revision CAS; Historical
-  Versions are read-only. Saving a forward Candidate independently re-encrypts
-  only compatible values. Activation requires every required declaration to be
-  configured. Secret values never enter Skill bytes, public readiness, audit
-  metadata, or API responses.
+  environment name. Current and Candidate secret writes use successful commit
+  order; Historical definitions remain read-only, but an administrator may
+  explicitly clear a Historical value for revocation and may not replace it.
+  Saving a forward Candidate independently re-encrypts only compatible values.
+  Activation requires every required declaration to be configured. Secret
+  values never enter Skill bytes, public readiness, audit metadata, or API
+  responses.
 
 #### Runtime admission and MCP
 

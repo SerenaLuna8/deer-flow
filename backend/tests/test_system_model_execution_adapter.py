@@ -4,15 +4,18 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from langchain_deepseek import ChatDeepSeek
 
 from app.system_settings.execution_adapter import (
     SystemModelExecutionAdapter,
     SystemModelMaterializationUnavailable,
 )
 from app.system_settings.models import (
+    ConnectionTestSystemModelMaterial,
     CreateSystemModel,
     FrozenSystemModelExecution,
     LockedSystemModelMaterial,
+    SystemModelConnectionCheck,
 )
 from app.system_settings.secrets import (
     model_secret_envelope_digest,
@@ -22,6 +25,7 @@ from app.system_settings.validation import (
     canonical_model_payload,
     canonical_model_payload_checksum,
 )
+from deerflow.models.factory import _normalize_openai_base_url
 from deerflow.persistence.system_settings import (
     RunModelConfigSnapshotRow,
     SystemModelConfigRow,
@@ -106,6 +110,49 @@ def test_model_execution_materializes_only_the_exact_owned_generation() -> None:
     assert runtime._system_model_payload_checksum == model.payload_checksum
     assert runtime._system_model_secret_generation_id == generation.id
     assert "runtime-only-api-key" not in repr(runtime)
+
+
+def test_provider_default_origin_is_pinned_for_recipient_and_execution() -> None:
+    model_id = uuid.uuid4()
+    assert model_secret_recipient(
+        model_id,
+        "patched_deepseek",
+        {},
+    ) == model_secret_recipient(
+        model_id,
+        "patched_deepseek",
+        {"base_url": "https://api.deepseek.com"},
+    )
+
+    runtime = SystemModelExecutionAdapter().materialize_connection_test(
+        ConnectionTestSystemModelMaterial(
+            command=SystemModelConnectionCheck(
+                provider_adapter="patched_deepseek",
+                provider_model="deepseek-v4-flash",
+                settings={},
+                supports_vision=False,
+                api_key="transient-test-key",
+            )
+        )
+    )
+
+    assert runtime.base_url == "https://api.deepseek.com/v1"
+
+
+def test_deepseek_effective_origin_ignores_host_endpoint_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_BASE", "https://host-poison.invalid/v1")
+    settings = {"base_url": "https://api.deepseek.com/v1"}
+
+    _normalize_openai_base_url(ChatDeepSeek, settings)
+    model = ChatDeepSeek(
+        model="deepseek-v4-flash",
+        api_key="transient-test-key",
+        **settings,
+    )
+
+    assert str(model.root_client.base_url) == "https://api.deepseek.com/v1/"
 
 
 def test_run_snapshot_keeps_payload_but_destroyed_generation_fails_closed() -> None:

@@ -131,16 +131,22 @@ describe("Skill secret declaration editor concurrency", () => {
     expect(
       skillSecretDraftAfterPatch({
         patchSucceeded: false,
-        name: "OPENAI_API_KEY",
+        name: "provider_key",
+        targetEnv: "OPENAI_API_KEY",
         optional: true,
       }),
-    ).toEqual({ name: "OPENAI_API_KEY", optional: true });
+    ).toEqual({
+      name: "provider_key",
+      targetEnv: "OPENAI_API_KEY",
+      optional: true,
+    });
     expect(
       skillSecretDraftAfterPatch({
         patchSucceeded: true,
-        name: "OPENAI_API_KEY",
+        name: "provider_key",
+        targetEnv: "OPENAI_API_KEY",
         optional: true,
       }),
-    ).toEqual({ name: "", optional: false });
+    ).toEqual({ name: "", targetEnv: "", optional: false });
   });
 });

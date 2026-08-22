@@ -1047,7 +1047,7 @@ class McpService:
         asset_id: uuid.UUID,
         version_id: uuid.UUID,
     ) -> McpToolDiscoveryAttemptView:
-        """Queue one exact current project MCP discovery without contacting it."""
+        """Queue discovery for one exact retained published Project MCP Version."""
 
         if not isinstance(actor, ProjectContext):
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
@@ -1063,7 +1063,7 @@ class McpService:
                 version_id,
                 for_update=True,
             )
-            if asset.status != "active" or asset.current_published_version_id != version_id or record.row.workflow_status != WorkflowStatus.PUBLISHED.value:
+            if asset.status != "active" or record.row.workflow_status != WorkflowStatus.PUBLISHED.value:
                 raise AssetConflict(actor.request_id)
             self._validate_transition_definition(actor, record)
             closure = await lock_mcp_secret_closure(
@@ -1488,6 +1488,7 @@ class McpService:
                 or not 1 <= definition.timeout_seconds <= 86_400
                 or any(not isinstance(value, str) or len(value) > 16_384 for value in args)
                 or any(not isinstance(key, str) or not isinstance(value, str) for key, value in env.items())
+                or any("${" in value for value in env.values())
                 or any(not isinstance(key, str) or not isinstance(value, str) for key, value in headers.items())
                 or len({slot.name for slot in slots}) != len(slots)
             ):

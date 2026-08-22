@@ -11,6 +11,7 @@ from app.audit.models import (
     AuditActor,
     AuditAuthorityRejected,
     AuditOutcome,
+    AuditProcessContext,
     AuditTarget,
     AuditTargetKind,
     resolve_system_audit_context,
@@ -183,6 +184,43 @@ class DurableSharedAssetGovernanceEventSink:
         await self._append(
             session,
             actor=AuditActor.user(uuid.UUID(str(actor))),
+            project_id=project_id,
+            asset_id=asset_id,
+            action=selected_action,
+            request_id=request_id,
+            asset_kind=selected_kind,
+            operation=action,
+            version_number=version_number,
+            secret_metadata=secret_metadata,
+        )
+
+    async def append_process(
+        self,
+        session: AsyncSession,
+        *,
+        process_context: AuditProcessContext,
+        project_id: uuid.UUID,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID | None,
+        action: str,
+        request_id: str,
+        asset_kind: str | None = None,
+        secret_metadata: dict[str, object] | None = None,
+    ) -> None:
+        """Append an operator-owned project event without impersonating a user."""
+
+        selected_action, selected_kind = self._select_event(action, asset_kind)
+        context = self._service.require_process_context(process_context)
+        version_number = await self._safe_version_number(
+            session,
+            asset_id=asset_id,
+            version_id=version_id,
+            operation=action,
+            asset_kind=selected_kind,
+        )
+        await self._append(
+            session,
+            actor=AuditActor.trusted_process(context),
             project_id=project_id,
             asset_id=asset_id,
             action=selected_action,

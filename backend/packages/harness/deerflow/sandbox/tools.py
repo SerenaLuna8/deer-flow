@@ -36,8 +36,10 @@ from deerflow.runtime.secret_context import (
     ACTIVE_SECRETS_CONTEXT_KEY,
     SKILL_SECRET_EXEC_READY_CONTEXT_KEY,
     SKILL_SECRET_PROVIDER_CONTEXT_KEY,
+    active_provider_environment_keys,
     active_provider_secret_request,
     extract_request_secrets,
+    normalize_active_secret_declarations,
     read_active_secrets,
     resolve_provider_active_secrets,
 )
@@ -1773,8 +1775,7 @@ def _host_execution_agent_path(context: object) -> tuple[str, ...]:
 def _host_execution_environment_keys(context: object) -> tuple[str, ...]:
     names = set(extract_request_secrets(context))
     names.update(read_active_secrets(context))
-    for requested_names in active_provider_secret_request(context).values():
-        names.update(requested_names)
+    names.update(active_provider_environment_keys(context))
     if isinstance(context, Mapping) and context.get("github_token") is not None:
         names.update({"GH_TOKEN", "GITHUB_TOKEN"})
     return tuple(sorted(names))
@@ -1794,6 +1795,9 @@ def _host_execution_skill_secret_sources(
     for source in raw_sources:
         if not isinstance(source, tuple) or len(source) != 4 or not isinstance(source[0], str) or not source[0] or not isinstance(source[1], str) or not source[1] or not isinstance(source[2], tuple) or type(source[3]) is not bool:
             continue
+        declarations = tuple(sorted(normalize_active_secret_declarations(source[2])))
+        if not declarations:
+            continue
         try:
             sources.add(
                 HostExecutionSkillSecretSource(
@@ -1802,8 +1806,9 @@ def _host_execution_skill_secret_sources(
                     # execution plan treats declarations as a set. Canonicalize
                     # that valid order here; the typed source still rejects
                     # duplicates and malformed names.
-                    secret_names=tuple(sorted(source[2])),
+                    secret_names=tuple(name for name, _target in declarations),
                     explicit=source[3],
+                    target_envs=tuple(target for _name, target in declarations),
                 ),
             )
         except ValueError:

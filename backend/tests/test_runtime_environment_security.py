@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import deerflow.sandbox.env_policy as sandbox_env_policy
 from deerflow.sandbox.env_policy import build_sandbox_env
 from scripts.run_runtime import build_runtime_environment
 
@@ -68,3 +69,34 @@ def test_sandbox_environment_drops_ambient_channel_identity(
     )
 
     assert "ACT_WEAVE_CHANNEL_USER_ID" not in build_sandbox_env()
+
+
+def test_sandbox_environment_inherits_only_explicit_safe_host_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sandbox_env_policy.os,
+        "environ",
+        {
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/tmp/test-home",
+            "LANG": "en_US.UTF-8",
+            "INNOCENT_HOST_METADATA": "must-not-leak",
+            "UNUSUAL_PROVIDER_AUTH": "must-not-leak-either",
+        },
+    )
+
+    environment = build_sandbox_env(
+        {
+            "DECLARED_SKILL_VALUE": "authorized-value",
+            "UNUSUAL_PROVIDER_AUTH": "authorized-override",
+        }
+    )
+
+    assert environment == {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/tmp/test-home",
+        "LANG": "en_US.UTF-8",
+        "DECLARED_SKILL_VALUE": "authorized-value",
+        "UNUSUAL_PROVIDER_AUTH": "authorized-override",
+    }

@@ -444,6 +444,7 @@ class SkillDesignBaseFileResponse(_StrictModel):
 
 class SkillDesignSecretRequirementResponse(_StrictModel):
     name: str
+    target_env: str
     optional: bool
 
 

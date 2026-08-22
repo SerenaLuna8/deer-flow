@@ -493,6 +493,15 @@ class McpRepository:
             raise AssetNotFound(request_id)
         self.session.add(version)
         await self.session.flush()
+        await self.session.scalar(
+            select(
+                func.set_config(
+                    "deerflow.asset_version_assembly",
+                    str(version.id),
+                    True,
+                )
+            )
+        )
         self.session.add_all(slots)
         await self.session.flush()
         return McpVersionRecord(version, tuple(slots))

@@ -17,12 +17,14 @@ from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.models import AuditProcess, AuditProcessContext
 from app.bootstrap_identities import (
     BUILTIN_ASSET_EMAIL,
     BUILTIN_ASSET_USER_ID,
     BUILTIN_ASSET_USERNAME,
 )
 from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+from app.shared_assets.audit import DurableSharedAssetGovernanceEventSink
 from app.shared_assets.bootstrap.catalog import (
     BootstrapCatalog,
     BootstrapCatalogError,
@@ -410,7 +412,14 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         preview,
         is_latest=True,
     )
-    requirements = [{"name": item.name, "optional": item.optional} for item in preview.secret_requirements]
+    requirements = [
+        {
+            "name": item.name,
+            "target_env": item.target_env,
+            "optional": item.optional,
+        }
+        for item in preview.secret_requirements
+    ]
     asset_id = _stable_id(entry.source_key)
     version_id = _version_id(entry)
     asset = await _existing_asset(session, entry)
@@ -796,6 +805,8 @@ async def _invalidate_project_mcp_secrets(
     *,
     mcp_server_id: uuid.UUID,
     mcp_server_version_id: uuid.UUID,
+    governance_sink: DurableSharedAssetGovernanceEventSink | None = None,
+    process_context: AuditProcessContext | None = None,
 ) -> None:
     states = tuple(
         (
@@ -815,6 +826,35 @@ async def _invalidate_project_mcp_secrets(
         .scalars()
         .all()
     )
+    configured_states = tuple(state for state in states if state.current_generation_id is not None)
+    if configured_states:
+        if governance_sink is None or process_context is None:
+            raise BootstrapConflict("System MCP Project secret invalidation requires operator audit authority")
+        if process_context.process is not AuditProcess.OPERATOR:
+            raise BootstrapConflict("System MCP Project secret invalidation requires operator audit authority")
+    elif (governance_sink is None) != (process_context is None):
+        raise BootstrapConflict("System MCP Project secret invalidation audit authority is incomplete")
+
+    slot_names = {
+        slot.id: slot.name
+        for slot in (
+            (
+                await session.execute(
+                    select(McpSecretSlotRow).where(
+                        McpSecretSlotRow.mcp_server_version_id == mcp_server_version_id,
+                        McpSecretSlotRow.id.in_(tuple(state.slot_id for state in configured_states)),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+            if configured_states
+            else ()
+        )
+    }
+    if len(slot_names) != len({state.slot_id for state in configured_states}):
+        raise BootstrapConflict("System MCP Project secret slot is inconsistent")
+
     actor_id = str(BUILTIN_ASSET_USER_ID)
     for state in states:
         generation_id = state.current_generation_id
@@ -834,6 +874,7 @@ async def _invalidate_project_mcp_secrets(
             ).scalar_one_or_none()
             if generation is None:
                 raise BootstrapConflict("System MCP Project secret state is inconsistent")
+            revision = int(state.revision) + 1
             session.add(
                 ProjectMcpSecretTombstoneRow(
                     project_id=state.project_id,
@@ -841,19 +882,41 @@ async def _invalidate_project_mcp_secrets(
                     mcp_server_version_id=state.mcp_server_version_id,
                     slot_id=state.slot_id,
                     destroyed_generation_id=generation.id,
-                    revision=generation.revision,
+                    revision=revision,
                     envelope_digest=generation.envelope_digest,
                     reason="definition_change",
                     destroyed_by_user_id=actor_id,
                 )
             )
             state.current_generation_id = None
-            state.revision = int(state.revision) + 1
+            state.revision = revision
             state.updated_by_user_id = actor_id
             state.updated_at = datetime.now(UTC)
             await session.flush()
             await session.delete(generation)
             await session.flush()
+            assert governance_sink is not None
+            assert process_context is not None
+            await governance_sink.append_process(
+                session,
+                process_context=process_context,
+                project_id=state.project_id,
+                asset_id=state.mcp_server_id,
+                version_id=state.mcp_server_version_id,
+                action="mcp.secret.invalidate",
+                request_id="system-mcp-definition-invalidation",
+                asset_kind="mcp",
+                secret_metadata={
+                    "version_id": state.mcp_server_version_id,
+                    "slot_id": state.slot_id,
+                    "secret_name": slot_names[state.slot_id],
+                    "generation_id": generation.id,
+                    "revision": int(state.revision),
+                    "result": "invalidated",
+                    "reason": "definition_change",
+                    "readiness": "unready",
+                },
+            )
         await session.delete(state)
     await session.flush()
 
@@ -876,7 +939,14 @@ def _mcp_slot_rows(
     )
 
 
-async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: BootstrapEntry) -> bool:
+async def _seed_mcp(
+    session: AsyncSession,
+    catalog: BootstrapCatalog,
+    entry: BootstrapEntry,
+    *,
+    governance_sink: DurableSharedAssetGovernanceEventSink | None = None,
+    process_context: AuditProcessContext | None = None,
+) -> bool:
     raw = _decode_json(_McpPayload, catalog_payload(catalog, entry))
     checksum = _mcp_checksum(raw)
     asset_id = _stable_id(entry.source_key)
@@ -942,6 +1012,8 @@ async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: Boo
             session,
             mcp_server_id=asset_id,
             mcp_server_version_id=version_id,
+            governance_sink=governance_sink,
+            process_context=process_context,
         )
         await session.execute(
             delete(McpSecretSlotRow).where(
@@ -1024,7 +1096,12 @@ async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: Boo
     return True
 
 
-async def bootstrap_system_assets(session_factory: Callable[[], AsyncSession]) -> BootstrapResult:
+async def bootstrap_system_assets(
+    session_factory: Callable[[], AsyncSession],
+    *,
+    governance_sink: DurableSharedAssetGovernanceEventSink | None = None,
+    process_context: AuditProcessContext | None = None,
+) -> BootstrapResult:
     """Apply canonical System Asset definitions atomically.
 
     ``counts`` reports unique assets by kind; ``applied_changes`` reports
@@ -1034,7 +1111,9 @@ async def bootstrap_system_assets(session_factory: Callable[[], AsyncSession]) -
     catalog = load_bootstrap_catalog()
     counts = Counter(kind for kind, _source_key in {(entry.kind, entry.source_key) for entry in catalog.entries})
     created = 0
-    seeders = {"skill": _seed_skill, "mcp": _seed_mcp, "agent": _seed_agent}
+    if (governance_sink is None) != (process_context is None):
+        raise BootstrapConflict("System Asset audit authority is incomplete")
+    seeders = {"skill": _seed_skill, "agent": _seed_agent}
     try:
         async with session_factory() as session, session.begin():
             # Bootstrap must not pre-lock asset_catalog_state: binding writes
@@ -1058,7 +1137,17 @@ async def bootstrap_system_assets(session_factory: Callable[[], AsyncSession]) -
                     item.version,
                 ),
             ):
-                created += int(await seeders[entry.kind](session, catalog, entry))
+                if entry.kind == "mcp":
+                    changed = await _seed_mcp(
+                        session,
+                        catalog,
+                        entry,
+                        governance_sink=governance_sink,
+                        process_context=process_context,
+                    )
+                else:
+                    changed = await seeders[entry.kind](session, catalog, entry)
+                created += int(changed)
             await _retire_removed_system_mcps(session, catalog)
     except BootstrapConflict:
         raise

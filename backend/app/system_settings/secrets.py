@@ -7,7 +7,10 @@ import uuid
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
-from app.system_settings.validation import ModelSettingsInvalid
+from app.system_settings.validation import (
+    ModelSettingsInvalid,
+    materialize_effective_model_settings,
+)
 from deerflow.secrets import SecretEnvelope
 
 
@@ -16,15 +19,27 @@ def model_secret_recipient(
     provider_adapter: str,
     settings: Mapping[str, object],
 ) -> str:
-    configured = settings.get("base_url")
+    configured = materialize_effective_model_settings(
+        settings,
+        provider_adapter=provider_adapter,
+    ).get("base_url")
     if not isinstance(configured, str):
-        origin = f"{provider_adapter}:provider-default"
-    else:
+        raise ModelSettingsInvalid
+    try:
         parsed = urlsplit(configured)
-        if not parsed.scheme or parsed.hostname is None:
-            raise ModelSettingsInvalid
-        port = f":{parsed.port}" if parsed.port is not None else ""
-        origin = f"{provider_adapter}:{parsed.scheme.lower()}://{parsed.hostname.lower()}{port}"
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ModelSettingsInvalid from None
+    if scheme not in {"http", "https"} or hostname is None:
+        raise ModelSettingsInvalid
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    normalized_host = hostname.lower()
+    if ":" in normalized_host:
+        normalized_host = f"[{normalized_host}]"
+    origin = f"{provider_adapter}:{scheme}://{normalized_host}:{port}"
     return f"system-model:{model_config_id}:api-key:{origin}"
 
 

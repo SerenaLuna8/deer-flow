@@ -139,7 +139,6 @@ def validate_channel_configuration(
     *,
     public_config: object,
     secrets: object,
-    has_existing_secret: bool,
     request_id: str,
 ) -> NormalizedChannelConfiguration:
     spec = CHANNEL_PROVIDER_SPECS.get(provider)
@@ -193,8 +192,9 @@ def validate_channel_configuration(
                 missing_fields.append(f"secrets.{field}")
                 continue
             normalized_secrets[field] = value
-    elif not has_existing_secret:
-        missing_fields.extend(f"secrets.{field}" for field in spec.secret_fields)
+    # A Channel Instance owns its public configuration independently from its
+    # secret readiness.  Empty input preserves an existing bundle and also
+    # permits a new, explicitly unready Instance to be saved.
 
     if missing_fields:
         labels = " and ".join(

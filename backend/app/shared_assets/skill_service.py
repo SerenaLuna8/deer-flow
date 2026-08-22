@@ -215,6 +215,7 @@ class SkillFileChange:
 @dataclass(frozen=True)
 class SkillSecretRequirementView:
     name: str
+    target_env: str
     optional: bool
 
 
@@ -507,12 +508,19 @@ def _snapshot_checksum_for_files(files: Sequence[SkillArchiveFile]) -> str:
 def _preflight_skill_frontmatter(
     skill_file: Path,
     request_id: str,
-) -> tuple[dict[str, object], tuple[tuple[str, bool], ...]]:
+) -> tuple[dict[str, object], tuple[tuple[str, str, bool], ...]]:
     manifest_text = skill_file.read_text(encoding="utf-8")
     parsed = parse_skill_frontmatter_document(manifest_text)
     if not parsed.valid or parsed.frontmatter is None or parsed.projection is None:
         raise AssetValidationFailed(request_id)
-    return dict(parsed.frontmatter), tuple((requirement.name, requirement.optional) for requirement in parsed.projection.required_secrets)
+    return dict(parsed.frontmatter), tuple(
+        (
+            requirement.name,
+            str(requirement.target_env),
+            requirement.optional,
+        )
+        for requirement in parsed.projection.required_secrets
+    )
 
 
 def _analyze_skill_files(
@@ -540,14 +548,35 @@ def _analyze_skill_files(
             if parsed is None:
                 raise AssetValidationFailed(request_id)
 
-            parsed_requirements = tuple((requirement.name, requirement.optional) for requirement in parsed.required_secrets)
+            parsed_requirements = tuple(
+                (
+                    requirement.name,
+                    str(requirement.target_env),
+                    requirement.optional,
+                )
+                for requirement in parsed.required_secrets
+            )
             if canonical_requirements != parsed_requirements:
                 raise AssetValidationFailed(request_id)
 
-            requirement_views = tuple(SkillSecretRequirementView(name=requirement.name, optional=requirement.optional) for requirement in parsed.required_secrets)
+            requirement_views = tuple(
+                SkillSecretRequirementView(
+                    name=requirement.name,
+                    target_env=str(requirement.target_env),
+                    optional=requirement.optional,
+                )
+                for requirement in parsed.required_secrets
+            )
             sanitized_frontmatter = dict(frontmatter)
             if "required-secrets" in sanitized_frontmatter:
-                sanitized_frontmatter["required-secrets"] = [{"name": requirement.name, "optional": requirement.optional} for requirement in requirement_views]
+                sanitized_frontmatter["required-secrets"] = [
+                    {
+                        "name": requirement.name,
+                        "target_env": requirement.target_env,
+                        "optional": requirement.optional,
+                    }
+                    for requirement in requirement_views
+                ]
             compatibility = sanitized_frontmatter.get("compatibility")
             if compatibility is not None and (not isinstance(compatibility, str) or len(compatibility) > 255):
                 raise AssetValidationFailed(request_id)
@@ -1697,7 +1726,14 @@ class SkillService:
         )
         current = await asyncio.to_thread(_analyze_skill_files, files, actor.request_id)
         self._require_archive_name_matches_asset(actor, asset, current)
-        expected_requirements = [{"name": requirement.name, "optional": requirement.optional} for requirement in current.secret_requirements]
+        expected_requirements = [
+            {
+                "name": requirement.name,
+                "target_env": requirement.target_env,
+                "optional": requirement.optional,
+            }
+            for requirement in current.secret_requirements
+        ]
         if (
             current.checksum != record.row.payload_checksum
             or current.description != record.row.description
@@ -1771,7 +1807,14 @@ class SkillService:
             description=preview.description,
             frontmatter=dict(preview.frontmatter),
             compatibility=preview.compatibility,
-            secret_requirements=[{"name": requirement.name, "optional": requirement.optional} for requirement in preview.secret_requirements],
+            secret_requirements=[
+                {
+                    "name": requirement.name,
+                    "target_env": requirement.target_env,
+                    "optional": requirement.optional,
+                }
+                for requirement in preview.secret_requirements
+            ],
             scan_decision=preview.scan_decision,
             scan_summary=dict(preview.scan_summary),
             supersedes_version_id=supersedes_version_id,
@@ -2172,7 +2215,15 @@ class SkillService:
         relation: VersionRelation,
     ) -> SkillVersionView:
         row = record.row
-        requirements = tuple(SkillSecretRequirementView(name=str(item["name"]), optional=bool(item.get("optional", False))) for item in row.secret_requirements if isinstance(item, dict) and isinstance(item.get("name"), str))
+        requirements = tuple(
+            SkillSecretRequirementView(
+                name=str(item["name"]),
+                target_env=str(item.get("target_env", item["name"])),
+                optional=bool(item.get("optional", False)),
+            )
+            for item in row.secret_requirements
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        )
         file_views = tuple(SkillFileView(path=file.path, media_type=file.media_type, size_bytes=file.size_bytes, sha256=file.sha256) for file in record.files)
         rule_ids = row.scan_summary.get("rule_ids", [])
         return SkillVersionView(

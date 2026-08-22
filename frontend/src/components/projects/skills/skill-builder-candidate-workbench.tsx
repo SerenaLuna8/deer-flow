@@ -525,7 +525,7 @@ export function SkillBuilderCandidateWorkbench({
               <p className="text-muted-foreground">
                 {copy.requiredSecrets}
                 {validation.secret_requirements
-                  .map((item) => item.name)
+                  .map((item) => `${item.name} → ${item.target_env}`)
                   .join(", ")}
               </p>
             ) : null}

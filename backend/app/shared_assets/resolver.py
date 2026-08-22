@@ -55,6 +55,7 @@ from app.shared_assets.models import (
     WorkflowStatus,
 )
 from app.shared_assets.skill_repository import SkillVersionRecord
+from app.shared_assets.skill_secret_policy import parse_skill_secret_declarations
 from app.shared_assets.skill_service import SkillService
 from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.persistence.shared_assets import (
@@ -1274,21 +1275,20 @@ class ProjectAssetResolver:
             )
         except AssetValidationFailed:
             raise AssetResolutionUnavailable(context.request_id) from None
-        requirements: list[SkillSecretRequirementSnapshot] = []
-        for item in version.secret_requirements:
-            if isinstance(item, str):
-                requirements.append(
-                    SkillSecretRequirementSnapshot(item, False),
+        try:
+            requirements = [
+                SkillSecretRequirementSnapshot(
+                    name=item.name,
+                    target_env=item.target_env,
+                    optional=item.optional,
                 )
-            elif isinstance(item, Mapping) and isinstance(item.get("name"), str) and isinstance(item.get("optional", False), bool):
-                requirements.append(
-                    SkillSecretRequirementSnapshot(
-                        str(item["name"]),
-                        bool(item.get("optional", False)),
-                    )
+                for item in parse_skill_secret_declarations(
+                    version.secret_requirements,
+                    request_id=context.request_id,
                 )
-            else:
-                raise AssetResolutionUnavailable(context.request_id)
+            ]
+        except SharedAssetError:
+            raise AssetResolutionUnavailable(context.request_id) from None
         return ResolvedSkillSnapshot(
             kind=AssetKind.SKILL,
             scope=record.scope,

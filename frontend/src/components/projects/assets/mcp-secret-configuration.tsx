@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { consumeWriteOnlyInput } from "@/core/api/write-only-input";
 import {
   useClearProjectMcpSecret,
   useReplaceProjectMcpSecret,
@@ -68,13 +69,15 @@ export function McpSecretConfiguration({
     if (!payload || !completeSlots.has(slotName)) return;
     setPending("replace");
     setMutationError(null);
-    setValues((current) => ({ ...current, [slotName]: {} }));
+    const submittedPayload = consumeWriteOnlyInput(payload, () =>
+      setValues((current) => ({ ...current, [slotName]: {} })),
+    );
     try {
-      await replace.mutateAsync({
+      await replace.execute({
         assetId,
         versionId,
         slotName,
-        input: { payload },
+        input: { payload: submittedPayload },
       });
       await query.refetch();
     } catch (error) {
@@ -128,7 +131,8 @@ export function McpSecretConfiguration({
                     <code>{slot.name}</code>
                   </p>
                   <p className="text-muted-foreground text-xs">
-                    {slot.required ? "必需" : "可选"} · {slot.configured ? "已配置" : "未配置"}
+                    {slot.required ? "必需" : "可选"} ·{" "}
+                    {slot.configured ? "已配置" : "未配置"}
                   </p>
                 </div>
                 <Button
@@ -143,16 +147,23 @@ export function McpSecretConfiguration({
               </div>
               {Object.entries(slot.payload_schema).flatMap(([group, names]) =>
                 names.map((name) => (
-                  <label key={`${group}:${name}`} className="grid gap-2 text-sm">
+                  <label
+                    key={`${group}:${name}`}
+                    className="grid gap-2 text-sm"
+                  >
                     <span>
-                      <code>{group}.{name}</code>
+                      <code>
+                        {group}.{name}
+                      </code>
                     </span>
                     <Input
                       type="password"
                       autoComplete="new-password"
                       disabled={!canManage || pending !== null}
                       value={values[slot.name]?.[group]?.[name] ?? ""}
-                      placeholder={slot.configured ? "留空以保留" : "输入秘密值"}
+                      placeholder={
+                        slot.configured ? "留空以保留" : "输入秘密值"
+                      }
                       aria-label={`${slot.name} ${group} ${name} 秘密值`}
                       onChange={(event) =>
                         setValues((current) => ({
@@ -190,7 +201,10 @@ export function McpSecretConfiguration({
         </p>
       ) : null}
 
-      <Dialog open={clearName !== null} onOpenChange={(open) => !open && setClearName(null)}>
+      <Dialog
+        open={clearName !== null}
+        onOpenChange={(open) => !open && setClearName(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>清除此 MCP 秘密槽位？</DialogTitle>
@@ -199,10 +213,19 @@ export function McpSecretConfiguration({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setClearName(null)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setClearName(null)}
+            >
               取消
             </Button>
-            <Button type="button" variant="destructive" disabled={pending !== null} onClick={() => void confirmClear()}>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={pending !== null}
+              onClick={() => void confirmClear()}
+            >
               {pending === "clear" ? "正在清除…" : "确认清除"}
             </Button>
           </DialogFooter>

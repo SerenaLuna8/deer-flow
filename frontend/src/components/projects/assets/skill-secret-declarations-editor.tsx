@@ -152,13 +152,17 @@ export function skillFrontmatterRequestIsCurrent({
 export function skillSecretDraftAfterPatch({
   patchSucceeded,
   name,
+  targetEnv,
   optional,
 }: {
   patchSucceeded: boolean;
   name: string;
+  targetEnv: string;
   optional: boolean;
-}): { name: string; optional: boolean } {
-  return patchSucceeded ? { name: "", optional: false } : { name, optional };
+}): { name: string; targetEnv: string; optional: boolean } {
+  return patchSucceeded
+    ? { name: "", targetEnv: "", optional: false }
+    : { name, targetEnv, optional };
 }
 
 function declarationErrorMessage(
@@ -221,6 +225,7 @@ export function SkillSecretDeclarationsEditor({
   const copy = t.skills.secrets;
   const [status, setStatus] = useState<EditorStatus>({ kind: "idle" });
   const [newName, setNewName] = useState("");
+  const [newTargetEnv, setNewTargetEnv] = useState("");
   const [newOptional, setNewOptional] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [parseNonce, setParseNonce] = useState(0);
@@ -452,8 +457,13 @@ export function SkillSecretDeclarationsEditor({
   function addRequirement() {
     if (status.kind !== "ready") return;
     const name = newName.trim();
+    const targetEnv = newTargetEnv.trim();
     if (!skillSecretDeclarationNameSchema.safeParse(name).success) {
       setLocalError(copy.invalidName);
+      return;
+    }
+    if (!skillSecretDeclarationNameSchema.safeParse(targetEnv).success) {
+      setLocalError(copy.invalidTargetEnv);
       return;
     }
     if (
@@ -464,16 +474,29 @@ export function SkillSecretDeclarationsEditor({
       setLocalError(copy.duplicateName);
       return;
     }
+    if (
+      status.projection.required_secrets.some(
+        (requirement) => requirement.target_env === targetEnv,
+      )
+    ) {
+      setLocalError(copy.duplicateTargetEnv);
+      return;
+    }
     void patchProjection(
-      [...status.projection.required_secrets, { name, optional: newOptional }],
+      [
+        ...status.projection.required_secrets,
+        { name, target_env: targetEnv, optional: newOptional },
+      ],
       status.projection.secrets_autonomous,
     ).then((succeeded) => {
       const nextDraft = skillSecretDraftAfterPatch({
         patchSucceeded: succeeded,
         name: newName,
+        targetEnv: newTargetEnv,
         optional: newOptional,
       });
       setNewName(nextDraft.name);
+      setNewTargetEnv(nextDraft.targetEnv);
       setNewOptional(nextDraft.optional);
     });
   }
@@ -607,8 +630,14 @@ export function SkillSecretDeclarationsEditor({
                   key={requirement.name}
                   className="bg-muted/20 flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center"
                 >
-                  <code className="min-w-0 flex-1 text-sm font-medium break-all">
+                  <code className="min-w-0 text-sm font-medium break-all">
                     {requirement.name}
+                  </code>
+                  <span aria-hidden className="text-muted-foreground">
+                    →
+                  </span>
+                  <code className="min-w-0 flex-1 text-sm break-all">
+                    {requirement.target_env}
                   </code>
                   <Badge variant="secondary">
                     {requirement.optional ? copy.optional : copy.required}
@@ -658,7 +687,7 @@ export function SkillSecretDeclarationsEditor({
           {access.editable ? (
             <div className="space-y-3 rounded-lg border border-dashed p-3">
               <p className="text-sm font-medium">{copy.addTitle}</p>
-              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end">
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] sm:items-end">
                 <label className="space-y-1">
                   <span className="text-muted-foreground text-xs">
                     {copy.nameLabel}
@@ -684,6 +713,30 @@ export function SkillSecretDeclarationsEditor({
                     }}
                   />
                 </label>
+                <label className="space-y-1">
+                  <span className="text-muted-foreground text-xs">
+                    {copy.targetEnvLabel}
+                  </span>
+                  <Input
+                    value={newTargetEnv}
+                    placeholder={copy.targetEnvPlaceholder}
+                    disabled={controlsDisabled || !status.patchable}
+                    aria-invalid={Boolean(localError)}
+                    aria-describedby={
+                      localError ? "skill-secret-name-error" : undefined
+                    }
+                    onChange={(event) => {
+                      setNewTargetEnv(event.target.value);
+                      setLocalError(null);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addRequirement();
+                      }
+                    }}
+                  />
+                </label>
                 <label className="flex h-9 items-center gap-2 text-xs">
                   <Switch
                     aria-label={copy.newOptional}
@@ -699,7 +752,8 @@ export function SkillSecretDeclarationsEditor({
                   disabled={
                     controlsDisabled ||
                     !status.patchable ||
-                    newName.trim() === ""
+                    newName.trim() === "" ||
+                    newTargetEnv.trim() === ""
                   }
                   onClick={addRequirement}
                 >

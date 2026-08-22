@@ -40,9 +40,11 @@ def test_parse_projects_mapping_requirements_and_explicit_autonomous() -> None:
         """name: example-skill
 description: Example
 required-secrets:
-  - name: \"OPENAI_API_KEY\"
+  - name: \"provider_key\"
+    target_env: \"OPENAI_API_KEY\"
     optional: false
-  - name: \"SECONDARY_TOKEN\"
+  - name: \"secondary_token\"
+    target_env: \"SECONDARY_TOKEN\"
     optional: true
 secrets-autonomous: false"""
     )
@@ -57,15 +59,31 @@ secrets-autonomous: false"""
         "name": "example-skill",
         "description": "Example",
         "required-secrets": [
-            {"name": "OPENAI_API_KEY", "optional": False},
-            {"name": "SECONDARY_TOKEN", "optional": True},
+            {
+                "name": "provider_key",
+                "target_env": "OPENAI_API_KEY",
+                "optional": False,
+            },
+            {
+                "name": "secondary_token",
+                "target_env": "SECONDARY_TOKEN",
+                "optional": True,
+            },
         ],
         "secrets-autonomous": False,
     }
     assert result.projection is not None
     assert result.projection.required_secrets == (
-        SecretRequirement(name="OPENAI_API_KEY", optional=False),
-        SecretRequirement(name="SECONDARY_TOKEN", optional=True),
+        SecretRequirement(
+            name="provider_key",
+            target_env="OPENAI_API_KEY",
+            optional=False,
+        ),
+        SecretRequirement(
+            name="secondary_token",
+            target_env="SECONDARY_TOKEN",
+            optional=True,
+        ),
     )
     assert result.projection.secrets_autonomous is False
     assert result.projection.secrets_autonomous_explicit is True
@@ -325,8 +343,8 @@ secrets-autonomous: true""",
 
     assert first.changed is True
     assert first.changed_fields == ("required-secrets", "secrets-autonomous")
-    assert '  - name: "API_TOKEN"\n    optional: false' in first.content
-    assert '  - name: "OPTIONAL_TOKEN"\n    optional: true' in first.content
+    assert ('  - name: "API_TOKEN"\n    target_env: "API_TOKEN"\n    optional: false') in first.content
+    assert ('  - name: "OPTIONAL_TOKEN"\n    target_env: "OPTIONAL_TOKEN"\n    optional: true') in first.content
     assert "metadata: {owner: team-a} # unmanaged inline comment" in first.content
     assert first.content.endswith("\n# Instructions\n\nKeep this body byte-exact.\n")
     assert second.content == first.content

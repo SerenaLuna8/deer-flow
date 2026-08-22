@@ -388,7 +388,12 @@ def test_secret_binding_expires_together_with_read_evidence() -> None:
     skill = _skill(
         name="secretive",
         allowed_tools=None,
-        required_secrets=(SecretRequirement(name="API_KEY"),),
+        required_secrets=(
+            SecretRequirement(
+                name="provider_key",
+                target_env="API_KEY",
+            ),
+        ),
     )
     app_config = AppConfig.model_validate(
         {
@@ -403,7 +408,7 @@ def test_secret_binding_expires_together_with_read_evidence() -> None:
         slash_source_owner_token=_OWNER_TOKEN,
     )
     context = _context()
-    context["secrets"] = {"API_KEY": "secret-value"}
+    context["secrets"] = {"provider_key": "secret-value"}
     entry_path = skill.get_container_file_path(_CONTAINER)
     request = SimpleNamespace(runtime=SimpleNamespace(context=context))
 

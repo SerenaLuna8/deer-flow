@@ -27,7 +27,7 @@ from app.shared_assets.models import (
     SkillSecretRequirementSnapshot,
 )
 
-RUN_ASSET_SNAPSHOT_SCHEMA_VERSION = 1
+RUN_ASSET_SNAPSHOT_SCHEMA_VERSION = 2
 _CHECKSUM = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -74,7 +74,14 @@ def encode_run_asset_snapshot(snapshot: ResolvedAssetSnapshot) -> dict[str, obje
                 }
                 for item in snapshot.files
             ],
-            "secret_requirements": [{"name": item.name, "optional": item.optional} for item in snapshot.secret_requirements],
+            "secret_requirements": [
+                {
+                    "name": item.name,
+                    "target_env": item.target_env,
+                    "optional": item.optional,
+                }
+                for item in snapshot.secret_requirements
+            ],
         }
     elif type(snapshot) is ResolvedMcpSnapshot:
         base["mcp"] = {
@@ -198,27 +205,21 @@ def decode_run_asset_snapshot(value: Mapping[str, object]) -> ResolvedAssetSnaps
             if _skill_checksum(files) != checksum:
                 raise RunAssetSnapshotInvalid("Run Skill snapshot checksum is invalid")
             requirements: list[SkillSecretRequirementSnapshot] = []
-            raw_requirements = raw["secret_requirements"]
-            if isinstance(raw_requirements, list) and all(isinstance(item, str) for item in raw_requirements):
-                # An unpublished intermediate snapshot shape omitted the
-                # optional bit. Preserve admitted references without turning an
-                # unknown optional target into a new required execution gate.
-                requirements.extend(SkillSecretRequirementSnapshot(item, True) for item in raw_requirements)
-            else:
-                for item in _mapping_sequence(
-                    raw_requirements,
-                    {"name", "optional"},
-                ):
-                    if not isinstance(item["optional"], bool):
-                        raise RunAssetSnapshotInvalid(
-                            "Run Skill secret requirement is invalid",
-                        )
-                    requirements.append(
-                        SkillSecretRequirementSnapshot(
-                            name=_string(item["name"]),
-                            optional=item["optional"],
-                        )
+            for item in _mapping_sequence(
+                raw["secret_requirements"],
+                {"name", "target_env", "optional"},
+            ):
+                if not isinstance(item["optional"], bool):
+                    raise RunAssetSnapshotInvalid(
+                        "Run Skill secret requirement is invalid",
                     )
+                requirements.append(
+                    SkillSecretRequirementSnapshot(
+                        name=_string(item["name"]),
+                        target_env=_string(item["target_env"]),
+                        optional=item["optional"],
+                    )
+                )
             return ResolvedSkillSnapshot(
                 **common,
                 files=files,

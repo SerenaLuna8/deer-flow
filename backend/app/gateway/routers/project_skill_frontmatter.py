@@ -70,6 +70,10 @@ class SkillSecretDeclarationRequest(_StrictModel):
         min_length=1,
         pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
     )
+    target_env: str = Field(
+        min_length=1,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+    )
     optional: StrictBool = False
 
 
@@ -139,6 +143,7 @@ def _projection(value) -> SkillSecretProjectionResponse:
         required_secrets=[
             SkillSecretDeclarationRequest(
                 name=item.name,
+                target_env=item.target_env,
                 optional=item.optional,
             )
             for item in value.required_secrets
@@ -228,6 +233,7 @@ async def patch_project_skill_frontmatter(
             required_secrets=tuple(
                 SecretRequirement(
                     name=item.name,
+                    target_env=item.target_env,
                     optional=item.optional,
                 )
                 for item in body.required_secrets

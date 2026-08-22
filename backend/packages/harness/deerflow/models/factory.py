@@ -63,20 +63,20 @@ def _normalize_openai_base_url(
     model_class: type,
     model_settings_from_config: dict,
 ) -> None:
-    """Map the common ``api_base`` alias to ``base_url`` for OpenAI-compatible clients.
+    """Map the catalog ``base_url`` to the provider's real constructor field.
 
     ``BaseChatOpenAI`` subclasses accept the OpenAI endpoint override as
-    ``base_url`` (with ``openai_api_base`` as a legacy alias). Some provider
-    adapters use ``api_base`` for other model classes, so an administrator may
-    copy ``api_base`` into an OpenAI-compatible model setting by mistake.
-    Because ``ModelConfig`` is
-    ``extra="allow"``, the bad key is not caught at config-load time — it is forwarded to the
-    constructor, which does not reject it but transfers it into ``model_kwargs``; that is then
-    spread into every ``Completions.create()`` call and rejected by the OpenAI SDK at *request*
-    time with an opaque ``unexpected keyword argument 'api_base'`` error (and the endpoint override
-    is silently dropped). Rename it here so the model works as the user intended.
+    ``base_url``. ChatDeepSeek also declares its own ``api_base`` field and
+    resolves that field from ``DEEPSEEK_API_BASE``; passing only ``base_url``
+    lets the host environment replace the catalog's recipient-bound origin.
+    Translate in both directions so the catalog remains canonical while every
+    constructor receives the field that actually controls its client.
     """
-    if not issubclass(model_class, BaseChatOpenAI) or _declares_api_base(model_class):
+    if not issubclass(model_class, BaseChatOpenAI):
+        return
+    if _declares_api_base(model_class):
+        if "base_url" in model_settings_from_config:
+            model_settings_from_config["api_base"] = model_settings_from_config.pop("base_url")
         return
     if "api_base" not in model_settings_from_config:
         return

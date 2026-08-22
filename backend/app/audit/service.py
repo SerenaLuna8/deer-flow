@@ -54,7 +54,16 @@ def _metadata_for_read(
 ) -> dict[str, object]:
     metadata_model = AUDIT_METADATA_MODELS[action]
     try:
-        return metadata_model.model_validate(metadata).model_dump(
+        # PostgreSQL JSON stores UUID fields as strings.  Strict Pydantic
+        # models intentionally accept that representation only through their
+        # JSON validation path, which is the actual durable boundary here.
+        encoded = json.dumps(
+            metadata,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return metadata_model.model_validate_json(encoded).model_dump(
             mode="json",
             exclude_none=True,
         )

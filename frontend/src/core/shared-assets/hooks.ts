@@ -5,6 +5,7 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 
+import { useImperativeRequest } from "@/core/api/use-imperative-request";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
   isPrivateWorkAccessActive,
@@ -448,10 +449,7 @@ export function useAdminProjectAssets(
   });
 }
 
-export function useSystemAssetCatalog(
-  accountId: string,
-  kind: AssetListKind,
-) {
+export function useSystemAssetCatalog(accountId: string, kind: AssetListKind) {
   return useQuery<AdminAssetList>({
     queryKey: systemCatalogKey(accountId, kind),
     queryFn: ({ signal }) => listSystemAssetCatalog(kind, signal),
@@ -594,12 +592,7 @@ export function useProjectSkillSecrets(
   enabled = true,
 ) {
   return useQuery<SkillSecretSetResponse>({
-    queryKey: projectSkillSecretsKey(
-      accountId,
-      projectId,
-      skillId,
-      versionId,
-    ),
+    queryKey: projectSkillSecretsKey(accountId, projectId, skillId, versionId),
     queryFn: ({ signal }) =>
       getProjectSkillSecrets(projectId, skillId, versionId, signal),
     enabled: enabled && versionId !== "",
@@ -648,14 +641,8 @@ export function useReplaceProjectMcpSecret(
   projectId: string,
 ) {
   const { runMutation } = useProjectMutationRunner(accountId, projectId);
-  return useMutation({
-    mutationKey: projectAssetMutationKey(
-      accountId,
-      projectId,
-      "mcp-servers",
-      "secret-replace",
-    ),
-    mutationFn: ({
+  return useImperativeRequest(
+    ({
       assetId,
       versionId,
       slotName,
@@ -676,13 +663,10 @@ export function useReplaceProjectMcpSecret(
           signal,
         ),
       ),
-  });
+  );
 }
 
-export function useClearProjectMcpSecret(
-  accountId: string,
-  projectId: string,
-) {
+export function useClearProjectMcpSecret(accountId: string, projectId: string) {
   const { runMutation } = useProjectMutationRunner(accountId, projectId);
   return useMutation({
     mutationKey: projectAssetMutationKey(
@@ -720,14 +704,8 @@ export function useReplaceProjectSkillSecrets(
   projectId: string,
 ) {
   const { runMutation } = useProjectMutationRunner(accountId, projectId);
-  return useMutation({
-    mutationKey: projectAssetMutationKey(
-      accountId,
-      projectId,
-      "skills",
-      "secret-replace",
-    ),
-    mutationFn: ({
+  return useImperativeRequest(
+    ({
       skillId,
       versionId,
       input,
@@ -745,7 +723,7 @@ export function useReplaceProjectSkillSecrets(
           signal,
         ),
       ),
-  });
+  );
 }
 
 export function useClearProjectSkillSecret(

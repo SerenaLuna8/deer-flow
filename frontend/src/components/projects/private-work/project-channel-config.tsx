@@ -206,7 +206,7 @@ function formValue(form: FormData, field: string) {
 
 export function buildProjectChannelInstanceInput(
   provider: ChannelProviderId,
-  secretConfigured: boolean,
+  configurationExists: boolean,
   form: FormData,
   enabled = true,
 ): ConfigureProjectChannelInstanceInput {
@@ -223,29 +223,28 @@ export function buildProjectChannelInstanceInput(
   const secrets: Record<string, string> = {};
   for (const field of descriptor.secretFields) {
     const value = formValue(form, field.name);
-    if (!secretConfigured && field.required && !value) {
-      throw new Error(`请填写${field.label}`);
-    }
     if (value) secrets[field.name] = value;
   }
 
+  const hasReplacementSecret = Object.keys(secrets).length > 0;
+
   return {
     publicConfig,
-    ...(Object.keys(secrets).length > 0 ? { secrets } : {}),
-    enabled,
+    ...(hasReplacementSecret ? { secrets } : {}),
+    enabled: configurationExists || hasReplacementSecret ? enabled : false,
   };
 }
 
 export function submitProjectChannelInstanceForm({
   provider,
-  secretConfigured,
+  configurationExists,
   enabled = true,
   form,
   clearSecrets,
   onSubmit,
 }: {
   provider: ChannelProviderId;
-  secretConfigured: boolean;
+  configurationExists: boolean;
   enabled?: boolean;
   form: FormData;
   clearSecrets: () => void;
@@ -253,13 +252,13 @@ export function submitProjectChannelInstanceForm({
     input: ConfigureProjectChannelInstanceInput,
   ) => void | Promise<void>;
 }) {
+  clearSecrets();
   const input = buildProjectChannelInstanceInput(
     provider,
-    secretConfigured,
+    configurationExists,
     form,
     enabled,
   );
-  clearSecrets();
   return onSubmit(input);
 }
 
@@ -296,14 +295,13 @@ export function ChannelInstanceConfigDialog({
     descriptor?.secretFields.length === 1
       ? descriptor.secretFields[0]?.label
       : "凭据";
-
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!instance || !descriptor || pending) return;
     const formElement = event.currentTarget;
     await submitProjectChannelInstanceForm({
       provider: instance.provider,
-      secretConfigured: instance.secret_configured,
+      configurationExists: instance.configured,
       enabled: instance.configured ? instance.enabled : true,
       form: new FormData(formElement),
       clearSecrets: () =>
@@ -323,7 +321,9 @@ export function ChannelInstanceConfigDialog({
           <DialogDescription>
             {instance?.secret_configured
               ? `${secretLabel} 已配置；留空表示保留。`
-              : ""}
+              : instance && instance.secret_revision > 0
+                ? `${secretLabel} 已清除；可留空保存未就绪配置，或输入新值重新配置。`
+                : `可先保存未就绪配置，或输入${secretLabel}立即完成配置。`}
           </DialogDescription>
         </DialogHeader>
         {instance && descriptor ? (
@@ -350,9 +350,13 @@ export function ChannelInstanceConfigDialog({
                 <Input
                   name={field.name}
                   type="password"
-                  required={field.required && !instance.secret_configured}
+                  required={false}
                   placeholder={
-                    instance.secret_configured ? "已配置，留空表示保留" : ""
+                    instance.secret_configured
+                      ? "已配置，留空表示保留"
+                      : instance.secret_revision > 0
+                        ? "已清除，留空保持未就绪"
+                        : "可留空保存未就绪配置，或输入秘密完成配置"
                   }
                   disabled={pending}
                   autoComplete="new-password"

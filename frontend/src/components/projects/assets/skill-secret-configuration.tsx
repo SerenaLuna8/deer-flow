@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { consumeWriteOnlyInput } from "@/core/api/write-only-input";
 import {
   useClearProjectSkillSecret,
   useReplaceProjectSkillSecrets,
@@ -23,14 +24,16 @@ export function SkillSecretConfiguration({
   projectId,
   skillId,
   versionId,
-  canManage,
+  canReplace,
+  canClear,
   onDirtyChange,
 }: {
   accountId: string;
   projectId: string;
   skillId: string;
   versionId: string;
-  canManage: boolean;
+  canReplace: boolean;
+  canClear: boolean;
   onDirtyChange: (dirty: boolean) => void;
 }) {
   const query = useProjectSkillSecrets(
@@ -56,12 +59,14 @@ export function SkillSecretConfiguration({
     if (Object.keys(secrets).length === 0) return;
     setPending("replace");
     setMutationError(null);
-    setValues({});
+    const submittedSecrets = consumeWriteOnlyInput(secrets, () =>
+      setValues({}),
+    );
     try {
-      await replace.mutateAsync({
+      await replace.execute({
         skillId,
         versionId,
-        input: { secrets },
+        input: { secrets: submittedSecrets },
       });
       await query.refetch();
     } catch (error) {
@@ -117,16 +122,19 @@ export function SkillSecretConfiguration({
                 <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
                   <code>{requirement.name}</code>
                   <span className="text-muted-foreground text-xs">
-                    {requirement.optional ? "可选" : "必需"} · {requirement.configured ? "已配置" : "未配置"}
+                    {requirement.optional ? "可选" : "必需"} ·{" "}
+                    {requirement.configured ? "已配置" : "未配置"}
                   </span>
                 </span>
                 <Input
                   type="password"
                   autoComplete="new-password"
                   value={values[requirement.name] ?? ""}
-                  disabled={!canManage || pending !== null}
+                  disabled={!canReplace || pending !== null}
                   aria-label={`${requirement.name} 秘密值`}
-                  placeholder={requirement.configured ? "留空以保留" : "输入秘密值"}
+                  placeholder={
+                    requirement.configured ? "留空以保留" : "输入秘密值"
+                  }
                   onChange={(event) =>
                     setValues((current) => ({
                       ...current,
@@ -139,14 +147,16 @@ export function SkillSecretConfiguration({
                 type="button"
                 variant="outline"
                 className="self-end"
-                disabled={!canManage || !requirement.configured || pending !== null}
+                disabled={
+                  !canClear || !requirement.configured || pending !== null
+                }
                 onClick={() => setClearName(requirement.name)}
               >
                 清除
               </Button>
             </div>
           ))}
-          {canManage ? (
+          {canReplace ? (
             <Button
               type="button"
               disabled={!dirty || pending !== null}
@@ -154,6 +164,11 @@ export function SkillSecretConfiguration({
             >
               {pending === "replace" ? "正在保存…" : "保存非空秘密值"}
             </Button>
+          ) : canClear ? (
+            <p className="text-muted-foreground text-sm">
+              Historical Version
+              的定义和值不可替换；仍可清除已配置值以显式撤销。
+            </p>
           ) : (
             <p className="text-muted-foreground text-sm">
               当前账户没有管理项目秘密的权限。
@@ -170,7 +185,10 @@ export function SkillSecretConfiguration({
         </p>
       ) : null}
 
-      <Dialog open={clearName !== null} onOpenChange={(open) => !open && setClearName(null)}>
+      <Dialog
+        open={clearName !== null}
+        onOpenChange={(open) => !open && setClearName(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>清除秘密值？</DialogTitle>
@@ -179,10 +197,19 @@ export function SkillSecretConfiguration({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setClearName(null)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setClearName(null)}
+            >
               取消
             </Button>
-            <Button type="button" variant="destructive" disabled={pending !== null} onClick={() => void confirmClear()}>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={pending !== null}
+              onClick={() => void confirmClear()}
+            >
               {pending === "clear" ? "正在清除…" : "确认清除"}
             </Button>
           </DialogFooter>

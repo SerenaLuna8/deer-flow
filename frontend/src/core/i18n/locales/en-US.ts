@@ -1721,14 +1721,20 @@ export const enUS: Translations = {
       setOptional: (name) => `Make ${name} optional`,
       remove: (name) => `Remove the ${name} declaration`,
       addTitle: "Add an environment variable declaration",
-      nameLabel: "Variable name",
-      namePlaceholder: "API_KEY",
+      nameLabel: "Secret name",
+      namePlaceholder: "provider_key",
+      targetEnvLabel: "Sandbox environment variable",
+      targetEnvPlaceholder: "API_KEY",
       newOptional: "Make the new variable optional",
       add: "Add",
       invalidName:
         "The name must start with a letter or underscore and contain only letters, numbers, and underscores.",
+      invalidTargetEnv:
+        "The Sandbox environment variable must use letters, numbers, and underscores and cannot start with a number.",
       duplicateName:
-        "That environment variable is already declared. Names are case-sensitive.",
+        "That secret name is already declared. Names are case-sensitive.",
+      duplicateTargetEnv:
+        "That Sandbox environment variable is already targeted by this Skill.",
       autonomousTitle: "Secret injection mode",
       autonomousDescription:
         "Choose which Skill activation modes may inject already configured secrets.",

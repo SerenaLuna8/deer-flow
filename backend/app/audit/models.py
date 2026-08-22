@@ -241,13 +241,25 @@ for _action in (
     AuditAction.ASSET_DEPRECATED,
     AuditAction.ASSET_DELETED,
 ):
+    _process_variants = (
+        (
+            _variant(
+                AuditScope.PROJECT,
+                "process",
+                processes=(AuditProcess.OPERATOR,),
+            ),
+        )
+        if _action is AuditAction.ASSET_UPDATED
+        else ()
+    )
     _ACTION_CONTRACTS[_action] = AuditActionContract(
         target_kind=AuditTargetKind.ASSET,
         variants=(
             _variant(AuditScope.PROJECT, "user"),
             _variant(AuditScope.PROJECT, "system"),
             _variant(AuditScope.PLATFORM, "system"),
-        ),
+        )
+        + _process_variants,
     )
 for _action in (AuditAction.ASSET_BOUND, AuditAction.ASSET_UNBOUND):
     _ACTION_CONTRACTS[_action] = _contract(

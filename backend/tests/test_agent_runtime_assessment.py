@@ -141,15 +141,13 @@ class _ClosureValidator:
 class _ModelCatalog:
     def __init__(self, *, fail_storage: bool = False) -> None:
         self.fail_storage = fail_storage
-        self.calls: list[tuple[str | None, bool]] = []
+        self.calls: list[str | None] = []
 
-    async def resolve_active_model(
+    async def resolve_admissible_active_model(
         self,
         model_ref: str | None,
-        *,
-        load_envelope: bool,
     ) -> object | None:
-        self.calls.append((model_ref, load_envelope))
+        self.calls.append(model_ref)
         if self.fail_storage:
             raise SystemModelRepositoryInvariant
         return object() if model_ref == "default" else None
@@ -251,7 +249,7 @@ async def test_batch_assessment_preserves_input_order_and_fails_closed_per_agent
     ]
     assert service.project_read_lock_calls == [(_context(), True)]  # type: ignore[attr-defined]
     assert len(validator.contexts) == 3
-    assert models.calls == [("default", False), (_INACTIVE_MODEL_REF, False)]
+    assert models.calls == ["default", _INACTIVE_MODEL_REF]
 
 
 @pytest.mark.asyncio

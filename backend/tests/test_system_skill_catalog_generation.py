@@ -352,7 +352,7 @@ async def test_bootstrap_orders_system_skill_before_mcp_and_agent(monkeypatch: p
         def __call__(self) -> Session:
             return Session()
 
-    async def seed(_session, _catalog, entry):
+    async def seed(_session, _catalog, entry, **_kwargs):
         calls.append((entry.kind, entry.version))
         return True
 

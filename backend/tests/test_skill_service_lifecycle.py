@@ -423,7 +423,11 @@ async def test_initial_archive_create_allows_required_secret_without_binding(
     assert created.revision == 2
     assert version.row.version_number == 1
     assert version.row.secret_requirements == [
-        {"name": "TARGET_API_KEY", "optional": False},
+        {
+            "name": "TARGET_API_KEY",
+            "target_env": "TARGET_API_KEY",
+            "optional": False,
+        },
     ]
 
 
@@ -454,6 +458,7 @@ async def test_builder_preview_create_allows_required_secret_without_binding(
     assert result.version.secret_requirements == (
         skill_service_module.SkillSecretRequirementView(
             name="TARGET_API_KEY",
+            target_env="TARGET_API_KEY",
             optional=False,
         ),
     )

@@ -12,6 +12,10 @@ from app.system_settings.models import (
     FrozenSystemModelExecution,
     LockedSystemModelMaterial,
 )
+from app.system_settings.validation import (
+    is_provider_adapter_eligible_for_new_binding,
+    provider_api_key_required,
+)
 from deerflow.persistence.system_settings import (
     RunModelConfigSnapshotRow,
     SystemModelCatalogStateRow,
@@ -125,6 +129,24 @@ class SystemModelRepository:
             model=model,
             secret_generation=generation,
         )
+
+    async def resolve_admissible_active_model(
+        self,
+        model_ref: str | None,
+    ) -> LockedSystemModelMaterial | None:
+        """Resolve current-work eligibility without returning secret material."""
+
+        material = await self.resolve_active_model(
+            model_ref,
+            load_secret=False,
+        )
+        if material is None or not is_provider_adapter_eligible_for_new_binding(
+            material.model.provider_adapter,
+        ):
+            return None
+        if provider_api_key_required(material.model.provider_adapter) and (await self.current_secret(material.model, for_update=True)) is None:
+            return None
+        return material
 
     async def add_model(self, model: SystemModelConfigRow) -> None:
         self.session.add(model)

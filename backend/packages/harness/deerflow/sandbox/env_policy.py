@@ -1,102 +1,60 @@
-"""Environment-variable policy for sandbox command execution (issue #3861).
+"""Construct the minimal host environment exposed to Sandbox processes.
 
-Skill scripts run as sandbox subprocesses. By default a subprocess inherits the
-Gateway process's entire ``os.environ`` — which holds platform credentials
-(``OPENAI_API_KEY``, tracing keys, community-provider keys, ...). That makes any
-scoped request-secret injection pointless: a script could simply read those
-inherited platform secrets. This module scrubs secret-looking variables from the
-inherited environment before request-scoped secrets are layered on top.
-
-The pattern set mirrors codex's ``*KEY*/*SECRET*/*TOKEN*`` default excludes and
-hermes's fixed provider blocklist; unlike codex (which defaults the exclude
-*off*), ActWeave scrubs by default — security first.
+Skill scripts must not inherit arbitrary Worker or host variables.  A denylist
+cannot enforce that boundary because an operator or library can introduce a
+secret under an otherwise innocent name.  Only the small process-bootstrapping
+allowlist below crosses the boundary; Skill-declared values are layered on top
+after their exact recipient has been authorized upstream.
 """
 
 from __future__ import annotations
 
-import fnmatch
 import os
 
-# Case-insensitive wildcard patterns for secret-looking variable names. Matched
-# against the upper-cased variable name. Benign system vars (PATH, HOME, SHELL,
-# LANG, PWD, TMPDIR, VIRTUAL_ENV, PYTHONPATH, ...) contain none of these tokens
-# and are therefore preserved.
-_SECRET_NAME_PATTERNS: tuple[str, ...] = (
-    "*KEY*",
-    "*SECRET*",
-    "*TOKEN*",
-    # Covers full PASSWORD/PASSWD spellings, abbreviated password variables
-    # such as DB_PASS, Postgres PGPASSFILE, and credential helper locators such
-    # as GIT_ASKPASS. False-positive scrubbing is fail-safe: an authorized
-    # request-scoped value can still be injected explicitly below.
-    "*PASS*",
-    "*CREDENTIAL*",
-    "*DSN*",  # data source name — almost always a connection string with a password
-)
-
-# Connection-string / credential-bearing variable names that carry no
-# KEY/SECRET/TOKEN/DSN substring but routinely embed a password (e.g.
-# ``postgresql://user:pw@host/db``). A blanket ``*URL*`` block is intentionally
-# avoided — it would strip benign service URLs a skill may legitimately read.
-# A skill that genuinely needs one of these must declare it via required-secrets
-# (the caller then supplies it through context.secrets, and injection wins).
-#
-# The same reasoning covers the password variables those clients read directly.
-# ``MYSQL_PWD`` and ``REDISCLI_AUTH`` are the documented no-flag credential
-# sources for ``mysql`` and ``redis-cli``. ``REDIS_AUTH`` is *not* canonical for
-# any standard Redis client — it is blocked defensively because client libraries
-# and deployment charts commonly set it.
-# All three need exact entries: ``PWD``/``AUTH`` cannot be wildcarded, since
-# ``*PWD*`` would strip ``PWD`` and ``OLDPWD``. (``*PASSWORD*``/``*PASSWD*``
-# already cover ``PGPASSWORD``, ``MYSQL_PASSWORD``, ``REDIS_PASSWORD``, ...)
-_BLOCKED_EXACT_NAMES: frozenset[str] = frozenset(
+# Values needed to locate ordinary executables, a writable temporary directory,
+# the account home, and locale/terminal behavior.  Runtime loaders, language
+# package paths, proxy settings, service endpoints, and application variables
+# are intentionally absent.
+_INHERITED_ENV_NAMES: frozenset[str] = frozenset(
     {
-        # Runtime channel attribution is server-owned per Run. It must never
-        # leak from a Worker/operator environment into an unrelated command.
-        "ACT_WEAVE_CHANNEL_USER_ID",
-        "DATABASE_URL",
-        "DATABASE_URI",
-        "REDIS_URL",
-        "MONGODB_URI",
-        "MONGO_URL",
-        "AMQP_URL",
-        "RABBITMQ_URL",
-        "POSTGRES_URL",
-        "POSTGRESQL_URL",
-        "POSTGRES_ADMIN_URL",
-        "MYSQL_URL",
-        "CLICKHOUSE_URL",
-        "CONNECTION_STRING",
-        "CONN_STR",
-        "GH_PAT",
-        "GITHUB_PAT",
-        "MYSQL_PWD",
-        "REDISCLI_AUTH",
-        "REDIS_AUTH",
-        "PGSERVICEFILE",
+        "COLORTERM",
+        "COMSPEC",
+        "FORCE_COLOR",
+        "HOME",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LOGNAME",
+        "NO_COLOR",
+        "PATH",
+        "PATHEXT",
+        "SHELL",
+        "SYSTEMROOT",
+        "TEMP",
+        "TERM",
+        "TMP",
+        "TMPDIR",
+        "TZ",
+        "USER",
+        "WINDIR",
     }
 )
 
 
 def is_blocked_env_name(name: str) -> bool:
-    """Return True if ``name`` looks like a credential that must not be inherited
-    by a sandbox subprocess."""
-    upper = name.upper()
-    if upper in _BLOCKED_EXACT_NAMES:
-        return True
-    return any(fnmatch.fnmatchcase(upper, pattern) for pattern in _SECRET_NAME_PATTERNS)
+    """Return whether a host variable is outside the Sandbox allowlist."""
+    return name.upper() not in _INHERITED_ENV_NAMES
 
 
 def build_sandbox_env(injected: dict[str, str] | None = None) -> dict[str, str]:
     """Build the environment dict for a sandbox subprocess.
 
-    Inherits ``os.environ`` minus any secret-looking variables, then layers the
-    explicitly injected request-scoped secrets on top. An injected secret wins
-    even if its name matches a blocked pattern, because injection is authorized
-    upstream (the skill declared it and the value came from the request, not from
-    the host environment).
+    Copies only explicitly safe process-bootstrapping values, then layers the
+    request-scoped values authorized for the exact Skill definition.  Injection
+    deliberately wins over a same-name host value.
     """
-    env = {key: value for key, value in os.environ.items() if not is_blocked_env_name(key)}
+    env = {key: value for key, value in os.environ.items() if key.upper() in _INHERITED_ENV_NAMES}
     if injected:
         env.update(injected)
     return env

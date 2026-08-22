@@ -581,8 +581,9 @@ async def test_frozen_exact_skill_secret_plan_revalidates_injects_masks_and_clea
 ) -> None:
     source = HostExecutionSkillSecretSource(
         skill_path="/mnt/skills/demo/SKILL.md",
-        secret_names=("TOKEN",),
+        secret_names=("provider_key",),
         explicit=True,
+        target_envs=("TOKEN",),
     )
     port = _Port(
         HostExecutionFrozenClaim.claimed(
@@ -602,7 +603,7 @@ async def test_frozen_exact_skill_secret_plan_revalidates_injects_masks_and_clea
     calls: list[dict[str, frozenset[str]]] = []
     carrier = {
         "/mnt/skills/demo/SKILL.md": {
-            "TOKEN": "credential-exact-v7",
+            "provider_key": "credential-exact-v7",
         },
     }
 
@@ -626,7 +627,7 @@ async def test_frozen_exact_skill_secret_plan_revalidates_injects_masks_and_clea
 
     assert calls == [
         {
-            "/mnt/skills/demo/SKILL.md": frozenset({"TOKEN"}),
+            "/mnt/skills/demo/SKILL.md": frozenset({"provider_key"}),
         },
     ]
     assert sandbox.executed[0][2] == {"TOKEN": "credential-exact-v7"}

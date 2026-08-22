@@ -122,7 +122,13 @@ class ProjectChannelSecretStore:
         *,
         instance: ProjectChannelInstanceRow,
         payload: object,
+        reason: str = "replace",
     ) -> ProjectChannelSecretStatus:
+        if reason not in {"replace", "recipient_change"}:
+            raise ChannelInstanceValidationFailed(
+                context.request_id,
+                "Channel secret replacement reason is invalid.",
+            )
         plaintext = self._plaintext(context, payload)
         try:
             recipient = channel_secret_recipient(instance)
@@ -157,7 +163,7 @@ class ProjectChannelSecretStore:
         await self._destroy_current(
             context,
             state=state,
-            reason="replace",
+            reason=reason,
             revision=revision,
         )
         generation = ProjectChannelSecretGenerationRow(

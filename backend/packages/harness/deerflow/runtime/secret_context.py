@@ -40,10 +40,10 @@ SKILL_SCOPED_SECRETS_CONTEXT_KEY = "__skill_scoped_secrets"
 # contract or serializable value.
 SKILL_SECRET_PROVIDER_CONTEXT_KEY = "__skill_secret_provider"
 
-# Name-only activation plan produced by SkillActivationMiddleware.  A private
-# provider uses this immediately before bash execution to select values from
-# the freshly materialized path-scoped carrier.  It intentionally contains no
-# secret values.
+# Secret-free activation plan produced by SkillActivationMiddleware. A private
+# provider uses its logical-name/target-environment pairs immediately before
+# bash execution to select values from the freshly materialized path-scoped
+# carrier. It intentionally contains no secret values.
 ACTIVE_SECRET_SOURCES_CONTEXT_KEY = "__active_skill_secret_sources"
 
 # Ephemeral marker set only by the async bash wrapper after a private provider
@@ -67,6 +67,28 @@ def _string_pairs(raw: Any) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
     return {key: value for key, value in raw.items() if isinstance(key, str) and isinstance(value, str)}
+
+
+def normalize_active_secret_declarations(
+    raw: Any,
+) -> tuple[tuple[str, str], ...]:
+    """Return validated logical-name/target-environment pairs.
+
+    Name-only entries remain an identity mapping for compatibility with an
+    already-running harness process during a rolling code restart. New Skill
+    activation plans always carry explicit pairs.
+    """
+
+    if not isinstance(raw, tuple):
+        return ()
+    declarations: list[tuple[str, str]] = []
+    for declaration in raw:
+        if isinstance(declaration, str) and declaration:
+            declarations.append((declaration, declaration))
+            continue
+        if isinstance(declaration, tuple) and len(declaration) == 2 and isinstance(declaration[0], str) and declaration[0] and isinstance(declaration[1], str) and declaration[1]:
+            declarations.append((declaration[0], declaration[1]))
+    return tuple(declarations)
 
 
 def extract_request_secrets(context: Any) -> dict[str, str]:
@@ -168,13 +190,13 @@ def resolve_provider_active_secrets(
     for source in raw_sources:
         if not isinstance(source, tuple) or len(source) != 4 or not isinstance(source[0], str) or not isinstance(source[1], str) or not isinstance(source[2], tuple) or not isinstance(source[3], bool):
             continue
-        _skill_name, path, names, is_explicit = source
+        _skill_name, path, declarations, is_explicit = source
         values = scoped.get(posixpath.normpath(path), {})
-        for name in names:
-            if not isinstance(name, str) or not name:
-                continue
+        for name, target_env in normalize_active_secret_declarations(
+            declarations,
+        ):
             supplied = name in values
-            claims.setdefault(name, []).append(
+            claims.setdefault(target_env, []).append(
                 (
                     values.get(name),
                     supplied,
@@ -183,16 +205,16 @@ def resolve_provider_active_secrets(
             )
 
     injected: dict[str, str] = {}
-    for name, secret_claims in claims.items():
+    for target_env, secret_claims in claims.items():
         explicit = [claim for claim in secret_claims if claim[2]]
         if explicit:
             value, supplied, _ = explicit[-1]
             if supplied and isinstance(value, str):
-                injected[name] = value
+                injected[target_env] = value
             continue
         supplied_values = {value for value, supplied, _ in secret_claims if supplied and isinstance(value, str)}
         if all(supplied for _value, supplied, _explicit in secret_claims) and len(supplied_values) == 1:
-            injected[name] = next(iter(supplied_values))
+            injected[target_env] = next(iter(supplied_values))
     return injected
 
 
@@ -212,8 +234,24 @@ def active_provider_secret_request(
             continue
         path = posixpath.normpath(source[1])
         names = requested.setdefault(path, set())
-        names.update(name for name in source[2] if isinstance(name, str) and name)
+        names.update(
+            name
+            for name, _target_env in normalize_active_secret_declarations(
+                source[2],
+            )
+        )
     return {path: frozenset(names) for path, names in requested.items()}
+
+
+def active_provider_environment_keys(context: Any) -> frozenset[str]:
+    """Return target environment names for the current activation plan."""
+
+    if not isinstance(context, dict):
+        return frozenset()
+    raw_sources = context.get(ACTIVE_SECRET_SOURCES_CONTEXT_KEY)
+    if not isinstance(raw_sources, tuple):
+        return frozenset()
+    return frozenset(target_env for source in raw_sources if isinstance(source, tuple) and len(source) == 4 for _name, target_env in normalize_active_secret_declarations(source[2]))
 
 
 # Private run-context keys the skill-activation middleware uses to carry secret

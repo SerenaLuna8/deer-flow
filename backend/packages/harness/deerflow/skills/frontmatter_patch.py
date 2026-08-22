@@ -30,6 +30,7 @@ def _render_required_secrets(
         lines.extend(
             (
                 f'  - name: "{requirement.name}"',
+                f'    target_env: "{requirement.target_env}"',
                 f"    optional: {'true' if requirement.optional else 'false'}",
             )
         )

@@ -27,7 +27,7 @@ function readiness(configured: boolean) {
     ready: configured,
     required_count: 1,
     configured_required_count: configured ? 1 : 0,
-    requirements: [{ name: "API_KEY", optional: false, configured }],
+    requirements: [{ name: "API_KEY", target_env: "API_KEY", optional: false, configured }],
     request_id: "activation-readiness",
   };
 }
@@ -40,7 +40,7 @@ describe("Skill domain secret contracts", () => {
       revision: 2,
       readiness: "ready",
       requirements: [
-        { name: "API_KEY", optional: false, configured: true, revision: 2 },
+        { name: "API_KEY", target_env: "API_KEY", optional: false, configured: true, revision: 2 },
       ],
       request_id: "status",
     });
@@ -80,7 +80,7 @@ describe("Skill domain secret contracts", () => {
   test("required missing status blocks activation", () => {
     const blocked = skillActivationReadinessResponseSchema.parse(readiness(false));
     expect(missingRequiredSkillActivationRequirements(blocked)).toEqual([
-      { name: "API_KEY", optional: false, configured: false },
+      { name: "API_KEY", target_env: "API_KEY", optional: false, configured: false },
     ]);
     expect(skillActivationBlocked({ readiness: blocked })).toBe(true);
   });

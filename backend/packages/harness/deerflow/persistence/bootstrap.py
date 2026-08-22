@@ -27,6 +27,7 @@ CURRENT_SCHEMA_REVISION = "schema_v1"
 SCHEMA_V1_REVISION = CURRENT_SCHEMA_REVISION
 
 _FULL_SCHEMA_PATH = Path(__file__).resolve().parent / "full_schema.sql"
+_SCHEMA_MARKER_INSERT = f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');"
 SCHEMA_MUTATION_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
 _PG_LOCK_POLL_SECONDS = 0.1
 
@@ -129,18 +130,29 @@ async def _postgres_lock(engine: AsyncEngine) -> AsyncIterator[None]:
         await lock_engine.dispose()
 
 
-def _read_full_schema_sql() -> str:
+def _read_full_schema_sql(*, publish_marker: bool = True) -> str:
     payload = _FULL_SCHEMA_PATH.read_text(encoding="utf-8")
-    expected_marker = f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');"
-    if not payload.startswith("BEGIN;\n") or not payload.rstrip().endswith("COMMIT;") or payload.count(expected_marker) != 1 or "-- Running upgrade" in payload or "UPDATE alembic_version" in payload:
+    if not payload.startswith("BEGIN;\n") or not payload.rstrip().endswith("COMMIT;") or payload.count(_SCHEMA_MARKER_INSERT) != 1 or "-- Running upgrade" in payload or "UPDATE alembic_version" in payload:
         raise RuntimeError("full schema SQL snapshot is invalid")
+    if not publish_marker:
+        payload = payload.replace(
+            _SCHEMA_MARKER_INSERT,
+            "-- Schema V1 marker is published only after setup bootstrap completes.",
+        )
     return payload
 
 
-async def _install_full_schema(engine: AsyncEngine) -> None:
+async def _install_full_schema(
+    engine: AsyncEngine,
+    *,
+    publish_marker: bool = True,
+) -> None:
     """Execute the complete snapshot as one PostgreSQL transaction."""
 
-    payload = await asyncio.to_thread(_read_full_schema_sql)
+    payload = await asyncio.to_thread(
+        _read_full_schema_sql,
+        publish_marker=publish_marker,
+    )
     async with engine.connect() as connection:
         raw_connection = await connection.get_raw_connection()
         driver_connection = raw_connection.driver_connection
@@ -173,6 +185,54 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
                 raise SchemaRecreateRequired()
 
 
+async def _is_staged_schema(connection: AsyncConnection) -> bool:
+    """Recognize the exact catalog while its completion marker is withheld."""
+
+    objects = await inventory_user_schema_objects(connection)
+    if "relation:r:alembic_version" not in objects:
+        return False
+    markers = tuple(str(value) for value in (await connection.execute(text("SELECT version_num FROM alembic_version ORDER BY version_num"))).scalars())
+    return not markers and inventory_is_schema_v1_allowed(objects) and await verify_schema_v1_catalog(connection)
+
+
+async def stage_schema_for_setup(engine: AsyncEngine) -> None:
+    """Install Schema V1 without publishing its completion marker."""
+
+    if not isinstance(engine, AsyncEngine):
+        raise TypeError("stage_schema_for_setup() requires an AsyncEngine")
+    async with _postgres_lock(engine):
+        async with engine.connect() as connection:
+            if await classify_database(connection) == "current":
+                return
+            if await inventory_user_schema_objects(connection):
+                raise SchemaRecreateRequired()
+        await _install_full_schema(engine, publish_marker=False)
+        async with engine.connect() as connection:
+            if not await _is_staged_schema(connection):
+                raise SchemaRecreateRequired()
+
+
+async def finalize_staged_schema(engine: AsyncEngine) -> None:
+    """Publish Schema V1 only after every local bootstrap stage succeeds."""
+
+    if not isinstance(engine, AsyncEngine):
+        raise TypeError("finalize_staged_schema() requires an AsyncEngine")
+    async with _postgres_lock(engine):
+        async with engine.begin() as connection:
+            if await _is_staged_schema(connection):
+                await connection.execute(
+                    text(
+                        "INSERT INTO alembic_version (version_num) VALUES (:revision)",
+                    ),
+                    {"revision": CURRENT_SCHEMA_REVISION},
+                )
+            elif await classify_database(connection) != "current":
+                raise SchemaRecreateRequired()
+        async with engine.connect() as connection:
+            if await classify_database(connection) != "current":
+                raise SchemaRecreateRequired()
+
+
 async def validate_schema(engine: AsyncEngine) -> None:
     """Read-only runtime gate; never invokes Alembic or executes DDL."""
 
@@ -193,6 +253,8 @@ __all__ = [
     "SchemaSetupRequired",
     "bootstrap_schema",
     "classify_database",
+    "finalize_staged_schema",
     "list_user_relations",
+    "stage_schema_for_setup",
     "validate_schema",
 ]

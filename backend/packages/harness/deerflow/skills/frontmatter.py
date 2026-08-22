@@ -239,9 +239,11 @@ _PUBLIC_MESSAGES: dict[str, str] = {
     "required_secret_invalid_item": "Each required-secrets item must be a name or mapping",
     "required_secret_unknown_field": "A required-secrets item contains an unsupported field",
     "required_secret_name_required": "Each required-secrets item must contain a string name",
+    "required_secret_target_env_required": "required-secrets target_env must be a string",
     "invalid_env_name": "Environment variable names must use POSIX syntax",
     "required_secret_optional_not_boolean": "required-secrets optional must be a boolean",
     "duplicate_env_name": "Environment variable names must be unique",
+    "duplicate_target_env": "Sandbox environment targets must be unique within one Skill",
     "secrets_autonomous_not_boolean": "secrets-autonomous must be a boolean",
     "managed_comments_unsupported": "Managed frontmatter comments must be edited in source mode",
     "patch_verification_failed": "The requested frontmatter change could not be verified",
@@ -377,6 +379,7 @@ def _parse_required_secrets(
     requirements: list[SecretRequirement] = []
     diagnostics: list[SkillFrontmatterDiagnostic] = []
     seen: set[str] = set()
+    seen_targets: set[str] = set()
     shorthand_count = 0
 
     for index, item in enumerate(raw):
@@ -386,10 +389,12 @@ def _parse_required_secrets(
         if isinstance(item, str):
             shorthand_count += 1
             name = item.strip()
+            target_env = name
+            target_env_node = item_node
             optional = False
         elif isinstance(item, dict):
             item_mapping_nodes = _mapping_value_nodes(item_node) if item_node is not None else {}
-            unknown = [key for key in item if not isinstance(key, str) or key not in {"name", "optional"}]
+            unknown = [key for key in item if not isinstance(key, str) or key not in {"name", "target_env", "optional"}]
             if unknown:
                 unknown_key = unknown[0]
                 key_node = item_mapping_nodes.get(str(unknown_key), (item_node, item_node))[0]
@@ -417,6 +422,23 @@ def _parse_required_secrets(
                 )
                 continue
             name = raw_name.strip()
+            raw_target_env = item.get("target_env", name)
+            target_env_node = item_mapping_nodes.get(
+                "target_env",
+                (name_node, name_node),
+            )[1]
+            if not isinstance(raw_target_env, str):
+                line, column = _node_position(target_env_node)
+                diagnostics.append(
+                    _diagnostic(
+                        "required_secret_target_env_required",
+                        field_path=("required-secrets", index, "target_env"),
+                        line=line,
+                        column=column,
+                    )
+                )
+                continue
+            target_env = raw_target_env.strip()
             raw_optional = item.get("optional", False)
             optional_node = item_mapping_nodes.get("optional", (item_node, item_node))[1]
             if not isinstance(raw_optional, bool):
@@ -465,8 +487,37 @@ def _parse_required_secrets(
                 )
             )
             continue
+        if _ENV_VAR_NAME_RE.fullmatch(target_env) is None:
+            line, column = _node_position(target_env_node)
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_env_name",
+                    field_path=("required-secrets", index, "target_env"),
+                    line=line,
+                    column=column,
+                )
+            )
+            continue
+        if target_env in seen_targets:
+            line, column = _node_position(target_env_node)
+            diagnostics.append(
+                _diagnostic(
+                    "duplicate_target_env",
+                    field_path=("required-secrets", index, "target_env"),
+                    line=line,
+                    column=column,
+                )
+            )
+            continue
         seen.add(name)
-        requirements.append(SecretRequirement(name=name, optional=optional))
+        seen_targets.add(target_env)
+        requirements.append(
+            SecretRequirement(
+                name=name,
+                optional=optional,
+                target_env=target_env,
+            )
+        )
 
     return tuple(requirements), shorthand_count, tuple(diagnostics)
 
@@ -760,6 +811,7 @@ def _validate_requested_projection(
     diagnostics: list[SkillFrontmatterDiagnostic] = []
     normalized: list[SecretRequirement] = []
     seen: set[str] = set()
+    seen_targets: set[str] = set()
     if len(required_secrets) > MAX_SKILL_SECRET_REQUIREMENTS:
         return None, (
             _diagnostic(
@@ -792,6 +844,14 @@ def _validate_requested_projection(
                 )
             )
             continue
+        if not isinstance(requirement.target_env, str) or _ENV_VAR_NAME_RE.fullmatch(requirement.target_env) is None:
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_env_name",
+                    field_path=("required-secrets", index, "target_env"),
+                )
+            )
+            continue
         if requirement.name in seen:
             diagnostics.append(
                 _diagnostic(
@@ -800,7 +860,16 @@ def _validate_requested_projection(
                 )
             )
             continue
+        if requirement.target_env in seen_targets:
+            diagnostics.append(
+                _diagnostic(
+                    "duplicate_target_env",
+                    field_path=("required-secrets", index, "target_env"),
+                )
+            )
+            continue
         seen.add(requirement.name)
+        seen_targets.add(requirement.target_env)
         normalized.append(requirement)
 
     if not isinstance(secrets_autonomous, bool):

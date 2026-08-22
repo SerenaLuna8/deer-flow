@@ -23,7 +23,9 @@ describe("Skill version conflict recovery", () => {
     const events: unknown[][] = [];
     notifySkillCandidateVersionCreated((...args) => events.push(args), {
       id: SOURCE_VERSION_ID,
-      secret_requirements: [{ name: "API_KEY", optional: false }],
+      secret_requirements: [
+        { name: "provider_key", target_env: "API_KEY", optional: false },
+      ],
     });
     expect(events).toEqual([[SOURCE_VERSION_ID, { focusSecrets: true }]]);
   });
