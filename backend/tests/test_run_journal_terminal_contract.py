@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 
@@ -13,11 +14,14 @@ from deerflow.agents.middlewares.llm_error_handling_middleware import (
     RECOVERED_LLM_FAILURES_KEY,
     LLMErrorHandlingMiddleware,
 )
-from deerflow.agents.middlewares.loop_detection_middleware import (
-    LOOP_SAFETY_REPLACEMENT_KEY,
+from deerflow.agents.middlewares.tool_call_control import (
+    TOOL_CALL_CONTROL_LOOP_REPLACEMENT_KEY,
+    RepeatedCallObservation,
+    ToolCallBudgetObservation,
+    ToolCallControlObservation,
 )
 from deerflow.runtime.context_keys import RuntimeContextKeys
-from deerflow.runtime.journal import RunJournal
+from deerflow.runtime.journal import RunJournal, RunJournalToolCallControlObserver
 from deerflow.runtime.recovered_llm_failures import (
     RunRecoveredLLMFailureRecorder,
     build_recovered_llm_failures_receipt,
@@ -31,6 +35,156 @@ class _RecordingEventStore:
 
     async def put_batch(self, events: list[dict], **_kwargs: object) -> None:
         self.events.extend(events)
+
+
+def _budget_observation(
+    *,
+    observation_id: str = "a" * 64,
+    role: str = "lead",
+    scope_id: str = "run-budget",
+) -> ToolCallControlObservation:
+    return ToolCallBudgetObservation(
+        reason_code="tool_budget_exhausted",
+        role=role,
+        scope_id=scope_id,
+        workload_profile="research",
+        tool_name="web_search",
+        count_before=9,
+        proposed=3,
+        admitted=1,
+        rejected=2,
+        count_after=10,
+        warn_threshold=6,
+        hard_limit=10,
+        disposition="truncate_tool_calls",
+        observation_id=observation_id,
+    )
+
+
+def _repeated_observation(
+    *,
+    observation_id: str = "c" * 64,
+) -> ToolCallControlObservation:
+    return RepeatedCallObservation(
+        reason_code="repeated_call_warning",
+        role="lead",
+        scope_id="run-budget",
+        workload_profile="research",
+        count_before=2,
+        proposed=1,
+        admitted=1,
+        rejected=0,
+        count_after=3,
+        warn_threshold=3,
+        hard_limit=5,
+        disposition="advisory",
+        observation_id=observation_id,
+    )
+
+
+@pytest.mark.anyio
+async def test_tool_call_control_observation_is_safe_deduplicated_and_precedes_terminal() -> None:
+    store = _RecordingEventStore()
+    journal = RunJournal(
+        "run-budget",
+        "thread-budget",
+        store,
+        flush_threshold=100,
+    )
+    observation = _budget_observation()
+
+    journal.record_tool_call_control_observation(observation)
+    journal.record_tool_call_control_observation(observation)
+    journal.on_chain_end(
+        {"messages": [AIMessage(content="Finished from existing evidence")]},
+        run_id=uuid.uuid4(),
+        parent_run_id=None,
+    )
+    await journal.flush()
+
+    assert [event["event_type"] for event in store.events] == [
+        "middleware:tool_call_budget",
+        "run.end",
+    ]
+    payload = store.events[0]["content"]
+    assert payload == {
+        "schema_version": 1,
+        "reason_code": "tool_budget_exhausted",
+        "workload_profile": "research",
+        "role": "lead",
+        "run_id": "run-budget",
+        "execution_id": None,
+        "tool_name": "web_search",
+        "count_before": 9,
+        "proposed": 3,
+        "admitted": 1,
+        "rejected": 2,
+        "count_after": 10,
+        "warn_threshold": 6,
+        "hard_limit": 10,
+        "disposition": "truncate_tool_calls",
+        "observation_id": "a" * 64,
+    }
+    serialized = str(payload)
+    assert "scope_id" not in payload
+    assert "query" not in serialized
+    assert "url" not in serialized
+    assert "args" not in serialized
+
+
+@pytest.mark.anyio
+async def test_repeated_call_and_tool_budget_use_distinct_observation_types_and_events() -> None:
+    store = _RecordingEventStore()
+    journal = RunJournal(
+        "run-budget",
+        "thread-budget",
+        store,
+        flush_threshold=100,
+    )
+
+    journal.record_tool_call_control_observation(_repeated_observation())
+    journal.record_tool_call_control_observation(_budget_observation())
+    await journal.flush()
+
+    assert [event["event_type"] for event in store.events] == [
+        "middleware:repeated_call",
+        "middleware:tool_call_budget",
+    ]
+    assert "tool_name" not in store.events[0]["content"]
+    assert store.events[1]["content"]["tool_name"] == "web_search"
+
+
+@pytest.mark.anyio
+async def test_tool_call_control_observer_marshals_subagent_observation_to_owner_loop() -> None:
+    store = _RecordingEventStore()
+    journal = RunJournal(
+        "run-parent",
+        "thread-parent",
+        store,
+        flush_threshold=100,
+    )
+    observer = RunJournalToolCallControlObserver(
+        journal,
+        owner_loop=asyncio.get_running_loop(),
+    )
+
+    await asyncio.to_thread(
+        observer.observe,
+        _budget_observation(
+            observation_id="b" * 64,
+            role="subagent",
+            scope_id="private-internal-execution-id",
+        ),
+    )
+    await asyncio.sleep(0)
+    await journal.flush()
+
+    assert len(store.events) == 1
+    payload = store.events[0]["content"]
+    assert payload["role"] == "subagent"
+    assert payload["run_id"] == "run-parent"
+    assert payload["execution_id"] != "private-internal-execution-id"
+    assert len(payload["execution_id"]) == 32
 
 
 def _observe_lead_ai_message(
@@ -477,7 +631,7 @@ async def test_idless_loop_safety_replacement_does_not_duplicate_ai_history() ->
             "tool_calls": [],
             "additional_kwargs": {
                 "hide_from_ui": True,
-                LOOP_SAFETY_REPLACEMENT_KEY: True,
+                TOOL_CALL_CONTROL_LOOP_REPLACEMENT_KEY: True,
             },
         }
     )
@@ -524,7 +678,7 @@ async def test_forged_loop_marker_cannot_hide_a_tool_call_bearing_message() -> N
         update={
             "additional_kwargs": {
                 "hide_from_ui": True,
-                LOOP_SAFETY_REPLACEMENT_KEY: True,
+                TOOL_CALL_CONTROL_LOOP_REPLACEMENT_KEY: True,
             },
         }
     )

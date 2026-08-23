@@ -48,6 +48,13 @@ _PRIVATE_WORK_CREATE_ROLES = tuple(role.value for role in ProjectRole if Capabil
 logger = logging.getLogger(__name__)
 
 
+class MemoryDreamModelUnavailable(RuntimeError):
+    """The enabled Memory policy points to no resolvable Dream model."""
+
+    def __init__(self) -> None:
+        super().__init__("Memory Dream model is unavailable")
+
+
 class MemoryDreamAdmissionService:
     """Freeze exact policy, model, preference and oldest history in one transaction."""
 
@@ -86,6 +93,11 @@ class MemoryDreamAdmissionService:
         )
 
     @staticmethod
+    def _requires_budget_rewrite(state, policy: AgentRuntimePolicyValue) -> bool:
+        document = state.document
+        return state.pending_count == 0 and document is not None and document.version >= 1 and estimate_memory_tokens(document.content) > policy.memory.max_injection_tokens
+
+    @staticmethod
     async def _platform_policy(
         session: AsyncSession,
         *,
@@ -105,6 +117,7 @@ class MemoryDreamAdmissionService:
         session: AsyncSession,
         *,
         create_document: bool,
+        policy_state: tuple[AgentRuntimePolicyValue, int] | None = None,
     ) -> (
         tuple[
             AgentRuntimePolicyValue,
@@ -114,10 +127,11 @@ class MemoryDreamAdmissionService:
         ]
         | None
     ):
-        policy_state = await MemoryDreamAdmissionService._platform_policy(
-            session,
-            for_update=True,
-        )
+        if policy_state is None:
+            policy_state = await MemoryDreamAdmissionService._platform_policy(
+                session,
+                for_update=True,
+            )
         if policy_state is None:
             return None
         policy, policy_revision = policy_state
@@ -133,7 +147,7 @@ class MemoryDreamAdmissionService:
             load_secret=True,
         )
         if model is None:
-            return None
+            raise MemoryDreamModelUnavailable
         return policy, policy_revision, model, creation_policy
 
     async def admit(
@@ -146,10 +160,28 @@ class MemoryDreamAdmissionService:
     ) -> MemoryDreamAdmissionRecord:
         repository = self._repository(session)
         state = await repository.read_state(scope)
-        runtime = await self._platform_runtime(
-            session,
-            create_document=state.document.sections_policy_version_id is None,
-        )
+        policy_state = None
+        if state.pending_count == 0:
+            policy_state = await self._platform_policy(
+                session,
+                for_update=True,
+            )
+            if policy_state is None or not self._requires_budget_rewrite(
+                state,
+                policy_state[0],
+            ):
+                return self._nothing_pending()
+        if policy_state is None:
+            runtime = await self._platform_runtime(
+                session,
+                create_document=state.document.sections_policy_version_id is None,
+            )
+        else:
+            runtime = await self._platform_runtime(
+                session,
+                create_document=state.document.sections_policy_version_id is None,
+                policy_state=policy_state,
+            )
         if runtime is None:
             return self._nothing_pending()
         return await self._admit_with_runtime(
@@ -199,8 +231,7 @@ class MemoryDreamAdmissionService:
             # and there is no pending history to consume. Requests carry no
             # trigger input.
             state = await repository.read_state(scope)
-            document = state.document
-            if state.pending_count == 0 and document is not None and document.version >= 1 and estimate_memory_tokens(document.content) > _policy.memory.max_injection_tokens:
+            if self._requires_budget_rewrite(state, _policy):
                 effective_trigger = "budget_rewrite"
         if budget_only and effective_trigger != "budget_rewrite":
             # Budget discovery over-approximates; a scope that turns out to be
@@ -280,18 +311,33 @@ class MemoryDreamAdmissionService:
         context.require(Capability.PRIVATE_WORK_CREATE)
         repository = self._repository(session)
         state = await repository.read_state(scope)
+        policy_state = await self._platform_policy(
+            session,
+            for_update=True,
+        )
+        if policy_state is None:
+            return self._nothing_pending()
+        policy, _policy_revision = policy_state
+        if require_due:
+            if not await repository.is_scope_due(
+                scope,
+                now=now,
+                interval_minutes=policy.memory.dream_interval_minutes,
+            ):
+                return self._nothing_pending()
+            if state.pending_count == 0 and not self._requires_budget_rewrite(
+                state,
+                policy,
+            ):
+                return self._nothing_pending()
+        elif not self._requires_budget_rewrite(state, policy):
+            return self._nothing_pending()
         runtime = await self._platform_runtime(
             session,
             create_document=state.document.sections_policy_version_id is None,
+            policy_state=policy_state,
         )
         if runtime is None:
-            return self._nothing_pending()
-        policy, _policy_revision, _model, _creation_policy = runtime
-        if require_due and not await self._repository(session).is_scope_due(
-            scope,
-            now=now,
-            interval_minutes=policy.memory.dream_interval_minutes,
-        ):
             return self._nothing_pending()
         return await self._admit_with_runtime(
             session,
@@ -398,6 +444,8 @@ class MemoryDreamSchedulerService:
                         trigger=("budget_rewrite" if result.admission_kind == "budget_rewrite" else "auto_dream"),
                         history_count=result.history_count,
                     )
+        except MemoryDreamModelUnavailable:
+            raise
         except (
             AccountPersonalizationNotFound,
             ProjectForbidden,
@@ -416,5 +464,6 @@ class MemoryDreamSchedulerService:
 
 __all__ = [
     "MemoryDreamAdmissionService",
+    "MemoryDreamModelUnavailable",
     "MemoryDreamSchedulerService",
 ]

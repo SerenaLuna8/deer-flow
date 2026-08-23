@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 from collections.abc import (
     Awaitable,
@@ -35,7 +36,7 @@ from langchain.agents.middleware.types import (
 )
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langgraph.graph import END
 from langgraph.runtime import Runtime
 from langgraph.types import Command
@@ -57,6 +58,7 @@ from app.projects.context import (
     ProjectContext,
     resolve_project_context_in_transaction,
 )
+from app.shared_assets.errors import AssetValidationFailed
 from app.shared_assets.project_authoring_catalog import (
     MAX_AUTHORING_SKILL_TEXT_BYTES,
     McpToolCatalogItem,
@@ -105,6 +107,10 @@ from deerflow.agents.middlewares.input_sanitization_middleware import (
     neutralize_untrusted_tags,
 )
 from deerflow.agents.middlewares.output_limit_recovery_middleware import message_reports_output_limit
+from deerflow.agents.middlewares.tool_call_control import (
+    ResolvedGraphToolCallControlProfile,
+    ToolCallControlObserver,
+)
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     mark_trusted_idempotent_tool,
     mark_trusted_read_only_tool,
@@ -129,6 +135,24 @@ SKILL_BUILDER_TOOL_NAMES = (
     "finalize_skill_candidate",
 )
 _TERMINAL_TOOL_NAMES = frozenset(SKILL_BUILDER_TOOL_NAMES[-2:])
+
+_CANDIDATE_VALIDATION_FAILED_PAYLOAD: dict[str, object] = {
+    "accepted": False,
+    "error_code": "SKILL_CANDIDATE_VALIDATION_FAILED",
+    "message": (
+        "Builder validation rejected the candidate. Re-read the latest draft, "
+        "correct it, and retry finalize_skill_candidate. Common checks include "
+        "exactly one root SKILL.md, a frontmatter name matching the required "
+        "Skill slug, and all referenced resources being present. Frontmatter "
+        "must be valid YAML with string name and description fields; quote or "
+        "fold scalar text containing ': ' (for example, description); "
+        "description cannot contain angle brackets; "
+        "compatibility, when present, must be one string of at most 255 "
+        "characters, not a YAML list. If these checks pass, inspect the remaining "
+        "package and static-scan constraints instead of repeating the same "
+        "finalize call."
+    ),
+}
 
 _SKILL_REFERENCE_PATTERN = re.compile(
     r"skill:(project|system):([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?):v([1-9][0-9]*)\Z",
@@ -184,7 +208,11 @@ Mandatory boundaries:
 - Candidate paths are already relative to the package root. The required root
   manifest path is exactly "SKILL.md"; never prefix it with the Skill slug or
   another wrapper directory. Create every script, reference, or asset that the
-  manifest claims is bundled.
+  manifest claims is bundled. Its frontmatter must be valid YAML with string
+  name and description fields. Quote or fold scalar text containing ': ' (for
+  example, description); description cannot contain angle brackets;
+  compatibility, when present, must be one string of at most 255 characters,
+  not a YAML list.
 - Search before reading or declaring a Skill/MCP dependency. Wait for the
   search result before using its exact reference; never invent a reference.
 - Dependency evidence is Run-local.
@@ -813,11 +841,21 @@ class SkillBuilderToolset:
                 expected_draft_checksum,
                 dependencies,
             )
-            receipt = await self._commit_terminal(
-                "candidate",
-                request,
-                dependencies=dependency_snapshot,
-            )
+            try:
+                receipt = await self._commit_terminal(
+                    "candidate",
+                    request,
+                    dependencies=dependency_snapshot,
+                )
+            except AssetValidationFailed:
+                raise ToolException(
+                    json.dumps(
+                        _CANDIDATE_VALIDATION_FAILED_PAYLOAD,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                ) from None
             return receipt.model_dump(mode="json")
 
         definitions: tuple[
@@ -911,6 +949,7 @@ class SkillBuilderToolset:
                 description=description,
                 args_schema=args_schema,
                 return_direct=False,
+                handle_tool_error=name == "finalize_skill_candidate",
             )
             if terminal or name in {
                 "upsert_candidate_file",
@@ -1475,6 +1514,11 @@ class SkillBuilderAgentFactory:
         config: RunnableConfig,
         private_runtime: object,
         app_config: AppConfig,
+        tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None,
+        tool_call_control_scope_id: str | None = None,
+        tool_call_control_observer: ToolCallControlObserver | None = None,
+        resolved_max_concurrent_subagents: int | None = None,
+        resolved_max_total_subagents: int | None = None,
     ):
         if self._built:
             raise SkillBuilderRuntimeError(
@@ -1506,6 +1550,11 @@ class SkillBuilderAgentFactory:
             private_runtime=canonical_runtime,
             app_config=app_config,
             trusted_extension=trusted_extension,
+            tool_call_control_profile=tool_call_control_profile,
+            tool_call_control_scope_id=tool_call_control_scope_id,
+            tool_call_control_observer=tool_call_control_observer,
+            resolved_max_concurrent_subagents=resolved_max_concurrent_subagents,
+            resolved_max_total_subagents=resolved_max_total_subagents,
         )
 
 

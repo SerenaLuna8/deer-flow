@@ -17,6 +17,7 @@ from app.private_work.run_metadata import (
     RunVisionDispatchBudgetExceeded,
     reserve_run_vision_dispatch_budget,
 )
+from app.private_work.workload_profile import RequestedRunWorkloadProfile
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
 from deerflow.persistence.jobs.sql import JobRepository, JobScope
 from deerflow.persistence.run.model import RunRow
@@ -44,6 +45,9 @@ class PrivateRunCreate:
     execution_profile: RequestedRunExecutionProfile = field(
         default_factory=RequestedRunExecutionProfile,
     )
+    workload_profile: RequestedRunWorkloadProfile = field(
+        default_factory=RequestedRunWorkloadProfile,
+    )
 
     def __post_init__(self) -> None:
         normalized = normalize_trace_id(self.origin_trace_id)
@@ -55,6 +59,10 @@ class PrivateRunCreate:
         if type(self.execution_profile) is not RequestedRunExecutionProfile:
             raise TypeError(
                 "execution_profile must be RequestedRunExecutionProfile",
+            )
+        if type(self.workload_profile) is not RequestedRunWorkloadProfile:
+            raise TypeError(
+                "workload_profile must be RequestedRunWorkloadProfile",
             )
 
 

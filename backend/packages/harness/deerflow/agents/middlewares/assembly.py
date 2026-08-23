@@ -29,6 +29,25 @@ if TYPE_CHECKING:
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 
+_TOOL_CALL_CONTROL_CONFIGURATION_ERROR = (
+    "tool_call_control_configuration_invalid: auto assembly accepts at most "
+    "one ToolCallControl; remove the duplicate custom/extra middleware, set "
+    "RuntimeFeatures.loop_detection=False to provide one explicitly, or use "
+    "middleware= for full takeover"
+)
+
+
+def _validate_tool_call_control_cardinality(
+    middlewares: Sequence[AgentMiddleware | None],
+) -> None:
+    """Reject ambiguous ownership before an auto-assembled graph is built."""
+
+    from deerflow.agents.middlewares.tool_call_control import ToolCallControl
+
+    if sum(isinstance(middleware, ToolCallControl) for middleware in middlewares) > 1:
+        raise ValueError(_TOOL_CALL_CONTROL_CONFIGURATION_ERROR)
+
+
 def _layer(
     middleware: AgentMiddleware,
     *,
@@ -156,8 +175,9 @@ def assemble_agent_middlewares(
     vision: AgentMiddleware | None = None,
     routing: Sequence[AgentMiddleware] = (),
     system_message: AgentMiddleware | None = None,
+    tool_call_control: AgentMiddleware | None = None,
+    host_execution_batch_barrier: AgentMiddleware | None = None,
     subagent: AgentMiddleware | None = None,
-    loop_detection: AgentMiddleware | None = None,
     token_budget: AgentMiddleware | None = None,
     custom: Sequence[AgentMiddleware] = (),
     safety: AgentMiddleware | None = None,
@@ -171,6 +191,29 @@ def assemble_agent_middlewares(
     final append here makes ``ClarificationMiddleware`` a structural tail
     invariant rather than a convention duplicated by each caller.
     """
+
+    _validate_tool_call_control_cardinality(
+        (
+            *runtime,
+            *before_summarization,
+            summarization,
+            planning,
+            output_limit_recovery,
+            token_usage,
+            title,
+            *after_title,
+            vision,
+            *routing,
+            system_message,
+            tool_call_control,
+            host_execution_batch_barrier,
+            subagent,
+            token_budget,
+            *custom,
+            safety,
+            clarification,
+        )
+    )
 
     middlewares = list(runtime)
     for index, middleware in enumerate(before_summarization, start=1):
@@ -261,67 +304,25 @@ def assemble_agent_middlewares(
                 why="Routing and deferred filtering shape available tools.",
             )
         )
-    for middleware in (
-        (
-            system_message,
-            "system_message_coalescing",
-            MiddlewarePhase.REQUEST_SHAPING,
-            90,
-            "Provider-facing system messages are coalesced after routing.",
-        ),
-        (
-            subagent,
-            "subagent_limit",
-            MiddlewarePhase.EXECUTION_LIMITS,
-            10,
-            "Subagent limits apply before loop and token limits.",
-        ),
-        (
-            loop_detection,
-            "loop_detection",
-            MiddlewarePhase.EXECUTION_LIMITS,
-            20,
-            "Loop accounting observes subagent activity.",
-        ),
-        (
-            token_budget,
-            "token_budget",
-            MiddlewarePhase.EXECUTION_LIMITS,
-            30,
-            "Token budget is the innermost execution limit.",
-        ),
-    ):
-        instance, layer_id, phase, slot, why = middleware
-        if instance is not None:
-            middlewares.append(
-                _layer(
-                    instance,
-                    layer_id=layer_id,
-                    phase=phase,
-                    slot=slot,
-                    why=why,
-                )
-            )
-    for index, middleware in enumerate(custom, start=1):
+    if system_message is not None:
         middlewares.append(
             _layer(
-                middleware,
-                layer_id=f"custom_{index}_{type(middleware).__name__}",
-                phase=MiddlewarePhase.CUSTOM,
-                slot=index * 10,
-                why="Caller-owned middleware occupies the explicit custom phase.",
+                system_message,
+                layer_id="system_message_coalescing",
+                phase=MiddlewarePhase.REQUEST_SHAPING,
+                slot=90,
+                why="Provider-facing system messages are coalesced after routing.",
             )
         )
-    if safety is not None:
-        middlewares.append(
-            _layer(
-                safety,
-                layer_id="safety_finish_reason",
-                phase=MiddlewarePhase.RESPONSE_GATE,
-                slot=10,
-                why="Safety sees the raw model response before reverse hooks.",
-            )
-        )
+    _append_tool_call_arbitration_band(
+        middlewares,
+        tool_call_control=tool_call_control,
+        host_execution_batch_barrier=host_execution_batch_barrier,
+        subagent=subagent,
+        token_budget=token_budget,
+        custom=custom,
+        safety=safety,
+    )
     middlewares.append(
         _layer(
             clarification,
@@ -332,10 +333,18 @@ def assemble_agent_middlewares(
         )
     )
 
+    arbitration_order = (
+        tool_call_control,
+        host_execution_batch_barrier,
+        subagent,
+        token_budget,
+        *custom,
+        safety,
+    )
     invariants = [
         _MiddlewareOrderInvariant(
-            name="safety cleanup before loop accounting",
-            registration_order=(loop_detection, safety),
+            name="protected tool-call arbitration band",
+            registration_order=arbitration_order,
             reverse_hook="after_model",
         )
     ]
@@ -347,8 +356,11 @@ def assemble_agent_middlewares(
                     planning,
                     output_limit_recovery,
                     token_usage,
-                    loop_detection,
+                    tool_call_control,
+                    host_execution_batch_barrier,
+                    subagent,
                     token_budget,
+                    *custom,
                     safety,
                 ),
                 reverse_hook="after_model",
@@ -360,11 +372,32 @@ def assemble_agent_middlewares(
         middlewares,
         (
             MiddlewareDispatchConstraint(
-                name="safety cleanup before loop accounting",
+                name="safety cleanup before token budget arbitration",
                 hook=MiddlewareHook.AFTER_MODEL,
                 first="safety_finish_reason",
-                then="loop_detection",
-                why="Safety must clear unsafe tool calls before loop accounting.",
+                then="token_budget",
+                why="Safety must clear unsafe tool calls before any budget arbitration.",
+            ),
+            MiddlewareDispatchConstraint(
+                name="token budget before subagent arbitration",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="token_budget",
+                then="subagent_limit",
+                why="Token accounting must run before the per-Run subagent limiter.",
+            ),
+            MiddlewareDispatchConstraint(
+                name="subagent arbitration before host batch serialization",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="subagent_limit",
+                then="host_execution_batch_barrier",
+                why="The subagent limiter must precede approval-mode batch serialization.",
+            ),
+            MiddlewareDispatchConstraint(
+                name="host batch serialization before tool-call control",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="host_execution_batch_barrier",
+                then="tool_call_control",
+                why="Tool-call control must arbitrate the batch that can actually reach ToolNode.",
             ),
             MiddlewareDispatchConstraint(
                 name="token budget before output-limit recovery",
@@ -390,6 +423,106 @@ def assemble_agent_middlewares(
         ),
     )
     return middlewares
+
+
+def _append_tool_call_arbitration_band(
+    middlewares: list[AgentMiddleware],
+    *,
+    tool_call_control: AgentMiddleware | None,
+    host_execution_batch_barrier: AgentMiddleware | None,
+    subagent: AgentMiddleware | None,
+    token_budget: AgentMiddleware | None,
+    safety: AgentMiddleware | None,
+    custom: Sequence[AgentMiddleware] = (),
+) -> None:
+    """Append the protected proposal chain and its outer response hooks.
+
+    Registration order is intentionally the inverse of ``after_model``
+    dispatch. Caller-owned middleware may run after Safety and before Token
+    Budget, but cannot split Subagent, Host Batch, and ToolCallControl.
+    """
+
+    for instance, layer_id, slot, why in (
+        (
+            tool_call_control,
+            "tool_call_control",
+            10,
+            "Tool-call control is the final proposal arbiter in reverse dispatch.",
+        ),
+        (
+            host_execution_batch_barrier,
+            "host_execution_batch_barrier",
+            20,
+            "Approval-capable batches are serialized before tool-call control.",
+        ),
+        (
+            subagent,
+            "subagent_limit",
+            30,
+            "Per-Run subagent policy remains independent from process scheduling.",
+        ),
+        (
+            token_budget,
+            "token_budget",
+            40,
+            "Token budget runs after custom response hooks in reverse dispatch.",
+        ),
+    ):
+        if instance is not None:
+            middlewares.append(
+                _layer(
+                    instance,
+                    layer_id=layer_id,
+                    phase=MiddlewarePhase.TOOL_CALL_ARBITRATION,
+                    slot=slot,
+                    why=why,
+                )
+            )
+    for index, middleware in enumerate(custom, start=1):
+        middlewares.append(
+            _layer(
+                middleware,
+                layer_id=f"custom_{index}_{type(middleware).__name__}",
+                phase=MiddlewarePhase.CUSTOM,
+                slot=index * 10,
+                why="Caller-owned after_model hooks run after Safety and before Token Budget.",
+            )
+        )
+    if safety is not None:
+        middlewares.append(
+            _layer(
+                safety,
+                layer_id="safety_finish_reason",
+                phase=MiddlewarePhase.RESPONSE_GATE,
+                slot=10,
+                why="Safety sees the raw model response before every other arbiter.",
+            )
+        )
+
+
+def _host_execution_approval_is_required(app_config: AppConfig) -> bool:
+    from deerflow.sandbox.security import (
+        HostBashExecutionMode,
+        resolve_host_bash_execution_mode,
+    )
+
+    return resolve_host_bash_execution_mode(app_config) is HostBashExecutionMode.LOCAL_APPROVAL_REQUIRED
+
+
+def build_host_execution_batch_barrier(
+    *,
+    app_config: AppConfig,
+) -> AgentMiddleware | None:
+    """Build the approval-mode batch arbiter selected by ``AppConfig``."""
+
+    if not _host_execution_approval_is_required(app_config):
+        return None
+
+    from deerflow.agents.middlewares.host_execution_batch_barrier_middleware import (
+        HostExecutionBatchBarrierMiddleware,
+    )
+
+    return HostExecutionBatchBarrierMiddleware()
 
 
 def build_runtime_middlewares(
@@ -512,33 +645,18 @@ def build_runtime_middlewares(
             )
         )
 
-    host_execution_batch_barrier: AgentMiddleware | None = None
     host_execution_approval_pause: AgentMiddleware | None = None
     if include_security_wrappers and app_config is not None:
-        from deerflow.sandbox.security import (
-            HostBashExecutionMode,
-            resolve_host_bash_execution_mode,
-        )
-
-        if resolve_host_bash_execution_mode(app_config) is HostBashExecutionMode.LOCAL_APPROVAL_REQUIRED:
+        if _host_execution_approval_is_required(app_config):
             from deerflow.agents.middlewares.host_execution_batch_barrier_middleware import (
                 HostExecutionApprovalPauseMiddleware,
-                HostExecutionBatchBarrierMiddleware,
             )
 
-            host_execution_batch_barrier = _layer(
-                HostExecutionBatchBarrierMiddleware(),
-                layer_id="host_execution_batch_barrier",
-                phase=MiddlewarePhase.TOOL_CALL_BOUNDARY,
-                slot=5,
-                why=("Approval-capable tool batches are serialized before any ToolNode sibling can start."),
-            )
-            tail.append(host_execution_batch_barrier)
             host_execution_approval_pause = _layer(
                 HostExecutionApprovalPauseMiddleware(),
                 layer_id="host_execution_approval_pause",
                 phase=MiddlewarePhase.TOOL_CALL_BOUNDARY,
-                slot=6,
+                slot=5,
                 why=("A staged approval exits before the next model call, after the ToolNode checkpoint."),
             )
             tail.append(host_execution_approval_pause)
@@ -643,7 +761,6 @@ def build_runtime_middlewares(
             _MiddlewareOrderInvariant(
                 name="private tool-call boundary",
                 registration_order=(
-                    host_execution_batch_barrier,
                     host_execution_approval_pause,
                     sandbox_audit_middleware,
                     read_before_write_middleware,
@@ -706,6 +823,7 @@ def build_subagent_runtime_middlewares(
     deferred_setup: DeferredToolSetup | None = None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     agent_name: str | None = None,
+    tool_call_control: AgentMiddleware | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -770,37 +888,14 @@ def build_subagent_runtime_middlewares(
 
         assert_mcp_routing_before_deferred_filter(middlewares)
 
-    loop_detection_middleware: AgentMiddleware | None = None
-    loop_detection_config = app_config.loop_detection
-    if loop_detection_config.enabled:
-        from deerflow.agents.middlewares.loop_detection_middleware import (
-            LoopDetectionMiddleware,
-        )
-
-        loop_detection_middleware = _layer(
-            LoopDetectionMiddleware.from_config(loop_detection_config),
-            layer_id="loop_detection",
-            phase=MiddlewarePhase.EXECUTION_LIMITS,
-            slot=20,
-            why="Loop accounting runs before token budget in registration order.",
-        )
-        middlewares.append(loop_detection_middleware)
-
+    token_budget_middleware: AgentMiddleware | None = None
     token_budget_config = app_config.subagents.get_token_budget_for(agent_name) if agent_name is not None else app_config.subagents.token_budget
     if token_budget_config.enabled:
         from deerflow.agents.middlewares.token_budget_middleware import (
             TokenBudgetMiddleware,
         )
 
-        middlewares.append(
-            _layer(
-                TokenBudgetMiddleware.from_config(token_budget_config),
-                layer_id="token_budget",
-                phase=MiddlewarePhase.EXECUTION_LIMITS,
-                slot=30,
-                why="Token budget is the innermost subagent execution limit.",
-            )
-        )
+        token_budget_middleware = TokenBudgetMiddleware.from_config(token_budget_config)
 
     safety_middleware: AgentMiddleware | None = None
     safety_config = app_config.safety_finish_reason
@@ -809,22 +904,30 @@ def build_subagent_runtime_middlewares(
             SafetyFinishReasonMiddleware,
         )
 
-        safety_middleware = _layer(
-            SafetyFinishReasonMiddleware.from_config(safety_config),
-            layer_id="safety_finish_reason",
-            phase=MiddlewarePhase.RESPONSE_GATE,
-            slot=10,
-            why="Safety sees raw subagent output before reverse hooks.",
-        )
-        middlewares.append(safety_middleware)
+        safety_middleware = SafetyFinishReasonMiddleware.from_config(safety_config)
+
+    host_execution_batch_barrier = build_host_execution_batch_barrier(
+        app_config=app_config,
+    )
+    _append_tool_call_arbitration_band(
+        middlewares,
+        tool_call_control=tool_call_control,
+        host_execution_batch_barrier=host_execution_batch_barrier,
+        subagent=None,
+        token_budget=token_budget_middleware,
+        custom=(),
+        safety=safety_middleware,
+    )
 
     _validate_middleware_invariants(
         middlewares,
         (
             _MiddlewareOrderInvariant(
-                name="subagent safety cleanup before loop accounting",
+                name="protected subagent tool-call arbitration band",
                 registration_order=(
-                    loop_detection_middleware,
+                    tool_call_control,
+                    host_execution_batch_barrier,
+                    token_budget_middleware,
                     safety_middleware,
                 ),
                 reverse_hook="after_model",
@@ -836,11 +939,25 @@ def build_subagent_runtime_middlewares(
         middlewares,
         (
             MiddlewareDispatchConstraint(
-                name="subagent safety cleanup before loop accounting",
+                name="subagent safety cleanup before token budget arbitration",
                 hook=MiddlewareHook.AFTER_MODEL,
                 first="safety_finish_reason",
-                then="loop_detection",
-                why="Safety must clean the response before loop accounting.",
+                then="token_budget",
+                why="Safety must clean the response before token arbitration.",
+            ),
+            MiddlewareDispatchConstraint(
+                name="subagent token budget before host batch serialization",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="token_budget",
+                then="host_execution_batch_barrier",
+                why="Token accounting must precede approval-mode batch serialization.",
+            ),
+            MiddlewareDispatchConstraint(
+                name="subagent host batch serialization before tool-call control",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="host_execution_batch_barrier",
+                then="tool_call_control",
+                why="Tool-call control must arbitrate the batch that can reach ToolNode.",
             ),
         ),
     )
@@ -849,6 +966,7 @@ def build_subagent_runtime_middlewares(
 
 __all__ = [
     "assemble_agent_middlewares",
+    "build_host_execution_batch_barrier",
     "build_lead_runtime_middlewares",
     "build_runtime_middlewares",
     "build_sandbox_infrastructure",

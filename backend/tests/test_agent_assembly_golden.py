@@ -21,7 +21,10 @@ import deerflow.agents.factory as factory_module
 import deerflow.agents.lead_agent.agent as lead_agent_module
 from deerflow.agents.factory import _assemble_from_features
 from deerflow.agents.features import RuntimeFeatures
-from deerflow.agents.lead_agent.agent import build_middlewares
+from deerflow.agents.lead_agent.agent import (
+    TrustedLeadAgentExtension,
+    build_middlewares,
+)
 from deerflow.agents.middlewares.assembly import (
     build_lead_runtime_middlewares,
     build_subagent_runtime_middlewares,
@@ -29,6 +32,14 @@ from deerflow.agents.middlewares.assembly import (
 from deerflow.agents.middlewares.manifest import (
     MiddlewareHook,
     middleware_dispatch_order,
+)
+from deerflow.agents.middlewares.tool_call_control import (
+    FixedToolCallControlScope,
+    ToolCallControl,
+    ToolCallControlBinding,
+    ToolCallControlRole,
+    build_tool_call_control,
+    default_graph_tool_call_control_profile,
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
@@ -138,8 +149,8 @@ NON_PRIVATE_LEAD_GOLDEN_CHAIN = [
     "McpRoutingMiddleware",
     "DeferredToolFilterMiddleware",
     "SystemMessageCoalescingMiddleware",
+    "ToolCallControl",
     "SubagentLimitMiddleware",
-    "LoopDetectionMiddleware",
     "TokenBudgetMiddleware",
     "SafetyFinishReasonMiddleware",
     "ClarificationMiddleware",
@@ -172,8 +183,8 @@ PRIVATE_LEAD_GOLDEN_CHAIN = [
     "McpRoutingMiddleware",
     "DeferredToolFilterMiddleware",
     "SystemMessageCoalescingMiddleware",
+    "ToolCallControl",
     "SubagentLimitMiddleware",
-    "LoopDetectionMiddleware",
     "TokenBudgetMiddleware",
     "SafetyFinishReasonMiddleware",
     "ClarificationMiddleware",
@@ -187,7 +198,7 @@ PRIVATE_LEAD_HOOK_GOLDEN = {
         "ToolProgressMiddleware",
         "DynamicContextMiddleware",
         "TodoMiddleware",
-        "LoopDetectionMiddleware",
+        "ToolCallControl",
         "TokenBudgetMiddleware",
     ),
     MiddlewareHook.BEFORE_MODEL: (
@@ -213,7 +224,7 @@ PRIVATE_LEAD_HOOK_GOLDEN = {
         "ViewImageMiddleware",
         "DeferredToolFilterMiddleware",
         "SystemMessageCoalescingMiddleware",
-        "LoopDetectionMiddleware",
+        "ToolCallControl",
         "TokenBudgetMiddleware",
     ),
     MiddlewareHook.WRAP_TOOL_CALL: (
@@ -232,8 +243,8 @@ PRIVATE_LEAD_HOOK_GOLDEN = {
     MiddlewareHook.AFTER_MODEL: (
         "SafetyFinishReasonMiddleware",
         "TokenBudgetMiddleware",
-        "LoopDetectionMiddleware",
         "SubagentLimitMiddleware",
+        "ToolCallControl",
         "TitleMiddleware",
         "TokenUsageMiddleware",
         "OutputLimitRecoveryMiddleware",
@@ -242,7 +253,6 @@ PRIVATE_LEAD_HOOK_GOLDEN = {
     ),
     MiddlewareHook.AFTER_AGENT: (
         "TokenBudgetMiddleware",
-        "LoopDetectionMiddleware",
         "TokenUsageMiddleware",
         "TodoMiddleware",
         "SandboxMiddleware",
@@ -250,7 +260,11 @@ PRIVATE_LEAD_HOOK_GOLDEN = {
 }
 
 
-def _build_production_lead_chain(*, private: bool) -> list[AgentMiddleware]:
+def _build_production_lead_chain(
+    *,
+    private: bool,
+    custom_middlewares: tuple[AgentMiddleware, ...] = (),
+) -> list[AgentMiddleware]:
     """Run the real lead factory and capture what it gives LangChain."""
 
     app_config = _full_feature_app_config()
@@ -324,6 +338,9 @@ def _build_production_lead_chain(*, private: bool) -> list[AgentMiddleware]:
             },
             app_config=app_config,
             private_runtime=private_runtime,
+            trusted_extension=TrustedLeadAgentExtension(
+                custom_middlewares=custom_middlewares,
+            ),
         )
 
     return create.call_args.kwargs["middleware"]
@@ -361,8 +378,8 @@ SDK_GOLDEN_CHAIN = [
     "TitleMiddleware",
     "_CustomMemory",
     "ViewImageMiddleware",
+    "ToolCallControl",
     "SubagentLimitMiddleware",
-    "LoopDetectionMiddleware",
     "TokenBudgetMiddleware",
     "ClarificationMiddleware",
 ]
@@ -413,6 +430,26 @@ def _build_embedded_chain() -> list[AgentMiddleware]:
     return create.call_args.kwargs["middleware"]
 
 
+def _control(*, role: ToolCallControlRole = "lead") -> ToolCallControl:
+    profile = default_graph_tool_call_control_profile()
+    policy = profile.lead if role == "lead" else profile.subagent
+    return build_tool_call_control(
+        policy,
+        ToolCallControlBinding(
+            role=role,
+            scope=FixedToolCallControlScope(f"golden-{role}-scope"),
+        ),
+    )
+
+
+def _build_subagent_chain() -> list[AgentMiddleware]:
+    return build_subagent_runtime_middlewares(
+        app_config=_full_feature_app_config(),
+        model_name=GOLDEN_MODEL,
+        tool_call_control=_control(role="subagent"),
+    )
+
+
 EMBEDDED_GOLDEN_CHAIN = NON_PRIVATE_LEAD_GOLDEN_CHAIN
 
 
@@ -428,6 +465,115 @@ EMBEDDED_GOLDEN_CHAIN = NON_PRIVATE_LEAD_GOLDEN_CHAIN
 )
 def test_each_assembly_path_matches_its_exact_golden(builder, golden) -> None:
     assert _names(builder()) == golden
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        _build_non_private_lead_chain,
+        _build_private_lead_chain,
+        lambda: _build_sdk_chain()[0],
+        _build_embedded_chain,
+        _build_subagent_chain,
+    ],
+    ids=["configured-lead", "private-lead", "sdk", "embedded", "subagent"],
+)
+def test_each_auto_assembled_graph_profile_has_exactly_one_tool_call_control(
+    builder,
+) -> None:
+    assert sum(isinstance(middleware, ToolCallControl) for middleware in builder()) == 1
+
+
+@pytest.mark.parametrize("private", [False, True], ids=["configured-lead", "private-lead"])
+def test_lead_auto_assembly_rejects_a_custom_second_tool_call_control(
+    private: bool,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=("tool_call_control_configuration_invalid: auto assembly accepts at most one ToolCallControl"),
+    ):
+        _build_production_lead_chain(
+            private=private,
+            custom_middlewares=(_control(),),
+        )
+
+
+def test_sdk_auto_assembly_rejects_an_extra_second_tool_call_control() -> None:
+    with (
+        patch.object(factory_module, "create_agent") as create,
+        pytest.raises(
+            ValueError,
+            match=("tool_call_control_configuration_invalid: auto assembly accepts at most one ToolCallControl"),
+        ),
+    ):
+        factory_module.create_deerflow_agent(
+            MagicMock(),
+            features=RuntimeFeatures(loop_detection=True),
+            extra_middleware=[_control()],
+        )
+    create.assert_not_called()
+
+
+def test_embedded_auto_assembly_rejects_a_custom_second_tool_call_control() -> None:
+    app_config = _full_feature_app_config()
+    with (
+        patch("deerflow.client.get_app_config", return_value=app_config),
+        patch(
+            "deerflow.client.ModelRuntime.build_chat_model",
+            return_value=MagicMock(),
+        ),
+        patch("deerflow.client.create_agent", return_value=MagicMock()),
+        patch("deerflow.client.apply_prompt_template", return_value="golden prompt"),
+        patch("deerflow.client.get_effective_user_id", return_value=None),
+    ):
+        from deerflow.client import DeerFlowClient
+
+        client = DeerFlowClient(
+            model_name=GOLDEN_MODEL,
+            middlewares=[_control()],
+        )
+        with (
+            patch.object(client, "_get_tools", return_value=[]),
+            pytest.raises(
+                ValueError,
+                match=("tool_call_control_configuration_invalid: auto assembly accepts at most one ToolCallControl"),
+            ),
+        ):
+            client._ensure_agent(client._get_runnable_config("golden-thread"))
+
+
+def test_subagent_auto_assembly_rejects_an_extra_second_tool_call_control() -> None:
+    with pytest.raises(
+        ValueError,
+        match=("tool_call_control_configuration_invalid: auto assembly accepts at most one ToolCallControl"),
+    ):
+        _assemble_from_features(
+            RuntimeFeatures(loop_detection=True),
+            extra_middleware=[_control(role="subagent")],
+            delegated=True,
+            tool_call_control=_control(role="subagent"),
+        )
+
+
+def test_sdk_explicit_control_exceptions_remain_single_owner() -> None:
+    explicitly_disabled, _ = _assemble_from_features(
+        RuntimeFeatures(loop_detection=False),
+        extra_middleware=[_control()],
+    )
+    assert sum(isinstance(middleware, ToolCallControl) for middleware in explicitly_disabled) == 1
+
+    caller_control = _control()
+    captured: dict[str, object] = {}
+    with patch.object(
+        factory_module,
+        "create_agent",
+        side_effect=lambda **kwargs: captured.update(kwargs) or MagicMock(),
+    ):
+        factory_module.create_deerflow_agent(
+            MagicMock(),
+            middleware=[caller_control],
+        )
+    assert captured["middleware"] == [caller_control]
 
 
 def test_private_lead_hook_dispatch_matches_exact_golden() -> None:
@@ -451,7 +597,9 @@ def test_each_assembly_path_keeps_load_bearing_order(builder) -> None:
     _assert_load_bearing_order(names)
     if "InputSanitizationMiddleware" in names:
         assert names[0] == "InputSanitizationMiddleware"
-        assert names.index("LoopDetectionMiddleware") < names.index("SafetyFinishReasonMiddleware")
+        assert names.index("ToolCallControl") < names.index("SubagentLimitMiddleware")
+        assert names.index("SubagentLimitMiddleware") < names.index("TokenBudgetMiddleware")
+        assert names.index("TokenBudgetMiddleware") < names.index("SafetyFinishReasonMiddleware")
         assert names.index("SystemMessageCoalescingMiddleware") > names.index("DeerFlowSummarizationMiddleware")
 
 
@@ -485,7 +633,7 @@ def test_all_four_chains_agree_on_the_shared_spine() -> None:
         "TitleMiddleware",
         "ViewImageMiddleware",
         "SubagentLimitMiddleware",
-        "LoopDetectionMiddleware",
+        "ToolCallControl",
         "TokenBudgetMiddleware",
         "ClarificationMiddleware",
     } <= shared
@@ -593,7 +741,6 @@ def test_subagent_runtime_chain_is_the_lead_runtime_minus_uploads() -> None:
     assert subagent[: len(expected_base)] == expected_base
     assert subagent[len(expected_base) :] == [
         "ViewImageMiddleware",
-        "LoopDetectionMiddleware",
         "TokenBudgetMiddleware",
         "SafetyFinishReasonMiddleware",
     ]

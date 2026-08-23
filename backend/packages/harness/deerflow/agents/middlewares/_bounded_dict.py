@@ -1,6 +1,6 @@
 """A small bounded ``OrderedDict`` shared by guard middlewares.
 
-Guard middlewares (``TokenBudgetMiddleware``, ``LoopDetectionMiddleware``) keep
+Guard middlewares (``TokenBudgetMiddleware``, ``ToolCallControl``) keep
 per-``run_id`` state that must not grow without bound on abandoned or reused
 runs. This module provides the single shared implementation so both middlewares
 cap identically and a future guard does not reinvent it.

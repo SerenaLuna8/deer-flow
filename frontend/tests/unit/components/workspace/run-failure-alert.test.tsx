@@ -9,10 +9,17 @@ import {
 import { I18nProvider } from "@/core/i18n/context";
 import {
   CURRENT_UPLOAD_UNAVAILABLE,
+  LLM_AUTHENTICATION_FAILED,
+  LLM_CIRCUIT_OPEN,
   LLM_PROVIDER_UNAVAILABLE,
+  LLM_QUOTA_EXCEEDED,
+  LOOP_FINALIZATION_FAILED,
   LOOP_SAFETY_LIMIT,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
+  RUN_POLICY_STALE,
+  TOOL_CALL_CONTROL_STATE_INVALID,
+  TOOL_EXECUTION_FAILED,
   type ProjectRunFailureCode,
 } from "@/core/private-work/api-client";
 
@@ -159,6 +166,30 @@ describe("RunFailureAlert", () => {
     expect(english).toContain("the failure reason is the loop safety limit");
     expect(english).toContain("Restore to composer");
     expect(english).not.toContain("could not produce a response");
+  });
+
+  test("renders stable model, tool, policy, and control-state direct causes", () => {
+    expect(render(LOOP_FINALIZATION_FAILED, "zh-CN")).toContain(
+      "模型仍尝试调用工具或没有返回可见的无工具最终回答",
+    );
+    expect(render(LLM_QUOTA_EXCEEDED, "en-US")).toContain(
+      "The configured model quota was exhausted",
+    );
+    expect(render(LLM_AUTHENTICATION_FAILED, "zh-CN")).toContain(
+      "所选模型的认证被服务商拒绝",
+    );
+    expect(render(LLM_CIRCUIT_OPEN, "en-US")).toContain(
+      "model request circuit breaker was open",
+    );
+    expect(render(TOOL_EXECUTION_FAILED, "zh-CN")).toContain(
+      "工具执行返回了明确失败",
+    );
+    expect(render(RUN_POLICY_STALE, "en-US")).toContain(
+      "frozen runtime policy could not be materialized",
+    );
+    expect(render(TOOL_CALL_CONTROL_STATE_INVALID, "zh-CN")).toContain(
+      "工具调用控制状态与冻结策略或执行作用域不一致",
+    );
   });
 
   test("disables retry without Run authority or while a Run is active", () => {

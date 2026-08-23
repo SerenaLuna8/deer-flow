@@ -32,8 +32,10 @@ from typing import Any, Literal, Protocol, cast
 from langchain_core.runnables.config import var_child_runnable_config
 
 from deerflow.error_codes import (
+    LOOP_FINALIZATION_FAILED_ERROR_CODE,
     SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE_ERROR_CODE,
     SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
+    TOOL_CALL_CONTROL_STATE_INVALID_ERROR_CODE,
 )
 from deerflow.runtime.host_execution_approval import HostExecutionApprovalArtifact
 from deerflow.subagents.change_signal import SubagentChangeSignal, wait_for_change
@@ -90,6 +92,8 @@ class SubagentFailureCode(StrEnum):
 
     EXECUTION_FAILED = SUBAGENT_EXECUTION_FAILED_ERROR_CODE
     COMMAND_EXECUTION_UNAVAILABLE = SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE_ERROR_CODE
+    TOOL_CALL_CONTROL_STATE_INVALID = TOOL_CALL_CONTROL_STATE_INVALID_ERROR_CODE
+    LOOP_FINALIZATION_FAILED = LOOP_FINALIZATION_FAILED_ERROR_CODE
     TURN_BUDGET_EXHAUSTED = "SUBAGENT_TURN_BUDGET_EXHAUSTED"
     LLM_QUOTA_EXCEEDED = "LLM_QUOTA_EXCEEDED"
     LLM_AUTHENTICATION_FAILED = "LLM_AUTHENTICATION_FAILED"
@@ -1040,7 +1044,12 @@ def _aggregate_usage(
 
 
 def _normalize_stop_reason(value: str | None) -> SubagentStopReasonValue | None:
-    if value not in {"token_capped", "turn_capped", "loop_capped"}:
+    if value not in {
+        "token_capped",
+        "turn_capped",
+        "loop_capped",
+        "tool_budget_capped",
+    }:
         return None
     return cast(SubagentStopReasonValue, value)
 

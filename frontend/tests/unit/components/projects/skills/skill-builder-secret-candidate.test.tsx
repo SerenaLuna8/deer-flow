@@ -64,7 +64,9 @@ function session(
       description: "ok",
       frontmatter: {},
       compatibility: null,
-      secret_requirements: [{ name: "API_KEY", target_env: "API_KEY", optional: false }],
+      secret_requirements: [
+        { name: "API_KEY", target_env: "API_KEY", optional: false },
+      ],
       scan_decision: "allow",
       scan_rule_ids: [],
       scan_summary: {},
@@ -349,7 +351,9 @@ describe("Skill Builder create secret setup", () => {
           description: "Secret reader",
           frontmatter: {},
           compatibility: null,
-          secret_requirements: [{ name: "API_KEY", target_env: "API_KEY", optional: false }],
+          secret_requirements: [
+            { name: "API_KEY", target_env: "API_KEY", optional: false },
+          ],
           scan_decision: "allow",
           scan_rule_ids: [],
           scan_summary: {},

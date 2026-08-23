@@ -187,9 +187,7 @@ export function SkillActivationDialog({
                       </Badge>
                       <Badge
                         variant={
-                          requirement.configured
-                            ? "default"
-                            : "secondary"
+                          requirement.configured ? "default" : "secondary"
                         }
                       >
                         {secretStatusLabel(requirement.configured, copy)}

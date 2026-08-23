@@ -79,8 +79,7 @@ function projectMcpSecretSchemasAreSupported(
       }
       const destination = section === "headers" ? headerNames : queryNames;
       for (const field of fields) {
-        const comparable =
-          section === "headers" ? field.toLowerCase() : field;
+        const comparable = section === "headers" ? field.toLowerCase() : field;
         if (
           !isValidProjectMcpCredentialName(section, field) ||
           destination.has(comparable)

@@ -21,6 +21,7 @@ import {
   listProjectMemoryVersions,
   restoreProjectMemoryVersion,
 } from "@/core/private-work/memory/api";
+import { memoryDreamErrorMessage } from "@/core/private-work/memory/error-presentation";
 import {
   projectMemoryDocumentQueryKey,
   projectMemoryEpisodesQueryKey,
@@ -283,7 +284,7 @@ export function useProjectMemoryQueryModel({
     },
     onError: (error) => {
       refreshOnConflict(error);
-      toast.error(error.message || copy.dreamFailed);
+      toast.error(memoryDreamErrorMessage(error, copy));
     },
   });
 

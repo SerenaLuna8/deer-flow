@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import copy
 import importlib
+import inspect
 import subprocess
 import sys
 
 import pytest
 from langchain.agents.middleware import AgentMiddleware
+
+from deerflow.agents.middlewares.manifest import (
+    MiddlewareHook,
+    middleware_dispatch_order,
+)
 
 _BUILDER_EXPORTS = (
     "build_sandbox_infrastructure",
@@ -156,7 +162,10 @@ def test_phase_builder_declares_reverse_after_model_contract(
     assembly = importlib.import_module(
         "deerflow.agents.middlewares.assembly",
     )
-    loop_detection = AgentMiddleware()
+    tool_call_control = AgentMiddleware()
+    host_execution_batch_barrier = AgentMiddleware()
+    subagent = AgentMiddleware()
+    token_budget = AgentMiddleware()
     safety = AgentMiddleware()
     captured = []
 
@@ -166,15 +175,44 @@ def test_phase_builder_declares_reverse_after_model_contract(
     monkeypatch.setattr(assembly, "_validate_middleware_invariants", capture)
     assembly.assemble_agent_middlewares(
         runtime=(),
-        loop_detection=loop_detection,
+        tool_call_control=tool_call_control,
+        host_execution_batch_barrier=host_execution_batch_barrier,
+        subagent=subagent,
+        token_budget=token_budget,
         safety=safety,
         clarification=AgentMiddleware(),
     )
 
     assert len(captured) == 1
     invariant = captured[0]
-    assert invariant.registration_order == (loop_detection, safety)
+    assert invariant.registration_order == (
+        tool_call_control,
+        host_execution_batch_barrier,
+        subagent,
+        token_budget,
+        safety,
+    )
     assert invariant.reverse_hook == "after_model"
+
+
+def test_assembly_interface_replaces_loop_detection_without_compatibility_alias() -> None:
+    assembly = importlib.import_module(
+        "deerflow.agents.middlewares.assembly",
+    )
+
+    parameters = inspect.signature(
+        assembly.assemble_agent_middlewares,
+    ).parameters
+
+    assert "tool_call_control" in parameters
+    assert "host_execution_batch_barrier" in parameters
+    assert "loop_detection" not in parameters
+    assert (
+        "tool_call_control"
+        in inspect.signature(
+            assembly.build_subagent_runtime_middlewares,
+        ).parameters
+    )
 
 
 def test_output_limit_recovery_is_between_todo_and_token_usage() -> None:
@@ -184,8 +222,11 @@ def test_output_limit_recovery_is_between_todo_and_token_usage() -> None:
     planning = AgentMiddleware()
     recovery = AgentMiddleware()
     token_usage = AgentMiddleware()
-    loop_detection = AgentMiddleware()
+    tool_call_control = AgentMiddleware()
+    host_execution_batch_barrier = AgentMiddleware()
+    subagent = AgentMiddleware()
     token_budget = AgentMiddleware()
+    custom = AgentMiddleware()
     safety = AgentMiddleware()
 
     chain = assembly.assemble_agent_middlewares(
@@ -193,8 +234,11 @@ def test_output_limit_recovery_is_between_todo_and_token_usage() -> None:
         planning=planning,
         output_limit_recovery=recovery,
         token_usage=token_usage,
-        loop_detection=loop_detection,
+        tool_call_control=tool_call_control,
+        host_execution_batch_barrier=host_execution_batch_barrier,
+        subagent=subagent,
         token_budget=token_budget,
+        custom=(custom,),
         safety=safety,
         clarification=AgentMiddleware(),
     )
@@ -205,8 +249,11 @@ def test_output_limit_recovery_is_between_todo_and_token_usage() -> None:
             planning,
             recovery,
             token_usage,
-            loop_detection,
+            tool_call_control,
+            host_execution_batch_barrier,
+            subagent,
             token_budget,
+            custom,
             safety,
         )
     ] == sorted(
@@ -215,10 +262,100 @@ def test_output_limit_recovery_is_between_todo_and_token_usage() -> None:
             planning,
             recovery,
             token_usage,
-            loop_detection,
+            tool_call_control,
+            host_execution_batch_barrier,
+            subagent,
             token_budget,
+            custom,
             safety,
         )
+    )
+
+
+def test_tool_call_arbitration_band_is_contiguous_and_protected_from_custom() -> None:
+    assembly = importlib.import_module(
+        "deerflow.agents.middlewares.assembly",
+    )
+    from deerflow.agents.middlewares.manifest import middleware_layer_metadata
+
+    tool_call_control = AgentMiddleware()
+    host_execution_batch_barrier = AgentMiddleware()
+    subagent = AgentMiddleware()
+    token_budget = AgentMiddleware()
+    custom = AgentMiddleware()
+    safety = AgentMiddleware()
+
+    chain = assembly.assemble_agent_middlewares(
+        runtime=(),
+        tool_call_control=tool_call_control,
+        host_execution_batch_barrier=host_execution_batch_barrier,
+        subagent=subagent,
+        token_budget=token_budget,
+        custom=(custom,),
+        safety=safety,
+        clarification=AgentMiddleware(),
+    )
+
+    protected_ids = [
+        "tool_call_control",
+        "host_execution_batch_barrier",
+        "subagent_limit",
+    ]
+    protected_positions = [index for index, middleware in enumerate(chain) if (metadata := middleware_layer_metadata(middleware)) is not None and metadata.layer_id in protected_ids]
+    assert protected_positions == list(range(protected_positions[0], protected_positions[0] + len(protected_ids)))
+    assert [middleware_layer_metadata(chain[index]).layer_id for index in protected_positions] == protected_ids
+    assert chain.index(subagent) < chain.index(token_budget)
+    assert chain.index(token_budget) < chain.index(custom)
+    assert chain.index(custom) < chain.index(safety)
+
+
+def test_tool_call_arbitration_after_model_dispatch_is_exact_reverse_order() -> None:
+    assembly = importlib.import_module(
+        "deerflow.agents.middlewares.assembly",
+    )
+
+    class ToolCallControlProbe(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    class HostExecutionBatchBarrierProbe(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    class SubagentLimitProbe(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    class TokenBudgetProbe(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    class CustomProbe(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    class SafetyProbe(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    chain = assembly.assemble_agent_middlewares(
+        runtime=(),
+        tool_call_control=ToolCallControlProbe(),
+        host_execution_batch_barrier=HostExecutionBatchBarrierProbe(),
+        subagent=SubagentLimitProbe(),
+        token_budget=TokenBudgetProbe(),
+        custom=(CustomProbe(),),
+        safety=SafetyProbe(),
+        clarification=AgentMiddleware(),
+    )
+
+    assert middleware_dispatch_order(chain, MiddlewareHook.AFTER_MODEL) == (
+        "SafetyProbe",
+        "CustomProbe",
+        "TokenBudgetProbe",
+        "SubagentLimitProbe",
+        "HostExecutionBatchBarrierProbe",
+        "ToolCallControlProbe",
     )
 
 

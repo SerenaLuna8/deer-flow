@@ -117,15 +117,15 @@ def test_dispatch_constraint_understands_reverse_hooks() -> None:
     loop = assign_middleware_layer(
         _AllHooks(),
         layer_id="loop",
-        phase=MiddlewarePhase.EXECUTION_LIMITS,
+        phase=MiddlewarePhase.TOOL_CALL_ARBITRATION,
         slot=20,
         why="test",
     )
     safety = assign_middleware_layer(
         _AllHooks(),
         layer_id="safety",
-        phase=MiddlewarePhase.RESPONSE_GATE,
-        slot=10,
+        phase=MiddlewarePhase.TOOL_CALL_ARBITRATION,
+        slot=50,
         why="test",
     )
     constraint = MiddlewareDispatchConstraint(

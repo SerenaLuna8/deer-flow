@@ -154,6 +154,29 @@ or downgrade an application database.
   `private_scope` or reconstruct SDK model/tools/middleware from global config.
   Expensive model, Skill, tool, middleware, and graph materialization occurs
   only after scheduler admission and counts against the execution budget.
+- A Private Run's `Run Workload Profile` is a server-owned `interactive` or
+  `research` value frozen at admission. Hidden Graph Turns, Job Attempts, and
+  delegated bindings inherit that effective value. Request metadata, model
+  output, and tool arguments cannot choose or upgrade it; SDK/Embedded callers
+  may choose only their own single invocation profile.
+- Every automatically assembled Lead, SDK/Embedded, and delegated Agent Graph
+  has exactly one `ToolCallControl`. It alone owns repeated-call identity,
+  per-tool admitted-occurrence budgets, complete-batch arbitration, advisory
+  delivery, scope, and replay receipts. Repeated-call, tool-budget, and
+  Sub-Agent-total observations use distinct types and durable event kinds;
+  `SubagentLimitMiddleware` remains a separate policy. Do not reintroduce the
+  retired frequency enforcement or register a second control middleware.
+- The public SDK graph adapter generates a fresh internal ToolCallControl scope
+  for every top-level `invoke`, `stream`, `ainvoke`, and `astream` call while
+  preserving a copied caller context. Callers never supply or reuse that
+  internal scope key. Synchronous SDK model calls are permitted only without
+  Private scope or authorization authority; those contexts fail closed.
+- With automatic ToolCallControl active, an unanchored SDK `extra_middleware`
+  that implements `after_model` or `aafter_model` belongs to the protected
+  Custom response band. Such response middleware cannot use `@Next`/`@Prev`;
+  callers that require arbitrary response ordering must use explicit
+  `middleware=` full takeover. Position-only extras without response hooks keep
+  their documented anchors.
 - Parent-to-child runtime propagation is one opaque
   `DelegatedRuntimeContextProjection`. It alone selects and copies inherited
   identity, preserves channel-identity absence versus explicit clear, applies
@@ -358,6 +381,22 @@ or downgrade an application database.
 - Compaction creates continuity plus tagged Memory input; only durable checkpoint
   persistence activates the corresponding history receipt. Dream and idle seal
   reuse the same scoped admission and settlement boundaries.
+- Seal and Dream Prepare freeze the current PostgreSQL `agent_runtime` Memory
+  and summarization policy once at Worker authorization, then reuse that exact
+  overlay for every drain pass and the final locked barrier. Never pass the
+  restart-frozen base `AppConfig` policy leaves to these background consumers.
+- One terminal idle-Seal failure consumes only the exact Thread activity epoch
+  identified by its `updated_at`; a later settled Run must touch Thread activity
+  before Scheduler admission can create a new generation.
+- Packaged SNIP may use a bounded in-memory projection to summarize one
+  oversized complete turn, but checkpoint replacement and receipt digest always
+  use the unchanged original messages. Automatic compaction normally protects
+  the latest complete turn; once an open follow-up exists, an over-budget
+  complete prefix may advance in bounded passes even when `keep` has no normal
+  cutoff. An explicit forced compaction may also archive a lone over-budget
+  latest turn. Every hierarchical leaf, reduction, and repair prompt stays
+  within the admitted trim budget, and permanent planning failures terminate
+  with a typed reason. Custom summary prompts never acquire this projection.
 - Model work runs outside database transactions. Admission freezes its inputs;
   settlement re-locks and rejects stale policy, model, preference, document, Job,
   or lease state before publishing results.
@@ -455,7 +494,8 @@ model configuration.
   before-write, audit, guardrail, and loop-detection policies.
 - Register middleware in exactly one lead/base/subagent/SDK builder. List order
   is nesting order; preserve the assertions around clarification, progress,
-  guardrail, error handling, MCP routing, and deferred filtering.
+  guardrail, error handling, MCP routing, ToolCallControl, host execution, and
+  deferred filtering.
 - A new state channel needs an explicit schema and delta-compatible
   materialization behavior.
 

@@ -432,7 +432,7 @@ async def test_prepare_terminal_failure_releases_active_thread(
                 _scope(seed),
                 job_id=claim.job_id,
                 lease_token=claim.lease_token,
-                public_error_code="MEMORY_DREAM_PREPARE_TEST_FAILED",
+                public_error_code="MEMORY_DREAM_MODEL_UNAVAILABLE",
                 retry_initial_seconds=5,
                 retry_max_seconds=5,
                 now=now + timedelta(seconds=2),
@@ -441,6 +441,7 @@ async def test_prepare_terminal_failure_releases_active_thread(
             retry_job = await session.get(JobRow, claim.job_id)
             retry_row = await session.get(MemoryDreamPrepareRunRow, claim.job_id)
             assert retry_job is not None and retry_job.status == "retry_wait"
+            assert retry_job.public_error_code == "MEMORY_DREAM_MODEL_UNAVAILABLE"
             assert retry_row is not None and retry_row.completed_at is None
         claim = await _claim_prepare(seed, now=now + timedelta(seconds=8))
         async with seed.factory() as session, session.begin():
@@ -452,7 +453,7 @@ async def test_prepare_terminal_failure_releases_active_thread(
                 _scope(seed),
                 job_id=claim.job_id,
                 lease_token=claim.lease_token,
-                public_error_code="MEMORY_DREAM_PREPARE_TEST_FAILED",
+                public_error_code="MEMORY_DREAM_MODEL_UNAVAILABLE",
                 retry_initial_seconds=5,
                 retry_max_seconds=5,
                 now=now + timedelta(seconds=9),
@@ -461,6 +462,7 @@ async def test_prepare_terminal_failure_releases_active_thread(
             job = await session.get(JobRow, claim.job_id)
             row = await session.get(MemoryDreamPrepareRunRow, claim.job_id)
             assert job is not None and job.status == "dead"
+            assert job.public_error_code == "MEMORY_DREAM_MODEL_UNAVAILABLE"
             assert row is not None and row.phase == "failed"
             assert row.completed_at is not None
         async with seed.factory() as session, session.begin():

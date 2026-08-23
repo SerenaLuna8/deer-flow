@@ -79,6 +79,13 @@ LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
         "quotas.max_storage_bytes_limit",
         "quotas.max_concurrent_run_limit",
         "quotas.max_mcp_calls_daily_limit",
+        "loop_detection.hard_limit",
+        "loop_detection.max_tracked_threads",
+        "loop_detection.tool_freq_hard_limit",
+        "loop_detection.tool_freq_overrides",
+        "loop_detection.tool_freq_warn",
+        "loop_detection.warn_threshold",
+        "loop_detection.window_size",
     }
 )
 
@@ -90,13 +97,6 @@ DATABASE_RUNTIME_POLICY_PATHS = frozenset(
         "input_polish.max_chars",
         "input_polish.model_name",
         "loop_detection.enabled",
-        "loop_detection.hard_limit",
-        "loop_detection.max_tracked_threads",
-        "loop_detection.tool_freq_hard_limit",
-        "loop_detection.tool_freq_overrides",
-        "loop_detection.tool_freq_warn",
-        "loop_detection.warn_threshold",
-        "loop_detection.window_size",
         "max_recursion_limit",
         "memory.enabled",
         "memory.dream_interval_minutes",
@@ -285,7 +285,10 @@ class AppConfig(BaseModel):
             field_doc=("Legacy deployment-config IM channel connection provider availability; does not gate database-backed project channel instances."),
         ),
     )
-    loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
+    loop_detection: LoopDetectionConfig = Field(
+        default_factory=LoopDetectionConfig,
+        description="Compatibility switch for unified Harness tool-call control.",
+    )
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")

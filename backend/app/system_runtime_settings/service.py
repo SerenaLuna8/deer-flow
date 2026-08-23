@@ -50,6 +50,7 @@ from app.system_runtime_settings.validation import (
     RuntimePolicyInvalid,
     canonical_policy_payload,
     canonical_policy_payload_for_schema,
+    decode_policy_value_for_schema,
     parse_policy_value,
 )
 from app.system_settings.validation import (
@@ -111,7 +112,11 @@ def _view(
         section=section,
         revision=policy_revision,
         schema_version=canonical.schema_version,
-        value=parse_policy_value(section, canonical.value),
+        value=decode_policy_value_for_schema(
+            section,
+            canonical.value,
+            schema_version=canonical.schema_version,
+        ),
         effect_scope=_EFFECT_SCOPE[section],
         effective_revision=policy_revision,
         updated_at=updated_at,
@@ -356,9 +361,10 @@ class SystemRuntimePolicyService:
                 dict(version.value),
                 schema_version=int(version.schema_version),
             )
-            value = parse_policy_value(
+            value = decode_policy_value_for_schema(
                 RuntimePolicySection.AGENT_RUNTIME,
                 canonical.value,
+                schema_version=canonical.schema_version,
             )
             if canonical.schema_version != int(version.schema_version) or canonical.checksum != version.payload_checksum or int(policy.revision) != int(version.version_number) or not isinstance(value, AgentRuntimePolicyValue):
                 raise SystemRuntimePolicyRepositoryInvariant
@@ -412,9 +418,10 @@ class SystemRuntimePolicyService:
                 dict(version.value),
                 schema_version=int(version.schema_version),
             )
-            value = parse_policy_value(
+            value = decode_policy_value_for_schema(
                 RuntimePolicySection.MEMORY_DOCUMENT,
                 canonical.value,
+                schema_version=canonical.schema_version,
             )
             if canonical.schema_version != int(version.schema_version) or canonical.checksum != version.payload_checksum or int(policy.revision) != int(version.version_number) or not isinstance(value, MemoryDocumentPolicy):
                 raise SystemRuntimePolicyRepositoryInvariant

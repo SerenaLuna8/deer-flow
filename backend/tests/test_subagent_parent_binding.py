@@ -16,6 +16,11 @@ from langchain_core.tools import StructuredTool
 
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import RuntimeFeatures
+from deerflow.agents.middlewares.tool_call_control import (
+    ToolCallBudgetObservation,
+    ToolCallControlObservation,
+    default_graph_tool_call_control_profile,
+)
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.subagents.binding import (
     AgentGraphExecutionInputs,
@@ -92,7 +97,7 @@ async def test_sdk_task_adapter_forces_graph_binding_over_forged_context(
             features=features,
         )
 
-    assert result is compiled_graph
+    assert result._compiled_graph is compiled_graph
     bound_task = next(tool for tool in create_agent.call_args.kwargs["tools"] if tool.name == "task")
     forged_factory = object()
     runtime = ToolRuntime(
@@ -340,3 +345,108 @@ def test_parent_binding_adapts_a_lazy_runner_without_materializing_it() -> None:
     assert lifecycle_binding.owner_loop_quiescent is not None
     assert lifecycle_binding.owner_loop_quiescent() is True
     owner_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_owned_control_observer_is_marshaled_to_parent_owner_loop() -> None:
+    owner_loop = asyncio.get_running_loop()
+    observed: list[tuple[asyncio.AbstractEventLoop, ToolCallControlObservation]] = []
+
+    class _Observer:
+        def observe(self, observation: ToolCallControlObservation) -> None:
+            observed.append((asyncio.get_running_loop(), observation))
+
+    profile = _sdk_binding(owner_loop).profile
+    control_profile = default_graph_tool_call_control_profile("research")
+    observer = _Observer()
+    factory = ParentExecutionBindingFactory(
+        profile,
+        tool_call_control_profile=control_profile,
+        tool_call_control_observer=observer,
+    )
+    runtime = ToolRuntime(
+        state={"messages": []},
+        context={RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: factory},
+        config={},
+        stream_writer=lambda _event: None,
+        tool_call_id="public-task-id",
+        store=None,
+    )
+    binding = factory.bind(runtime)
+    observation = ToolCallBudgetObservation(
+        reason_code="tool_budget_exhausted",
+        role="subagent",
+        scope_id="internal-execution-id",
+        workload_profile="research",
+        tool_name="web_search",
+        count_before=19,
+        proposed=2,
+        admitted=1,
+        rejected=1,
+        count_after=20,
+        warn_threshold=12,
+        hard_limit=20,
+        disposition="truncate_tool_calls",
+        observation_id="observation-1",
+    )
+
+    assert binding.tool_call_control_profile is control_profile
+    assert binding.tool_call_control_observer is not observer
+    assert binding.tool_call_control_observer is not None
+    await asyncio.to_thread(
+        binding.tool_call_control_observer.observe,
+        observation,
+    )
+    await asyncio.wait_for(binding.barrier.wait_quiescent(), timeout=1)
+
+    assert observed == [(owner_loop, observation)]
+
+
+@pytest.mark.asyncio
+async def test_owner_loop_control_observer_failure_is_receipted_and_suppressed() -> None:
+    class _FailingObserver:
+        def observe(self, observation: ToolCallControlObservation) -> None:
+            del observation
+            raise RuntimeError("observer transport failed")
+
+    owner_loop = asyncio.get_running_loop()
+    profile = _sdk_binding(owner_loop).profile
+    factory = ParentExecutionBindingFactory(
+        profile,
+        tool_call_control_profile=default_graph_tool_call_control_profile(),
+        tool_call_control_observer=_FailingObserver(),
+    )
+    runtime = ToolRuntime(
+        state={"messages": []},
+        context={RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: factory},
+        config={},
+        stream_writer=lambda _event: None,
+        tool_call_id="public-task-id",
+        store=None,
+    )
+    binding = factory.bind(runtime)
+    observation = ToolCallBudgetObservation(
+        reason_code="tool_budget_warning",
+        role="subagent",
+        scope_id="internal-execution-id",
+        workload_profile="interactive",
+        tool_name="web_search",
+        count_before=5,
+        proposed=1,
+        admitted=1,
+        rejected=0,
+        count_after=6,
+        warn_threshold=6,
+        hard_limit=10,
+        disposition="advisory",
+        observation_id="observation-2",
+    )
+
+    assert binding.tool_call_control_observer is not None
+    await asyncio.to_thread(
+        binding.tool_call_control_observer.observe,
+        observation,
+    )
+    await asyncio.wait_for(binding.barrier.wait_quiescent(), timeout=1)
+
+    assert binding.barrier.active_operations == 0

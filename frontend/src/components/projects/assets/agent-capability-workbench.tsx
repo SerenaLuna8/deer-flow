@@ -359,16 +359,11 @@ export function AgentCapabilityWorkbench({
     !sameIds(baselineSkills, draftSkills) || !sameIds(baselineMcps, draftMcps);
   const skillOptions = useMemo(
     () =>
-      skills.data
-        ? agentDependencyOptions("skill", skills.data, copy)
-        : [],
+      skills.data ? agentDependencyOptions("skill", skills.data, copy) : [],
     [copy, skills.data],
   );
   const mcpOptions = useMemo(
-    () =>
-      mcps.data
-        ? agentDependencyOptions("mcp", mcps.data, copy)
-        : [],
+    () => (mcps.data ? agentDependencyOptions("mcp", mcps.data, copy) : []),
     [copy, mcps.data],
   );
   const mcpRuntime = useMcpDependencyRuntime({

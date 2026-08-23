@@ -5,8 +5,20 @@ from types import SimpleNamespace
 
 import pytest
 
+import app.worker.memory_dream_prepare as prepare_worker_module
+from app.private_work.errors import (
+    PrivateWorkCompactionDisabled,
+    PrivateWorkConflict,
+    PrivateWorkThreadBusy,
+)
+from app.private_work.memory_dream_service import MemoryDreamModelUnavailable
+from app.projects.capabilities import capabilities_for
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
+from app.system_runtime_settings.models import AgentRuntimePolicyValue
 from app.worker.memory_dream_prepare import MemoryDreamPrepareJobHandler, _PrepareWork
 from app.worker.service import JobSettlement, LeaseLost
+from deerflow.config.app_config import AppConfig
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDocumentScope,
@@ -35,6 +47,9 @@ class _Session:
 
     def begin(self):
         return _Transaction()
+
+    async def scalar(self, _statement):
+        return True
 
 
 class _Authority:
@@ -72,6 +87,18 @@ class _Repository:
         if self.error is not None:
             raise self.error
 
+    async def read_execution(self, _scope, **_kwargs):
+        return SimpleNamespace(
+            thread_id="thread-prepare",
+            request_id="memory-dream-prepare-worker",
+        )
+
+    async def link_dream(self, _scope, **kwargs):
+        self.calls.append(("link", kwargs))
+
+    async def settle_success(self, _scope, **kwargs):
+        self.calls.append(("success", kwargs))
+
 
 class _Jobs:
     def __init__(self, *, settled: bool = True) -> None:
@@ -84,16 +111,48 @@ class _Jobs:
 
 
 class _Barrier:
-    def __init__(self, results: list[ThreadCompactionResult]) -> None:
+    def __init__(self, results: list[object]) -> None:
         self.results = list(results)
         self.calls: list[dict[str, object]] = []
 
     async def compact(self, _context, thread_id, **kwargs):
         self.calls.append({"thread_id": thread_id, **kwargs})
-        return self.results.pop(0)
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     async def lock_and_verify_dream_archive_ready(self, *_args, **_kwargs):
         return True
+
+
+class _PolicySensitiveBarrier(_Barrier):
+    async def compact(self, context, thread_id, **kwargs):
+        if not kwargs["app_config"].summarization.enabled:
+            return ThreadCompactionResult(
+                thread_id=thread_id,
+                compacted=False,
+                reason="compaction_failed",
+            )
+        return await super().compact(context, thread_id, **kwargs)
+
+    async def lock_and_verify_dream_archive_ready(self, *_args, **kwargs):
+        return bool(kwargs["app_config"].summarization.enabled)
+
+
+class _Personalization:
+    async def read_memory(self, _owner_user_id):
+        return SimpleNamespace(memory_enabled=True)
+
+
+class _Admission:
+    async def admit(self, *_args, **_kwargs):
+        return SimpleNamespace(
+            disposition="nothing_pending",
+            job_id=None,
+            admission_kind="memory_dream",
+            history_count=0,
+        )
 
 
 def _claim() -> JobClaim:
@@ -148,6 +207,13 @@ def _work(claim: JobClaim) -> _PrepareWork:
         scope=scope,
         thread_id="thread-prepare",
         request_id="memory-dream-prepare-worker",
+        app_config=AppConfig.model_validate(
+            {
+                "sandbox": {
+                    "use": "deerflow.sandbox.local:LocalSandboxProvider",
+                },
+            }
+        ),
     )
 
 
@@ -188,6 +254,115 @@ async def test_prepare_worker_compacts_pass_by_pass_before_final_settlement() ->
     assert all(call["keep"] == ("messages", 0) for call in barrier.calls)
 
 
+@pytest.mark.asyncio
+async def test_prepare_worker_applies_current_database_policy_to_base_compaction_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim = _claim()
+    owner_user_id = claim.scope.owner_user_id or ""
+
+    async def resolve(*_args, **_kwargs):
+        return ProjectContext(
+            user_id=uuid.UUID(owner_user_id),
+            project_id=claim.scope.project_id,
+            membership_id=uuid.uuid4(),
+            role=ProjectRole.ADMIN,
+            capabilities=capabilities_for(ProjectRole.ADMIN),
+            membership_version=1,
+            request_id="memory-dream-prepare-worker",
+        )
+
+    async def materialize(*_args, **_kwargs):
+        return AgentRuntimePolicyValue(), 23
+
+    monkeypatch.setattr(
+        prepare_worker_module,
+        "resolve_project_context_in_transaction",
+        resolve,
+    )
+    monkeypatch.setattr(
+        prepare_worker_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_with_revision_in_session",
+        staticmethod(materialize),
+    )
+    repository = _Repository()
+    barrier = _PolicySensitiveBarrier(
+        [
+            ThreadCompactionResult(
+                thread_id="thread-prepare",
+                compacted=False,
+                reason="not_enough_messages",
+            )
+        ]
+    )
+    handler = MemoryDreamPrepareJobHandler(
+        lambda: _Session(),
+        app_config=AppConfig.model_validate(
+            {
+                "sandbox": {
+                    "use": "deerflow.sandbox.local:LocalSandboxProvider",
+                },
+                "summarization": {"enabled": False},
+            }
+        ),
+        barrier=barrier,
+        admission=_Admission(),  # type: ignore[arg-type]
+        repository_builder=lambda _session, *, jobs: repository,
+        job_repository_builder=lambda _session: _Jobs(),
+        personalization_repository_builder=lambda _session: _Personalization(),
+    )
+
+    settlement = await handler(claim, _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.status == "succeeded"
+    await settlement.commit()
+    assert [name for name, _kwargs in repository.calls][-2:] == [
+        "link",
+        "success",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_final_settlement_retries_when_dream_model_becomes_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim = _claim()
+    owner_user_id = claim.scope.owner_user_id or ""
+
+    async def resolve(*_args, **_kwargs):
+        return ProjectContext(
+            user_id=uuid.UUID(owner_user_id),
+            project_id=claim.scope.project_id,
+            membership_id=uuid.uuid4(),
+            role=ProjectRole.ADMIN,
+            capabilities=capabilities_for(ProjectRole.ADMIN),
+            membership_version=1,
+            request_id="memory-dream-prepare-worker",
+        )
+
+    class Admission:
+        async def admit(self, *_args, **_kwargs):
+            raise MemoryDreamModelUnavailable
+
+    monkeypatch.setattr(
+        prepare_worker_module,
+        "resolve_project_context_in_transaction",
+        resolve,
+    )
+    repository = _Repository()
+    handler = _handler(repository, barrier=_Barrier([]))
+    handler._admission = Admission()
+
+    await handler._final_settlement(claim, _work(claim)).commit()
+
+    assert [name for name, _kwargs in repository.calls] == [
+        "phase",
+        "retry",
+    ]
+    assert repository.calls[-1][1]["public_error_code"] == ("MEMORY_DREAM_MODEL_UNAVAILABLE")
+
+
 async def _async_value(value):
     return value
 
@@ -220,6 +395,79 @@ async def test_prepare_worker_stalled_compaction_returns_failure_settlement() ->
         "authority",
         "retry",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "expected_code"),
+    [
+        (
+            "source_too_large",
+            "MEMORY_DREAM_PREPARE_SOURCE_TOO_LARGE",
+        ),
+        (
+            "prompt_budget_too_small",
+            "MEMORY_DREAM_PREPARE_PROMPT_BUDGET_TOO_SMALL",
+        ),
+        ("compaction_failed", "MEMORY_DREAM_PREPARE_DRAIN_FAILED"),
+    ],
+)
+async def test_prepare_worker_preserves_permanent_compaction_failure_reason(
+    reason: str,
+    expected_code: str,
+) -> None:
+    repository = _Repository()
+    barrier = _Barrier(
+        [
+            ThreadCompactionResult(
+                thread_id="thread-prepare",
+                compacted=False,
+                reason=reason,
+            )
+        ]
+    )
+    handler = _handler(repository, barrier=barrier)
+    claim = _claim()
+    handler._authorize = lambda _claim: _async_value(_work(claim))
+
+    settlement = await handler(claim, _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.public_error_code == expected_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (
+            PrivateWorkThreadBusy("memory-dream-prepare-worker"),
+            "MEMORY_DREAM_PREPARE_THREAD_BUSY",
+        ),
+        (
+            PrivateWorkCompactionDisabled("memory-dream-prepare-worker"),
+            "MEMORY_DREAM_PREPARE_COMPACTION_DISABLED",
+        ),
+        (
+            PrivateWorkConflict("memory-dream-prepare-worker"),
+            "MEMORY_DREAM_PREPARE_HEAD_CHANGED",
+        ),
+    ],
+)
+async def test_prepare_worker_preserves_machine_compaction_outcomes(
+    error: Exception,
+    expected_code: str,
+) -> None:
+    repository = _Repository()
+    barrier = _Barrier([error])
+    handler = _handler(repository, barrier=barrier)
+    claim = _claim()
+    handler._authorize = lambda _claim: _async_value(_work(claim))
+
+    settlement = await handler(claim, _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.public_error_code == expected_code
 
 
 @pytest.mark.asyncio

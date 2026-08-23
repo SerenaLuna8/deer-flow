@@ -363,6 +363,7 @@ async def test_durable_builder_run_replay_retry_delta_cancel_and_delete_link(
             assert thread is not None
             assert thread.thread_kind == "skill_builder"
             assert run.metadata_json == {}
+            assert run.kwargs_json["config"] == {"recursion_limit": 250}
             vision_snapshot = (
                 await session.execute(
                     sa.select(RunModelConfigSnapshotRow).where(
@@ -724,6 +725,91 @@ async def test_builder_admission_quota_failure_rolls_back_the_whole_turn(
             assert await session.scalar(sa.select(sa.func.count()).select_from(RunRow).where(RunRow.thread_id == str(design.thread_id))) == 0
             assert await session.scalar(sa.select(sa.func.count()).select_from(JobRow).where(JobRow.project_id == context.project_id)) == 0
         assert audit.admitted == []
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_running_stop_settlement_restores_multifile_canonical_checksum(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, service, _quota, _audit = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        design = await service.create(
+            context,
+            CreateSkillDesignSession(
+                slug="multifile-stop-rollback",
+                display_name="Multifile Stop Rollback",
+                idempotency_key="create-multifile-stop-rollback",
+            ),
+        )
+        baseline = (
+            SkillArchiveFile(
+                path="SKILL.md",
+                media_type="text/markdown",
+                content=b"---\nname: multifile-stop-rollback\ndescription: baseline\n---\n",
+            ),
+            SkillArchiveFile(
+                path="references/review-checklist.md",
+                media_type="text/markdown",
+                content=b"# Review checklist\n",
+            ),
+        )
+        expected_checksum = service._draft_snapshot(
+            context,
+            baseline,
+        ).draft_checksum
+        async with seed.factory() as session, session.begin():
+            repository = SkillDesignRepository(session)
+            row = await repository.get(context, design.id, for_update=True)
+            await repository.replace_draft_files(context, row.id, baseline)
+            row.draft_checksum = expected_checksum
+            row.status = SkillDesignStatus.DRAFT_READY.value
+            row.progress_json = service._progress_json(
+                SkillDesignStatus.DRAFT_READY,
+            )
+            row.revision += 1
+
+        ready = await service.get(context, design.id)
+        admission = await service.submit_turn(
+            context,
+            design.id,
+            _message_turn(
+                message="运行中停止并恢复多文件候选",
+                revision=ready.revision,
+                key="stop-multifile-running-turn",
+            ),
+        )
+        assert isinstance(admission, SkillBuilderRunAdmission)
+        _worker_id, claim = await _claim_and_begin(
+            seed,
+            now=datetime.now(UTC),
+        )
+        assert claim.run_id == admission.run_id
+
+        async with seed.factory() as session, session.begin():
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.run_id == admission.run_id,
+                    )
+                )
+            ).scalar_one()
+            operation.stop_requested_at = datetime.now(UTC)
+            await PrivateRunJobHandler._project_skill_builder_terminal(
+                session,
+                claim,
+                settled_status="interrupted",
+                public_error_code=None,
+            )
+
+        restored = await service.get(context, design.id)
+        assert restored.status is SkillDesignStatus.DRAFT_READY
+        assert restored.draft_checksum == expected_checksum
+        assert [(item.path, item.content) for item in restored.files] == [(item.path, item.content.decode("utf-8")) for item in sorted(baseline, key=lambda value: value.path)]
     finally:
         await seed.engine.dispose()
 

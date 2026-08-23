@@ -31,6 +31,9 @@ STREAM_TERMINAL_ERROR_CODES = (
         {
             "MODEL_OUTPUT_LIMIT",
             "LOOP_SAFETY_LIMIT",
+            "LOOP_FINALIZATION_FAILED",
+            "TOOL_CALL_CONTROL_STATE_INVALID",
+            "RUN_POLICY_STALE",
             "OUTPUT_DELIVERY_INCOMPLETE",
             "CURRENT_UPLOAD_UNAVAILABLE",
         }

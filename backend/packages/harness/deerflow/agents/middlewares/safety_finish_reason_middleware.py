@@ -20,16 +20,17 @@ consumers can see what happened.
 
 Hook choice: ``after_model`` (not ``wrap_model_call``) because the response
 is a *normal* return — not an exception — and we want to participate in the
-same after-model chain as ``LoopDetectionMiddleware``, with which we share
+same after-model chain as ``ToolCallControl``, with which we share
 the same tool-call-suppression mechanic but a different trigger.
 
-Placement: register *after* ``LoopDetectionMiddleware`` in the middleware
+Placement: register *after* ``ToolCallControl`` in the middleware
 list. LangChain factory wires ``after_model`` edges in reverse list order
 (``langchain/agents/factory.py:add_edge("model", middleware_w_after_model[-1])``,
 then walks ``range(len-1, 0, -1)``), so the *last* registered middleware is
-the *first* to observe the model output. Registering Safety after Loop
+the *first* to observe the model output. Registering Safety after
+ToolCallControl
 means Safety sees the raw response first, clears tool calls if it fires,
-and Loop then accounts against the cleaned message.
+and ToolCallControl then accounts against the cleaned message.
 """
 
 from __future__ import annotations
@@ -118,9 +119,8 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
     def _append_user_message(content: object, text: str) -> str | list:
         """Append a plain-text explanation to AIMessage content.
 
-        Mirrors ``LoopDetectionMiddleware._append_text`` so list-content
-        responses (Anthropic thinking blocks, vLLM reasoning splits) keep
-        their structure instead of being string-coerced into a TypeError.
+        Preserve list-content responses (Anthropic thinking blocks, vLLM
+        reasoning splits) instead of string-coercing their structure.
         """
         if content is None or content == "":
             return text

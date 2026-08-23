@@ -68,4 +68,20 @@ describe("SubtaskCard delegated execution approval", () => {
     expect(html).not.toContain("子任务运行中");
     expect(html).not.toContain("animate-spin");
   });
+
+  test("keeps a completed tool-budget-capped task successful while showing the cap", () => {
+    const html = render({
+      ...baseTask,
+      status: "completed",
+      statusSource: "tool_result",
+      stopReason: "tool_budget_capped",
+      result: "Useful partial research",
+      executionApproval: undefined,
+    });
+
+    expect(html).toContain('data-subtask-stop-reason="tool_budget_capped"');
+    expect(html).toContain("子任务已达到工具调用额度");
+    expect(html).toContain("子任务已完成");
+    expect(html).not.toContain("子任务失败");
+  });
 });

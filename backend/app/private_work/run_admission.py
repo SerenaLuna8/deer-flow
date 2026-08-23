@@ -31,6 +31,7 @@ from app.private_work.errors import (
     PrivateWorkRunExecutionProfileUnsupported,
     PrivateWorkRunModelSelectionLocked,
     PrivateWorkRunModelUnavailable,
+    PrivateWorkRunWorkloadProfileUnsupported,
     PrivateWorkUnavailable,
 )
 from app.private_work.execution_approval_audit import (
@@ -74,6 +75,11 @@ from app.private_work.snapshot_repository import (
     RunSnapshotRepository,
 )
 from app.private_work.thread_repository import PrivateThreadRepository
+from app.private_work.workload_profile import (
+    RUN_WORKLOAD_PROFILE_KWARG,
+    RunWorkloadProfileUnsupported,
+    parse_persisted_run_workload_profile,
+)
 from app.projects.capabilities import Capability
 from app.reliability.jobs import (
     AdmittedJobRecord,
@@ -605,6 +611,10 @@ class PrivateRunAdmissionService:
             RUN_EXECUTION_PROFILE_KWARG,
             None,
         )
+        persisted_workload_profile = persisted_kwargs.pop(
+            RUN_WORKLOAD_PROFILE_KWARG,
+            None,
+        )
         try:
             required_current_upload_snapshot_from_run_kwargs(run.kwargs)
         except CurrentUploadSnapshotInvalid:
@@ -624,11 +634,28 @@ class PrivateRunAdmissionService:
                 profile_match = persisted_requested == request.execution_profile
             except RunExecutionProfileUnsupported:
                 profile_match = False
+        if persisted_workload_profile is None:
+            workload_profile_match = request.workload_profile.name == "interactive"
+        else:
+            try:
+                persisted_requested_workload, _ = parse_persisted_run_workload_profile(
+                    persisted_workload_profile,
+                )
+                workload_profile_match = persisted_requested_workload == request.workload_profile
+            except RunWorkloadProfileUnsupported:
+                workload_profile_match = False
         kwargs_match = persisted_kwargs == request.kwargs or _matches_server_promoted_human_input_retry(
             persisted_kwargs,
             request.kwargs,
         )
-        return run.thread_id == thread_id and run.multitask_strategy == request.multitask_strategy and strip_server_run_metadata(run.metadata) == strip_server_run_metadata(request.metadata) and kwargs_match and profile_match
+        return (
+            run.thread_id == thread_id
+            and run.multitask_strategy == request.multitask_strategy
+            and strip_server_run_metadata(run.metadata) == strip_server_run_metadata(request.metadata)
+            and kwargs_match
+            and profile_match
+            and workload_profile_match
+        )
 
     @staticmethod
     def _server_kwargs(
@@ -1038,6 +1065,8 @@ class PrivateRunAdmissionService:
             raise PrivateWorkRunModelUnavailable(context.request_id) from None
         except RunExecutionProfileUnsupported:
             raise PrivateWorkRunExecutionProfileUnsupported(context.request_id) from None
+        except RunWorkloadProfileUnsupported:
+            raise PrivateWorkRunWorkloadProfileUnsupported(context.request_id) from None
         except AssetForbidden:
             raise PrivateWorkForbidden(context.request_id) from None
         except AssetValidationFailed:

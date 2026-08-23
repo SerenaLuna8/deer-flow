@@ -128,7 +128,7 @@ def _policy(
     return LockedAgentRuntimePolicy(
         policy_version_id=uuid.uuid4(),
         revision=4,
-        schema_version=1,
+        schema_version=3,
         payload_checksum="a" * 64,
         value=AgentRuntimePolicyValue(
             memory={
@@ -585,6 +585,17 @@ async def test_run_admission_locks_models_before_optional_user_memory_snapshot(
     class Session:
         def in_transaction(self) -> bool:
             return True
+
+        async def execute(self, _statement):
+            class Result:
+                @staticmethod
+                def one_or_none():
+                    return SimpleNamespace(
+                        kwargs_json={},
+                        schema_version=3,
+                    )
+
+            return Result()
 
         def add_all(self, values) -> None:
             tuple(values)

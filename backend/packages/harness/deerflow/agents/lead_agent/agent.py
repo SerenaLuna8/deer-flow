@@ -34,16 +34,25 @@ from langchain_core.tools import BaseTool
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.assembly import (
     assemble_agent_middlewares,
+    build_host_execution_batch_barrier,
     build_lead_runtime_middlewares,
 )
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
-from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
+from deerflow.agents.middlewares.tool_call_control import (
+    FixedToolCallControlScope,
+    PerInvocationToolCallControlScope,
+    ResolvedGraphToolCallControlProfile,
+    ToolCallControlBinding,
+    ToolCallControlObserver,
+    build_tool_call_control,
+    default_graph_tool_call_control_profile,
+)
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import (
     get_thread_state_schema,
@@ -336,6 +345,8 @@ def build_middlewares(
     runtime_skills_container_path: str | None = None,
     resolved_subagent_enabled: bool | None = None,
     resolved_max_concurrent_subagents: int | None = None,
+    resolved_max_total_subagents: int | None = None,
+    tool_call_control: AgentMiddleware | None = None,
     output_limit_recovery_model: BaseChatModel | None = None,
     output_limit_recovery_override: AgentMiddleware | None = None,
 ):
@@ -362,6 +373,10 @@ def build_middlewares(
             Private Runs pass this explicitly because their sanitized request
             config intentionally contains no client-controlled authority flag.
         resolved_max_concurrent_subagents: Server-resolved per-batch limit.
+        resolved_max_total_subagents: Server-resolved per-execution delegation
+            total. It remains owned by ``SubagentLimitMiddleware``.
+        tool_call_control: The already-bound repeated-call and per-tool budget
+            Adapter for this graph execution profile.
 
     Returns:
         List of middleware instances.
@@ -484,14 +499,11 @@ def build_middlewares(
     subagent_middleware = None
     if effective_subagent_enabled:
         effective_max_concurrent = cfg.get("max_concurrent_subagents", 3) if resolved_max_concurrent_subagents is None else resolved_max_concurrent_subagents
+        effective_max_total = resolved_app_config.subagents.max_total_per_run if resolved_max_total_subagents is None else resolved_max_total_subagents
         subagent_middleware = SubagentLimitMiddleware(
             max_concurrent=effective_max_concurrent,
-            max_total=resolved_app_config.subagents.max_total_per_run,
+            max_total=effective_max_total,
         )
-
-    # LoopDetectionMiddleware — detect and break repetitive tool call loops
-    loop_detection_config = resolved_app_config.loop_detection
-    loop_detection_middleware = LoopDetectionMiddleware.from_config(loop_detection_config) if loop_detection_config.enabled else None
 
     # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
@@ -513,10 +525,9 @@ def build_middlewares(
         )
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
-    # safety-terminated the response. Registered after custom middlewares so
-    # that LangChain's reverse-order after_model dispatch runs Safety first;
-    # cleared tool_calls then flow through Loop/Subagent accounting without
-    # firing extra alarms. See safety_finish_reason_middleware.py docstring.
+    # safety-terminated the response. The shared assembly owns the protected
+    # reverse-dispatch arbitration band; ToolCallControl therefore sees only
+    # calls still eligible to reach ToolNode.
     safety_config = resolved_app_config.safety_finish_reason
     safety_middleware = SafetyFinishReasonMiddleware.from_config(safety_config) if safety_config.enabled else None
 
@@ -531,8 +542,9 @@ def build_middlewares(
         vision=vision_middleware,
         routing=tuple(routing_middlewares),
         system_message=system_message_middleware,
+        tool_call_control=tool_call_control,
+        host_execution_batch_barrier=(build_host_execution_batch_barrier(app_config=resolved_app_config)),
         subagent=subagent_middleware,
-        loop_detection=loop_detection_middleware,
         token_budget=token_budget_middleware,
         custom=tuple(custom_middlewares or ()),
         safety=safety_middleware,
@@ -609,6 +621,11 @@ def _make_lead_agent(
     app_config: AppConfig,
     private_runtime=None,
     trusted_extension: TrustedLeadAgentExtension | None = None,
+    tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None,
+    tool_call_control_scope_id: str | None = None,
+    tool_call_control_observer: ToolCallControlObserver | None = None,
+    resolved_max_concurrent_subagents: int | None = None,
+    resolved_max_total_subagents: int | None = None,
 ):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
@@ -650,7 +667,42 @@ def _make_lead_agent(
     if private_runtime is not None:
         is_plan_mode = False
         subagent_enabled = "task" in tuple(getattr(private_runtime, "tool_groups", ()))
-        max_concurrent_subagents = 3
+        max_concurrent_subagents = 3 if resolved_max_concurrent_subagents is None else resolved_max_concurrent_subagents
+    elif resolved_max_concurrent_subagents is not None:
+        max_concurrent_subagents = resolved_max_concurrent_subagents
+
+    admitted_control_profile = tool_call_control_profile is not None
+    if tool_call_control_profile is None:
+        tool_call_control_profile = default_graph_tool_call_control_profile(
+            "interactive",
+            repeated_calls_enabled=resolved_app_config.loop_detection.enabled,
+        )
+    elif not isinstance(
+        tool_call_control_profile,
+        ResolvedGraphToolCallControlProfile,
+    ):
+        raise TypeError(
+            "tool_call_control_profile must be a ResolvedGraphToolCallControlProfile",
+        )
+
+    if tool_call_control_scope_id is not None:
+        control_scope = FixedToolCallControlScope(tool_call_control_scope_id)
+    elif admitted_control_profile and private_runtime is not None:
+        raise ValueError(
+            "An admitted Private Run tool-call control profile requires its exact run scope",
+        )
+    else:
+        configured_run_id = cfg.get("run_id")
+        control_scope = FixedToolCallControlScope(configured_run_id) if isinstance(configured_run_id, str) and configured_run_id else PerInvocationToolCallControlScope()
+    tool_call_control = build_tool_call_control(
+        tool_call_control_profile.lead,
+        ToolCallControlBinding(
+            role="lead",
+            scope=control_scope,
+            workload_profile=tool_call_control_profile.workload_profile,
+            observer=tool_call_control_observer,
+        ),
+    )
     agent_config = load_agent_config(agent_name) if private_runtime is None else None
     agent_version_model_settings = getattr(private_runtime, "model_settings", None) if private_runtime is not None else getattr(agent_config, "model_settings", None)
     if agent_version_model_settings is not None:
@@ -898,6 +950,8 @@ def _make_lead_agent(
             runtime_skills_container_path=(container_base_path if runtime_skills is not None else None),
             resolved_subagent_enabled=subagent_enabled,
             resolved_max_concurrent_subagents=max_concurrent_subagents,
+            resolved_max_total_subagents=resolved_max_total_subagents,
+            tool_call_control=tool_call_control,
             output_limit_recovery_model=output_limit_recovery_model,
             output_limit_recovery_override=(extension.output_limit_recovery_override),
             custom_middlewares=list(extension.custom_middlewares),
@@ -965,7 +1019,11 @@ def _make_lead_agent(
         )
     final_tools = bind_task_tool_in_tools(
         final_tools,
-        ParentExecutionBindingFactory(parent_profile),
+        ParentExecutionBindingFactory(
+            parent_profile,
+            tool_call_control_profile=tool_call_control_profile,
+            tool_call_control_observer=tool_call_control_observer,
+        ),
     )
     return create_agent(
         model=lead_model,
@@ -982,6 +1040,11 @@ def _make_lead_agent_with_private_runtime(
     private_runtime,
     app_config: AppConfig | None = None,
     trusted_extension: TrustedLeadAgentExtension | None = None,
+    tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None,
+    tool_call_control_scope_id: str | None = None,
+    tool_call_control_observer: ToolCallControlObserver | None = None,
+    resolved_max_concurrent_subagents: int | None = None,
+    resolved_max_total_subagents: int | None = None,
 ):
     runtime_config = _get_runtime_config(config)
     runtime_app_config = runtime_config.get("app_config")
@@ -990,6 +1053,11 @@ def _make_lead_agent_with_private_runtime(
         app_config=app_config or runtime_app_config or get_app_config(),
         private_runtime=private_runtime,
         trusted_extension=trusted_extension,
+        tool_call_control_profile=tool_call_control_profile,
+        tool_call_control_scope_id=tool_call_control_scope_id,
+        tool_call_control_observer=tool_call_control_observer,
+        resolved_max_concurrent_subagents=resolved_max_concurrent_subagents,
+        resolved_max_total_subagents=resolved_max_total_subagents,
     )
 
 

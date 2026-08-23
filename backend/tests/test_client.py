@@ -13,10 +13,16 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
 
 from app.gateway.routers.models import ModelResponse, ModelsListResponse
+from deerflow.agents.middlewares.tool_call_control import (
+    TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY,
+    ToolCallControl,
+)
 from deerflow.agents.thread_state import DeltaThreadState
 from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.client import DeerFlowClient
+from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import ModelRuntimeProfile
 from deerflow.subagents.binding import (
     EmbeddedParentExecutionProfile,
@@ -77,11 +83,12 @@ class TestClientInit:
         assert client._available_skills is None
         assert client._checkpointer is None
         assert client._agent is None
+        assert client._workload_profile == "interactive"
 
     def test_custom_params(self, mock_app_config):
         mock_middleware = MagicMock()
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
-            c = DeerFlowClient(model_name="gpt-4", thinking_enabled=False, subagent_enabled=True, plan_mode=True, agent_name="test-agent", available_skills={"skill1", "skill2"}, middlewares=[mock_middleware])
+            c = DeerFlowClient(model_name="gpt-4", thinking_enabled=False, subagent_enabled=True, plan_mode=True, agent_name="test-agent", available_skills={"skill1", "skill2"}, middlewares=[mock_middleware], workload_profile="research")
         assert c._model_name == "gpt-4"
         assert c._thinking_enabled is False
         assert c._subagent_enabled is True
@@ -89,6 +96,17 @@ class TestClientInit:
         assert c._agent_name == "test-agent"
         assert c._available_skills == {"skill1", "skill2"}
         assert c._middlewares == [mock_middleware]
+        assert c._workload_profile == "research"
+
+    @pytest.mark.parametrize("workload_profile", ["", "batch", None, [], {}])
+    def test_invalid_workload_profile(self, mock_app_config, workload_profile):
+        with (
+            patch("deerflow.client.get_app_config", return_value=mock_app_config),
+            pytest.raises(ValueError, match="workload_profile"),
+        ):
+            DeerFlowClient(
+                workload_profile=workload_profile,  # type: ignore[arg-type]
+            )
 
     def test_invalid_agent_name(self, mock_app_config):
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
@@ -267,6 +285,25 @@ class TestStream:
         call_kwargs = agent.stream.call_args.kwargs
         assert call_kwargs["context"]["thread_id"] == "t1"
         assert call_kwargs["context"]["agent_name"] == "test-agent-1"
+
+    def test_each_stream_call_gets_one_distinct_control_invocation_id(self, client):
+        cached_agent = MagicMock()
+        cached_agent.stream.side_effect = [iter(()), iter(())]
+
+        def ensure_agent(_config):
+            client._agent = cached_agent
+
+        with patch.object(client, "_ensure_agent", side_effect=ensure_agent):
+            list(client.stream("first", thread_id="shared-thread"))
+            list(client.stream("second", thread_id="shared-thread"))
+
+        first_context = cached_agent.stream.call_args_list[0].kwargs["context"]
+        second_context = cached_agent.stream.call_args_list[1].kwargs["context"]
+        first_id = first_context[TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY]
+        second_id = second_context[TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY]
+        assert isinstance(first_id, str) and first_id
+        assert isinstance(second_id, str) and second_id
+        assert first_id != second_id
 
     def test_custom_mode_is_normalized_to_string(self, client):
         """stream() forwards custom events even when the mode is not a plain string."""
@@ -984,6 +1021,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config(
             "t-binding",
             subagent_enabled=True,
+            workload_profile="research",
         )
         model = MagicMock(name="embedded-model")
 
@@ -996,7 +1034,10 @@ class TestEnsureAgent:
                 "deerflow.client.create_agent",
                 return_value=MagicMock(),
             ) as create_agent,
-            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch(
+                "deerflow.client.build_middlewares",
+                side_effect=lambda *args, **kwargs: [kwargs["tool_call_control"]],
+            ),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(
                 client,
@@ -1017,6 +1058,82 @@ class TestEnsureAgent:
         assert profile.asset_context is client._asset_context
         assert profile.graph.model is model
         assert profile.subagent_enabled is True
+        assert binding_factory.tool_call_control_profile.workload_profile == "research"
+        assert (
+            binding_factory.tool_call_control_profile.subagent.tool_budget.limit_for(
+                "web_search",
+            ).hard_limit
+            == 20
+        )
+        assert isinstance(
+            create_agent.call_args.kwargs["middleware"][0],
+            ToolCallControl,
+        )
+
+    def test_research_workload_builds_a_distinct_cached_agent_profile(self, client):
+        interactive = client._get_runnable_config(
+            "t-workload",
+            workload_profile="interactive",
+        )
+        research = client._get_runnable_config(
+            "t-workload",
+            workload_profile="research",
+        )
+        created: list[object] = []
+
+        def capture_agent(**_kwargs):
+            agent = MagicMock()
+            created.append(agent)
+            return agent
+
+        with (
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=capture_agent),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+        ):
+            client._ensure_agent(interactive)
+            interactive_key = client._agent_config_key
+            client._ensure_agent(research)
+            research_key = client._agent_config_key
+
+        assert len(created) == 2
+        assert interactive_key != research_key
+
+    def test_local_approval_embedded_chain_keeps_the_batch_barrier(self):
+        app_config = AppConfig(
+            sandbox=SandboxConfig(
+                use="deerflow.sandbox.local:LocalSandboxProvider",
+                host_execution_approval={
+                    "mode": "approval_required",
+                    "execution_domain_id": "embedded-test",
+                },
+            ),
+        )
+        with patch("deerflow.client.get_app_config", return_value=app_config):
+            embedded = DeerFlowClient()
+
+        with (
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()) as create,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch.object(embedded, "_get_tools", return_value=[]),
+        ):
+            embedded._ensure_agent(embedded._get_runnable_config("approval"))
+
+        names = [type(middleware).__name__ for middleware in create.call_args.kwargs["middleware"]]
+        assert names.index("ToolCallControl") < names.index(
+            "HostExecutionBatchBarrierMiddleware",
+        )
+        assert "HostExecutionApprovalPauseMiddleware" in names
+
+    def test_per_call_workload_profile_is_strict(self, client):
+        with pytest.raises(ValueError, match="workload_profile"):
+            client._get_runnable_config(
+                "t-workload",
+                workload_profile="batch",
+            )
 
     def test_delta_mode_uses_delta_state_schema(self, client):
         client._checkpoint_channel_mode = "delta"
@@ -1111,6 +1228,7 @@ class TestEnsureAgent:
             True,
             False,
             False,
+            "interactive",
             None,
             None,
             "full",

@@ -9,10 +9,7 @@ import { useAgentMcpDependencyRuntime } from "@/components/projects/assets/use-m
 import { useI18n } from "@/core/i18n/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import type { Project } from "@/core/projects/types";
-import {
-  useProjectAssets,
-  useProjectDefaultAgent,
-} from "@/core/shared-assets";
+import { useProjectAssets, useProjectDefaultAgent } from "@/core/shared-assets";
 import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
 
 import {
@@ -39,11 +36,7 @@ export function useProjectNewChat(project: Project) {
   );
   const refetchDefaultAgent = defaultAgent.refetch;
   const resolution = useMemo(
-    () =>
-      resolveProjectDefaultAgent(
-        assets.data,
-        defaultAgent.data,
-      ),
+    () => resolveProjectDefaultAgent(assets.data, defaultAgent.data),
     [assets.data, defaultAgent.data],
   );
   const customAgent =

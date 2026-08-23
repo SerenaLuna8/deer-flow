@@ -300,6 +300,26 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         return getattr(runtime, "context", None)
 
     @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        runtime_context = self._runtime_context(request)
+        if isinstance(runtime_context, Mapping) and any(
+            key in runtime_context
+            for key in (
+                RuntimeContextKeys.PRIVATE_SCOPE,
+                RuntimeContextKeys.AUTHORIZATION_CHECKER,
+                RuntimeContextKeys.AUTHORIZATION_BOUNDARY,
+            )
+        ):
+            # Private authority is asynchronous and must never be bypassed by
+            # a synchronous graph invocation.
+            raise AuthorizationRevoked
+        return handler(request)
+
+    @override
     async def awrap_model_call(
         self,
         request: ModelRequest,

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
@@ -23,13 +24,18 @@ from app.personalization.repository import (
 from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
+    PrivateWorkCompactionDisabled,
     PrivateWorkConflict,
     PrivateWorkError,
     PrivateWorkNotFound,
+    PrivateWorkThreadBusy,
 )
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.system_runtime_settings.app_config_projection import (
+    project_memory_compaction_app_config_policy,
+)
 from app.system_runtime_settings.materializer import SystemRuntimePolicyMaterializer
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
@@ -47,6 +53,16 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 _MEMORY_SEAL_REQUEST_ID = "memory-seal-worker"
 _SEAL_KEEP: tuple[str, int] = ("messages", 0)
+_SEAL_COMPACTION_FAILURE_CODES = {
+    "prompt_budget_too_small": "MEMORY_SEAL_PROMPT_BUDGET_TOO_SMALL",
+    "source_too_large": "MEMORY_SEAL_SOURCE_TOO_LARGE",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _SealWork:
+    context: PrivateWorkContext
+    app_config: AppConfig
 
 
 class MemorySealJobHandler:
@@ -83,7 +99,7 @@ class MemorySealJobHandler:
         self,
         claim: JobClaim,
         thread_id: str,
-    ) -> PrivateWorkContext | None:
+    ) -> _SealWork | None:
         """Mint the private authority context, or None when sealing must stop.
 
         Platform policy, owner preference, and the thread row are all re-read
@@ -128,7 +144,12 @@ class MemorySealJobHandler:
             )
             if not thread_live:
                 return None
-        return PrivateWorkContext.from_project(project_context)
+        return _SealWork(
+            context=PrivateWorkContext.from_project(project_context),
+            app_config=self._app_config.with_runtime_policy(
+                project_memory_compaction_app_config_policy(policy),
+            ),
+        )
 
     async def __call__(
         self,
@@ -140,12 +161,12 @@ class MemorySealJobHandler:
         thread_id = claim.namespace
         await authority.heartbeat()
         try:
-            context = await self._authorize(claim, thread_id)
+            work = await self._authorize(claim, thread_id)
         except asyncio.CancelledError:
             raise
         except Exception:
             return JobOutcome.failed("MEMORY_SEAL_AUTHORITY_UNAVAILABLE")
-        if context is None:
+        if work is None:
             return JobOutcome.cancelled()
 
         committed_checkpoints: set[str] = set()
@@ -155,17 +176,19 @@ class MemorySealJobHandler:
                 return JobOutcome.cancelled()
             try:
                 result = await self._barrier.compact(
-                    context,
+                    work.context,
                     thread_id,
                     force=True,
                     keep=_SEAL_KEEP,
-                    app_config=self._app_config,
+                    app_config=work.app_config,
                 )
             except asyncio.CancelledError:
                 raise
-            except PrivateWorkConflict:
+            except PrivateWorkThreadBusy:
                 # A live Run owns the thread again: yield without stamping.
-                return self._settlement(claim, context, disposition="noop")
+                return self._settlement(claim, work, disposition="noop")
+            except PrivateWorkCompactionDisabled:
+                return JobOutcome.failed("MEMORY_SEAL_COMPACTION_DISABLED")
             except PrivateWorkNotFound:
                 return JobOutcome.cancelled()
             except PrivateWorkError:
@@ -179,13 +202,18 @@ class MemorySealJobHandler:
                 committed_checkpoints.add(checkpoint_id)
                 continue
             if result.reason != "not_enough_messages":
-                return JobOutcome.failed("MEMORY_SEAL_DRAIN_FAILED")
-            return self._settlement(claim, context, disposition="sealed")
+                return JobOutcome.failed(
+                    _SEAL_COMPACTION_FAILURE_CODES.get(
+                        result.reason or "",
+                        "MEMORY_SEAL_DRAIN_FAILED",
+                    )
+                )
+            return self._settlement(claim, work, disposition="sealed")
 
     def _settlement(
         self,
         claim: JobClaim,
-        context: PrivateWorkContext,
+        work: _SealWork,
         *,
         disposition: str,
     ) -> JobSettlement:
@@ -198,6 +226,7 @@ class MemorySealJobHandler:
 
         thread_id = claim.namespace or ""
         now = datetime.now(UTC)
+        context = work.context
 
         async def commit() -> None:
             final_disposition = disposition
@@ -208,7 +237,7 @@ class MemorySealJobHandler:
                             session,
                             context,
                             thread_id,
-                            app_config=self._app_config,
+                            app_config=work.app_config,
                         )
                     except PrivateWorkConflict:
                         ready = False

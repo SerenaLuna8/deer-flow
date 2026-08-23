@@ -1,8 +1,9 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { z } from "zod";
 
-import type { FileInMessage } from "../messages/utils";
-import type { UploadedFileInfo } from "../uploads";
+import type { FileInMessage } from "@/core/messages/utils";
+import type { RunWorkloadProfileName } from "@/core/private-work/workload-profile";
+import type { UploadedFileInfo } from "@/core/uploads";
 
 export type MessageSendAttempt = {
   readonly generation: number;
@@ -170,6 +171,7 @@ export type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   continueFromLatestCheckpoint?: boolean;
+  workloadProfile?: RunWorkloadProfileName;
   /**
    * Invoked exactly once after uploads succeed and the server admits the Run.
    * It never fires for a dropped concurrent send or pre-admission failure, so

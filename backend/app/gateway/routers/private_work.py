@@ -91,6 +91,11 @@ from app.private_work.run_repository import PrivateRunRecord
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRecord, ThreadAgentRef
 from app.private_work.thread_service import PrivateThreadService
+from app.private_work.workload_profile import (
+    RUN_WORKLOAD_PROFILE_KWARG,
+    RunWorkloadProfileUnsupported,
+    parse_persisted_run_workload_profile,
+)
 from app.reliability.error_mapping import reliability_http_exception
 from app.reliability.errors import (
     ReliabilityDatabaseUnavailable,
@@ -227,6 +232,7 @@ class PrivateRunResponse(StrictPrivateWorkResponse):
     error: str | None = None
     model_name: str | None = None
     execution_profile: PrivateRunExecutionProfileResponse | None = None
+    workload_profile: Literal["interactive", "research"] | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -609,6 +615,11 @@ def _run_response(record: PrivateRunRecord | RunRecord) -> PrivateRunResponse:
         )
     except RunExecutionProfileUnsupported:
         effective_profile = None
+    try:
+        frozen_workload_profile = record.kwargs.get(RUN_WORKLOAD_PROFILE_KWARG)
+        effective_workload_profile = parse_persisted_run_workload_profile(frozen_workload_profile)[1] if frozen_workload_profile is not None else None
+    except RunWorkloadProfileUnsupported:
+        effective_workload_profile = None
     return PrivateRunResponse(
         run_id=record.run_id,
         thread_id=record.thread_id,
@@ -625,6 +636,7 @@ def _run_response(record: PrivateRunRecord | RunRecord) -> PrivateRunResponse:
             if effective_profile is not None
             else None
         ),
+        workload_profile=(effective_workload_profile.name if effective_workload_profile is not None else None),
         created_at=_timestamp(record.created_at),
         updated_at=_timestamp(record.updated_at),
     )

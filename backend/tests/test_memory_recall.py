@@ -698,24 +698,30 @@ def test_resolver_accepts_only_worker_shaped_authorities() -> None:
     assert resolve_memory_authority(load_only, method="load_snapshot") is not None
 
 
-def test_recall_tool_is_async_only_and_named_for_loop_detection() -> None:
+def test_recall_tool_is_async_only_and_has_tool_call_budget_defaults() -> None:
     assert recall_memory_tool.name == "recall_memory"
     assert recall_memory_tool.coroutine is not None
 
-    from app.system_runtime_settings.models import LoopDetectionPolicy
-    from deerflow.config.loop_detection_config import LoopDetectionConfig
+    from app.system_runtime_settings.models import AgentRuntimePolicyValue
+    from deerflow.agents.middlewares.tool_call_control import (
+        default_graph_tool_call_control_profile,
+    )
+    from deerflow.vision.dispatch import MAX_VISION_CALLS_PER_RUN
 
-    config_overrides = LoopDetectionConfig().tool_freq_overrides
-    policy_overrides = LoopDetectionPolicy().tool_freq_overrides
-    expected = {
+    raw_policy_expected = {
         "web_fetch": (6, 10),
         "web_search": (6, 10),
         "recall_memory": (6, 10),
-        # The ninth proposed call is stripped, so at most eight calls execute.
         "inspect_image": (6, 9),
     }
-    assert {name: (override.warn, override.hard_limit) for name, override in config_overrides.items()} == expected
-    assert {name: (override.warn, override.hard_limit) for name, override in policy_overrides.items()} == expected
+    effective_harness_expected = {
+        **raw_policy_expected,
+        "inspect_image": (6, MAX_VISION_CALLS_PER_RUN),
+    }
+    policy_limits = AgentRuntimePolicyValue().tool_call_budget.profiles.interactive.lead.tools
+    harness_limits = default_graph_tool_call_control_profile().lead.tool_budget.tools
+    assert {name: (limit.warn, limit.hard_limit) for name, limit in policy_limits.items()} == raw_policy_expected
+    assert {name: (limit.warn_threshold, limit.hard_limit) for name, limit in harness_limits.items()} == effective_harness_expected
 
 
 def test_example_config_omits_database_runtime_policy_tombstones() -> None:

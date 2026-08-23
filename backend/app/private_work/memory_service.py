@@ -18,12 +18,16 @@ from app.private_work.context import (
 )
 from app.private_work.errors import (
     PrivateWorkConflict,
+    PrivateWorkDreamModelUnavailable,
     PrivateWorkError,
     PrivateWorkInvalid,
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
-from app.private_work.memory_dream_service import MemoryDreamAdmissionService
+from app.private_work.memory_dream_service import (
+    MemoryDreamAdmissionService,
+    MemoryDreamModelUnavailable,
+)
 from app.private_work.memory_injection import (
     MemoryInjectionAssessment,
     MemoryInjectionCandidate,
@@ -402,6 +406,8 @@ class PrivateMemoryDocumentService:
                     admitted,
                 )
                 return admitted
+        except MemoryDreamModelUnavailable:
+            raise PrivateWorkDreamModelUnavailable(context.request_id) from None
         except PrivateWorkError:
             raise
         except MemoryDocumentConflict:

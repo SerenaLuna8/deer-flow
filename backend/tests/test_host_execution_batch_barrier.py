@@ -9,6 +9,7 @@ from typing import ClassVar
 
 import pytest
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
@@ -17,12 +18,18 @@ from langgraph.graph import END
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.assembly import (
+    build_host_execution_batch_barrier,
     build_lead_runtime_middlewares,
     build_subagent_runtime_middlewares,
 )
 from deerflow.agents.middlewares.host_execution_batch_barrier_middleware import (
     HostExecutionApprovalPauseMiddleware,
     HostExecutionBatchBarrierMiddleware,
+)
+from deerflow.agents.middlewares.manifest import (
+    MiddlewareHook,
+    middleware_dispatch_order,
+    middleware_layer_metadata,
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
@@ -114,47 +121,62 @@ def test_batch_without_bash_or_task_is_unchanged() -> None:
 
 
 def test_runtime_assembly_adds_barrier_only_for_local_approval_mode() -> None:
-    def names(config: AppConfig, *, subagent: bool) -> list[str]:
-        middlewares = build_subagent_runtime_middlewares(app_config=config) if subagent else build_lead_runtime_middlewares(app_config=config)
+    def names(middlewares: list[AgentMiddleware]) -> list[str]:
         return [type(middleware).__name__ for middleware in middlewares]
 
-    for subagent in (False, True):
-        assert "HostExecutionBatchBarrierMiddleware" in names(
-            _config(),
-            subagent=subagent,
-        )
-        assert "HostExecutionApprovalPauseMiddleware" in names(
-            _config(),
-            subagent=subagent,
-        )
-        assert "HostExecutionBatchBarrierMiddleware" not in names(
-            _config(mode="disabled"),
-            subagent=subagent,
-        )
-        assert "HostExecutionApprovalPauseMiddleware" not in names(
-            _config(mode="disabled"),
-            subagent=subagent,
-        )
-        assert "HostExecutionBatchBarrierMiddleware" not in names(
-            _config(mode="disabled", allow_host_bash=True),
-            subagent=subagent,
-        )
-        assert "HostExecutionApprovalPauseMiddleware" not in names(
-            _config(mode="disabled", allow_host_bash=True),
-            subagent=subagent,
-        )
-        assert "HostExecutionBatchBarrierMiddleware" not in names(
-            _config(
-                use="deerflow.community.aio_sandbox:AioSandboxProvider",
-            ),
-            subagent=subagent,
-        )
-        assert "HostExecutionApprovalPauseMiddleware" not in names(
-            _config(
-                use="deerflow.community.aio_sandbox:AioSandboxProvider",
-            ),
-            subagent=subagent,
-        )
+    approval_config = _config()
+    lead_runtime = build_lead_runtime_middlewares(app_config=approval_config)
+    subagent = build_subagent_runtime_middlewares(app_config=approval_config)
+
+    assert "HostExecutionBatchBarrierMiddleware" not in names(lead_runtime)
+    assert "HostExecutionApprovalPauseMiddleware" in names(lead_runtime)
+    assert "HostExecutionBatchBarrierMiddleware" in names(subagent)
+    assert "HostExecutionApprovalPauseMiddleware" in names(subagent)
+    assert isinstance(
+        build_host_execution_batch_barrier(app_config=approval_config),
+        HostExecutionBatchBarrierMiddleware,
+    )
+
+    for config in (
+        _config(mode="disabled"),
+        _config(mode="disabled", allow_host_bash=True),
+        _config(use="deerflow.community.aio_sandbox:AioSandboxProvider"),
+    ):
+        assert build_host_execution_batch_barrier(app_config=config) is None
+        assert "HostExecutionBatchBarrierMiddleware" not in names(build_lead_runtime_middlewares(app_config=config))
+        assert "HostExecutionApprovalPauseMiddleware" not in names(build_lead_runtime_middlewares(app_config=config))
+        assert "HostExecutionBatchBarrierMiddleware" not in names(build_subagent_runtime_middlewares(app_config=config))
+        assert "HostExecutionApprovalPauseMiddleware" not in names(build_subagent_runtime_middlewares(app_config=config))
+
+
+def test_subagent_builder_places_host_barrier_in_protected_arbitration_band() -> None:
+    class ToolCallControlProbe(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    chain = build_subagent_runtime_middlewares(
+        app_config=_config(),
+        tool_call_control=ToolCallControlProbe(),
+    )
+    protected_ids = {
+        "tool_call_control",
+        "host_execution_batch_barrier",
+        "token_budget",
+        "safety_finish_reason",
+    }
+
+    assert [metadata.layer_id for middleware in chain if (metadata := middleware_layer_metadata(middleware)) is not None and metadata.layer_id in protected_ids] == [
+        "tool_call_control",
+        "host_execution_batch_barrier",
+        "token_budget",
+        "safety_finish_reason",
+    ]
+    assert middleware_dispatch_order(chain, MiddlewareHook.AFTER_MODEL) == (
+        "SafetyFinishReasonMiddleware",
+        "TokenBudgetMiddleware",
+        "HostExecutionBatchBarrierMiddleware",
+        "ToolCallControlProbe",
+    )
 
 
 class _ToolBindingFakeModel(GenericFakeChatModel):

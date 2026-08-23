@@ -57,6 +57,7 @@ _CLIENT_AUTHORITY_FIELDS = frozenset(
         "system_role",
         "thinking_enabled",
         "reasoning_effort",
+        "workload_profile",
         "tool_groups",
         "trace_id",
         "trusted_asset_context",

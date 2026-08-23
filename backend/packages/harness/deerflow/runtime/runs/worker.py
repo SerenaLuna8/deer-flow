@@ -32,6 +32,11 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
+from deerflow.agents.middlewares.tool_call_control import (
+    ResolvedGraphToolCallControlProfile,
+    ToolCallControlLoopFinalizationFailed,
+    ToolCallControlStateInvalid,
+)
 from deerflow.config.app_config import AppConfig, is_trace_correlation_enabled
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.config.worker_config import DEFAULT_TEXT_DELTA_FLUSH_MS
@@ -591,6 +596,11 @@ class RunContext:
     channel_user_id: str | None = field(default=None)
     vision_dispatch_authority: object | None = field(default=None)
     resource_ownership: RunAgentResourceOwnership | None = field(default=None)
+    tool_call_control_policy: ResolvedGraphToolCallControlProfile | None = field(
+        default=None,
+    )
+    max_concurrent_subagents: int | None = field(default=None)
+    max_total_subagents: int | None = field(default=None)
 
 
 def _checkpoint_runtime_settings(
@@ -684,8 +694,43 @@ async def _call_agent_factory_off_loop(
     config: Any,
     app_config: AppConfig | None,
     private_runtime: PrivateAgentRuntime | None = None,
+    *,
+    tool_call_control_policy: ResolvedGraphToolCallControlProfile | None = None,
+    tool_call_control_scope_id: str | None = None,
+    tool_call_control_observer: object | None = None,
+    resolved_max_concurrent_subagents: int | None = None,
+    resolved_max_total_subagents: int | None = None,
 ) -> Any:
     """Build a synchronous graph without blocking the Gateway event loop."""
+
+    if tool_call_control_policy is not None and (not isinstance(tool_call_control_scope_id, str) or not tool_call_control_scope_id):
+        raise PrivateRuntimeFactoryUnavailable(
+            "Admitted tool-call control requires an exact execution scope.",
+        )
+
+    control_parameters = {
+        "tool_call_control_profile": tool_call_control_policy,
+        "tool_call_control_scope_id": tool_call_control_scope_id,
+        "tool_call_control_observer": tool_call_control_observer,
+        "resolved_max_concurrent_subagents": resolved_max_concurrent_subagents,
+        "resolved_max_total_subagents": resolved_max_total_subagents,
+    }
+
+    def _bind_control_parameters(
+        factory: Any,
+        kwargs: dict[str, Any],
+    ) -> None:
+        if tool_call_control_policy is None:
+            return
+        try:
+            parameters = inspect.signature(factory).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if not set(control_parameters).issubset(parameters):
+            raise PrivateRuntimeFactoryUnavailable(
+                "Private runtime factory does not accept the admitted tool-call control profile.",
+            )
+        kwargs.update(control_parameters)
 
     def _build() -> Any:
         if private_runtime is not None:
@@ -697,6 +742,7 @@ async def _call_agent_factory_off_loop(
                 }
                 if app_config is not None and _agent_factory_supports_app_config(private_factory):
                     private_kwargs["app_config"] = app_config
+                _bind_control_parameters(private_factory, private_kwargs)
                 return private_factory(**private_kwargs)
             try:
                 accepts_private_runtime = "private_runtime" in inspect.signature(agent_factory).parameters
@@ -709,6 +755,7 @@ async def _call_agent_factory_off_loop(
             kwargs["app_config"] = app_config
         if private_runtime is not None:
             kwargs["private_runtime"] = private_runtime
+        _bind_control_parameters(agent_factory, kwargs)
         return agent_factory(**kwargs)
 
     return await asyncio.to_thread(_build)
@@ -1191,11 +1238,27 @@ async def run_agent(
             continuation_config["configurable"] = configurable
             return RunnableConfig(**continuation_config)
 
+        tool_call_control_observer = None
+        if journal is not None and ctx.tool_call_control_policy is not None:
+            from deerflow.runtime.journal import (
+                RunJournalToolCallControlObserver,
+            )
+
+            tool_call_control_observer = RunJournalToolCallControlObserver(
+                journal,
+                owner_loop=asyncio.get_running_loop(),
+            )
+
         agent = await _call_agent_factory_off_loop(
             agent_factory,
             initial_runnable_config,
             ctx.app_config,
             ctx.private_agent_runtime,
+            tool_call_control_policy=ctx.tool_call_control_policy,
+            tool_call_control_scope_id=run_id,
+            tool_call_control_observer=tool_call_control_observer,
+            resolved_max_concurrent_subagents=ctx.max_concurrent_subagents,
+            resolved_max_total_subagents=ctx.max_total_subagents,
         )
 
         accessor = CheckpointStateAccessor.bind(
@@ -1660,6 +1723,32 @@ async def run_agent(
             {
                 "message": AUTHORIZATION_REVOKED_REASON,
                 "name": AUTHORIZATION_REVOKED_REASON,
+            },
+        )
+
+    except (
+        ToolCallControlLoopFinalizationFailed,
+        ToolCallControlStateInvalid,
+    ) as exc:
+        error_code = PublicRunErrorCode.LOOP_FINALIZATION_FAILED if isinstance(exc, ToolCallControlLoopFinalizationFailed) else PublicRunErrorCode.TOOL_CALL_CONTROL_STATE_INVALID
+        public_error = PublicRunError(error_code)
+        logger.error(
+            "Run %s failed with tool-call control error %s",
+            run_id,
+            error_code.value,
+        )
+        await private_files.mark_failed()
+        await run_manager.set_status(
+            run_id,
+            RunStatus.error,
+            error=error_code.value,
+        )
+        await bridge.publish(
+            run_id,
+            "error",
+            {
+                "message": public_error.public_message,
+                "name": error_code.value,
             },
         )
 

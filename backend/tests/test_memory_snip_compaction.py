@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -126,6 +127,39 @@ def _complete_tool_turn(prefix: str) -> list[object]:
         ),
         AIMessage(id=f"{prefix}-assistant", content=f"{prefix} answer"),
     ]
+
+
+def _many_tool_call_turn(count: int = 40) -> list[object]:
+    messages: list[object] = [
+        HumanMessage(id="many-human", content="Research all sources."),
+    ]
+    for index in range(count):
+        call_id = f"many-call-{index}"
+        messages.extend(
+            [
+                AIMessage(
+                    id=f"many-ai-{index}",
+                    content="thinking-" + "x" * 60,
+                    tool_calls=[
+                        {
+                            "name": "lookup",
+                            "args": {"index": index},
+                            "id": call_id,
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    id=f"many-tool-{index}",
+                    name="lookup",
+                    content="result-" + "y" * 100,
+                    tool_call_id=call_id,
+                    status="success",
+                ),
+            ]
+        )
+    messages.append(AIMessage(id="many-final", content="Final answer."))
+    return messages
 
 
 def _clarification_request_messages(prefix: str) -> list[object]:
@@ -703,6 +737,589 @@ def test_tool_result_without_final_assistant_remains_uncompacted() -> None:
     )
 
 
+def test_automatic_compaction_preserves_the_only_complete_turn_for_active_follow_up() -> None:
+    model = _model(
+        _dual(
+            "Must not summarize the immediately referenced answer.",
+            "- [durable] Must not be reached.",
+        )
+    )
+    middleware = _middleware(model)
+    messages = [
+        HumanMessage(id="report-request", content="Write the complete report."),
+        AIMessage(id="complete-report", content="The complete report body."),
+        HumanMessage(
+            id="follow-up",
+            content="Write your previous complete report to a file verbatim.",
+        ),
+    ]
+
+    result = middleware.compact_state(
+        {"messages": messages},
+        _runtime(),
+        force=False,
+    )
+
+    assert result is None
+    assert model.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "keep",
+    [
+        ("messages", 10),
+        ("tokens", 100_000),
+    ],
+)
+def test_automatic_compaction_projects_the_only_complete_turn_when_it_exceeds_the_prompt_budget(
+    keep: tuple[str, int],
+) -> None:
+    model = _model(
+        _dual(
+            "The oversized report remains available for the active follow-up.",
+            "- [durable] The oversized report was completed.",
+        )
+    )
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 1),
+        keep=keep,
+        trim_tokens_to_summarize=3_000,
+        summary_prompt=SNIP_ARCHIVE_PROMPT,
+    )
+    messages = [
+        HumanMessage(id="oversized-report-request", content="Write the report."),
+        AIMessage(id="oversized-complete-report", content="report-" + "x" * 30_000),
+        HumanMessage(id="oversized-follow-up", content="What are its three main findings?"),
+    ]
+
+    result = middleware.compact_state(
+        {"messages": messages},
+        _runtime(),
+        force=False,
+    )
+
+    assert result is not None
+    assert tuple(message.id for message in result.messages_to_summarize) == (
+        "oversized-report-request",
+        "oversized-complete-report",
+    )
+    assert tuple(message.id for message in result.preserved_messages) == ("oversized-follow-up",)
+    assert 1 < model.call_count <= 8
+
+
+def test_automatic_compaction_projects_an_oversized_oldest_turn_even_when_keep_exceeds_message_count() -> None:
+    model = _model(
+        _dual(
+            "The oversized oldest report is archived while the recent turn stays verbatim.",
+            "- [durable] The oldest oversized report was completed.",
+        )
+    )
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 1),
+        keep=("messages", 10),
+        trim_tokens_to_summarize=3_000,
+        summary_prompt=SNIP_ARCHIVE_PROMPT,
+    )
+    messages = [
+        HumanMessage(id="old-report-request", content="Write the old report."),
+        AIMessage(id="old-report", content="old-report-" + "x" * 30_000),
+        HumanMessage(id="recent-request", content="Give a recent answer."),
+        AIMessage(id="recent-answer", content="This recent answer must remain verbatim."),
+        HumanMessage(id="open-follow-up", content="Compare the two answers."),
+    ]
+
+    result = middleware.compact_state(
+        {"messages": messages},
+        _runtime(),
+        force=False,
+    )
+
+    assert result is not None
+    assert tuple(message.id for message in result.messages_to_summarize) == (
+        "old-report-request",
+        "old-report",
+    )
+    assert tuple(message.id for message in result.preserved_messages) == (
+        "recent-request",
+        "recent-answer",
+        "open-follow-up",
+    )
+    assert 1 < model.call_count <= 8
+
+
+def test_automatic_compaction_advances_to_a_later_oversized_turn_when_keep_blocks_normal_candidates() -> None:
+    response = _dual(
+        "The bounded pass preserves continuity across the small and oversized turns.",
+        "- [durable] Both completed turns remain represented after bounded passes.",
+    )
+    model = _model(*([response] * 16))
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 1),
+        keep=("messages", 10),
+        trim_tokens_to_summarize=3_000,
+        summary_prompt=SNIP_ARCHIVE_PROMPT,
+    )
+    messages = [
+        HumanMessage(id="small-request", content="Give a short answer."),
+        AIMessage(id="small-answer", content="Short answer."),
+        HumanMessage(id="later-report-request", content="Write the later report."),
+        AIMessage(id="later-oversized-report", content="later-report-" + "x" * 30_000),
+        HumanMessage(id="later-open-follow-up", content="What is the key conclusion?"),
+    ]
+
+    first = middleware.compact_state(
+        {"messages": messages},
+        _runtime(),
+        force=False,
+    )
+
+    assert first is not None
+    assert tuple(message.id for message in first.messages_to_summarize) == (
+        "small-request",
+        "small-answer",
+    )
+    assert tuple(message.id for message in first.preserved_messages) == (
+        "later-report-request",
+        "later-oversized-report",
+        "later-open-follow-up",
+    )
+
+    second = middleware.compact_state(
+        {
+            "messages": list(first.preserved_messages),
+            "summary_text": first.summary_text,
+        },
+        _runtime(),
+        force=False,
+    )
+
+    assert second is not None
+    assert tuple(message.id for message in second.messages_to_summarize) == (
+        "later-report-request",
+        "later-oversized-report",
+    )
+    assert tuple(message.id for message in second.preserved_messages) == ("later-open-follow-up",)
+    assert 2 < model.call_count <= 9
+
+
+def test_automatic_compaction_fails_stably_when_packaged_prompt_cannot_fit() -> None:
+    model = _model("- [durable] Must not be reached.")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 1),
+        keep=("messages", 1),
+        trim_tokens_to_summarize=1,
+        summary_prompt=SNIP_ARCHIVE_PROMPT,
+    )
+    messages = [
+        HumanMessage(id="old-human", content="old request"),
+        AIMessage(id="old-ai", content="old answer"),
+        HumanMessage(id="recent-human", content="recent request"),
+        AIMessage(id="recent-ai", content="recent answer"),
+        HumanMessage(id="open-human", content="current request"),
+    ]
+
+    with pytest.raises(summarization_module.SnipPromptBudgetTooSmall):
+        middleware.before_model(
+            {"messages": messages},
+            _runtime(),
+        )
+
+    assert model.call_count == 0
+
+
+def test_automatic_compaction_projects_an_oversized_tool_turn_without_splitting_its_durable_source() -> None:
+    model = _model(
+        _dual(
+            "The first research turn and its tool evidence are archived.",
+            "- [durable] The first research result remains available as Memory.",
+        )
+    )
+    budget = 3_000
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 1),
+        keep=("messages", 1),
+        trim_tokens_to_summarize=budget,
+        summary_prompt=SNIP_ARCHIVE_PROMPT,
+    )
+    oversized_tool_content = "primary-source-evidence " + "x" * 30_000
+    oversized_turn = [
+        HumanMessage(id="research-human", content="Research the primary sources."),
+        AIMessage(
+            id="research-tool-call",
+            content="",
+            tool_calls=[
+                {
+                    "name": "web_fetch",
+                    "args": {"url": "https://example.test/primary"},
+                    "id": "research-call",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(
+            id="research-tool-result",
+            name="web_fetch",
+            content=oversized_tool_content,
+            tool_call_id="research-call",
+            status="success",
+        ),
+        AIMessage(id="research-final", content="The verified research answer."),
+    ]
+    messages = [
+        *oversized_turn,
+        HumanMessage(id="delivery-human", content="Deliver the existing report."),
+        AIMessage(id="delivery-final", content="The report was delivered."),
+        HumanMessage(id="open-human", content="What should we do next?"),
+    ]
+
+    result = middleware.compact_state(
+        {"messages": messages},
+        _runtime(archive_context=_archive_context()),
+        force=False,
+    )
+
+    assert result is not None
+    assert tuple(message.id for message in result.messages_to_summarize) == tuple(message.id for message in oversized_turn)
+    assert tuple(message.id for message in result.preserved_messages) == (
+        "delivery-human",
+        "delivery-final",
+        "open-human",
+    )
+    assert model.call_count > 1
+    assert model.call_count <= 8
+    assert all(middleware.token_counter([HumanMessage(content=prompt)]) <= budget for prompt in model.prompts)
+    assert any("research-call" in prompt and "research-tool-result" in prompt and "web_fetch" in prompt and 'status="success"' in prompt and hashlib.sha256(oversized_tool_content.encode()).hexdigest() in prompt for prompt in model.prompts)
+    assert result.memory_archive_receipt is not None
+    assert result.memory_archive_receipt["source_digest"] == compute_snip_source_digest(
+        previous_summary=None,
+        source_checkpoint_id="checkpoint-source",
+        messages=oversized_turn,
+    )
+
+
+def test_keep_zero_projects_only_the_oldest_turn_when_no_whole_prefix_fits() -> None:
+    model = _model(
+        _dual(
+            "The oldest oversized turn is archived first.",
+            "- [durable] Archive barriers make bounded forward progress.",
+        )
+    )
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=3_000,
+    )
+    oversized_turn = [
+        HumanMessage(id="oversized-human", content="Produce the full report."),
+        AIMessage(id="oversized-final", content="report " + "x" * 30_000),
+    ]
+    later_turn = [
+        HumanMessage(id="later-human", content="Deliver the report."),
+        AIMessage(id="later-final", content="Delivered."),
+    ]
+
+    result = middleware.compact_state(
+        {"messages": [*oversized_turn, *later_turn]},
+        _runtime(),
+        force=True,
+    )
+
+    assert result is not None
+    assert tuple(message.id for message in result.messages_to_summarize) == (
+        "oversized-human",
+        "oversized-final",
+    )
+    assert tuple(message.id for message in result.preserved_messages) == (
+        "later-human",
+        "later-final",
+    )
+    assert all(middleware.token_counter([HumanMessage(content=prompt)]) <= 3_000 for prompt in model.prompts)
+
+
+def test_oversized_terminal_answer_is_hierarchically_summarized_with_bounded_prompts() -> None:
+    model = _model(
+        _dual(
+            "The complete oversized report is archived for continuation.",
+            "- [durable] The oversized report was completed.",
+        )
+    )
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=3_000,
+    )
+    terminal_answer = "REPORT-BEGIN\n" + "x" * 30_000 + "\nREPORT-END"
+    source = [
+        HumanMessage(id="report-human", content="Produce the full report."),
+        AIMessage(id="report-final", content=terminal_answer),
+    ]
+
+    result = middleware.compact_state(
+        {"messages": source},
+        _runtime(archive_context=_archive_context()),
+        force=True,
+    )
+
+    assert result is not None
+    assert tuple(message.id for message in result.messages_to_summarize) == (
+        "report-human",
+        "report-final",
+    )
+    assert result.preserved_messages == ()
+    assert 1 < model.call_count <= 8
+    assert all(middleware.token_counter([HumanMessage(content=prompt)]) <= 3_000 for prompt in model.prompts)
+    assert any("REPORT-BEGIN" in prompt for prompt in model.prompts)
+    assert any("REPORT-END" in prompt for prompt in model.prompts)
+    assert result.memory_archive_receipt is not None
+    assert result.memory_archive_receipt["source_digest"] == compute_snip_source_digest(
+        previous_summary=None,
+        source_checkpoint_id="checkpoint-source",
+        messages=source,
+    )
+
+
+def test_hierarchical_leaf_reserves_budget_for_one_repair_retry() -> None:
+    repaired = _dual(
+        "The oversized report is retained after one bounded repair.",
+        "- [durable] Hierarchical SNIP preserves its repair retry.",
+    )
+    model = _model("invalid output", *([repaired] * 16))
+    budget = 3_000
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=budget,
+    )
+    source = [
+        HumanMessage(id="repair-human", content="Archive the full report."),
+        AIMessage(id="repair-final", content="REPORT\n" + "x" * 30_000),
+    ]
+
+    result = middleware.compact_state(
+        {"messages": source},
+        _runtime(),
+        force=True,
+    )
+
+    assert result is not None
+    assert model.call_count > 2
+    assert model.prompts[1].endswith(SNIP_RETRY_REINFORCEMENT)
+    assert all(middleware.token_counter([HumanMessage(content=prompt)]) <= budget for prompt in model.prompts)
+
+
+@pytest.mark.asyncio
+async def test_async_hierarchical_leaf_reserves_budget_for_one_repair_retry() -> None:
+    repaired = _dual(
+        "The async oversized report is retained after one bounded repair.",
+        "- [durable] Async hierarchical SNIP preserves its repair retry.",
+    )
+    model = _model("invalid output", *([repaired] * 16))
+    budget = 3_000
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=budget,
+    )
+
+    result = await middleware.acompact_state(
+        {
+            "messages": [
+                HumanMessage(id="async-repair-human", content="Archive the full report."),
+                AIMessage(
+                    id="async-repair-final",
+                    content="ASYNC-REPORT\n" + "x" * 30_000,
+                ),
+            ]
+        },
+        _runtime(),
+        force=True,
+    )
+
+    assert result is not None
+    assert model.call_count > 2
+    assert model.prompts[1].endswith(SNIP_RETRY_REINFORCEMENT)
+    assert all(middleware.token_counter([HumanMessage(content=prompt)]) <= budget for prompt in model.prompts)
+
+
+def test_hierarchical_reduction_that_cannot_fit_terminates_with_stable_budget_error() -> None:
+    legal_maximum = _dual(
+        "c" * 2_000,
+        "- [durable] " + "t" * 988,
+    )
+    model = _model(*([legal_maximum] * 16))
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=1_500,
+    )
+
+    with pytest.raises(summarization_module.SnipPromptBudgetTooSmall):
+        middleware.compact_state(
+            {
+                "messages": [
+                    HumanMessage(id="reduction-human", content="Archive the report."),
+                    AIMessage(id="reduction-final", content="x" * 8_000),
+                ]
+            },
+            _runtime(),
+            force=True,
+        )
+
+    assert 1 <= model.call_count <= summarization_module.MAX_SNIP_HIERARCHICAL_MODEL_CALLS
+
+
+def test_hierarchical_structure_that_cannot_fit_is_typed_source_too_large() -> None:
+    model = _model(_dual("unused", SNIP_NOTHING))
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=3_000,
+    )
+
+    with pytest.raises(summarization_module.SnipSourceTooLarge):
+        middleware.compact_state(
+            {"messages": _many_tool_call_turn()},
+            _runtime(),
+            force=True,
+        )
+
+    assert model.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_async_hierarchical_structure_that_cannot_fit_is_typed_source_too_large() -> None:
+    model = _model(_dual("unused", SNIP_NOTHING))
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=3_000,
+    )
+
+    with pytest.raises(summarization_module.SnipSourceTooLarge):
+        await middleware.acompact_state(
+            {"messages": _many_tool_call_turn()},
+            _runtime(),
+            force=True,
+        )
+
+    assert model.call_count == 0
+
+
+def test_unprojectable_oversized_turn_is_typed_source_too_large() -> None:
+    model = _model(_dual("unused", SNIP_NOTHING))
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=3_000,
+    )
+    call_id = "unprojectable-call"
+    messages = [
+        HumanMessage(id="unprojectable-human", content="Archive this tool turn."),
+        AIMessage(
+            id="unprojectable-tool-call",
+            content="analysis-" + "x" * 20_000,
+            tool_calls=[
+                {
+                    "name": "lookup",
+                    "args": {"value": object()},
+                    "id": call_id,
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(
+            id="unprojectable-tool-result",
+            name="lookup",
+            content="result",
+            tool_call_id=call_id,
+        ),
+        AIMessage(id="unprojectable-final", content="Final answer."),
+    ]
+
+    with pytest.raises(summarization_module.SnipSourceTooLarge):
+        middleware.compact_state(
+            {"messages": messages},
+            _runtime(),
+            force=True,
+        )
+
+    assert model.call_count == 0
+
+
+def test_invalid_direct_snip_without_repair_headroom_is_typed_budget_error() -> None:
+    model = _model("invalid SNIP output")
+    middleware = _keep_zero_middleware(model)
+    source = [
+        HumanMessage(id="direct-human", content="Archive this answer."),
+        AIMessage(id="direct-ai", content="answer-" + "x" * 400),
+    ]
+    prompt = middleware._build_summary_prompt(source)
+    assert prompt is not None
+    exact_budget = middleware.token_counter([HumanMessage(content=prompt)])
+    middleware.trim_tokens_to_summarize = exact_budget
+    assert middleware._prompt_within_budget(prompt)
+    assert not middleware._prompt_with_repair_within_budget(prompt)
+
+    with pytest.raises(summarization_module.SnipPromptBudgetTooSmall):
+        middleware.compact_state(
+            {"messages": source},
+            _runtime(),
+            force=True,
+        )
+
+    assert model.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_async_invalid_direct_snip_without_repair_headroom_is_typed_budget_error() -> None:
+    model = _model("invalid SNIP output")
+    middleware = _keep_zero_middleware(model)
+    source = [
+        HumanMessage(id="async-direct-human", content="Archive this answer."),
+        AIMessage(id="async-direct-ai", content="answer-" + "x" * 400),
+    ]
+    prompt = middleware._build_summary_prompt(source)
+    assert prompt is not None
+    exact_budget = middleware.token_counter([HumanMessage(content=prompt)])
+    middleware.trim_tokens_to_summarize = exact_budget
+    assert middleware._prompt_within_budget(prompt)
+    assert not middleware._prompt_with_repair_within_budget(prompt)
+
+    with pytest.raises(summarization_module.SnipPromptBudgetTooSmall):
+        await middleware.acompact_state(
+            {"messages": source},
+            _runtime(),
+            force=True,
+        )
+
+    assert model.call_count == 1
+
+
+def test_hierarchical_call_budget_exhaustion_is_typed_source_too_large() -> None:
+    model = _model(_dual("Must not be reached.", SNIP_NOTHING))
+    middleware = _keep_zero_middleware(model)
+
+    with pytest.raises(summarization_module.SnipSourceTooLarge):
+        middleware._invoke_snip_prompt(
+            "small prompt",
+            call_budget=[summarization_module.MAX_SNIP_HIERARCHICAL_MODEL_CALLS],
+        )
+
+    assert model.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_async_hierarchical_call_budget_exhaustion_is_typed_source_too_large() -> None:
+    model = _model(_dual("Must not be reached.", SNIP_NOTHING))
+    middleware = _keep_zero_middleware(model)
+
+    with pytest.raises(summarization_module.SnipSourceTooLarge):
+        await middleware._ainvoke_snip_prompt(
+            "small prompt",
+            authorization_context=None,
+            call_budget=[summarization_module.MAX_SNIP_HIERARCHICAL_MODEL_CALLS],
+        )
+
+    assert model.call_count == 0
+
+
 def test_prompt_budget_falls_back_to_an_earlier_whole_turn() -> None:
     model = _model(_dual("The prompt budget only admits the first turn.", "- [durable] Only the first complete turn fits."))
     middleware = _middleware(model)
@@ -808,7 +1425,7 @@ async def test_prepare_keep_zero_reports_invalid_snip_as_compaction_failed(
 
 
 @pytest.mark.asyncio
-async def test_prepare_keep_zero_reports_prompt_budget_failure(
+async def test_prepare_keep_zero_reports_prompt_budget_too_small(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _model("- [durable] Must not be reached.")
@@ -835,8 +1452,138 @@ async def test_prepare_keep_zero_reports_prompt_budget_failure(
     )
 
     assert prepared.result.compacted is False
-    assert prepared.result.reason == "compaction_failed"
+    assert prepared.result.reason == "prompt_budget_too_small"
     assert model.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_keep_zero_reports_hierarchical_source_too_large(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _model("- [durable] Must not be reached.")
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=3_000,
+    )
+    monkeypatch.setattr(
+        context_compaction_module,
+        "_create_compaction_middleware",
+        lambda **_kwargs: middleware,
+    )
+
+    prepared = await prepare_thread_compaction(
+        _SnapshotAccessor(
+            [
+                HumanMessage(id="huge-human", content="Archive this full answer."),
+                AIMessage(id="huge-ai", content="x" * 100_000),
+            ]
+        ),
+        "thread-1",
+        keep=("messages", 0),
+        app_config=object(),  # type: ignore[arg-type]
+    )
+
+    assert prepared.result.compacted is False
+    assert prepared.result.reason == "source_too_large"
+    assert model.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_keep_zero_reports_oversized_structure_as_source_too_large(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _model(_dual("unused", SNIP_NOTHING))
+    middleware = _keep_zero_middleware(
+        model,
+        trim_tokens_to_summarize=3_000,
+    )
+    monkeypatch.setattr(
+        context_compaction_module,
+        "_create_compaction_middleware",
+        lambda **_kwargs: middleware,
+    )
+
+    prepared = await prepare_thread_compaction(
+        _SnapshotAccessor(_many_tool_call_turn()),
+        "thread-1",
+        keep=("messages", 0),
+        app_config=object(),  # type: ignore[arg-type]
+    )
+
+    assert prepared.result.compacted is False
+    assert prepared.result.reason == "source_too_large"
+    assert model.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_force_projects_a_lone_oversized_turn_despite_policy_keep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _dual(
+        "The explicit API compaction archived the lone oversized completed turn.",
+        "- [durable] The lone oversized turn was compacted through the API path.",
+    )
+    model = _model(*([response] * 8))
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("tokens", 32_000),
+        keep=("messages", 10),
+        trim_tokens_to_summarize=3_000,
+        summary_prompt=SNIP_ARCHIVE_PROMPT,
+    )
+    monkeypatch.setattr(
+        context_compaction_module,
+        "_create_compaction_middleware",
+        lambda **_kwargs: middleware,
+    )
+
+    prepared = await prepare_thread_compaction(
+        _SnapshotAccessor(
+            [
+                HumanMessage(id="api-oversized-human", content="Write the report."),
+                AIMessage(id="api-oversized-ai", content="report-" + "x" * 30_000),
+            ]
+        ),
+        "thread-1",
+        keep=None,
+        force=True,
+        app_config=object(),  # type: ignore[arg-type]
+    )
+
+    assert prepared.result.compacted is True
+    assert prepared.result.removed_message_count == 2
+    assert prepared.result.preserved_message_count == 0
+    assert 1 < model.call_count <= 8
+
+
+@pytest.mark.asyncio
+async def test_prepare_force_reports_invalid_model_output_as_compaction_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _model("invalid first output", "invalid repair output")
+    middleware = _middleware(model)
+    monkeypatch.setattr(
+        context_compaction_module,
+        "_create_compaction_middleware",
+        lambda **_kwargs: middleware,
+    )
+
+    prepared = await prepare_thread_compaction(
+        _SnapshotAccessor(
+            [
+                HumanMessage(id="complete-human", content="complete"),
+                AIMessage(id="complete-ai", content="complete answer"),
+            ]
+        ),
+        "thread-1",
+        keep=None,
+        force=True,
+        app_config=object(),  # type: ignore[arg-type]
+    )
+
+    assert prepared.result.compacted is False
+    assert prepared.result.reason == "compaction_failed"
+    assert model.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -987,6 +1734,90 @@ def test_custom_summary_prompt_keeps_single_segment_semantics() -> None:
     assert result.memory_archive_receipt["tagged_text"] == output
 
 
+def test_oversized_custom_summary_prompt_fails_with_typed_source_error_without_projection() -> None:
+    model = _model("- [durable] Must not be reached.")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 1),
+        keep=("messages", 10),
+        trim_tokens_to_summarize=1_000,
+        summary_prompt="Custom summary contract.\n\n{messages}",
+    )
+
+    with pytest.raises(summarization_module.SnipSourceTooLarge):
+        middleware.compact_state(
+            {
+                "messages": [
+                    HumanMessage(id="custom-human", content="custom request"),
+                    AIMessage(id="custom-ai", content="x" * 20_000),
+                ]
+            },
+            _runtime(),
+            force=True,
+        )
+
+    assert model.call_count == 0
+
+
+def test_forced_compaction_projects_a_lone_oversized_turn_despite_keep() -> None:
+    response = _dual(
+        "The explicit compaction archived the lone oversized completed turn.",
+        "- [durable] The lone oversized turn was explicitly compacted.",
+    )
+    model = _model(*([response] * 8))
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("tokens", 32_000),
+        keep=("messages", 10),
+        trim_tokens_to_summarize=3_000,
+        summary_prompt=SNIP_ARCHIVE_PROMPT,
+    )
+    messages = [
+        HumanMessage(id="forced-oversized-human", content="Write the report."),
+        AIMessage(id="forced-oversized-ai", content="report-" + "x" * 30_000),
+    ]
+
+    result = middleware.compact_state(
+        {"messages": messages},
+        _runtime(),
+        force=True,
+    )
+
+    assert result is not None
+    assert tuple(message.id for message in result.messages_to_summarize) == (
+        "forced-oversized-human",
+        "forced-oversized-ai",
+    )
+    assert result.preserved_messages == ()
+    assert 1 < model.call_count <= 8
+
+
+def test_automatic_oversized_custom_prompt_bypasses_keep_with_typed_source_error() -> None:
+    model = _model("- [durable] Must not be reached.")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 1),
+        keep=("messages", 10),
+        trim_tokens_to_summarize=1_000,
+        summary_prompt="Custom summary contract.\n\n{messages}",
+    )
+
+    with pytest.raises(summarization_module.SnipSourceTooLarge):
+        middleware.compact_state(
+            {
+                "messages": [
+                    HumanMessage(id="automatic-custom-human", content="custom request"),
+                    AIMessage(id="automatic-custom-ai", content="x" * 20_000),
+                    HumanMessage(id="automatic-custom-follow-up", content="follow up"),
+                ]
+            },
+            _runtime(),
+            force=False,
+        )
+
+    assert model.call_count == 0
+
+
 def test_configured_custom_prompt_reaches_the_production_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1110,7 +1941,9 @@ def test_snip_summary_model_output_budget_is_raised_for_dual_output() -> None:
     assert raised.max_tokens > model.max_tokens
 
 
-def test_twice_invalid_snip_output_preserves_state_after_two_calls() -> None:
+def test_twice_invalid_snip_output_preserves_state_after_two_calls(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     model = _model(
         "Preamble\n- [durable] Invalid.",
         "Still invalid output",
@@ -1133,6 +1966,13 @@ def test_twice_invalid_snip_output_preserves_state_after_two_calls() -> None:
 
     assert result is None
     assert model.call_count == 2
+    validation_logs = [record.getMessage() for record in caplog.records if "SNIP model output failed validation" in record.getMessage()]
+    assert validation_logs == [
+        "SNIP model output failed validation on attempt 1/2: SNIP output does not start with a continuity segment",
+        "SNIP model output failed validation on attempt 2/2: SNIP output does not start with a continuity segment",
+    ]
+    assert "Preamble" not in "\n".join(validation_logs)
+    assert "Still invalid output" not in "\n".join(validation_logs)
 
 
 def test_nothing_still_updates_continuity_summary_but_clears_receipt() -> None:

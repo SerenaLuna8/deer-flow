@@ -1,6 +1,9 @@
 """Middleware enforcing concurrent and per-Run subagent tool-call limits."""
 
+import hashlib
+import json
 import logging
+from dataclasses import dataclass
 from typing import Any, override
 
 from langchain.agents import AgentState
@@ -38,6 +41,71 @@ _TOTAL_LIMIT_STOP_MSG = (
     "execute remaining simple work directly, or summarize the remaining work "
     "instead of launching more subagents."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentLimitObservation:
+    """Safe, argument-free fact for one per-Run delegation truncation."""
+
+    run_id: str
+    count_before: int
+    proposed: int
+    admitted: int
+    rejected: int
+    count_after: int
+    hard_limit: int
+    observation_id: str
+    reason_code: str = SUBAGENT_LIMIT_EVENT_REASON
+    role: str = "lead"
+    disposition: str = "truncate_tool_calls"
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "reason_code": self.reason_code,
+            "role": self.role,
+            "run_id": self.run_id,
+            "count_before": self.count_before,
+            "proposed": self.proposed,
+            "admitted": self.admitted,
+            "rejected": self.rejected,
+            "count_after": self.count_after,
+            "hard_limit": self.hard_limit,
+            "disposition": self.disposition,
+            "observation_id": self.observation_id,
+        }
+
+
+def _total_limit_observation_id(
+    *,
+    run_id: str,
+    message: AIMessage,
+    task_calls: list[dict],
+    count_before: int,
+    proposed: int,
+    admitted: int,
+    rejected: int,
+    hard_limit: int,
+) -> str:
+    """Derive one replay-stable receipt without exposing task arguments."""
+
+    correlation = {
+        "run_id": run_id,
+        "message_id": message.id,
+        "task_call_ids": [call.get("id") for call in task_calls],
+        "count_before": count_before,
+        "proposed": proposed,
+        "admitted": admitted,
+        "rejected": rejected,
+        "hard_limit": hard_limit,
+    }
+    encoded = json.dumps(
+        correlation,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _clamp_subagent_limit(value: int) -> int:
@@ -189,38 +257,35 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         self,
         runtime: Runtime | None,
         *,
-        prior_delegations: int,
-        admitted_calls: int,
-        dropped_calls: int,
+        observation: SubagentLimitObservation,
     ) -> None:
-        """Persist a bounded, argument-free RunJournal event when available."""
+        """Project one safe fact without changing the enforcement decision."""
 
         context = getattr(runtime, "context", None)
         if not isinstance(context, dict):
             return
-        journal = context.get("__run_journal")
-        record = getattr(journal, "record_middleware", None)
-        if not callable(record):
-            return
         try:
-            record(
-                tag="subagent_limit",
-                name=type(self).__name__,
-                hook="after_model",
-                action="truncate_tool_calls",
-                changes={
-                    "reason": SUBAGENT_LIMIT_EVENT_REASON,
-                    "max_total": self.max_total,
-                    "prior_delegations": prior_delegations,
-                    "admitted_task_calls": admitted_calls,
-                    "dropped_task_calls": dropped_calls,
-                },
+            from langgraph.config import get_stream_writer
+
+            get_stream_writer()(
+                {
+                    "type": "subagent_limit",
+                    **observation.payload(),
+                }
             )
         except Exception:  # noqa: BLE001
-            logger.debug(
-                "Failed to record middleware:subagent_limit event",
-                exc_info=True,
-            )
+            logger.debug("Subagent-limit live event unavailable", exc_info=True)
+
+        journal = context.get("__run_journal")
+        record = getattr(journal, "record_subagent_limit_observation", None)
+        if callable(record):
+            try:
+                record(observation)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Failed to record middleware:subagent_limit event",
+                    exc_info=True,
+                )
 
     def _truncate_task_calls(
         self,
@@ -280,11 +345,38 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
             min(len(task_indices), self.max_concurrent) - allowed_task_calls,
         )
         if total_limit_dropped:
+            context = getattr(runtime, "context", None)
+            run_id = context.get("run_id") if isinstance(context, dict) else None
+            total_limit_proposed = min(len(task_indices), self.max_concurrent)
+            if isinstance(run_id, str) and run_id:
+                task_calls = [tool_calls[index] for index in task_indices]
+                observation = SubagentLimitObservation(
+                    run_id=run_id,
+                    count_before=prior_delegation_count,
+                    proposed=total_limit_proposed,
+                    admitted=allowed_task_calls,
+                    rejected=total_limit_dropped,
+                    count_after=prior_delegation_count + allowed_task_calls,
+                    hard_limit=self.max_total,
+                    observation_id=_total_limit_observation_id(
+                        run_id=run_id,
+                        message=last_msg,
+                        task_calls=task_calls,
+                        count_before=prior_delegation_count,
+                        proposed=total_limit_proposed,
+                        admitted=allowed_task_calls,
+                        rejected=total_limit_dropped,
+                        hard_limit=self.max_total,
+                    ),
+                )
+            else:
+                observation = None
+        else:
+            observation = None
+        if observation is not None:
             self._record_total_limit_event(
                 runtime,
-                prior_delegations=prior_delegation_count,
-                admitted_calls=allowed_task_calls,
-                dropped_calls=total_limit_dropped,
+                observation=observation,
             )
 
         content = _append_text(last_msg.content, _TOTAL_LIMIT_STOP_MSG) if total_limit_dropped else None

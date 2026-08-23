@@ -11,6 +11,8 @@ PRIVATE_WORK_ERROR_STATUS = {
     "RUN_MODEL_SELECTION_LOCKED": 409,
     "RUN_MODEL_UNAVAILABLE": 409,
     "RUN_EXECUTION_PROFILE_UNSUPPORTED": 409,
+    "RUN_WORKLOAD_PROFILE_UNSUPPORTED": 409,
+    "MEMORY_DREAM_MODEL_UNAVAILABLE": 409,
     "DEFAULT_AGENT_UNAVAILABLE": 409,
     "PRIVATE_WORK_TOO_LARGE": 413,
     "PROJECT_STORAGE_QUOTA_EXCEEDED": 429,
@@ -51,6 +53,14 @@ class PrivateWorkConflict(PrivateWorkError):
     public_message = "Private work conflict."
 
 
+class PrivateWorkThreadBusy(PrivateWorkConflict):
+    """An incomplete Run currently owns the Thread mutation seam."""
+
+
+class PrivateWorkCompactionDisabled(PrivateWorkConflict):
+    """The authoritative runtime policy disables context compaction."""
+
+
 class PrivateWorkAssetStale(PrivateWorkError):
     code = "PRIVATE_WORK_ASSET_STALE"
     public_message = "Private work asset is stale."
@@ -74,6 +84,16 @@ class PrivateWorkRunModelUnavailable(PrivateWorkError):
 class PrivateWorkRunExecutionProfileUnsupported(PrivateWorkError):
     code = "RUN_EXECUTION_PROFILE_UNSUPPORTED"
     public_message = "The selected model does not support the Run execution profile."
+
+
+class PrivateWorkRunWorkloadProfileUnsupported(PrivateWorkError):
+    code = "RUN_WORKLOAD_PROFILE_UNSUPPORTED"
+    public_message = "The Run workload profile is unavailable for the admitted runtime policy."
+
+
+class PrivateWorkDreamModelUnavailable(PrivateWorkError):
+    code = "MEMORY_DREAM_MODEL_UNAVAILABLE"
+    public_message = "The configured Dream model is unavailable."
 
 
 class PrivateWorkDefaultAgentUnavailable(PrivateWorkError):

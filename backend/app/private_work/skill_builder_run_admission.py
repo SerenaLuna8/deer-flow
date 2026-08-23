@@ -65,6 +65,8 @@ from deerflow.persistence.shared_assets import (
 )
 from deerflow.trace_context import normalize_trace_id
 
+_SKILL_BUILDER_RECURSION_LIMIT = 250
+
 
 class _NoopQuota:
     async def reserve_concurrent_run(
@@ -226,7 +228,9 @@ class SkillBuilderRunAdmissionService(SkillBuilderRunAdmissionPort):
                         }
                     ]
                 },
-                "config": {},
+                "config": {
+                    "recursion_limit": _SKILL_BUILDER_RECURSION_LIMIT,
+                },
                 "stream_mode": ["values", "updates", "messages"],
                 "stream_subgraphs": False,
             },

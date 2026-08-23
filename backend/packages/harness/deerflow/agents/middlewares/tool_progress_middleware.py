@@ -24,25 +24,25 @@ State machine transitions per (thread_id, tool_name):
   - recoverable_by_model=False, action=stop (auth, config, internal):
       Immediately BLOCKED on the first occurrence — no retry can help.
 
-Division of labor with LoopDetectionMiddleware (middleware position 23):
+Division of labor with ToolCallControl:
   ToolProgressMiddleware (position 10) is a result-quality guard — it fires
   after a tool executes, inspects what came back, and blocks *specific tools*
   that have stopped producing new information.
 
-  LoopDetectionMiddleware is a call-pattern guard — it fires after the model
-  responds (before tools execute), inspects the tool_calls signature in the
-  AIMessage, and forces the *whole turn* to stop when the model keeps issuing
-  the same calls regardless of results.
+  ToolCallControl is a proposal guard — it fires after the model responds
+  (before tools execute), detects repeated call sets, and applies exact
+  admitted budgets to each tool occurrence.
 
   They are complementary, not competing:
   - ToolProgressMiddleware is fine-grained (per-tool BLOCK, other tools normal).
-  - LoopDetectionMiddleware is coarse-grained (strips all tool_calls, ends turn).
+  - ToolCallControl rejects a whole repeated batch, but budget exhaustion only
+    rejects occurrences of the exhausted tool.
   - Both can inject HumanMessage hints in the same model call without conflict;
     the model sees both sets of hints and can reason about them.
-  - If LoopDetectionMiddleware hard-stops (strips tool_calls), no wrap_tool_call
+  - If ToolCallControl rejects a whole batch, no wrap_tool_call
     is issued so ToolProgressMiddleware never fires — there is no double-stop.
   - If ToolProgressMiddleware BLOCKs a tool (returns an error ToolMessage),
-    the model still makes a tool call that LoopDetectionMiddleware tracks; both
+    the model still makes a tool call that ToolCallControl tracks; both
     continue to operate on their own independent state.
 """
 
@@ -217,7 +217,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         # ops with no I/O, so event-loop stall risk is negligible.  asyncio.Lock would
         # not protect the sync wrap_tool_call path used by subagent executor thread
         # pools — two separate locks would be required instead.  This matches the
-        # existing LoopDetectionMiddleware pattern; see module docstring for details.
+        # other sync/async Harness guard paths; see module docstring for details.
         self._lock = threading.Lock()
         # LRU-evicting store: thread_id → {tool_name → ToolPhaseState}
         self._phase_states: OrderedDict[str, dict[str, ToolPhaseState]] = OrderedDict()
@@ -453,16 +453,11 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
           the previous run are also cleared so a single first-call problem in the new run
           cannot falsely trip WARNED against stale context from a run the model no longer sees.
 
-        **Cross-run scoping vs LoopDetectionMiddleware**: this per-run reset is an intentional
-        policy choice, not an oversight.  Errors like ``rate_limited`` and ``transient`` are
-        time-bound: their root cause may resolve between user turns, so carrying a stale
-        counter forward risks a false-positive BLOCKED on calls that would now succeed.
-        LoopDetectionMiddleware takes the opposite stance — it retains ``_history`` across
-        runs (only clearing other-run *pending* warnings at ``before_agent``), because
-        call-pattern loops are time-invariant: a model that keeps issuing the same tool_calls
-        regardless of results does so regardless of when the run started.  The two middlewares
-        therefore guard different failure modes (result quality vs. call pattern) and their
-        cross-run scoping policies intentionally differ as a consequence.
+        This reset is intentionally Run-scoped. Errors like ``rate_limited`` and
+        ``transient`` may resolve before another Run, so carrying them forward could
+        block a now-productive call. ToolCallControl independently persists its
+        proposal facts in the exact execution scope's private graph state; neither
+        middleware relies on the deleted process-local loop history.
         """
         thread_id = self._thread_id(runtime)
         with self._lock:

@@ -628,18 +628,12 @@ export function ProjectAgentSelectorDialog({
   );
   const candidateAgents = useMemo(
     () =>
-      otherProjectAgents(
-        executableProjectAgents(assets.data),
-        currentAgent,
-      ),
+      otherProjectAgents(executableProjectAgents(assets.data), currentAgent),
     [assets.data, currentAgent],
   );
   const systemAgents = useMemo(
     () =>
-      otherProjectAgents(
-        configurableSystemAgents(assets.data),
-        currentAgent,
-      ),
+      otherProjectAgents(configurableSystemAgents(assets.data), currentAgent),
     [assets.data, currentAgent],
   );
   const shouldCheckDependencies = open && Boolean(user);
@@ -731,16 +725,11 @@ export function ProjectAgentSelectorDialog({
     (_agent, index) => candidateDependencyAvailability[index] === "blocked",
   );
   const boundSkillAssetRefs = useMemo(
-    () =>
-      boundSystemSkillAssetRefs(
-        skillAssets.data,
-      ),
+    () => boundSystemSkillAssetRefs(skillAssets.data),
     [skillAssets.data],
   );
   const boundMcpVersionIds = useMemo(() => {
-    const bound = boundSystemVersionIds(
-      mcpAssets.data,
-    );
+    const bound = boundSystemVersionIds(mcpAssets.data);
     const supported = supportedMcpVersionIds(mcpDependencyRuntime.versions);
     return new Set([...bound].filter((id) => supported.has(id)));
   }, [mcpAssets.data, mcpDependencyRuntime.versions]);

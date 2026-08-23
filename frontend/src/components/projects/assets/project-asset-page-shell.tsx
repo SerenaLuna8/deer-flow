@@ -918,21 +918,20 @@ function ProjectAssetCatalog({
   );
   const [importedSkillSelection, setImportedSkillSelection] =
     useState<ImportedSkillSelection | null>(null);
-  const [secretSetupAssetId, setSecretSetupAssetId] = useState<
-    string | null
-  >(null);
-  const initialSecretSetupSelectionRef =
-    useRef<ImportedSkillSelection | null>(
-      initialFocusSkillSecrets &&
-        kind === "skills" &&
-        initialSelectedAssetId &&
-        initialSelectedVersionId
-        ? {
-            assetId: initialSelectedAssetId,
-            versionId: initialSelectedVersionId,
-          }
-        : null,
-    );
+  const [secretSetupAssetId, setSecretSetupAssetId] = useState<string | null>(
+    null,
+  );
+  const initialSecretSetupSelectionRef = useRef<ImportedSkillSelection | null>(
+    initialFocusSkillSecrets &&
+      kind === "skills" &&
+      initialSelectedAssetId &&
+      initialSelectedVersionId
+      ? {
+          assetId: initialSelectedAssetId,
+          versionId: initialSelectedVersionId,
+        }
+      : null,
+  );
   const appliedInitialVersionSelectionRef = useRef(
     initialSelectedAssetId && initialSelectedVersionId
       ? `${initialSelectedAssetId}:${initialSelectedVersionId}:${initialFocusSkillSecrets}`
@@ -1204,8 +1203,7 @@ function ProjectAssetCatalog({
 
   const handleRequestedVersionHandled = useCallback(
     (assetId: string, versionId: string, available: boolean) => {
-      const secretSetupSelection =
-        initialSecretSetupSelectionRef.current;
+      const secretSetupSelection = initialSecretSetupSelectionRef.current;
       if (
         available &&
         secretSetupSelection?.assetId === assetId &&

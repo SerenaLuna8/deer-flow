@@ -1,6 +1,7 @@
 # Harness Tool-Call Control 改造方案
 
-> 状态：Proposed，待实施批准
+> 状态：Implemented；自动化门禁与 Harness enforcement 浏览器验收已完成；
+> 追加的严格 Research 自报真实性验收未全通过，见 16.5
 >
 > 日期：2026-08-23
 >
@@ -31,19 +32,19 @@ ownership 混合，同时避免引入包含所有执行限制的“大 Guard”�
 
 ### 2.1 已确认事实
 
-1. 当前 [`LoopDetectionConfig`](../backend/packages/harness/deerflow/config/loop_detection_config.py)
+1. ownership cutover 前的 [`LoopDetectionConfig`](../backend/packages/harness/deerflow/config/loop_detection_config.py)
    同时包含：
 
    - 相同调用集合的 `warn_threshold`、`hard_limit` 与 `window_size`；
    - 同名工具累计次数的 `tool_freq_warn`、`tool_freq_hard_limit` 与
      `tool_freq_overrides`。
 
-2. 当前 warning 文案明确要求模型停止调用工具并立即回答，不是普通提醒：
-   [`loop_detection_middleware.py`](../backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py#L240)。
+2. ownership cutover 前的 warning 文案明确要求模型停止调用工具并立即回答，不是普通提醒；
+   该旧 Middleware 已在本方案实施时删除。
 
-3. 当前 frequency 扫描在一个并行 tool-call batch 中遇到首个 warning 或 hard
-   limit 后立即返回，后续 occurrence 没有完整计数：
-   [`loop_detection_middleware.py`](../backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py#L539)。
+3. ownership cutover 前的 frequency 扫描在一个并行 tool-call batch 中遇到首个
+   warning 或 hard limit 后立即返回，后续 occurrence 没有完整计数；该旧
+   Middleware 已在本方案实施时删除。
    这是配置 hard limit 为 10、实际执行出现 11 或 12 次的直接原因。
 
 4. 当前计数 key 是 `thread_id`，不是明确的 Run、Sub-Agent Task 或 SDK
@@ -61,7 +62,8 @@ ownership 混合，同时避免引入包含所有执行限制的“大 Guard”�
    [`execution_profile.py`](../backend/app/private_work/execution_profile.py#L11)。
    因此 `interactive/research` 不能继续使用 `Run Execution Profile` 这个名称。
 
-7. 当前 Lead 与 Sub-Agent 分别装配新的 `LoopDetectionMiddleware` 实例，但消费
+7. ownership cutover 前 Lead 与 Sub-Agent 分别装配新的 `LoopDetectionMiddleware`
+   实例，但消费
    同一个 `AppConfig.loop_detection` 数值策略：
 
    - Lead：[`lead_agent/agent.py`](../backend/packages/harness/deerflow/agents/lead_agent/agent.py#L482)；
@@ -255,14 +257,22 @@ contract test 锁定下列有效顺序，而不是仅依赖注释：
 ```text
 Safety/terminal response cleanup
         ↓
+Custom after_model middleware（如存在）
+        ↓
 Token Budget hard-stop cleanup（如已触发）
         ↓
 SubagentLimitMiddleware（先过滤不可能执行的 task proposal）
+        ↓
+HostExecutionBatchBarrierMiddleware（仅 Local approval profile）
         ↓
 ToolCallControl
         ↓
 ToolNode
 ```
+
+这里描述的是反向 `after_model` dispatch 的有效顺序；注册顺序中 custom band 位于
+Token Budget 与 Safety 之间。Custom middleware 不得插入受保护的
+`SubagentLimit → HostExecutionBatchBarrier → ToolCallControl` 仲裁链内部。
 
 不变量：
 
@@ -329,7 +339,7 @@ ToolNode
 | --- | --- | --- |
 | Private Lead | exact `run_id` 对应的 Run scope | 跨同一 Run 的 Graph Turn、Goal Continuation 和 Job Attempt 恢复保持；新 Run 清零 |
 | Sub-Agent | `SubagentTaskLifecycle` 生成的内部 `execution_id` | 每个 Sub-Agent Task 独立；不得使用公开 `task_id/tool_call_id` 作为 registry identity |
-| SDK | graph invocation ID | 每次 `invoke/stream` 清零 |
+| SDK | SDK Adapter 自动生成的 graph invocation ID | 每次 `invoke/stream/ainvoke/astream` 清零；调用方不提供内部 scope key |
 | Embedded | graph invocation ID | 每次调用清零；不能退化为共享 `default` 或 Thread scope |
 
 Lead 私有状态至少包含：
@@ -354,6 +364,9 @@ loop finalization phase
 - Sub-Agent 没有独立 durable Run，但其 Task 内状态必须绑定内部
   `execution_id`，并在 lifecycle outcome 结算前保持可用；
 - replay receipt 使用内部 occurrence identity，不假设 tool-call ID 全局唯一。
+- 只有携带已知 server receipt 的物化消息才能命中 replay；压缩后复用旧
+  message index 的无 stamp 新 proposal 必须分配新的 collision ordinal receipt，
+  不能依靠相同 signature 猜测它是 replay。
 
 ## 9. Run Workload Profile 与 Policy v4
 
@@ -457,8 +470,8 @@ value:
 - `task` 明确排除在 `ToolCallBudget` 外；
 - `inspect_image` 的有效 hard limit 为 policy 值与下层真实技术 cap 的较小值；
 - Sub-Agent concurrency 继续受当前 `1..4` canonical clamp；
-- exact Agent Version 声明的并发委托值只能收紧 System Runtime Policy ceiling，
-  Run Admission 冻结两者的较小值；
+- 首版 Agent Version 没有并发委托字段；Run Admission 只冻结 System Runtime
+  Policy 所选 workload profile 的并发值，不引入不存在的第二个约束来源；
 - per-Run total 继续受当前 `1..50` canonical clamp；
 - Harness 只接收选中 profile 的 resolved、frozen value，不接收整个 catalog 后再
   自行选择。
@@ -602,6 +615,12 @@ UI 必须明确区分：
 - 自定义 middleware 使用者迁移到 `extra_middleware` 或显式 full takeover；
 - SDK/Embedded 可以显式选择 `research`，但这只是 caller-owned、单次 invocation
   配置，不能称作 server-issued Run Snapshot；
+- SDK 公共 Adapter 为每次顶层 `invoke`、`stream`、`ainvoke`、`astream` 自动生成
+  新 scope，并复制调用方 context；内部 scope key 不属于公共调用契约；
+- ToolCallControl 活跃时，SDK `extra_middleware` 中实现
+  `after_model/aafter_model` 的无锚点扩展进入受保护 Custom band；同类扩展声明
+  `@Next/@Prev` 时明确拒绝并提示移除锚点或使用 `middleware=` full takeover。
+  没有 response hook 的定位扩展与显式关闭 ToolCallControl 的兼容行为保持不变；
 - Sub-Agent profile 通过已完成的 profile-specific binding factory 传递，不能从
   `private_scope` 重建。
 
@@ -689,8 +708,8 @@ version；不得手工修改数据库行或 checksum。
 ### Harness
 
 - 新 `backend/packages/harness/deerflow/agents/middlewares/tool_call_control.py`
-- [`backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py`](../backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py)
-  的 production replacement/deletion
+- `backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py`
+  的 production replacement/deletion（实施后已删除）
 - [`backend/packages/harness/deerflow/agents/middlewares/assembly.py`](../backend/packages/harness/deerflow/agents/middlewares/assembly.py)
 - [`backend/packages/harness/deerflow/agents/lead_agent/agent.py`](../backend/packages/harness/deerflow/agents/lead_agent/agent.py)
 - [`backend/packages/harness/deerflow/agents/factory.py`](../backend/packages/harness/deerflow/agents/factory.py)
@@ -749,6 +768,8 @@ version；不得手工修改数据库行或 checksum。
 - 新 Run 即使属于同一 Thread 也清零；
 - 三个 Sub-Agent Task 使用三个内部 execution scope；
 - 同一 proposal checkpoint replay 不重复消费；
+- 只有携带已知 server receipt 的物化 proposal 才按 replay 处理；上下文压缩后复用
+  message index 的全新无 stamp proposal 必须获得新 receipt 并重新计数；
 - tool-call ID 重用不造成 receipt 碰撞；
 - SDK/Embedded 每个 graph invocation 清零；
 - full/delta checkpoint mode 行为一致。
@@ -772,6 +793,8 @@ version；不得手工修改数据库行或 checksum。
 - Sub-Agent `completed + tool_budget_capped` 被父 Lead 保留；
 - model/provider failure 不被较早 budget receipt 覆盖；
 - observer 失败不改变 enforcement decision 或 semantic outcome。
+- contract test 锁定有效 `after_model` 顺序为 Safety → Custom → Token Budget →
+  Subagent Limit → Host Execution Batch Barrier → ToolCallControl。
 
 ## 16. 复杂真实验收
 
@@ -826,6 +849,60 @@ version；不得手工修改数据库行或 checksum。
 - Run Event 精确记录 proposed/admitted/rejected；
 - 刷新后 observation 和 terminal 不重复；
 - 恢复原 active policy version 后再做一次 readback。
+
+### 16.5 2026-08-23 真实验收记录
+
+本节把 Harness enforcement 事实与 Agent 自报内容分开。成功 Run 不能证明最终
+自然语言报告中的每个数字都真实，模型自报也不能覆盖 Run Event/PostgreSQL 事实。
+
+已确认的 enforcement 结果：
+
+- 本地管理员明确选择 `research`，Run
+  `24df8c15-8fb8-4cca-86e4-aa460ebdd5fa`、Job、Job Attempt 最终均为成功；
+  requested/effective workload 都是 `research`，冻结策略为 revision 7、schema v4。
+- Lead 恰好提出并执行 12 次 `web_search`。其中 A1–A5 使用相同 query、不同
+  `max_results=1/2/3/4/5`，12 次全部 admitted，`repeated_call` 事件为 0；证明
+  generic fingerprint 会区分完整 canonical args。
+- 4 个独立 Sub-Agent Task 都有唯一 start/end 和 usage receipt。真实
+  `web_search` proposal 数分别为 T1=13、T2=20、T3=17、T4=20。
+- T2 与 T4 都在第 20 次 admitted 后产生小写稳定码
+  `tool_budget_exhausted`，`count_after=20`、`rejected=0`，随后隐藏耗尽工具并用
+  已有证据完成；不存在真实的第 21 次 proposal 或 rejection。
+- terminal 前共有 6 个 control observations；刷新后仍为唯一 8714 个 Run Event、
+  唯一 `stream.end`、4 对 task start/end、4 个唯一 usage receipt 和 1 个 artifact，
+  没有重复归集。
+- usage 为 input 2,668,805、output 78,400、total 2,747,205；Lead 595,401 加
+  Sub-Agent 2,151,804 与总量精确相等。最终 artifact 为
+  `outputs/agent-evolution-final-research.md`，27,711 bytes、201 splitlines、46 个
+  唯一 URL，刷新后仍可预览。
+- 低阈值负向验收另行证明 repeated-call 第 5 次 hard stop、预算只拒绝超额
+  occurrence、同批文件工具仍可交付、策略恢复后 PostgreSQL readback 不漂移。
+
+追加的严格 Research 自报真实性验收**未全通过**：
+
+- 最终回答没有列出 durable Task ID；
+- 把 T1/T3 的真实搜索数 13/17 误写为 12/11；
+- 把 T2/T4 的“第 20 次 admitted 后耗尽”误写为“第 21 次被拒”；
+- 把展示标题 `[TOOL BUDGET EXHAUSTED]` 当作稳定码，durable reason code 实为
+  `tool_budget_exhausted`；
+- 可见失败台账漏记 T1 `write_file` 缺少必填 `description` 和 Lead 校验脚本的
+  SHA 自引用 `AssertionError`。真实可见 provider failure 是 9 次独立
+  `provider_unavailable`；另有 13 次 `LLM_PROVIDER_UNAVAILABLE` 模型请求经重试
+  恢复，底层 provider/proxy/DNS/TLS/主机原因未验证。
+
+确认的直接原因是模型最终汇总没有与实际 Task step、ToolMessage 和 durable control
+observation 对账；同时第 20 次达到 hard limit 后，下一轮模型请求已不再暴露该工具，
+所以不能把耗尽通知反推成一次不存在的第 21 次 proposal。这是追加的报告真实性
+失败，不是 admitted 上限、指纹、usage settlement 或刷新幂等失败。基础 16.3
+Harness 验收标准均有独立证据；追加的严格自报检查不能标为全绿。
+
+浏览器证据：
+
+- [非法 window/hard 关系被拒绝](../.codex-qa/tool-call-control/09-invalid-window-rejected.png)
+- [最终 Run、恢复重试与单一交付文件](../.codex-qa/tool-call-control/14-final-research-completed.png)
+- [最终 artifact 与可见失败台账](../.codex-qa/tool-call-control/17-final-artifact-ledger.png)
+- [刷新后终态与 aggregate usage 保持不变](../.codex-qa/tool-call-control/16-final-refresh-deduped.png)
+- [最终代码由生产守护进程重启加载后的页面读回](../.codex-qa/tool-call-control/19-final-code-prod-refresh.png)
 
 ## 17. 失败调查与报告模板
 

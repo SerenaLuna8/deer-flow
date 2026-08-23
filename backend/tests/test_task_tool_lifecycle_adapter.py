@@ -910,6 +910,64 @@ async def test_nonquiescent_execution_timeout_preserves_coordination_timeout_wir
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_code", "expected_error"),
+    [
+        (
+            SubagentFailureCode.TOOL_CALL_CONTROL_STATE_INVALID,
+            "TOOL_CALL_CONTROL_STATE_INVALID: The Sub-Agent Task stopped because its tool-control state could not be validated.",
+        ),
+        (
+            SubagentFailureCode.LOOP_FINALIZATION_FAILED,
+            "LOOP_FINALIZATION_FAILED: The Sub-Agent Task did not complete the required tool-free final response.",
+        ),
+    ],
+)
+async def test_tool_control_failures_keep_safe_specific_adapter_presentation(
+    failure_code: SubagentFailureCode,
+    expected_error: str,
+) -> None:
+    now = datetime.now(UTC)
+    outcome = SubagentFailed(
+        execution_id=uuid.uuid4(),
+        task_id="call-control-failure",
+        trace_id="trace",
+        queued_at=now,
+        started_at=now,
+        completed_at=now,
+        ai_messages=(),
+        usage=None,
+        usage_completeness=SubagentUsageCompleteness.FINAL_OBSERVED,
+        quiescent=True,
+        failure_code=failure_code,
+        detail=None,
+        stop_reason=None,
+    )
+    events: list[dict[str, object]] = []
+    adapter = task_module._TaskLifecycleEventAdapter(
+        writer=events.append,
+        task_id=outcome.task_id,
+        description="control failure",
+        model_name="parent-model",
+        execution_timeout_seconds=120,
+    )
+
+    await adapter(outcome)
+    message = _tool_message(
+        task_module._outcome_command(
+            outcome,
+            tool_call_id=outcome.task_id,
+            model_name="parent-model",
+            execution_timeout_seconds=120,
+        )
+    )
+
+    assert events[-1]["error"] == expected_error
+    assert message.content == f"Task failed. Error: {expected_error}"
+    assert message.additional_kwargs["subagent_error"] == expected_error
+
+
+@pytest.mark.asyncio
 async def test_failure_detail_and_cancellation_code_keep_adapter_owned_wire() -> None:
     now = datetime.now(UTC)
     common = {

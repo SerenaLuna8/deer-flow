@@ -32,10 +32,12 @@ from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext, require_issued_private_work_context
 from app.private_work.errors import (
     PrivateWorkAssetStale,
+    PrivateWorkCompactionDisabled,
     PrivateWorkConflict,
     PrivateWorkError,
     PrivateWorkInvalid,
     PrivateWorkNotFound,
+    PrivateWorkThreadBusy,
     PrivateWorkUnavailable,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
@@ -317,7 +319,7 @@ class ProjectChatControlService:
         except AuthorizationRevoked:
             raise authorization_boundary.private_error() from None
         except ContextCompactionDisabled:
-            raise PrivateWorkConflict(context.request_id) from None
+            raise PrivateWorkCompactionDisabled(context.request_id) from None
         except ContextCompactionFailed:
             raise PrivateWorkUnavailable(context.request_id) from None
         except LookupError:
@@ -903,7 +905,7 @@ class ProjectChatControlService:
                 )
             ).scalar_one_or_none()
             if incomplete is not None:
-                raise PrivateWorkConflict(context.request_id)
+                raise PrivateWorkThreadBusy(context.request_id)
         return thread
 
     async def _find_checkpoint_before_message(

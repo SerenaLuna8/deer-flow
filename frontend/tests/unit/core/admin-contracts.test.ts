@@ -84,21 +84,166 @@ function agentRuntimeSettings() {
     },
     loop_detection: {
       enabled: true,
-      warn_threshold: 10,
-      hard_limit: 20,
-      window_size: 50,
-      max_tracked_threads: 100,
-      tool_freq_warn: 5,
-      tool_freq_hard_limit: 10,
-      tool_freq_overrides: {},
+      identical_calls: {
+        warn_threshold: 3,
+        hard_limit: 5,
+        window_size: 20,
+      },
+    },
+    tool_call_budget: {
+      profiles: {
+        interactive: {
+          lead: {
+            default: { warn: 30, hard_limit: 50 },
+            tools: {
+              web_search: { warn: 6, hard_limit: 10 },
+              web_fetch: { warn: 6, hard_limit: 10 },
+            },
+          },
+          subagent: {
+            default: { warn: 30, hard_limit: 50 },
+            tools: {
+              web_search: { warn: 6, hard_limit: 10 },
+              web_fetch: { warn: 6, hard_limit: 10 },
+            },
+          },
+        },
+        research: {
+          lead: {
+            default: { warn: 30, hard_limit: 50 },
+            tools: {
+              web_search: { warn: 20, hard_limit: 30 },
+              web_fetch: { warn: 20, hard_limit: 30 },
+            },
+          },
+          subagent: {
+            default: { warn: 30, hard_limit: 50 },
+            tools: {
+              web_search: { warn: 12, hard_limit: 20 },
+              web_fetch: { warn: 12, hard_limit: 20 },
+            },
+          },
+        },
+      },
     },
     read_before_write: { enabled: true },
     safety_finish_reason: { enabled: true },
-    subagents: { max_total_per_run: 5 },
+    subagents: {
+      max_concurrent: 3,
+      max_total_per_run_by_workload: {
+        interactive: 6,
+        research: 9,
+      },
+    },
   };
 }
 
 describe("admin contracts", () => {
+  test("accepts the complete schema v4 Agent runtime policy without an outer wrapper", () => {
+    const parsed = agentRuntimeSettingsValueSchema.parse(
+      agentRuntimeSettings(),
+    );
+
+    expect(parsed.loop_detection.identical_calls).toEqual({
+      warn_threshold: 3,
+      hard_limit: 5,
+      window_size: 20,
+    });
+    expect(
+      parsed.tool_call_budget.profiles.research.subagent.tools.web_search,
+    ).toEqual({ warn: 12, hard_limit: 20 });
+    expect(parsed.subagents.max_total_per_run_by_workload).toEqual({
+      interactive: 6,
+      research: 9,
+    });
+  });
+
+  test("fails closed on incomplete, malformed, wrapped, or legacy Agent runtime policy shapes", () => {
+    const missingProfile = structuredClone(agentRuntimeSettings());
+    delete (missingProfile.tool_call_budget.profiles as Record<string, unknown>)
+      .research;
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse(missingProfile).success,
+    ).toBe(false);
+
+    const invalidOrder = structuredClone(agentRuntimeSettings());
+    invalidOrder.tool_call_budget.profiles.research.lead.default = {
+      warn: 31,
+      hard_limit: 30,
+    };
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse(invalidOrder).success,
+    ).toBe(false);
+
+    const legacy = structuredClone(agentRuntimeSettings()) as Record<
+      string,
+      unknown
+    >;
+    legacy.loop_detection = {
+      enabled: true,
+      warn_threshold: 3,
+      hard_limit: 5,
+      window_size: 20,
+      max_tracked_threads: 100,
+      tool_freq_warn: 6,
+      tool_freq_hard_limit: 10,
+      tool_freq_overrides: {},
+    };
+    expect(agentRuntimeSettingsValueSchema.safeParse(legacy).success).toBe(
+      false,
+    );
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse({
+        agent_runtime: agentRuntimeSettings(),
+      }).success,
+    ).toBe(false);
+  });
+
+  test("rejects task from Tool Call Budget with its direct ownership reason", () => {
+    const policy = agentRuntimeSettings();
+    (
+      policy.tool_call_budget.profiles.research.lead.tools as Record<
+        string,
+        { warn: number; hard_limit: number }
+      >
+    ).task = {
+      warn: 1,
+      hard_limit: 2,
+    };
+
+    const parsed = agentRuntimeSettingsValueSchema.safeParse(policy);
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: ["tool_call_budget", "profiles", "research", "lead", "tools"],
+          message:
+            "task is governed by the Sub-Agent delegation limit and cannot be configured as an ordinary tool budget",
+        }),
+      ]),
+    );
+  });
+
+  test("rejects a repeated-call window smaller than its hard limit", () => {
+    const policy = agentRuntimeSettings();
+    policy.loop_detection.identical_calls.window_size = 4;
+
+    const parsed = agentRuntimeSettingsValueSchema.safeParse(policy);
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: ["loop_detection", "identical_calls", "window_size"],
+          message: "Window size cannot be below the hard limit",
+        }),
+      ]),
+    );
+  });
+
   test("fails closed on malformed provider descriptors while allowing intentional omission", () => {
     const baseUrlField = {
       name: "base_url",

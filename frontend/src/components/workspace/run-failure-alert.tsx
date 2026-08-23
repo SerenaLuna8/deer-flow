@@ -6,13 +6,11 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import {
-  CURRENT_UPLOAD_UNAVAILABLE,
-  LLM_PROVIDER_UNAVAILABLE,
-  LOOP_SAFETY_LIMIT,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   type ProjectRunFailureCode,
 } from "@/core/private-work/api-client";
+import { resolveRunFailureCopy } from "@/core/threads/run-failure-presentation";
 
 export function canRetryModelOutputLimit({
   canRun,
@@ -64,10 +62,7 @@ export function RunFailureAlert({
   const { t } = useI18n();
   const [retrying, setRetrying] = useState(false);
   const isModelOutputLimit = failureCode === MODEL_OUTPUT_LIMIT;
-  const isLoopSafetyLimit = failureCode === LOOP_SAFETY_LIMIT;
-  const isOutputDeliveryIncomplete = failureCode === OUTPUT_DELIVERY_INCOMPLETE;
-  const isCurrentUploadUnavailable = failureCode === CURRENT_UPLOAD_UNAVAILABLE;
-  const isProviderUnavailable = failureCode === LLM_PROVIDER_UNAVAILABLE;
+  const copy = resolveRunFailureCopy(t.conversation, failureCode);
 
   return (
     <Alert
@@ -76,33 +71,9 @@ export function RunFailureAlert({
       data-testid="run-failure-alert"
       data-run-failure-code={failureCode ?? "generic"}
     >
-      <AlertTitle>
-        {isModelOutputLimit
-          ? t.conversation.modelOutputLimitTitle
-          : isLoopSafetyLimit
-            ? t.conversation.loopSafetyLimitTitle
-            : isOutputDeliveryIncomplete
-              ? t.conversation.outputDeliveryIncompleteTitle
-              : isCurrentUploadUnavailable
-                ? t.conversation.currentUploadUnavailableTitle
-                : isProviderUnavailable
-                  ? t.conversation.providerUnavailableTitle
-                  : t.conversation.runFailedTitle}
-      </AlertTitle>
+      <AlertTitle>{copy.title}</AlertTitle>
       <AlertDescription className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
-        <span>
-          {isModelOutputLimit
-            ? t.conversation.modelOutputLimitDescription
-            : isLoopSafetyLimit
-              ? t.conversation.loopSafetyLimitDescription
-              : isOutputDeliveryIncomplete
-                ? t.conversation.outputDeliveryIncompleteDescription
-                : isCurrentUploadUnavailable
-                  ? t.conversation.currentUploadUnavailableDescription
-                  : isProviderUnavailable
-                    ? t.conversation.providerUnavailableDescription
-                    : t.conversation.runFailedDescription}
-        </span>
+        <span>{copy.description}</span>
         {isModelOutputLimit && (
           <Button
             type="button"

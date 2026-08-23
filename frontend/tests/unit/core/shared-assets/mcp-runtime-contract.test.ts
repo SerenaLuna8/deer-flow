@@ -61,16 +61,22 @@ describe("Project MCP runtime eligibility", () => {
   test.each([
     ["an empty slot", {}],
     ["an empty Header group", { headers: [] }],
-    ["an empty Query group beside a populated Header group", {
-      headers: ["Authorization"],
-      query: [],
-    }],
+    [
+      "an empty Query group beside a populated Header group",
+      {
+        headers: ["Authorization"],
+        query: [],
+      },
+    ],
     ["an env group", { env: ["API_KEY"] }],
     ["an oauth group", { oauth: ["token"] }],
     ["a forbidden Header name", { headers: ["Host"] }],
-    ["case-insensitive duplicate Header names", {
-      headers: ["Authorization", "authorization"],
-    }],
+    [
+      "case-insensitive duplicate Header names",
+      {
+        headers: ["Authorization", "authorization"],
+      },
+    ],
     ["an invalid Query name", { query: ["api key"] }],
     ["duplicate Query names", { query: ["api_key", "api_key"] }],
   ])("rejects %s", (_label, payloadSchema) => {

@@ -12,6 +12,7 @@ from app.reliability.run_execution.contracts import (
     AgentExecutionResult,
     PrivateRunExecution,
 )
+from app.system_runtime_settings.models import MaterializedAgentRuntimePolicy
 from app.worker.service import JobLeaseAuthority
 from deerflow.config.model_config import ModelConfig
 from deerflow.persistence.jobs.sql import JobTerminalEvent
@@ -34,13 +35,13 @@ class SystemModelMaterializationPort(Protocol):
 class SystemRuntimePolicyMaterializationPort(Protocol):
     """Materialize the exact global runtime policy frozen for one Run."""
 
-    async def materialize_run_snapshot(
+    async def materialize_run_snapshot_envelope(
         self,
         *,
         project_id: uuid.UUID,
         owner_user_id: str,
         run_id: str,
-    ) -> object: ...
+    ) -> MaterializedAgentRuntimePolicy: ...
 
 
 class PrivateRunExecutor(Protocol):

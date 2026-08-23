@@ -48,6 +48,7 @@ from deerflow.subagents.lifecycle import (
     SubagentCancelled,
     SubagentCompleted,
     SubagentFailed,
+    SubagentFailureCode,
     SubagentTaskCall,
     SubagentTaskEvent,
     SubagentTaskOutcome,
@@ -273,10 +274,19 @@ def _plain_event_value(value: Any) -> Any:
     return value
 
 
+_TOOL_CONTROL_FAILURE_PRESENTATION: dict[SubagentFailureCode, str] = {
+    SubagentFailureCode.TOOL_CALL_CONTROL_STATE_INVALID: ("TOOL_CALL_CONTROL_STATE_INVALID: The Sub-Agent Task stopped because its tool-control state could not be validated."),
+    SubagentFailureCode.LOOP_FINALIZATION_FAILED: ("LOOP_FINALIZATION_FAILED: The Sub-Agent Task did not complete the required tool-free final response."),
+}
+
+
 def _failure_presentation(outcome: SubagentFailed) -> str:
     """Choose adapter-owned wording for one stable lifecycle failure."""
 
-    return outcome.detail or outcome.failure_code.value
+    return outcome.detail or _TOOL_CONTROL_FAILURE_PRESENTATION.get(
+        outcome.failure_code,
+        outcome.failure_code.value,
+    )
 
 
 def _cancellation_presentation(outcome: SubagentCancelled) -> str:
@@ -777,6 +787,8 @@ async def _run_task_through_lifecycle(
             "thread_data": thread_data,
             "trace_id": trace_id,
             "delegated_context": delegated_context,
+            "tool_call_control_profile": parent_binding.tool_call_control_profile,
+            "tool_call_control_observer": parent_binding.tool_call_control_observer,
         }
         if runtime_agent_profile is not None:
             executor_kwargs["agent_model_settings"] = runtime_agent_profile.model_settings

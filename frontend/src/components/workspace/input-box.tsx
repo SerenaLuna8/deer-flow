@@ -46,6 +46,10 @@ import { hasOpenHumanInputRequest } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import {
+  DEFAULT_RUN_WORKLOAD_PROFILE,
+  type RunWorkloadProfileName,
+} from "@/core/private-work/workload-profile";
 import { useProjectRuntimeSlashSkills } from "@/core/shared-assets";
 import { buildReferenceMessageMetadata } from "@/core/sidecar";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
@@ -115,6 +119,7 @@ import { InputBoxModeChooser } from "./input-box-mode-chooser";
 import { InputBoxModelChooser } from "./input-box-model-chooser";
 import { buildHiddenConversationQuoteMessage } from "./input-box-quote";
 import { SlashSkillSuggestionsListbox } from "./input-box-skill-suggestions";
+import { InputBoxWorkloadProfileToggle } from "./input-box-workload-profile-toggle";
 import { memoryDreamPreparationCanCancel } from "./memory-dream-preparation-view-model";
 import { useThread } from "./messages/context";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
@@ -129,6 +134,7 @@ export type InputBoxSubmitOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   continueFromLatestCheckpoint?: boolean;
+  workloadProfile?: RunWorkloadProfileName;
   onSent?: () => void;
 };
 
@@ -233,6 +239,8 @@ export function InputBox({
   const { locale, t } = useI18n();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  const [workloadProfile, setWorkloadProfile] =
+    useState<RunWorkloadProfileName>(DEFAULT_RUN_WORKLOAD_PROFILE);
   const { models } = useModels();
   const { thread, isMock } = useThread();
   const privateWork = usePrivateWorkAccess();
@@ -291,6 +299,10 @@ export function InputBox({
   const draftSaveTimerRef = useRef<number | null>(null);
   const handledRestoreRequestIdRef = useRef<string | null>(null);
   const commandRequestsCleanupRef = useRef<() => void>(() => undefined);
+
+  useEffect(() => {
+    setWorkloadProfile(DEFAULT_RUN_WORKLOAD_PROFILE);
+  }, [threadId]);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -1003,6 +1015,7 @@ export function InputBox({
       );
       const submitOptions: InputBoxSubmitOptions = {
         continueFromLatestCheckpoint,
+        workloadProfile,
         ...(quotes.length
           ? {
               additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
@@ -1026,6 +1039,11 @@ export function InputBox({
           }
           clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
           sidecar?.clearConversationQuotes(quoteIds);
+          setWorkloadProfile((current) =>
+            current === workloadProfile
+              ? DEFAULT_RUN_WORKLOAD_PROFILE
+              : current,
+          );
         },
       };
       const submit = () => onSubmit?.(message, submitOptions);
@@ -1071,6 +1089,7 @@ export function InputBox({
       t.inputBox.suggestionPlaceholderRequired,
       uploadLimits,
       threadId,
+      workloadProfile,
     ],
   );
 
@@ -2114,6 +2133,11 @@ export function InputBox({
               supportReasoningEffort={supportReasoningEffort}
               supportThinking={supportThinking}
               onSelect={handleModeSelect}
+            />
+            <InputBoxWorkloadProfileToggle
+              disabled={composerLocked}
+              profile={workloadProfile}
+              onSelect={setWorkloadProfile}
             />
           </PromptInputTools>
           <PromptInputTools className="min-w-0 justify-end">

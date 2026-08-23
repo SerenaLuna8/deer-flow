@@ -52,10 +52,7 @@ export function adminProjectAssetKey(
   ] as const;
 }
 
-export function systemCatalogKey(
-  accountId: string,
-  kind: AssetListKind,
-) {
+export function systemCatalogKey(accountId: string, kind: AssetListKind) {
   return [
     ...sharedAssetKeys.account(accountId),
     "catalog",
@@ -230,12 +227,7 @@ export function projectSkillSecretsMutationKey(
   versionId: string,
 ) {
   return [
-    ...projectSkillSecretsKey(
-      accountId,
-      projectId,
-      skillId,
-      versionId,
-    ),
+    ...projectSkillSecretsKey(accountId, projectId, skillId, versionId),
     "mutation",
     "replace",
   ] as const;

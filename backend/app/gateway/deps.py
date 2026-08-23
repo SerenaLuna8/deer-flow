@@ -130,6 +130,7 @@ async def get_current_agent_runtime_config(
     from app.system_runtime_settings import (
         AgentRuntimePolicyValue,
         RuntimePolicySection,
+        project_agent_runtime_app_config_policy,
     )
     from app.system_runtime_settings.errors import SystemRuntimePolicyUnavailable
 
@@ -146,7 +147,12 @@ async def get_current_agent_runtime_config(
         )
         if not isinstance(policy, AgentRuntimePolicyValue):
             raise SystemRuntimePolicyUnavailable
-        return config.with_runtime_policy(policy)
+        return config.with_runtime_policy(
+            project_agent_runtime_app_config_policy(
+                policy,
+                max_total_subagents=(policy.subagents.max_total_per_run_by_workload.interactive),
+            )
+        )
     except SystemRuntimePolicyUnavailable:
         request_id = get_current_trace_id() or generate_trace_id()
         raise HTTPException(

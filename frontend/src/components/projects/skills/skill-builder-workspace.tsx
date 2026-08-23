@@ -171,9 +171,7 @@ export function SkillBuilderRevisionCommitSuccess({
       </p>
       <Button asChild type="button" className="mt-6 min-h-11">
         <Link href={href}>
-          {secretRequirementCount > 0
-            ? copy.configureSecrets
-            : copy.goActivate}
+          {secretRequirementCount > 0 ? copy.configureSecrets : copy.goActivate}
         </Link>
       </Button>
     </div>

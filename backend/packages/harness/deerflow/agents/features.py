@@ -22,6 +22,12 @@ class RuntimeFeatures:
 
     ``memory``, ``summarization``, and ``guardrail`` have no built-in default — they only
     accept ``False`` (disable) or an ``AgentMiddleware`` instance (custom).
+
+    ``loop_detection`` is a compatibility switch for the unified
+    ``ToolCallControl`` module. ``True`` installs the default control and
+    ``False`` disables it. A legacy custom replacement is rejected with a
+    migration error; use ``extra_middleware`` or the full ``middleware``
+    takeover interface instead.
     """
 
     sandbox: bool | AgentMiddleware = True

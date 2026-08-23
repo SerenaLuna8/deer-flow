@@ -85,6 +85,10 @@ from app.reliability.run_execution.stream_authority import (
     LeaseAuthorizedRunEventStore,
     LeaseAuthorizedStreamBridge,
 )
+from app.reliability.run_execution.tool_call_control_policy import (
+    ResolvedRunToolCallControlPolicy,
+    resolve_run_tool_call_control_policy,
+)
 from app.reliability.run_execution.vision_dispatch import (
     PrivateRunVisionDispatchAuthority,
 )
@@ -568,17 +572,23 @@ class RunAgentPrivateExecutor:
                 raise PermanentExecutionError("RUN_ASSET_STALE")
             runtime_app_config = self._app_config
             runtime_policy = None
+            tool_call_control_policy: ResolvedRunToolCallControlPolicy | None = None
             vision_model: ModelConfig | None = None
             delegate_model_names: dict[uuid.UUID, str] = {}
             if self._runtime_policy_materializer is not None:
                 try:
-                    runtime_policy = await self._runtime_policy_materializer.materialize_run_snapshot(
+                    materialized_runtime_policy = await self._runtime_policy_materializer.materialize_run_snapshot_envelope(
                         project_id=execution.context.project_id,
                         owner_user_id=str(execution.context.user_id),
                         run_id=execution.run.run_id,
                     )
+                    runtime_policy = materialized_runtime_policy.value
+                    tool_call_control_policy = resolve_run_tool_call_control_policy(
+                        materialized_runtime_policy,
+                        execution.run.kwargs,
+                    )
                     runtime_app_config = self._app_config.with_runtime_policy(
-                        runtime_policy,
+                        tool_call_control_policy.app_config_policy,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -873,6 +883,9 @@ class RunAgentPrivateExecutor:
                 channel_user_id=channel_user_id,
                 vision_dispatch_authority=vision_dispatch_authority,
                 resource_ownership=resource_ownership,
+                tool_call_control_policy=(tool_call_control_policy.graph_profile if tool_call_control_policy is not None else None),
+                max_concurrent_subagents=(tool_call_control_policy.max_concurrent_subagents if tool_call_control_policy is not None else None),
+                max_total_subagents=(tool_call_control_policy.max_total_subagents if tool_call_control_policy is not None else None),
             )
             owner_token = set_current_user(
                 SimpleNamespace(id=execution.run.owner_user_id),

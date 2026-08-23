@@ -3,10 +3,13 @@ from __future__ import annotations
 import pytest
 
 from deerflow.subagents.status_contract import (
+    SUBAGENT_STOP_REASON_VALUES,
     SUBAGENT_USAGE_COMPLETENESS_KEY,
     SUBAGENT_USAGE_RECEIPT_ID_KEY,
     SUBAGENT_USAGE_RECEIPT_STATE_KEY,
+    format_subagent_result_message,
     make_subagent_additional_kwargs,
+    read_subagent_result_metadata,
     read_subagent_usage_receipt,
     read_subagent_usage_receipt_state,
 )
@@ -175,4 +178,28 @@ def test_subagent_usage_receipt_state_rejects_contribution_conflict_overlap() ->
             }
         )
         is None
+    )
+
+
+def test_tool_budget_cap_is_an_additive_completed_stop_reason() -> None:
+    payload = make_subagent_additional_kwargs(
+        "completed",
+        result="usable partial result",
+        stop_reason="tool_budget_capped",
+    )
+
+    assert "tool_budget_capped" in SUBAGENT_STOP_REASON_VALUES
+    assert read_subagent_result_metadata(payload) == {
+        "status": "completed",
+        "stop_reason": "tool_budget_capped",
+        "result_brief": "usable partial result",
+        "result_sha256": payload["subagent_result_sha256"],
+    }
+    assert format_subagent_result_message(
+        "completed",
+        result="usable partial result",
+        stop_reason="tool_budget_capped",
+    ) == (
+        "Task Succeeded (capped: tool-call budget). Result: usable partial result",
+        None,
     )

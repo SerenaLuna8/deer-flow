@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -20,7 +21,11 @@ from app.audit.models import (
     AuditTargetKind,
 )
 from app.private_work.context import PrivateWorkContext
-from app.private_work.errors import PrivateWorkConflict, PrivateWorkUnavailable
+from app.private_work.errors import (
+    PrivateWorkCompactionDisabled,
+    PrivateWorkThreadBusy,
+    PrivateWorkUnavailable,
+)
 from app.private_work.memory_seal_service import (
     MemorySealAdmissionService,
     MemorySealSchedulerService,
@@ -32,6 +37,7 @@ from app.projects.errors import ProjectNotFound
 from app.projects.models import ProjectRole
 from app.worker.memory_seal import MemorySealJobHandler
 from app.worker.service import JobSettlement, LeaseLost
+from deerflow.config.app_config import AppConfig
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository, JobScope
 from deerflow.runtime.context_compaction import ThreadCompactionResult
 
@@ -230,6 +236,38 @@ class _Barrier:
         return self.verify_ready
 
 
+class _PolicySensitiveBarrier(_Barrier):
+    async def compact(self, context, thread_id, *, force, keep, app_config):
+        if not app_config.summarization.enabled:
+            return ThreadCompactionResult(
+                thread_id=thread_id,
+                compacted=False,
+                reason="compaction_failed",
+            )
+        return await super().compact(
+            context,
+            thread_id,
+            force=force,
+            keep=keep,
+            app_config=app_config,
+        )
+
+    async def lock_and_verify_dream_archive_ready(
+        self,
+        session,
+        context,
+        thread_id,
+        *,
+        app_config,
+    ):
+        return bool(app_config.summarization.enabled) and await super().lock_and_verify_dream_archive_ready(
+            session,
+            context,
+            thread_id,
+            app_config=app_config,
+        )
+
+
 def _compacted(checkpoint_id: str, *, removed: int = 3) -> ThreadCompactionResult:
     return ThreadCompactionResult(
         thread_id=THREAD_ID,
@@ -254,11 +292,19 @@ def _handler(
     jobs: _Jobs | None = None,
     audit: _SettlementAudit | None = None,
     personalization: _Personalization | None = None,
+    app_config: AppConfig | None = None,
 ) -> MemorySealJobHandler:
     active_session = session or _Session()
+    runtime_config = app_config or AppConfig.model_validate(
+        {
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+            }
+        }
+    )
     return MemorySealJobHandler(
         lambda: active_session,
-        app_config=None,
+        app_config=runtime_config,
         barrier=barrier,
         job_repository_builder=lambda _session: jobs or _Jobs(),
         personalization_repository_builder=lambda _session: personalization or _Personalization(),
@@ -279,6 +325,19 @@ def _policy(*, enabled: bool = True, idle_seal_minutes: int = 60):
     )
 
 
+def _seal_work():
+    return seal_worker_module._SealWork(
+        context=_private_context(),
+        app_config=AppConfig.model_validate(
+            {
+                "sandbox": {
+                    "use": "deerflow.sandbox.local:LocalSandboxProvider",
+                }
+            }
+        ),
+    )
+
+
 def _patch_platform_policy(monkeypatch: pytest.MonkeyPatch, policy) -> list[object]:
     calls: list[object] = []
 
@@ -292,6 +351,10 @@ def _patch_platform_policy(monkeypatch: pytest.MonkeyPatch, policy) -> list[obje
         staticmethod(materialize),
     )
     return calls
+
+
+def _thread(*, updated_at: datetime = NOW) -> SimpleNamespace:
+    return SimpleNamespace(updated_at=updated_at)
 
 
 # ---------------------------------------------------------------------------
@@ -321,17 +384,17 @@ async def test_job_repository_claim_allowlist_includes_memory_seal() -> None:
     assert "jobs.job_type IN ('memory_seal')" in compiled
 
 
-def test_seal_idempotency_key_is_canonical_and_ordinal_separated() -> None:
+def test_seal_idempotency_key_is_canonical_and_activity_separated() -> None:
     key = compute_seal_idempotency_key(
         project_id=str(PROJECT_ID),
         owner_user_id=OWNER_USER_ID,
         thread_id=THREAD_ID,
-        ordinal=1,
+        activity_at=NOW,
     )
     expected_payload = json.dumps(
         {
-            "domain": "actweave.memory.seal.v1",
-            "ordinal": 1,
+            "activity_at": "2026-08-06T10:20:30.000000Z",
+            "domain": "actweave.memory.seal.v2",
             "owner_user_id": OWNER_USER_ID,
             "project_id": str(PROJECT_ID),
             "thread_id": THREAD_ID,
@@ -347,9 +410,25 @@ def test_seal_idempotency_key_is_canonical_and_ordinal_separated() -> None:
         project_id=str(PROJECT_ID),
         owner_user_id=OWNER_USER_ID,
         thread_id=THREAD_ID,
-        ordinal=2,
+        activity_at=NOW,
     )
-    assert second != key
+    assert second == key
+
+    after_activity = compute_seal_idempotency_key(
+        project_id=str(PROJECT_ID),
+        owner_user_id=OWNER_USER_ID,
+        thread_id=THREAD_ID,
+        activity_at=NOW.replace(second=31),
+    )
+    assert after_activity != key
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        compute_seal_idempotency_key(
+            project_id=str(PROJECT_ID),
+            owner_user_id=OWNER_USER_ID,
+            thread_id=THREAD_ID,
+            activity_at=NOW.replace(tzinfo=None),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +461,27 @@ async def test_discovery_rejects_out_of_contract_batches() -> None:
         await service.list_due_threads(_Session(), now=NOW, max_jobs=21)
 
 
+def test_discovery_excludes_terminal_seal_failure_for_current_activity() -> None:
+    statement = seal_service_module.sa.select(
+        seal_service_module.ThreadMetaRow.thread_id,
+    ).where(
+        *MemorySealAdmissionService._due_predicates(
+            now=NOW,
+            idle_minutes=60,
+        )
+    )
+
+    compiled = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "jobs.status IN ('failed', 'dead')" in compiled
+    assert "jobs.created_at >= threads_meta.updated_at" in compiled
+
+
 @pytest.mark.asyncio
 async def test_admission_enqueues_one_job_with_thread_coordinate_and_audit(
     monkeypatch: pytest.MonkeyPatch,
@@ -409,8 +509,8 @@ async def test_admission_enqueues_one_job_with_thread_coordinate_and_audit(
     audit = _AdmissionAudit()
     personalization = _Personalization()
     session = _Session(
-        execute_results=[_Rows((object(),))],
-        scalar_results=[True, 3],
+        execute_results=[_Rows((_thread(),))],
+        scalar_results=[True, None],
     )
     service = MemorySealAdmissionService(
         job_repository_builder=lambda _session: jobs,
@@ -449,12 +549,52 @@ async def test_admission_enqueues_one_job_with_thread_coordinate_and_audit(
         project_id=str(PROJECT_ID),
         owner_user_id=OWNER_USER_ID,
         thread_id=THREAD_ID,
-        ordinal=4,
+        activity_at=NOW,
     )
     (audited,) = audit.calls
     assert audited["project_id"] == PROJECT_ID
     assert audited["job_id"] == job_id
     assert audited["request_id"] == "memory-seal-scheduler"
+
+
+@pytest.mark.asyncio
+async def test_admission_skips_an_existing_job_for_the_same_activity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_platform_policy(monkeypatch, _policy())
+
+    async def resolve(*_args, **_kwargs):
+        return _project_context()
+
+    monkeypatch.setattr(
+        seal_service_module,
+        "resolve_project_context_in_transaction",
+        resolve,
+    )
+    existing_job_id = uuid.uuid4()
+    jobs = _Jobs()
+    audit = _AdmissionAudit()
+    session = _Session(
+        execute_results=[_Rows((_thread(),))],
+        scalar_results=[True, existing_job_id],
+    )
+    service = MemorySealAdmissionService(
+        job_repository_builder=lambda _session: jobs,
+        personalization_repository_builder=lambda _session: _Personalization(),
+        audit=audit,
+    )
+
+    admitted = await service.admit_thread(
+        session,
+        project_id=PROJECT_ID,
+        owner_user_id=OWNER_USER_ID,
+        thread_id=THREAD_ID,
+        now=NOW,
+    )
+
+    assert admitted is None
+    assert jobs.enqueued == []
+    assert audit.calls == []
 
 
 @pytest.mark.asyncio
@@ -500,8 +640,8 @@ async def test_admission_locks_thread_before_reading_live_policy_and_preference(
         staticmethod(materialize),
     )
     session = _OrderedSession(
-        execute_results=[_Rows((object(),))],
-        scalar_results=[True, 0],
+        execute_results=[_Rows((_thread(),))],
+        scalar_results=[True, None],
     )
     service = MemorySealAdmissionService(
         job_repository_builder=lambda _session: _OrderedJobs(),
@@ -544,7 +684,7 @@ async def test_admission_skips_when_the_locked_recheck_is_no_longer_due(
     jobs = _Jobs()
     audit = _AdmissionAudit()
     session = _Session(
-        execute_results=[_Rows((object(),))],
+        execute_results=[_Rows((_thread(),))],
         scalar_results=[None],
     )
     service = MemorySealAdmissionService(
@@ -712,9 +852,11 @@ async def test_authorize_rechecks_platform_policy_owner_preference_and_thread(
 
     live_session = _Session(scalar_results=[True])
     handler = _handler(_Barrier(), session=live_session)
-    context = await handler._authorize(_claim(), THREAD_ID)
-    assert isinstance(context, PrivateWorkContext)
-    assert context.project_id == PROJECT_ID
+    work = await handler._authorize(_claim(), THREAD_ID)
+    assert work is not None
+    assert isinstance(work.context, PrivateWorkContext)
+    assert work.context.project_id == PROJECT_ID
+    assert work.app_config.summarization.enabled is True
 
     gone_session = _Session(scalar_results=[None])
     handler = _handler(_Barrier(), session=gone_session)
@@ -732,6 +874,46 @@ async def test_authorize_rechecks_platform_policy_owner_preference_and_thread(
     assert await handler._authorize(_claim(), THREAD_ID) is None
 
 
+@pytest.mark.asyncio
+async def test_handler_applies_current_database_policy_to_base_compaction_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def resolve(*_args, **_kwargs):
+        return _project_context()
+
+    async def materialize(*_args, **_kwargs):
+        return _policy(), 23
+
+    monkeypatch.setattr(
+        seal_worker_module,
+        "resolve_project_context_in_transaction",
+        resolve,
+    )
+    monkeypatch.setattr(
+        seal_worker_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_with_revision_in_session",
+        staticmethod(materialize),
+    )
+    barrier = _PolicySensitiveBarrier(compact_results=[_drained()])
+    handler = _handler(
+        barrier,
+        session=_Session(scalar_results=[True]),
+        app_config=AppConfig.model_validate(
+            {
+                "sandbox": {
+                    "use": "deerflow.sandbox.local:LocalSandboxProvider",
+                },
+                "summarization": {"enabled": False},
+            }
+        ),
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.status == "succeeded"
+
+
 # ---------------------------------------------------------------------------
 # Worker handler: drain loop and settlement
 # ---------------------------------------------------------------------------
@@ -743,7 +925,7 @@ async def _run_to_settlement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> JobSettlement:
     async def authorize(_claim, _thread_id):
-        return _private_context()
+        return _seal_work()
 
     monkeypatch.setattr(handler, "_authorize", authorize)
     outcome = await handler(claim, _Authority())
@@ -796,7 +978,7 @@ async def test_handler_yields_noop_when_a_live_run_preempts_the_drain(
     barrier = _Barrier(
         compact_results=[
             _compacted("cp-1"),
-            PrivateWorkConflict("a live Run owns the thread"),
+            PrivateWorkThreadBusy("a live Run owns the thread"),
         ],
     )
     session = _Session()
@@ -845,12 +1027,71 @@ async def test_handler_fails_closed_on_drain_errors(
     handler = _handler(barrier)
 
     async def authorize(_claim, _thread_id):
-        return _private_context()
+        return _seal_work()
 
     monkeypatch.setattr(handler, "_authorize", authorize)
     outcome = await handler(_claim(), _Authority())
     assert outcome.status == "failed"
     assert outcome.public_error_code == "MEMORY_SEAL_DRAIN_FAILED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "expected_code"),
+    [
+        ("source_too_large", "MEMORY_SEAL_SOURCE_TOO_LARGE"),
+        (
+            "prompt_budget_too_small",
+            "MEMORY_SEAL_PROMPT_BUDGET_TOO_SMALL",
+        ),
+        ("compaction_failed", "MEMORY_SEAL_DRAIN_FAILED"),
+    ],
+)
+async def test_handler_preserves_permanent_compaction_failure_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    expected_code: str,
+) -> None:
+    barrier = _Barrier(
+        compact_results=[
+            ThreadCompactionResult(
+                thread_id=THREAD_ID,
+                compacted=False,
+                reason=reason,
+            )
+        ],
+    )
+    handler = _handler(barrier)
+
+    async def authorize(_claim, _thread_id):
+        return _seal_work()
+
+    monkeypatch.setattr(handler, "_authorize", authorize)
+
+    outcome = await handler(_claim(), _Authority())
+
+    assert outcome.status == "failed"
+    assert outcome.public_error_code == expected_code
+
+
+@pytest.mark.asyncio
+async def test_handler_reports_disabled_compaction_instead_of_successful_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = _Barrier(
+        compact_results=[PrivateWorkCompactionDisabled("memory-seal-test")],
+    )
+    handler = _handler(barrier)
+
+    async def authorize(_claim, _thread_id):
+        return _seal_work()
+
+    monkeypatch.setattr(handler, "_authorize", authorize)
+
+    outcome = await handler(_claim(), _Authority())
+
+    assert outcome.status == "failed"
+    assert outcome.public_error_code == "MEMORY_SEAL_COMPACTION_DISABLED"
 
 
 @pytest.mark.asyncio
@@ -863,7 +1104,7 @@ async def test_handler_rejects_stalled_drain_progress(
     handler = _handler(barrier)
 
     async def authorize(_claim, _thread_id):
-        return _private_context()
+        return _seal_work()
 
     monkeypatch.setattr(handler, "_authorize", authorize)
     outcome = await handler(_claim(), _Authority())

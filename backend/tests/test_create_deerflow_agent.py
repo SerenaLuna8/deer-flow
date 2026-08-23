@@ -1,14 +1,33 @@
 """Tests for create_deerflow_agent SDK entry point."""
 
-from typing import get_type_hints
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from typing import ClassVar, get_type_hints
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import Next, Prev, RuntimeFeatures
+from deerflow.agents.middlewares.host_execution_batch_barrier_middleware import (
+    HostExecutionBatchBarrierMiddleware,
+)
+from deerflow.agents.middlewares.subagent_limit_middleware import (
+    SubagentLimitMiddleware,
+)
+from deerflow.agents.middlewares.tool_call_control import (
+    TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY,
+    TOOL_CALL_CONTROL_STATE_KEY,
+    ToolCallControl,
+)
+from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    ToolErrorHandlingMiddleware,
+)
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
+from deerflow.sandbox.sandbox import AuthorizationRevoked
+from deerflow.subagents.binding import ParentExecutionBindingFactory
 
 
 def _make_mock_model():
@@ -32,7 +51,7 @@ def test_minimal_creation(mock_create_agent):
     result = create_deerflow_agent(model)
 
     mock_create_agent.assert_called_once()
-    assert result is mock_create_agent.return_value
+    assert result._compiled_graph is mock_create_agent.return_value
     call_kwargs = mock_create_agent.call_args[1]
     assert call_kwargs["model"] is model
     assert call_kwargs["system_prompt"] is None
@@ -97,7 +116,11 @@ def test_middleware_takeover(mock_create_agent):
     custom_mw = MagicMock(name="custom_middleware")
     custom_mw.name = "custom"
 
-    create_deerflow_agent(_make_mock_model(), middleware=[custom_mw])
+    create_deerflow_agent(
+        _make_mock_model(),
+        middleware=[custom_mw],
+        workload_profile="research",
+    )
 
     call_kwargs = mock_create_agent.call_args[1]
     assert call_kwargs["middleware"] == [custom_mw]
@@ -465,6 +488,121 @@ def test_extra_unanchored_before_clarification(mock_create_agent):
     mw_types = [type(m).__name__ for m in middleware]
     assert mw_types[-1] == "ClarificationMiddleware"
     assert mw_types[-2] == "MyPlain"
+    assert middleware.count(plain) == 1
+
+
+@pytest.mark.parametrize("position", [Next, Prev], ids=["next", "prev"])
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        ToolCallControl,
+        HostExecutionBatchBarrierMiddleware,
+        SubagentLimitMiddleware,
+    ],
+    ids=["tool-call-control", "host-execution-batch-barrier", "subagent-limit"],
+)
+def test_after_model_extra_cannot_anchor_around_protected_arbitration(
+    position,
+    anchor,
+):
+    from langchain.agents.middleware import AgentMiddleware
+
+    @position(anchor)
+    class AnchoredAfterModel(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    with (
+        patch(
+            "deerflow.agents.factory.create_agent",
+            return_value=MagicMock(),
+        ),
+        pytest.raises(
+            ValueError,
+            match=("after_model hooks cannot use @Next/@Prev.*protected custom band.*full takeover"),
+        ),
+    ):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False, subagent=True),
+            extra_middleware=[AnchoredAfterModel()],
+        )
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_unanchored_after_model_extra_uses_protected_custom_band(
+    mock_create_agent,
+):
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.manifest import (
+        MiddlewareHook,
+        MiddlewarePhase,
+        middleware_dispatch_order,
+        middleware_layer_metadata,
+    )
+
+    class UnanchoredAfterModel(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    custom = UnanchoredAfterModel()
+    mock_create_agent.return_value = MagicMock()
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(
+            sandbox=False,
+            subagent=True,
+            token_budget=True,
+        ),
+        extra_middleware=[custom],
+    )
+
+    chain = mock_create_agent.call_args.kwargs["middleware"]
+    metadata = middleware_layer_metadata(custom)
+    assert metadata is not None
+    assert metadata.phase is MiddlewarePhase.CUSTOM
+    relevant = {
+        "UnanchoredAfterModel",
+        "TokenBudgetMiddleware",
+        "SubagentLimitMiddleware",
+        "ToolCallControl",
+    }
+    assert tuple(name for name in middleware_dispatch_order(chain, MiddlewareHook.AFTER_MODEL) if name in relevant) == (
+        "UnanchoredAfterModel",
+        "TokenBudgetMiddleware",
+        "SubagentLimitMiddleware",
+        "ToolCallControl",
+    )
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_anchored_after_model_extra_keeps_position_without_tool_call_control(
+    mock_create_agent,
+):
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.clarification_middleware import (
+        ClarificationMiddleware,
+    )
+
+    @Prev(ClarificationMiddleware)
+    class PositionedAfterModel(AgentMiddleware):
+        def after_model(self, state, runtime):
+            return None
+
+    custom = PositionedAfterModel()
+    mock_create_agent.return_value = MagicMock()
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, loop_detection=False),
+        extra_middleware=[custom],
+    )
+
+    chain = mock_create_agent.call_args.kwargs["middleware"]
+    assert chain.index(custom) == next(index for index, middleware in enumerate(chain) if isinstance(middleware, ClarificationMiddleware)) - 1
 
 
 # ---------------------------------------------------------------------------
@@ -612,36 +750,39 @@ def test_extra_with_middleware_takeover_conflict():
 
 
 # ---------------------------------------------------------------------------
-# 29. LoopDetectionMiddleware is always present
+# 29. ToolCallControl is the sole SDK auto-path enforcement adapter
 # ---------------------------------------------------------------------------
 @patch("deerflow.agents.factory.create_agent")
-def test_loop_detection_always_present(mock_create_agent):
+def test_tool_call_control_is_present_without_legacy_loop_detection(
+    mock_create_agent,
+):
     mock_create_agent.return_value = MagicMock()
     create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(sandbox=False))
 
     call_kwargs = mock_create_agent.call_args[1]
     mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
-    assert "LoopDetectionMiddleware" in mw_types
+    assert "ToolCallControl" in mw_types
+    assert "LoopDetectionMiddleware" not in mw_types
 
 
 # ---------------------------------------------------------------------------
-# 30. LoopDetection before Clarification
+# 30. ToolCallControl before Clarification
 # ---------------------------------------------------------------------------
 @patch("deerflow.agents.factory.create_agent")
-def test_loop_detection_before_clarification(mock_create_agent):
+def test_tool_call_control_before_clarification(mock_create_agent):
     mock_create_agent.return_value = MagicMock()
     create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(sandbox=False))
 
     call_kwargs = mock_create_agent.call_args[1]
     mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
-    loop_idx = mw_types.index("LoopDetectionMiddleware")
+    control_idx = mw_types.index("ToolCallControl")
     clar_idx = mw_types.index("ClarificationMiddleware")
-    assert loop_idx < clar_idx
-    assert loop_idx == clar_idx - 1
+    assert control_idx < clar_idx
+    assert control_idx == clar_idx - 1
 
 
 # ---------------------------------------------------------------------------
-# 30b. loop_detection=False skips LoopDetectionMiddleware
+# 30b. loop_detection=False skips ToolCallControl
 # ---------------------------------------------------------------------------
 @patch("deerflow.agents.factory.create_agent")
 def test_loop_detection_disabled(mock_create_agent):
@@ -653,36 +794,288 @@ def test_loop_detection_disabled(mock_create_agent):
 
     call_kwargs = mock_create_agent.call_args[1]
     mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "ToolCallControl" not in mw_types
     assert "LoopDetectionMiddleware" not in mw_types
 
 
 # ---------------------------------------------------------------------------
-# 30c. loop_detection=<custom AgentMiddleware> replaces the default
+# 30c. loop_detection=<custom AgentMiddleware> has an explicit migration error
 # ---------------------------------------------------------------------------
-@patch("deerflow.agents.factory.create_agent")
-def test_loop_detection_custom_middleware(mock_create_agent):
+def test_loop_detection_custom_middleware_requires_explicit_extension_seam():
     from langchain.agents.middleware import AgentMiddleware as AM
-
-    mock_create_agent.return_value = MagicMock()
 
     class MyLoopDetection(AM):
         pass
 
     custom = MyLoopDetection()
+    with pytest.raises(
+        ValueError,
+        match="extra_middleware.*full takeover",
+    ):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False, loop_detection=custom),
+        )
+
+
+@pytest.mark.parametrize("loop_detection", [None, "enabled", 1])
+def test_loop_detection_compatibility_switch_is_strict(loop_detection):
+    with pytest.raises(TypeError, match="loop_detection"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(
+                sandbox=False,
+                loop_detection=loop_detection,  # type: ignore[arg-type]
+            ),
+        )
+
+
+@pytest.mark.parametrize("workload_profile", ["", "batch", None, [], {}])
+def test_workload_profile_is_strict(workload_profile):
+    with pytest.raises(ValueError, match="workload_profile"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            workload_profile=workload_profile,  # type: ignore[arg-type]
+        )
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_cached_sdk_control_requires_and_isolates_invocation_scope(
+    mock_create_agent,
+):
+    mock_create_agent.return_value = MagicMock()
     create_deerflow_agent(
         _make_mock_model(),
-        features=RuntimeFeatures(sandbox=False, loop_detection=custom),
+        features=RuntimeFeatures(sandbox=False),
+        workload_profile="research",
     )
 
-    call_kwargs = mock_create_agent.call_args[1]
-    middleware = call_kwargs["middleware"]
-    assert custom in middleware
-    mw_types = [type(m).__name__ for m in middleware]
-    # Default LoopDetectionMiddleware must not also appear.
-    assert "LoopDetectionMiddleware" not in mw_types
-    # Custom replacement sits immediately before TokenBudgetMiddleware and ClarificationMiddleware.
-    assert mw_types[-1] == "ClarificationMiddleware"
-    assert mw_types[-2] == "MyLoopDetection"
+    control = next(middleware for middleware in mock_create_agent.call_args.kwargs["middleware"] if isinstance(middleware, ToolCallControl))
+    runtime = MagicMock()
+    runtime.context = {}
+    with pytest.raises(RuntimeError, match="explicit invocation scope missing"):
+        control.before_agent({"messages": []}, runtime)
+
+    runtime.context = {
+        TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY: "sdk-invocation-a",
+    }
+    first = control.before_agent({"messages": []}, runtime)
+    admitted = control.after_model(
+        {
+            "messages": [
+                HumanMessage(content="research Agent history"),
+                AIMessage(
+                    id="sdk-proposal-a",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "web_search",
+                            "args": {"query": "Agent history"},
+                            "id": "sdk-call-a",
+                        }
+                    ],
+                ),
+            ],
+            TOOL_CALL_CONTROL_STATE_KEY: first[TOOL_CALL_CONTROL_STATE_KEY],
+        },
+        runtime,
+    )
+    assert admitted is not None
+    assert admitted[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {
+        "web_search": 1,
+    }
+
+    runtime.context = {
+        TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY: "sdk-invocation-b",
+    }
+    second = control.before_agent(
+        {
+            "messages": [],
+            TOOL_CALL_CONTROL_STATE_KEY: admitted[TOOL_CALL_CONTROL_STATE_KEY],
+        },
+        runtime,
+    )
+
+    assert first[TOOL_CALL_CONTROL_STATE_KEY]["scope_id"] == "sdk-invocation-a"
+    assert second[TOOL_CALL_CONTROL_STATE_KEY]["scope_id"] == "sdk-invocation-b"
+    assert second[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {}
+
+
+def test_sdk_graph_invoke_supplies_invocation_scope_and_calls_the_model():
+    class CountingModel(GenericFakeChatModel):
+        calls: ClassVar[int] = 0
+
+        def bind_tools(self, tools, **kwargs):
+            del tools, kwargs
+            return self
+
+        def _generate(self, *args, **kwargs):
+            type(self).calls += 1
+            return super()._generate(*args, **kwargs)
+
+    model = CountingModel(messages=iter([AIMessage(content="complete")]))
+    graph = create_deerflow_agent(
+        model,
+        features=RuntimeFeatures(sandbox=False),
+    )
+
+    result = graph.invoke({"messages": [HumanMessage(content="research")]})
+
+    assert result["messages"][-1].content == "complete"
+    assert CountingModel.calls == 1
+
+
+def test_sdk_graph_stream_supplies_invocation_scope() -> None:
+    class StreamModel(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            del tools, kwargs
+            return self
+
+    graph = create_deerflow_agent(
+        StreamModel(messages=iter([AIMessage(content="stream complete")])),
+        features=RuntimeFeatures(sandbox=False),
+    )
+
+    chunks = list(graph.stream({"messages": [HumanMessage(content="research")]}))
+
+    assert any(message.content == "stream complete" for chunk in chunks for update in chunk.values() if isinstance(update, dict) for message in update.get("messages", []))
+
+
+@pytest.mark.asyncio
+async def test_sdk_graph_async_entrypoints_supply_invocation_scope() -> None:
+    class AsyncModel(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            del tools, kwargs
+            return self
+
+    graph = create_deerflow_agent(
+        AsyncModel(
+            messages=iter(
+                [
+                    AIMessage(content="ainvoke complete"),
+                    AIMessage(content="astream complete"),
+                ]
+            )
+        ),
+        features=RuntimeFeatures(sandbox=False),
+    )
+
+    invoked = await graph.ainvoke(
+        {"messages": [HumanMessage(content="research")]},
+    )
+    streamed = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="research again")]},
+        )
+    ]
+
+    assert invoked["messages"][-1].content == "ainvoke complete"
+    assert any(message.content == "astream complete" for chunk in streamed for update in chunk.values() if isinstance(update, dict) for message in update.get("messages", []))
+
+
+@patch("deerflow.agents.factory.create_agent")
+@pytest.mark.asyncio
+async def test_sdk_public_entrypoints_generate_distinct_invocation_scopes(
+    mock_create_agent,
+):
+    compiled_graph = MagicMock()
+    compiled_graph.invoke.return_value = {"mode": "invoke"}
+    compiled_graph.stream.return_value = iter([{"mode": "stream"}])
+    compiled_graph.ainvoke = AsyncMock(return_value={"mode": "ainvoke"})
+
+    async def async_chunks():
+        yield {"mode": "astream"}
+
+    compiled_graph.astream.side_effect = lambda *args, **kwargs: async_chunks()
+    mock_create_agent.return_value = compiled_graph
+    graph = create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False),
+    )
+    caller_context = {
+        "caller": "sdk-test",
+        TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY: "caller-supplied-value",
+    }
+
+    assert graph.invoke({"messages": []}, context=caller_context) == {
+        "mode": "invoke",
+    }
+    assert list(graph.stream({"messages": []}, context=caller_context)) == [
+        {"mode": "stream"},
+    ]
+    assert await graph.ainvoke({"messages": []}, context=caller_context) == {
+        "mode": "ainvoke",
+    }
+    assert [chunk async for chunk in graph.astream({"messages": []}, context=caller_context)] == [{"mode": "astream"}]
+
+    contexts = [
+        compiled_graph.invoke.call_args.kwargs["context"],
+        compiled_graph.stream.call_args.kwargs["context"],
+        compiled_graph.ainvoke.call_args.kwargs["context"],
+        compiled_graph.astream.call_args.kwargs["context"],
+    ]
+    invocation_ids = {context[TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY] for context in contexts}
+    assert len(invocation_ids) == 4
+    assert "caller-supplied-value" not in invocation_ids
+    assert all(context["caller"] == "sdk-test" for context in contexts)
+    assert caller_context[TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY] == ("caller-supplied-value")
+
+
+def test_sync_model_call_without_private_authority_delegates() -> None:
+    middleware = ToolErrorHandlingMiddleware()
+    request = SimpleNamespace(runtime=SimpleNamespace(context={}))
+    response = object()
+
+    assert middleware.wrap_model_call(request, lambda _request: response) is response
+
+
+@pytest.mark.parametrize(
+    "authority_context",
+    [
+        {"private_scope": object()},
+        {"__authorization_boundary": object()},
+        {"__authorization_checker": lambda: None},
+    ],
+)
+def test_sync_model_call_with_private_authority_fails_closed(
+    authority_context,
+) -> None:
+    middleware = ToolErrorHandlingMiddleware()
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(context=authority_context),
+    )
+    handler_called = False
+
+    def handler(_request):
+        nonlocal handler_called
+        handler_called = True
+        return object()
+
+    with pytest.raises(AuthorizationRevoked):
+        middleware.wrap_model_call(request, handler)
+
+    assert not handler_called
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_research_profile_is_bound_for_delegated_sdk_execution(
+    mock_create_agent,
+):
+    mock_create_agent.return_value = MagicMock()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, subagent=True),
+        workload_profile="research",
+    )
+
+    bound_task = next(tool for tool in mock_create_agent.call_args.kwargs["tools"] if tool.name == "task")
+    binding_factory = next(cell.cell_contents for cell in bound_task.coroutine.__closure__ or () if type(cell.cell_contents) is ParentExecutionBindingFactory)
+    profile = binding_factory.tool_call_control_profile
+
+    assert profile.workload_profile == "research"
+    assert profile.lead.tool_budget.limit_for("web_search").hard_limit == 30
+    assert profile.subagent.tool_budget.limit_for("web_search").hard_limit == 20
 
 
 # ---------------------------------------------------------------------------
@@ -815,8 +1208,8 @@ def test_full_chain_order(mock_create_agent):
         "TitleMiddleware",
         "MyMemory",
         "ViewImageMiddleware",
+        "ToolCallControl",
         "SubagentLimitMiddleware",
-        "LoopDetectionMiddleware",
         "ClarificationMiddleware",
     ]
     assert mw_types == expected_order

@@ -133,6 +133,9 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
         "LLM_PROVIDER_UNAVAILABLE",
         "LLM_REQUEST_FAILED",
         "LLM_CIRCUIT_OPEN",
+        "RUN_POLICY_STALE",
+        "TOOL_CALL_CONTROL_STATE_INVALID",
+        "LOOP_FINALIZATION_FAILED",
     }
     assert StreamFrame.end(
         status="error",

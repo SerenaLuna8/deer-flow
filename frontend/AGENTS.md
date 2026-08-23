@@ -130,6 +130,17 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Conversation rendering is a lead-Agent projection. Subagent/middleware events
   use their dedicated task/progress surfaces and must not be attached to an
   arbitrary assistant message.
+- The Main Project Chat composer may select `Research` for the next Run only.
+  Promote that choice through the reserved admission context, clear it only
+  after authoritative Run admission succeeds, and render the server-confirmed
+  effective profile. Research is workload policy, not a capability or model
+  instruction, and is unavailable on unrelated chat surfaces.
+- Repeated-call, per-tool-budget, and Sub-Agent-total progress are three strict
+  event contracts. Merge live custom frames with durable Run Event replay by
+  deterministic `observation_id`; refresh, reconnect, or duplicated middleware
+  execution must not double-render them. A budget-exhausted observation remains
+  non-terminal unless a later terminal failure supplies a more specific direct
+  cause.
 
 ### Governed assets and runtime state
 

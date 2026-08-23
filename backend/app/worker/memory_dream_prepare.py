@@ -18,14 +18,22 @@ from app.personalization.repository import (
 from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
+    PrivateWorkCompactionDisabled,
     PrivateWorkConflict,
     PrivateWorkError,
     PrivateWorkNotFound,
+    PrivateWorkThreadBusy,
 )
-from app.private_work.memory_dream_service import MemoryDreamAdmissionService
+from app.private_work.memory_dream_service import (
+    MemoryDreamAdmissionService,
+    MemoryDreamModelUnavailable,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.system_runtime_settings.app_config_projection import (
+    project_memory_compaction_app_config_policy,
+)
 from app.system_runtime_settings.materializer import SystemRuntimePolicyMaterializer
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
@@ -47,6 +55,10 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 _MEMORY_DREAM_PREPARE_REQUEST_ID = "memory-dream-prepare-worker"
 _DREAM_PREPARE_KEEP: tuple[str, int] = ("messages", 0)
+_DREAM_PREPARE_COMPACTION_FAILURE_CODES = {
+    "prompt_budget_too_small": "MEMORY_DREAM_PREPARE_PROMPT_BUDGET_TOO_SMALL",
+    "source_too_large": "MEMORY_DREAM_PREPARE_SOURCE_TOO_LARGE",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +67,7 @@ class _PrepareWork:
     scope: MemoryDocumentScope
     thread_id: str
     request_id: str
+    app_config: AppConfig
 
 
 class MemoryDreamPrepareJobHandler:
@@ -185,6 +198,9 @@ class MemoryDreamPrepareJobHandler:
                 scope=scope,
                 thread_id=row.thread_id,
                 request_id=row.request_id,
+                app_config=self._app_config.with_runtime_policy(
+                    project_memory_compaction_app_config_policy(policy),
+                ),
             )
 
     async def __call__(
@@ -225,15 +241,25 @@ class MemoryDreamPrepareJobHandler:
                     work.thread_id,
                     force=True,
                     keep=_DREAM_PREPARE_KEEP,
-                    app_config=self._app_config,
+                    app_config=work.app_config,
                 )
                 await authority.heartbeat()
             except asyncio.CancelledError:
                 raise
-            except PrivateWorkConflict:
+            except PrivateWorkThreadBusy:
                 return self._failure_settlement(
                     claim,
                     "MEMORY_DREAM_PREPARE_THREAD_BUSY",
+                )
+            except PrivateWorkCompactionDisabled:
+                return self._failure_settlement(
+                    claim,
+                    "MEMORY_DREAM_PREPARE_COMPACTION_DISABLED",
+                )
+            except PrivateWorkConflict:
+                return self._failure_settlement(
+                    claim,
+                    "MEMORY_DREAM_PREPARE_HEAD_CHANGED",
                 )
             except PrivateWorkNotFound:
                 return self._cancel_settlement(claim)
@@ -272,7 +298,10 @@ class MemoryDreamPrepareJobHandler:
             if result.reason != "not_enough_messages":
                 return self._failure_settlement(
                     claim,
-                    "MEMORY_DREAM_PREPARE_DRAIN_FAILED",
+                    _DREAM_PREPARE_COMPACTION_FAILURE_CODES.get(
+                        result.reason or "",
+                        "MEMORY_DREAM_PREPARE_DRAIN_FAILED",
+                    ),
                 )
             return self._final_settlement(claim, work)
 
@@ -364,7 +393,7 @@ class MemoryDreamPrepareJobHandler:
                     session,
                     context,
                     work.thread_id,
-                    app_config=self._app_config,
+                    app_config=work.app_config,
                 )
                 # The barrier now holds the Thread row.  Only then may the
                 # preparation row be locked/updated, matching admission order.
@@ -386,12 +415,24 @@ class MemoryDreamPrepareJobHandler:
                         now=now,
                     )
                     return
-                admitted = await self._admission.admit(
-                    session,
-                    work.scope,
-                    trigger="manual_dream",
-                    now=now,
-                )
+                try:
+                    admitted = await self._admission.admit(
+                        session,
+                        work.scope,
+                        trigger="manual_dream",
+                        now=now,
+                    )
+                except MemoryDreamModelUnavailable:
+                    await repository.retry_or_dead(
+                        work.scope,
+                        job_id=claim.job_id,
+                        lease_token=claim.lease_token,
+                        public_error_code="MEMORY_DREAM_MODEL_UNAVAILABLE",
+                        retry_initial_seconds=self._retry_initial_seconds,
+                        retry_max_seconds=self._retry_max_seconds,
+                        now=now,
+                    )
+                    return
                 await repository.link_dream(
                     work.scope,
                     job_id=claim.job_id,

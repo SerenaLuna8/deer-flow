@@ -680,7 +680,7 @@ class SkillDesignRepository:
                     "sha256": hashlib.sha256(item.content).hexdigest(),
                     "size_bytes": len(item.content),
                 }
-                for item in files
+                for item in sorted(files, key=lambda value: value.path)
             ],
             ensure_ascii=False,
             separators=(",", ":"),

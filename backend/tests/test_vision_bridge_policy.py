@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from app.system_runtime_settings.materializer import _materialize_exact
 from app.system_runtime_settings.models import (
     DEFAULT_VISION_BRIDGE_MODEL_NAME,
     AgentRuntimePolicyValue,
@@ -13,11 +12,9 @@ from app.system_runtime_settings.models import (
     default_policy_value,
 )
 from app.system_runtime_settings.validation import (
-    LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
     RUNTIME_POLICY_SCHEMA_VERSION,
     RuntimePolicyInvalid,
     canonical_policy_payload,
-    canonical_policy_payload_for_schema,
     parse_policy_value,
 )
 from deerflow.config.app_config import AppConfig
@@ -93,33 +90,13 @@ def test_policy_rejects_unknown_contract_version() -> None:
         VisionBridgePolicy(contract_version="vision.bridge.v2")
 
 
-def test_legacy_v2_payload_materializes_with_bridge_disabled() -> None:
-    legacy_value = AgentRuntimePolicyValue().model_dump(mode="json")
-    legacy_value.pop("vision_bridge")
-    canonical = canonical_policy_payload_for_schema(
-        "agent_runtime",
-        legacy_value,
-        schema_version=LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
-    )
-
-    materialized = _materialize_exact(
-        "agent_runtime",
-        schema_version=canonical.schema_version,
-        value=canonical.value,
-        checksum=canonical.checksum,
-    )
-
-    assert isinstance(materialized, AgentRuntimePolicyValue)
-    assert materialized.vision_bridge.model_name is None
-
-
-def test_new_policy_payload_uses_schema_v3_and_includes_bridge() -> None:
+def test_new_policy_payload_uses_schema_v4_and_includes_bridge() -> None:
     canonical = canonical_policy_payload(
         "agent_runtime",
         AgentRuntimePolicyValue(),
     )
 
-    assert canonical.schema_version == RUNTIME_POLICY_SCHEMA_VERSION == 3
+    assert canonical.schema_version == RUNTIME_POLICY_SCHEMA_VERSION == 4
     assert canonical.value["vision_bridge"] == {
         "model_name": None,
         "timeout_seconds": 60,

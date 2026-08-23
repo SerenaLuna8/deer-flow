@@ -177,6 +177,9 @@ export const zhCN: Translations = {
     proModeDescription: "开启扩展思考，采用中等推理强度，平衡质量与耗时",
     ultraMode: "Ultra",
     ultraModeDescription: "开启扩展思考，采用高推理强度，适合复杂任务",
+    researchWorkload: "深度研究",
+    researchWorkloadDescription:
+      "仅用于下一次发送；Run 准入后自动复位为普通对话。",
     searchModels: "搜索模型...",
     surpriseMe: "小惊喜",
     surpriseMePrompt: "给我一个小惊喜吧",
@@ -204,6 +207,10 @@ export const zhCN: Translations = {
       "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
     compactSkipped: "当前上下文还不需要压缩。",
     compactFailed: "上下文压缩失败。",
+    compactSourceTooLarge:
+      "一个完整对话轮次无法在有界工作量内安全压缩。请缩小该轮内容，或联系平台管理员提高摘要预算。",
+    compactPromptBudgetTooSmall:
+      "摘要 Token 预算不足以容纳压缩提示词，请联系平台管理员提高预算。",
     dreamQueued: "已开始整理 {count} 条记忆。",
     dreamAlreadyRunning: "记忆整理任务正在运行。",
     dreamNothingPending: "当前没有等待整理的记忆。",
@@ -214,6 +221,8 @@ export const zhCN: Translations = {
       "请在 /dream-restore 后添加一个正整数版本号。",
     dreamAttachmentsUnsupported: "记忆命令不能携带附件。",
     dreamFailed: "记忆整理启动失败。",
+    dreamModelUnavailable:
+      "当前配置的 Dream 模型不可用。请联系平台管理员选择可用模型后重试。",
     dreamRequiresThread: "/Dream 只能在已有对话中执行。",
     dreamPreparationStarted: "已在后台开始准备 Dream。",
     dreamPreparationQueued: "Dream 准备任务正在排队。",
@@ -557,6 +566,8 @@ export const zhCN: Translations = {
     dreamAlreadyRunning: "记忆整理任务正在运行。",
     dreamNothingPending: "当前没有等待整理的记忆。",
     dreamFailed: "记忆整理启动失败。",
+    dreamModelUnavailable:
+      "当前配置的 Dream 模型不可用。请联系平台管理员选择可用模型后重试。",
     restoreSucceeded: (version) => `已恢复为新版本 ${version}。`,
     restoreFailed: "记忆版本恢复失败。",
     autoDream: "自动整理",
@@ -2305,6 +2316,21 @@ export const zhCN: Translations = {
     providerUnavailableTitle: "模型服务暂时不可用",
     providerUnavailableDescription:
       "Worker 重试后仍无法连接所选模型服务。请检查 Worker 网络或代理配置，然后重试此消息。",
+    modelQuotaExceededTitle: "模型额度已用尽",
+    modelQuotaExceededDescription:
+      "已配置模型的服务商额度已用尽。请增加额度或选择可用模型后重试。",
+    modelAuthenticationFailedTitle: "模型认证失败",
+    modelAuthenticationFailedDescription:
+      "所选模型的认证被服务商拒绝。请替换或核对该模型配置的 API Key 后重试。",
+    modelProviderBusyTitle: "模型服务繁忙",
+    modelProviderBusyDescription:
+      "Worker 重试后模型服务仍然繁忙。请稍后重试，或选择其他可用模型。",
+    modelCircuitOpenTitle: "模型请求暂时熔断",
+    modelCircuitOpenDescription:
+      "近期模型服务失败后，请求熔断器仍处于打开状态。请等待恢复或核验服务商后重试。",
+    modelRequestFailedTitle: "模型请求失败",
+    modelRequestFailedDescription:
+      "模型请求重试后仍失败。现有公开证据无法进一步区分服务商、代理或 Worker 主机网络中的直接原因。",
     runAdmissionNotConfirmedDescription:
       "运行未开始：会话可能正在运行或状态已变化。输入已保留，请稍后重试。",
     restoreFailedInput: "恢复到输入框",
@@ -2316,6 +2342,36 @@ export const zhCN: Translations = {
     loopSafetyLimitTitle: "重复操作触发安全上限",
     loopSafetyLimitDescription:
       "本次运行已停止。已有回答或文件属于部分结果；本次失败原因是循环安全限制。",
+    loopFinalizationFailedTitle: "循环收尾失败",
+    loopFinalizationFailedDescription:
+      "触发重复调用上限后，模型仍尝试调用工具或没有返回可见的无工具最终回答，因此本次运行无法完成收尾。",
+    toolExecutionFailedTitle: "工具执行失败",
+    toolExecutionFailedDescription:
+      "工具执行返回了明确失败，导致本次运行无法完成；此状态不会展示工具参数或私有输出。",
+    runPolicyStaleTitle: "运行策略不可用",
+    runPolicyStaleDescription:
+      "本次 Run Snapshot 冻结的运行策略无法物化，因此执行已按安全原则拒绝。请核验当前策略后新建运行。",
+    toolCallControlStateInvalidTitle: "工具调用控制状态无效",
+    toolCallControlStateInvalidDescription:
+      "检查点中的工具调用控制状态与冻结策略或执行作用域不一致，因此本次运行已按安全原则失败。",
+    toolCallControl: {
+      progressLabel: "运行控制进度",
+      repeatedWarningTitle: "检测到重复工具调用模式",
+      repeatedWarningDescription: (count, hardLimit) =>
+        `同一组工具调用已出现 ${count} 次（上限 ${hardLimit} 次）。Agent 可调整策略，或基于已有证据完成结果。`,
+      repeatedLimitTitle: "已达到重复调用上限",
+      repeatedLimitDescription:
+        "重复批次已被拒绝。Agent 仍有一次不调用工具的收尾机会，以保留可用的部分结果。",
+      toolBudgetWarningTitle: (toolName) => `${toolName} 即将达到调用额度`,
+      toolBudgetWarningDescription: (count, hardLimit) =>
+        `已准入 ${count}/${hardLimit} 次调用，剩余额度应保留给尚缺的关键证据。`,
+      toolBudgetExhaustedTitle: (toolName) => `${toolName} 调用额度已用尽`,
+      toolBudgetExhaustedDescription:
+        "运行仍可使用已有证据和其他工具继续整理结果；额度状态本身不是终止失败。",
+      subagentTotalLimitTitle: "已达到 Sub-Agent 委托总数上限",
+      subagentTotalLimitDescription:
+        "本次运行不能再准入新的 Sub-Agent Task；Lead Agent 可继续使用已经收集的结果。",
+    },
     recoveredModelFailuresTitle: "模型调用失败后已恢复",
     recoveredModelFailuresDescription: (count) =>
       `本轮有 ${count} 次模型请求失败。这些请求经重试后恢复；本轮最终状态以运行提示为准。`,
@@ -2356,6 +2412,8 @@ export const zhCN: Translations = {
       "无法解析 Agent 配置的模型。请检查其系统绑定、Current Version 和模型目录中的启用状态后重试。",
     runExecutionProfile: (modelDisplayName, modeName, supportsVision) =>
       `实际执行：${modelDisplayName} · ${modeName} · ${supportsVision ? "支持视觉" : "仅文本"}`,
+    runWorkloadProfile: (profile) =>
+      `服务端确认：${profile === "research" ? "深度研究" : "普通对话"}`,
   },
 
   // Chats
@@ -2548,6 +2606,12 @@ export const zhCN: Translations = {
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",
+    stopReasons: {
+      token_capped: "子任务已达到 Token 预算。",
+      turn_capped: "子任务已达到执行轮次预算。",
+      loop_capped: "子任务因重复工具调用循环而停止。",
+      tool_budget_capped: "子任务已达到工具调用额度；可用结果已保留。",
+    },
   },
 
   // Token Usage

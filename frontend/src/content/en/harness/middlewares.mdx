@@ -19,7 +19,7 @@ This design keeps the agent core simple and stable while allowing rich, composab
 
 ## How the chain works
 
-The middleware chain is built once per agent invocation, based on the current configuration and request parameters. The middlewares run in a defined order:
+The middleware chain is built once per agent invocation, based on the current configuration and request parameters. Middlewares are registered in this canonical order:
 
 1. Runtime middlewares (error handling, thread data, uploads, dangling tool call patching)
 2. `DynamicContextMiddleware` — current date and Run-frozen memory context
@@ -32,14 +32,15 @@ The middleware chain is built once per agent invocation, based on the current co
 9. `ViewImageMiddleware` — image details injection (if model supports vision)
 10. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
 11. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
-12. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
-13. `LoopDetectionMiddleware` — breaks repetitive tool call loops
-14. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
-15. Custom middlewares (if any)
-16. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
-17. `ClarificationMiddleware` — intercepts clarification requests (always last)
+12. `ToolCallControl` — arbitrates repeated calls and per-tool call budgets
+13. `HostExecutionBatchBarrierMiddleware` — isolates Local host-execution approval batches (Local approval profile only)
+14. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
+15. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
+16. Custom middlewares (if any)
+17. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
+18. `ClarificationMiddleware` — intercepts clarification requests (always last)
 
-The ordering is significant. Durable context capture runs before summarization so delegated task dispatches, terminal delegation results, and loaded skill references survive compaction. Clarification always runs last so it can intercept after all other middlewares have had their turn.
+The ordering is significant. Durable context capture runs before summarization so delegated task dispatches, terminal delegation results, and loaded skill references survive compaction. LangGraph dispatches `after_model` hooks in reverse registration order, so the effective path before ToolNode execution is Safety → Custom → Token Budget → Subagent Limit → Host Execution Batch Barrier → ToolCallControl. Custom middleware cannot split the protected Subagent Limit → Host Execution Batch Barrier → ToolCallControl arbitration sequence. Clarification remains the structural registration tail.
 
 ## Middleware reference
 
@@ -51,13 +52,13 @@ Intercepts clarification tool calls and converts them into proper user-facing re
 
 ---
 
-### LoopDetectionMiddleware
+### ToolCallControl
 
-Detects when the agent is making the same tool call repeatedly without making progress. When a loop is detected, the middleware intervenes to break the cycle and prevents the agent from burning turns indefinitely.
+Arbitrates the complete tool-call batch before ToolNode execution. It keeps repeated-call detection separate from per-tool occurrence budgets, admits only the deterministic executable prefix, and leaves unrelated tools available when one tool is exhausted.
 
-Warning interventions are queued per thread and run, then drained on the next model call as a single hidden `HumanMessage(name="loop_warning")` appended after existing tool results. This keeps provider tool-call pairing valid. Run start/end hooks clear stale or undelivered warnings, and hard stops still strip tool calls before forcing a final text response.
+Warnings are neutral advisories queued until existing tool results are paired. Replaying the same checkpoint receipt does not consume the budget again. Only an identical-call hard stop triggers one tool-free finalization; exhausting one tool records a non-terminal observation and does not block other admitted tools such as file writing and delivery.
 
-**Configuration**: built-in, no user configuration.
+**Configuration**: System Runtime Policy in `/admin/settings/system`, frozen for each admitted Run.
 
 ---
 
@@ -227,4 +228,4 @@ class MyMiddleware(AgentMiddleware):
         return state, config
 ```
 
-Custom middlewares are passed to `make_lead_agent` via the `custom_middlewares` parameter in `build_middlewares`. They are injected immediately before `ClarificationMiddleware` at the end of the chain.
+Custom middlewares are passed to `make_lead_agent` via the `custom_middlewares` parameter in `build_middlewares`. In registration order, they sit after Token Budget and before Safety; their `after_model` hooks therefore run after Safety and before Token Budget. They cannot split the protected Subagent Limit → Host Execution Batch Barrier → ToolCallControl arbitration sequence.

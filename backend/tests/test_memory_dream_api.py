@@ -19,6 +19,7 @@ from app.gateway.routers import project_memory as memory_router
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
     PrivateWorkConflict,
+    PrivateWorkDreamModelUnavailable,
     PrivateWorkInvalid,
 )
 from app.private_work.memory_injection import MemoryInjectionAssessment
@@ -385,6 +386,26 @@ async def test_manual_dream_preserves_nothing_pending_response_shape(
         "disposition": "nothing_pending",
         "jobId": None,
         "historyCount": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_manual_dream_exposes_stable_model_unavailable_error(
+    app: tuple[FastAPI, _Service],
+) -> None:
+    value, service = app
+    service.error = PrivateWorkDreamModelUnavailable("memory-dream-api")
+
+    response = await _post(
+        value,
+        f"/api/projects/{uuid.uuid4()}/memory/dream",
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "MEMORY_DREAM_MODEL_UNAVAILABLE",
+        "message": "The configured Dream model is unavailable.",
+        "request_id": "memory-dream-api",
     }
 
 

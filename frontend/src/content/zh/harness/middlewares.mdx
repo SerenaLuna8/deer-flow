@@ -19,7 +19,7 @@ import { Callout } from "nextra/components";
 
 ## 链的工作方式
 
-中间件链在每次 Agent 调用时根据当前配置和请求参数构建一次。中间件按定义的顺序运行：
+中间件链在每次 Agent 调用时根据当前配置和请求参数构建一次。中间件按以下规范顺序注册：
 
 1. 运行时中间件（错误处理、线程数据、上传、悬空工具调用修补）
 2. `DynamicContextMiddleware` — 当前日期和 Run 固定的记忆上下文
@@ -32,14 +32,15 @@ import { Callout } from "nextra/components";
 9. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
 10. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
 11. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
-12. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
-13. `LoopDetectionMiddleware` — 打破重复工具调用循环
-14. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
-15. 自定义中间件（如有）
-16. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
-17. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
+12. `ToolCallControl` — 仲裁重复调用与单工具调用预算
+13. `HostExecutionBatchBarrierMiddleware` — 隔离 Local 主机执行审批批次（仅 Local approval profile）
+14. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
+15. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
+16. 自定义中间件（如有）
+17. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
+18. `ClarificationMiddleware` — 拦截澄清请求（始终作为注册链尾）
 
-顺序很重要。Durable context 会在摘要压缩之前捕获已委托任务的派发状态、终态结果和已加载的技能引用，确保它们不会随原始 transcript 压缩而丢失。澄清总是最后运行，这样它可以在所有其他中间件完成后拦截。
+顺序很重要。Durable context 会在摘要压缩之前捕获已委托任务的派发状态、终态结果和已加载的技能引用，确保它们不会随原始 transcript 压缩而丢失。LangGraph 会按注册顺序的反向 dispatch `after_model` hook，因此 ToolNode 前的有效路径是 Safety → Custom → Token Budget → Subagent Limit → Host Execution Batch Barrier → ToolCallControl。自定义中间件不能切开受保护的 Subagent Limit → Host Execution Batch Barrier → ToolCallControl 仲裁序列。Clarification 保持为结构性的注册链尾。
 
 ## 中间件参考
 
@@ -51,13 +52,13 @@ import { Callout } from "nextra/components";
 
 ---
 
-### LoopDetectionMiddleware
+### ToolCallControl
 
-检测 Agent 是否在没有取得进展的情况下重复进行相同的工具调用。检测到循环时，中间件会介入打破循环，防止 Agent 无限消耗轮次。
+在 ToolNode 执行前仲裁完整工具调用批次。它把重复调用检测与单工具 occurrence 预算保持为两种独立语义，只准入确定性的可执行前缀；某个工具耗尽时，其他工具仍可继续执行。
 
-Warning 介入会按 thread 和 run 排队，并在下一次模型调用时合并为一条隐藏的 `HumanMessage(name="loop_warning")`，追加到已有工具结果之后。这样不会破坏 provider 对 tool-call/tool-message 配对的校验。Run 开始和结束时会清理过期或未送达的 warning；达到 hard stop 时仍会清空 tool calls 并强制生成最终文本回复。
+Warning 是中性的 advisory，会等已有 ToolMessage 配对完成后再注入。相同 checkpoint receipt 的重放不会重复消费预算。只有相同调用集合达到 hard stop 时才执行一次无工具 finalization；单工具预算耗尽只产生非终止 observation，不会阻止文件写入和交付等其他已准入工具。
 
-**配置**：内置，无需用户配置。
+**配置**：平台设置 `/admin/settings/system` 中的 System Runtime Policy；每个已准入 Run 使用冻结值。
 
 ---
 
@@ -213,4 +214,4 @@ class MyMiddleware(AgentMiddleware):
         return state, config
 ```
 
-自定义中间件在链末尾 `ClarificationMiddleware` 之前注入。
+自定义中间件在注册顺序中位于 Token Budget 之后、Safety 之前，因此它的 `after_model` hook 在 Safety 之后、Token Budget 之前运行。它不能切开受保护的 Subagent Limit → Host Execution Batch Barrier → ToolCallControl 仲裁序列。

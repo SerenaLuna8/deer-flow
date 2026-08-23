@@ -176,6 +176,14 @@ _Avoid_: Harness Execution
 The immutable set of exact Agent and Skill definitions, a copied System Model Configuration, exact MCP configuration, their Configuration Secret Generation references, and runtime policy authorized for a Run. It does not preserve destroyed secret material, and Channel delivery secrets are resolved separately from the current Channel configuration.
 _Avoid_: Current configuration
 
+**Run Workload Profile**:
+The server-confirmed `interactive` or `research` workload policy frozen into one Run Snapshot. It selects bounded tool-call and Sub-Agent workload limits, is inherited by hidden Graph Turns and Job Attempts of that Run, and never grants additional tools, project capabilities, or data authority.
+_Avoid_: Agent mode, permission profile, model-selected research
+
+**ToolCallControl**:
+The single Harness arbitration seam that applies frozen repeated-call and per-tool occurrence policy to a model-proposed batch before ToolNode execution. It owns scope and replay receipts, but does not own Sub-Agent concurrency, Token Budget, tool authorization, or approval authority.
+_Avoid_: Loop detector, tool permission policy
+
 **Job**:
 The durable dispatch unit that carries an admitted Run to a Worker. A Job owns scheduling, retry, and dead-letter state, but not the user-visible conversation outcome.
 _Avoid_: Run

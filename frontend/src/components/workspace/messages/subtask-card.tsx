@@ -5,6 +5,7 @@ import {
   Clock3Icon,
   Loader2Icon,
   SparklesIcon,
+  TriangleAlertIcon,
   WrenchIcon,
   XCircleIcon,
 } from "lucide-react";
@@ -76,6 +77,9 @@ export function SubtaskCard({
         ? undefined
         : t.tokenUsage.unavailableShort
     : undefined;
+  const stopReasonLabel = task.stopReason
+    ? t.subtasks.stopReasons[task.stopReason]
+    : undefined;
 
   // The card shows the subagent's step timeline (#3779): its reasoning turns
   // (AI text) interleaved with the tools it ran (by name). See stepsForDisplay
@@ -128,6 +132,7 @@ export function SubtaskCard({
     <ChainOfThought
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
       open={!collapsed}
+      data-subtask-stop-reason={task.stopReason}
     >
       <div
         className={cn("ambilight z-[-1]", visuallyRunning ? "enabled" : "")}
@@ -191,7 +196,10 @@ export function SubtaskCard({
                       task.latestMessage &&
                       hasToolCalls(task.latestMessage)
                         ? explainLastToolCall(task.latestMessage, t)
-                        : (approvalStatusLabel ?? t.subtasks[task.status])}
+                        : (approvalStatusLabel ??
+                          (stopReasonLabel
+                            ? `${t.subtasks[task.status]} · ${stopReasonLabel}`
+                            : t.subtasks[task.status]))}
                     </FlipDisplay>
                   </div>
                 )}
@@ -248,6 +256,12 @@ export function SubtaskCard({
               />
             );
           })}
+          {stopReasonLabel && (
+            <ChainOfThoughtStep
+              label={stopReasonLabel}
+              icon={<TriangleAlertIcon className="size-4 text-amber-600" />}
+            />
+          )}
           {task.status === "completed" && (
             <>
               <ChainOfThoughtStep

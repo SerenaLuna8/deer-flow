@@ -139,8 +139,17 @@ def test_parse_snip_dual_output_bounds_each_segment_independently() -> None:
     assert continuity == max_continuity
     assert tagged_text == SNIP_NOTHING
 
-    with pytest.raises(SnipOutputInvalid):
-        parse_snip_dual_output(f"<continuity>\n{'c' * (MAX_CONTINUITY_CHARS + 1)}\n</continuity>\n(nothing)")
+    oversized_continuity = (
+        "HEAD-" + "c" * (MAX_CONTINUITY_CHARS * 2) + "-TAIL"
+    )
+    bounded_continuity, tagged_text = parse_snip_dual_output(
+        f"<continuity>\n{oversized_continuity}\n</continuity>\n(nothing)"
+    )
+    assert len(bounded_continuity) <= MAX_CONTINUITY_CHARS
+    assert bounded_continuity.startswith("HEAD-")
+    assert bounded_continuity.endswith("-TAIL")
+    assert "\n...\n" in bounded_continuity
+    assert tagged_text == SNIP_NOTHING
 
     prefix = "- [durable] "
     max_tagged = prefix + "x" * (MAX_SNIP_OUTPUT_CHARS - len(prefix))

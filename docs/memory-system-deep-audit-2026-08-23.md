@@ -8,6 +8,10 @@
 >
 > 注意：未提交工作树在审查期间仍有并行用户变更，因而不是不可变快照。本文记录各项
 > 取证当时的源码与运行状态；测试数量是时点证据，不应当作固定基线。
+>
+> **复验更新（2026-08-23）：** 第 1 至第 8 节保留原始审查快照，不能再作为当前
+> 缺陷状态使用。修复后的代码、测试与运行时复验见第 9 节；真实外部模型浏览器验收
+> 尚未执行，因而本文还没有宣称端到端验收完成。
 
 ## 1. 结论
 
@@ -15,7 +19,7 @@ Memory 的核心数据模型、Run 快照注入、SNIP receipt 事务激活以�
 Dream 的冻结、执行、发布状态机有较完整的权限、幂等和并发保护；当前业务库也有
 一次真实成功的自动 Dream 记录。但是，整个端到端功能**不能判定为正常**：
 
-| 编号        | 级别 | 结论                                                                           | 当前状态                               |
+| 编号        | 级别 | 结论                                                                           | 原审查时状态                           |
 | ----------- | ---- | ------------------------------------------------------------------------------ | -------------------------------------- |
 | M-01        | P1   | Memory Seal 与会话 Dream Prepare 没有应用 PostgreSQL 中的 `agent_runtime` 策略 | 当前配置已经命中                       |
 | M-02        | P1   | 永久不可执行的 Seal 被结算成成功 `noop`，随后可被新 ordinal 重复准入           | 缺陷可稳定复现；当前尚未到闲置时间门槛 |
@@ -378,3 +382,85 @@ PYTHONPATH=app:packages/harness uv run python scripts/run_runtime.py -- \
 - pending > 0 + default/dedicated model 不可用 -> 明确 unavailable，不是 empty；
 - oversized first complete turn -> 自动、手工、Seal、Prepare 均有可判别且可前进的结果；
 - full/delta checkpoint -> receipt 仅随 replacement checkpoint 原子激活。
+
+## 9. 修复复验（2026-08-23）
+
+### 9.1 当前结论
+
+本文共提出 **4 项主缺陷**；`M-04 / C-01` 是同一个跨 Memory/Context 的发现，不应
+拆算成两项。当前冻结工作树的代码审查、确定性反例探针与自动化门禁均表明四项缺陷
+已经修复，但需要区分“代码级闭环”和“真实 provider 端到端验收”：
+
+| 编号        | 当前代码判定 | 修复后的行为 |
+| ----------- | ------------ | ------------ |
+| M-01        | 已修复       | Seal 与 Dream Prepare 在授权边界读取当前 PostgreSQL `agent_runtime`，仅投影 Memory/Summarization 策略，并让同一冻结 `AppConfig` 贯穿 drain 和最终 barrier。 |
+| M-02        | 已修复       | 只有真实的活动 Run 抢占可以成功 `noop`；disabled、SNIP 失败及其他冲突均失败结算。同一 Thread activity epoch 的终态失败不会被连续 Scheduler poll 重新准入。 |
+| M-03        | 已修复       | 存在 pending history 或 budget rewrite 时，Dream 模型不可用会返回/记录稳定的 `MEMORY_DREAM_MODEL_UNAVAILABLE`，不再伪装成 `nothing_pending`。 |
+| M-04 / C-01 | 已修复       | 默认 SNIP 对超大完整 turn 使用有界分层投影，保持工具 turn 与原始 receipt identity 完整；手工 `force=True` 可压缩单个超长完整 turn，不可规划输入返回类型化错误。 |
+
+主要实现位置：
+
+- M-01：`backend/app/system_runtime_settings/app_config_projection.py`、
+  `backend/app/worker/memory_seal.py`、
+  `backend/app/worker/memory_dream_prepare.py`；
+- M-02：`backend/app/private_work/memory_seal_service.py`、
+  `backend/app/worker/memory_seal.py`；
+- M-03：`backend/app/private_work/memory_dream_service.py`、
+  `backend/app/scheduler/app.py`、前端 Memory 错误映射；
+- M-04 / C-01：
+  `backend/packages/harness/deerflow/agents/middlewares/summarization_middleware.py`、
+  `backend/packages/harness/deerflow/runtime/context_compaction.py`。
+
+### 9.2 M-04 / C-01 的进展保证
+
+修复不是拆断工具调用或篡改 checkpoint 源消息。默认提示超预算时，系统按完整工具
+turn 建立有界叶片，每个叶片都重复保留工具身份、状态和结果摘要，再对叶片结果做
+有界归并；checkpoint replacement 与 receipt digest 仍绑定原始完整消息。每个叶片、
+归并和修复提示都必须先通过 token budget 检查，并受叶片数与最多 32 次模型调用限制。
+
+若输入结构本身不可投影、预算小到无法容纳最低提示、归并不能收敛或耗尽调用上限，
+系统分别使用 `SnipSourceTooLarge` / `SnipPromptBudgetTooSmall` 结算，而不是对同一个
+不可能前缀永远返回静默 `None`。直接 `/compact`、Seal 和 Dream Prepare 会把这些
+结果映射为稳定错误；前端不再把它们显示成“没有足够消息”或普通跳过。
+
+### 9.3 本轮验证证据
+
+修复后在同一冻结工作树完成：
+
+- 非 PostgreSQL Memory 测试：`489 passed`；
+- PostgreSQL Memory 测试：`45 passed`，使用隔离测试数据库；
+- 前端单元测试：`889 passed`（173 个文件）；
+- 前端 `pnpm check`：ESLint 与 `tsc --noEmit` 通过；
+- 相关后端文件 Ruff check 与 format check 通过；
+- 本地服务重启后，PostgreSQL 17.11、Schema V1、`pg_trgm` readiness 与 Gateway
+  `/health` 均通过。
+
+针对原报告中的真实 Thread
+`2d57b2a3-3624-49e0-af4f-484b316fbdd7`，只读 checkpoint 探针确认：当前有 61 条
+消息、两个完整范围；最老直接 SNIP 提示仍超过 `15564` token 预算。使用不调用外部
+模型的确定性 fake model 执行新算法后，4 次模型调用即可完成有界投影，删除 29 条、
+保留 32 条，最大提示为 `15428 <= 15564`，且原始 source identity 不变。这证明原来
+的确定性规划死锁已经消除，但不等同于真实 provider 成功。
+
+本地浏览器重启后只读复核仍显示该真实研究会话为 `55.9K Tokens`、自动压缩阈值
+`32.0K Tokens`、进度 `100%`；没有执行 `/compact`、发送新消息或运行 `/Dream`，
+因此样本尚未被验收动作改变。
+
+### 9.4 尚未完成的端到端边界与已知权衡
+
+真实浏览器验收将把该会话的研究内容、工具结果和生成的 Memory 发送给当前配置的
+外部模型，并写入新的 checkpoint、Run/Job 和 Memory 记录。该动作需要明确授权，
+目前尚未执行；在依次验证 `/compact`、有业务意义的后续追问及 `/Dream` 之前，不能
+把第 9.1 节的“已修复”扩大解释为真实 provider 端到端验收通过。
+
+以下是本轮审查确认的非阻断边界，不属于原四项缺陷仍然存在：
+
+- Scheduler 遇到 Dream model unavailable 时有稳定结构化日志，但没有独立持久化的
+  失败 Job/审计记录；
+- 普通 Run 的自动 SNIP 若遇到不可约 source，当前最终可能显示通用 Run 失败，而非
+  M-04 的专用 UI 错误；
+- Seal 的终态失败会消费当前 activity epoch，以抑制 Job storm；管理员修复配置后需
+  重新排队 dead Job，或等待 Thread 产生新活动；
+- provider 异常或连续返回无效 SNIP 输出仍会由后续调用重试，当前没有按 checkpoint
+  建立独立 circuit breaker；
+- 未闭合/畸形工具 turn 与仍处于开放状态的超长用户输入不属于“完整 turn”压缩范围。

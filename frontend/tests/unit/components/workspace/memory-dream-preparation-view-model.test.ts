@@ -142,4 +142,37 @@ describe("Memory Dream preparation view model", () => {
       ),
     ).toEqual({ kind: "failed" });
   });
+
+  test("distinguishes an unavailable Dream model from a generic failure", () => {
+    expect(
+      memoryDreamPreparationTerminalNotice(
+        status({
+          status: "failed",
+          phase: "failed",
+          publicErrorCode: "MEMORY_DREAM_MODEL_UNAVAILABLE",
+        }),
+      ),
+    ).toEqual({ kind: "model_unavailable" });
+  });
+
+  test("distinguishes permanent compaction planning failures", () => {
+    expect(
+      memoryDreamPreparationTerminalNotice(
+        status({
+          status: "failed",
+          phase: "failed",
+          publicErrorCode: "MEMORY_DREAM_PREPARE_SOURCE_TOO_LARGE",
+        }),
+      ),
+    ).toEqual({ kind: "source_too_large" });
+    expect(
+      memoryDreamPreparationTerminalNotice(
+        status({
+          status: "failed",
+          phase: "failed",
+          publicErrorCode: "MEMORY_DREAM_PREPARE_PROMPT_BUDGET_TOO_SMALL",
+        }),
+      ),
+    ).toEqual({ kind: "prompt_budget_too_small" });
+  });
 });

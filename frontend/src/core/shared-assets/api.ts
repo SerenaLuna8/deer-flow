@@ -571,8 +571,7 @@ function configuredMcpResponseSchemaForRequest({
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message:
-          "Configured MCP response secret slots must match the request",
+        message: "Configured MCP response secret slots must match the request",
         path: ["version", "secret_slots"],
       });
     }
@@ -580,8 +579,7 @@ function configuredMcpResponseSchemaForRequest({
     if (value.version.workflow_status !== "published") {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message:
-          "Configured MCP response must be published",
+        message: "Configured MCP response must be published",
         path: ["version", "workflow_status"],
       });
     }
@@ -716,9 +714,7 @@ export async function createConfiguredProjectMcp(
     response,
     configuredMcpResponseSchemaForRequest({
       projectId: parsedProjectId,
-      secretSlotNames: (body.secret_slots ?? []).map(
-        (slot) => slot.name,
-      ),
+      secretSlotNames: (body.secret_slots ?? []).map((slot) => slot.name),
     }),
   );
 }
@@ -747,9 +743,7 @@ export async function updateConfiguredProjectMcp(
       projectId: parsedProjectId,
       assetId: id,
       expectedAssetVersion: body.expected_asset_version,
-      secretSlotNames: (body.secret_slots ?? []).map(
-        (slot) => slot.name,
-      ),
+      secretSlotNames: (body.secret_slots ?? []).map((slot) => slot.name),
     }),
   );
 }

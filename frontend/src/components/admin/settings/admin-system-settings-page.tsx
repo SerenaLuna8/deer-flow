@@ -262,9 +262,19 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
     hintEn:
       "Fixed version used by the server to validate structured image-inspection results.",
   },
-  "agent_runtime.subagents.max_total_per_run": {
-    zh: "每个 Run 最多调用子 Agent",
-    en: "Maximum subagents per Run",
+  "agent_runtime.subagents.max_concurrent": {
+    zh: "同时执行的子 Agent 上限",
+    en: "Concurrent subagent limit",
+    unit: "个",
+  },
+  "agent_runtime.subagents.max_total_per_run_by_workload.interactive": {
+    zh: "普通对话每个 Run 最多委托数",
+    en: "Interactive delegations per Run",
+    unit: "个",
+  },
+  "agent_runtime.subagents.max_total_per_run_by_workload.research": {
+    zh: "深度研究每个 Run 最多委托数",
+    en: "Research delegations per Run",
     unit: "个",
   },
   "agent_runtime.title.enabled": {
@@ -427,38 +437,23 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
   "agent_runtime.loop_detection.enabled": {
     zh: "检测重复工具调用",
     en: "Detect repeated tool calls",
-    hintZh: "发现循环或异常高频调用时提醒并阻止继续执行。",
+    hintZh: "发现完全相同的调用反复出现时提醒，并在达到硬上限后终止循环。",
     hintEn:
-      "Warn and stop execution when repeated or unusually frequent calls are detected.",
+      "Warn when identical calls repeat and stop the loop at the hard limit.",
   },
-  "agent_runtime.loop_detection.warn_threshold": {
+  "agent_runtime.loop_detection.identical_calls.warn_threshold": {
     zh: "重复调用提醒阈值",
     en: "Repeated-call warning",
     unit: "次",
   },
-  "agent_runtime.loop_detection.hard_limit": {
+  "agent_runtime.loop_detection.identical_calls.hard_limit": {
     zh: "重复调用终止阈值",
     en: "Repeated-call hard limit",
     unit: "次",
   },
-  "agent_runtime.loop_detection.window_size": {
+  "agent_runtime.loop_detection.identical_calls.window_size": {
     zh: "检测最近操作数",
     en: "Recent operations inspected",
-    unit: "次",
-  },
-  "agent_runtime.loop_detection.max_tracked_threads": {
-    zh: "最多跟踪任务数",
-    en: "Maximum tracked Runs",
-    unit: "个",
-  },
-  "agent_runtime.loop_detection.tool_freq_warn": {
-    zh: "同一工具调用次数预警",
-    en: "Tool-frequency warning",
-    unit: "次",
-  },
-  "agent_runtime.loop_detection.tool_freq_hard_limit": {
-    zh: "同一工具调用次数上限",
-    en: "Tool-frequency hard limit",
     unit: "次",
   },
   "agent_runtime.read_before_write.enabled": {
@@ -1244,7 +1239,7 @@ function ToolThresholdOverrides({
   );
 }
 
-function ToolFrequencyOverrides({
+function ToolCallLimitsByTool({
   name,
   onChange,
   value,
@@ -1266,12 +1261,12 @@ function ToolFrequencyOverrides({
     >
       <div>
         <p className="text-sm font-medium">
-          {locale === "zh-CN" ? "工具调用例外规则" : "Tool-frequency overrides"}
+          {locale === "zh-CN" ? "各工具调用预算" : "Per-tool call budgets"}
         </p>
         <p className="text-muted-foreground mt-1 text-xs leading-5">
           {locale === "zh-CN"
-            ? "为确实需要重复调用的工具设置单独的提醒与终止次数。"
-            : "Set separate warning and stop counts for tools that legitimately repeat."}
+            ? "为该 workload 和 Agent 角色设置工具级提醒与硬上限；未列出的工具使用默认预算。"
+            : "Set tool-specific warnings and hard limits for this workload and Agent role. Unlisted tools use the default budget."}
         </p>
       </div>
       {entries.length ? (
@@ -1282,75 +1277,93 @@ function ToolFrequencyOverrides({
           <span className="sr-only">{labels.removeRow}</span>
         </div>
       ) : null}
-      {entries.map(([tool, limits], index) => (
-        <div
-          key={`${tool}-${index}`}
-          className="grid gap-2 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
-        >
-          <Input
-            aria-label={locale === "zh-CN" ? "工具名称" : "Tool name"}
-            value={tool}
-            onChange={(event) => {
-              const next = { ...value };
-              delete next[tool];
-              next[event.target.value] = limits;
-              onChange(next);
-            }}
-          />
-          <Input
-            type="number"
-            aria-label={
-              locale === "zh-CN"
-                ? `${tool} 的提醒次数`
-                : `Warning count for ${tool}`
-            }
-            value={limits.warn}
-            min={1}
-            max={100_000}
-            onChange={(event) => {
-              const next = event.currentTarget.valueAsNumber;
-              if (Number.isFinite(next)) {
-                onChange({ ...value, [tool]: { ...limits, warn: next } });
-              }
-            }}
-          />
-          <Input
-            type="number"
-            aria-label={
-              locale === "zh-CN"
-                ? `${tool} 的终止次数`
-                : `Stop count for ${tool}`
-            }
-            value={limits.hard_limit}
-            min={1}
-            max={100_000}
-            onChange={(event) => {
-              const next = event.currentTarget.valueAsNumber;
-              if (Number.isFinite(next)) {
-                onChange({
-                  ...value,
-                  [tool]: { ...limits, hard_limit: next },
-                });
-              }
-            }}
-          />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label={
-              locale === "zh-CN" ? `删除 ${tool} 规则` : `Remove ${tool} rule`
-            }
-            onClick={() => {
-              const next = { ...value };
-              delete next[tool];
-              onChange(next);
-            }}
-          >
-            <XIcon aria-hidden />
-          </Button>
-        </div>
-      ))}
+      {entries.map(([tool, limits], index) => {
+        const taskReserved = tool === "task";
+        const taskErrorId = `${name}-${index}-task-reserved`;
+        return (
+          <div key={`${tool}-${index}`} className="space-y-1">
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
+              <Input
+                aria-label={locale === "zh-CN" ? "工具名称" : "Tool name"}
+                value={tool}
+                aria-invalid={taskReserved}
+                aria-describedby={taskReserved ? taskErrorId : undefined}
+                onChange={(event) => {
+                  const next = { ...value };
+                  delete next[tool];
+                  next[event.target.value] = limits;
+                  onChange(next);
+                }}
+              />
+              <Input
+                type="number"
+                aria-label={
+                  locale === "zh-CN"
+                    ? `${tool} 的提醒次数`
+                    : `Warning count for ${tool}`
+                }
+                value={limits.warn}
+                min={1}
+                max={100_000}
+                onChange={(event) => {
+                  const next = event.currentTarget.valueAsNumber;
+                  if (Number.isFinite(next)) {
+                    onChange({ ...value, [tool]: { ...limits, warn: next } });
+                  }
+                }}
+              />
+              <Input
+                type="number"
+                aria-label={
+                  locale === "zh-CN"
+                    ? `${tool} 的终止次数`
+                    : `Stop count for ${tool}`
+                }
+                value={limits.hard_limit}
+                min={1}
+                max={100_000}
+                onChange={(event) => {
+                  const next = event.currentTarget.valueAsNumber;
+                  if (Number.isFinite(next)) {
+                    onChange({
+                      ...value,
+                      [tool]: { ...limits, hard_limit: next },
+                    });
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={
+                  locale === "zh-CN"
+                    ? `删除 ${tool} 规则`
+                    : `Remove ${tool} rule`
+                }
+                onClick={() => {
+                  const next = { ...value };
+                  delete next[tool];
+                  onChange(next);
+                }}
+              >
+                <XIcon aria-hidden />
+              </Button>
+            </div>
+            {taskReserved ? (
+              <p
+                id={taskErrorId}
+                role="alert"
+                className="text-destructive text-xs"
+              >
+                {locale === "zh-CN"
+                  ? "task 由 Sub-Agent 委托总量限制管理，不能配置为普通工具调用预算"
+                  : "task is governed by the Sub-Agent delegation limit and cannot be configured as an ordinary tool budget"}
+              </p>
+            ) : null}
+          </div>
+        );
+      })}
       <Button
         type="button"
         variant="outline"
@@ -1381,6 +1394,15 @@ function agentRuntimeGroups(locale: Locale) {
           ? "限制单次任务的 Token、执行步数和子 Agent 数量，避免资源占用或执行时间失控。"
           : "Limit Tokens, steps, and subagents per Run to keep resource usage and execution time under control.",
       icon: GaugeIcon,
+    },
+    {
+      value: "tool-call-budget",
+      title: locale === "zh-CN" ? "工具调用预算" : "Tool call budgets",
+      description:
+        locale === "zh-CN"
+          ? "分别配置普通对话和深度研究中 Lead Agent 与 Sub-Agent 的默认及工具级调用预算。"
+          : "Configure default and per-tool call budgets for Lead Agents and Sub-Agents in interactive and research workloads.",
+      icon: WrenchIcon,
     },
     {
       value: "assistant-experience",
@@ -1432,8 +1454,8 @@ function agentRuntimeGroups(locale: Locale) {
       title: locale === "zh-CN" ? "安全防护" : "Safeguards",
       description:
         locale === "zh-CN"
-          ? "检测重复执行和高频工具调用，并保护文件写入和安全拦截。"
-          : "Detect repeated execution and high-frequency tool use while protecting file writes and safety stops.",
+          ? "检测完全相同的重复调用，并保护文件写入和安全拦截。"
+          : "Detect identical repeated calls while protecting file writes and safety stops.",
       icon: ShieldCheckIcon,
     },
   ] as const;
@@ -1467,6 +1489,7 @@ const AGENT_RUNTIME_DESTINATION_FIELDS: Record<
     "max_recursion_limit",
     "subagents",
   ],
+  "tool-call-budget": ["tool_call_budget"],
   "assistant-experience": ["title", "suggestions", "input_polish"],
   summarization: ["summarization"],
   memory: ["memory"],
@@ -1616,12 +1639,121 @@ function AgentRuntimeEditor({
           onChange={(next) => update("max_recursion_limit", next)}
         />
         <NumberField
-          name="agent_runtime.subagents.max_total_per_run"
-          value={value.subagents.max_total_per_run}
+          name="agent_runtime.subagents.max_concurrent"
+          value={value.subagents.max_concurrent}
+          min={1}
+          max={4}
+          onChange={(next) => update("subagents.max_concurrent", next)}
+        />
+        <NumberField
+          name="agent_runtime.subagents.max_total_per_run_by_workload.interactive"
+          value={value.subagents.max_total_per_run_by_workload.interactive}
           min={1}
           max={50}
-          onChange={(next) => update("subagents.max_total_per_run", next)}
+          onChange={(next) =>
+            update("subagents.max_total_per_run_by_workload.interactive", next)
+          }
         />
+        <NumberField
+          name="agent_runtime.subagents.max_total_per_run_by_workload.research"
+          value={value.subagents.max_total_per_run_by_workload.research}
+          min={1}
+          max={50}
+          onChange={(next) =>
+            update("subagents.max_total_per_run_by_workload.research", next)
+          }
+        />
+      </RuntimeGroup>
+
+      <RuntimeGroup
+        activeValue={activeGroup}
+        value="tool-call-budget"
+        title={group("tool-call-budget").title}
+        description={group("tool-call-budget").description}
+      >
+        {(["interactive", "research"] as const).map((profile) => (
+          <section
+            key={profile}
+            className="border-border/70 space-y-4 rounded-lg border p-4"
+          >
+            <div>
+              <h4 className="text-sm font-semibold">
+                {profile === "interactive"
+                  ? locale === "zh-CN"
+                    ? "普通对话"
+                    : "Interactive"
+                  : locale === "zh-CN"
+                    ? "深度研究"
+                    : "Research"}
+              </h4>
+              <p className="text-muted-foreground mt-1 text-xs">
+                {locale === "zh-CN"
+                  ? "每个角色独立计数；达到硬上限后只禁用已耗尽的工具。"
+                  : "Each role is counted independently. At the hard limit, only the exhausted tool is disabled."}
+              </p>
+            </div>
+            <div className="grid gap-4 xl:grid-cols-2">
+              {(["lead", "subagent"] as const).map((role) => {
+                const roleBudget =
+                  value.tool_call_budget.profiles[profile][role];
+                const basePath = `tool_call_budget.profiles.${profile}.${role}`;
+                const roleLabel =
+                  role === "lead"
+                    ? "Lead Agent"
+                    : locale === "zh-CN"
+                      ? "子 Agent"
+                      : "Sub-Agent";
+                return (
+                  <fieldset
+                    key={role}
+                    className="bg-muted/20 space-y-3 rounded-md p-3"
+                  >
+                    <legend className="px-1 text-sm font-medium">
+                      {roleLabel}
+                    </legend>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <NumberField
+                        name={`agent_runtime.${basePath}.default.warn`}
+                        label={
+                          locale === "zh-CN"
+                            ? "默认提醒次数"
+                            : "Default warning"
+                        }
+                        unit={locale === "zh-CN" ? "次" : "calls"}
+                        value={roleBudget.default.warn}
+                        min={1}
+                        max={100_000}
+                        onChange={(next) =>
+                          update(`${basePath}.default.warn`, next)
+                        }
+                      />
+                      <NumberField
+                        name={`agent_runtime.${basePath}.default.hard_limit`}
+                        label={
+                          locale === "zh-CN"
+                            ? "默认硬上限"
+                            : "Default hard limit"
+                        }
+                        unit={locale === "zh-CN" ? "次" : "calls"}
+                        value={roleBudget.default.hard_limit}
+                        min={1}
+                        max={100_000}
+                        onChange={(next) =>
+                          update(`${basePath}.default.hard_limit`, next)
+                        }
+                      />
+                    </div>
+                    <ToolCallLimitsByTool
+                      name={`agent_runtime.${basePath}.tools`}
+                      value={roleBudget.tools}
+                      onChange={(next) => update(`${basePath}.tools`, next)}
+                    />
+                  </fieldset>
+                );
+              })}
+            </div>
+          </section>
+        ))}
       </RuntimeGroup>
 
       <RuntimeGroup
@@ -1943,12 +2075,9 @@ function AgentRuntimeEditor({
             {locale === "zh-CN" ? "循环检测详细设置" : "Loop detection details"}
           </legend>
           {[
-            ["loop_detection.warn_threshold", 1, 100_000],
-            ["loop_detection.hard_limit", 1, 100_000],
-            ["loop_detection.window_size", 1, 100_000],
-            ["loop_detection.max_tracked_threads", 1, 100_000],
-            ["loop_detection.tool_freq_warn", 1, 100_000],
-            ["loop_detection.tool_freq_hard_limit", 1, 100_000],
+            ["loop_detection.identical_calls.warn_threshold", 1, 100_000],
+            ["loop_detection.identical_calls.hard_limit", 1, 100_000],
+            ["loop_detection.identical_calls.window_size", 1, 100_000],
           ].map(([path, min, max]) => (
             <NumberField
               key={String(path)}
@@ -1959,13 +2088,6 @@ function AgentRuntimeEditor({
               onChange={(next) => update(String(path), next)}
             />
           ))}
-          <ToolFrequencyOverrides
-            name="agent_runtime.loop_detection.tool_freq_overrides"
-            value={value.loop_detection.tool_freq_overrides}
-            onChange={(next) =>
-              update("loop_detection.tool_freq_overrides", next)
-            }
-          />
         </fieldset>
         <BooleanField
           name="agent_runtime.read_before_write.enabled"

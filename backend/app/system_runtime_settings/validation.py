@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -20,9 +21,14 @@ from app.system_runtime_settings.models import (
     RuntimePolicySection,
     RuntimePolicyValue,
 )
+from app.system_runtime_settings.schema_codec import (
+    canonical_policy_value_v2,
+    canonical_policy_value_v3,
+)
 
 LEGACY_RUNTIME_POLICY_SCHEMA_VERSION = 2
-RUNTIME_POLICY_SCHEMA_VERSION = 3
+PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION = 3
+RUNTIME_POLICY_SCHEMA_VERSION = 4
 MAX_RUNTIME_POLICY_BYTES = 32 * 1024
 _SECRET_KEY = re.compile(
     r"(?i)(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
@@ -150,6 +156,10 @@ def canonical_policy_payload(
     value: RuntimePolicyValue | Mapping[str, object],
 ) -> CanonicalRuntimePolicy:
     parsed = parse_policy_value(section, value)
+    if isinstance(parsed, AgentRuntimePolicyValue):
+        identical_calls = parsed.loop_detection.identical_calls
+        if identical_calls.window_size < identical_calls.hard_limit:
+            raise RuntimePolicyInvalid
     normalized = parsed.model_dump(mode="json")
     encoded = json.dumps(
         normalized,
@@ -173,30 +183,54 @@ def canonical_policy_payload_for_schema(
     """Canonicalize a stored payload using its declared schema version.
 
     Runtime-policy rows are immutable and may already be frozen into Runs.
-    Schema v2 therefore remains readable.  Its Agent Runtime shape predates
-    ``vision_bridge``; parsing supplies the safe ``model_name=None`` default,
-    while checksum verification still uses the exact legacy JSON shape.
+    Schemas v2 and v3 therefore remain readable through version-owned codecs.
+    Schema v2 predates ``vision_bridge``; decoding supplies the safe
+    ``model_name=None`` default while checksum verification still uses each
+    legacy schema's exact JSON shape.
     """
 
     if schema_version == RUNTIME_POLICY_SCHEMA_VERSION:
         return canonical_policy_payload(section, value)
+    if schema_version == PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION:
+        try:
+            parsed_section = RuntimePolicySection(section)
+            raw = value.model_dump(mode="python") if isinstance(value, BaseModel) else dict(value)
+            _reject_secret_material(raw)
+            normalized = canonical_policy_value_v3(parsed_section, raw)
+            _reject_secret_material(normalized)
+            encoded = json.dumps(
+                normalized,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            if len(encoded) > MAX_RUNTIME_POLICY_BYTES:
+                raise RuntimePolicyInvalid
+            return CanonicalRuntimePolicy(
+                schema_version=PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
+                value=normalized,
+                checksum=hashlib.sha256(encoded).hexdigest(),
+            )
+        except RuntimePolicyInvalid:
+            raise
+        except (TypeError, ValueError, ValidationError):
+            raise RuntimePolicyInvalid from None
     if schema_version != LEGACY_RUNTIME_POLICY_SCHEMA_VERSION:
         raise RuntimePolicyInvalid
     try:
         parsed_section = RuntimePolicySection(section)
         raw = value.model_dump(mode="python") if isinstance(value, BaseModel) else dict(value)
-        if parsed_section is RuntimePolicySection.AGENT_RUNTIME and "vision_bridge" in raw:
-            raise RuntimePolicyInvalid
-        parsed = parse_policy_value(parsed_section, raw)
-        normalized = parsed.model_dump(mode="json")
-        if parsed_section is RuntimePolicySection.AGENT_RUNTIME:
-            normalized.pop("vision_bridge", None)
+        _reject_secret_material(raw)
+        normalized = canonical_policy_value_v2(parsed_section, raw)
+        _reject_secret_material(normalized)
         encoded = json.dumps(
             normalized,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
         ).encode("utf-8")
+        if len(encoded) > MAX_RUNTIME_POLICY_BYTES:
+            raise RuntimePolicyInvalid
         return CanonicalRuntimePolicy(
             schema_version=LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
             value=normalized,
@@ -208,13 +242,99 @@ def canonical_policy_payload_for_schema(
         raise RuntimePolicyInvalid from None
 
 
+def _decode_legacy_agent_runtime(
+    value: Mapping[str, object],
+) -> AgentRuntimePolicyValue:
+    upgraded = AgentRuntimePolicyValue().model_dump(mode="python")
+    for key, item in value.items():
+        if key not in {"loop_detection", "subagents"}:
+            upgraded[key] = deepcopy(item)
+
+    legacy_loop = value["loop_detection"]
+    legacy_subagents = value["subagents"]
+    if not isinstance(legacy_loop, Mapping) or not isinstance(legacy_subagents, Mapping):
+        raise RuntimePolicyInvalid
+    overrides = legacy_loop["tool_freq_overrides"]
+    if not isinstance(overrides, Mapping):
+        raise RuntimePolicyInvalid
+    role_budget = {
+        "default": {
+            "warn": legacy_loop["tool_freq_warn"],
+            "hard_limit": legacy_loop["tool_freq_hard_limit"],
+        },
+        "tools": {name: deepcopy(limit) for name, limit in overrides.items() if name != "task"},
+    }
+    upgraded["loop_detection"] = {
+        "enabled": legacy_loop["enabled"],
+        "identical_calls": {
+            "warn_threshold": legacy_loop["warn_threshold"],
+            "hard_limit": legacy_loop["hard_limit"],
+            "window_size": legacy_loop["window_size"],
+        },
+    }
+    budget = upgraded["tool_call_budget"]
+    if not isinstance(budget, dict):
+        raise RuntimePolicyInvalid
+    profiles = budget["profiles"]
+    if not isinstance(profiles, dict):
+        raise RuntimePolicyInvalid
+    profiles["interactive"] = {
+        "lead": deepcopy(role_budget),
+        "subagent": deepcopy(role_budget),
+    }
+    upgraded["subagents"] = {
+        "max_concurrent": 3,
+        "max_total_per_run_by_workload": {
+            "interactive": legacy_subagents["max_total_per_run"],
+            "research": 9,
+        },
+    }
+    parsed = parse_policy_value(RuntimePolicySection.AGENT_RUNTIME, upgraded)
+    if not isinstance(parsed, AgentRuntimePolicyValue):
+        raise RuntimePolicyInvalid
+    return parsed
+
+
+def decode_policy_value_for_schema(
+    section: RuntimePolicySection | str,
+    value: RuntimePolicyValue | Mapping[str, object],
+    *,
+    schema_version: int,
+) -> RuntimePolicyValue:
+    """Validate one exact stored schema and decode it into the current model."""
+
+    canonical = canonical_policy_payload_for_schema(
+        section,
+        value,
+        schema_version=schema_version,
+    )
+    try:
+        parsed_section = RuntimePolicySection(section)
+        if (
+            schema_version
+            in {
+                LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
+                PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
+            }
+            and parsed_section is RuntimePolicySection.AGENT_RUNTIME
+        ):
+            return _decode_legacy_agent_runtime(canonical.value)
+        return parse_policy_value(parsed_section, canonical.value)
+    except RuntimePolicyInvalid:
+        raise
+    except (KeyError, TypeError, ValueError, ValidationError):
+        raise RuntimePolicyInvalid from None
+
+
 __all__ = [
     "CanonicalRuntimePolicy",
     "MAX_RUNTIME_POLICY_BYTES",
     "LEGACY_RUNTIME_POLICY_SCHEMA_VERSION",
+    "PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION",
     "RUNTIME_POLICY_SCHEMA_VERSION",
     "RuntimePolicyInvalid",
     "canonical_policy_payload",
     "canonical_policy_payload_for_schema",
+    "decode_policy_value_for_schema",
     "parse_policy_value",
 ]

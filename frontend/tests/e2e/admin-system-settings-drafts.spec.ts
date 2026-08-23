@@ -72,7 +72,7 @@ function systemSettingsCatalog() {
       agent_runtime: {
         section: "agent_runtime",
         revision: 1,
-        schema_version: 2,
+        schema_version: 4,
         effective_revision: 1,
         effect_scope: "new_requests_and_runs",
         updated_at: TIMESTAMP,
@@ -134,17 +134,57 @@ function systemSettingsCatalog() {
           },
           loop_detection: {
             enabled: true,
-            warn_threshold: 10,
-            hard_limit: 20,
-            window_size: 50,
-            max_tracked_threads: 100,
-            tool_freq_warn: 5,
-            tool_freq_hard_limit: 10,
-            tool_freq_overrides: {},
+            identical_calls: {
+              warn_threshold: 3,
+              hard_limit: 5,
+              window_size: 20,
+            },
+          },
+          tool_call_budget: {
+            profiles: {
+              interactive: {
+                lead: {
+                  default: { warn: 30, hard_limit: 50 },
+                  tools: {
+                    web_search: { warn: 6, hard_limit: 10 },
+                    web_fetch: { warn: 6, hard_limit: 10 },
+                  },
+                },
+                subagent: {
+                  default: { warn: 30, hard_limit: 50 },
+                  tools: {
+                    web_search: { warn: 6, hard_limit: 10 },
+                    web_fetch: { warn: 6, hard_limit: 10 },
+                  },
+                },
+              },
+              research: {
+                lead: {
+                  default: { warn: 30, hard_limit: 50 },
+                  tools: {
+                    web_search: { warn: 20, hard_limit: 30 },
+                    web_fetch: { warn: 20, hard_limit: 30 },
+                  },
+                },
+                subagent: {
+                  default: { warn: 30, hard_limit: 50 },
+                  tools: {
+                    web_search: { warn: 12, hard_limit: 20 },
+                    web_fetch: { warn: 12, hard_limit: 20 },
+                  },
+                },
+              },
+            },
           },
           read_before_write: { enabled: true },
           safety_finish_reason: { enabled: true },
-          subagents: { max_total_per_run: 5 },
+          subagents: {
+            max_concurrent: 3,
+            max_total_per_run_by_workload: {
+              interactive: 6,
+              research: 9,
+            },
+          },
         },
       },
       memory_document: {
@@ -335,6 +375,40 @@ test("confirms browser Back navigation while a grouped draft is dirty", async ({
   await leaveDialog.getByRole("button", { name: "Continue editing" }).click();
   await expect(leaveDialog).toBeHidden();
   await expect(page).toHaveURL(/\/admin\/settings\/system$/u);
+});
+
+test("edits and retains a workload and role specific tool-call budget draft", async ({
+  page,
+  baseURL,
+}) => {
+  await page.context().addCookies([
+    {
+      name: "locale",
+      value: "en-US",
+      url: baseURL ?? "http://localhost:3000",
+    },
+  ]);
+  await mockSystemSettings(page);
+  await page.goto("/admin/settings/system");
+
+  const destination = page.locator(
+    '[data-settings-destination="tool-call-budget"]',
+  );
+  await destination.click();
+  const researchSubagentHardLimit = page.locator(
+    'input[name="agent_runtime.tool_call_budget.profiles.research.subagent.default.hard_limit"]',
+  );
+  await expect(researchSubagentHardLimit).toHaveValue("50");
+  await researchSubagentHardLimit.fill("64");
+  await expect(
+    page.locator('[data-settings-dirty-marker="tool-call-budget"]'),
+  ).toHaveText("Unsaved");
+
+  await page
+    .locator('[data-settings-destination="assistant-experience"]')
+    .click();
+  await destination.click();
+  await expect(researchSubagentHardLimit).toHaveValue("64");
 });
 
 test("explains tested-Key clearing and requires re-entry before create", async ({

@@ -13,6 +13,11 @@ import {
   withRunExecutionProfileContext,
 } from "@/core/private-work/execution-profile";
 import {
+  DEFAULT_RUN_WORKLOAD_PROFILE,
+  resolveDisplayedRunWorkloadProfile,
+  withRunWorkloadProfileContext,
+} from "@/core/private-work/workload-profile";
+import {
   buildRunExecutionProfileRequest,
   resolveAgentExecutionModelSelection,
 } from "@/core/threads/agent-mode";
@@ -21,12 +26,9 @@ import { fetch } from "../api/fetcher";
 import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import {
-  isCurrentUploadUnavailableError,
-  isLlmProviderUnavailableError,
-  isModelOutputLimitError,
-  isOutputDeliveryIncompleteError,
   isProjectAgentArchivedError,
   isProjectRunTerminalFailure,
+  projectRunFailureCode,
   projectRunTerminalFailureEventToError,
 } from "../private-work/api-client";
 import { usePrivateWorkAccess } from "../private-work/provider";
@@ -85,6 +87,7 @@ import {
   type PreparedReplayAttempt,
   removeSetItems,
 } from "./prepared-replay";
+import { resolveRunFailureCopy } from "./run-failure-presentation";
 import {
   latestRunHasTerminalFailure,
   rememberActiveRun,
@@ -126,6 +129,12 @@ import {
 } from "./thread-lists";
 import { scopedThreadQueryKey } from "./thread-query-key";
 import { threadTokenUsageQueryKey } from "./token-usage";
+import {
+  emptyRunControlProgress,
+  fetchRunControlObservations,
+  mergeRunControlObservations,
+  parseRunControlLiveEvent,
+} from "./tool-call-control-events";
 import type { AgentThread, AgentThreadState } from "./types";
 import { useThreadHistory } from "./use-thread-history";
 
@@ -404,6 +413,10 @@ export function useThreadStream({
   const messagesRef = useRef<Message[]>([]);
   const currentRunIdRef = useRef<string | null>(null);
   const currentRunThreadIdRef = useRef<string | null>(null);
+  const [runControlProgress, setRunControlProgress] = useState(
+    emptyRunControlProgress,
+  );
+  const runControlReplayGenerationRef = useRef(0);
   const expectedTerminalFailureKeysRef = useRef<Set<string>>(new Set());
   const currentRunBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const runBaselinePreparedRef = useRef(false);
@@ -493,6 +506,8 @@ export function useThreadStream({
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
+    runControlReplayGenerationRef.current += 1;
+    setRunControlProgress(emptyRunControlProgress());
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
@@ -514,6 +529,10 @@ export function useThreadStream({
     }
     currentRunIdRef.current = _runId;
     currentRunThreadIdRef.current = _threadId;
+    runControlReplayGenerationRef.current += 1;
+    setRunControlProgress((current) =>
+      current.runId === _runId ? current : { runId: _runId, observations: [] },
+    );
     runBaselinePreparedRef.current = false;
     setOptimisticThreadId((currentOptimisticThreadId) => {
       const currentView = currentViewThreadIdRef.current;
@@ -547,6 +566,53 @@ export function useThreadStream({
     }
     setOnStreamThreadId(_threadId);
   }, []);
+
+  const latestHistoryRunId = historyRuns?.[0]?.run_id ?? null;
+  useEffect(() => {
+    const targetThreadId = onStreamThreadId ?? null;
+    const targetRunId = latestHistoryRunId;
+    if (!streamEnabled || !targetThreadId || !targetRunId) {
+      return;
+    }
+    const activeRunId =
+      currentRunThreadIdRef.current === targetThreadId
+        ? currentRunIdRef.current
+        : null;
+    if (activeRunId && activeRunId !== targetRunId) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const generation = ++runControlReplayGenerationRef.current;
+    setRunControlProgress((current) =>
+      current.runId === targetRunId
+        ? current
+        : { runId: targetRunId, observations: [] },
+    );
+    void fetchRunControlObservations(
+      privateWork,
+      targetThreadId,
+      targetRunId,
+      controller.signal,
+    )
+      .then((observations) => {
+        if (
+          controller.signal.aborted ||
+          generation !== runControlReplayGenerationRef.current ||
+          threadIdRef.current !== targetThreadId
+        ) {
+          return;
+        }
+        setRunControlProgress((current) =>
+          mergeRunControlObservations(current, observations),
+        );
+      })
+      .catch(() => {
+        // Progress replay is supplementary. Message history and the terminal
+        // Run remain authoritative when this bounded diagnostic read fails.
+      });
+    return () => controller.abort();
+  }, [latestHistoryRunId, onStreamThreadId, privateWork, streamEnabled]);
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
@@ -696,20 +762,16 @@ export function useThreadStream({
       setLiveMessagesThreadId(null);
     }
     if (decision?.kind !== "ignore-history-refetch-duplicate") {
+      const classifiedFailure = projectRunFailureCode(error);
       toast.error(
         isProjectAgentArchivedError(error)
           ? t.conversation.agentArchivedDescription
-          : isModelOutputLimitError(error)
-            ? t.conversation.modelOutputLimitDescription
-            : isOutputDeliveryIncompleteError(error)
-              ? t.conversation.outputDeliveryIncompleteDescription
-              : isCurrentUploadUnavailableError(error)
-                ? t.conversation.currentUploadUnavailableDescription
-                : isLlmProviderUnavailableError(error)
-                  ? t.conversation.providerUnavailableDescription
-                  : isProjectRunTerminalFailure(error)
-                    ? t.conversation.runFailedDescription
-                    : getStreamErrorMessage(error),
+          : classifiedFailure
+            ? resolveRunFailureCopy(t.conversation, classifiedFailure)
+                .description
+            : isProjectRunTerminalFailure(error)
+              ? t.conversation.runFailedDescription
+              : getStreamErrorMessage(error),
       );
     }
     pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -981,6 +1043,21 @@ export function useThreadStream({
           thread_id: failedThreadId ?? undefined,
           run_id: failedRunId ?? undefined,
         });
+        return;
+      }
+
+      const runControlObservation = parseRunControlLiveEvent(event);
+      if (runControlObservation) {
+        const activeRunId =
+          currentRunThreadIdRef.current === threadIdRef.current
+            ? currentRunIdRef.current
+            : null;
+        if (activeRunId && activeRunId !== runControlObservation.run_id) {
+          return;
+        }
+        setRunControlProgress((current) =>
+          mergeRunControlObservations(current, [runControlObservation]),
+        );
         return;
       }
 
@@ -1837,13 +1914,16 @@ export function useThreadStream({
               options?.continueFromLatestCheckpoint,
             ),
             ...buildRootThreadStreamOptions(),
-            context: withRunExecutionProfileContext(
-              {
-                ...extraContext,
-                ...context,
-                thread_id: threadId,
-              },
-              executionProfile,
+            context: withRunWorkloadProfileContext(
+              withRunExecutionProfileContext(
+                {
+                  ...extraContext,
+                  ...context,
+                  thread_id: threadId,
+                },
+                executionProfile,
+              ),
+              options?.workloadProfile ?? DEFAULT_RUN_WORKLOAD_PROFILE,
             ),
           },
         );
@@ -1869,22 +1949,20 @@ export function useThreadStream({
                   currentViewThreadIdRef.current,
                 )
               ) {
+                const classifiedFailure = projectRunFailureCode(error);
                 toast.error(
                   isProjectAgentArchivedError(error)
                     ? t.conversation.agentArchivedDescription
                     : isRunAdmissionNotConfirmedError(error)
                       ? t.conversation.runAdmissionNotConfirmedDescription
-                      : isModelOutputLimitError(error)
-                        ? t.conversation.modelOutputLimitDescription
-                        : isOutputDeliveryIncompleteError(error)
-                          ? t.conversation.outputDeliveryIncompleteDescription
-                          : isCurrentUploadUnavailableError(error)
-                            ? t.conversation.currentUploadUnavailableDescription
-                            : isLlmProviderUnavailableError(error)
-                              ? t.conversation.providerUnavailableDescription
-                              : isProjectRunTerminalFailure(error)
-                                ? t.conversation.runFailedDescription
-                                : getStreamErrorMessage(error),
+                      : classifiedFailure
+                        ? resolveRunFailureCopy(
+                            t.conversation,
+                            classifiedFailure,
+                          ).description
+                        : isProjectRunTerminalFailure(error)
+                          ? t.conversation.runFailedDescription
+                          : getStreamErrorMessage(error),
                 );
               }
             }
@@ -1950,13 +2028,7 @@ export function useThreadStream({
       t.uploads.serverTooLarge,
       t.uploads.storageQuotaExceeded,
       t.uploads.uploadFailed,
-      t.conversation.agentArchivedDescription,
-      t.conversation.runAdmissionNotConfirmedDescription,
-      t.conversation.modelOutputLimitDescription,
-      t.conversation.outputDeliveryIncompleteDescription,
-      t.conversation.currentUploadUnavailableDescription,
-      t.conversation.providerUnavailableDescription,
-      t.conversation.runFailedDescription,
+      t.conversation,
       context,
       attachmentUploadCoordinator,
       cleanupUploadedAttachment,
@@ -2271,6 +2343,14 @@ export function useThreadStream({
 
   const explicitActiveRunId =
     currentRunThreadIdRef.current === threadId ? currentRunIdRef.current : null;
+  const effectiveRunWorkloadProfile = useMemo(
+    () =>
+      resolveDisplayedRunWorkloadProfile(
+        historyRuns ?? [],
+        explicitActiveRunId,
+      ),
+    [explicitActiveRunId, historyRuns],
+  );
   const activeRunId = useMemo(
     () =>
       resolveActiveRunIdForMessages(
@@ -2365,8 +2445,10 @@ export function useThreadStream({
     historyError,
     retryHistory,
     runExecutionProfiles,
+    effectiveRunWorkloadProfile,
     hasTerminalRunFailure: latestRunHasTerminalFailure(historyRuns),
     runFailureCode,
     runFailureRunId,
+    runControlObservations: runControlProgress.observations,
   } as const;
 }

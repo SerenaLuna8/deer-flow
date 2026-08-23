@@ -68,10 +68,13 @@ rs.mock("@/core/i18n/hooks", () => ({
     t: {
       inputBox: {
         compactFailed: "compact failed",
+        compactPromptBudgetTooSmall: "compact prompt budget too small",
         compactSkipped: "compact skipped",
+        compactSourceTooLarge: "compact source too large",
         compactSuccess: "compact success",
         dreamAlreadyRunning: "dream already running",
         dreamFailed: "dream failed",
+        dreamModelUnavailable: "dream model unavailable",
         dreamNothingPending: "nothing pending",
         dreamPreparationCancelled: "dream preparation cancelled",
         dreamPreparationCompleted: "dream preparation completed",
@@ -379,6 +382,40 @@ describe("useInputBoxCommands", () => {
     );
   });
 
+  test("distinguishes permanent compact failures from a context that needs no work", async () => {
+    mockedCompactThreadContext
+      .mockResolvedValueOnce({
+        compacted: false,
+        reason: "source_too_large",
+      } as never)
+      .mockResolvedValueOnce({
+        compacted: false,
+        reason: "prompt_budget_too_small",
+      } as never)
+      .mockResolvedValueOnce({
+        compacted: false,
+        reason: "compaction_failed",
+      } as never)
+      .mockResolvedValueOnce({
+        compacted: false,
+        reason: "not_enough_messages",
+      } as never);
+    const { result } = renderCommands();
+
+    await result.handleCompactCommand();
+    await result.handleCompactCommand();
+    await result.handleCompactCommand();
+    await result.handleCompactCommand();
+
+    expect(toast.error).toHaveBeenNthCalledWith(1, "compact source too large");
+    expect(toast.error).toHaveBeenNthCalledWith(
+      2,
+      "compact prompt budget too small",
+    );
+    expect(toast.error).toHaveBeenNthCalledWith(3, "compact failed");
+    expect(toast.info).toHaveBeenCalledWith("compact skipped");
+  });
+
   test("starts Dream, routes logs, and projects terminal preparation state", async () => {
     preparation = terminalPreparation;
     startDreamPreparation.mockResolvedValueOnce({
@@ -416,6 +453,54 @@ describe("useInputBoxCommands", () => {
     result.handleDreamLogCommand(null);
     expect(routerPush).toHaveBeenLastCalledWith(MEMORY_ROUTE);
   });
+
+  test("shows the localized unavailable-model notice for failed Dream preparation", () => {
+    preparation = {
+      ...terminalPreparation,
+      status: "failed",
+      phase: "failed",
+      dreamJobId: null,
+      historyCount: null,
+      admissionKind: null,
+      resultDisposition: "failed",
+      publicErrorCode: "MEMORY_DREAM_MODEL_UNAVAILABLE",
+    };
+
+    renderCommands();
+
+    expect(toast.error).toHaveBeenCalledWith("dream model unavailable");
+    expect(toast.error).not.toHaveBeenCalledWith("dream failed");
+  });
+
+  test.each([
+    {
+      publicErrorCode: "MEMORY_DREAM_PREPARE_SOURCE_TOO_LARGE",
+      expected: "compact source too large",
+    },
+    {
+      publicErrorCode: "MEMORY_DREAM_PREPARE_PROMPT_BUDGET_TOO_SMALL",
+      expected: "compact prompt budget too small",
+    },
+  ])(
+    "shows the localized permanent compaction notice for $publicErrorCode",
+    ({ publicErrorCode, expected }) => {
+      preparation = {
+        ...terminalPreparation,
+        status: "failed",
+        phase: "failed",
+        dreamJobId: null,
+        historyCount: null,
+        admissionKind: null,
+        resultDisposition: "failed",
+        publicErrorCode,
+      };
+
+      renderCommands();
+
+      expect(toast.error).toHaveBeenCalledWith(expected);
+      expect(toast.error).not.toHaveBeenCalledWith("dream failed");
+    },
+  );
 
   test("restores against the current version and routes only after freshness commit", async () => {
     const options = createOptions();

@@ -16,10 +16,12 @@ from langgraph.types import Command
 from pydantic import ValidationError
 
 import app.shared_assets.skill_builder_agent_runtime as runtime_module
+import deerflow.runtime.runs.worker as run_worker
 from app.private_work.context import PrivateWorkContext
 from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.shared_assets.errors import AssetValidationFailed
 from app.shared_assets.project_authoring_catalog import (
     McpToolCatalogItem,
     McpToolCatalogSearchResult,
@@ -65,6 +67,9 @@ from app.shared_assets.skill_design_generation import (
     NeedsClarificationResult,
     SkillBuilderDependencySnapshot,
 )
+from deerflow.agents.middlewares.tool_call_control import (
+    default_graph_tool_call_control_profile,
+)
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     _is_trusted_idempotent_tool,
     _is_trusted_read_only_tool,
@@ -74,6 +79,14 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     _is_inline_only_tool_output,
 )
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
+from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+from deerflow.runtime.journal import RunJournalToolCallControlObserver
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.worker import (
+    RunContext,
+    _call_agent_factory_off_loop,
+    run_agent,
+)
 from deerflow.sandbox.sandbox import check_authorization_boundary
 from deerflow.skills.types import Skill, SkillCategory
 
@@ -281,6 +294,16 @@ class _DraftSink:
         self.finalized = request
         self.dependencies = dependencies
         return SkillBuilderTerminalReceipt(terminal="candidate")
+
+
+class _ValidationFailingDraftSink(_DraftSink):
+    async def finalize_candidate(
+        self,
+        request: SkillBuilderCandidateFinalize,
+        dependencies: SkillBuilderDependencySnapshot,
+    ) -> SkillBuilderTerminalReceipt:
+        del request, dependencies
+        raise AssetValidationFailed("skill-builder-validation")
 
 
 def _tool(toolset: SkillBuilderToolset, name: str):  # type: ignore[no-untyped-def]
@@ -933,6 +956,61 @@ async def test_terminal_tool_error_returns_to_model_but_success_exits() -> None:
     assert result.update == {"messages": [success]}
 
 
+@pytest.mark.asyncio
+async def test_finalize_validation_failure_is_actionable_and_retryable() -> None:
+    sink = _ValidationFailingDraftSink()
+    toolset = SkillBuilderToolset(_Catalog(), sink)
+    staged = await _tool(toolset, "upsert_candidate_file").ainvoke(
+        {
+            "path": "SKILL.md",
+            "media_type": "text/markdown",
+            "content": ("---\nname: safe-skill\ndescription: Review <base> safely: do not edit\ncompatibility:\n  - Git CLI\n---\n"),
+            "mode": "replace",
+            "expected_draft_checksum": None,
+            "expected_file_size_bytes": 0,
+            "expected_file_sha256": None,
+        }
+    )
+
+    result = await _tool(toolset, "finalize_skill_candidate").ainvoke(
+        {
+            "name": "finalize_skill_candidate",
+            "id": "finalize-validation",
+            "type": "tool_call",
+            "args": {
+                "expected_draft_checksum": staged["draft_checksum"],
+                "summary": "Candidate ready",
+                "dependencies": [],
+            },
+        }
+    )
+
+    assert isinstance(result, ToolMessage)
+    assert result.status == "error"
+    assert result.tool_call_id == "finalize-validation"
+    assert json.loads(str(result.content)) == {
+        "accepted": False,
+        "error_code": "SKILL_CANDIDATE_VALIDATION_FAILED",
+        "message": (
+            "Builder validation rejected the candidate. Re-read the latest draft, "
+            "correct it, and retry finalize_skill_candidate. Common checks include "
+            "exactly one root SKILL.md, a frontmatter name matching the required "
+            "Skill slug, and all referenced resources being present. Frontmatter "
+            "must be valid YAML with string name and description fields; quote or "
+            "fold scalar text containing ': ' (for example, description); "
+            "description cannot contain angle brackets; "
+            "compatibility, when present, must be one string of at most 255 "
+            "characters, not a YAML list. If these checks pass, inspect the remaining "
+            "package and static-scan constraints instead of repeating the same "
+            "finalize call."
+        ),
+    }
+    assert toolset.terminal_completed is False
+    assert "Quote or fold scalar text containing ': '" in runtime_module._SYSTEM_PROMPT
+    assert "description cannot contain angle brackets" in runtime_module._SYSTEM_PROMPT
+    assert "compatibility, when present, must be one string" in runtime_module._SYSTEM_PROMPT
+
+
 def test_terminal_enforcement_retries_plain_text_exit_once() -> None:
     toolset = SkillBuilderToolset(_Catalog(), _DraftSink())
     middleware = runtime_module._TerminalEnforcementMiddleware(toolset)
@@ -1176,3 +1254,137 @@ def test_factory_delegates_to_canonical_private_agent_with_trusted_builder_exten
                 skills=SimpleNamespace(container_path="/runtime/exact-skills"),
             ),  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.asyncio
+async def test_factory_forwards_admitted_tool_call_control_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_canonical_factory(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return "builder-graph"
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_make_lead_agent_with_private_runtime",
+        fake_canonical_factory,
+    )
+    factory = SkillBuilderAgentFactory(
+        catalog=_Catalog(),
+        draft_sink=_DraftSink(),
+    )
+    config = {"configurable": {"thinking_enabled": False}}
+    profile = default_graph_tool_call_control_profile()
+    observer = object()
+
+    graph = await _call_agent_factory_off_loop(
+        factory,
+        config,
+        SimpleNamespace(
+            skills=SimpleNamespace(container_path="/runtime/exact-skills"),
+        ),  # type: ignore[arg-type]
+        _private_runtime(tmp_path),
+        tool_call_control_policy=profile,
+        tool_call_control_scope_id="skill-builder-run",
+        tool_call_control_observer=observer,
+        resolved_max_concurrent_subagents=2,
+        resolved_max_total_subagents=7,
+    )
+
+    assert graph == "builder-graph"
+    assert captured["tool_call_control_profile"] is profile
+    assert captured["tool_call_control_scope_id"] == "skill-builder-run"
+    assert captured["tool_call_control_observer"] is observer
+    assert captured["resolved_max_concurrent_subagents"] == 2
+    assert captured["resolved_max_total_subagents"] == 7
+
+
+@pytest.mark.asyncio
+async def test_run_agent_forwards_admitted_tool_call_control_contract_to_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    class Bridge:
+        async def publish(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def publish_end(self, *_args, **_kwargs) -> None:
+            return None
+
+    class MountProvider:
+        def validate_run_scoped_mounts(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def release_run_scoped_mounts_async(
+            self,
+            *_args,
+            **_kwargs,
+        ) -> None:
+            return None
+
+    def fake_canonical_factory(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return Agent()
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_make_lead_agent_with_private_runtime",
+        fake_canonical_factory,
+    )
+    monkeypatch.setattr(
+        run_worker,
+        "get_sandbox_provider",
+        lambda: MountProvider(),
+    )
+    factory = SkillBuilderAgentFactory(
+        catalog=_Catalog(),
+        draft_sink=_DraftSink(),
+    )
+    private_runtime = _private_runtime(tmp_path / "skills")
+
+    async def close_private_runtime() -> None:
+        return None
+
+    private_runtime.aclose = close_private_runtime  # type: ignore[attr-defined]
+    profile = default_graph_tool_call_control_profile()
+    run_manager = RunManager()
+    record = await run_manager.create("skill-builder-thread")
+
+    outcome = await run_agent(
+        Bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=JsonlRunEventStore(tmp_path / "events"),
+            app_config=SimpleNamespace(
+                skills=SimpleNamespace(container_path="/runtime/exact-skills"),
+            ),  # type: ignore[arg-type]
+            private_agent_runtime=private_runtime,  # type: ignore[arg-type]
+            tool_call_control_policy=profile,
+            max_concurrent_subagents=2,
+            max_total_subagents=7,
+        ),
+        agent_factory=factory,
+        graph_input={},
+        config={"configurable": {"thinking_enabled": False}},
+    )
+
+    assert outcome.status == "succeeded"
+    assert captured["tool_call_control_profile"] is profile
+    assert captured["tool_call_control_scope_id"] == record.run_id
+    assert isinstance(
+        captured["tool_call_control_observer"],
+        RunJournalToolCallControlObserver,
+    )
+    assert captured["resolved_max_concurrent_subagents"] == 2
+    assert captured["resolved_max_total_subagents"] == 7

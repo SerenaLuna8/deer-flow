@@ -13,7 +13,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,7 +38,7 @@ from deerflow.persistence.user.model import UserRow
 
 _SCHEDULER_REQUEST_ID = "memory-seal-scheduler"
 _SEAL_JOB_MAX_ATTEMPTS = 5
-_SEAL_KEY_DOMAIN = "actweave.memory.seal.v1"
+_SEAL_KEY_DOMAIN = "actweave.memory.seal.v2"
 _ACTIVE_JOB_STATUSES = ("queued", "leased", "running", "retry_wait")
 logger = logging.getLogger(__name__)
 
@@ -48,13 +48,20 @@ def compute_seal_idempotency_key(
     project_id: str,
     owner_user_id: str,
     thread_id: str,
-    ordinal: int,
+    activity_at: datetime,
 ) -> str:
-    """Hash one seal admission identity; the ordinal separates re-admissions."""
+    """Hash one seal admission identity from the Thread activity epoch."""
+
+    if activity_at.tzinfo is None or activity_at.utcoffset() is None:
+        raise ValueError("Seal activity timestamp must be timezone-aware")
 
     payload = {
+        "activity_at": activity_at.astimezone(UTC)
+        .isoformat(
+            timespec="microseconds",
+        )
+        .replace("+00:00", "Z"),
         "domain": _SEAL_KEY_DOMAIN,
-        "ordinal": ordinal,
         "owner_user_id": owner_user_id,
         "project_id": project_id,
         "thread_id": thread_id,
@@ -146,6 +153,23 @@ class MemorySealAdmissionService:
             )
         )
 
+    @staticmethod
+    def _terminal_seal_failure_for_activity_exists(
+        thread: type[ThreadMetaRow],
+    ) -> sa.ColumnElement[bool]:
+        """A terminal failure already consumed the current activity epoch."""
+
+        return sa.exists(
+            sa.select(sa.literal(1)).where(
+                JobRow.job_type == "memory_seal",
+                JobRow.project_id == thread.project_id,
+                JobRow.owner_user_id == thread.owner_user_id,
+                JobRow.namespace == thread.thread_id,
+                JobRow.status.in_(("failed", "dead")),
+                JobRow.created_at >= thread.updated_at,
+            )
+        )
+
     @classmethod
     def _due_predicates(
         cls,
@@ -160,6 +184,7 @@ class MemorySealAdmissionService:
             cls._settled_run_exists(ThreadMetaRow),
             ~cls._active_run_exists(ThreadMetaRow),
             ~cls._active_seal_job_exists(ThreadMetaRow),
+            ~cls._terminal_seal_failure_for_activity_exists(ThreadMetaRow),
         )
 
     async def list_due_threads(
@@ -243,33 +268,31 @@ class MemorySealAdmissionService:
         )
         if not still_due:
             return None
-        ordinal = (
-            int(
-                await session.scalar(
-                    sa.select(sa.func.count())
-                    .select_from(JobRow)
-                    .where(
-                        JobRow.job_type == "memory_seal",
-                        JobRow.project_id == project_id,
-                        JobRow.owner_user_id == owner_user_id,
-                        JobRow.namespace == thread_id,
-                    )
-                )
-                or 0
-            )
-            + 1
+        idempotency_key = compute_seal_idempotency_key(
+            project_id=str(project_id),
+            owner_user_id=owner_user_id,
+            thread_id=thread_id,
+            activity_at=thread.updated_at,
         )
+        existing_job_id = await session.scalar(
+            sa.select(JobRow.id)
+            .where(
+                JobRow.job_type == "memory_seal",
+                JobRow.project_id == project_id,
+                JobRow.owner_user_id == owner_user_id,
+                JobRow.namespace == thread_id,
+                JobRow.idempotency_key == idempotency_key,
+            )
+            .limit(1)
+        )
+        if existing_job_id is not None:
+            return None
         job_id = await self._job_repository_builder(session).enqueue(
             EnqueueJob(
                 job_type="memory_seal",
                 scope=JobScope(project_id, owner_user_id),
                 namespace=thread_id,
-                idempotency_key=compute_seal_idempotency_key(
-                    project_id=str(project_id),
-                    owner_user_id=owner_user_id,
-                    thread_id=thread_id,
-                    ordinal=ordinal,
-                ),
+                idempotency_key=idempotency_key,
                 run_id=None,
                 occurrence_id=None,
                 max_attempts=_SEAL_JOB_MAX_ATTEMPTS,

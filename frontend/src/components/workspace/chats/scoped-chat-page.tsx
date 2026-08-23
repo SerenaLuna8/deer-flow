@@ -22,12 +22,14 @@ import {
 } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ExecutionApprovalCard } from "@/components/workspace/messages/execution-approval-card";
+import { RunControlProgress } from "@/components/workspace/run-control-progress";
 import {
   canRestoreRunFailureInput,
   canRetryModelOutputLimit,
   RunFailureAlert,
   shouldShowRunFailureAlert,
 } from "@/components/workspace/run-failure-alert";
+import { RunWorkloadProfileBadge } from "@/components/workspace/run-workload-profile-badge";
 import {
   SidecarProvider,
   SidecarTrigger,
@@ -243,6 +245,8 @@ export function ScopedChatPage({
     hasTerminalRunFailure,
     runFailureCode,
     runFailureRunId,
+    runControlObservations,
+    effectiveRunWorkloadProfile,
   } = useThreadStream({
     threadId,
     displayThreadId: threadId,
@@ -737,6 +741,11 @@ export function ScopedChatPage({
             >
               <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
                 {renderHeaderAccessory?.(threadMetadata.data)}
+                {effectiveRunWorkloadProfile ? (
+                  <RunWorkloadProfileBadge
+                    profile={effectiveRunWorkloadProfile}
+                  />
+                ) : null}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <TokenUsageIndicator
@@ -891,6 +900,7 @@ export function ScopedChatPage({
                       </div>
                     </div>
                   )}
+                  <RunControlProgress observations={runControlObservations} />
                   {hasRunFailure && (
                     <RunFailureAlert
                       failureCode={runFailureCode}

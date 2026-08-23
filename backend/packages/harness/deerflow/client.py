@@ -36,6 +36,14 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.agents.middlewares.tool_call_control import (
+    TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY,
+    PerInvocationToolCallControlScope,
+    ToolCallControlBinding,
+    ToolCallControlWorkloadProfile,
+    build_tool_call_control,
+    default_graph_tool_call_control_profile,
+)
 from deerflow.agents.thread_state import (
     get_thread_state_schema,
     normalize_middleware_state_schemas,
@@ -78,6 +86,19 @@ from deerflow.uploads.manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_workload_profile(
+    workload_profile: object,
+) -> ToolCallControlWorkloadProfile:
+    if not isinstance(workload_profile, str) or workload_profile not in {
+        "interactive",
+        "research",
+    }:
+        raise ValueError(
+            "workload_profile must be 'interactive' or 'research'",
+        )
+    return workload_profile  # type: ignore[return-value]
 
 
 def _run_async_from_sync(coro):
@@ -161,6 +182,7 @@ class DeerFlowClient:
         middlewares: Sequence[AgentMiddleware] | None = None,
         environment: str | None = None,
         asset_context: object | None = None,
+        workload_profile: ToolCallControlWorkloadProfile = "interactive",
     ):
         """Initialize the client.
 
@@ -187,6 +209,10 @@ class DeerFlowClient:
             asset_context: Opaque trusted context supplied by an internal
                 caller for project-scoped secret materialization. Client
                 dictionaries are not accepted as authorization context.
+            workload_profile: Caller-owned Embedded invocation policy selector.
+                Only ``interactive`` and ``research`` are accepted. Individual
+                ``stream``/``chat`` calls may override it without mutating the
+                client default.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -206,6 +232,7 @@ class DeerFlowClient:
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
         self._environment = environment
+        self._workload_profile = _validate_workload_profile(workload_profile)
         self._asset_context = trusted_asset_context(asset_context)
         if asset_context is not None and self._asset_context is None:
             raise AssetCatalogUnavailable("trusted asset context must be an opaque internal object")
@@ -248,12 +275,16 @@ class DeerFlowClient:
 
     def _get_runnable_config(self, thread_id: str, **overrides) -> RunnableConfig:
         """Build a RunnableConfig for agent invocation."""
+        workload_profile = _validate_workload_profile(
+            overrides.get("workload_profile", self._workload_profile),
+        )
         configurable = {
             "thread_id": thread_id,
             "model_name": overrides.get("model_name", self._model_name),
             "thinking_enabled": overrides.get("thinking_enabled", self._thinking_enabled),
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
             "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
+            "workload_profile": workload_profile,
         }
         return RunnableConfig(
             configurable=configurable,
@@ -268,6 +299,7 @@ class DeerFlowClient:
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
+            cfg.get("workload_profile"),
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
@@ -281,6 +313,20 @@ class DeerFlowClient:
         model_name = cfg.get("model_name")
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        workload_profile = _validate_workload_profile(
+            cfg.get("workload_profile"),
+        )
+        tool_call_control_profile = default_graph_tool_call_control_profile(
+            workload_profile,
+        )
+        tool_call_control = build_tool_call_control(
+            tool_call_control_profile.lead,
+            ToolCallControlBinding(
+                role="lead",
+                scope=PerInvocationToolCallControlScope(),
+                workload_profile=workload_profile,
+            ),
+        )
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
@@ -322,6 +368,7 @@ class DeerFlowClient:
                 deferred_setup=deferred_setup,
                 mcp_routing_middleware=mcp_routing_middleware,
                 user_id=get_effective_user_id(),
+                tool_call_control=tool_call_control,
             ),
             self._checkpoint_channel_mode,
             self._checkpoint_snapshot_frequency,
@@ -361,7 +408,8 @@ class DeerFlowClient:
                 plan_mode=bool(cfg.get("is_plan_mode", self._plan_mode)),
                 agent_name=self._agent_name,
                 available_skills=(tuple(sorted(self._available_skills)) if self._available_skills is not None else None),
-            )
+            ),
+            tool_call_control_profile=tool_call_control_profile,
         )
         final_tools = bind_task_tool_in_tools(final_tools, binding_factory)
         kwargs: dict[str, Any] = {
@@ -795,7 +843,8 @@ class DeerFlowClient:
             message: User message text.
             thread_id: Thread ID for conversation context. Auto-generated if None.
             **kwargs: Override client defaults (model_name, thinking_enabled,
-                plan_mode, subagent_enabled, recursion_limit).
+                plan_mode, subagent_enabled, workload_profile,
+                recursion_limit).
 
         Yields:
             StreamEvent with one of:
@@ -856,6 +905,7 @@ class DeerFlowClient:
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
         context = {"thread_id": thread_id}
+        context[TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY] = str(uuid.uuid4())
         if deerflow_trace_id:
             context[ACT_WEAVE_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:

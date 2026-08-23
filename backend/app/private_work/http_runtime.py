@@ -19,6 +19,7 @@ from app.private_work.run_admission import (
 )
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.runtime_context import prepare_private_run_config
+from app.private_work.workload_profile import RequestedRunWorkloadProfile
 from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.runtime.secret_context import redact_config_secrets
 from deerflow.trace_context import (
@@ -105,6 +106,9 @@ async def start_private_run(
                 None,
             ),
         )
+        workload_profile = RequestedRunWorkloadProfile(
+            name=getattr(body, "workload_profile", "interactive"),
+        )
     except TypeError:
         raise PrivateWorkInvalid(context.request_id) from None
     origin_trace_id = get_current_trace_id() or normalize_trace_id(context.request_id) or generate_trace_id()
@@ -122,6 +126,7 @@ async def start_private_run(
         multitask_strategy=getattr(body, "multitask_strategy", "reject"),
         origin_trace_id=origin_trace_id,
         execution_profile=execution_profile,
+        workload_profile=workload_profile,
     )
     if type(server_context) is PrivateRunAdmissionServerContext:
         trusted_admission_context = replace(

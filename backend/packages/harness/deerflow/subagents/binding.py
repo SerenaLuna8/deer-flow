@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -28,7 +29,14 @@ from langgraph.types import Command
 
 from deerflow.runtime.context_keys import RuntimeContextKeys
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
+    from deerflow.agents.middlewares.tool_call_control import (
+        ResolvedGraphToolCallControlProfile,
+        ToolCallControlObservation,
+        ToolCallControlObserver,
+    )
     from deerflow.subagents.lifecycle import (
         SubagentExecutionBinding,
         SubagentRunnerFactory,
@@ -41,6 +49,20 @@ else:
     # is annotation-only here; the graph-local tool reuses the canonical
     # StructuredTool's already-built argument schema.
     Runtime = Any
+
+
+def _validate_tool_call_control_profile(value: object | None) -> None:
+    if value is None:
+        return
+    # Delayed to avoid the tools -> task_tool -> binding initialization cycle.
+    from deerflow.agents.middlewares.tool_call_control import (
+        ResolvedGraphToolCallControlProfile,
+    )
+
+    if type(value) is not ResolvedGraphToolCallControlProfile:
+        raise TypeError(
+            "tool_call_control_profile must be ResolvedGraphToolCallControlProfile or None",
+        )
 
 
 class _OpaqueExecutionObject:
@@ -293,6 +315,59 @@ class ParentExecutionReceipt(_OpaqueExecutionObject):
         return self._barrier._acknowledge(token)
 
 
+class _ParentOwnerLoopToolCallControlObserver(_OpaqueExecutionObject):
+    """Deliver one graph observation on its parent execution owner loop."""
+
+    __slots__ = ("_barrier", "_owner_loop", "_target")
+
+    def __init__(
+        self,
+        *,
+        target: ToolCallControlObserver,
+        owner_loop: asyncio.AbstractEventLoop,
+        barrier: ParentExecutionBarrier,
+    ) -> None:
+        self._target = target
+        self._owner_loop = owner_loop
+        self._barrier = barrier
+
+    def observe(self, observation: ToolCallControlObservation) -> None:
+        """Schedule one receipt; delivery failure never changes enforcement."""
+
+        receipt = self._barrier.open_operation()
+
+        def deliver() -> None:
+            try:
+                self._target.observe(observation)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Tool-call control observation delivery failed: reason_code=%s role=%s exception_type=%s",
+                    observation.reason_code,
+                    observation.role,
+                    type(exc).__name__,
+                )
+            finally:
+                receipt.acknowledge()
+
+        if self._owner_loop.is_closed() or not self._owner_loop.is_running():
+            receipt.acknowledge()
+            logger.error(
+                "Tool-call control observation owner loop is unavailable: reason_code=%s role=%s",
+                observation.reason_code,
+                observation.role,
+            )
+            return
+        try:
+            self._owner_loop.call_soon_threadsafe(deliver)
+        except RuntimeError:
+            receipt.acknowledge()
+            logger.error(
+                "Tool-call control observation owner loop rejected delivery: reason_code=%s role=%s",
+                observation.reason_code,
+                observation.role,
+            )
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class ParentExecutionBinding(_OpaqueExecutionObject):
     """One Sub-Agent Task's immutable parent Run snapshot and authority."""
@@ -304,6 +379,21 @@ class ParentExecutionBinding(_OpaqueExecutionObject):
     owner_loop: asyncio.AbstractEventLoop
     store: object | None
     barrier: ParentExecutionBarrier
+    tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None
+    tool_call_control_observer: ToolCallControlObserver | None = None
+
+    def __post_init__(self) -> None:
+        _validate_tool_call_control_profile(self.tool_call_control_profile)
+        if self.tool_call_control_observer is not None and not callable(
+            getattr(self.tool_call_control_observer, "observe", None),
+        ):
+            raise TypeError(
+                "tool_call_control_observer must implement observe()",
+            )
+        if self.tool_call_control_observer is not None and self.tool_call_control_profile is None:
+            raise ValueError(
+                "tool_call_control_observer requires a resolved graph profile",
+            )
 
     def to_lifecycle_binding(
         self,
@@ -340,6 +430,8 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
     """Graph-owned factory for per-Sub-Agent Task parent bindings."""
 
     profile: ParentExecutionProfile
+    tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None
+    tool_call_control_observer: ToolCallControlObserver | None = None
 
     def __post_init__(self) -> None:
         if type(self.profile) not in {
@@ -349,6 +441,17 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
             PrivateRunParentExecutionProfile,
         }:
             raise TypeError("unsupported parent execution profile")
+        _validate_tool_call_control_profile(self.tool_call_control_profile)
+        if self.tool_call_control_observer is not None and not callable(
+            getattr(self.tool_call_control_observer, "observe", None),
+        ):
+            raise TypeError(
+                "tool_call_control_observer must implement observe()",
+            )
+        if self.tool_call_control_observer is not None and self.tool_call_control_profile is None:
+            raise ValueError(
+                "tool_call_control_observer requires a resolved graph profile",
+            )
 
     def bind(self, runtime: Runtime) -> ParentExecutionBinding:
         """Capture one invocation without materializing a subagent runner."""
@@ -363,14 +466,27 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
         # The factory key is an internal construction capability, not parent
         # Run authority inherited by the child graph itself.
         context = {key: value for key, value in raw_context.items() if key != RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY}
+        owner_loop = asyncio.get_running_loop()
+        barrier = ParentExecutionBarrier()
+        observer = (
+            None
+            if self.tool_call_control_observer is None
+            else _ParentOwnerLoopToolCallControlObserver(
+                target=self.tool_call_control_observer,
+                owner_loop=owner_loop,
+                barrier=barrier,
+            )
+        )
         return ParentExecutionBinding(
             profile=self.profile,
             state=MappingProxyType(dict(state)),
             context=MappingProxyType(context),
             config=MappingProxyType(dict(config)),
-            owner_loop=asyncio.get_running_loop(),
+            owner_loop=owner_loop,
             store=runtime.store,
-            barrier=ParentExecutionBarrier(),
+            barrier=barrier,
+            tool_call_control_profile=self.tool_call_control_profile,
+            tool_call_control_observer=observer,
         )
 
 

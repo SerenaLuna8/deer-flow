@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
@@ -15,6 +16,8 @@ from support.system_model_seed import (
 )
 
 import deerflow.runtime.checkpoint_mode as checkpoint_mode_state
+from app.audit.models import resolve_system_audit_context
+from app.audit.service import AuditService
 from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.checkpoint_state import (
     bind_scoped_checkpoint_state,
@@ -26,12 +29,15 @@ from app.private_work.memory_seal_service import (
     MemorySealAdmissionService,
     MemorySealSchedulerService,
 )
+from app.private_work.thread_repository import PrivateThreadRepository
 from app.private_work.thread_service import PrivateThreadService
+from app.reliability.owner_refs import AuditHmacKeyring
 from app.system_runtime_settings.materializer import SystemRuntimePolicyMaterializer
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
     RuntimePolicySection,
 )
+from app.system_runtime_settings.service import SystemRuntimePolicyService
 from app.worker.memory_seal import MemorySealJobHandler
 from app.worker.service import JobLeaseAuthority, JobSettlement
 from deerflow.config.app_config import AppConfig
@@ -43,6 +49,7 @@ from deerflow.persistence.private_work.memory_document_model import (
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.model import UserRow
 
 _CONTINUITY = "The sealed thread remains available through compacted continuity."
 _TAGGED_TEXT = "- [durable] Idle sealing archives completed Thread turns before Dream"
@@ -99,6 +106,57 @@ async def _seed_summary_model(seed: PrivateThreadSeed) -> ModelConfig:
         supports_vision=False,
     )
     return runtime_model
+
+
+async def _set_current_summary_model(
+    seed: PrivateThreadSeed,
+    runtime_model: ModelConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind the test model through the same authoritative DB policy seam."""
+
+    monkeypatch.setenv("ACT_WEAVE_AUDIT_ACTIVE_KEY_ID", "test-audit-v1")
+    monkeypatch.setenv(
+        "ACT_WEAVE_AUDIT_KEYRING_JSON",
+        '{"test-audit-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}',
+    )
+    async with seed.factory() as session, session.begin():
+        await session.execute(sa.update(UserRow).where(UserRow.id == str(seed.owner_a.user_id)).values(system_role="system_admin"))
+    async with seed.factory() as session:
+        policy, revision = await SystemRuntimePolicyMaterializer.materialize_current_with_revision_in_session(
+            session,
+            RuntimePolicySection.AGENT_RUNTIME,
+        )
+    assert isinstance(policy, AgentRuntimePolicyValue)
+    updated = policy.model_copy(
+        update={
+            "summarization": policy.summarization.model_copy(
+                update={"model_name": runtime_model.name},
+            ),
+            # The isolated fixture intentionally does not seed the catalog's
+            # production default Vision model.
+            "vision_bridge": policy.vision_bridge.model_copy(
+                update={"model_name": None},
+            ),
+        },
+    )
+    service = SystemRuntimePolicyService(
+        seed.factory,
+        AuditService(seed.factory, AuditHmacKeyring.from_environment()),
+    )
+    context = resolve_system_audit_context(
+        SimpleNamespace(
+            id=seed.owner_a.user_id,
+            system_role="system_admin",
+        ),
+        request_id="memory-seal-postgres-policy",
+    )
+    await service.update_policy(
+        context,
+        RuntimePolicySection.AGENT_RUNTIME,
+        expected_revision=revision,
+        value=updated,
+    )
 
 
 def _app_config(database_url: str, runtime_model: ModelConfig) -> AppConfig:
@@ -315,6 +373,132 @@ async def _assert_job_succeeded(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_memory_seal_terminal_failure_waits_for_new_thread_activity(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _reset_checkpoint_mode(monkeypatch)
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    thread_id = f"seal-epoch-{uuid.uuid4().hex}"
+    try:
+        async with AsyncPostgresSaver.from_conn_string(_checkpointer_url(migrated_postgres_database_url)) as raw:
+            await raw.setup()
+            scoped = ProjectScopedCheckpointer(raw, seed.factory)
+            runtime_model = await _seed_summary_model(seed)
+            app_config = _app_config(
+                migrated_postgres_database_url,
+                runtime_model,
+            )
+            _source_checkpoint_id, _idle_at, admitted_at = await _seed_due_thread(
+                seed,
+                scoped,
+                app_config,
+                thread_id=thread_id,
+            )
+            scheduler = MemorySealSchedulerService(seed.factory)
+
+            assert await scheduler.admit_due(now=admitted_at) == 1
+            async with seed.factory() as session, session.begin():
+                first_job = await session.scalar(
+                    sa.select(JobRow).where(
+                        JobRow.job_type == "memory_seal",
+                        JobRow.project_id == seed.owner_a.project_id,
+                        JobRow.owner_user_id == str(seed.owner_a.user_id),
+                        JobRow.namespace == thread_id,
+                    )
+                )
+                assert first_job is not None
+                first_key = first_job.idempotency_key
+                first_created_at = first_job.created_at
+                await session.execute(
+                    sa.update(JobRow)
+                    .where(JobRow.id == first_job.id)
+                    .values(
+                        status="dead",
+                        public_error_code="MEMORY_SEAL_COMPACTION_DISABLED",
+                        completed_at=first_created_at,
+                    )
+                )
+
+            assert await scheduler.admit_due(now=admitted_at) == 0
+            assert await scheduler.admit_due(now=admitted_at) == 0
+            async with seed.factory() as session:
+                unchanged_count = await session.scalar(
+                    sa.select(sa.func.count())
+                    .select_from(JobRow)
+                    .where(
+                        JobRow.job_type == "memory_seal",
+                        JobRow.project_id == seed.owner_a.project_id,
+                        JobRow.owner_user_id == str(seed.owner_a.user_id),
+                        JobRow.namespace == thread_id,
+                    )
+                )
+            assert unchanged_count == 1
+
+            activity_at = max(admitted_at, first_created_at) + timedelta(
+                seconds=1,
+            )
+            async with seed.factory() as session, session.begin():
+                session.add(
+                    RunRow(
+                        run_id=f"activity-{uuid.uuid4().hex}",
+                        thread_id=thread_id,
+                        assistant_id=str(seed.project_agent_id),
+                        owner_user_id=str(seed.owner_a.user_id),
+                        status="success",
+                        model_name=runtime_model.name,
+                        multitask_strategy="reject",
+                        metadata_json={},
+                        kwargs_json={},
+                        origin_trace_id=uuid.uuid4().hex,
+                        project_id=seed.owner_a.project_id,
+                        finalization_status="complete",
+                        created_at=activity_at,
+                        updated_at=activity_at,
+                    )
+                )
+                await session.flush()
+                await PrivateThreadRepository(session).touch_activity(
+                    scope=seed.owner_a.resource_scope,
+                    thread_id=thread_id,
+                    occurred_at=activity_at,
+                )
+
+            async with seed.factory() as session:
+                policy, _revision = await SystemRuntimePolicyMaterializer.materialize_current_with_revision_in_session(
+                    session,
+                    RuntimePolicySection.AGENT_RUNTIME,
+                )
+            assert isinstance(policy, AgentRuntimePolicyValue)
+            next_due_at = activity_at + timedelta(
+                minutes=policy.memory.idle_seal_minutes + 1,
+            )
+
+            assert await scheduler.admit_due(now=next_due_at) == 1
+            async with seed.factory() as session:
+                keys = tuple(
+                    (
+                        await session.execute(
+                            sa.select(JobRow.idempotency_key)
+                            .where(
+                                JobRow.job_type == "memory_seal",
+                                JobRow.project_id == seed.owner_a.project_id,
+                                JobRow.owner_user_id == str(seed.owner_a.user_id),
+                                JobRow.namespace == thread_id,
+                            )
+                            .order_by(JobRow.created_at, JobRow.id)
+                        )
+                    ).scalars()
+                )
+            assert len(keys) == 2
+            assert keys[0] == first_key
+            assert keys[1] != first_key
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_memory_seal_real_postgres_scheduler_worker_and_archive_closure(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -327,6 +511,7 @@ async def test_memory_seal_real_postgres_scheduler_worker_and_archive_closure(
             await raw.setup()
             scoped = ProjectScopedCheckpointer(raw, seed.factory)
             runtime_model = await _seed_summary_model(seed)
+            await _set_current_summary_model(seed, runtime_model, monkeypatch)
             app_config = _app_config(
                 migrated_postgres_database_url,
                 runtime_model,

@@ -12,11 +12,13 @@ from app.personalization.repository import AccountMemoryPreference
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
     PrivateWorkConflict,
+    PrivateWorkDreamModelUnavailable,
     PrivateWorkInvalid,
     PrivateWorkUnavailable,
 )
 from app.private_work.memory_dream_service import (
     MemoryDreamAdmissionService,
+    MemoryDreamModelUnavailable,
     MemoryDreamSchedulerService,
 )
 from app.private_work.memory_service import PrivateMemoryDocumentService
@@ -464,6 +466,134 @@ async def test_platform_runtime_does_not_read_current_document_policy_for_existi
 
 
 @pytest.mark.asyncio
+async def test_manual_admission_reports_unavailable_model_when_pending_memory_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _Repository(())
+
+    async def materialize(_session, _section, *, for_update=False):
+        assert for_update is True
+        return _runtime()[0], _runtime()[1]
+
+    class Models:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def resolve_active_model(self, model_ref, *, load_secret):
+            assert (model_ref, load_secret) == (DREAM_MODEL_REF, True)
+            return None
+
+    monkeypatch.setattr(
+        service_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_with_revision_in_session",
+        staticmethod(materialize),
+    )
+    monkeypatch.setattr(service_module, "SystemModelRepository", Models)
+
+    with pytest.raises(MemoryDreamModelUnavailable):
+        await _service(repository).admit(
+            object(),
+            _scope(),
+            trigger="manual_dream",
+            now=NOW,
+        )
+
+    assert repository.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_manual_admission_returns_nothing_pending_before_resolving_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Repository(_Repository):
+        async def read_state(self, _scope_value, **_kwargs):
+            return SimpleNamespace(
+                document=SimpleNamespace(
+                    version=1,
+                    content=EMPTY_MEMORY_DOCUMENT,
+                    sections_policy_version_id=SECTIONS_POLICY_VERSION_ID,
+                ),
+                pending_count=0,
+            )
+
+    repository = Repository(())
+
+    async def materialize(_session, _section, *, for_update=False):
+        assert for_update is True
+        return _runtime()[0], _runtime()[1]
+
+    class Models:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def resolve_active_model(self, *_args, **_kwargs):
+            raise AssertionError("empty admission must not resolve a Dream model")
+
+    monkeypatch.setattr(
+        service_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_with_revision_in_session",
+        staticmethod(materialize),
+    )
+    monkeypatch.setattr(service_module, "SystemModelRepository", Models)
+
+    result = await _service(repository).admit(
+        object(),
+        _scope(),
+        trigger="manual_dream",
+        now=NOW,
+    )
+
+    assert result.disposition == "nothing_pending"
+    assert repository.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_budget_rewrite_reports_unavailable_model_with_an_empty_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Repository(_Repository):
+        async def read_state(self, _scope_value, **_kwargs):
+            return SimpleNamespace(
+                document=SimpleNamespace(
+                    version=1,
+                    content=f"{EMPTY_MEMORY_DOCUMENT}\n\n{'x' * 20_000}",
+                    sections_policy_version_id=SECTIONS_POLICY_VERSION_ID,
+                ),
+                pending_count=0,
+            )
+
+    repository = Repository(())
+
+    async def materialize(_session, _section, *, for_update=False):
+        assert for_update is True
+        return _runtime()[0], _runtime()[1]
+
+    class Models:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def resolve_active_model(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(
+        service_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_with_revision_in_session",
+        staticmethod(materialize),
+    )
+    monkeypatch.setattr(service_module, "SystemModelRepository", Models)
+
+    with pytest.raises(MemoryDreamModelUnavailable):
+        await _service(repository).admit(
+            object(),
+            _scope(),
+            trigger="manual_dream",
+            now=NOW,
+        )
+
+    assert repository.admissions == []
+
+
+@pytest.mark.asyncio
 async def test_manual_admission_freezes_exact_four_field_runtime_and_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -535,11 +665,12 @@ async def test_scheduler_uses_dream_interval_and_admits_each_due_scope_once(
     contexts = []
 
     async def policy(_session, *, for_update):
-        assert for_update is False
+        assert isinstance(for_update, bool)
         return _runtime()[0], _runtime()[1]
 
-    async def runtime(_session, *, create_document):
+    async def runtime(_session, *, create_document, policy_state):
         assert create_document is False
+        assert policy_state == (_runtime()[0], _runtime()[1])
         return (*_runtime(), None)
 
     async def resolve(*_args, **_kwargs):
@@ -693,14 +824,14 @@ async def test_scheduler_discovers_without_row_locks_then_uses_one_transaction_p
         ("due", 0),
         ("project", 1),
         ("policy", 1, True),
-        ("model", 1),
         ("due_scope", 1),
+        ("model", 1),
         ("preference", 1),
         ("document", 1),
         ("project", 2),
         ("policy", 2, True),
-        ("model", 2),
         ("due_scope", 2),
+        ("model", 2),
         ("preference", 2),
         ("document", 2),
         ("policy", 3, False),
@@ -763,7 +894,7 @@ async def test_scheduler_rechecks_due_with_the_locked_current_interval(
             pass
 
         async def resolve_active_model(self, *_args, **_kwargs):
-            return _runtime()[2]
+            raise AssertionError("a no-longer-due scope must not resolve a model")
 
     async def resolve(*_args, **_kwargs):
         return _ProjectContext()
@@ -980,6 +1111,27 @@ async def test_scheduler_wrapper_preserves_the_configured_poll_bound() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scheduler_poll_propagates_dream_model_unavailable() -> None:
+    class Admission:
+        async def list_due_scopes(self, _session, **_kwargs):
+            return (_scope(),)
+
+        async def list_budget_rewrite_scope_page(self, *_args, **_kwargs):
+            raise AssertionError("model unavailability must stop the current scan")
+
+        async def admit_scheduled_scope(self, *_args, **_kwargs):
+            raise MemoryDreamModelUnavailable
+
+    scheduler = MemoryDreamSchedulerService(
+        lambda: _Session(),
+        admission=Admission(),
+    )
+
+    with pytest.raises(MemoryDreamModelUnavailable):
+        await scheduler.admit_due(now=NOW)
+
+
+@pytest.mark.asyncio
 async def test_budget_scheduler_pages_past_more_than_one_hundred_unadmittable_scopes() -> None:
     unadmittable = tuple(_scope(index) for index in range(1, 102))
     queued_scope = _scope(102)
@@ -1081,6 +1233,7 @@ class _DreamAdmission:
         session: _Session,
         *,
         result: MemoryDreamAdmissionRecord | None = None,
+        error: Exception | None = None,
     ) -> None:
         self.session = session
         self.calls: list[tuple[object, object, dict[str, object]]] = []
@@ -1089,11 +1242,14 @@ class _DreamAdmission:
             job_id=uuid.uuid4(),
             history_count=3,
         )
+        self.error = error
 
     async def admit(self, session, scope, **kwargs):
         assert session is self.session
         assert session.in_transaction() is True
         self.calls.append((session, scope, kwargs))
+        if self.error is not None:
+            raise self.error
         return self.result
 
 
@@ -1175,6 +1331,32 @@ async def test_manual_dream_does_not_audit_nonqueued_admission() -> None:
 
     assert result.disposition == "nothing_pending"
     assert audit.calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_dream_maps_unavailable_model_to_stable_public_error() -> None:
+    session = _Session()
+    audit = _DreamLifecycleAudit()
+
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            return None
+
+    service = PrivateMemoryDocumentService(
+        lambda: session,
+        revalidator=Revalidator(),
+        dream_admission=_DreamAdmission(
+            session,
+            error=MemoryDreamModelUnavailable(),
+        ),
+        audit=audit,
+    )
+
+    with pytest.raises(PrivateWorkDreamModelUnavailable):
+        await service.dream(_context())
+
+    assert audit.calls == []
+    assert session.in_transaction() is False
 
 
 @pytest.mark.asyncio

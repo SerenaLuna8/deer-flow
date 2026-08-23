@@ -61,7 +61,10 @@ from app.shared_assets.models import (
     AssetScope,
     ResolvedAgentSnapshot,
 )
-from app.system_runtime_settings.models import AgentRuntimePolicyValue
+from app.system_runtime_settings.models import (
+    AgentRuntimePolicyValue,
+    MaterializedAgentRuntimePolicy,
+)
 from app.system_settings import SystemModelCatalogService
 from app.worker.service import JobLeaseAuthority
 from deerflow.agents.memory.snip import SnipArchiveContext
@@ -674,8 +677,11 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
     materialized_purposes: list[str] = []
 
     class RuntimePolicy:
-        async def materialize_run_snapshot(self, **_kwargs):
-            return runtime_policy
+        async def materialize_run_snapshot_envelope(self, **_kwargs):
+            return MaterializedAgentRuntimePolicy(
+                schema_version=3,
+                value=runtime_policy,
+            )
 
     class Models:
         async def materialize_snapshot(self, *, purpose: str, **_kwargs):
@@ -708,6 +714,9 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
     async def runner(_bridge, _run_manager, record, *, ctx, **_kwargs):
         observed["authority"] = ctx.vision_dispatch_authority
         observed["record_status"] = str(record.status)
+        observed["tool_control_policy"] = ctx.tool_call_control_policy
+        observed["max_concurrent_subagents"] = ctx.max_concurrent_subagents
+        observed["max_total_subagents"] = ctx.max_total_subagents
         return _runner_success()
 
     async def activity_emitter_factory(*_args):
@@ -804,6 +813,11 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         observed["authority"],
         PrivateRunVisionDispatchAuthority,
     )
+    assert observed["tool_control_policy"].workload_profile == "interactive"
+    assert observed["tool_control_policy"].lead.tool_budget.limit_for("web_search").hard_limit == 10
+    assert observed["tool_control_policy"].subagent.tool_budget.limit_for("web_search").hard_limit == 10
+    assert observed["max_concurrent_subagents"] == 3
+    assert observed["max_total_subagents"] == 6
 
 
 def test_run_response_echoes_the_effective_execution_profile() -> None:

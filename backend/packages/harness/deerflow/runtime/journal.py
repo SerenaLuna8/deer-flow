@@ -19,7 +19,10 @@ Key design decisions:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import re
+import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -32,12 +35,19 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
-from deerflow.agents.middlewares.loop_detection_middleware import (
-    LOOP_SAFETY_REPLACEMENT_KEY,
+from deerflow.agents.middlewares.subagent_limit_middleware import (
+    SUBAGENT_LIMIT_EVENT_REASON,
+    SubagentLimitObservation,
 )
 from deerflow.agents.middlewares.token_budget_middleware import (
     TOKEN_BUDGET_STATUS_KEY,
     read_token_budget_status,
+)
+from deerflow.agents.middlewares.tool_call_control import (
+    TOOL_CALL_CONTROL_LOOP_REPLACEMENT_KEY,
+    RepeatedCallObservation,
+    ToolCallBudgetObservation,
+    ToolCallControlObservation,
 )
 from deerflow.public_error_codes import (
     LLM_PUBLIC_ERROR_CODES,
@@ -64,6 +74,27 @@ _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"}
 _REASONING_DURATION_KEY = "reasoning_duration_ms"
 _MAX_REASONING_DURATION_MS = 24 * 60 * 60 * 1000
 _SAFE_EXCEPTION_CLASS_MAX_LENGTH = 96
+_SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+_TOOL_CALL_CONTROL_DISPOSITIONS = frozenset(
+    {
+        "advisory",
+        "tool_free_finalization",
+        "truncate_tool_calls",
+        "exhaust_tool",
+    }
+)
+_REPEATED_CALL_REASON_CODES = frozenset(
+    {
+        "repeated_call_warning",
+        "repeated_call_limit",
+    }
+)
+_TOOL_CALL_BUDGET_REASON_CODES = frozenset(
+    {
+        "tool_budget_warning",
+        "tool_budget_exhausted",
+    }
+)
 
 
 @dataclass
@@ -180,6 +211,8 @@ class RunJournal(BaseCallbackHandler):
         self._lead_tool_call_messages_by_id: dict[str, AIMessage] = {}
         self._reconciled_recovered_llm_observations: set[tuple[str, str, int]] = set()
         self._reconciled_loop_safety_message_ids: set[str] = set()
+        self._tool_call_control_observation_ids: set[str] = set()
+        self._subagent_limit_observation_ids: set[str] = set()
 
     # -- Lifecycle callbacks --
 
@@ -843,7 +876,7 @@ class RunJournal(BaseCallbackHandler):
             additional_kwargs.pop("tool_calls", None)
             additional_kwargs.pop("function_call", None)
             additional_kwargs["hide_from_ui"] = True
-            additional_kwargs[LOOP_SAFETY_REPLACEMENT_KEY] = True
+            additional_kwargs[TOOL_CALL_CONTROL_LOOP_REPLACEMENT_KEY] = True
             response_metadata = dict(original.response_metadata or {})
             if response_metadata.get("finish_reason") == "tool_calls":
                 response_metadata["finish_reason"] = "stop"
@@ -960,6 +993,153 @@ class RunJournal(BaseCallbackHandler):
                 },
             )
             return
+
+    def _tool_call_control_payload(
+        self,
+        observation: ToolCallControlObservation,
+    ) -> dict[str, object]:
+        if not isinstance(
+            observation,
+            (RepeatedCallObservation, ToolCallBudgetObservation),
+        ):
+            raise TypeError(
+                "observation must be a repeated-call or tool-budget observation",
+            )
+        if isinstance(observation, RepeatedCallObservation):
+            if observation.reason_code not in _REPEATED_CALL_REASON_CODES:
+                raise ValueError("repeated-call reason code is invalid")
+            tool_name = None
+        else:
+            if observation.reason_code not in _TOOL_CALL_BUDGET_REASON_CODES:
+                raise ValueError("tool-budget reason code is invalid")
+            tool_name = observation.tool_name
+        if observation.role not in {"lead", "subagent"}:
+            raise ValueError("tool-call control role is invalid")
+        if observation.workload_profile not in {"interactive", "research"}:
+            raise ValueError("tool-call control workload profile is invalid")
+        if observation.disposition not in _TOOL_CALL_CONTROL_DISPOSITIONS:
+            raise ValueError("tool-call control disposition is invalid")
+        if not isinstance(observation.observation_id, str) or re.fullmatch(r"[0-9a-f]{64}", observation.observation_id) is None:
+            raise ValueError("tool-call control observation ID is invalid")
+        if not isinstance(observation.scope_id, str) or not observation.scope_id:
+            raise ValueError("tool-call control scope is invalid")
+        if observation.role == "lead" and observation.scope_id != self.run_id:
+            raise ValueError("lead tool-call control scope does not match Run")
+        values = (
+            observation.count_before,
+            observation.proposed,
+            observation.admitted,
+            observation.rejected,
+            observation.count_after,
+            observation.warn_threshold,
+            observation.hard_limit,
+        )
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
+            raise ValueError("tool-call control counters are invalid")
+        if observation.warn_threshold < 1 or observation.hard_limit < 1:
+            raise ValueError("tool-call control thresholds are invalid")
+        if observation.hard_limit < observation.warn_threshold:
+            raise ValueError("tool-call control threshold order is invalid")
+        if tool_name is not None and (not isinstance(tool_name, str) or _SAFE_TOOL_NAME.fullmatch(tool_name) is None):
+            tool_name = "unknown"
+        execution_id = (
+            hashlib.sha256(
+                f"{self.run_id}:{observation.scope_id}".encode(),
+            ).hexdigest()[:32]
+            if observation.role == "subagent"
+            else None
+        )
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "reason_code": observation.reason_code,
+            "workload_profile": observation.workload_profile,
+            "role": observation.role,
+            "run_id": self.run_id,
+            "execution_id": execution_id,
+            "count_before": observation.count_before,
+            "proposed": observation.proposed,
+            "admitted": observation.admitted,
+            "rejected": observation.rejected,
+            "count_after": observation.count_after,
+            "warn_threshold": observation.warn_threshold,
+            "hard_limit": observation.hard_limit,
+            "disposition": observation.disposition,
+            "observation_id": observation.observation_id,
+        }
+        if isinstance(observation, ToolCallBudgetObservation):
+            payload["tool_name"] = tool_name
+        return payload
+
+    def record_tool_call_control_observation(
+        self,
+        observation: ToolCallControlObservation,
+    ) -> None:
+        """Persist one safe, idempotent control fact on the Run owner loop."""
+
+        payload = self._tool_call_control_payload(observation)
+        observation_id = observation.observation_id
+        if observation_id in self._tool_call_control_observation_ids:
+            return
+        self._tool_call_control_observation_ids.add(observation_id)
+        self._put(
+            event_type=("middleware:repeated_call" if isinstance(observation, RepeatedCallObservation) else "middleware:tool_call_budget"),
+            category="middleware",
+            content=payload,
+            metadata={
+                "reason_code": observation.reason_code,
+                "observation_id": observation_id,
+            },
+        )
+
+    def record_subagent_limit_observation(
+        self,
+        observation: SubagentLimitObservation,
+    ) -> None:
+        """Persist one safe, replay-idempotent delegation-limit fact."""
+
+        if not isinstance(observation, SubagentLimitObservation):
+            raise TypeError("observation must be SubagentLimitObservation")
+        if observation.reason_code != SUBAGENT_LIMIT_EVENT_REASON:
+            raise ValueError("subagent-limit reason code is invalid")
+        if observation.role != "lead":
+            raise ValueError("subagent-limit role is invalid")
+        if observation.run_id != self.run_id:
+            raise ValueError("subagent-limit observation does not match Run")
+        if observation.disposition != "truncate_tool_calls":
+            raise ValueError("subagent-limit disposition is invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", observation.observation_id) is None:
+            raise ValueError("subagent-limit observation ID is invalid")
+        values = (
+            observation.count_before,
+            observation.proposed,
+            observation.admitted,
+            observation.rejected,
+            observation.count_after,
+            observation.hard_limit,
+        )
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
+            raise ValueError("subagent-limit counters are invalid")
+        if observation.hard_limit < 1:
+            raise ValueError("subagent-limit hard limit is invalid")
+        if observation.admitted + observation.rejected != observation.proposed:
+            raise ValueError("subagent-limit proposal accounting is invalid")
+        if observation.count_after != observation.count_before + observation.admitted:
+            raise ValueError("subagent-limit admitted accounting is invalid")
+        if observation.count_after > observation.hard_limit:
+            raise ValueError("subagent-limit count exceeds hard limit")
+        observation_id = observation.observation_id
+        if observation_id in self._subagent_limit_observation_ids:
+            return
+        self._subagent_limit_observation_ids.add(observation_id)
+        self._put(
+            event_type="middleware:subagent_limit",
+            category="middleware",
+            content=observation.payload(),
+            metadata={
+                "reason_code": observation.reason_code,
+                "observation_id": observation_id,
+            },
+        )
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
         self._buffer.append(
@@ -1311,3 +1491,76 @@ class RunJournal(BaseCallbackHandler):
     @property
     def llm_error_fallback_code(self) -> str | None:
         return self._llm_error_fallback_code
+
+
+class RunJournalToolCallControlObserver:
+    """Marshal Harness control facts onto the parent Run's owner loop."""
+
+    __slots__ = ("_journal", "_lock", "_observed", "_owner_loop")
+
+    def __init__(
+        self,
+        journal: RunJournal,
+        *,
+        owner_loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        if not isinstance(journal, RunJournal):
+            raise TypeError("journal must be RunJournal")
+        if not isinstance(owner_loop, asyncio.AbstractEventLoop):
+            raise TypeError("owner_loop must be an asyncio event loop")
+        self._journal = journal
+        self._owner_loop = owner_loop
+        self._lock = threading.Lock()
+        self._observed: set[str] = set()
+
+    def observe(self, observation: ToolCallControlObservation) -> None:
+        """Attempt one safe SSE/journal projection without changing enforcement."""
+
+        try:
+            payload = self._journal._tool_call_control_payload(observation)
+            with self._lock:
+                if observation.observation_id in self._observed:
+                    return
+                self._observed.add(observation.observation_id)
+
+            if observation.role == "lead":
+                try:
+                    from langgraph.config import get_stream_writer
+
+                    get_stream_writer()(
+                        {
+                            "type": (
+                                "repeated_call"
+                                if isinstance(
+                                    observation,
+                                    RepeatedCallObservation,
+                                )
+                                else "tool_call_budget"
+                            ),
+                            **payload,
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "Tool-call control live event unavailable",
+                        exc_info=True,
+                    )
+
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if current_loop is self._owner_loop:
+                self._journal.record_tool_call_control_observation(observation)
+                return
+            if self._owner_loop.is_closed() or not self._owner_loop.is_running():
+                return
+            self._owner_loop.call_soon_threadsafe(
+                self._journal.record_tool_call_control_observation,
+                observation,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "Tool-call control observation delivery failed",
+                exc_info=True,
+            )

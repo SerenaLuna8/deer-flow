@@ -23,7 +23,10 @@ from app.automations.system_policy import (
     SystemAutomationsPolicyReader,
 )
 from app.final_schema import FinalSchemaProbe
-from app.private_work.memory_dream_service import MemoryDreamSchedulerService
+from app.private_work.memory_dream_service import (
+    MemoryDreamModelUnavailable,
+    MemoryDreamSchedulerService,
+)
 from app.private_work.memory_seal_service import (
     MemorySealAdmissionService,
     MemorySealSchedulerService,
@@ -115,6 +118,8 @@ class SchedulerApp:
                         await self.dream_service.admit_due(now=now)
                     except asyncio.CancelledError:
                         raise
+                    except MemoryDreamModelUnavailable:
+                        logger.error("Memory Dream scheduler poll unavailable: reason=model_unavailable")
                     except Exception as error:  # noqa: BLE001 - isolated poll
                         logger.error(
                             "Memory Dream scheduler poll failed: error_type=%s",

@@ -145,6 +145,7 @@ class PrivateRunCreateRequest(StrictPrivateWorkRequest):
     execution_profile: PrivateRunExecutionProfileRequest = Field(
         default_factory=PrivateRunExecutionProfileRequest,
     )
+    workload_profile: Literal["interactive", "research"] = "interactive"
     multitask_strategy: Literal["reject", "interrupt", "rollback"] = "reject"
     checkpoint: PrivateRunCheckpoint | None = None
     on_disconnect: Literal["cancel", "continue"] = "cancel"

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.system_runtime_settings.errors import SystemRuntimePolicyUnavailable
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
+    MaterializedAgentRuntimePolicy,
     RuntimePolicySection,
     RuntimePolicyValue,
 )
@@ -19,10 +20,12 @@ from app.system_runtime_settings.repository import (
     SystemRuntimePolicyRepositoryInvariant,
 )
 from app.system_runtime_settings.validation import (
+    LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
+    PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
     RUNTIME_POLICY_SCHEMA_VERSION,
     RuntimePolicyInvalid,
     canonical_policy_payload_for_schema,
-    parse_policy_value,
+    decode_policy_value_for_schema,
 )
 
 
@@ -33,7 +36,11 @@ def _materialize_exact(
     value: dict[str, object],
     checksum: str,
 ) -> RuntimePolicyValue:
-    if schema_version not in {2, RUNTIME_POLICY_SCHEMA_VERSION}:
+    if schema_version not in {
+        LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
+        PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
+        RUNTIME_POLICY_SCHEMA_VERSION,
+    }:
         raise SystemRuntimePolicyRepositoryInvariant
     canonical = canonical_policy_payload_for_schema(
         section,
@@ -42,7 +49,33 @@ def _materialize_exact(
     )
     if canonical.schema_version != schema_version or canonical.checksum != checksum:
         raise SystemRuntimePolicyRepositoryInvariant
-    return parse_policy_value(section, canonical.value)
+    return decode_policy_value_for_schema(
+        section,
+        canonical.value,
+        schema_version=schema_version,
+    )
+
+
+def materialize_agent_runtime_policy(
+    *,
+    schema_version: int,
+    value: dict[str, object],
+    checksum: str,
+) -> MaterializedAgentRuntimePolicy:
+    """Verify one exact Agent Runtime payload and retain its frozen schema."""
+
+    decoded = _materialize_exact(
+        RuntimePolicySection.AGENT_RUNTIME,
+        schema_version=schema_version,
+        value=value,
+        checksum=checksum,
+    )
+    if not isinstance(decoded, AgentRuntimePolicyValue):
+        raise SystemRuntimePolicyRepositoryInvariant
+    return MaterializedAgentRuntimePolicy(
+        schema_version=schema_version,
+        value=decoded,
+    )
 
 
 class SystemRuntimePolicyMaterializer:
@@ -166,13 +199,13 @@ class SystemRuntimePolicyMaterializer:
             raise SystemRuntimePolicyUnavailable from None
 
     @staticmethod
-    async def materialize_run_snapshot_in_session(
+    async def materialize_run_snapshot_envelope_in_session(
         session: AsyncSession,
         *,
         project_id: uuid.UUID,
         owner_user_id: str,
         run_id: str,
-    ) -> AgentRuntimePolicyValue:
+    ) -> MaterializedAgentRuntimePolicy:
         try:
             material = await SystemRuntimePolicyRepository(session).snapshot_material(
                 project_id=project_id,
@@ -183,15 +216,11 @@ class SystemRuntimePolicyMaterializer:
             if material is None:
                 raise SystemRuntimePolicyRepositoryInvariant
             snapshot, version = material
-            value = _materialize_exact(
-                RuntimePolicySection.AGENT_RUNTIME,
+            return materialize_agent_runtime_policy(
                 schema_version=int(snapshot.schema_version),
                 value=dict(version.value),
                 checksum=snapshot.payload_checksum,
             )
-            if not isinstance(value, AgentRuntimePolicyValue):
-                raise SystemRuntimePolicyRepositoryInvariant
-            return value
         except SystemRuntimePolicyUnavailable:
             raise
         except (
@@ -203,6 +232,42 @@ class SystemRuntimePolicyMaterializer:
             ValueError,
         ):
             raise SystemRuntimePolicyUnavailable from None
+
+    async def materialize_run_snapshot_envelope(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        run_id: str,
+    ) -> MaterializedAgentRuntimePolicy:
+        try:
+            async with self._session_factory() as session, session.begin():
+                return await self.materialize_run_snapshot_envelope_in_session(
+                    session,
+                    project_id=project_id,
+                    owner_user_id=owner_user_id,
+                    run_id=run_id,
+                )
+        except SystemRuntimePolicyUnavailable:
+            raise
+        except (DBAPIError, RuntimeError):
+            raise SystemRuntimePolicyUnavailable from None
+
+    @staticmethod
+    async def materialize_run_snapshot_in_session(
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        run_id: str,
+    ) -> AgentRuntimePolicyValue:
+        materialized = await SystemRuntimePolicyMaterializer.materialize_run_snapshot_envelope_in_session(
+            session,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            run_id=run_id,
+        )
+        return materialized.value
 
     async def materialize_run_snapshot(
         self,
@@ -225,4 +290,7 @@ class SystemRuntimePolicyMaterializer:
             raise SystemRuntimePolicyUnavailable from None
 
 
-__all__ = ["SystemRuntimePolicyMaterializer"]
+__all__ = [
+    "SystemRuntimePolicyMaterializer",
+    "materialize_agent_runtime_policy",
+]

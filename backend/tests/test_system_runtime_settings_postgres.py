@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from types import SimpleNamespace
 
@@ -24,11 +25,13 @@ from app.system_runtime_settings.materializer import (
     SystemRuntimePolicyMaterializer,
 )
 from app.system_runtime_settings.models import (
+    AgentRuntimePolicyValue,
     MemoryDocumentPolicy,
     RuntimePolicySection,
     default_policy_value,
 )
 from app.system_runtime_settings.service import SystemRuntimePolicyService
+from app.system_runtime_settings.validation import canonical_policy_payload_for_schema
 from deerflow.persistence.system_runtime_settings import (
     RunRuntimePolicySnapshotRow,
     SystemRuntimePolicyVersionRow,
@@ -42,6 +45,73 @@ def _audit_hmac_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ACT_WEAVE_AUDIT_KEYRING_JSON",
         '{"test-audit-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}',
     )
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_postgres_current_v3_policy_remains_admissible_after_v4_deploy(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        assert await bootstrap_system_runtime_policies(factory) == 1
+        canonical_v3 = canonical_policy_payload_for_schema(
+            RuntimePolicySection.AGENT_RUNTIME,
+            {},
+            schema_version=3,
+        )
+        version_id = uuid.uuid4()
+        async with engine.begin() as connection:
+            current = (
+                await connection.execute(
+                    text(
+                        """SELECT current_version_id,updated_by_user_id
+                             FROM system_runtime_policies
+                            WHERE section='agent_runtime'"""
+                    )
+                )
+            ).one()
+            await connection.execute(
+                text(
+                    """INSERT INTO system_runtime_policy_versions
+                       (id,section,version_number,schema_version,value,
+                        payload_checksum,supersedes_version_id,created_by_user_id)
+                       VALUES (:id,'agent_runtime',2,3,CAST(:value AS jsonb),
+                               :checksum,:supersedes,:actor)"""
+                ),
+                {
+                    "id": version_id,
+                    "value": json.dumps(canonical_v3.value),
+                    "checksum": canonical_v3.checksum,
+                    "supersedes": current.current_version_id,
+                    "actor": current.updated_by_user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """UPDATE system_runtime_policies
+                          SET current_version_id=:version,revision=2
+                        WHERE section='agent_runtime'"""
+                ),
+                {"version": version_id},
+            )
+            await connection.execute(
+                text("UPDATE system_runtime_policy_catalog_state SET revision=2"),
+            )
+
+        assert await bootstrap_system_runtime_policies(factory) == 2
+        async with factory() as session, session.begin():
+            locked = await SystemRuntimePolicyService.lock_agent_runtime_for_admission(
+                session,
+            )
+
+        assert locked.schema_version == 3
+        assert isinstance(locked.value, AgentRuntimePolicyValue)
+        assert locked.value.tool_call_budget.profiles.interactive.lead.default.warn == 30
+        assert locked.value.vision_bridge.model_name is None
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.postgres
@@ -217,6 +287,13 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
             owner_user_id=str(admin_id),
             run_id=run_two,
         )
+        materialized_v1_envelope = await materializer.materialize_run_snapshot_envelope(
+            project_id=project_id,
+            owner_user_id=str(admin_id),
+            run_id=run_one,
+        )
+        assert materialized_v1_envelope.schema_version == 4
+        assert materialized_v1_envelope.value == materialized_v1
         assert materialized_v1.max_recursion_limit == 1_000
         assert materialized_v2.max_recursion_limit == 77
         assert materialized_v1.memory.dream_interval_minutes == 120

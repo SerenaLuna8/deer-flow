@@ -14,7 +14,6 @@ from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime as GraphRuntime
 from PIL import Image
 
-from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
 )
@@ -26,7 +25,6 @@ from deerflow.agents.middlewares.tool_result_sanitization_middleware import (
     ToolResultSanitizationMiddleware,
 )
 from deerflow.config.app_config import AppConfig
-from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
@@ -336,59 +334,6 @@ async def test_analysis_sanitizer_collapses_noncanonical_success() -> None:
     assert isinstance(result, ToolMessage)
     assert result.status == "error"
     assert json.loads(result.content)["code"] == "VISION_SCHEMA_MISMATCH"
-
-
-def test_inspect_image_frequency_guard_allows_eight_and_blocks_ninth() -> None:
-    middleware = LoopDetectionMiddleware.from_config(LoopDetectionConfig())
-    runtime = SimpleNamespace(
-        context={"thread_id": "thread-vision", "run_id": "run-vision"},
-    )
-
-    for index in range(1, 9):
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "inspect_image",
-                            "args": {
-                                "image_path": f"/mnt/user-data/uploads/{index}.png",
-                                "analysis_goal": ANALYSIS_GOAL,
-                            },
-                            "id": f"call-{index}",
-                            "type": "tool_call",
-                        }
-                    ],
-                )
-            ]
-        }
-        _warning, hard_stop = middleware._track_and_check(state, runtime)
-        assert hard_stop is False
-
-    warning, hard_stop = middleware._track_and_check(
-        {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "inspect_image",
-                            "args": {
-                                "image_path": "/mnt/user-data/uploads/9.png",
-                                "analysis_goal": ANALYSIS_GOAL,
-                            },
-                            "id": "call-9",
-                            "type": "tool_call",
-                        }
-                    ],
-                )
-            ]
-        },
-        runtime,
-    )
-    assert hard_stop is True
-    assert warning is not None
 
 
 @pytest.mark.asyncio

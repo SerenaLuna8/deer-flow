@@ -177,7 +177,7 @@ const toolOutputOverridesSchema = z
     }
   });
 
-const toolFrequencyOverrideSchema = z
+const toolCallLimitSchema = z
   .object({
     warn: boundedInteger(1, 100_000),
     hard_limit: boundedInteger(1, 100_000),
@@ -187,9 +187,16 @@ const toolFrequencyOverrideSchema = z
     path: ["hard_limit"],
     message: "Hard limit cannot be below the warning threshold",
   });
-const toolFrequencyOverridesSchema = z
-  .record(toolNameSchema, toolFrequencyOverrideSchema)
+const toolCallLimitsByToolSchema = z
+  .record(toolNameSchema, toolCallLimitSchema)
   .superRefine((value, context) => {
+    if (Object.hasOwn(value, "task")) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "task is governed by the Sub-Agent delegation limit and cannot be configured as an ordinary tool budget",
+      });
+    }
     if (Object.keys(value).length > 64) {
       context.addIssue({
         code: z.ZodIssueCode.too_big,
@@ -198,6 +205,43 @@ const toolFrequencyOverridesSchema = z
         inclusive: true,
       });
     }
+  });
+const toolCallRoleBudgetSchema = z
+  .object({
+    default: toolCallLimitSchema,
+    tools: toolCallLimitsByToolSchema,
+  })
+  .strict();
+const toolCallBudgetProfileSchema = z
+  .object({
+    lead: toolCallRoleBudgetSchema,
+    subagent: toolCallRoleBudgetSchema,
+  })
+  .strict();
+const toolCallBudgetSchema = z
+  .object({
+    profiles: z
+      .object({
+        interactive: toolCallBudgetProfileSchema,
+        research: toolCallBudgetProfileSchema,
+      })
+      .strict(),
+  })
+  .strict();
+const identicalCallsSchema = z
+  .object({
+    warn_threshold: boundedInteger(1, 100_000),
+    hard_limit: boundedInteger(1, 100_000),
+    window_size: boundedInteger(1, 100_000),
+  })
+  .strict()
+  .refine((value) => value.hard_limit >= value.warn_threshold, {
+    path: ["hard_limit"],
+    message: "Hard limit cannot be below the warning threshold",
+  })
+  .refine((value) => value.window_size >= value.hard_limit, {
+    path: ["window_size"],
+    message: "Window size cannot be below the hard limit",
   });
 
 export const agentRuntimeSettingsValueSchema = boundedJson(
@@ -281,35 +325,22 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
       loop_detection: z
         .object({
           enabled: z.boolean(),
-          warn_threshold: boundedInteger(1, 100_000),
-          hard_limit: boundedInteger(1, 100_000),
-          window_size: boundedInteger(1, 100_000),
-          max_tracked_threads: boundedInteger(1, 100_000),
-          tool_freq_warn: boundedInteger(1, 100_000),
-          tool_freq_hard_limit: boundedInteger(1, 100_000),
-          tool_freq_overrides: toolFrequencyOverridesSchema,
+          identical_calls: identicalCallsSchema,
         })
-        .strict()
-        .superRefine((value, context) => {
-          if (value.hard_limit < value.warn_threshold) {
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["hard_limit"],
-              message: "Hard limit cannot be below the warning threshold",
-            });
-          }
-          if (value.tool_freq_hard_limit < value.tool_freq_warn) {
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["tool_freq_hard_limit"],
-              message: "Hard limit cannot be below the warning threshold",
-            });
-          }
-        }),
+        .strict(),
+      tool_call_budget: toolCallBudgetSchema,
       read_before_write: z.object({ enabled: z.boolean() }).strict(),
       safety_finish_reason: z.object({ enabled: z.boolean() }).strict(),
       subagents: z
-        .object({ max_total_per_run: boundedInteger(1, 50) })
+        .object({
+          max_concurrent: boundedInteger(1, 4),
+          max_total_per_run_by_workload: z
+            .object({
+              interactive: boundedInteger(1, 50),
+              research: boundedInteger(1, 50),
+            })
+            .strict(),
+        })
         .strict(),
     })
     .strict(),

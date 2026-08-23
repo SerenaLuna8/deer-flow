@@ -368,9 +368,17 @@ async def test_real_stategraph_threshold_uses_runtime_checkpoint_and_activates_h
             {
                 "messages": [
                     HumanMessage(
+                        id="recent-human",
+                        content="Keep the immediately previous turn available",
+                    ),
+                    AIMessage(
+                        id="recent-ai",
+                        content="The recent answer remains in the active context",
+                    ),
+                    HumanMessage(
                         id="open-human",
                         content="This turn is still open",
-                    )
+                    ),
                 ]
             },
             as_node="memory_receipt_test",
@@ -896,6 +904,7 @@ async def test_durable_dream_prepare_worker_drains_real_thread_and_activates_bef
             ),
             thread_id=thread_id,
             request_id="durable-dream-prepare-test",
+            app_config=app_config,
         )
 
         async def authorize(_claim):

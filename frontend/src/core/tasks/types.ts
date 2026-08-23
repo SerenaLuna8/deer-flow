@@ -11,6 +11,12 @@ export type SubtaskStatusSource =
   | "tool_result"
   | "execution_approval";
 
+export type SubtaskStopReason =
+  | "token_capped"
+  | "turn_capped"
+  | "loop_capped"
+  | "tool_budget_capped";
+
 export interface SubtaskExecutionApprovalState {
   approvalId: string;
   status: ExecutionApprovalStatus;
@@ -47,10 +53,10 @@ export interface Subtask {
   result?: string;
   error?: string;
   /**
-   * Why a guardrail cap ended the run early (``token_capped`` / ``turn_capped``
-   * / ``loop_capped``), or ``undefined`` for a clean run. The pill status stays
-   * normal (``completed``/``failed``); this carries the cap detail so a future
-   * badge can show "capped" without parsing result text (#3875 Phase 2).
+   * Why a guardrail cap ended the run early (token, turn, loop, or tool-call
+   * budget), or ``undefined`` for a clean run. The pill status stays normal
+   * (``completed``/``failed``); the task surface can show the cap without
+   * parsing result text (#3875 Phase 2).
    */
-  stopReason?: string;
+  stopReason?: SubtaskStopReason;
 }

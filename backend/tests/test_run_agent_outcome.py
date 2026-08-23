@@ -9,6 +9,10 @@ import pytest
 from langchain_core.messages import AIMessage
 
 import deerflow.runtime.runs.worker as run_worker
+from deerflow.agents.middlewares.tool_call_control import (
+    ToolCallControlLoopFinalizationFailed,
+    ToolCallControlStateInvalid,
+)
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.runtime.runs.execution_contracts import (
     RunAgentOutcome,
@@ -281,3 +285,64 @@ async def test_provider_failure_precedes_loop_capped_semantic_outcome() -> None:
     assert record.error == "LLM_PROVIDER_UNAVAILABLE"
     assert outcome.status == "failed"
     assert outcome.public_error_code == "LLM_PROVIDER_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        (
+            ToolCallControlStateInvalid("checkpoint policy mismatch"),
+            "TOOL_CALL_CONTROL_STATE_INVALID",
+        ),
+        (
+            ToolCallControlLoopFinalizationFailed(
+                "model attempted another tool call",
+            ),
+            "LOOP_FINALIZATION_FAILED",
+        ),
+    ],
+)
+async def test_tool_call_control_contract_failures_keep_stable_direct_cause(
+    failure: RuntimeError,
+    expected_code: str,
+) -> None:
+    published: list[tuple[str, object]] = []
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            if False:
+                yield None
+            raise failure
+
+    class Bridge:
+        async def publish(
+            self,
+            _run_id: str,
+            event: str,
+            payload: object,
+        ) -> None:
+            published.append((event, payload))
+
+        async def publish_end(self, _run_id: str) -> None:
+            published.append(("end", None))
+
+    run_manager = RunManager()
+    record = await run_manager.create(f"{expected_code.lower()}-thread")
+
+    outcome = await run_agent(
+        Bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda *, config: Agent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status.value == "error"
+    assert record.error == expected_code
+    assert outcome.status == "failed"
+    assert outcome.public_error_code == expected_code
+    assert any(event == "error" and isinstance(payload, dict) and payload.get("name") == expected_code for event, payload in published)
+    assert published[-1] == ("end", None)

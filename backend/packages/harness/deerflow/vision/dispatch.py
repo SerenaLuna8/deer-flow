@@ -10,10 +10,9 @@ from deerflow.vision.contracts import VisionUsageReceipt
 MAX_VISION_CALLS_PER_RUN: Final = 8
 MAX_VISION_NORMALIZED_BYTES_PER_RUN: Final = 40 * 1024 * 1024
 MAX_VISION_NORMALIZED_PIXELS_PER_RUN: Final = 80_000_000
-# LoopDetectionMiddleware evaluates a proposed tool call before ToolNode runs
-# it. Blocking proposal N+1 therefore permits exactly the same eight calls as
-# the authoritative dispatch counter while also governing the non-dispatching
-# fake adapter.
+# Runtime Policy v2/v3 and the v4 stored document retain the historical value
+# ``9`` on their canonical wire. ResolvedToolCallBudgetPolicy clamps the
+# effective admitted limit to MAX_VISION_CALLS_PER_RUN before graph execution.
 VISION_TOOL_FREQUENCY_WARN: Final = 6
 VISION_TOOL_FREQUENCY_HARD_STOP: Final = MAX_VISION_CALLS_PER_RUN + 1
 

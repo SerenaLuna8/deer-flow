@@ -2,7 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import { normalizeTokenUsage } from "../messages/usage";
 
-import type { Subtask } from "./types";
+import type { Subtask, SubtaskStopReason } from "./types";
 
 export type SubtaskStatus = Subtask["status"];
 
@@ -19,7 +19,7 @@ export interface SubtaskResultUpdate {
    * final answer, ``failed`` when it did not — so this field is the only
    * signal that distinguishes "finished" from "capped" (#3875 Phase 2).
    */
-  stopReason?: string;
+  stopReason?: SubtaskStopReason;
 }
 
 /**
@@ -51,6 +51,7 @@ const SUBAGENT_STOP_REASON_VALUES = [
   "token_capped",
   "turn_capped",
   "loop_capped",
+  "tool_budget_capped",
 ] as const;
 const STRUCTURED_SUBAGENT_KEYS = [
   SUBAGENT_STATUS_KEY,
@@ -334,13 +335,13 @@ function readStructuredResultBrief(
 
 function readStructuredStopReason(
   additionalKwargs: Record<string, unknown> | null | undefined,
-): string | undefined {
+): SubtaskStopReason | undefined {
   const value = additionalKwargs?.[SUBAGENT_STOP_REASON_KEY];
   if (typeof value !== "string") return undefined;
   return SUBAGENT_STOP_REASON_VALUES.includes(
     value as (typeof SUBAGENT_STOP_REASON_VALUES)[number],
   )
-    ? value
+    ? (value as SubtaskStopReason)
     : undefined;
 }
 

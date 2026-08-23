@@ -48,8 +48,7 @@ function ProjectSkillDetail({
         secretConfigurationDirty: context.secretConfigurationDirty,
         onEditingChange: context.onEditingChange,
         onDirtyChange: context.onDirtyChange,
-        onSecretsDirtyChange:
-          context.onSecretsDirtyChange,
+        onSecretsDirtyChange: context.onSecretsDirtyChange,
         onActivationValidityChange: context.onActivationValidityChange,
         onVersionCreated: context.onVersionCreated,
         canManageSecrets: project.capabilities.includes(
@@ -99,10 +98,7 @@ export function ProjectSkillsPage({
       initialSelectedVersionId={selectedVersionId}
       initialFocusSkillSecrets={focusSelectedSkillSecrets}
       selectionQueryParam="skill_id"
-      selectionDependentQueryParams={[
-        "skill_version_id",
-        "configure_secrets",
-      ]}
+      selectionDependentQueryParams={["skill_version_id", "configure_secrets"]}
       renderLead={({ project }) => (
         <ProjectSkillBuilderLead project={project} />
       )}

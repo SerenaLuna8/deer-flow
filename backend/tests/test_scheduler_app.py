@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 import pytest
 
+from app.private_work.memory_dream_service import MemoryDreamModelUnavailable
 from app.scheduler.app import SchedulerApp
 from app.system_runtime_settings import AutomationsPolicyValue
 
@@ -142,3 +144,40 @@ async def test_scheduler_skips_automation_admission_when_policy_disables_polling
     assert automation.admit_sessions == []
     assert dream.calls == 1
     assert ownership.verify_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_observes_unavailable_dream_model_and_keeps_polling(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Dream:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.recovered_poll = asyncio.Event()
+
+        async def admit_due(self, *, now) -> None:
+            assert now.tzinfo is not None
+            self.calls += 1
+            if self.calls == 1:
+                raise MemoryDreamModelUnavailable
+            self.recovered_poll.set()
+
+    stop_event = asyncio.Event()
+    dream = Dream()
+    app = SchedulerApp(
+        enabled=True,
+        ownership=_Ownership(),
+        service=_Automation(),
+        session_factory=_SessionFactory(),
+        poll_interval_seconds=0.01,
+        dream_service=dream,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.scheduler.app"):
+        task = asyncio.create_task(app.run(stop_event))
+        await asyncio.wait_for(dream.recovered_poll.wait(), timeout=1)
+        stop_event.set()
+        await task
+
+    assert dream.calls == 2
+    assert [record.getMessage() for record in caplog.records if "Memory Dream scheduler" in record.getMessage()] == ["Memory Dream scheduler poll unavailable: reason=model_unavailable"]

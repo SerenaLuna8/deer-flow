@@ -187,6 +187,9 @@ export const enUS: Translations = {
     ultraMode: "Ultra",
     ultraModeDescription:
       "Enable extended thinking with high reasoning effort for complex tasks",
+    researchWorkload: "Research",
+    researchWorkloadDescription:
+      "Use for the next send only; resets to Interactive after Run admission.",
     searchModels: "Search models...",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
@@ -217,6 +220,10 @@ export const enUS: Translations = {
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
     compactFailed: "Context compaction failed.",
+    compactSourceTooLarge:
+      "A complete chat turn cannot be safely compacted within the bounded workload. Shorten that turn or ask a platform administrator to increase the summary budget.",
+    compactPromptBudgetTooSmall:
+      "The summary token budget is too small for the compaction prompt. Ask a platform administrator to increase it.",
     dreamQueued: "Started organizing {count} Memory items.",
     dreamAlreadyRunning: "Memory organization is already running.",
     dreamNothingPending: "There is no Memory waiting to be organized.",
@@ -228,6 +235,8 @@ export const enUS: Translations = {
       "Use /dream-restore followed by one positive version number.",
     dreamAttachmentsUnsupported: "Memory commands cannot include attachments.",
     dreamFailed: "Failed to organize Memory.",
+    dreamModelUnavailable:
+      "The configured Dream model is unavailable. Ask a platform administrator to select an active model, then try again.",
     dreamRequiresThread: "/Dream requires an existing chat.",
     dreamPreparationStarted: "Dream preparation started in the background.",
     dreamPreparationQueued: "Dream preparation is queued.",
@@ -588,6 +597,8 @@ export const enUS: Translations = {
     dreamAlreadyRunning: "A Memory organization job is already running.",
     dreamNothingPending: "There is no Memory waiting to be organized.",
     dreamFailed: "Memory organization failed.",
+    dreamModelUnavailable:
+      "The configured Dream model is unavailable. Ask a platform administrator to select an active model, then try again.",
     restoreSucceeded: (version) => `Restored as new version ${version}.`,
     restoreFailed: "Memory restore failed.",
     autoDream: "Automatic Dream",
@@ -2443,6 +2454,21 @@ export const enUS: Translations = {
     providerUnavailableTitle: "Model provider temporarily unavailable",
     providerUnavailableDescription:
       "The Worker could not reach the configured model provider after retrying. Check the Worker network or proxy configuration, then retry this message.",
+    modelQuotaExceededTitle: "Model quota exhausted",
+    modelQuotaExceededDescription:
+      "The configured model quota was exhausted. Increase provider quota or select an available model before retrying.",
+    modelAuthenticationFailedTitle: "Model authentication failed",
+    modelAuthenticationFailedDescription:
+      "The selected model provider rejected authentication. Replace or verify that model configuration's API key before retrying.",
+    modelProviderBusyTitle: "Model provider busy",
+    modelProviderBusyDescription:
+      "The selected model provider remained busy after Worker retries. Retry later or select another available model.",
+    modelCircuitOpenTitle: "Model requests temporarily paused",
+    modelCircuitOpenDescription:
+      "The model request circuit breaker was open after recent provider failures. Wait for recovery or verify the provider before retrying.",
+    modelRequestFailedTitle: "Model request failed",
+    modelRequestFailedDescription:
+      "The model request failed after retry. The available public evidence does not distinguish the provider, proxy, or Worker host network as the direct cause.",
     runAdmissionNotConfirmedDescription:
       "The Run did not start because the conversation may already be running or its state changed. Your input was preserved; try again shortly.",
     restoreFailedInput: "Restore to composer",
@@ -2456,6 +2482,38 @@ export const enUS: Translations = {
     loopSafetyLimitTitle: "Repeated operations triggered the safety limit",
     loopSafetyLimitDescription:
       "This Run has stopped. Any existing answer or files are partial results; the failure reason is the loop safety limit.",
+    loopFinalizationFailedTitle: "Loop finalization failed",
+    loopFinalizationFailedDescription:
+      "After the repeated-call limit fired, the model attempted another tool call or returned no visible tool-free answer, so the Run could not finalize.",
+    toolExecutionFailedTitle: "Tool execution failed",
+    toolExecutionFailedDescription:
+      "A tool execution returned an explicit failure before the Run could complete. Tool arguments and private output are not shown in this status.",
+    runPolicyStaleTitle: "Run policy unavailable",
+    runPolicyStaleDescription:
+      "The Run Snapshot's frozen runtime policy could not be materialized, so execution failed closed. Validate the active policy and start a new Run.",
+    toolCallControlStateInvalidTitle: "Tool-call control state invalid",
+    toolCallControlStateInvalidDescription:
+      "The checkpointed tool-call control state did not match the frozen policy or execution scope, so the Run failed closed.",
+    toolCallControl: {
+      progressLabel: "Run control progress",
+      repeatedWarningTitle: "Repeated tool-call pattern detected",
+      repeatedWarningDescription: (count, hardLimit) =>
+        `The same tool-call set has appeared ${count} times (limit ${hardLimit}). The Agent can change strategy or finish from existing evidence.`,
+      repeatedLimitTitle: "Repeated-call limit reached",
+      repeatedLimitDescription:
+        "The repeated batch was rejected. The Agent has one tool-free finalization attempt to preserve a useful partial result.",
+      toolBudgetWarningTitle: (toolName) =>
+        `${toolName} is nearing its call limit`,
+      toolBudgetWarningDescription: (count, hardLimit) =>
+        `${count} of ${hardLimit} admitted calls have been used. Remaining calls are reserved for material gaps.`,
+      toolBudgetExhaustedTitle: (toolName) =>
+        `${toolName} call budget is exhausted`,
+      toolBudgetExhaustedDescription:
+        "The Run can continue with existing evidence and other tools; this budget status is not a terminal failure.",
+      subagentTotalLimitTitle: "Sub-Agent delegation limit reached",
+      subagentTotalLimitDescription:
+        "No more Sub-Agent Tasks can be admitted in this Run. The Lead Agent can continue with the results already collected.",
+    },
     recoveredModelFailuresTitle: "Model request failures recovered",
     recoveredModelFailuresDescription: (count) =>
       `${count} model ${count === 1 ? "request" : "requests"} failed during this Run. Those requests recovered after retry; refer to the Run status for the final outcome.`,
@@ -2498,6 +2556,8 @@ export const enUS: Translations = {
       "The Agent's configured model could not be resolved. Check its system binding, Current Version, and active model catalog entry, then retry.",
     runExecutionProfile: (modelDisplayName, modeName, supportsVision) =>
       `Effective run: ${modelDisplayName} · ${modeName} · ${supportsVision ? "vision-capable" : "text only"}`,
+    runWorkloadProfile: (profile) =>
+      `Server-confirmed: ${profile === "research" ? "Research" : "Interactive"}`,
   },
 
   // Chats
@@ -2696,6 +2756,13 @@ export const enUS: Translations = {
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",
+    stopReasons: {
+      token_capped: "The Sub-Agent reached its token budget.",
+      turn_capped: "The Sub-Agent reached its turn budget.",
+      loop_capped: "The Sub-Agent stopped after a repeated tool-call loop.",
+      tool_budget_capped:
+        "The Sub-Agent reached its tool-call budget; any usable result was preserved.",
+    },
   },
 
   // Token Usage

@@ -1,5 +1,7 @@
 """Subagent execution engine."""
 
+from __future__ import annotations
+
 import asyncio
 import html
 import logging
@@ -23,8 +25,10 @@ from deerflow.config import get_app_config
 from deerflow.config.agents_config import AgentModelSettings
 from deerflow.config.app_config import AppConfig, is_trace_correlation_enabled
 from deerflow.error_codes import (
+    LOOP_FINALIZATION_FAILED_ERROR_CODE,
     SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE_ERROR_CODE,
     SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
+    TOOL_CALL_CONTROL_STATE_INVALID_ERROR_CODE,
 )
 from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.public_error_codes import llm_error_code_for_reason
@@ -38,12 +42,18 @@ from deerflow.subagents.change_signal import SubagentChangeSignal
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.delegated_context import DelegatedRuntimeContextProjection
 from deerflow.subagents.lifecycle import _SubagentGraphExecutionSnapshot
+from deerflow.subagents.status_contract import SubagentStopReasonValue
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
+    from deerflow.agents.middlewares.tool_call_control import (
+        ResolvedGraphToolCallControlProfile,
+        ToolCallControlObserver,
+    )
+
     # Imported lazily at runtime inside _build_initial_state: importing
     # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
     # the graph-runner import, which re-enters this
@@ -59,6 +69,7 @@ def _log_subagent_internal_exception(
     trace_id: str | None,
     subagent_name: str | None,
     error: Exception,
+    error_code: str,
 ) -> None:
     """Log a traceable stack without exposing the exception's message."""
 
@@ -69,13 +80,30 @@ def _log_subagent_internal_exception(
         event,
         subagent_name or "unknown",
         type(error).__name__,
-        SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
+        error_code,
         exc_info=(
             type(redacted_error),
             redacted_error,
             error.__traceback__,
         ),
     )
+
+
+def _subagent_graph_failure_code(error: Exception) -> str:
+    """Keep closed ToolCallControl causes without importing presentation."""
+
+    # Lazy import avoids executor -> tools -> task_tool -> executor re-entry
+    # while this module is still initializing.
+    from deerflow.agents.middlewares.tool_call_control import (
+        ToolCallControlLoopFinalizationFailed,
+        ToolCallControlStateInvalid,
+    )
+
+    if isinstance(error, ToolCallControlStateInvalid):
+        return TOOL_CALL_CONTROL_STATE_INVALID_ERROR_CODE
+    if isinstance(error, ToolCallControlLoopFinalizationFailed):
+        return LOOP_FINALIZATION_FAILED_ERROR_CODE
+    return SUBAGENT_EXECUTION_FAILED_ERROR_CODE
 
 
 SUBAGENT_SYSTEM_CONFIDENTIALITY_GUARD = """## Platform System-Context Confidentiality (CRITICAL)
@@ -141,7 +169,7 @@ def _is_explicit_command_execution_request(task: str) -> bool:
 
 def _has_command_execution_tool(
     tools: list[BaseTool],
-    deferred_setup: "DeferredToolSetup | None",
+    deferred_setup: DeferredToolSetup | None,
 ) -> bool:
     tool_names = {name for tool in tools if isinstance((name := getattr(tool, "name", None)), str)}
     if deferred_setup is not None:
@@ -458,6 +486,8 @@ class _SubagentGraphRunner:
         middleware_override: tuple[object, ...] | None = None,
         sdk_feature_snapshot: object | None = None,
         tool_search_enabled: bool | None = None,
+        tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None,
+        tool_call_control_observer: ToolCallControlObserver | None = None,
     ):
         """Initialize one lifecycle-owned graph runner.
 
@@ -481,6 +511,10 @@ class _SubagentGraphRunner:
             tool_search_enabled: Explicit delegated tool-search policy. SDK
                 callers pass ``False`` so graph construction never reads global
                 configuration.
+            tool_call_control_profile: Exact graph-owned Lead/Sub-Agent control
+                profile selected before this Task invocation.
+            tool_call_control_observer: Optional parent-owner-loop observation
+                Adapter already bound by :mod:`deerflow.subagents.binding`.
         """
         if type(delegated_context) is not DelegatedRuntimeContextProjection:
             raise TypeError(
@@ -521,10 +555,33 @@ class _SubagentGraphRunner:
             )
         if tool_search_enabled is not None and type(tool_search_enabled) is not bool:
             raise TypeError("tool_search_enabled must be a boolean or None")
+        if tool_call_control_profile is not None:
+            # Delayed to avoid executor's tools -> task_tool import cycle while
+            # the ToolCallControl module itself is still initializing.
+            from deerflow.agents.middlewares.tool_call_control import (
+                ResolvedGraphToolCallControlProfile,
+            )
+
+            if type(tool_call_control_profile) is not ResolvedGraphToolCallControlProfile:
+                raise TypeError(
+                    "tool_call_control_profile must be ResolvedGraphToolCallControlProfile or None",
+                )
+        if tool_call_control_observer is not None and not callable(
+            getattr(tool_call_control_observer, "observe", None),
+        ):
+            raise TypeError(
+                "tool_call_control_observer must implement observe()",
+            )
+        if tool_call_control_observer is not None and tool_call_control_profile is None:
+            raise ValueError(
+                "tool_call_control_observer requires a resolved graph profile",
+            )
         self._model_override = model_override
         self._middleware_override = middleware_override
         self._sdk_feature_snapshot = sdk_feature_snapshot
         self._tool_search_enabled = tool_search_enabled
+        self._tool_call_control_profile = tool_call_control_profile
+        self._tool_call_control_observer = tool_call_control_observer
 
         self._base_tools = _filter_tools(
             tools,
@@ -532,14 +589,12 @@ class _SubagentGraphRunner:
             config.disallowed_tools,
         )
         self.tools = self._base_tools
-        # Guard middlewares that expose ``consume_stop_reason`` (currently
-        # ``TokenBudgetMiddleware`` and ``LoopDetectionMiddleware``), captured in
-        # ``_create_agent`` so ``_aexecute`` can read each after the run and
-        # surface whichever cap fired (token_capped / loop_capped) to the lead
-        # (#3875 Phase 2). Collected as a list — every guard must be checked,
-        # not just the first — because the v2 contract advertises more than one
-        # cap reason.
-        self._stop_reason_middlewares: list[Any] = []
+        # ToolCallControl owns the lifecycle internal execution scope. Legacy
+        # TokenBudgetMiddleware remains a fresh per-Task instance keyed by the
+        # inherited parent run_id; the two receipts are consumed explicitly and
+        # then reduced by semantic priority after graph completion.
+        self._tool_call_control_middleware: Any | None = None
+        self._legacy_stop_reason_middlewares: list[Any] = []
 
         logger.info(
             "[trace=%s] Subagent graph runner initialized: %s with %s tools",
@@ -548,13 +603,42 @@ class _SubagentGraphRunner:
             len(self.tools),
         )
 
-    def _create_agent(self, tools: list[BaseTool] | None = None, *, deferred_setup: "DeferredToolSetup | None" = None):
+    def _create_agent(
+        self,
+        tools: list[BaseTool] | None = None,
+        *,
+        deferred_setup: DeferredToolSetup | None = None,
+        execution_id: uuid.UUID | None = None,
+    ):
         """Create the agent instance.
 
         ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
         deferred MCP tool names + catalog hash so the subagent gets the same
         DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
         """
+        tool_call_control = None
+        if self._middleware_override is None and self._tool_call_control_profile is not None:
+            if not isinstance(execution_id, uuid.UUID):
+                raise TypeError(
+                    "execution_id must be the lifecycle internal UUID when ToolCallControl is enabled",
+                )
+            from deerflow.agents.middlewares.tool_call_control import (
+                FixedToolCallControlScope,
+                ToolCallControlBinding,
+                build_tool_call_control,
+            )
+
+            tool_call_control = build_tool_call_control(
+                self._tool_call_control_profile.subagent,
+                ToolCallControlBinding(
+                    role="subagent",
+                    scope=FixedToolCallControlScope(str(execution_id)),
+                    workload_profile=(self._tool_call_control_profile.workload_profile),
+                    observer=self._tool_call_control_observer,
+                ),
+            )
+        self._tool_call_control_middleware = tool_call_control
+
         if self._model_override is not None:
             model = self._model_override
             if self._middleware_override is not None:
@@ -583,6 +667,8 @@ class _SubagentGraphRunner:
                         getattr(snapshot, "extra_middleware", ()),
                     ),
                     delegated=True,
+                    tool_call_control=tool_call_control,
+                    workload_profile=(self._tool_call_control_profile.workload_profile if self._tool_call_control_profile is not None else "interactive"),
                 )
             else:
                 raise RuntimeError(
@@ -638,17 +724,12 @@ class _SubagentGraphRunner:
                 "lazy_init": True,
                 "deferred_setup": deferred_setup,
                 "agent_name": self.config.name,
+                "tool_call_control": tool_call_control,
             }
             if mcp_routing_middleware is not None:
                 middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
             middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
-        # Collect every guard middleware that exposes ``consume_stop_reason``
-        # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
-        # each after the run and surface whichever cap fired. Duck-typed
-        # (``hasattr``) so this file needs no import of the middleware classes;
-        # a list (not ``next(...)``) so every guard is checked and a later one
-        # is picked up automatically.
-        self._stop_reason_middlewares = [m for m in middlewares if hasattr(m, "consume_stop_reason")]
+        self._legacy_stop_reason_middlewares = [middleware for middleware in middlewares if middleware is not tool_call_control and hasattr(middleware, "consume_stop_reason")]
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -661,23 +742,42 @@ class _SubagentGraphRunner:
             checkpointer=False,
         )
 
-    def _consume_guard_stop_reason(self) -> str | None:
-        """Pop and return the guard-cap stop reason set during the last run.
+    def _consume_guard_stop_reason(
+        self,
+        execution_id: uuid.UUID,
+    ) -> SubagentStopReasonValue | None:
+        """Consume all cap receipts and return the strongest contributing one.
 
-        Checks every guard middleware that exposes ``consume_stop_reason``
-        (collected in :meth:`_create_agent`) and returns the first non-``None``
-        reason — ``"token_capped"`` when the token-budget hard stop fired,
-        ``"loop_capped"`` when loop detection forced a stop, otherwise ``None``.
-        Each guard's cap does not raise (the run still completes with a final
-        answer), so this is how the executor learns a completion was actually
-        capped. Typically at most one guard fires per run, but checking all of
-        them keeps the contract's full cap vocabulary reachable.
+        ToolCallControl is keyed only by the lifecycle-owned internal UUID.
+        Legacy TokenBudgetMiddleware retains its existing parent ``run_id``
+        contract and is safe here because each delegated graph builds a fresh
+        instance. A later loop is stronger than token/turn caps, and every one
+        of those is stronger than a non-terminal per-tool budget exhaustion.
         """
-        for mw in self._stop_reason_middlewares:
-            reason = mw.consume_stop_reason(self.run_id)
-            if reason is not None:
-                return reason
-        return None
+
+        priorities: dict[str, int] = {
+            "tool_budget_capped": 1,
+            "turn_capped": 2,
+            "token_capped": 3,
+            "loop_capped": 4,
+        }
+        reasons: list[str] = []
+        if self._tool_call_control_middleware is not None:
+            reason = self._tool_call_control_middleware.consume_stop_reason(
+                str(execution_id),
+            )
+            if reason in priorities:
+                reasons.append(reason)
+        for middleware in self._legacy_stop_reason_middlewares:
+            reason = middleware.consume_stop_reason(self.run_id)
+            if reason in priorities:
+                reasons.append(reason)
+        if not reasons:
+            return None
+        return cast(
+            SubagentStopReasonValue,
+            max(reasons, key=priorities.__getitem__),
+        )
 
     async def _load_skills(self) -> list[Skill]:
         """Filter the parent run's immutable Skill snapshot."""
@@ -741,7 +841,7 @@ class _SubagentGraphRunner:
 
         return messages
 
-    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
+    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], DeferredToolSetup]:
         """Build the initial state for agent execution.
 
         Args:
@@ -894,7 +994,11 @@ class _SubagentGraphRunner:
                     error=SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE_ERROR,
                 )
                 return result
-            agent = self._create_agent(final_tools, deferred_setup=deferred_setup)
+            agent = self._create_agent(
+                final_tools,
+                deferred_setup=deferred_setup,
+                execution_id=result.execution_id,
+            )
 
             # Token collector for subagent LLM calls
             collector_caller = f"subagent:{self.config.name}"
@@ -1018,12 +1122,11 @@ class _SubagentGraphRunner:
                 )
             else:
                 final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
-                # A guard hard-stop (token budget or loop detection) does not raise
-                # — it strips tool_calls so the run completes with a final answer.
-                # ``consume_stop_reason`` on each guard tells us whether that
-                # happened so we can mark the completed result with the cap reason
-                # (token_capped / loop_capped) for the lead (#3875 Phase 2).
-                stop_reason = self._consume_guard_stop_reason()
+                # Control/token caps are additive receipts; successful partial
+                # work remains completed and surfaces the strongest reason.
+                stop_reason = self._consume_guard_stop_reason(
+                    result.execution_id,
+                )
                 result.try_set_terminal(
                     _SubagentGraphStatus.COMPLETED,
                     result=final_result,
@@ -1060,7 +1163,13 @@ class _SubagentGraphRunner:
             max_turns = self.config.max_turns
             logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} reached max_turns={max_turns} (GraphRecursionError); recovering partial result")
             records = collector.snapshot_records() if collector is not None else None
-            stop_reason = self._consume_guard_stop_reason() or "turn_capped"
+            guard_stop_reason = self._consume_guard_stop_reason(
+                result.execution_id,
+            )
+            # Tool exhaustion never forces finalization, so a later recursion
+            # limit is the binding cap. Loop/token hard stops do force the next
+            # turn and therefore retain their stronger direct cap reason.
+            stop_reason = guard_stop_reason if guard_stop_reason in {"loop_capped", "token_capped"} else "turn_capped"
             llm_error = _extract_llm_error_fallback(final_state)
             if llm_error is not None:
                 result.try_set_terminal(
@@ -1094,15 +1203,17 @@ class _SubagentGraphRunner:
                     )
 
         except Exception as exc:
+            failure_code = _subagent_graph_failure_code(exc)
             _log_subagent_internal_exception(
                 event="graph_execution",
                 trace_id=self.trace_id,
                 subagent_name=self.config.name,
                 error=exc,
+                error_code=failure_code,
             )
             result.try_set_terminal(
                 _SubagentGraphStatus.FAILED,
-                error=SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
+                error=failure_code,
                 token_usage_records=collector.snapshot_records() if collector is not None else None,
             )
 

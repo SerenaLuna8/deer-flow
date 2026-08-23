@@ -2,7 +2,11 @@
 
 import { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
 
-import { RUN_EXECUTION_PROFILE_CONTEXT_KEY } from "../private-work/execution-profile";
+import { RUN_EXECUTION_PROFILE_CONTEXT_KEY } from "@/core/private-work/execution-profile";
+import {
+  isRunWorkloadProfile,
+  RUN_WORKLOAD_PROFILE_CONTEXT_KEY,
+} from "@/core/private-work/workload-profile";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
 import { sanitizeRunStreamOptions } from "./stream-mode";
@@ -89,8 +93,67 @@ export function promotePrivateRunExecutionProfile(
   };
 }
 
+/** Promote the strict one-Run workload choice after SDK serialization. */
+export function promotePrivateRunWorkloadProfile(
+  url: URL,
+  init: RequestInit,
+): RequestInit {
+  if (
+    (init.method ?? "GET").toUpperCase() !== "POST" ||
+    !PRIVATE_RUN_CREATE_PATH.test(url.pathname) ||
+    typeof init.body !== "string"
+  ) {
+    return init;
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(init.body);
+  } catch {
+    return init;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return init;
+  }
+
+  const context = Reflect.get(body, "context");
+  if (
+    typeof context !== "object" ||
+    context === null ||
+    Array.isArray(context) ||
+    !Object.hasOwn(context, RUN_WORKLOAD_PROFILE_CONTEXT_KEY)
+  ) {
+    return init;
+  }
+
+  const workloadProfile = Reflect.get(
+    context,
+    RUN_WORKLOAD_PROFILE_CONTEXT_KEY,
+  );
+  if (!isRunWorkloadProfile(workloadProfile)) {
+    throw new TypeError("Run workload profile is invalid.");
+  }
+  const nextContext = { ...context };
+  Reflect.deleteProperty(nextContext, RUN_WORKLOAD_PROFILE_CONTEXT_KEY);
+
+  return {
+    ...init,
+    body: JSON.stringify({
+      ...body,
+      context: nextContext,
+      workload_profile: workloadProfile,
+    }),
+  };
+}
+
 function prepareSdkRequest(url: URL, init: RequestInit): RequestInit {
-  return injectCsrfHeader(url, promotePrivateRunExecutionProfile(url, init));
+  return injectCsrfHeader(
+    url,
+    promotePrivateRunWorkloadProfile(
+      url,
+      promotePrivateRunExecutionProfile(url, init),
+    ),
+  );
 }
 
 function isAbortError(error: unknown): boolean {

@@ -83,6 +83,12 @@ type Deferred<T> = {
   resolve: (value: T | PromiseLike<T>) => void;
 };
 
+type MockRunControlEvent = Record<string, unknown> & {
+  type: string;
+  reason_code: string;
+  observation_id: string;
+};
+
 function deferred<T>(): Deferred<T> {
   let resolve!: Deferred<T>["resolve"];
   const promise = new Promise<T>((nextResolve) => {
@@ -106,6 +112,10 @@ async function mockProjectChat(
     mediaType: string;
     size: number;
     firstRunError?: string;
+    firstRunAdmissionError?: string;
+    effectiveWorkloadProfiles?: readonly ("interactive" | "research")[];
+    liveRunControlEvents?: readonly MockRunControlEvent[];
+    duplicateLiveRunControlEvents?: boolean;
   } = {
     filename: FILE_NAME,
     mediaType: "text/plain",
@@ -123,6 +133,10 @@ async function mockProjectChat(
   let runListGetCount = 0;
   let runMessagesGetCount = 0;
   let failedRunVisible = false;
+  let completedRunId: string | null = null;
+  let effectiveWorkloadProfile: "interactive" | "research" | null = null;
+  let durableRunId: string | null = null;
+  let durableRunControlEvents: Record<string, unknown>[] = [];
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -269,17 +283,63 @@ async function mockProjectChat(
                   reasoning_effort: null,
                   supports_vision: true,
                 },
+                workload_profile: effectiveWorkloadProfile,
               },
             ]
-          : [],
+          : completedRunId
+            ? [
+                {
+                  run_id: completedRunId,
+                  thread_id: THREAD_ID,
+                  assistant_id: AGENT_ID,
+                  created_at: TIMESTAMP,
+                  updated_at: TIMESTAMP,
+                  status: "success",
+                  metadata: {},
+                  multitask_strategy: "reject",
+                  error: null,
+                  model_name: MODEL_ID,
+                  execution_profile: {
+                    model_name: MODEL_ID,
+                    thinking_enabled: false,
+                    reasoning_effort: null,
+                    supports_vision: true,
+                  },
+                  workload_profile: effectiveWorkloadProfile,
+                },
+              ]
+            : [],
       );
     }
     if (
-      path ===
-        `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/messages` &&
+      (path ===
+        `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/events` ||
+        path ===
+          `${privateWorkBase}/threads/${THREAD_ID}/runs/${SECOND_RUN_ID}/events`) &&
+      method === "GET"
+    ) {
+      const requestedRunId = path.includes(SECOND_RUN_ID)
+        ? SECOND_RUN_ID
+        : RUN_ID;
+      return json(
+        route,
+        requestedRunId === durableRunId ? durableRunControlEvents : [],
+      );
+    }
+    if (
+      (path ===
+        `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/messages` ||
+        path ===
+          `${privateWorkBase}/threads/${THREAD_ID}/runs/${SECOND_RUN_ID}/messages`) &&
       method === "GET"
     ) {
       runMessagesGetCount += 1;
+      if (path.includes(SECOND_RUN_ID)) {
+        return json(route, { data: [], has_more: false });
+      }
+      if (!upload.firstRunError) {
+        return json(route, { data: [], has_more: false });
+      }
       return json(route, {
         data: [
           {
@@ -378,10 +438,88 @@ async function mockProjectChat(
       method === "POST"
     ) {
       runPostCount += 1;
-      runRequestBodies.push(request.postDataJSON());
+      const requestBody = request.postDataJSON() as Record<string, unknown>;
+      runRequestBodies.push(requestBody);
+      effectiveWorkloadProfile =
+        upload.effectiveWorkloadProfiles?.[runPostCount - 1] ??
+        (requestBody.workload_profile === "research"
+          ? "research"
+          : "interactive");
+      if (runPostCount === 1 && upload.firstRunAdmissionError) {
+        return json(
+          route,
+          {
+            detail: {
+              code: upload.firstRunAdmissionError,
+              message: "Run admission rejected for browser coverage",
+            },
+          },
+          422,
+        );
+      }
       const shouldFail = runPostCount === 1 && Boolean(upload.firstRunError);
       failedRunVisible = shouldFail;
       const currentRunId = runPostCount === 1 ? RUN_ID : SECOND_RUN_ID;
+      const liveRunControlEvents = (upload.liveRunControlEvents ?? []).map(
+        (event) => ({
+          ...event,
+          run_id: currentRunId,
+        }),
+      );
+      durableRunId = currentRunId;
+      durableRunControlEvents = liveRunControlEvents.map((event, index) => {
+        const { type, ...content } = event;
+        const eventType =
+          type === "repeated_call"
+            ? "middleware:repeated_call"
+            : type === "subagent_limit"
+              ? "middleware:subagent_limit"
+              : "middleware:tool_call_budget";
+        return {
+          thread_id: THREAD_ID,
+          run_id: currentRunId,
+          event_type: eventType,
+          category: "middleware",
+          content,
+          metadata: {
+            reason_code: event.reason_code,
+            observation_id: event.observation_id,
+          },
+          seq: String(index + 10),
+          created_at: TIMESTAMP,
+        };
+      });
+      if (!shouldFail) {
+        completedRunId = currentRunId;
+      }
+      const liveFrames = liveRunControlEvents.flatMap((event) =>
+        upload.duplicateLiveRunControlEvents ? [event, event] : [event],
+      );
+      const streamLines = [
+        "event: metadata",
+        `data: ${JSON.stringify({ run_id: currentRunId, thread_id: THREAD_ID })}`,
+        "id: 1",
+        "",
+      ];
+      liveFrames.forEach((event, index) => {
+        streamLines.push(
+          "event: custom",
+          `data: ${JSON.stringify(event)}`,
+          `id: ${index + 2}`,
+          "",
+        );
+      });
+      streamLines.push(
+        "event: end",
+        `data: ${JSON.stringify(
+          shouldFail
+            ? { status: "error", error_code: upload.firstRunError }
+            : { status: "success" },
+        )}`,
+        `id: ${liveFrames.length + 2}`,
+        "",
+        "",
+      );
       return route.fulfill({
         status: 200,
         contentType: "text/event-stream",
@@ -389,21 +527,7 @@ async function mockProjectChat(
           "Content-Location": `${privateWorkBase}/threads/${THREAD_ID}/runs/${currentRunId}`,
           Location: `/threads/${THREAD_ID}/runs/${currentRunId}/stream`,
         },
-        body: [
-          "event: metadata",
-          `data: ${JSON.stringify({ run_id: currentRunId, thread_id: THREAD_ID })}`,
-          "id: 1",
-          "",
-          "event: end",
-          `data: ${JSON.stringify(
-            shouldFail
-              ? { status: "error", error_code: upload.firstRunError }
-              : { status: "success" },
-          )}`,
-          "id: 2",
-          "",
-          "",
-        ].join("\n"),
+        body: streamLines.join("\n"),
       });
     }
     if (
@@ -628,4 +752,255 @@ test("restores a failed pasted image and resubmits without another upload", asyn
   } finally {
     requests.releaseUpload();
   }
+});
+
+test("uses Research for one admitted Run and resets the next send to Interactive", async ({
+  page,
+}) => {
+  const requests = await mockProjectChat(page);
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  const research = page.getByTestId("research-workload-toggle");
+  await expect(composer).toBeEnabled();
+  await expect(research).toHaveAttribute("aria-pressed", "false");
+
+  await research.click();
+  await expect(research).toHaveAttribute("aria-pressed", "true");
+  await composer.fill("Research Agent history.");
+  await composer.press("Enter");
+
+  await expect.poll(requests.runPostCount).toBe(1);
+  expect(requests.runRequestBodies[0]).toMatchObject({
+    workload_profile: "research",
+  });
+  await expect(research).toHaveAttribute("aria-pressed", "false");
+  await expect(
+    page.getByTestId("effective-run-workload-profile"),
+  ).toHaveAttribute("data-workload-profile", "research");
+
+  await composer.fill("Summarize one point.");
+  await composer.press("Enter");
+  await expect.poll(requests.runPostCount).toBe(2);
+  expect(requests.runRequestBodies[1]).toMatchObject({
+    workload_profile: "interactive",
+  });
+  await expect(
+    page.getByTestId("effective-run-workload-profile"),
+  ).toHaveAttribute("data-workload-profile", "interactive");
+  expect(requests.unexpectedRequests).toEqual([]);
+});
+
+test("displays the server-confirmed workload profile instead of the local Research request", async ({
+  page,
+}) => {
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    effectiveWorkloadProfiles: ["interactive"],
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await page.getByTestId("research-workload-toggle").click();
+  await composer.fill("Research Agent history.");
+  await composer.press("Enter");
+
+  await expect.poll(requests.runPostCount).toBe(1);
+  expect(requests.runRequestBodies[0]).toMatchObject({
+    workload_profile: "research",
+  });
+  const effective = page.getByTestId("effective-run-workload-profile");
+  await expect(effective).toHaveAttribute(
+    "data-workload-profile",
+    "interactive",
+  );
+  await expect(effective).toContainText("Server-confirmed: Interactive");
+  expect(requests.unexpectedRequests).toEqual([]);
+});
+
+test("keeps the one-Run Research choice after a pre-admission failure", async ({
+  page,
+}) => {
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    firstRunAdmissionError: "RUN_ADMISSION_REJECTED",
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  const research = page.getByTestId("research-workload-toggle");
+  await expect(composer).toBeEnabled();
+  await research.click();
+  await composer.fill("Research Agent history.");
+  await composer.press("Enter");
+
+  await expect.poll(requests.runPostCount).toBe(1);
+  expect(requests.runRequestBodies[0]).toMatchObject({
+    workload_profile: "research",
+  });
+  await expect(research).toHaveAttribute("aria-pressed", "true");
+
+  await composer.press("Enter");
+  await expect.poll(requests.runPostCount).toBe(2);
+  expect(requests.runRequestBodies[1]).toMatchObject({
+    workload_profile: "research",
+  });
+  await expect(research).toHaveAttribute("aria-pressed", "false");
+  expect(requests.unexpectedRequests).toEqual([]);
+});
+
+test("deduplicates live and durable Run-control progress across refresh", async ({
+  page,
+}) => {
+  const repeatedObservation = {
+    type: "repeated_call",
+    schema_version: 1,
+    reason_code: "repeated_call_warning",
+    workload_profile: "research",
+    role: "lead",
+    run_id: RUN_ID,
+    execution_id: null,
+    count_before: 1,
+    proposed: 1,
+    admitted: 1,
+    rejected: 0,
+    count_after: 2,
+    warn_threshold: 2,
+    hard_limit: 4,
+    disposition: "advisory",
+    observation_id: "a".repeat(64),
+  } as const;
+  const toolObservation = {
+    type: "tool_call_budget",
+    schema_version: 1,
+    reason_code: "tool_budget_exhausted",
+    workload_profile: "research",
+    role: "lead",
+    run_id: RUN_ID,
+    execution_id: null,
+    tool_name: "web_search",
+    count_before: 9,
+    proposed: 3,
+    admitted: 1,
+    rejected: 2,
+    count_after: 10,
+    warn_threshold: 6,
+    hard_limit: 10,
+    disposition: "truncate_tool_calls",
+    observation_id: "b".repeat(64),
+  } as const;
+  const subagentObservation = {
+    type: "subagent_limit",
+    schema_version: 1,
+    reason_code: "subagent_total_limit",
+    role: "lead",
+    run_id: RUN_ID,
+    count_before: 8,
+    proposed: 3,
+    admitted: 1,
+    rejected: 2,
+    count_after: 9,
+    hard_limit: 9,
+    disposition: "truncate_tool_calls",
+    observation_id: "c".repeat(64),
+  } as const;
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    liveRunControlEvents: [
+      repeatedObservation,
+      toolObservation,
+      subagentObservation,
+    ],
+    duplicateLiveRunControlEvents: true,
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("Research the Agent timeline.");
+  await composer.press("Enter");
+
+  const progress = page.getByTestId("run-control-progress");
+  await expect(progress).toBeVisible();
+  await expect(
+    progress.locator('[data-reason-code="repeated_call_warning"]'),
+  ).toHaveCount(1);
+  await expect(
+    progress.locator('[data-reason-code="tool_budget_exhausted"]'),
+  ).toHaveCount(1);
+  await expect(
+    progress.locator('[data-reason-code="subagent_total_limit"]'),
+  ).toHaveCount(1);
+  await expect(progress).toContainText(
+    /Run can continue with existing evidence|运行仍可使用已有证据/u,
+  );
+  await expect(page.getByTestId("run-failure-alert")).toHaveCount(0);
+
+  await page.reload();
+  const replayedProgress = page.getByTestId("run-control-progress");
+  await expect(
+    replayedProgress.locator('[data-reason-code="repeated_call_warning"]'),
+  ).toHaveCount(1);
+  await expect(
+    replayedProgress.locator('[data-reason-code="tool_budget_exhausted"]'),
+  ).toHaveCount(1);
+  await expect(
+    replayedProgress.locator('[data-reason-code="subagent_total_limit"]'),
+  ).toHaveCount(1);
+  expect(requests.unexpectedRequests).toEqual([]);
+});
+
+test("keeps a specific terminal failure authoritative after a tool budget receipt", async ({
+  page,
+}) => {
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    firstRunError: "LLM_PROVIDER_UNAVAILABLE",
+    liveRunControlEvents: [
+      {
+        type: "tool_call_budget",
+        schema_version: 1,
+        reason_code: "tool_budget_exhausted",
+        workload_profile: "research",
+        role: "lead",
+        run_id: RUN_ID,
+        execution_id: null,
+        tool_name: "web_search",
+        count_before: 9,
+        proposed: 1,
+        admitted: 1,
+        rejected: 0,
+        count_after: 10,
+        warn_threshold: 6,
+        hard_limit: 10,
+        disposition: "exhaust_tool",
+        observation_id: "d".repeat(64),
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("Research the Agent timeline.");
+  await composer.press("Enter");
+
+  await expect(
+    page.locator('[data-reason-code="tool_budget_exhausted"]'),
+  ).toHaveCount(1);
+  const failure = page.getByTestId("run-failure-alert");
+  await expect(failure).toHaveAttribute(
+    "data-run-failure-code",
+    "LLM_PROVIDER_UNAVAILABLE",
+  );
+  await expect(failure).toContainText(
+    /Model provider temporarily unavailable|模型服务暂时不可用/u,
+  );
+  expect(requests.unexpectedRequests).toEqual([]);
 });

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { REASONING_EFFORTS } from "../private-work/execution-profile";
 import { usePrivateWorkAccess } from "../private-work/provider";
 import type { ProjectPrivateWorkScope } from "../private-work/types";
+import { RUN_WORKLOAD_PROFILES } from "../private-work/workload-profile";
 
 import { scopedThreadQueryKey } from "./thread-query-key";
 
@@ -126,6 +127,7 @@ const threadRunSchema = z
     error: z.string().nullable(),
     model_name: z.string().min(1).nullable(),
     execution_profile: runExecutionProfileSchema.nullable(),
+    workload_profile: z.enum(RUN_WORKLOAD_PROFILES).nullable().optional(),
   })
   .strict();
 

@@ -230,8 +230,14 @@ export function useInputBoxCommands({
         markLatestCheckpoint();
         clearMemoryCommandInput();
         toast.success(t.inputBox.compactSuccess);
-      } else {
+      } else if (result.reason === "source_too_large") {
+        toast.error(t.inputBox.compactSourceTooLarge);
+      } else if (result.reason === "prompt_budget_too_small") {
+        toast.error(t.inputBox.compactPromptBudgetTooSmall);
+      } else if (result.reason === "not_enough_messages") {
         toast.info(t.inputBox.compactSkipped);
+      } else {
+        toast.error(t.inputBox.compactFailed);
       }
       await Promise.all([
         queryClient.invalidateQueries({
@@ -278,7 +284,9 @@ export function useInputBoxCommands({
     markLatestCheckpoint,
     queryClient,
     t.inputBox.compactFailed,
+    t.inputBox.compactPromptBudgetTooSmall,
     t.inputBox.compactSkipped,
+    t.inputBox.compactSourceTooLarge,
     t.inputBox.compactSuccess,
     privateWork,
     threadExists,
@@ -395,6 +403,12 @@ export function useInputBoxCommands({
       );
     } else if (terminalNotice.kind === "cancelled") {
       toast.info(t.inputBox.dreamPreparationCancelled);
+    } else if (terminalNotice.kind === "model_unavailable") {
+      toast.error(t.inputBox.dreamModelUnavailable);
+    } else if (terminalNotice.kind === "source_too_large") {
+      toast.error(t.inputBox.compactSourceTooLarge);
+    } else if (terminalNotice.kind === "prompt_budget_too_small") {
+      toast.error(t.inputBox.compactPromptBudgetTooSmall);
     } else {
       toast.error(t.inputBox.dreamFailed);
     }
@@ -404,7 +418,10 @@ export function useInputBoxCommands({
     privateWork.scope,
     queryClient,
     t.inputBox.dreamAlreadyRunning,
+    t.inputBox.compactPromptBudgetTooSmall,
+    t.inputBox.compactSourceTooLarge,
     t.inputBox.dreamFailed,
+    t.inputBox.dreamModelUnavailable,
     t.inputBox.dreamNothingPending,
     t.inputBox.dreamPreparationCancelled,
     t.inputBox.dreamQueued,

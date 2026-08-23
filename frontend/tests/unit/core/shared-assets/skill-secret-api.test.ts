@@ -27,7 +27,13 @@ const secretStatus = {
   revision: 2,
   readiness: "ready" as const,
   requirements: [
-    { name: "API_KEY", target_env: "API_KEY", optional: false, configured: true, revision: 2 },
+    {
+      name: "API_KEY",
+      target_env: "API_KEY",
+      optional: false,
+      configured: true,
+      revision: 2,
+    },
   ],
   request_id: "secret-status",
 };
@@ -67,19 +73,21 @@ describe("Skill domain secret API", () => {
       ...secretStatus,
       readiness: "unready" as const,
       requirements: [
-        { name: "API_KEY", target_env: "API_KEY", optional: false, configured: false, revision: 3 },
+        {
+          name: "API_KEY",
+          target_env: "API_KEY",
+          optional: false,
+          configured: false,
+          revision: 3,
+        },
       ],
     };
     const fetchMock = rs.fn(async () => jsonResponse(cleared));
     rs.stubGlobal("fetch", fetchMock);
     await expect(
-      clearProjectSkillSecret(
-        PROJECT_ID,
-        SKILL_ID,
-        VERSION_ID,
-        "API_KEY",
-        { confirmed: true },
-      ),
+      clearProjectSkillSecret(PROJECT_ID, SKILL_ID, VERSION_ID, "API_KEY", {
+        confirmed: true,
+      }),
     ).resolves.toEqual(cleared);
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(`/secrets/API_KEY/clear`),
@@ -102,7 +110,12 @@ describe("Skill domain secret API", () => {
       required_count: 1,
       configured_required_count: 1,
       requirements: [
-        { name: "API_KEY", target_env: "API_KEY", optional: false, configured: true },
+        {
+          name: "API_KEY",
+          target_env: "API_KEY",
+          optional: false,
+          configured: true,
+        },
       ],
       request_id: "readiness",
     };
@@ -115,7 +128,9 @@ describe("Skill domain secret API", () => {
         description: "Example",
         frontmatter: {},
         compatibility: null,
-        secret_requirements: [{ name: "API_KEY", target_env: "API_KEY", optional: false }],
+        secret_requirements: [
+          { name: "API_KEY", target_env: "API_KEY", optional: false },
+        ],
         scan_decision: "allow",
         scan_rule_ids: [],
         scan_summary: {},

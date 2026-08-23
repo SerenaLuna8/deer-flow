@@ -244,11 +244,7 @@ export function buildProjectMcpFormSubmission({
     editedSecretSlots,
   );
   const transport = formString(form, "transport", "http") as "http" | "sse";
-  if (
-    configuration &&
-    submittedFields.length > 0 &&
-    supplied.length === 0
-  ) {
+  if (configuration && submittedFields.length > 0 && supplied.length === 0) {
     if (
       !secretSlotSchemasMatch(
         configuration.version.definition.secret_slots,
@@ -559,9 +555,7 @@ export function ProjectMcpFormDialog({
                             `${fieldCopy.itemLabel} ${index + 1}`,
                         )}
                         placeholder={
-                          configuration
-                            ? "结构不变可留空保留"
-                            : "输入凭证值"
+                          configuration ? "结构不变可留空保留" : "输入凭证值"
                         }
                       />
                     </label>

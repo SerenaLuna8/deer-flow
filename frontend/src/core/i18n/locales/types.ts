@@ -151,6 +151,8 @@ export interface Translations {
     proModeDescription: string;
     ultraMode: string;
     ultraModeDescription: string;
+    researchWorkload: string;
+    researchWorkloadDescription: string;
     searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
@@ -176,6 +178,8 @@ export interface Translations {
     compactSuccess: string;
     compactSkipped: string;
     compactFailed: string;
+    compactSourceTooLarge: string;
+    compactPromptBudgetTooSmall: string;
     dreamQueued: string;
     dreamAlreadyRunning: string;
     dreamNothingPending: string;
@@ -184,6 +188,7 @@ export interface Translations {
     dreamRestoreInvalidArguments: string;
     dreamAttachmentsUnsupported: string;
     dreamFailed: string;
+    dreamModelUnavailable: string;
     dreamRequiresThread: string;
     dreamPreparationStarted: string;
     dreamPreparationQueued: string;
@@ -478,6 +483,7 @@ export interface Translations {
     dreamAlreadyRunning: string;
     dreamNothingPending: string;
     dreamFailed: string;
+    dreamModelUnavailable: string;
     restoreSucceeded: (version: number) => string;
     restoreFailed: string;
     autoDream: string;
@@ -2089,6 +2095,16 @@ export interface Translations {
     runFailedDescription: string;
     providerUnavailableTitle: string;
     providerUnavailableDescription: string;
+    modelQuotaExceededTitle: string;
+    modelQuotaExceededDescription: string;
+    modelAuthenticationFailedTitle: string;
+    modelAuthenticationFailedDescription: string;
+    modelProviderBusyTitle: string;
+    modelProviderBusyDescription: string;
+    modelCircuitOpenTitle: string;
+    modelCircuitOpenDescription: string;
+    modelRequestFailedTitle: string;
+    modelRequestFailedDescription: string;
     runAdmissionNotConfirmedDescription: string;
     restoreFailedInput: string;
     restoreFailedInputBlocked: string;
@@ -2098,6 +2114,30 @@ export interface Translations {
     modelOutputLimitRetrying: string;
     loopSafetyLimitTitle: string;
     loopSafetyLimitDescription: string;
+    loopFinalizationFailedTitle: string;
+    loopFinalizationFailedDescription: string;
+    toolExecutionFailedTitle: string;
+    toolExecutionFailedDescription: string;
+    runPolicyStaleTitle: string;
+    runPolicyStaleDescription: string;
+    toolCallControlStateInvalidTitle: string;
+    toolCallControlStateInvalidDescription: string;
+    toolCallControl: {
+      progressLabel: string;
+      repeatedWarningTitle: string;
+      repeatedWarningDescription: (count: number, hardLimit: number) => string;
+      repeatedLimitTitle: string;
+      repeatedLimitDescription: string;
+      toolBudgetWarningTitle: (toolName: string) => string;
+      toolBudgetWarningDescription: (
+        count: number,
+        hardLimit: number,
+      ) => string;
+      toolBudgetExhaustedTitle: (toolName: string) => string;
+      toolBudgetExhaustedDescription: string;
+      subagentTotalLimitTitle: string;
+      subagentTotalLimitDescription: string;
+    };
     recoveredModelFailuresTitle: string;
     recoveredModelFailuresDescription: (count: number) => string;
     recoveredModelFailureAttempt: (
@@ -2134,6 +2174,7 @@ export interface Translations {
       modeName: string,
       supportsVision: boolean,
     ) => string;
+    runWorkloadProfile: (profile: "interactive" | "research") => string;
   };
 
   // Chats
@@ -2312,6 +2353,12 @@ export interface Translations {
     in_progress: string;
     completed: string;
     failed: string;
+    stopReasons: {
+      token_capped: string;
+      turn_capped: string;
+      loop_capped: string;
+      tool_budget_capped: string;
+    };
   };
 
   // Token Usage

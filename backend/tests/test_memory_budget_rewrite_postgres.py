@@ -411,8 +411,14 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
 
         class Admission(MemoryDreamAdmissionService):
             @staticmethod
-            async def _platform_runtime(session, *, create_document):
+            async def _platform_runtime(
+                session,
+                *,
+                create_document,
+                policy_state=None,
+            ):
                 assert create_document is False
+                assert policy_state == (policy, policy_revision)
                 runtime_model = await SystemModelRepository(session).resolve_active_model(model_ref, load_secret=True)
                 assert runtime_model is not None
                 return policy, policy_revision, runtime_model, None

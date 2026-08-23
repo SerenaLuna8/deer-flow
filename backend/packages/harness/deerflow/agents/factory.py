@@ -32,24 +32,42 @@ Deliberately lead-only (absent here by design):
 - provider/runtime hardening — SystemMessageCoalescing, SafetyFinishReason,
   TokenUsage.
 
-SDK users opt into extra behavior through ``extra_middleware`` (positioned
-via ``@Next``/``@Prev``) or take full control with ``middleware=``.
+SDK users opt into extra behavior through ``extra_middleware`` or take full
+control with ``middleware=``. When automatic ToolCallControl is active,
+unanchored after-model extras enter the protected custom band; positional
+``@Next``/``@Prev`` anchors remain available to extras without after-model
+hooks.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.assembly import (
+    _validate_tool_call_control_cardinality,
     assemble_agent_middlewares,
     build_runtime_middlewares,
 )
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.manifest import (
+    MiddlewareHook,
+    middleware_hooks,
+)
+from deerflow.agents.middlewares.tool_call_control import (
+    TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY,
+    PerInvocationToolCallControlScope,
+    ToolCallControlBinding,
+    ToolCallControlWorkloadProfile,
+    build_tool_call_control,
+    default_graph_tool_call_control_profile,
+)
 from deerflow.agents.thread_state import (
     adapt_state_schema_for_mode,
     get_thread_state_schema,
@@ -72,6 +90,59 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
 logger = logging.getLogger(__name__)
+
+
+class _SdkInvocationGraph:
+    """Keep ToolCallControl's execution scope private to the public SDK."""
+
+    def __init__(self, compiled_graph: CompiledStateGraph) -> None:
+        self._compiled_graph = compiled_graph
+
+    @staticmethod
+    def _invocation_context(context: object | None) -> dict[str, object]:
+        if context is None:
+            scoped_context: dict[str, object] = {}
+        elif isinstance(context, Mapping):
+            scoped_context = dict(context)
+        else:
+            raise TypeError("SDK graph context must be a mapping when provided")
+        scoped_context[TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY] = uuid4().hex
+        return scoped_context
+
+    @classmethod
+    def _scoped_kwargs(cls, kwargs: dict[str, Any]) -> dict[str, Any]:
+        scoped_kwargs = dict(kwargs)
+        scoped_kwargs["context"] = cls._invocation_context(
+            scoped_kwargs.get("context"),
+        )
+        return scoped_kwargs
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        return self._compiled_graph.invoke(
+            *args,
+            **self._scoped_kwargs(kwargs),
+        )
+
+    def stream(self, *args: Any, **kwargs: Any) -> Any:
+        return self._compiled_graph.stream(
+            *args,
+            **self._scoped_kwargs(kwargs),
+        )
+
+    async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._compiled_graph.ainvoke(
+            *args,
+            **self._scoped_kwargs(kwargs),
+        )
+
+    def astream(self, *args: Any, **kwargs: Any) -> Any:
+        return self._compiled_graph.astream(
+            *args,
+            **self._scoped_kwargs(kwargs),
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._compiled_graph, name)
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +183,7 @@ def create_deerflow_agent(
     checkpoint_snapshot_frequency: int | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     name: str = "default",
+    workload_profile: ToolCallControlWorkloadProfile = "interactive",
 ) -> CompiledStateGraph:
     """Create an ActWeave agent from plain Python arguments.
 
@@ -133,8 +205,11 @@ def create_deerflow_agent(
     features:
         Declarative feature flags.  Cannot be combined with *middleware*.
     extra_middleware:
-        Additional middlewares inserted into the auto-assembled chain via
-        ``@Next``/``@Prev`` positioning.  Cannot be used with *middleware*.
+        Additional middlewares for the auto-assembled chain. With automatic
+        ToolCallControl, unanchored ``after_model`` hooks use the protected
+        custom band; anchored ``after_model`` hooks are rejected because they
+        could bypass proposal arbitration. Other hooks retain ``@Next``/
+        ``@Prev`` positioning. Cannot be used with *middleware*.
     plan_mode:
         Enable TodoMiddleware for task tracking.
     state_schema:
@@ -147,12 +222,19 @@ def create_deerflow_agent(
         Optional persistence backend.
     name:
         Agent name passed to middleware that uses an agent namespace.
+    workload_profile:
+        Caller-owned SDK invocation policy selector. ``interactive`` and
+        ``research`` are the only accepted values. Auto-assembled graphs create
+        one fresh internal ToolCallControl scope for every top-level
+        ``invoke``/``stream``/``ainvoke``/``astream`` call. Full middleware
+        takeover does not inject ToolCallControl.
 
     Raises
     ------
     ValueError
         If both *middleware* and *features*/*extra_middleware* are provided.
     """
+    workload_profile = _validate_workload_profile(workload_profile)
     if middleware is not None and features is not None:
         raise ValueError("Cannot specify both 'middleware' and 'features'.  Use one or the other.")
     if checkpoint_channel_mode == "delta" and checkpointer is not None:
@@ -181,8 +263,20 @@ def create_deerflow_agent(
     if middleware is not None:
         effective_middleware = list(middleware)
         feature_snapshot = None
+        tool_call_control_profile = None
     else:
         feat = features or RuntimeFeatures()
+        loop_detection_enabled = _validate_loop_detection_feature(
+            feat.loop_detection,
+        )
+        tool_call_control_profile = (
+            default_graph_tool_call_control_profile(
+                workload_profile,
+                repeated_calls_enabled=True,
+            )
+            if loop_detection_enabled
+            else None
+        )
         feature_snapshot = SdkFeatureSnapshot.capture(
             feat,
             extra_middleware=extra_middleware or (),
@@ -192,6 +286,19 @@ def create_deerflow_agent(
             name=name,
             plan_mode=plan_mode,
             extra_middleware=extra_middleware or [],
+            tool_call_control=(
+                None
+                if tool_call_control_profile is None
+                else build_tool_call_control(
+                    tool_call_control_profile.lead,
+                    ToolCallControlBinding(
+                        role="lead",
+                        scope=PerInvocationToolCallControlScope(),
+                        workload_profile=workload_profile,
+                    ),
+                )
+            ),
+            workload_profile=workload_profile,
         )
         # Deduplicate by tool name — user-provided tools take priority.
         existing_names = {t.name for t in effective_tools}
@@ -222,14 +329,15 @@ def create_deerflow_agent(
             plan_mode=plan_mode,
             checkpoint_channel_mode=checkpoint_channel_mode,
             checkpoint_snapshot_frequency=checkpoint_snapshot_frequency,
-        )
+        ),
+        tool_call_control_profile=tool_call_control_profile,
     )
     effective_tools = bind_task_tool_in_tools(
         effective_tools,
         binding_factory,
     )
 
-    return create_agent(
+    compiled_graph = create_agent(
         model=model,
         tools=effective_tools or None,
         middleware=effective_middleware,
@@ -238,6 +346,9 @@ def create_deerflow_agent(
         checkpointer=checkpointer,
         name=name,
     )
+    if tool_call_control_profile is None:
+        return compiled_graph
+    return _SdkInvocationGraph(compiled_graph)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +363,8 @@ def _assemble_from_features(
     plan_mode: bool = False,
     extra_middleware: list[AgentMiddleware] | None = None,
     delegated: bool = False,
+    tool_call_control: AgentMiddleware | None = None,
+    workload_profile: ToolCallControlWorkloadProfile = "interactive",
 ) -> tuple[list[AgentMiddleware], list[BaseTool]]:
     """Map feature switches onto the shared builders and compose the SDK chain.
 
@@ -262,13 +375,15 @@ def _assemble_from_features(
 
     Two-phase ordering:
       1. Map SDK features into the shared runtime/phase builders.
-      2. Insert extra middleware via @Next/@Prev.
+      2. Route unanchored after-model extras through the protected custom band,
+         then position other extras via @Next/@Prev.
 
     Each feature value is handled as:
       - ``False``: skip
       - ``True``: create the built-in default middleware (not available for
         ``memory``, ``summarization``, and ``guardrail`` — these require a custom instance)
-      - ``AgentMiddleware`` instance: use directly (custom replacement)
+      - ``AgentMiddleware`` instance: use directly, except the legacy
+        ``loop_detection`` replacement which has an explicit migration error.
     """
     extra_tools: list[BaseTool] = []
 
@@ -352,15 +467,43 @@ def _assemble_from_features(
 
         extra_tools.append(task_tool)
 
-    loop_detection_middleware = None
-    if feat.loop_detection is not False:
-        if isinstance(feat.loop_detection, AgentMiddleware):
-            loop_detection_middleware = feat.loop_detection
-        else:
-            from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
-            from deerflow.config.loop_detection_config import LoopDetectionConfig
-
-            loop_detection_middleware = LoopDetectionMiddleware.from_config(LoopDetectionConfig())
+    loop_detection_enabled = _validate_loop_detection_feature(
+        feat.loop_detection,
+    )
+    workload_profile = _validate_workload_profile(workload_profile)
+    if not delegated and loop_detection_enabled and tool_call_control is None:
+        profile = default_graph_tool_call_control_profile(workload_profile)
+        tool_call_control = build_tool_call_control(
+            profile.lead,
+            ToolCallControlBinding(
+                role="lead",
+                scope=PerInvocationToolCallControlScope(),
+                workload_profile=workload_profile,
+            ),
+        )
+    if delegated and loop_detection_enabled and tool_call_control is None:
+        raise ValueError(
+            "delegated SDK graph requires an execution-scoped ToolCallControl",
+        )
+    _validate_tool_call_control_cardinality(
+        (
+            tool_call_control,
+            *(extra_middleware or ()),
+        )
+    )
+    protected_custom_middlewares: list[AgentMiddleware] = []
+    positioned_extra_middlewares: list[AgentMiddleware] = []
+    if tool_call_control is not None:
+        for middleware in extra_middleware or ():
+            has_position_anchor = getattr(type(middleware), "_next_anchor", None) is not None or getattr(type(middleware), "_prev_anchor", None) is not None
+            if MiddlewareHook.AFTER_MODEL not in middleware_hooks(middleware):
+                positioned_extra_middlewares.append(middleware)
+                continue
+            if has_position_anchor:
+                raise ValueError("extra_middleware after_model hooks cannot use @Next/@Prev while ToolCallControl is active; remove the anchor to use the protected custom band, or pass middleware= for full takeover")
+            protected_custom_middlewares.append(middleware)
+    else:
+        positioned_extra_middlewares.extend(extra_middleware or ())
 
     token_budget_middleware = None
     if feat.token_budget is not False:
@@ -379,16 +522,17 @@ def _assemble_from_features(
         title=title_middleware,
         after_title=(() if memory_middleware is None else (memory_middleware,)),
         vision=vision_middleware,
+        tool_call_control=tool_call_control,
         subagent=subagent_middleware,
-        loop_detection=loop_detection_middleware,
         token_budget=token_budget_middleware,
+        custom=tuple(protected_custom_middlewares),
         clarification=ClarificationMiddleware(),
     )
     extra_tools.append(ask_clarification_tool)
 
     # --- Insert extra_middleware via @Next/@Prev ---
-    if extra_middleware:
-        _insert_extra(chain, extra_middleware)
+    if positioned_extra_middlewares:
+        _insert_extra(chain, positioned_extra_middlewares)
         # Invariant: ClarificationMiddleware must always be last.
         # @Next(ClarificationMiddleware) could push it off the tail.
         clar_idx = next(i for i, m in enumerate(chain) if isinstance(m, ClarificationMiddleware))
@@ -396,6 +540,31 @@ def _assemble_from_features(
             chain.append(chain.pop(clar_idx))
 
     return chain, extra_tools
+
+
+def _validate_workload_profile(
+    workload_profile: object,
+) -> ToolCallControlWorkloadProfile:
+    if not isinstance(workload_profile, str) or workload_profile not in {
+        "interactive",
+        "research",
+    }:
+        raise ValueError(
+            "workload_profile must be 'interactive' or 'research'",
+        )
+    return workload_profile  # type: ignore[return-value]
+
+
+def _validate_loop_detection_feature(value: object) -> bool:
+    if isinstance(value, AgentMiddleware):
+        raise ValueError(
+            "RuntimeFeatures.loop_detection no longer accepts a custom AgentMiddleware replacement; migrate it to extra_middleware or use middleware= for full takeover",
+        )
+    if type(value) is not bool:
+        raise TypeError(
+            "RuntimeFeatures.loop_detection must be True or False",
+        )
+    return value
 
 
 # ---------------------------------------------------------------------------

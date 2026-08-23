@@ -79,7 +79,7 @@ function catalog(): SystemSettingsCatalog {
       agent_runtime: {
         section: "agent_runtime",
         revision: 6,
-        schema_version: 2,
+        schema_version: 4,
         effective_revision: 6,
         effect_scope: "new_requests_and_runs",
         updated_at: TIMESTAMP,
@@ -141,17 +141,57 @@ function catalog(): SystemSettingsCatalog {
           },
           loop_detection: {
             enabled: true,
-            warn_threshold: 10,
-            hard_limit: 20,
-            window_size: 50,
-            max_tracked_threads: 100,
-            tool_freq_warn: 5,
-            tool_freq_hard_limit: 10,
-            tool_freq_overrides: {},
+            identical_calls: {
+              warn_threshold: 3,
+              hard_limit: 5,
+              window_size: 20,
+            },
+          },
+          tool_call_budget: {
+            profiles: {
+              interactive: {
+                lead: {
+                  default: { warn: 30, hard_limit: 50 },
+                  tools: {
+                    web_search: { warn: 6, hard_limit: 10 },
+                    web_fetch: { warn: 6, hard_limit: 10 },
+                  },
+                },
+                subagent: {
+                  default: { warn: 30, hard_limit: 50 },
+                  tools: {
+                    web_search: { warn: 6, hard_limit: 10 },
+                    web_fetch: { warn: 6, hard_limit: 10 },
+                  },
+                },
+              },
+              research: {
+                lead: {
+                  default: { warn: 30, hard_limit: 50 },
+                  tools: {
+                    web_search: { warn: 20, hard_limit: 30 },
+                    web_fetch: { warn: 20, hard_limit: 30 },
+                  },
+                },
+                subagent: {
+                  default: { warn: 30, hard_limit: 50 },
+                  tools: {
+                    web_search: { warn: 12, hard_limit: 20 },
+                    web_fetch: { warn: 12, hard_limit: 20 },
+                  },
+                },
+              },
+            },
           },
           read_before_write: { enabled: true },
           safety_finish_reason: { enabled: true },
-          subagents: { max_total_per_run: 5 },
+          subagents: {
+            max_concurrent: 3,
+            max_total_per_run_by_workload: {
+              interactive: 6,
+              research: 9,
+            },
+          },
         },
       },
       memory_document: {
@@ -168,6 +208,79 @@ function catalog(): SystemSettingsCatalog {
 }
 
 describe("admin Memory document settings", () => {
+  test("renders editable schema v4 tool budgets by workload and Agent role", () => {
+    const html = renderEnglish(
+      <AdminSystemSettingsStateView
+        activeModels={[]}
+        lastResults={{}}
+        modelsStatus="ready"
+        onRetry={rs.fn()}
+        onSave={rs.fn(async () => null)}
+        pendingSection={null}
+        retrying={false}
+        sectionErrors={{}}
+        state={{ status: "ready", data: catalog() }}
+      />,
+    );
+
+    expect(html).toContain('data-settings-destination="tool-call-budget"');
+    expect(html).toContain(
+      'name="agent_runtime.tool_call_budget.profiles.interactive.lead.default.warn"',
+    );
+    expect(html).toContain(
+      'name="agent_runtime.tool_call_budget.profiles.research.subagent.default.hard_limit"',
+    );
+    expect(html).toContain(
+      'name="agent_runtime.loop_detection.identical_calls.window_size"',
+    );
+    expect(html).toContain(
+      'name="agent_runtime.subagents.max_total_per_run_by_workload.research"',
+    );
+    expect(html).not.toContain("tool_freq_hard_limit");
+  });
+
+  test("shows the direct ownership reason beside a reserved task budget row", () => {
+    const data = catalog();
+    data.sections.agent_runtime.value.tool_call_budget.profiles.research.lead.tools.task =
+      { warn: 1, hard_limit: 2 };
+
+    const english = renderEnglish(
+      <AdminSystemSettingsStateView
+        activeModels={[]}
+        lastResults={{}}
+        modelsStatus="ready"
+        onRetry={rs.fn()}
+        onSave={rs.fn(async () => null)}
+        pendingSection={null}
+        retrying={false}
+        sectionErrors={{}}
+        state={{ status: "ready", data }}
+      />,
+    );
+    const chinese = renderChinese(
+      <AdminSystemSettingsStateView
+        activeModels={[]}
+        lastResults={{}}
+        modelsStatus="ready"
+        onRetry={rs.fn()}
+        onSave={rs.fn(async () => null)}
+        pendingSection={null}
+        retrying={false}
+        sectionErrors={{}}
+        state={{ status: "ready", data }}
+      />,
+    );
+
+    expect(english).toContain('value="task"');
+    expect(english).toContain('aria-invalid="true"');
+    expect(english).toContain(
+      "task is governed by the Sub-Agent delegation limit and cannot be configured as an ordinary tool budget",
+    );
+    expect(chinese).toContain(
+      "task 由 Sub-Agent 委托总量限制管理，不能配置为普通工具调用预算",
+    );
+  });
+
   test("treats a same-page hash target as navigation within the current document", () => {
     expect(
       isSameDocumentNavigation(

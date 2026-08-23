@@ -15,6 +15,8 @@ from deerflow.agents.memory.snip import (
 from deerflow.agents.middlewares.summarization_middleware import (
     ContextTriggerUsage,
     DeerFlowSummarizationMiddleware,
+    SnipPromptBudgetTooSmall,
+    SnipSourceTooLarge,
     create_summarization_middleware,
 )
 from deerflow.config.app_config import AppConfig, get_app_config
@@ -195,7 +197,28 @@ async def prepare_thread_compaction(
     if authorization_boundary is not None:
         runtime_context["__authorization_boundary"] = authorization_boundary
     runtime = SimpleNamespace(context=runtime_context)
-    result = await middleware.acompact_state(state, runtime, force=force)  # type: ignore[arg-type]
+    try:
+        result = await middleware.acompact_state(state, runtime, force=force)  # type: ignore[arg-type]
+    except SnipPromptBudgetTooSmall:
+        return PreparedThreadCompaction(
+            thread_id=thread_id,
+            source_checkpoint_id=source_checkpoint_id,
+            result=ThreadCompactionResult(
+                thread_id=thread_id,
+                compacted=False,
+                reason="prompt_budget_too_small",
+            ),
+        )
+    except SnipSourceTooLarge:
+        return PreparedThreadCompaction(
+            thread_id=thread_id,
+            source_checkpoint_id=source_checkpoint_id,
+            result=ThreadCompactionResult(
+                thread_id=thread_id,
+                compacted=False,
+                reason="source_too_large",
+            ),
+        )
     if result is None:
         reason = "not_enough_messages"
         if keep is not None and keep[0] == "messages" and keep[1] == 0 and has_complete_turns(messages):

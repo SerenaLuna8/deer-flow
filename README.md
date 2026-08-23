@@ -69,14 +69,24 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   准入时重新解析 Agent 与 Skill 的 Current Version，并冻结为完整 Run Snapshot。Worker
   只执行该快照，执行与重试期间不会重新查询 Current Version。Agent 对 Skill 的依赖只
   保存 Skill Asset ID，运行时自动解析该 Skill 的 Current Version；MCP 仍绑定精确配置。
-- 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
-- Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。
+- 项目主会话可为下一次 Run 一次性选择 Interactive 或 Research Workload Profile；
+  Gateway 把服务端确认的 effective profile 冻结进 Run Snapshot，隐藏 continuation 与
+  Job retry 继承同一选择。Research 只提高受治理的 Web 工具和 Sub-Agent 工作量上限，
+  不增加工具、项目或数据访问权限。重复调用保护、单工具预算和 Sub-Agent 总数分别拥有
+  独立的状态、事件和用户提示；工具预算耗尽不会阻止仍获准的文件写入与交付。
+- 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。超大的完整
+  工具 turn 通过有界分层 SNIP 逐 turn 压缩，receipt 仍绑定原始 checkpoint source；
+  Dream 模型不可用会显示明确失败，不会伪装成“没有待整理 Memory”。
+- Sub-Agent、Guardrail、Tool Search、ToolCallControl 和可扩展工具链。
 - 文本 lead model 的受治理图片识别桥接：按 Run 冻结辅助视觉模型，使用
   `inspect_image` 返回有界、不可信视觉分析；视觉调用与其他模型调用共用唯一
   `ModelRuntime` 和所选模型已有的 Provider adapter。
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
+  System Runtime Policy v4 在系统设置中分别配置 Interactive/Research、Lead/Sub-Agent
+  的单工具预算及委托上限；管理员每次保存都会在同一事务中创建不可变的新版本并将其设为
+  当前生效版本，只影响之后准入的 Run。
 
 项目菜单按服务端下发的 capability 分层，而不是仅按角色名称在浏览器中推断：
 

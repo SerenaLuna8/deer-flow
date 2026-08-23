@@ -29,7 +29,9 @@ describe("Skill activation secret governance", () => {
       }),
     ).toBe(true);
     expect(primaryVersionActionDisabled(false, false, false, true)).toBe(true);
-    expect(primaryVersionActionDisabled(false, false, false, false)).toBe(false);
+    expect(primaryVersionActionDisabled(false, false, false, false)).toBe(
+      false,
+    );
   });
 
   test("keeps Project Skill deletion under shared_assets.edit", () => {
@@ -49,7 +51,9 @@ describe("Skill activation secret governance", () => {
       "Required Skill secrets are incomplete",
     );
     expect(projectSkillSecretSetupRequired(error)).toBe(true);
-    expect(projectSkillSecretRepairVersionId(error, VERSION_ID)).toBe(VERSION_ID);
+    expect(projectSkillSecretRepairVersionId(error, VERSION_ID)).toBe(
+      VERSION_ID,
+    );
     expect(adminAssetErrorMessage(error)).toContain("Skill 运行秘密");
     expect(
       projectSkillSecretSetupRequired(

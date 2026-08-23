@@ -18,6 +18,7 @@ from app.private_work.errors import (
     PrivateWorkRunExecutionProfileUnsupported,
     PrivateWorkRunModelSelectionLocked,
     PrivateWorkRunModelUnavailable,
+    PrivateWorkRunWorkloadProfileUnsupported,
     PrivateWorkUnavailable,
 )
 from app.private_work.execution_profile import (
@@ -47,6 +48,12 @@ from app.private_work.sandbox_files import (
     persisted_current_upload_snapshot,
 )
 from app.private_work.thread_repository import PrivateThreadRepository
+from app.private_work.workload_profile import (
+    EffectiveRunWorkloadProfile,
+    RunWorkloadProfileUnsupported,
+    effective_run_workload_profile_from_kwargs,
+    freeze_admitted_run_workload_profile,
+)
 from app.shared_assets.agent_payload_checksum import (
     agent_payload_checksum_matches,
     persisted_agent_payload_checksum_matches,
@@ -124,6 +131,9 @@ from deerflow.persistence.shared_assets.mcp_model import (
     McpServerVersionRow,
 )
 from deerflow.persistence.shared_assets.skill_model import SkillRow, SkillVersionRow
+from deerflow.persistence.system_runtime_settings.model import (
+    RunRuntimePolicySnapshotRow,
+)
 
 _FORBIDDEN_PERSISTED_KEY_PARTS = (
     "secret",
@@ -281,6 +291,47 @@ class RunSnapshotRepository:
         if audit is not None and not callable(getattr(audit, "memory_injection_skipped", None)):
             raise TypeError("Run snapshot audit port is invalid")
         self._audit = audit
+
+    @staticmethod
+    async def _continuation_workload_profile(
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        thread_id: str,
+        source_run_id: str,
+    ) -> EffectiveRunWorkloadProfile:
+        source = (
+            await session.execute(
+                select(
+                    RunRow.kwargs_json,
+                    RunRuntimePolicySnapshotRow.schema_version,
+                )
+                .join(
+                    RunRuntimePolicySnapshotRow,
+                    (RunRuntimePolicySnapshotRow.project_id == RunRow.project_id)
+                    & (RunRuntimePolicySnapshotRow.owner_user_id == RunRow.owner_user_id)
+                    & (RunRuntimePolicySnapshotRow.thread_id == RunRow.thread_id)
+                    & (RunRuntimePolicySnapshotRow.run_id == RunRow.run_id)
+                    & (RunRuntimePolicySnapshotRow.section == "agent_runtime"),
+                )
+                .where(
+                    RunRow.project_id == context.project_id,
+                    RunRow.owner_user_id == str(context.user_id),
+                    RunRow.thread_id == thread_id,
+                    RunRow.run_id == source_run_id,
+                    RunRow.status != "deleted",
+                )
+            )
+        ).one_or_none()
+        if source is None:
+            raise RunWorkloadProfileUnsupported
+        try:
+            return effective_run_workload_profile_from_kwargs(
+                source.kwargs_json,
+                policy_schema_version=source.schema_version,
+            )
+        except (AttributeError, TypeError, RunWorkloadProfileUnsupported):
+            raise RunWorkloadProfileUnsupported from None
 
     async def _skip_memory_injection(
         self,
@@ -770,6 +821,8 @@ class RunSnapshotRepository:
             raise PrivateWorkRunModelUnavailable(context.request_id) from None
         except RunExecutionProfileUnsupported:
             raise PrivateWorkRunExecutionProfileUnsupported(context.request_id) from None
+        except RunWorkloadProfileUnsupported:
+            raise PrivateWorkRunWorkloadProfileUnsupported(context.request_id) from None
         except PrivateRunConflict:
             raise PrivateWorkConflict(context.request_id) from None
         except PrivateWorkError as error:
@@ -885,6 +938,21 @@ class RunSnapshotRepository:
                 )
             except SystemRuntimePolicyRepositoryInvariant:
                 raise RunSnapshotAssetStale from None
+        inherited_workload_profile: EffectiveRunWorkloadProfile | None = None
+        if continuation_source_run_id is not None and locked_runtime_policy is not None:
+            inherited_workload_profile = await self._continuation_workload_profile(
+                session,
+                context,
+                thread_id=thread_id,
+                source_run_id=continuation_source_run_id,
+            )
+        _, frozen_workload_kwargs = freeze_admitted_run_workload_profile(
+            safe_request.kwargs,
+            requested=safe_request.workload_profile,
+            policy_schema_version=(locked_runtime_policy.schema_version if locked_runtime_policy is not None else 3),
+            inherited_effective=inherited_workload_profile,
+        )
+        safe_request = replace(safe_request, kwargs=frozen_workload_kwargs)
         run = await PrivateRunRepository(session).create(
             scope=context.resource_scope,
             thread_id=thread_id,

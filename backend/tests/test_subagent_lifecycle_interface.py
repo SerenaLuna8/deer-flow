@@ -327,6 +327,94 @@ async def test_failed_outcome_separates_stable_code_from_graph_detail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_control_state_invalid_is_a_stable_failed_outcome() -> None:
+    lifecycle = _lifecycle()
+
+    async def behavior(holder: _FakeHolder) -> None:
+        holder.fail("TOOL_CALL_CONTROL_STATE_INVALID")
+
+    try:
+        outcome = await lifecycle.run(
+            _call(),
+            _binding(lambda: _FakeRunner(behavior)),
+        )
+
+        assert isinstance(outcome, SubagentFailed)
+        assert outcome.status is SubagentTaskStatus.FAILED
+        assert outcome.failure_code.value == "TOOL_CALL_CONTROL_STATE_INVALID"
+        assert outcome.detail is None
+    finally:
+        await lifecycle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_loop_finalization_failure_is_a_stable_failed_outcome() -> None:
+    lifecycle = _lifecycle()
+
+    async def behavior(holder: _FakeHolder) -> None:
+        holder.fail("LOOP_FINALIZATION_FAILED")
+
+    try:
+        outcome = await lifecycle.run(
+            _call(),
+            _binding(lambda: _FakeRunner(behavior)),
+        )
+
+        assert isinstance(outcome, SubagentFailed)
+        assert outcome.status is SubagentTaskStatus.FAILED
+        assert outcome.failure_code.value == "LOOP_FINALIZATION_FAILED"
+        assert outcome.detail is None
+    finally:
+        await lifecycle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_budget_cap_survives_as_a_completed_contributing_reason() -> None:
+    lifecycle = _lifecycle()
+
+    async def behavior(holder: _FakeHolder) -> None:
+        holder.complete(
+            "completed from admitted evidence",
+            stop_reason="tool_budget_capped",
+        )
+
+    try:
+        outcome = await lifecycle.run(
+            _call(),
+            _binding(lambda: _FakeRunner(behavior)),
+        )
+
+        assert isinstance(outcome, SubagentCompleted)
+        assert outcome.result == "completed from admitted evidence"
+        assert outcome.stop_reason == "tool_budget_capped"
+    finally:
+        await lifecycle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_remains_direct_when_tool_budget_was_capped() -> None:
+    lifecycle = _lifecycle()
+
+    async def behavior(holder: _FakeHolder) -> None:
+        holder.fail(
+            "LLM_PROVIDER_UNAVAILABLE",
+            stop_reason="tool_budget_capped",
+        )
+
+    try:
+        outcome = await lifecycle.run(
+            _call(),
+            _binding(lambda: _FakeRunner(behavior)),
+        )
+
+        assert isinstance(outcome, SubagentFailed)
+        assert outcome.failure_code is SubagentFailureCode.LLM_PROVIDER_UNAVAILABLE
+        assert outcome.stop_reason == "tool_budget_capped"
+    finally:
+        await lifecycle.aclose()
+
+
+@pytest.mark.asyncio
 async def test_approval_is_a_discriminated_typed_outcome() -> None:
     lifecycle = _lifecycle()
 
