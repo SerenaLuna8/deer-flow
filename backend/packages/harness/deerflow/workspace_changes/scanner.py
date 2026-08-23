@@ -258,6 +258,12 @@ def _decode_text_bytes(data: bytes) -> str | None:
     return None
 
 
+def decode_workspace_text_bytes(data: bytes) -> str | None:
+    """Decode bounded authoritative file bytes using the scanner contract."""
+
+    return _decode_text_bytes(data)
+
+
 def _sample_decodes_as_text(sample: bytes, encoding: str) -> bool:
     try:
         decoder = getincrementaldecoder(encoding)()
@@ -275,3 +281,9 @@ def _looks_binary(sample: bytes) -> bool:
     if _sample_decodes_as_text(sample, "utf-8"):
         return False
     return True
+
+
+def workspace_bytes_look_binary(sample: bytes) -> bool:
+    """Classify bounded authoritative bytes using the scanner contract."""
+
+    return _looks_binary(sample)

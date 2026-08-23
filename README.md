@@ -71,22 +71,28 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   保存 Skill Asset ID，运行时自动解析该 Skill 的 Current Version；MCP 仍绑定精确配置。
 - 项目主会话可为下一次 Run 一次性选择 Interactive 或 Research Workload Profile；
   Gateway 把服务端确认的 effective profile 冻结进 Run Snapshot，隐藏 continuation 与
-  Job retry 继承同一选择。Research 只提高受治理的 Web 工具和 Sub-Agent 工作量上限，
-  不增加工具、项目或数据访问权限。重复调用保护、单工具预算和 Sub-Agent 总数分别拥有
-  独立的状态、事件和用户提示；工具预算耗尽不会阻止仍获准的文件写入与交付。
+  Job retry 继承同一选择。Research 提高 Sub-Agent 工作量上限，但不增加工具、项目或数据
+  访问权限。内部工具调用采用单一 hard limit：同一 Run 的 Lead 与所有 Sub-Agent 共用一个
+  计数，所有内部工具统一累计，不同 Run 相互独立；达到上限后不再准入新的内部工具调用。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。超大的完整
   工具 turn 通过有界分层 SNIP 逐 turn 压缩，receipt 仍绑定原始 checkpoint source；
-  Dream 模型不可用会显示明确失败，不会伪装成“没有待整理 Memory”。
-- Sub-Agent、Guardrail、Tool Search、ToolCallControl 和可扩展工具链。
+  Dream 模型不可用会显示明确失败，不会伪装成“没有待整理 Memory”。上下文用量与
+  自动压缩共用冻结的 provider-request 估算口径，计入系统提示、完整工具 schema 和
+  Durable Context；无法证明当前模型、Agent closure 与策略仍匹配时，界面明确显示暂不
+  支持计量，不回退到偏低的旧估算。
+- Sub-Agent、Guardrail、Tool Search、ToolCallControl 和可扩展工具链。每个
+  Sub-Agent Task 直接写入的输出先进入各自的隔离草稿，只有 Lead 明确复制并调用
+  `present_files` 后才作为主会话文件交付；文件变更的校验与持久化仍由后端执行，无法
+  可靠计算的行数保持未知，但普通会话不再渲染文件变更卡片。
 - 文本 lead model 的受治理图片识别桥接：按 Run 冻结辅助视觉模型，使用
   `inspect_image` 返回有界、不可信视觉分析；视觉调用与其他模型调用共用唯一
   `ModelRuntime` 和所选模型已有的 Provider adapter。
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
-  System Runtime Policy v4 在系统设置中分别配置 Interactive/Research、Lead/Sub-Agent
-  的单工具预算及委托上限；管理员每次保存都会在同一事务中创建不可变的新版本并将其设为
-  当前生效版本，只影响之后准入的 Run。
+  System Runtime Policy v5 在系统设置中配置单一内部工具调用 hard limit 及委托上限；
+  管理员每次保存都会在同一事务中创建不可变的新版本并将其设为当前生效版本，只影响之后
+  准入的 Run。
 
 项目菜单按服务端下发的 capability 分层，而不是仅按角色名称在浏览器中推断：
 
@@ -162,6 +168,9 @@ make check-db
 ```
 
 - `make setup-db` 只初始化空目标库，并写入完整 Schema V1 快照。
+- 空库初始化的 System Runtime Policy v1 将内部工具调用 hard limit 设为 `200`。同一
+  Run 的 Lead 与所有 Sub-Agent 共用该计数，`inspect_image`、`task` 与其他内部工具统一
+  累计，不同 Run 相互独立；重复执行初始化不会覆盖既有数据库的当前策略版本。
 - 初始化会为应用表、Schema V1 标记表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
 - 非空旧库、未知 marker 或 catalog drift 都会安全失败；开发阶段请重建数据库。
@@ -206,12 +215,22 @@ make stop
 管理端当前可创建 OpenAI、OpenAI 兼容增强、Anthropic、DeepSeek、DeepSeek
 兼容增强和 vLLM 模型。Vision Bridge 不再定义专用模型适配器；
 `vision_openai_compatible_v1` 不在生产适配器注册表，`vision_bridge_fake` 仅供测试注入。
+模型编辑器按适配器描述符显示独立表单字段，不要求管理员编写 Provider JSON；常用设置直接显示，
+其余设置默认收在“高级设置”中。平台已固定的默认值会直接展示，未固定的参数明确使用
+“Provider 默认”，已有结构化兼容设置在同一 Provider 下编辑时原样保留。
+OpenAI、OpenAI 兼容增强和 vLLM 适配器的通用表单选项为 `none`、`low`、
+`medium`、`high`、`xhigh`、`max`。
+DeepSeek 与 DeepSeek 兼容增强适配器的思考强度只提供 `low`、`high`、`max`；运行时
+`thinking`、`pro`、`ultra` 分别映射到这三档，`flash` 使用思考关闭参数且不发送强度值。
 MiMo、MiniMax、StepFun、MindIE、Claude Code CLI
 和 Codex CLI 模型适配器已停止支持，不再允许新建、启用、设为默认或准入新 Run；已有
 历史目录记录仍可由管理员查看并改配到受支持适配器。全新数据库只初始化
 三个 `patched_deepseek` 模型配置：`deepseek-v4-flash`、`deepseek-v4-pro` 和
 `deepseek-v4-flash-vision-exp`。Flash 是默认 System Model；Vision Exp 是默认
-Vision Bridge。
+Vision Bridge；三者的必填最大输入上限均初始化为 `1,000,000` tokens，独立于
+`settings.max_tokens=51,200` 的输出上限。管理员新建、更新或测试 System Model 时必须
+填写 `max_input_tokens`（`1..2,000,000`）；它表示该 Provider Model 可接收的最大输入，
+并作为上下文占比与自动压缩容量保护的模型分母，不是 Run 的 token budget。
 
 ### 文本模型图片识别桥接
 

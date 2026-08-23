@@ -88,6 +88,10 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.host_execution_runner import (
     execute_frozen_host_execution_continuation,
 )
+from deerflow.runtime.public_token_usage import (
+    project_public_sse_payload,
+    project_public_subagent_event,
+)
 from deerflow.runtime.recovered_llm_failures import (
     RunRecoveredLLMFailureRecorder,
 )
@@ -103,6 +107,7 @@ from deerflow.sandbox.security import (
     resolve_host_bash_execution_mode,
 )
 from deerflow.subagents.runtime_catalog import trusted_runtime_agent_catalog
+from deerflow.token_budget_usage import TokenBudgetUsageRecorder
 from deerflow.trace_context import get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
@@ -112,6 +117,7 @@ from deerflow.workspace_changes import (
     capture_workspace_snapshot,
     record_workspace_changes,
     trusted_workspace_change_result,
+    workspace_change_event_content,
 )
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
@@ -142,6 +148,41 @@ _ROLLBACK_SUCCEEDED_ERROR = "Rolled back by user"
 _LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
 _LARGE_FILE_TOOL_BATCH_SIZE = 32
 _MESSAGE_TRANSPORT_METADATA_KEYS = frozenset({"model_provider"})
+
+
+class _PublicTokenUsageBridge:
+    """Apply one Run's frozen token-tracking policy at the SSE boundary."""
+
+    def __init__(
+        self,
+        bridge: StreamBridge,
+        *,
+        tracking_enabled: bool,
+    ) -> None:
+        self._bridge = bridge
+        self._tracking_enabled = tracking_enabled
+
+    async def publish(
+        self,
+        run_id: str,
+        event: str,
+        payload: Any,
+    ) -> None:
+        await self._bridge.publish(
+            run_id,
+            event,
+            project_public_sse_payload(
+                event,
+                payload,
+                tracking_enabled=self._tracking_enabled,
+            ),
+        )
+
+    async def publish_end(self, run_id: str) -> None:
+        await self._bridge.publish_end(run_id)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._bridge, name)
 
 
 @dataclass
@@ -510,6 +551,7 @@ def _build_runtime_context(
     server_abort_event: object | None = None,
     vision_dispatch_authority: object | None = None,
     run_semantic_stop_recorder: RunSemanticStopRecorder | None = None,
+    token_budget_usage_recorder: TokenBudgetUsageRecorder | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -542,6 +584,7 @@ def _build_runtime_context(
         server_abort_event=server_abort_event,
         vision_dispatch_authority=vision_dispatch_authority,
         run_semantic_stop_recorder=run_semantic_stop_recorder,
+        token_budget_usage_recorder=token_budget_usage_recorder,
     ).build(caller_context)
     if private_scope is not None and channel_user_id is None:
         # A private Run without verified IM identity must explicitly clear the
@@ -595,6 +638,9 @@ class RunContext:
     host_execution_approval_port: object | None = field(default=None)
     channel_user_id: str | None = field(default=None)
     vision_dispatch_authority: object | None = field(default=None)
+    token_budget_usage_recorder: TokenBudgetUsageRecorder | None = field(
+        default=None,
+    )
     resource_ownership: RunAgentResourceOwnership | None = field(default=None)
     tool_call_control_policy: ResolvedGraphToolCallControlProfile | None = field(
         default=None,
@@ -785,11 +831,20 @@ class _SubagentEventBuffer:
     #: a single deep subagent without paying a per-step lock.
     FLUSH_THRESHOLD = 25
 
-    def __init__(self, event_store: Any | None, thread_id: str, run_id: str, scope: Any | None = None) -> None:
+    def __init__(
+        self,
+        event_store: Any | None,
+        thread_id: str,
+        run_id: str,
+        scope: Any | None = None,
+        *,
+        token_usage_tracking_enabled: bool = True,
+    ) -> None:
         self._event_store = event_store
         self._thread_id = thread_id
         self._run_id = run_id
         self._scope = scope
+        self._token_usage_tracking_enabled = token_usage_tracking_enabled
         self._pending: list[dict[str, Any]] = []
 
     async def add(self, chunk: Any) -> None:
@@ -802,7 +857,12 @@ class _SubagentEventBuffer:
         # it to call time (after all modules are loaded) breaks that cycle.
         from deerflow.subagents.step_events import subagent_run_event
 
-        record = subagent_run_event(chunk)
+        record = subagent_run_event(
+            project_public_subagent_event(
+                chunk,
+                tracking_enabled=self._token_usage_tracking_enabled,
+            )
+        )
         if record is None:
             return
         self._pending.append({"thread_id": self._thread_id, "run_id": self._run_id, **record})
@@ -850,6 +910,22 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
+
+    token_usage_tracking_enabled = bool(
+        getattr(
+            run_events_config,
+            "track_token_usage",
+            getattr(
+                getattr(ctx.app_config, "token_usage", None),
+                "enabled",
+                True,
+            ),
+        )
+    )
+    bridge = _PublicTokenUsageBridge(
+        bridge,
+        tracking_enabled=token_usage_tracking_enabled,
+    )
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -942,7 +1018,7 @@ async def run_agent(
                 run_id=run_id,
                 thread_id=thread_id,
                 event_store=event_store,
-                track_token_usage=getattr(run_events_config, "track_token_usage", True),
+                track_token_usage=token_usage_tracking_enabled,
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
                 scope=record.scope,
                 recovered_llm_failure_recorder=(recovered_llm_failure_recorder),
@@ -1107,6 +1183,7 @@ async def run_agent(
             server_abort_event=record.abort_event,
             vision_dispatch_authority=ctx.vision_dispatch_authority,
             run_semantic_stop_recorder=semantic_stop_recorder,
+            token_budget_usage_recorder=ctx.token_budget_usage_recorder,
         )
         runtime_model_name = None
         prompt_bundle = None
@@ -1160,6 +1237,7 @@ async def run_agent(
             ),
             trace_id=deerflow_trace_id,
             run_journal=journal,
+            token_usage_tracking_enabled=token_usage_tracking_enabled,
             recovered_llm_failure_recorder=(recovered_llm_failure_recorder),
         ).install_into(runtime_ctx)
         _install_runtime_context(config, runtime_ctx)
@@ -1393,7 +1471,13 @@ async def run_agent(
         # Buffer subagent step events and persist them in batches (#3779) instead
         # of one low-frequency put() per step on the hot stream loop. Flushed in
         # the finally block so buffered steps survive abort/exception paths too.
-        subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id, record.scope)
+        subagent_events = _SubagentEventBuffer(
+            event_store,
+            thread_id,
+            run_id,
+            record.scope,
+            token_usage_tracking_enabled=token_usage_tracking_enabled,
+        )
 
         goal_evaluator_model: Any | None = None
 
@@ -1759,7 +1843,12 @@ async def run_agent(
             exc.code.value,
         )
         await private_files.mark_failed()
-        if exc.code is PublicRunErrorCode.MODEL_OUTPUT_LIMIT:
+        if exc.code in {
+            PublicRunErrorCode.MODEL_OUTPUT_LIMIT,
+            PublicRunErrorCode.PROVIDER_REQUEST_USAGE_UNSUPPORTED,
+            PublicRunErrorCode.PROVIDER_REQUEST_PROFILE_DRIFT,
+            PublicRunErrorCode.PROVIDER_REQUEST_CAPACITY_EXCEEDED,
+        }:
             # Publish the typed terminal immediately after the in-memory Run
             # classification. The durable stream terminal is takeover
             # authority even if this Worker exits before Job settlement.
@@ -1768,8 +1857,18 @@ async def run_agent(
                 RunStatus.error,
                 error=exc.code.value,
             )
-            await bridge.publish_end(run_id)
-            terminal_published = True
+            if exc.code is PublicRunErrorCode.MODEL_OUTPUT_LIMIT:
+                await bridge.publish_end(run_id)
+                terminal_published = True
+            else:
+                await bridge.publish(
+                    run_id,
+                    "error",
+                    {
+                        "message": exc.public_message,
+                        "name": exc.code.value,
+                    },
+                )
         else:
             await run_manager.set_status(
                 run_id,
@@ -1827,15 +1926,13 @@ async def run_agent(
                 )
                 if result is not None:
                     payload = result.to_dict()
-                    summary = result.summary
-                    changed_file_count = summary.created + summary.modified + summary.deleted
                     try:
                         await event_store.put(
                             thread_id=thread_id,
                             run_id=run_id,
                             event_type=WORKSPACE_CHANGES_EVENT_TYPE,
                             category="workspace",
-                            content=f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed +0 -0",
+                            content=workspace_change_event_content(result),
                             metadata={WORKSPACE_CHANGES_METADATA_KEY: payload},
                             scope=record.scope,
                         )
@@ -2001,6 +2098,7 @@ async def run_agent(
         subagent_tokens=record.subagent_tokens,
         middleware_tokens=record.middleware_tokens,
         token_usage_by_model=record.token_usage_by_model,
+        token_budget_usage=(ctx.token_budget_usage_recorder.snapshot() if ctx.token_budget_usage_recorder is not None else None),
     )
     if record.status is RunStatus.success:
         return RunAgentOutcome.succeeded(

@@ -86,6 +86,7 @@ def _runtime_config() -> AppConfig:
         description="",
         use="support.fake_models:FakeVisionBridgeChatModel",
         model="fake-lead",
+        max_input_tokens=64_000,
         supports_vision=False,
     )
     vision = ModelConfig(
@@ -94,6 +95,7 @@ def _runtime_config() -> AppConfig:
         description="",
         use="support.fake_models:FakeVisionBridgeChatModel",
         model="fake-vision",
+        max_input_tokens=64_000,
         supports_vision=True,
     )
     vision._system_model_config_id = uuid.uuid4()

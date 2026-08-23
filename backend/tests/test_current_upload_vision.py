@@ -65,6 +65,17 @@ class _Sandbox:
     def close_regular_file(self, _handle: list[object]) -> None:
         return None
 
+    def list_secure_files(
+        self,
+        root: str,
+        *,
+        max_entries: int,
+        excluded_root_names: tuple[str, ...] = (),
+    ):
+        del max_entries, excluded_root_names
+        prefix = root.rstrip("/") + "/"
+        return iter(SimpleNamespace(path=path, size=len(content), file_type="regular") for path, content in sorted(self.files.items()) if path.startswith(prefix))
+
 
 class _Authority:
     def __init__(
@@ -1063,6 +1074,92 @@ def test_explicit_view_image_still_injects_historical_image(
 
     assert len(_image_urls(injected)) == 1
     assert sandbox.opened == [image_path]
+
+
+def test_delegated_view_image_keeps_canonical_alias_and_reads_exact_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    image_path = "/mnt/user-data/outputs/chart.png"
+    delegated_root = "/mnt/user-data/workspace/.deerflow/subagents/0123456789abcdef0123456789abcdef/outputs"
+    scratch_path = f"{delegated_root}/chart.png"
+    authority = _Authority(())
+    authority.delegated_output_root = delegated_root
+    sandbox = _Sandbox({scratch_path: _PNG})
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    runtime = SimpleNamespace(
+        state={
+            "thread_data": {
+                "workspace_path": "/mnt/user-data/workspace",
+                "uploads_path": "/mnt/user-data/uploads",
+                "outputs_path": delegated_root,
+            },
+        },
+        context={
+            "private_scope": scope,
+            "run_id": "run-1",
+            "thread_id": "thread-1",
+            "__file_authority": authority,
+        },
+        config={},
+    )
+    view_tool_module = importlib.import_module(
+        "deerflow.tools.builtins.view_image_tool",
+    )
+    monkeypatch.setattr(
+        view_tool_module,
+        "image_sandbox",
+        lambda _runtime: sandbox,
+    )
+
+    command = view_tool_module.view_image_tool.func(
+        runtime=runtime,
+        image_path=image_path,
+        tool_call_id="view-delegated-1",
+    )
+
+    viewed_images = command.update["viewed_images"]
+    assert sandbox.opened == [scratch_path]
+    assert viewed_images[image_path]["file_ref"]["path"] == image_path
+    assert ".deerflow" not in repr(viewed_images)
+
+    messages = [
+        HumanMessage("inspect the delegated image"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "view_image",
+                    "args": {"image_path": image_path},
+                    "id": "view-delegated-1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(
+            "Successfully read image",
+            tool_call_id="view-delegated-1",
+        ),
+    ]
+    request, _runtime = _request(
+        authority,
+        state={"messages": messages, "viewed_images": viewed_images},
+    )
+    monkeypatch.setattr(
+        view_module,
+        "sandbox_from_runtime",
+        lambda _runtime, **_kwargs: sandbox,
+    )
+
+    injected = ViewImageMiddleware()._inject_request(request)
+
+    assert len(_image_urls(injected)) == 1
+    assert sandbox.opened == [scratch_path, scratch_path]
 
 
 def test_non_image_current_upload_is_not_read_or_injected(

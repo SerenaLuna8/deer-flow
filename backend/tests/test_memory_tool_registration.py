@@ -40,6 +40,7 @@ def _app_config(
             description="",
             use="langchain_openai:ChatOpenAI",
             model=MODEL_NAME,
+            max_input_tokens=64_000,
             api_key=SecretStr("unit-test-key"),
             base_url="https://example.invalid/v1",
             supports_thinking=False,
@@ -54,6 +55,7 @@ def _app_config(
             description="",
             use="support.fake_models:FakeVisionBridgeChatModel",
             model="fake-vision",
+            max_input_tokens=64_000,
             supports_vision=True,
         )
         vision_model._system_model_config_id = uuid.uuid4()

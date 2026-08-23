@@ -47,6 +47,13 @@ from app.shared_assets.models import (
 )
 from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.agents.memory.snip import MEMORY_ARCHIVE_RECEIPT_KEY
+from deerflow.agents.middlewares.token_budget_middleware import (
+    TOKEN_BUDGET_USAGE_STATE_KEY,
+)
+from deerflow.agents.provider_request_contract import (
+    PROVIDER_REQUEST_MEASUREMENT_STATE_KEY,
+    PROVIDER_REQUEST_PROFILE_STATE_KEY,
+)
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import AgentRow
@@ -54,6 +61,24 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 _BUILTIN_MAIN_AGENT_SOURCE_KEY = "builtin:agent:project-assistant"
+_BRANCH_EXCLUDED_STATE_KEYS = frozenset(
+    {
+        "sandbox",
+        "thread_data",
+        MEMORY_ARCHIVE_RECEIPT_KEY,
+        PROVIDER_REQUEST_MEASUREMENT_STATE_KEY,
+        PROVIDER_REQUEST_PROFILE_STATE_KEY,
+        TOKEN_BUDGET_USAGE_STATE_KEY,
+    }
+)
+
+
+def _copyable_branch_state_values(
+    values: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exclude Run-bound private authorities from a new Thread branch."""
+
+    return {key: value for key, value in values.items() if key not in _BRANCH_EXCLUDED_STATE_KEYS}
 
 
 class BranchAuthorityCopyHook(Protocol):
@@ -445,13 +470,12 @@ class PrivateThreadService:
                 resolved_app_config,
                 as_node="branch",
             )
-            excluded = {
-                "sandbox",
-                "thread_data",
-                MEMORY_ARCHIVE_RECEIPT_KEY,
-            }
-            base_values = {key: value for key, value in replay_base_snapshot.values.items() if key not in excluded}
-            selected_values = {key: value for key, value in source_snapshot.values.items() if key not in excluded}
+            base_values = _copyable_branch_state_values(
+                replay_base_snapshot.values,
+            )
+            selected_values = _copyable_branch_state_values(
+                source_snapshot.values,
+            )
             await target_state.aupdate(
                 checkpoint_config(target_thread_id),
                 target_state.replacement_values(

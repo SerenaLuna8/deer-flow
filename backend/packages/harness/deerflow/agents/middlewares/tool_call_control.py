@@ -1,4 +1,4 @@
-"""Harness control for repeated tool calls and per-tool admitted budgets.
+"""Harness control for repeated calls and one shared per-Run tool-call limit.
 
 The public construction seam is :func:`build_tool_call_control`.  Callers bind
 one already-resolved immutable policy to one exact Harness execution scope;
@@ -15,7 +15,6 @@ import re
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Annotated, Literal, NotRequired, Protocol, TypedDict, override
 
 from langchain.agents import AgentState
@@ -37,17 +36,12 @@ from deerflow.agents.middlewares.tool_call_metadata import (
 )
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.runtime.runs.execution_contracts import RunSemanticStopRecorder
-from deerflow.vision.dispatch import (
-    MAX_VISION_CALLS_PER_RUN,
-    VISION_TOOL_FREQUENCY_WARN,
-)
 
 TOOL_CALL_CONTROL_STATE_KEY = "tool_call_control"
 TOOL_CALL_CONTROL_RECEIPT_KEY = "deerflow_tool_call_control_receipt"
 TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY = "__deerflow_tool_call_control_invocation_id"
 TOOL_CALL_CONTROL_LOOP_REPLACEMENT_KEY = "deerflow_tool_call_control_loop_replacement"
-_STATE_VERSION = 1
-_BUDGET_EXCLUDED_TOOLS = frozenset({"task"})
+_STATE_VERSION = 2
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _LOOP_HARD_STOP_NOTICE = "[REPEATED TOOL CALL LIMIT] The same tool-call set reached the safety limit. A tool-free finalization turn will now summarize the evidence already collected."
 _LOOP_FINALIZATION_PROMPT = (
@@ -64,17 +58,13 @@ ToolCallControlWorkloadProfile = Literal["interactive", "research"]
 ToolCallControlReasonCode = Literal[
     "repeated_call_warning",
     "repeated_call_limit",
-    "tool_budget_warning",
     "tool_budget_exhausted",
 ]
 RepeatedCallReasonCode = Literal[
     "repeated_call_warning",
     "repeated_call_limit",
 ]
-ToolCallBudgetReasonCode = Literal[
-    "tool_budget_warning",
-    "tool_budget_exhausted",
-]
+ToolCallBudgetReasonCode = Literal["tool_budget_exhausted",]
 ToolCallControlStopReason = Literal["tool_budget_capped", "loop_capped"]
 
 
@@ -214,7 +204,7 @@ def _repeated_call_fingerprint(
 
 @dataclass(frozen=True, slots=True)
 class ToolCallLimit:
-    """Resolved warning and hard limits for one tool class."""
+    """Resolved warning and hard limits for repeated-call detection."""
 
     warn_threshold: int
     hard_limit: int
@@ -246,75 +236,43 @@ class RepeatedCallPolicy:
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedToolCallBudgetPolicy:
-    """Resolved role-specific tool budget without profile-selection authority."""
-
-    default: ToolCallLimit
-    tools: Mapping[str, ToolCallLimit]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.default, ToolCallLimit):
-            raise TypeError("default must be a ToolCallLimit")
-        if not isinstance(self.tools, Mapping):
-            raise TypeError("tools must be a mapping")
-        normalized: dict[str, ToolCallLimit] = {}
-        for name, limit in self.tools.items():
-            if not isinstance(name, str) or not name.strip():
-                raise ValueError("tool budget names must be non-empty strings")
-            if name in _BUDGET_EXCLUDED_TOOLS:
-                raise ValueError(f"{name} is owned by a separate execution policy")
-            if not isinstance(limit, ToolCallLimit):
-                raise TypeError("tool budget values must be ToolCallLimit instances")
-            if name == "inspect_image":
-                effective_hard_limit = min(
-                    limit.hard_limit,
-                    MAX_VISION_CALLS_PER_RUN,
-                )
-                limit = ToolCallLimit(
-                    warn_threshold=min(
-                        limit.warn_threshold,
-                        effective_hard_limit,
-                    ),
-                    hard_limit=effective_hard_limit,
-                )
-            normalized[name] = limit
-        object.__setattr__(self, "tools", MappingProxyType(normalized))
-
-    def limit_for(self, tool_name: str) -> ToolCallLimit:
-        return self.tools.get(tool_name, self.default)
-
-
-@dataclass(frozen=True, slots=True)
 class ResolvedToolCallControlPolicy:
-    """One immutable policy already selected for a role and workload."""
+    """One immutable policy shared by the Lead and every Sub-Agent."""
 
     repeated_calls: RepeatedCallPolicy
-    tool_budget: ResolvedToolCallBudgetPolicy
+    internal_tool_call_limit: int = 200
 
     def __post_init__(self) -> None:
         if not isinstance(self.repeated_calls, RepeatedCallPolicy):
             raise TypeError("repeated_calls must be a RepeatedCallPolicy")
-        if not isinstance(self.tool_budget, ResolvedToolCallBudgetPolicy):
-            raise TypeError("tool_budget must be a ResolvedToolCallBudgetPolicy")
+        _positive_int(
+            self.internal_tool_call_limit,
+            field="internal_tool_call_limit",
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedGraphToolCallControlProfile:
-    """Harness-owned Lead/Sub-Agent policy selected before graph construction."""
+    """Harness policy plus the independently selected Run workload."""
 
     workload_profile: ToolCallControlWorkloadProfile
-    lead: ResolvedToolCallControlPolicy
-    subagent: ResolvedToolCallControlPolicy
+    policy: ResolvedToolCallControlPolicy
 
     def __post_init__(self) -> None:
         if self.workload_profile not in {"interactive", "research"}:
             raise ValueError(
                 "workload_profile must be 'interactive' or 'research'",
             )
-        if not isinstance(self.lead, ResolvedToolCallControlPolicy):
-            raise TypeError("lead must be a ResolvedToolCallControlPolicy")
-        if not isinstance(self.subagent, ResolvedToolCallControlPolicy):
-            raise TypeError("subagent must be a ResolvedToolCallControlPolicy")
+        if not isinstance(self.policy, ResolvedToolCallControlPolicy):
+            raise TypeError("policy must be a ResolvedToolCallControlPolicy")
+
+    @property
+    def lead(self) -> ResolvedToolCallControlPolicy:
+        return self.policy
+
+    @property
+    def subagent(self) -> ResolvedToolCallControlPolicy:
+        return self.policy
 
 
 def default_graph_tool_call_control_profile(
@@ -322,7 +280,7 @@ def default_graph_tool_call_control_profile(
     *,
     repeated_calls_enabled: bool = True,
 ) -> ResolvedGraphToolCallControlProfile:
-    """Return the caller-owned Harness defaults matching Runtime Policy v4.
+    """Return the caller-owned Harness defaults matching Runtime Policy v5.
 
     This helper does not select a Private Run workload and does not read
     ``AppConfig``.  Server-admitted Runs must pass their already materialized
@@ -334,49 +292,16 @@ def default_graph_tool_call_control_profile(
     repeated_calls = RepeatedCallPolicy(
         enabled=repeated_calls_enabled,
         warn_threshold=3,
-        hard_limit=5,
+        hard_limit=20,
         window_size=20,
     )
 
-    def role_budget(*, web_warn: int, web_hard_limit: int) -> ResolvedToolCallControlPolicy:
-        return ResolvedToolCallControlPolicy(
-            repeated_calls=repeated_calls,
-            tool_budget=ResolvedToolCallBudgetPolicy(
-                default=ToolCallLimit(
-                    warn_threshold=30,
-                    hard_limit=50,
-                ),
-                tools={
-                    "web_search": ToolCallLimit(
-                        warn_threshold=web_warn,
-                        hard_limit=web_hard_limit,
-                    ),
-                    "web_fetch": ToolCallLimit(
-                        warn_threshold=web_warn,
-                        hard_limit=web_hard_limit,
-                    ),
-                    "recall_memory": ToolCallLimit(
-                        warn_threshold=6,
-                        hard_limit=10,
-                    ),
-                    "inspect_image": ToolCallLimit(
-                        warn_threshold=VISION_TOOL_FREQUENCY_WARN,
-                        hard_limit=MAX_VISION_CALLS_PER_RUN,
-                    ),
-                },
-            ),
-        )
-
-    if workload_profile == "research":
-        lead = role_budget(web_warn=20, web_hard_limit=30)
-        subagent = role_budget(web_warn=12, web_hard_limit=20)
-    else:
-        lead = role_budget(web_warn=6, web_hard_limit=10)
-        subagent = role_budget(web_warn=6, web_hard_limit=10)
     return ResolvedGraphToolCallControlProfile(
         workload_profile=workload_profile,
-        lead=lead,
-        subagent=subagent,
+        policy=ResolvedToolCallControlPolicy(
+            repeated_calls=repeated_calls,
+            internal_tool_call_limit=200,
+        ),
     )
 
 
@@ -387,6 +312,98 @@ class ToolCallControlObserver(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class RunToolCallLimitReservation:
+    """One atomic prefix decision from a Run-shared tool-call counter."""
+
+    count_before: int
+    proposed: int
+    admitted: int
+    rejected: int
+    count_after: int
+    admitted_indices: tuple[int, ...]
+    first_exhaustion: bool
+
+
+@dataclass(slots=True)
+class _RunToolCallLimitFacts:
+    count: int
+    reservations: dict[str, tuple[int, RunToolCallLimitReservation]]
+
+
+class RunToolCallLimitAuthority:
+    """Thread-safe counters keyed by an exact top-level Run/invocation scope."""
+
+    def __init__(self, *, hard_limit: int, max_scopes: int = 1000) -> None:
+        self.hard_limit = _positive_int(hard_limit, field="hard_limit")
+        self._lock = threading.Lock()
+        self._scopes: BoundedDict[str, _RunToolCallLimitFacts] = BoundedDict(_positive_int(max_scopes, field="max_scopes"))
+
+    def reserve_batch(
+        self,
+        *,
+        scope_id: str,
+        proposal_receipt: str,
+        proposed: int,
+        baseline: int,
+    ) -> RunToolCallLimitReservation:
+        if not isinstance(scope_id, str) or not scope_id.strip():
+            raise ValueError("scope_id must be a non-empty string")
+        if not isinstance(proposal_receipt, str) or not proposal_receipt:
+            raise ValueError("proposal_receipt must be a non-empty string")
+        if not isinstance(proposed, int) or isinstance(proposed, bool) or proposed < 0:
+            raise ValueError("proposed must be a non-negative integer")
+        if not isinstance(baseline, int) or isinstance(baseline, bool) or not 0 <= baseline <= self.hard_limit:
+            raise ValueError("baseline must be within the hard limit")
+        with self._lock:
+            facts = self._scopes.get(scope_id)
+            if facts is None:
+                facts = _RunToolCallLimitFacts(count=baseline, reservations={})
+                self._scopes[scope_id] = facts
+            elif baseline > facts.count:
+                facts.count = baseline
+            replay = facts.reservations.get(proposal_receipt)
+            if replay is not None:
+                replay_proposed, reservation = replay
+                if replay_proposed != proposed:
+                    raise ToolCallControlStateInvalid(
+                        "proposal receipt changed its batch size",
+                    )
+                return reservation
+            before = facts.count
+            admitted = min(proposed, self.hard_limit - before)
+            after = before + admitted
+            reservation = RunToolCallLimitReservation(
+                count_before=before,
+                proposed=proposed,
+                admitted=admitted,
+                rejected=proposed - admitted,
+                count_after=after,
+                admitted_indices=tuple(range(admitted)),
+                first_exhaustion=(before < self.hard_limit <= after),
+            )
+            facts.count = after
+            facts.reservations[proposal_receipt] = (proposed, reservation)
+            return reservation
+
+    def count(self, *, scope_id: str, baseline: int = 0) -> int:
+        if not isinstance(scope_id, str) or not scope_id.strip():
+            raise ValueError("scope_id must be a non-empty string")
+        if not isinstance(baseline, int) or isinstance(baseline, bool) or not 0 <= baseline <= self.hard_limit:
+            raise ValueError("baseline must be within the hard limit")
+        with self._lock:
+            facts = self._scopes.get(scope_id)
+            if facts is None:
+                self._scopes[scope_id] = _RunToolCallLimitFacts(
+                    count=baseline,
+                    reservations={},
+                )
+                return baseline
+            if baseline > facts.count:
+                facts.count = baseline
+            return facts.count
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCallControlBinding:
     """Exact caller-owned scope for one middleware instance."""
 
@@ -394,6 +411,8 @@ class ToolCallControlBinding:
     scope: ToolCallControlScope
     workload_profile: ToolCallControlWorkloadProfile = "interactive"
     observer: ToolCallControlObserver | None = None
+    limit_authority: RunToolCallLimitAuthority | None = None
+    limit_scope: ToolCallControlScope | None = None
 
     def __post_init__(self) -> None:
         if self.role not in {"lead", "subagent"}:
@@ -405,6 +424,16 @@ class ToolCallControlBinding:
             raise TypeError("scope must be an explicit tool-call control strategy")
         if self.workload_profile not in {"interactive", "research"}:
             raise ValueError("workload_profile must be 'interactive' or 'research'")
+        if self.limit_authority is not None and not isinstance(
+            self.limit_authority,
+            RunToolCallLimitAuthority,
+        ):
+            raise TypeError("limit_authority must be RunToolCallLimitAuthority")
+        if self.limit_scope is not None and not isinstance(
+            self.limit_scope,
+            (FixedToolCallControlScope, PerInvocationToolCallControlScope),
+        ):
+            raise TypeError("limit_scope must be an explicit scope strategy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,19 +457,17 @@ class RepeatedCallObservation:
 
 @dataclass(frozen=True, slots=True)
 class ToolCallBudgetObservation:
-    """Argument-free per-tool budget fact emitted at a budget threshold."""
+    """Argument-free fact emitted when the shared Run limit is reached."""
 
     reason_code: ToolCallBudgetReasonCode
     role: ToolCallControlRole
     scope_id: str
     workload_profile: str
-    tool_name: str
     count_before: int
     proposed: int
     admitted: int
     rejected: int
     count_after: int
-    warn_threshold: int
     hard_limit: int
     disposition: str
     observation_id: str
@@ -453,9 +480,8 @@ class _ControlFacts(TypedDict):
     version: int
     scope_id: str
     contract_fingerprint: str
-    admitted_counts: dict[str, int]
-    exhausted_tools: list[str]
-    warned_tools: list[str]
+    admitted_count: int
+    limit_exhausted: bool
     pending_notices: list[str]
     proposal_receipts: dict[str, list[int]]
     proposal_signatures: dict[str, str]
@@ -482,6 +508,12 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
         super().__init__()
         self._policy = policy
         self._binding = binding
+        self._limit_authority = binding.limit_authority or RunToolCallLimitAuthority(
+            hard_limit=policy.internal_tool_call_limit,
+        )
+        if self._limit_authority.hard_limit != policy.internal_tool_call_limit:
+            raise ValueError("limit authority and policy hard limits must match")
+        self._limit_scope = binding.limit_scope or binding.scope
         self._stop_reason_lock = threading.Lock()
         self._stop_reasons: BoundedDict[str, ToolCallControlStopReason] = BoundedDict(1000)
         scope_contract: dict[str, str] = {
@@ -497,19 +529,7 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                 "hard_limit": policy.repeated_calls.hard_limit,
                 "window_size": policy.repeated_calls.window_size,
             },
-            "tool_budget": {
-                "default": {
-                    "warn_threshold": policy.tool_budget.default.warn_threshold,
-                    "hard_limit": policy.tool_budget.default.hard_limit,
-                },
-                "tools": {
-                    name: {
-                        "warn_threshold": limit.warn_threshold,
-                        "hard_limit": limit.hard_limit,
-                    }
-                    for name, limit in sorted(policy.tool_budget.tools.items())
-                },
-            },
+            "internal_tool_call_limit": policy.internal_tool_call_limit,
         }
         self._contract_fingerprint = hashlib.sha256(
             json.dumps(
@@ -532,9 +552,8 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                 "version": _STATE_VERSION,
                 "scope_id": scope_id,
                 "contract_fingerprint": self._contract_fingerprint,
-                "admitted_counts": {},
-                "exhausted_tools": [],
-                "warned_tools": [],
+                "admitted_count": 0,
+                "limit_exhausted": False,
                 "pending_notices": [],
                 "proposal_receipts": {},
                 "proposal_signatures": {},
@@ -555,9 +574,8 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                 raise ToolCallControlStateInvalid("malformed contract fingerprint")
         elif raw_contract_fingerprint != self._contract_fingerprint:
             raise ToolCallControlStateInvalid("policy or binding mismatch")
-        counts = raw.get("admitted_counts")
-        exhausted = raw.get("exhausted_tools")
-        warned = raw.get("warned_tools")
+        admitted_count = raw.get("admitted_count")
+        limit_exhausted = raw.get("limit_exhausted")
         pending = raw.get("pending_notices")
         receipts = raw.get("proposal_receipts")
         signatures = raw.get("proposal_signatures")
@@ -566,9 +584,11 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
         warned_fingerprints = raw.get("warned_fingerprints")
         finalization = raw.get("loop_finalization")
         if (
-            not isinstance(counts, Mapping)
-            or not isinstance(exhausted, list)
-            or not isinstance(warned, list)
+            not isinstance(admitted_count, int)
+            or isinstance(admitted_count, bool)
+            or admitted_count < 0
+            or admitted_count > self._policy.internal_tool_call_limit
+            or not isinstance(limit_exhausted, bool)
             or not isinstance(pending, list)
             or not isinstance(receipts, Mapping)
             or not isinstance(signatures, Mapping)
@@ -577,15 +597,8 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
             or not isinstance(warned_fingerprints, list)
         ):
             raise ToolCallControlStateInvalid("malformed budget facts")
-        normalized_counts: dict[str, int] = {}
-        for name, count in counts.items():
-            if not isinstance(name, str) or not isinstance(count, int) or isinstance(count, bool) or count < 0:
-                raise ToolCallControlStateInvalid("malformed admitted count")
-            if not allow_prior_contract and count > self._policy.tool_budget.limit_for(name).hard_limit:
-                raise ToolCallControlStateInvalid("admitted count exceeds hard limit")
-            normalized_counts[name] = count
-        if any(not isinstance(name, str) for name in exhausted) or any(not isinstance(name, str) for name in warned):
-            raise ToolCallControlStateInvalid("malformed exhausted tools")
+        if limit_exhausted is not (admitted_count >= self._policy.internal_tool_call_limit):
+            raise ToolCallControlStateInvalid("limit exhaustion does not match count")
         if any(not isinstance(notice, str) or not notice for notice in pending):
             raise ToolCallControlStateInvalid("malformed pending notices")
         normalized_receipts: dict[str, list[int]] = {}
@@ -624,9 +637,8 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
             "version": _STATE_VERSION,
             "scope_id": scope_id,
             "contract_fingerprint": raw_contract_fingerprint,
-            "admitted_counts": normalized_counts,
-            "exhausted_tools": list(dict.fromkeys(exhausted)),
-            "warned_tools": list(dict.fromkeys(warned)),
+            "admitted_count": admitted_count,
+            "limit_exhausted": limit_exhausted,
             "pending_notices": list(dict.fromkeys(pending)),
             "proposal_receipts": normalized_receipts,
             "proposal_signatures": normalized_signatures,
@@ -770,7 +782,6 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
         self,
         *,
         reason_code: ToolCallControlReasonCode,
-        tool_name: str | None,
         count_before: int,
         proposed: int,
         admitted: int,
@@ -786,7 +797,6 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                 scope_id,
                 proposal_receipt,
                 reason_code,
-                tool_name or "",
                 str(count_before),
                 str(proposed),
                 str(admitted),
@@ -803,23 +813,18 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
             "admitted": admitted,
             "rejected": rejected,
             "count_after": count_after,
-            "warn_threshold": limit.warn_threshold,
             "hard_limit": limit.hard_limit,
             "disposition": disposition,
             "observation_id": hashlib.sha256(identity.encode()).hexdigest(),
         }
         if reason_code in {"repeated_call_warning", "repeated_call_limit"}:
-            if tool_name is not None:
-                raise ValueError("repeated-call observations cannot name a tool")
             return RepeatedCallObservation(
                 reason_code=reason_code,
+                warn_threshold=limit.warn_threshold,
                 **common,
             )
-        if tool_name is None:
-            raise ValueError("tool-budget observations require a tool name")
         return ToolCallBudgetObservation(
             reason_code=reason_code,
-            tool_name=tool_name,
             **common,
         )
 
@@ -855,6 +860,13 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
         if raw_facts is None and not tool_calls:
             return None
         facts = self._facts(state, scope_id=scope_id)
+        limit_scope_id = self._limit_scope.resolve(runtime)
+        shared_count = self._limit_authority.count(
+            scope_id=limit_scope_id,
+            baseline=facts["admitted_count"],
+        )
+        facts["admitted_count"] = shared_count
+        facts["limit_exhausted"] = shared_count >= self._policy.internal_tool_call_limit
         signature = self._proposal_signature(
             message,
             scope_id=scope_id,
@@ -991,7 +1003,6 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                 }
                 observation = self._observation(
                     reason_code="repeated_call_limit",
-                    tool_name=None,
                     count_before=repeat_count - 1,
                     proposed=1,
                     admitted=0,
@@ -1019,7 +1030,6 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                 repeated_observations.append(
                     self._observation(
                         reason_code="repeated_call_warning",
-                        tool_name=None,
                         count_before=repeat_count - 1,
                         proposed=1,
                         admitted=1,
@@ -1032,94 +1042,36 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                     )
                 )
 
-        counts = dict(facts["admitted_counts"])
-        exhausted = set(facts["exhausted_tools"])
-        warned = set(facts["warned_tools"])
         pending_notices: list[str] = list(repeated_notices)
-        kept: list[dict] = []
-        kept_indices: list[int] = []
-        rejected = False
-        count_before: dict[str, int] = {}
-        proposed: dict[str, int] = {}
-        admitted: dict[str, int] = {}
-        rejected_by_tool: dict[str, int] = {}
-        tool_order: list[str] = []
-        for index, call in enumerate(tool_calls):
-            name = call.get("name")
-            if not isinstance(name, str) or not name or name in _BUDGET_EXCLUDED_TOOLS:
-                kept.append(call)
-                kept_indices.append(index)
-                continue
-            if name not in proposed:
-                tool_order.append(name)
-                count_before[name] = counts.get(name, 0)
-                proposed[name] = 0
-                admitted[name] = 0
-                rejected_by_tool[name] = 0
-            proposed[name] += 1
-            limit = self._policy.tool_budget.limit_for(name)
-            current = counts.get(name, 0)
-            if current >= limit.hard_limit:
-                exhausted.add(name)
-                rejected = True
-                rejected_by_tool[name] += 1
-                continue
-            counts[name] = current + 1
-            admitted[name] += 1
-            kept.append(call)
-            kept_indices.append(index)
-            if counts[name] >= limit.hard_limit:
-                exhausted.add(name)
-
         observations: list[ToolCallControlObservation] = list(repeated_observations)
-        prior_exhausted = set(facts["exhausted_tools"])
-        for name in tool_order:
-            limit = self._policy.tool_budget.limit_for(name)
-            before = count_before[name]
-            after = counts.get(name, before)
-            if rejected_by_tool[name] or before < limit.hard_limit <= after:
-                if name not in prior_exhausted:
-                    pending_notices.append(f"[TOOL BUDGET EXHAUSTED] The {name} budget for this execution is exhausted at {after} admitted calls. Continue with existing evidence or use other available tools.")
-                if self._binding.role == "subagent":
-                    self._record_stop_reason(
-                        scope_id,
-                        "tool_budget_capped",
-                    )
-                observations.append(
-                    self._observation(
-                        reason_code="tool_budget_exhausted",
-                        tool_name=name,
-                        count_before=before,
-                        proposed=proposed[name],
-                        admitted=admitted[name],
-                        rejected=rejected_by_tool[name],
-                        count_after=after,
-                        limit=limit,
-                        disposition=("truncate_tool_calls" if rejected_by_tool[name] else "exhaust_tool"),
-                        proposal_receipt=receipt,
-                        scope_id=scope_id,
-                    )
+        reservation = self._limit_authority.reserve_batch(
+            scope_id=limit_scope_id,
+            proposal_receipt=receipt,
+            proposed=len(tool_calls),
+            baseline=facts["admitted_count"],
+        )
+        kept_indices = list(reservation.admitted_indices)
+        if reservation.first_exhaustion or reservation.rejected:
+            pending_notices.append(f"[RUN TOOL CALL LIMIT] The shared internal tool-call limit for this Run is exhausted at {reservation.count_after} admitted calls. Finish with the evidence already collected.")
+            if self._binding.role == "subagent":
+                self._record_stop_reason(scope_id, "tool_budget_capped")
+            observations.append(
+                self._observation(
+                    reason_code="tool_budget_exhausted",
+                    count_before=reservation.count_before,
+                    proposed=reservation.proposed,
+                    admitted=reservation.admitted,
+                    rejected=reservation.rejected,
+                    count_after=reservation.count_after,
+                    limit=ToolCallLimit(
+                        warn_threshold=self._policy.internal_tool_call_limit,
+                        hard_limit=self._policy.internal_tool_call_limit,
+                    ),
+                    disposition=("truncate_tool_calls" if reservation.rejected else "exhaust_run"),
+                    proposal_receipt=receipt,
+                    scope_id=scope_id,
                 )
-            elif before < limit.warn_threshold <= after and name not in warned:
-                warned.add(name)
-                pending_notices.append(
-                    f"[TOOL BUDGET ADVISORY] You have used {after} of {limit.hard_limit} {name} calls for this execution. Review existing evidence and reserve remaining calls for material gaps. Continue when another call adds new evidence."
-                )
-                observations.append(
-                    self._observation(
-                        reason_code="tool_budget_warning",
-                        tool_name=name,
-                        count_before=before,
-                        proposed=proposed[name],
-                        admitted=admitted[name],
-                        rejected=0,
-                        count_after=after,
-                        limit=limit,
-                        disposition="advisory",
-                        proposal_receipt=receipt,
-                        scope_id=scope_id,
-                    )
-                )
+            )
 
         controlled_message = clone_ai_message_with_tool_call_occurrences(
             message,
@@ -1133,9 +1085,8 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
             "version": _STATE_VERSION,
             "scope_id": scope_id,
             "contract_fingerprint": self._contract_fingerprint,
-            "admitted_counts": counts,
-            "exhausted_tools": sorted(exhausted),
-            "warned_tools": sorted(warned),
+            "admitted_count": reservation.count_after,
+            "limit_exhausted": (reservation.count_after >= self._policy.internal_tool_call_limit),
             "pending_notices": list(dict.fromkeys(pending_notices)),
             "proposal_receipts": {
                 **facts["proposal_receipts"],
@@ -1155,7 +1106,7 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
         }
         update: dict = {TOOL_CALL_CONTROL_STATE_KEY: next_facts}
         update["messages"] = [self._stamp_receipt(controlled_message, receipt)]
-        if rejected and not kept:
+        if reservation.rejected and not kept_indices:
             update["jump_to"] = "model"
         for observation in observations:
             self._observe(observation)
@@ -1167,6 +1118,11 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
             return request
         scope_id = self._binding.scope.resolve(request.runtime)
         facts = self._facts(request.state or {}, scope_id=scope_id)
+        limit_scope_id = self._limit_scope.resolve(request.runtime)
+        shared_count = self._limit_authority.count(
+            scope_id=limit_scope_id,
+            baseline=facts["admitted_count"],
+        )
         finalization = facts["loop_finalization"]
         if finalization is not None:
             return request.override(
@@ -1182,9 +1138,15 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                 tool_choice=None,
                 response_format=None,
             )
-        exhausted = set(facts["exhausted_tools"])
-        tools = [tool for tool in request.tools if tool.name not in exhausted]
+        tools = [] if shared_count >= self._policy.internal_tool_call_limit else list(request.tools)
         messages = list(request.messages)
+        if shared_count >= self._policy.internal_tool_call_limit and not facts["limit_exhausted"]:
+            messages.append(
+                HumanMessage(
+                    content=(f"[RUN TOOL CALL LIMIT] The shared internal tool-call limit for this Run is exhausted at {shared_count} admitted calls. Finish with the evidence already collected."),
+                    name="tool_call_control_advisory",
+                )
+            )
         if facts["pending_notices"]:
             messages.append(
                 HumanMessage(
@@ -1294,9 +1256,10 @@ __all__ = [
     "RepeatedCallObservation",
     "RepeatedCallReasonCode",
     "RepeatedCallPolicy",
-    "ResolvedToolCallBudgetPolicy",
     "ResolvedToolCallControlPolicy",
     "ResolvedGraphToolCallControlProfile",
+    "RunToolCallLimitAuthority",
+    "RunToolCallLimitReservation",
     "ToolCallControlBinding",
     "ToolCallControlLoopFinalizationFailed",
     "ToolCallControlObservation",

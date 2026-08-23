@@ -255,6 +255,7 @@ async def _add_all_domain_secrets(session, context: ProjectContext) -> _ProjectS
         status="active",
         provider_adapter="patched_deepseek",
         provider_model="deepseek-v4-flash",
+        max_input_tokens=64_000,
         settings={"base_url": "https://api.deepseek.com"},
         supports_thinking=True,
         supports_reasoning_effort=True,

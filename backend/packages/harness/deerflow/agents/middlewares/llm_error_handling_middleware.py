@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 import threading
 import time
@@ -15,7 +16,6 @@ from httpx import HTTPStatusError
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import (
-    ExtendedModelResponse,
     ModelCallResult,
     ModelRequest,
     ModelResponse,
@@ -26,6 +26,7 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.config.app_config import AppConfig
 from deerflow.error_codes import (
     CURRENT_UPLOAD_FAILURE_DETAIL,
+    PublicRunError,
 )
 from deerflow.public_error_codes import (
     llm_error_code_for_reason,
@@ -33,8 +34,9 @@ from deerflow.public_error_codes import (
 )
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.runtime.recovered_llm_failures import (
-    RECOVERED_LLM_FAILURES_KEY,
+    RecoveredLLMCaller,
     RecoveredLLMFailure,
+    RecoveredLLMFailureSubtype,
     RunRecoveredLLMFailureRecorder,
     build_recovered_llm_failures_receipt,
     read_recovered_llm_failures,
@@ -123,6 +125,18 @@ _TRANSPORT_EXCEPTION_NAMES = _TRANSIENT_EXCEPTION_NAMES - {
     "InternalServerError",
     "StreamChunkTimeoutError",
 }
+_TIMEOUT_EXCEPTION_NAMES = frozenset(
+    {
+        "APITimeoutError",
+        "ConnectTimeout",
+        "PoolTimeout",
+        "ReadTimeout",
+        "StreamChunkTimeoutError",
+        "TimeoutException",
+        "WriteTimeout",
+    }
+)
+_CONNECTION_EXCEPTION_NAMES = _TRANSPORT_EXCEPTION_NAMES - _TIMEOUT_EXCEPTION_NAMES
 _SAFE_CLASSIFIER_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,63}\Z")
 
 # Per-exception retry budget overrides.
@@ -168,7 +182,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     retry_base_delay_ms: int = 1000
     retry_cap_delay_ms: int = 8000
 
-    def __init__(self, *, app_config: AppConfig, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        app_config: AppConfig,
+        retry_jitter_source: Callable[[], float] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
 
         self.circuit_failure_threshold = app_config.circuit_breaker.failure_threshold
@@ -180,6 +200,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self._circuit_open_until = 0.0
         self._circuit_state = "closed"
         self._circuit_probe_in_flight = False
+        self._retry_jitter_source = retry_jitter_source or random.random
 
     def _max_attempts_for(self, exc: BaseException) -> int:
         """Return the effective max attempt count for this exception.
@@ -298,7 +319,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if retry_after is not None:
             return retry_after
         backoff = self.retry_base_delay_ms * (2 ** max(0, attempt - 1))
-        return min(backoff, self.retry_cap_delay_ms)
+        bounded_backoff = min(backoff, self.retry_cap_delay_ms)
+        lower_bound = bounded_backoff // 2
+        sample = self._retry_jitter_source()
+        if not isinstance(sample, (int, float)) or not 0 <= sample <= 1:
+            sample = 0.5
+        return lower_bound + int((bounded_backoff - lower_bound) * sample)
 
     def _build_retry_message(self, attempt: int, wait_ms: int, reason: str) -> str:
         seconds = max(1, round(wait_ms / 1000))
@@ -399,58 +425,6 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             logger.debug("Failed to emit llm_retry event")
 
     @staticmethod
-    def _attach_recovered_failures(
-        result: ModelCallResult,
-        failures: Sequence[RecoveredLLMFailure],
-    ) -> ModelCallResult:
-        """Attach a safe, replayable receipt to the successful AI response."""
-
-        if isinstance(result, ExtendedModelResponse):
-            response = result.model_response
-        elif isinstance(result, AIMessage):
-            response = ModelResponse(result=[result])
-        else:
-            response = result
-
-        messages = list(response.result)
-        target_index: int | None = None
-        changed = False
-        for index, message in enumerate(messages):
-            if not isinstance(message, AIMessage):
-                continue
-            target_index = index
-            additional_kwargs = dict(message.additional_kwargs or {})
-            if RECOVERED_LLM_FAILURES_KEY in additional_kwargs:
-                additional_kwargs.pop(RECOVERED_LLM_FAILURES_KEY, None)
-                messages[index] = message.model_copy(
-                    update={"additional_kwargs": additional_kwargs},
-                )
-                changed = True
-
-        if target_index is not None and failures:
-            message = messages[target_index]
-            assert isinstance(message, AIMessage)
-            additional_kwargs = dict(message.additional_kwargs or {})
-            additional_kwargs[RECOVERED_LLM_FAILURES_KEY] = build_recovered_llm_failures_receipt(failures)
-            messages[target_index] = message.model_copy(
-                update={"additional_kwargs": additional_kwargs},
-            )
-            changed = True
-
-        if not changed:
-            return result
-
-        rebuilt = ModelResponse(
-            result=messages,
-            structured_response=response.structured_response,
-        )
-        if isinstance(result, ExtendedModelResponse):
-            return ExtendedModelResponse(rebuilt, result.command)
-        if isinstance(result, AIMessage):
-            return messages[0]
-        return rebuilt
-
-    @staticmethod
     def _record_recovered_failures(
         request: ModelRequest,
         failures: Sequence[RecoveredLLMFailure],
@@ -484,15 +458,32 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return tuple(failures)
         return parsed if len(parsed) == len(snapshot) else tuple(failures)
 
-    def _attach_existing_run_recovered_failures(
-        self,
+    @staticmethod
+    def _build_recovered_failure(
         request: ModelRequest,
-        result: ModelCallResult,
-    ) -> ModelCallResult:
-        """Attach only facts already settled by earlier successful calls."""
-
-        aggregate = self._record_recovered_failures(request, ())
-        return self._attach_recovered_failures(result, aggregate)
+        exc: BaseException,
+        *,
+        attempt: int,
+        max_attempts: int,
+        error_code: str,
+        reason: str,
+    ) -> RecoveredLLMFailure:
+        context = getattr(getattr(request, "runtime", None), "context", None)
+        caller: RecoveredLLMCaller = "subagent" if isinstance(context, Mapping) and context.get(RuntimeContextKeys.IS_SUBAGENT) is True else "lead_agent"
+        failure_subtype, status_code = _safe_recovered_failure_subtype(
+            exc,
+            reason=reason,
+        )
+        return {
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "error_code": error_code,
+            "reason": normalize_llm_error_reason(reason),
+            "caller": caller,
+            "failure_subtype": failure_subtype,
+            "status_code": status_code,
+            "disposition": "recovered",
+        }
 
     @override
     def wrap_model_call(
@@ -501,12 +492,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
         if self._check_circuit():
-            return self._attach_existing_run_recovered_failures(
-                request,
-                self._build_error_fallback_message(
-                    self._build_circuit_breaker_message(),
-                    reason="circuit_open",
-                ),
+            return self._build_error_fallback_message(
+                self._build_circuit_breaker_message(),
+                reason="circuit_open",
             )
 
         attempt = 1
@@ -515,15 +503,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             try:
                 response = handler(request)
                 self._record_success()
-                aggregate = self._record_recovered_failures(
+                self._record_recovered_failures(
                     request,
                     recovered_failures,
                 )
-                return self._attach_recovered_failures(
-                    response,
-                    aggregate,
-                )
-            except GraphBubbleUp:
+                return response
+            except (GraphBubbleUp, PublicRunError):
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
                 with self._circuit_lock:
                     if self._circuit_state == "half_open":
@@ -544,13 +529,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     )
                     self._emit_retry_event(attempt, wait_ms, reason)
                     recovered_failures.append(
-                        {
-                            "attempt": attempt,
-                            "max_attempts": max_attempts,
-                            "error_code": error_code,
-                            "reason": normalize_llm_error_reason(reason),
-                            "disposition": "recovered",
-                        }
+                        self._build_recovered_failure(
+                            request,
+                            exc,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            error_code=error_code,
+                            reason=reason,
+                        )
                     )
                     time.sleep(wait_ms / 1000)
                     attempt += 1
@@ -562,10 +548,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
-                return self._attach_existing_run_recovered_failures(
-                    request,
-                    self._build_user_fallback_message(exc, reason),
-                )
+                return self._build_user_fallback_message(exc, reason)
 
     @override
     async def awrap_model_call(
@@ -574,12 +557,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         if self._check_circuit():
-            return self._attach_existing_run_recovered_failures(
-                request,
-                self._build_error_fallback_message(
-                    self._build_circuit_breaker_message(),
-                    reason="circuit_open",
-                ),
+            return self._build_error_fallback_message(
+                self._build_circuit_breaker_message(),
+                reason="circuit_open",
             )
 
         attempt = 1
@@ -588,15 +568,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             try:
                 response = await handler(request)
                 self._record_success()
-                aggregate = self._record_recovered_failures(
+                self._record_recovered_failures(
                     request,
                     recovered_failures,
                 )
-                return self._attach_recovered_failures(
-                    response,
-                    aggregate,
-                )
-            except GraphBubbleUp:
+                return response
+            except (GraphBubbleUp, PublicRunError):
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
                 with self._circuit_lock:
                     if self._circuit_state == "half_open":
@@ -617,13 +594,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     )
                     self._emit_retry_event(attempt, wait_ms, reason)
                     recovered_failures.append(
-                        {
-                            "attempt": attempt,
-                            "max_attempts": max_attempts,
-                            "error_code": error_code,
-                            "reason": normalize_llm_error_reason(reason),
-                            "disposition": "recovered",
-                        }
+                        self._build_recovered_failure(
+                            request,
+                            exc,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            error_code=error_code,
+                            reason=reason,
+                        )
                     )
                     await asyncio.sleep(wait_ms / 1000)
                     attempt += 1
@@ -635,10 +613,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
-                return self._attach_existing_run_recovered_failures(
-                    request,
-                    self._build_user_fallback_message(exc, reason),
-                )
+                return self._build_user_fallback_message(exc, reason)
 
 
 def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:
@@ -751,6 +726,28 @@ def _extract_status_code(exc: BaseException) -> int | None:
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     return status if isinstance(status, int) else None
+
+
+def _safe_recovered_failure_subtype(
+    exc: BaseException,
+    *,
+    reason: str,
+) -> tuple[RecoveredLLMFailureSubtype, int | None]:
+    """Return a closed diagnostic class without retaining exception content."""
+
+    status_code = _extract_status_code(exc)
+    if type(status_code) is int and 100 <= status_code <= 599:
+        return "http_status", status_code
+    exception_names = _exception_type_names(exc)
+    if exception_names & _TIMEOUT_EXCEPTION_NAMES:
+        return "timeout", None
+    if exception_names & _CONNECTION_EXCEPTION_NAMES:
+        return "connection", None
+    if isinstance(exc, IndexError):
+        return "empty_response", None
+    if reason == "busy":
+        return "provider_busy", None
+    return "unknown", None
 
 
 def _extract_retry_after_ms(exc: BaseException) -> int | None:

@@ -1,4 +1,4 @@
-"""Exact Runtime Policy schema compatibility and v4 contracts."""
+"""Exact Runtime Policy schema compatibility and v5 contracts."""
 
 from __future__ import annotations
 
@@ -20,7 +20,10 @@ from app.system_runtime_settings.models import (
     MaterializedAgentRuntimePolicy,
     RuntimePolicySection,
 )
-from app.system_runtime_settings.schema_codec import canonical_policy_value_v2
+from app.system_runtime_settings.schema_codec import (
+    canonical_policy_value_v2,
+    canonical_policy_value_v4,
+)
 from app.system_runtime_settings.validation import (
     RUNTIME_POLICY_SCHEMA_VERSION,
     RuntimePolicyInvalid,
@@ -109,6 +112,54 @@ _V3_AGENT_RUNTIME_VALUE: dict[str, object] = {
 _V3_AGENT_RUNTIME_CHECKSUM = "03c4b5333aaca53fafbe45aad48889e69617c8a18a654412472b63041f17cef4"
 _V2_AGENT_RUNTIME_VALUE = {key: value for key, value in _V3_AGENT_RUNTIME_VALUE.items() if key != "vision_bridge"}
 _V2_AGENT_RUNTIME_CHECKSUM = "272c452dafa5517375b30fe6dde36791cafe028a7c08afc71d2af1cdbae9aa7b"
+
+
+def _v4_role_budget(*, web_warn: int, web_hard_limit: int) -> dict[str, object]:
+    return {
+        "default": {"warn": 30, "hard_limit": 50},
+        "tools": {
+            "web_search": {"warn": web_warn, "hard_limit": web_hard_limit},
+            "web_fetch": {"warn": web_warn, "hard_limit": web_hard_limit},
+            "recall_memory": {"warn": 6, "hard_limit": 10},
+            "inspect_image": {"warn": 6, "hard_limit": 9},
+        },
+    }
+
+
+_V4_AGENT_RUNTIME_VALUE = deepcopy(_V3_AGENT_RUNTIME_VALUE)
+_V4_AGENT_RUNTIME_VALUE["loop_detection"] = {
+    "enabled": True,
+    "identical_calls": {
+        "warn_threshold": 3,
+        "hard_limit": 5,
+        "window_size": 20,
+    },
+}
+_V4_AGENT_RUNTIME_VALUE["tool_call_budget"] = {
+    "profiles": {
+        "interactive": {
+            "lead": _v4_role_budget(web_warn=6, web_hard_limit=10),
+            "subagent": _v4_role_budget(web_warn=6, web_hard_limit=10),
+        },
+        "research": {
+            "lead": _v4_role_budget(web_warn=20, web_hard_limit=30),
+            "subagent": _v4_role_budget(web_warn=12, web_hard_limit=20),
+        },
+    },
+}
+_V4_AGENT_RUNTIME_VALUE["subagents"] = {
+    "max_concurrent": 3,
+    "max_total_per_run_by_workload": {
+        "interactive": 6,
+        "research": 9,
+    },
+}
+_V4_AGENT_RUNTIME_VALUE["vision_bridge"] = {
+    "model_name": None,
+    "timeout_seconds": 60,
+    "contract_version": "vision.bridge.v1",
+}
+_V4_AGENT_RUNTIME_CHECKSUM = "06fc1c841ba2fe4c7d8ad318326b095050f2e9d78d9b2f319d88f4fa018b19f5"
 _LEGACY_OTHER_SECTION_CASES = (
     (
         RuntimePolicySection.AUTH,
@@ -206,14 +257,14 @@ async def test_gateway_projects_decoded_v3_policy_before_app_config_overlay() ->
     assert runtime.subagents.max_total_per_run == 6
 
 
-def test_schema_v3_agent_runtime_fixture_remains_exact_when_v4_is_current() -> None:
+def test_schema_v3_agent_runtime_fixture_remains_exact_when_v5_is_current() -> None:
     canonical = canonical_policy_payload_for_schema(
         RuntimePolicySection.AGENT_RUNTIME,
         _V3_AGENT_RUNTIME_VALUE,
         schema_version=3,
     )
 
-    assert RUNTIME_POLICY_SCHEMA_VERSION == 4
+    assert RUNTIME_POLICY_SCHEMA_VERSION == 5
     assert canonical.schema_version == 3
     assert canonical.value == _V3_AGENT_RUNTIME_VALUE
     assert canonical.checksum == _V3_AGENT_RUNTIME_CHECKSUM
@@ -254,63 +305,20 @@ def test_schema_v2_uses_its_own_exact_codec_without_v3_bridge_defaults() -> None
         )
 
 
-def test_schema_v4_agent_runtime_has_typed_loop_budget_and_subagent_profiles() -> None:
+def test_schema_v5_agent_runtime_has_one_internal_tool_call_limit() -> None:
     value = AgentRuntimePolicyValue()
     canonical = canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
 
-    assert canonical.schema_version == 4
-    assert canonical.checksum == ("06fc1c841ba2fe4c7d8ad318326b095050f2e9d78d9b2f319d88f4fa018b19f5")
+    assert canonical.schema_version == 5
     assert "agent_runtime" not in canonical.value
+    assert canonical.value["internal_tool_call_limit"] == 200
+    assert "tool_call_budget" not in canonical.value
     assert canonical.value["loop_detection"] == {
         "enabled": True,
         "identical_calls": {
             "warn_threshold": 3,
-            "hard_limit": 5,
+            "hard_limit": 20,
             "window_size": 20,
-        },
-    }
-    assert canonical.value["tool_call_budget"] == {
-        "profiles": {
-            "interactive": {
-                "lead": {
-                    "default": {"warn": 30, "hard_limit": 50},
-                    "tools": {
-                        "web_search": {"warn": 6, "hard_limit": 10},
-                        "web_fetch": {"warn": 6, "hard_limit": 10},
-                        "recall_memory": {"warn": 6, "hard_limit": 10},
-                        "inspect_image": {"warn": 6, "hard_limit": 9},
-                    },
-                },
-                "subagent": {
-                    "default": {"warn": 30, "hard_limit": 50},
-                    "tools": {
-                        "web_search": {"warn": 6, "hard_limit": 10},
-                        "web_fetch": {"warn": 6, "hard_limit": 10},
-                        "recall_memory": {"warn": 6, "hard_limit": 10},
-                        "inspect_image": {"warn": 6, "hard_limit": 9},
-                    },
-                },
-            },
-            "research": {
-                "lead": {
-                    "default": {"warn": 30, "hard_limit": 50},
-                    "tools": {
-                        "web_search": {"warn": 20, "hard_limit": 30},
-                        "web_fetch": {"warn": 20, "hard_limit": 30},
-                        "recall_memory": {"warn": 6, "hard_limit": 10},
-                        "inspect_image": {"warn": 6, "hard_limit": 9},
-                    },
-                },
-                "subagent": {
-                    "default": {"warn": 30, "hard_limit": 50},
-                    "tools": {
-                        "web_search": {"warn": 12, "hard_limit": 20},
-                        "web_fetch": {"warn": 12, "hard_limit": 20},
-                        "recall_memory": {"warn": 6, "hard_limit": 10},
-                        "inspect_image": {"warn": 6, "hard_limit": 9},
-                    },
-                },
-            },
         },
     }
     assert canonical.value["subagents"] == {
@@ -322,7 +330,49 @@ def test_schema_v4_agent_runtime_has_typed_loop_budget_and_subagent_profiles() -
     }
 
 
-def test_legacy_agent_runtime_decodes_frequency_into_interactive_v4_policy() -> None:
+def test_schema_v4_agent_runtime_fixture_remains_exact_when_v5_is_current() -> None:
+    assert (
+        canonical_policy_value_v4(
+            RuntimePolicySection.AGENT_RUNTIME,
+            _V4_AGENT_RUNTIME_VALUE,
+        )
+        == _V4_AGENT_RUNTIME_VALUE
+    )
+
+    canonical = canonical_policy_payload_for_schema(
+        RuntimePolicySection.AGENT_RUNTIME,
+        _V4_AGENT_RUNTIME_VALUE,
+        schema_version=4,
+    )
+
+    assert canonical.schema_version == 4
+    assert canonical.value == _V4_AGENT_RUNTIME_VALUE
+    assert canonical.checksum == _V4_AGENT_RUNTIME_CHECKSUM
+
+    with pytest.raises(RuntimePolicyInvalid):
+        canonical_policy_payload_for_schema(
+            RuntimePolicySection.AGENT_RUNTIME,
+            AgentRuntimePolicyValue(),
+            schema_version=4,
+        )
+
+
+def test_schema_v4_agent_runtime_decodes_max_hard_limit_into_single_v5_limit() -> None:
+    legacy = deepcopy(_V4_AGENT_RUNTIME_VALUE)
+    legacy["tool_call_budget"]["profiles"]["research"]["subagent"]["tools"]["web_fetch"] = {"warn": 12, "hard_limit": 87}
+
+    decoded = decode_policy_value_for_schema(
+        RuntimePolicySection.AGENT_RUNTIME,
+        legacy,
+        schema_version=4,
+    )
+
+    assert isinstance(decoded, AgentRuntimePolicyValue)
+    assert decoded.internal_tool_call_limit == 87
+    assert "tool_call_budget" not in decoded.model_dump(mode="json")
+
+
+def test_schema_v3_agent_runtime_decodes_frequency_into_single_v5_limit() -> None:
     legacy = deepcopy(_V3_AGENT_RUNTIME_VALUE)
     legacy["loop_detection"] = {
         "enabled": True,
@@ -354,20 +404,8 @@ def test_legacy_agent_runtime_decodes_frequency_into_interactive_v4_policy() -> 
             "window_size": 15,
         },
     }
-    interactive = decoded.tool_call_budget.profiles.interactive
-    assert interactive.lead.default.model_dump(mode="json") == {
-        "warn": 17,
-        "hard_limit": 23,
-    }
-    assert interactive.lead.tools["web_search"].model_dump(mode="json") == {
-        "warn": 11,
-        "hard_limit": 13,
-    }
-    assert interactive.lead.tools["custom_reader"].model_dump(mode="json") == {
-        "warn": 5,
-        "hard_limit": 8,
-    }
-    assert interactive.subagent == interactive.lead
+    assert decoded.internal_tool_call_limit == 23
+    assert "tool_call_budget" not in decoded.model_dump(mode="json")
     assert decoded.subagents.max_concurrent == 3
     assert decoded.subagents.max_total_per_run_by_workload.interactive == 8
     assert decoded.subagents.max_total_per_run_by_workload.research == 9
@@ -429,11 +467,11 @@ def test_legacy_repeat_window_below_hard_limit_materializes_and_resolves_exactly
     assert resolved.lead.repeated_calls.window_size == 4
 
 
-def test_legacy_task_frequency_keeps_exact_payload_readable_but_is_not_upgraded() -> None:
+def test_schema_v3_task_frequency_remains_exact_and_contributes_to_v5_limit() -> None:
     legacy = deepcopy(_V3_AGENT_RUNTIME_VALUE)
     legacy["loop_detection"]["tool_freq_overrides"]["task"] = {
-        "warn": 2,
-        "hard_limit": 4,
+        "warn": 55,
+        "hard_limit": 60,
     }
 
     canonical = canonical_policy_payload_for_schema(
@@ -448,10 +486,11 @@ def test_legacy_task_frequency_keeps_exact_payload_readable_but_is_not_upgraded(
     )
 
     assert canonical.value["loop_detection"]["tool_freq_overrides"]["task"] == {
-        "warn": 2,
-        "hard_limit": 4,
+        "warn": 55,
+        "hard_limit": 60,
     }
-    assert "task" not in decoded.tool_call_budget.profiles.interactive.lead.tools
+    assert isinstance(decoded, AgentRuntimePolicyValue)
+    assert decoded.internal_tool_call_limit == 60
 
 
 @pytest.mark.parametrize(
@@ -459,6 +498,7 @@ def test_legacy_task_frequency_keeps_exact_payload_readable_but_is_not_upgraded(
     [
         (2, _V2_AGENT_RUNTIME_VALUE, _V2_AGENT_RUNTIME_CHECKSUM),
         (3, _V3_AGENT_RUNTIME_VALUE, _V3_AGENT_RUNTIME_CHECKSUM),
+        (4, _V4_AGENT_RUNTIME_VALUE, _V4_AGENT_RUNTIME_CHECKSUM),
     ],
 )
 def test_materializer_verifies_legacy_checksum_then_returns_current_policy(
@@ -474,7 +514,7 @@ def test_materializer_verifies_legacy_checksum_then_returns_current_policy(
     )
 
     assert isinstance(materialized, AgentRuntimePolicyValue)
-    assert materialized.tool_call_budget.profiles.interactive.lead.default.warn == 30
+    assert materialized.internal_tool_call_limit == 50
 
 
 def test_agent_runtime_materialization_preserves_frozen_schema_in_envelope() -> None:
@@ -487,10 +527,10 @@ def test_agent_runtime_materialization_preserves_frozen_schema_in_envelope() -> 
     assert isinstance(materialized, MaterializedAgentRuntimePolicy)
     assert materialized.schema_version == 3
     assert isinstance(materialized.value, AgentRuntimePolicyValue)
-    assert materialized.value.tool_call_budget.profiles.interactive.lead.default.warn == 30
+    assert materialized.value.internal_tool_call_limit == 50
 
 
-@pytest.mark.parametrize("schema_version", [2, 3])
+@pytest.mark.parametrize("schema_version", [2, 3, 4])
 @pytest.mark.parametrize(
     ("section", "value", "checksum"),
     _LEGACY_OTHER_SECTION_CASES,
@@ -516,104 +556,32 @@ def test_other_runtime_policy_sections_keep_exact_legacy_values_and_checksums(
     assert canonical.value == value
     assert canonical.checksum == checksum
     assert decoded.model_dump(mode="json") == value
-    assert current.schema_version == 4
+    assert current.schema_version == 5
     assert current.value == value
     assert current.checksum == checksum
 
 
-def test_schema_v4_rejects_incomplete_profiles_flat_legacy_fields_and_wrapper() -> None:
-    incomplete_profiles = AgentRuntimePolicyValue().model_dump(mode="python")
-    del incomplete_profiles["tool_call_budget"]["profiles"]["research"]
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, incomplete_profiles)
-
-    flat_loop = AgentRuntimePolicyValue().model_dump(mode="python")
-    flat_loop["loop_detection"]["tool_freq_warn"] = 30
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, flat_loop)
-
-    invalid_order = AgentRuntimePolicyValue().model_dump(mode="python")
-    invalid_order["tool_call_budget"]["profiles"]["research"]["lead"]["default"] = {
-        "warn": 31,
-        "hard_limit": 30,
-    }
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, invalid_order)
-
-    undersized_repeat_window = AgentRuntimePolicyValue().model_dump(mode="python")
-    undersized_repeat_window["loop_detection"]["identical_calls"] = {
-        "warn_threshold": 3,
-        "hard_limit": 5,
-        "window_size": 4,
-    }
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(
-            RuntimePolicySection.AGENT_RUNTIME,
-            undersized_repeat_window,
-        )
-
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(
-            RuntimePolicySection.AGENT_RUNTIME,
-            {"agent_runtime": AgentRuntimePolicyValue().model_dump(mode="python")},
-        )
-
-
-def test_schema_v4_rejects_task_from_ordinary_tool_call_budget() -> None:
+@pytest.mark.parametrize("internal_tool_call_limit", [0, 100_001])
+def test_schema_v5_rejects_out_of_range_internal_tool_call_limit(
+    internal_tool_call_limit: int,
+) -> None:
     value = AgentRuntimePolicyValue().model_dump(mode="python")
-    value["tool_call_budget"]["profiles"]["interactive"]["lead"]["tools"]["task"] = {"warn": 1, "hard_limit": 1}
+    value["internal_tool_call_limit"] = internal_tool_call_limit
 
     with pytest.raises(RuntimePolicyInvalid):
         canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
 
 
-def test_schema_v4_rejects_unknown_profile_unknown_field_and_boundary_values() -> None:
-    unknown_profile = AgentRuntimePolicyValue().model_dump(mode="python")
-    unknown_profile["tool_call_budget"]["profiles"]["batch"] = deepcopy(
-        unknown_profile["tool_call_budget"]["profiles"]["interactive"],
+def test_schema_v5_rejects_v4_tool_budget_and_agent_runtime_wrapper() -> None:
+    legacy_budget = AgentRuntimePolicyValue().model_dump(mode="python")
+    legacy_budget["tool_call_budget"] = deepcopy(
+        _V4_AGENT_RUNTIME_VALUE["tool_call_budget"],
     )
     with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(
-            RuntimePolicySection.AGENT_RUNTIME,
-            unknown_profile,
-        )
+        canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, legacy_budget)
 
-    unknown_limit_field = AgentRuntimePolicyValue().model_dump(mode="python")
-    unknown_limit_field["tool_call_budget"]["profiles"]["interactive"]["lead"]["default"]["burst"] = 2
     with pytest.raises(RuntimePolicyInvalid):
         canonical_policy_payload(
             RuntimePolicySection.AGENT_RUNTIME,
-            unknown_limit_field,
-        )
-
-    zero_warning = AgentRuntimePolicyValue().model_dump(mode="python")
-    zero_warning["tool_call_budget"]["profiles"]["interactive"]["lead"]["default"]["warn"] = 0
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(
-            RuntimePolicySection.AGENT_RUNTIME,
-            zero_warning,
-        )
-
-    excessive_concurrency = AgentRuntimePolicyValue().model_dump(mode="python")
-    excessive_concurrency["subagents"]["max_concurrent"] = 5
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(
-            RuntimePolicySection.AGENT_RUNTIME,
-            excessive_concurrency,
-        )
-
-    excessive_total = AgentRuntimePolicyValue().model_dump(mode="python")
-    excessive_total["subagents"]["max_total_per_run_by_workload"]["research"] = 51
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(
-            RuntimePolicySection.AGENT_RUNTIME,
-            excessive_total,
-        )
-
-    zero_window = AgentRuntimePolicyValue().model_dump(mode="python")
-    zero_window["loop_detection"]["identical_calls"]["window_size"] = 0
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload(
-            RuntimePolicySection.AGENT_RUNTIME,
-            zero_window,
+            {"agent_runtime": AgentRuntimePolicyValue().model_dump(mode="python")},
         )

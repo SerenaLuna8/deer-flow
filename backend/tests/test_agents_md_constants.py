@@ -22,6 +22,7 @@ from app.shared_assets.skill_archive import (
     MAX_SKILL_ARCHIVE_FILES,
     MAX_SKILL_ARCHIVE_UPLOAD_BYTES,
 )
+from app.system_runtime_settings.models import IdenticalCallsPolicy
 from deerflow.agents.memory.snip import MAX_CONTINUITY_CHARS, MAX_SNIP_OUTPUT_CHARS
 from deerflow.agents.middlewares.summarization_middleware import (
     MIN_SNIP_SUMMARY_OUTPUT_TOKENS,
@@ -97,6 +98,23 @@ def _example_config_version() -> str:
 _QUOTAS = QuotaConfig()
 
 DOCUMENTED_CONSTANTS = (
+    DocumentedConstant(
+        pattern=r"repeated-call defaults\s+are warning `(\d+)`",
+        expected=str(
+            IdenticalCallsPolicy.model_fields["warn_threshold"].default,
+        ),
+        source="app.system_runtime_settings.models.IdenticalCallsPolicy.warn_threshold default",
+    ),
+    DocumentedConstant(
+        pattern=r"repeated-call defaults\s+are warning `\d+`, hard limit `(\d+)`",
+        expected=str(IdenticalCallsPolicy.model_fields["hard_limit"].default),
+        source="app.system_runtime_settings.models.IdenticalCallsPolicy.hard_limit default",
+    ),
+    DocumentedConstant(
+        pattern=r"hard limit `\d+`, and window `(\d+)`",
+        expected=str(IdenticalCallsPolicy.model_fields["window_size"].default),
+        source="app.system_runtime_settings.models.IdenticalCallsPolicy.window_size default",
+    ),
     DocumentedConstant(
         pattern=r"current marker is `([a-z0-9_]+)`",
         expected=CURRENT_SCHEMA_REVISION,

@@ -72,6 +72,9 @@ def test_public_run_error_codes_have_closed_stable_payloads() -> None:
         PublicRunErrorCode.CURRENT_UPLOAD_UNAVAILABLE: ("The current image attachment could not be read or validated"),
         PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED: ("Configured sandbox provider does not support run-scoped read-only mounts"),
         PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED: ("Local private runtime cannot enforce read-only mounts when host bash is enabled"),
+        PublicRunErrorCode.PROVIDER_REQUEST_USAGE_UNSUPPORTED: ("Provider request usage cannot be measured safely for this request"),
+        PublicRunErrorCode.PROVIDER_REQUEST_PROFILE_DRIFT: ("The final provider request no longer matches its frozen usage profile"),
+        PublicRunErrorCode.PROVIDER_REQUEST_CAPACITY_EXCEEDED: ("The provider request safety value exceeds the selected model input capacity"),
     }
 
     assert set(PublicRunErrorCode) == set(expected_messages)

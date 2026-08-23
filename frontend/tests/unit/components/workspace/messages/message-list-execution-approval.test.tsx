@@ -95,6 +95,29 @@ describe("MessageList execution approval integration", () => {
     ).not.toContain('data-testid="run-activity"');
   });
 
+  test("keeps RunActivity visible after the Agent emits execution progress", () => {
+    const activeThread = threadState({
+      isLoading: true,
+      messages: [
+        {
+          id: "human-1",
+          type: "human",
+          content: "Verify the page",
+        } as Message,
+        {
+          id: "ai-progress-1",
+          type: "ai",
+          content: "Checking the page before the final answer.",
+        } as Message,
+      ],
+    });
+
+    const html = renderMessageList(activeThread);
+
+    expect(html).toContain('data-testid="run-activity"');
+    expect(html).toContain("Working…");
+  });
+
   test("settles the last reasoning message visually while approval is pending", () => {
     const activeThread = threadState({
       isLoading: true,

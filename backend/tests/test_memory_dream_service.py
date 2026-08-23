@@ -185,6 +185,7 @@ def _runtime():
             status="active",
             provider_adapter="vision_bridge_fake",
             provider_model="dream-test",
+            max_input_tokens=64_000,
             settings={},
             supports_thinking=False,
             supports_reasoning_effort=False,

@@ -32,7 +32,7 @@ The middleware chain is built once per agent invocation, based on the current co
 9. `ViewImageMiddleware` — image details injection (if model supports vision)
 10. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
 11. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
-12. `ToolCallControl` — arbitrates repeated calls and per-tool call budgets
+12. `ToolCallControl` — arbitrates repeated calls and the Run internal tool-call hard limit
 13. `HostExecutionBatchBarrierMiddleware` — isolates Local host-execution approval batches (Local approval profile only)
 14. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
 15. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
@@ -54,11 +54,11 @@ Intercepts clarification tool calls and converts them into proper user-facing re
 
 ### ToolCallControl
 
-Arbitrates the complete tool-call batch before ToolNode execution. It keeps repeated-call detection separate from per-tool occurrence budgets, admits only the deterministic executable prefix, and leaves unrelated tools available when one tool is exhausted.
+Arbitrates the complete tool-call batch before ToolNode execution. It keeps repeated-call detection separate from one internal tool-call hard limit and admits only the deterministic executable prefix. Every internal tool occurrence counts uniformly; the Lead and all Sub-Agents share one count within a Run, while different Runs remain isolated.
 
-Warnings are neutral advisories queued until existing tool results are paired. Replaying the same checkpoint receipt does not consume the budget again. Only an identical-call hard stop triggers one tool-free finalization; exhausting one tool records a non-terminal observation and does not block other admitted tools such as file writing and delivery.
+Replaying the same checkpoint receipt does not consume the limit again. Once the shared hard limit is reached, no new internal tool calls are admitted for that Run.
 
-**Configuration**: System Runtime Policy in `/admin/settings/system`, frozen for each admitted Run.
+**Configuration**: the single internal tool-call hard limit in System Runtime Policy at `/admin/settings/system`, frozen for each admitted Run.
 
 ---
 

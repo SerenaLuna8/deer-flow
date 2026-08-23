@@ -19,6 +19,11 @@ from deerflow.agents.middlewares.output_limit_recovery_middleware import (
 )
 from deerflow.agents.middlewares.token_budget_middleware import (
     OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY,
+    TOKEN_BUDGET_USAGE_STATE_KEY,
+)
+from deerflow.agents.provider_request_contract import (
+    PROVIDER_REQUEST_MEASUREMENT_STATE_KEY,
+    PROVIDER_REQUEST_PROFILE_STATE_KEY,
 )
 
 _MAX_PUBLIC_VIEWED_IMAGE_BYTES = 20 * 1024 * 1024
@@ -34,6 +39,9 @@ _INTERNAL_STATE_KEYS = frozenset(
         MEMORY_ARCHIVE_RECEIPT_KEY,
         OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY,
         OUTPUT_LIMIT_RECOVERY_STATE_KEY,
+        PROVIDER_REQUEST_MEASUREMENT_STATE_KEY,
+        PROVIDER_REQUEST_PROFILE_STATE_KEY,
+        TOKEN_BUDGET_USAGE_STATE_KEY,
     }
 )
 _PUBLIC_VIEWED_IMAGE_MIME_TYPES = frozenset(

@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 
 from app.private_work.snapshot_repository import RunSnapshotAssetStale
@@ -12,6 +13,9 @@ from app.shared_assets.mcp_tool_inventory_repository import (
     MAX_MCP_TOOL_INVENTORY_DESCRIPTION_CHARS,
 )
 from app.shared_assets.models import AssetScope, ResolvedMcpSnapshot
+from deerflow.agents.middlewares.provider_request_usage import (
+    provider_tool_schema_fact,
+)
 from deerflow.mcp.http_security import SecureMcpHttpClientFactory
 from deerflow.mcp_definition_policy import (
     McpDefinitionPolicyError,
@@ -47,14 +51,31 @@ def mcp_tool_inventory_description(value: str) -> str:
 
 def mcp_tool_inventory_payload(
     tools: tuple[DiscoveredMcpTool, ...],
-) -> tuple[dict[str, str], ...]:
-    return tuple(
-        {
-            "name": tool.provider_name,
-            "description": mcp_tool_inventory_description(tool.description),
-        }
-        for tool in tools
-    )
+) -> tuple[dict[str, str | int], ...]:
+    payload: list[dict[str, str | int]] = []
+    for tool in tools:
+
+        async def unavailable(**_arguments: object) -> str:
+            raise RuntimeError("inventory-only MCP schema cannot be invoked")
+
+        schema_fact = provider_tool_schema_fact(
+            StructuredTool.from_function(
+                coroutine=unavailable,
+                name=tool.name,
+                description=tool.description,
+                args_schema=tool.args_schema,
+            )
+        )
+        payload.append(
+            {
+                "name": tool.provider_name,
+                "runtime_name": tool.name,
+                "description": mcp_tool_inventory_description(tool.description),
+                "schema_utf8_bytes": schema_fact["schema_utf8_bytes"],
+                "schema_sha256": schema_fact["schema_sha256"],
+            }
+        )
+    return tuple(payload)
 
 
 def validate_project_mcp_snapshot_policy(

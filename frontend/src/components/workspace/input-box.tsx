@@ -242,12 +242,35 @@ export function InputBox({
   const [workloadProfile, setWorkloadProfile] =
     useState<RunWorkloadProfileName>(DEFAULT_RUN_WORKLOAD_PROFILE);
   const { models } = useModels();
+  const modelSelection = useMemo(
+    () =>
+      resolveAgentExecutionModelSelection(
+        models,
+        context.model_name,
+        agentModelRef,
+        context.model_selection_explicit === true,
+      ),
+    [
+      agentModelRef,
+      context.model_name,
+      context.model_selection_explicit,
+      models,
+    ],
+  );
+  const selectedModel = modelSelection.model;
+  const resolvedModelName = modelSelection.modelName;
+  const modelSelectionLocked = modelSelection.modelSelectionLocked;
   const { thread, isMock } = useThread();
   const privateWork = usePrivateWorkAccess();
   const contextUsage = useThreadContextUsage(
     threadExists && !isMock ? threadId : undefined,
     {
-      enabled: compactCommandEnabled && threadExists && !isMock,
+      enabled:
+        compactCommandEnabled &&
+        threadExists &&
+        !isMock &&
+        Boolean(resolvedModelName),
+      modelName: resolvedModelName,
       privateWork,
     },
   );
@@ -346,7 +369,13 @@ export function InputBox({
   const latestAiId = useMemo(() => {
     const id = [...thread.messages]
       .reverse()
-      .find((message) => message.type === "ai")?.id;
+      .find(
+        (message) =>
+          message.type === "ai" &&
+          !message.tool_calls?.some(
+            (toolCall) => toolCall.name === "ask_clarification",
+          ),
+      )?.id;
     return typeof id === "string" && id ? id : null;
   }, [thread.messages]);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
@@ -560,25 +589,6 @@ export function InputBox({
     uploadLimits,
     uploadsEnabled,
   ]);
-
-  const modelSelection = useMemo(
-    () =>
-      resolveAgentExecutionModelSelection(
-        models,
-        context.model_name,
-        agentModelRef,
-        context.model_selection_explicit === true,
-      ),
-    [
-      agentModelRef,
-      context.model_name,
-      context.model_selection_explicit,
-      models,
-    ],
-  );
-  const selectedModel = modelSelection.model;
-  const resolvedModelName = modelSelection.modelName;
-  const modelSelectionLocked = modelSelection.modelSelectionLocked;
 
   useEffect(() => {
     if (models.length === 0) {

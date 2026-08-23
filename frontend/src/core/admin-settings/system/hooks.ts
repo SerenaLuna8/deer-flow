@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { modelsQueryKey } from "@/core/models/hooks";
+import { commitAccountAgentRuntimeCacheHint } from "@/core/private-work/memory-freshness";
 
 import {
   fetchAdminSystemSettings,
@@ -77,12 +78,15 @@ export function useReplaceAdminSystemSettingsSection(accountId: string) {
             );
         }
       }),
-    onSuccess: async () => {
+    onSuccess: async (_response, request) => {
       await Promise.all([
         queryClient.invalidateQueries({
           queryKey: adminSystemSettingsRoot(parsed),
         }),
         queryClient.invalidateQueries({ queryKey: modelsQueryKey }),
+        ...(request.section === "agent_runtime"
+          ? [commitAccountAgentRuntimeCacheHint(queryClient, parsed)]
+          : []),
       ]);
     },
   });

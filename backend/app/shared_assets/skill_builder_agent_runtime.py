@@ -1251,6 +1251,14 @@ paths are relative to the package root, so the required manifest is exactly
 SKILL.md, never <skill-slug>/SKILL.md. Inspect and complete the persisted draft
 with the candidate-file tools if needed, then invoke exactly one terminal tool:
 request_skill_clarification or finalize_skill_candidate."""
+    provider_request_bounded_overlay_material = (
+        HumanMessage(
+            content=_REMINDER,
+            name="skill_builder_terminal_reminder",
+            additional_kwargs={"hide_from_ui": True},
+        ),
+    )
+    provider_request_bounded_overlay_message_count = 1
 
     def __init__(self, toolset: SkillBuilderToolset) -> None:
         super().__init__()

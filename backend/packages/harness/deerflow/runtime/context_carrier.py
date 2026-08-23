@@ -57,6 +57,8 @@ class RuntimeContextCarrier:
     current_run_pre_existing_message_ids: frozenset[str] | None = None
     trace_id: str | None = None
     run_journal: object | None = None
+    token_usage_tracking_enabled: bool | None = None
+    token_budget_usage_recorder: object | None = None
     recovered_llm_failure_recorder: object | None = None
     run_semantic_stop_recorder: object | None = None
     server_abort_event: object | None = None
@@ -122,6 +124,14 @@ class RuntimeContextCarrier:
             ),
             (RuntimeContextKeys.TRACE_ID, self.trace_id),
             (RuntimeContextKeys.RUN_JOURNAL, self.run_journal),
+            (
+                RuntimeContextKeys.TOKEN_USAGE_TRACKING_ENABLED,
+                self.token_usage_tracking_enabled,
+            ),
+            (
+                RuntimeContextKeys.TOKEN_BUDGET_USAGE_RECORDER,
+                self.token_budget_usage_recorder,
+            ),
             (
                 RuntimeContextKeys.RECOVERED_LLM_FAILURE_RECORDER,
                 self.recovered_llm_failure_recorder,

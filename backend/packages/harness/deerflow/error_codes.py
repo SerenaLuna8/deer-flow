@@ -47,6 +47,9 @@ class PublicRunErrorCode(StrEnum):
     CURRENT_UPLOAD_UNAVAILABLE = "CURRENT_UPLOAD_UNAVAILABLE"
     SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED = "SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED"
     LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED = "LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED"
+    PROVIDER_REQUEST_USAGE_UNSUPPORTED = "PROVIDER_REQUEST_USAGE_UNSUPPORTED"
+    PROVIDER_REQUEST_PROFILE_DRIFT = "PROVIDER_REQUEST_PROFILE_DRIFT"
+    PROVIDER_REQUEST_CAPACITY_EXCEEDED = "PROVIDER_REQUEST_CAPACITY_EXCEEDED"
 
 
 _PUBLIC_RUN_ERROR_MESSAGE_BY_CODE: Final[Mapping[PublicRunErrorCode, str]] = MappingProxyType(
@@ -60,6 +63,9 @@ _PUBLIC_RUN_ERROR_MESSAGE_BY_CODE: Final[Mapping[PublicRunErrorCode, str]] = Map
         PublicRunErrorCode.CURRENT_UPLOAD_UNAVAILABLE: ("The current image attachment could not be read or validated"),
         PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED: ("Configured sandbox provider does not support run-scoped read-only mounts"),
         PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED: ("Local private runtime cannot enforce read-only mounts when host bash is enabled"),
+        PublicRunErrorCode.PROVIDER_REQUEST_USAGE_UNSUPPORTED: ("Provider request usage cannot be measured safely for this request"),
+        PublicRunErrorCode.PROVIDER_REQUEST_PROFILE_DRIFT: ("The final provider request no longer matches its frozen usage profile"),
+        PublicRunErrorCode.PROVIDER_REQUEST_CAPACITY_EXCEEDED: ("The provider request safety value exceeds the selected model input capacity"),
     }
 )
 

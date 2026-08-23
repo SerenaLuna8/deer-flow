@@ -60,6 +60,7 @@ def _material_payload(
             "model_config_id": str(uuid.UUID(str(model.id))),
             "provider_adapter": model.provider_adapter,
             "provider_model": model.provider_model,
+            "max_input_tokens": model.max_input_tokens,
             "settings": dict(model.settings),
             "supports_thinking": model.supports_thinking,
             "supports_reasoning_effort": model.supports_reasoning_effort,
@@ -94,6 +95,7 @@ class SystemModelExecutionAdapter:
             model_config_id = uuid.UUID(str(payload["model_config_id"]))
             provider_adapter = payload["provider_adapter"]
             provider_model = payload["provider_model"]
+            max_input_tokens = payload["max_input_tokens"]
             settings_value = payload["settings"]
             supports_thinking = payload["supports_thinking"]
             supports_reasoning_effort = payload["supports_reasoning_effort"]
@@ -101,6 +103,8 @@ class SystemModelExecutionAdapter:
             if (
                 type(provider_adapter) is not str
                 or type(provider_model) is not str
+                or type(max_input_tokens) is not int
+                or not 1 <= max_input_tokens <= 2_000_000
                 or not isinstance(settings_value, Mapping)
                 or type(supports_thinking) is not bool
                 or type(supports_reasoning_effort) is not bool
@@ -147,6 +151,7 @@ class SystemModelExecutionAdapter:
                 "description": "",
                 "use": provider_class_path(provider_adapter),
                 "model": provider_model,
+                "max_input_tokens": max_input_tokens,
                 "supports_thinking": supports_thinking,
                 "supports_reasoning_effort": supports_reasoning_effort,
                 "supports_vision": supports_vision,
@@ -194,6 +199,7 @@ class SystemModelExecutionAdapter:
                 "description": "",
                 "use": provider_class_path(command.provider_adapter),
                 "model": command.provider_model,
+                "max_input_tokens": command.max_input_tokens,
                 "supports_thinking": False,
                 "supports_reasoning_effort": False,
                 "supports_vision": command.supports_vision,

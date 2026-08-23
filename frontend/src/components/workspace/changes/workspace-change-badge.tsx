@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { Sheet } from "@/components/ui/sheet";
 import { useI18n } from "@/core/i18n/hooks";
+import { getFileName } from "@/core/utils/files";
 import { useWorkspaceChanges } from "@/core/workspace-changes/hooks";
 import {
   getChangedFileCount,
@@ -100,17 +101,12 @@ export function WorkspaceChangeBadge({
 }
 
 function WorkspaceChangeSummaryRow({ file }: { file: WorkspaceFileChange }) {
-  const pathParts = formatWorkspacePath(file.path);
+  const fileName = getFileName(file.path);
 
   return (
     <div className="flex items-center justify-between gap-3 px-3 py-2.5">
-      <div className="min-w-0 truncate text-sm" title={file.path}>
-        {pathParts.dirname && (
-          <span className="text-muted-foreground">{pathParts.dirname}/</span>
-        )}
-        <span className="text-foreground font-medium">
-          {pathParts.basename}
-        </span>
+      <div className="min-w-0 truncate text-sm" title={fileName}>
+        <span className="text-foreground font-medium">{fileName}</span>
       </div>
       <SummaryDelta
         additions={file.additions}
@@ -126,8 +122,8 @@ function SummaryDelta({
   deletions,
   className,
 }: {
-  additions: number;
-  deletions: number;
+  additions: number | null;
+  deletions: number | null;
   className?: string;
 }) {
   return (
@@ -137,22 +133,14 @@ function SummaryDelta({
         className,
       )}
     >
-      <span className="text-emerald-500">+{additions}</span>
-      <span className="text-red-500">-{deletions}</span>
+      {additions === null || deletions === null ? (
+        <span className="text-muted-foreground">—</span>
+      ) : (
+        <>
+          <span className="text-emerald-500">+{additions}</span>
+          <span className="text-red-500">-{deletions}</span>
+        </>
+      )}
     </span>
   );
-}
-
-function formatWorkspacePath(path: string) {
-  const compact = path
-    .replace(/^\/mnt\/user-data\/workspace\//, "")
-    .replace(/^\/mnt\/user-data\/outputs\//, "outputs/");
-  const lastSlash = compact.lastIndexOf("/");
-  if (lastSlash < 0) {
-    return { dirname: "", basename: compact };
-  }
-  return {
-    dirname: compact.slice(0, lastSlash),
-    basename: compact.slice(lastSlash + 1),
-  };
 }

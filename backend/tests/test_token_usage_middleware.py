@@ -12,16 +12,30 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END
 from langgraph.graph.message import add_messages
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.middlewares.host_execution_batch_barrier_middleware import (
     HostExecutionApprovalPauseMiddleware,
 )
 from deerflow.agents.middlewares.token_budget_middleware import (
+    TOKEN_BUDGET_USAGE_STATE_KEY,
     TokenBudgetMiddleware,
 )
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
+from deerflow.agents.thread_state import (
+    get_thread_state_schema,
+    normalize_middleware_state_schemas,
+)
 from deerflow.config.token_budget_config import TokenBudgetConfig
+from deerflow.runtime.checkpoint_mode import inject_checkpoint_mode
+from deerflow.runtime.checkpoint_state import (
+    CheckpointStateAccessor,
+    build_state_mutation_graph,
+)
+from deerflow.runtime.serialization import (
+    serialize,
+    serialize_channel_values_for_api,
+)
 
 
 def _task_call(tool_call_id: str) -> dict[str, object]:
@@ -50,6 +64,36 @@ def _budget(*, max_tokens: int) -> TokenBudgetMiddleware:
 
 def _runtime(run_id: str = "run-receipts") -> SimpleNamespace:
     return SimpleNamespace(context={"run_id": run_id})
+
+
+def _assert_budget_checkpoint_only(update: dict | None) -> None:
+    assert update is not None
+    assert set(update) == {TOKEN_BUDGET_USAGE_STATE_KEY}
+
+
+def test_token_budget_private_checkpoint_is_excluded_from_public_serialization() -> None:
+    private_usage = {
+        "version": 1,
+        "run_id": "private-budget-run",
+        "input_tokens": 87651,
+        "output_tokens": 87652,
+        "total_tokens": 175303,
+    }
+    payload = {
+        TOKEN_BUDGET_USAGE_STATE_KEY: private_usage,
+        "messages": [HumanMessage(content="visible")],
+        "business_state": {"usage": "business instructions"},
+    }
+
+    values = serialize(payload, mode="values")
+    updates = serialize({"checkpoint": payload}, mode="updates")
+    rest = serialize_channel_values_for_api(payload)
+
+    assert TOKEN_BUDGET_USAGE_STATE_KEY not in values
+    assert TOKEN_BUDGET_USAGE_STATE_KEY not in updates["checkpoint"]
+    assert TOKEN_BUDGET_USAGE_STATE_KEY not in rest
+    assert values["business_state"] == {"usage": "business instructions"}
+    assert payload[TOKEN_BUDGET_USAGE_STATE_KEY] is private_usage
 
 
 def test_receipt_wire_adds_usage_and_persists_its_contribution() -> None:
@@ -256,7 +300,9 @@ def test_token_budget_does_not_count_persisted_receipt_state_twice() -> None:
     budget = _budget(max_tokens=1_500)
     messages = [dispatch, result, first_response]
 
-    assert budget.after_model({"messages": messages}, runtime) is None
+    _assert_budget_checkpoint_only(
+        budget.after_model({"messages": messages}, runtime),
+    )
     usage_update = TokenUsageMiddleware().after_model(
         {"messages": messages},
         runtime,
@@ -275,7 +321,9 @@ def test_token_budget_does_not_count_persisted_receipt_state_twice() -> None:
         )
     )
 
-    assert budget.after_model({"messages": resumed}, runtime) is None
+    _assert_budget_checkpoint_only(
+        budget.after_model({"messages": resumed}, runtime),
+    )
     cumulative = budget._cumulative_usage["run-no-double-count"]
     assert cumulative.total == 1_120
 
@@ -337,14 +385,285 @@ def test_token_budget_seeds_checkpoint_history_without_recounting_receipts() -> 
         },
     )
 
-    assert (
+    _assert_budget_checkpoint_only(
         budget.after_model(
             {"messages": [dispatch, result, next_response]},
             runtime,
-        )
-        is None
+        ),
     )
     assert budget._cumulative_usage["run-history"].total == 10
+
+
+def test_token_budget_restores_same_run_checkpoint_usage_after_attempt_recreation() -> None:
+    runtime = _runtime("run-retried")
+    prior_response = AIMessage(
+        id="prior-attempt-response",
+        content="partial",
+        usage_metadata={
+            "input_tokens": 450,
+            "output_tokens": 450,
+            "total_tokens": 900,
+        },
+    )
+    prior_update = _budget(max_tokens=1_000).after_model(
+        {"messages": [prior_response]},
+        runtime,
+    )
+
+    assert prior_update is not None
+    durable_usage = prior_update["token_budget_usage"]
+
+    recreated = _budget(max_tokens=1_000)
+    recreated.before_agent(
+        {
+            "messages": [prior_response],
+            "token_budget_usage": durable_usage,
+        },
+        runtime,
+    )
+    current_response = AIMessage(
+        id="retried-attempt-response",
+        content="",
+        tool_calls=[
+            {
+                "name": "lookup",
+                "args": {},
+                "id": "retried-attempt-call",
+                "type": "tool_call",
+            }
+        ],
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 100,
+            "total_tokens": 200,
+        },
+    )
+
+    stopped = recreated.after_model(
+        {"messages": [prior_response, current_response]},
+        runtime,
+    )
+
+    assert stopped is not None
+    assert stopped[TOKEN_BUDGET_USAGE_STATE_KEY]["total_tokens"] == 1_100
+    assert stopped["messages"][0].tool_calls == []
+
+
+def test_token_budget_does_not_inherit_checkpoint_usage_from_an_older_run() -> None:
+    old_run_usage = {
+        "version": 1,
+        "run_id": "run-old",
+        "input_tokens": 450,
+        "output_tokens": 450,
+        "total_tokens": 900,
+    }
+    current = _budget(max_tokens=1_000)
+    runtime = _runtime("run-new")
+    reset_update = current.before_agent(
+        {"messages": [], "token_budget_usage": old_run_usage},
+        runtime,
+    )
+    assert reset_update == {
+        "token_budget_usage": {
+            "version": 1,
+            "run_id": "run-new",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+    }
+    response = AIMessage(
+        id="new-run-response",
+        content="",
+        tool_calls=[
+            {
+                "name": "lookup",
+                "args": {},
+                "id": "new-run-call",
+                "type": "tool_call",
+            }
+        ],
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 100,
+            "total_tokens": 200,
+        },
+    )
+
+    update = current.after_model(
+        {"messages": [response]},
+        runtime,
+    )
+
+    assert update == {
+        "token_budget_usage": {
+            "version": 1,
+            "run_id": "run-new",
+            "input_tokens": 100,
+            "output_tokens": 100,
+            "total_tokens": 200,
+        }
+    }
+
+
+def test_token_budget_checkpoints_terminal_subagent_usage_before_clearing_attempt_state() -> None:
+    dispatch = AIMessage(
+        id="terminal-budget-dispatch",
+        content="",
+        tool_calls=[_task_call("terminal-budget-call")],
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "total_tokens": 14,
+        },
+    )
+    result = ToolMessage(
+        id="terminal-budget-result",
+        content="approval required",
+        tool_call_id="terminal-budget-call",
+        additional_kwargs={
+            "subagent_usage_receipt_id": "terminal-budget-receipt",
+            "subagent_token_usage": {
+                "input_tokens": 3,
+                "output_tokens": 5,
+                "total_tokens": 8,
+            },
+        },
+    )
+    runtime = _runtime("run-terminal-budget")
+    budget = _budget(max_tokens=1_000)
+    model_update = budget.after_model(
+        {"messages": [dispatch]},
+        runtime,
+    )
+    assert model_update is not None
+
+    terminal_update = budget.after_agent(
+        {
+            "messages": [dispatch, result],
+            "token_budget_usage": model_update["token_budget_usage"],
+        },
+        runtime,
+    )
+
+    assert terminal_update == {
+        "token_budget_usage": {
+            "version": 1,
+            "run_id": "run-terminal-budget",
+            "input_tokens": 13,
+            "output_tokens": 9,
+            "total_tokens": 22,
+        }
+    }
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_token_budget_private_checkpoint_survives_message_compaction_in_each_mode(
+    mode: str,
+) -> None:
+    run_id = f"run-budget-{mode}"
+    budget = _budget(max_tokens=1_000)
+    checkpointer = InMemorySaver()
+    graph = create_agent(
+        model=GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        id=f"prior-{mode}",
+                        content="partial",
+                        usage_metadata={
+                            "input_tokens": 450,
+                            "output_tokens": 450,
+                            "total_tokens": 900,
+                        },
+                    )
+                ]
+            )
+        ),
+        tools=None,
+        middleware=normalize_middleware_state_schemas(
+            [budget],
+            mode,  # type: ignore[arg-type]
+            2,
+        ),
+        state_schema=get_thread_state_schema(
+            mode,  # type: ignore[arg-type]
+            2,
+        ),
+        context_schema=dict,
+        checkpointer=checkpointer,
+    )
+    config: dict[str, Any] = {
+        "configurable": {
+            "thread_id": f"thread-budget-{mode}",
+            "checkpoint_ns": "",
+        }
+    }
+    inject_checkpoint_mode(config, mode)  # type: ignore[arg-type]
+
+    public_result = graph.invoke(
+        {"messages": [HumanMessage(content="start")]},
+        config,
+        context={"run_id": run_id},
+    )
+    assert TOKEN_BUDGET_USAGE_STATE_KEY not in public_result
+    accessor = CheckpointStateAccessor.bind(
+        graph,
+        checkpointer,
+        mode=mode,  # type: ignore[arg-type]
+    )
+    before_compaction = accessor.get(config)
+    durable_usage = before_compaction.values[TOKEN_BUDGET_USAGE_STATE_KEY]
+    assert durable_usage["total_tokens"] == 900
+
+    compaction_accessor = CheckpointStateAccessor.bind(
+        build_state_mutation_graph(
+            "manual_compaction",
+            mode,  # type: ignore[arg-type]
+            snapshot_frequency=2,
+        ),
+        checkpointer,
+        mode=mode,  # type: ignore[arg-type]
+    )
+    compaction_accessor.update(
+        config,
+        {"messages": Overwrite([])},
+        as_node="manual_compaction",
+    )
+    after_compaction = accessor.get(config)
+
+    assert after_compaction.values[TOKEN_BUDGET_USAGE_STATE_KEY] == durable_usage
+
+    recreated = _budget(max_tokens=1_000)
+    recreated.before_agent(dict(after_compaction.values), _runtime(run_id))
+    current_response = AIMessage(
+        id=f"current-{mode}",
+        content="",
+        tool_calls=[
+            {
+                "name": "lookup",
+                "args": {},
+                "id": f"current-call-{mode}",
+                "type": "tool_call",
+            }
+        ],
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 100,
+            "total_tokens": 200,
+        },
+    )
+    stopped = recreated.after_model(
+        {
+            **dict(after_compaction.values),
+            "messages": [current_response],
+        },
+        _runtime(run_id),
+    )
+
+    assert stopped is not None
+    assert stopped[TOKEN_BUDGET_USAGE_STATE_KEY]["total_tokens"] == 1_100
+    assert stopped["messages"][0].tool_calls == []
 
 
 def test_token_budget_counts_distinct_receipts_even_when_tool_call_id_is_reused() -> None:
@@ -508,12 +827,11 @@ def test_token_budget_conflict_decision_is_independent_of_arrival_timing() -> No
 
     incremental = _budget(max_tokens=5_000)
     incremental_runtime = _runtime("run-conflict-incremental")
-    assert (
+    _assert_budget_checkpoint_only(
         incremental.after_model(
             {"messages": messages[:3]},
             incremental_runtime,
-        )
-        is None
+        ),
     )
     incremental_stop = incremental.after_model(
         {"messages": messages},
@@ -586,12 +904,11 @@ def test_token_budget_hard_stops_when_a_seen_receipt_is_replaced() -> None:
     budget = _budget(max_tokens=5_000)
     runtime = _runtime("run-replaced-conflict")
 
-    assert (
+    _assert_budget_checkpoint_only(
         budget.after_model(
             {"messages": [dispatch, result(10), first_response]},
             runtime,
-        )
-        is None
+        ),
     )
 
     stopped = budget.after_model(
@@ -657,12 +974,11 @@ def test_historical_receipt_conflict_does_not_poison_a_new_run() -> None:
     runtime = _runtime("run-after-historical-conflict")
     budget.before_agent({"messages": history}, runtime)
 
-    assert (
+    _assert_budget_checkpoint_only(
         budget.after_model(
             {"messages": [*history, current]},
             runtime,
-        )
-        is None
+        ),
     )
 
 
@@ -1430,7 +1746,9 @@ def test_unmarked_historical_tool_usage_is_not_guessed_or_double_counted() -> No
     ]
     budget = _budget(max_tokens=1_000)
     runtime = _runtime("run-legacy-receipt")
-    assert budget.after_model({"messages": messages}, runtime) is None
+    _assert_budget_checkpoint_only(
+        budget.after_model({"messages": messages}, runtime),
+    )
     assert budget._cumulative_usage["run-legacy-receipt"].total == 24
     update = middleware.after_model(
         {
@@ -1441,7 +1759,9 @@ def test_unmarked_historical_tool_usage_is_not_guessed_or_double_counted() -> No
 
     assert update is not None
     assert all(not isinstance(message, AIMessage) or message.id != "dispatch-1" for message in update["messages"])
-    assert budget.after_model({"messages": messages}, runtime) is None
+    _assert_budget_checkpoint_only(
+        budget.after_model({"messages": messages}, runtime),
+    )
     assert budget._cumulative_usage["run-legacy-receipt"].total == 24
 
 
@@ -1521,7 +1841,9 @@ def test_unmarked_history_does_not_hide_a_new_explicit_receipt() -> None:
     budget = _budget(max_tokens=1_000)
     runtime = _runtime("run-mixed-history")
     budget.before_agent({"messages": history}, runtime)
-    assert budget.after_model({"messages": messages}, runtime) is None
+    _assert_budget_checkpoint_only(
+        budget.after_model({"messages": messages}, runtime),
+    )
     assert budget._cumulative_usage["run-mixed-history"].total == 22
 
 

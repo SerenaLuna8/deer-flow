@@ -241,6 +241,21 @@ class PrivateAgentRuntime:
         return self._run_id
 
     @property
+    def provider_request_closure_identity(self) -> str:
+        from deerflow.agents.middlewares.provider_request_usage import (
+            provider_request_closure_identity,
+        )
+
+        return provider_request_closure_identity(
+            agent_facts=((str(self.safe_manifest.agent_version_id), self.safe_manifest.checksum),),
+            catalog_generation=self.safe_manifest.catalog_generation,
+        )
+
+    @property
+    def provider_request_mcp_closure_present(self) -> bool:
+        return bool(self._mcp_snapshots)
+
+    @property
     def soul(self) -> str:
         return self.safe_manifest.soul
 

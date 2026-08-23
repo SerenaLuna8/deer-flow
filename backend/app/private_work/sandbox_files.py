@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -15,11 +17,13 @@ from app.private_work.context import PrivateWorkContext, require_issued_private_
 from app.private_work.errors import (
     PrivateWorkError,
     PrivateWorkInvalid,
+    PrivateWorkTooLarge,
     PrivateWorkUnavailable,
 )
 from app.private_work.file_paths import normalize_private_logical_path
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.projects.capabilities import Capability
+from app.upload_contracts import PRIVATE_UPLOAD_DEFAULTS
 from deerflow.file_authority import AuthorityManifest, AuthorityManifestEntry
 from deerflow.persistence.private_work.file_repository import (
     PRIVATE_FILE_CHUNK_SIZE,
@@ -46,6 +50,9 @@ _LOGICAL_ROOTS = {
     "output": "outputs",
 }
 _PRIVATE_FILE_REMOVE_MAX_ATTEMPTS = 3
+_DELEGATED_OUTPUT_RUNTIME_ROOT = "/mnt/user-data/workspace/.deerflow/subagents"
+_DELEGATED_OUTPUT_MAX_CAPTURE_FILES = 2_000
+_DELEGATED_OUTPUT_MAX_SCRATCH_ENTRIES = 100_000
 RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG = "__run_current_upload_snapshot"
 _CURRENT_UPLOAD_SNAPSHOT_KEYS = frozenset(
     {
@@ -65,6 +72,26 @@ class CurrentUploadSnapshotInvalid(ValueError):
 
 class CurrentUploadSnapshotStale(RuntimeError):
     """The restored file authority no longer matches the admitted snapshot."""
+
+
+@dataclass(slots=True)
+class DelegatedOutputCapture:
+    """Files isolated from delegated work and available for Lead promotion."""
+
+    output_root: str
+    promotions: tuple[DelegatedOutputPromotion, ...] = ()
+
+    @property
+    def promotable_paths(self) -> tuple[str, ...]:
+        return tuple(promotion.scratch_path for promotion in self.promotions)
+
+
+@dataclass(frozen=True, slots=True)
+class DelegatedOutputPromotion:
+    """One original delegated output and its isolated scratch copy."""
+
+    source_path: str
+    scratch_path: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +538,8 @@ class PrivateRunFileAuthority:
         self._current_upload_ids: list[str] = []
         self._cleanup_failed = False
         self._release_lock = asyncio.Lock()
+        self._delegated_output_lock = asyncio.Lock()
+        self._active_delegated_output_roots: set[str] = set()
 
     @property
     def sandbox_id(self) -> str | None:
@@ -598,6 +627,10 @@ class PrivateRunFileAuthority:
             raise PrivateWorkUnavailable(self._run_scope.context.request_id)
         self._lease = lease
         self._sandbox = sandbox
+        # A provider may retain its thread projection after an ungraceful
+        # process exit. Remove only the exact runtime scratch root before any
+        # prior Run data can become visible to this Run or its projection.
+        await self._cleanup_delegated_output_scratch()
         self._manifest = await self._projection.restore(self._run_scope, sandbox)
         upload_entries = tuple(entry for entry in self._manifest.entries if entry.kind == "upload")
         by_id = {str(entry.file_id): entry for entry in upload_entries}
@@ -717,6 +750,270 @@ class PrivateRunFileAuthority:
             content=content,
         )
 
+    def _secure_regular_files(
+        self,
+        root: str,
+        *,
+        max_entries: int,
+        missing_ok: bool,
+    ) -> tuple[Any, ...]:
+        sandbox = self._sandbox
+        if sandbox is None:
+            raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+        try:
+            entries = sandbox.list_secure_files(
+                root,
+                max_entries=max_entries,
+            )
+        except FileNotFoundError:
+            if missing_ok:
+                return ()
+            raise
+        try:
+            files: list[Any] = []
+            prefix = root.rstrip("/") + "/"
+            for entry in entries:
+                if entry.file_type == "directory":
+                    continue
+                path = PurePosixPath(entry.path)
+                if entry.file_type != "regular" or not entry.path.startswith(prefix) or path.as_posix() != entry.path or ".." in path.parts:
+                    raise PrivateWorkInvalid(self._run_scope.context.request_id)
+                files.append(entry)
+            return tuple(files)
+        finally:
+            close_entries = getattr(entries, "close", None)
+            if callable(close_entries):
+                close_entries()
+
+    async def _begin_delegated_output_capture(self) -> str:
+        async with self._delegated_output_lock:
+            if self._cleanup_failed or self._sandbox is None:
+                raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+            output_root = f"{_DELEGATED_OUTPUT_RUNTIME_ROOT}/{uuid.uuid4().hex}/outputs"
+            self._active_delegated_output_roots.add(output_root)
+            try:
+                await _joined_to_thread(
+                    self._create_delegated_output_root,
+                    output_root,
+                )
+            except BaseException:
+                self._active_delegated_output_roots.discard(output_root)
+                self._cleanup_failed = True
+                raise
+            return output_root
+
+    def _create_delegated_output_root(self, output_root: str) -> None:
+        """Create an empty Task root through the secure atomic file boundary."""
+
+        sandbox = self._sandbox
+        if sandbox is None:
+            raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+        marker_path = f"{output_root}/.scope"
+        handle: str | None = None
+        published = False
+        try:
+            handle = sandbox.begin_atomic_file(marker_path)
+            sandbox.append_atomic_file(handle, b"scope")
+            sandbox.publish_atomic_file(handle)
+            handle = None
+            published = True
+        finally:
+            if handle is not None:
+                try:
+                    sandbox.abort_atomic_file(handle)
+                except Exception:
+                    pass
+            if published:
+                self._remove_published_file(sandbox, marker_path)
+
+    async def _finish_delegated_output_capture(
+        self,
+        output_root: str,
+    ) -> tuple[DelegatedOutputPromotion, ...]:
+        async with self._delegated_output_lock:
+            if output_root not in self._active_delegated_output_roots:
+                raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+            try:
+                files = await _joined_to_thread(
+                    partial(
+                        self._secure_regular_files,
+                        output_root,
+                        max_entries=_DELEGATED_OUTPUT_MAX_CAPTURE_FILES,
+                        missing_ok=True,
+                    ),
+                )
+                promotions: list[DelegatedOutputPromotion] = []
+                prefix = output_root.rstrip("/") + "/"
+                total_size = 0
+                for entry in files:
+                    relative = entry.path.removeprefix(prefix)
+                    if not relative or relative == entry.path:
+                        raise PrivateWorkInvalid(
+                            self._run_scope.context.request_id,
+                        )
+                    size = getattr(entry, "size", None)
+                    if type(size) is not int or size < 0:
+                        raise PrivateWorkInvalid(
+                            self._run_scope.context.request_id,
+                        )
+                    total_size += size
+                    if size > PRIVATE_UPLOAD_DEFAULTS.max_file_size or total_size > PRIVATE_UPLOAD_DEFAULTS.max_total_size:
+                        raise PrivateWorkTooLarge(
+                            self._run_scope.context.request_id,
+                        )
+                    promotions.append(
+                        DelegatedOutputPromotion(
+                            source_path=f"/mnt/user-data/outputs/{relative}",
+                            scratch_path=entry.path,
+                        )
+                    )
+                return tuple(promotions)
+            except BaseException:
+                self._cleanup_failed = True
+                raise
+            finally:
+                self._active_delegated_output_roots.discard(output_root)
+
+    @asynccontextmanager
+    async def delegated_output_scope(self, task_id: str):
+        """Isolate direct Sub-Agent outputs until the Lead promotes a copy."""
+
+        if type(task_id) is not str or not task_id:
+            raise ValueError("Invalid delegated output scope")
+        output_root = await self._begin_delegated_output_capture()
+        capture = DelegatedOutputCapture(output_root=output_root)
+        try:
+            yield capture
+        finally:
+            finish_task = asyncio.create_task(
+                self._finish_delegated_output_capture(output_root),
+            )
+            cancelled = False
+            while True:
+                try:
+                    capture.promotions = await asyncio.shield(finish_task)
+                    break
+                except asyncio.CancelledError:
+                    if finish_task.cancelled():
+                        raise
+                    cancelled = True
+                except BaseException:
+                    if cancelled:
+                        raise asyncio.CancelledError from None
+                    raise
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def write_delegated_output(
+        self,
+        output_root: str,
+        relative_path: str,
+        content: bytes,
+    ) -> str:
+        """Write a tool-produced Sub-Agent file into its exact scratch root."""
+
+        return await self._write_delegated_file(
+            output_root,
+            zone="outputs",
+            relative_path=relative_path,
+            content=content,
+        )
+
+    async def write_delegated_internal(
+        self,
+        output_root: str,
+        relative_path: str,
+        content: bytes,
+    ) -> str:
+        """Externalize oversized delegated tool output without persisting it."""
+
+        return await self._write_delegated_file(
+            output_root,
+            zone="internal",
+            relative_path=relative_path,
+            content=content,
+        )
+
+    async def _write_delegated_file(
+        self,
+        output_root: str,
+        *,
+        zone: str,
+        relative_path: str,
+        content: bytes,
+    ) -> str:
+        async with self._delegated_output_lock:
+            if output_root not in self._active_delegated_output_roots or zone not in {"outputs", "internal"}:
+                raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+            prefix = "/mnt/user-data/workspace/"
+            if not output_root.startswith(prefix):
+                raise PrivateWorkInvalid(self._run_scope.context.request_id)
+            capture_root = str(PurePosixPath(output_root).parent)
+            runtime_relative_root = f"{capture_root.removeprefix(prefix)}/{zone}"
+            return await self._write_private_file(
+                root_kind="workspace",
+                relative_path=f"{runtime_relative_root}/{relative_path}",
+                content=content,
+                delegated_output_root=capture_root,
+            )
+
+    def _remove_delegated_output_scratch_files(self, sandbox: Any) -> None:
+        """Remove only runtime-owned delegated scratch files, never user data."""
+
+        prefix = f"{_DELEGATED_OUTPUT_RUNTIME_ROOT}/"
+        entries = None
+        try:
+            try:
+                entries = sandbox.list_secure_files(
+                    _DELEGATED_OUTPUT_RUNTIME_ROOT,
+                    max_entries=_DELEGATED_OUTPUT_MAX_SCRATCH_ENTRIES,
+                )
+            except FileNotFoundError:
+                # Remote private-file providers report an absent scan root,
+                # while the local provider exposes the same state as an empty
+                # iterator. A fresh Run has no scratch root by definition.
+                entries = ()
+            for entry in entries:
+                path = PurePosixPath(entry.path)
+                if entry.file_type == "directory" or not entry.path.startswith(prefix) or path.as_posix() != entry.path or ".." in path.parts:
+                    if entry.file_type == "directory" and entry.path.startswith(
+                        prefix,
+                    ):
+                        continue
+                    raise PrivateWorkInvalid(
+                        self._run_scope.context.request_id,
+                    )
+                if entry.file_type != "regular":
+                    raise PrivateWorkInvalid(
+                        self._run_scope.context.request_id,
+                    )
+                self._remove_published_file(sandbox, entry.path)
+        finally:
+            close_entries = getattr(entries, "close", None)
+            if callable(close_entries):
+                close_entries()
+
+    async def _cleanup_delegated_output_scratch(self) -> None:
+        """Join exact scratch cleanup before finalization or Run teardown."""
+
+        async with self._delegated_output_lock:
+            sandbox = self._sandbox
+            if sandbox is None:
+                return
+            if self._active_delegated_output_roots:
+                self._cleanup_failed = True
+                raise PrivateWorkUnavailable(
+                    self._run_scope.context.request_id,
+                )
+            try:
+                await _joined_to_thread(
+                    self._remove_delegated_output_scratch_files,
+                    sandbox,
+                )
+            except BaseException:
+                self._cleanup_failed = True
+                raise
+
     async def write_internal(
         self,
         relative_path: str,
@@ -741,6 +1038,7 @@ class PrivateRunFileAuthority:
         root_kind: str,
         relative_path: str,
         content: bytes,
+        delegated_output_root: str | None = None,
     ) -> str:
         """Own validation, fencing, bounded writes, and cancellation cleanup."""
 
@@ -756,8 +1054,21 @@ class PrivateRunFileAuthority:
             request_id=self._run_scope.context.request_id,
         )
         path = PurePosixPath(logical_path)
-        if len(path.parts) < 2 or path.parts[0] != root_kind or any(part.startswith(".deerflow") for part in path.parts[1:]):
+        if len(path.parts) < 2 or path.parts[0] != root_kind:
             raise PrivateWorkInvalid(self._run_scope.context.request_id)
+        if any(part.startswith(".deerflow") for part in path.parts[1:]):
+            runtime_prefix = (
+                delegated_output_root.removeprefix(
+                    "/mnt/user-data/",
+                ).rstrip("/")
+                + "/"
+                if delegated_output_root is not None
+                else None
+            )
+            if runtime_prefix is None or not logical_path.startswith(
+                runtime_prefix,
+            ):
+                raise PrivateWorkInvalid(self._run_scope.context.request_id)
 
         unique_name = f"{path.stem}-{uuid.uuid4().hex[:12]}{path.suffix}"
         unique_relative = PurePosixPath(*path.parts[1:-1], unique_name)
@@ -835,6 +1146,7 @@ class PrivateRunFileAuthority:
         raise last_error
 
     async def finalize(self):
+        await self._cleanup_delegated_output_scratch()
         if self._cleanup_failed or self._manifest is None or self._sandbox is None:
             raise PrivateWorkUnavailable(self._run_scope.context.request_id)
         return await self._finalizer.finalize(
@@ -845,7 +1157,12 @@ class PrivateRunFileAuthority:
         )
 
     async def mark_failed(self) -> None:
-        await self._finalizer.mark_failed(self._run_scope)
+        try:
+            await self._cleanup_delegated_output_scratch()
+        finally:
+            # Failure settlement is independent authority and must still be
+            # attempted when scratch cleanup itself fails closed.
+            await self._finalizer.mark_failed(self._run_scope)
 
     def _clear_released_state(self) -> None:
         self._lease = None
@@ -854,12 +1171,14 @@ class PrivateRunFileAuthority:
         self._presented_paths = []
         self._current_upload_ids = []
         self._cleanup_failed = False
+        self._active_delegated_output_roots.clear()
 
     async def release(self) -> None:
         async with self._release_lock:
             lease = self._lease
             if lease is None:
                 return
+            await self._cleanup_delegated_output_scratch()
             provider = self._provider
             if provider is None:
                 raise PrivateWorkUnavailable(self._run_scope.context.request_id)

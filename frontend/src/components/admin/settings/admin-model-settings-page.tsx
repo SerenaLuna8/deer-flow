@@ -29,8 +29,15 @@ import {
   useSetAdminModelDefault,
   useSetAdminModelStatus,
   useTestAdminModelConnection,
+  ADMIN_MODEL_MAX_INPUT_TOKENS,
+  createAdminModelProviderSettingsDraft,
+  resetAdminModelProviderSettingDraftValue,
+  serializeAdminModelProviderSettingsDraft,
+  updateAdminModelProviderSettingDraftValue,
   type AdminModelItem,
   type AdminModelProviderAdapterDescriptor,
+  type AdminModelProviderSettingField,
+  type AdminModelProviderSettingsDraft,
   type CreateAdminModelInput,
   type ReplaceAdminModelInput,
 } from "@/core/admin-settings/models";
@@ -64,7 +71,20 @@ const MODEL_SETTINGS_COPY = {
     displayName: "Display name",
     provider: "Provider",
     providerModelId: "Provider model ID",
-    providerSettingsJson: "Provider settings JSON",
+    maximumInputTokens: "Maximum input tokens",
+    maximumInputTokensHint:
+      "The model's maximum input context and the denominator for context-percentage summarization; this is not the maximum output token limit.",
+    providerSettings: "Provider settings",
+    advancedSettings: "Advanced settings",
+    providerDefault: "Provider default",
+    enabledValue: "Enabled",
+    disabledValue: "Disabled",
+    preservedSettings:
+      "{count} structured advanced setting(s) will be preserved unchanged without displaying raw JSON.",
+    incompatibleSettings:
+      "This model contains settings that the current Provider form cannot safely edit: {keys}. Saving and connection testing are disabled.",
+    unknownProvider:
+      "This model uses an unknown historical Provider ({provider}). Saving and connection testing are disabled.",
     supportsThinking: "Thinking",
     supportsReasoningEffort: "Reasoning effort",
     supportsVision: "Vision",
@@ -78,7 +98,9 @@ const MODEL_SETTINGS_COPY = {
     cancel: "Cancel",
     saving: "Saving…",
     save: "Save",
-    invalidSettingsJson: "Provider settings must be a JSON object.",
+    invalidProviderSettings: "Provider settings are invalid.",
+    invalidMaximumInputTokens:
+      "Maximum input tokens must be a whole number from 1 to 2,000,000.",
     apiKeyRequired:
       "Enter an API Key before saving a new model for this provider.",
     invalidModelConfiguration: "Model configuration is invalid.",
@@ -134,7 +156,19 @@ const MODEL_SETTINGS_COPY = {
     displayName: "显示名称",
     provider: "Provider",
     providerModelId: "Provider 模型 ID",
-    providerSettingsJson: "Provider 设置 JSON",
+    maximumInputTokens: "最大输入 Token",
+    maximumInputTokensHint:
+      "模型可接收的最大输入上下文，也是按上下文占比触发摘要时的分母；不是最大输出 Token。",
+    providerSettings: "Provider 设置",
+    advancedSettings: "高级设置",
+    providerDefault: "Provider 默认",
+    enabledValue: "启用",
+    disabledValue: "禁用",
+    preservedSettings: "将原样保留 {count} 项结构化高级设置，不展示原始 JSON。",
+    incompatibleSettings:
+      "当前模型包含此 Provider 表单无法安全编辑的设置：{keys}。已禁止保存和连接测试。",
+    unknownProvider:
+      "当前模型使用未知的历史 Provider（{provider}）。已禁止保存和连接测试。",
     supportsThinking: "思考模式",
     supportsReasoningEffort: "推理强度",
     supportsVision: "视觉输入",
@@ -148,7 +182,9 @@ const MODEL_SETTINGS_COPY = {
     cancel: "取消",
     saving: "正在保存…",
     save: "保存",
-    invalidSettingsJson: "Provider 设置必须是 JSON 对象。",
+    invalidProviderSettings: "Provider 设置无效。",
+    invalidMaximumInputTokens:
+      "最大输入 Token 必须是 1 到 2,000,000 之间的整数。",
     apiKeyRequired: "新增此 Provider 的模型必须输入 API Key 后才能保存。",
     invalidModelConfiguration: "模型配置无效。",
     saveFailed: "模型保存失败。",
@@ -187,6 +223,55 @@ export function adminModelSettingsCopy(locale: Locale) {
   return MODEL_SETTINGS_COPY[locale];
 }
 
+const BUILTIN_PROVIDER_SETTING_LABELS: Record<
+  string,
+  Record<Locale, string>
+> = {
+  base_url: { "en-US": "Base URL", "zh-CN": "Base URL" },
+  max_tokens: {
+    "en-US": "Maximum output tokens",
+    "zh-CN": "最大输出 Token",
+  },
+  temperature: { "en-US": "Temperature", "zh-CN": "温度" },
+  request_timeout: {
+    "en-US": "Request timeout (seconds)",
+    "zh-CN": "请求超时（秒）",
+  },
+  default_request_timeout: {
+    "en-US": "Default request timeout (seconds)",
+    "zh-CN": "默认请求超时（秒）",
+  },
+  stream_chunk_timeout: {
+    "en-US": "Stream chunk timeout (seconds)",
+    "zh-CN": "流式分片超时（秒）",
+  },
+  timeout: {
+    "en-US": "Timeout (seconds)",
+    "zh-CN": "超时（秒）",
+  },
+  reasoning_effort: {
+    "en-US": "Reasoning effort",
+    "zh-CN": "推理强度",
+  },
+  output_version: { "en-US": "Output version", "zh-CN": "输出版本" },
+  use_responses_api: {
+    "en-US": "Use Responses API",
+    "zh-CN": "使用 Responses API",
+  },
+  cumulative_stream_usage: {
+    "en-US": "Cumulative stream usage",
+    "zh-CN": "累计流用量",
+  },
+};
+
+export function adminModelProviderSettingLabel(
+  name: string,
+  fallback: string,
+  locale: Locale,
+): string {
+  return BUILTIN_PROVIDER_SETTING_LABELS[name]?.[locale] ?? fallback;
+}
+
 export function selectAdminModelCatalogItems(
   items: readonly AdminModelItem[],
   query: string,
@@ -210,30 +295,42 @@ function formString(form: FormData, name: string, fallback = ""): string {
 
 export function consumeAdminModelEditorSubmission(
   form: FormData,
-  provider: string,
+  descriptor: AdminModelProviderAdapterDescriptor | undefined,
+  providerSettingsDraft: AdminModelProviderSettingsDraft,
   apiKey: string,
   clearApiKey: () => void,
   locale: Locale = "zh-CN",
 ) {
-  // Consume the write-only value before JSON or field validation can return.
+  // Consume the write-only value before any local field validation can return.
   // The returned local is used only by the immediate imperative request.
   const submittedKey = consumeWriteOnlyInput(apiKey, clearApiKey);
-  const settingsText = formString(form, "settings", "{}");
   let settings: CreateAdminModelInput["settings"];
   try {
-    const parsed = JSON.parse(settingsText) as unknown;
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-      throw new Error();
-    }
-    settings = parsed as CreateAdminModelInput["settings"];
+    settings = serializeAdminModelProviderSettingsDraft(
+      descriptor,
+      providerSettingsDraft,
+    );
   } catch {
-    throw new Error(adminModelSettingsCopy(locale).invalidSettingsJson);
+    throw new Error(adminModelSettingsCopy(locale).invalidProviderSettings);
+  }
+  const maxInputTokensText = formString(form, "max_input_tokens").trim();
+  if (!/^[1-9][0-9]*$/u.test(maxInputTokensText)) {
+    throw new Error(adminModelSettingsCopy(locale).invalidMaximumInputTokens);
+  }
+  const maxInputTokens = Number(maxInputTokensText);
+  if (
+    !Number.isSafeInteger(maxInputTokens) ||
+    maxInputTokens > ADMIN_MODEL_MAX_INPUT_TOKENS
+  ) {
+    throw new Error(adminModelSettingsCopy(locale).invalidMaximumInputTokens);
   }
   return {
     common: {
       display_name: formString(form, "display_name").trim(),
-      provider_adapter: provider,
+      provider_adapter:
+        descriptor?.id ?? providerSettingsDraft.provider_adapter,
       provider_model: formString(form, "provider_model").trim(),
+      max_input_tokens: maxInputTokens,
       settings,
       supports_thinking: form.get("supports_thinking") === "on",
       supports_reasoning_effort: form.get("supports_reasoning_effort") === "on",
@@ -248,17 +345,20 @@ export function isAdminModelEditorSaveDisabled({
   creating,
   pending,
   providerRequiresApiKey,
+  providerSettingsIncompatible,
   testPending,
 }: {
   apiKey: string;
   creating: boolean;
   pending: boolean;
   providerRequiresApiKey: boolean;
+  providerSettingsIncompatible: boolean;
   testPending: boolean;
 }): boolean {
   return (
     pending ||
     testPending ||
+    providerSettingsIncompatible ||
     (creating && providerRequiresApiKey && apiKey.trim() === "")
   );
 }
@@ -293,6 +393,174 @@ export function adminModelConnectionTestErrorState(
   };
 }
 
+function ProviderSettingInput({
+  field,
+  locale,
+  value,
+  onChange,
+  onReset,
+}: {
+  field: AdminModelProviderSettingField;
+  locale: Locale;
+  value: string;
+  onChange: (value: string) => void;
+  onReset: () => void;
+}) {
+  const copy = adminModelSettingsCopy(locale);
+  const label = adminModelProviderSettingLabel(field.name, field.label, locale);
+  const selectClassName =
+    "border-input bg-background h-9 rounded-md border px-3 text-sm";
+
+  let control: React.ReactNode;
+  if (field.input_type === "boolean") {
+    control = (
+      <select
+        className={selectClassName}
+        value={value}
+        aria-label={label}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {field.default_mode === "provider" ? (
+          <option value="">{copy.providerDefault}</option>
+        ) : null}
+        <option value="true">{copy.enabledValue}</option>
+        <option value="false">{copy.disabledValue}</option>
+      </select>
+    );
+  } else if (field.input_type === "enum") {
+    control = (
+      <select
+        className={selectClassName}
+        value={value}
+        aria-label={label}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {field.default_mode === "provider" ? (
+          <option value="">{copy.providerDefault}</option>
+        ) : null}
+        {field.options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    );
+  } else {
+    control = (
+      <Input
+        type={
+          field.input_type === "integer" || field.input_type === "number"
+            ? "number"
+            : field.input_type === "url"
+              ? "url"
+              : "text"
+        }
+        value={value}
+        min={field.minimum ?? undefined}
+        max={field.maximum ?? undefined}
+        step={field.step ?? undefined}
+        placeholder={
+          field.default_mode === "provider" ? copy.providerDefault : undefined
+        }
+        aria-label={label}
+        onChange={(event) => onChange(event.target.value)}
+        onBlur={(event) => {
+          if (
+            field.default_mode === "platform" &&
+            event.currentTarget.value.trim() === ""
+          ) {
+            onReset();
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <label className="grid gap-2 text-sm">
+      {label}
+      {control}
+    </label>
+  );
+}
+
+function ProviderSettingsFields({
+  descriptor,
+  draft,
+  locale,
+  onChange,
+  onReset,
+}: {
+  descriptor: AdminModelProviderAdapterDescriptor;
+  draft: AdminModelProviderSettingsDraft;
+  locale: Locale;
+  onChange: (name: string, value: string) => void;
+  onReset: (name: string) => void;
+}) {
+  const copy = adminModelSettingsCopy(locale);
+  const editableFields = descriptor.setting_fields.filter(
+    (field) =>
+      field.form_control === "input" &&
+      field.input_type !== "json" &&
+      !Object.hasOwn(draft.preserved_settings, field.name) &&
+      !draft.incompatible_keys.includes(field.name),
+  );
+  const directFields = editableFields.filter((field) => !field.advanced);
+  const advancedFields = editableFields.filter((field) => field.advanced);
+  const preservedCount = Object.keys(draft.preserved_settings).length;
+
+  if (
+    directFields.length === 0 &&
+    advancedFields.length === 0 &&
+    preservedCount === 0
+  ) {
+    return null;
+  }
+
+  const renderField = (field: AdminModelProviderSettingField) => (
+    <ProviderSettingInput
+      key={field.name}
+      field={field}
+      locale={locale}
+      value={draft.values[field.name] ?? ""}
+      onChange={(value) => onChange(field.name, value)}
+      onReset={() => onReset(field.name)}
+    />
+  );
+
+  return (
+    <section className="space-y-3 rounded-lg border p-4">
+      <h3 className="text-sm font-medium">{copy.providerSettings}</h3>
+      {directFields.length > 0 ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {directFields.map(renderField)}
+        </div>
+      ) : null}
+      {advancedFields.length > 0 || preservedCount > 0 ? (
+        <details
+          key={descriptor.id}
+          className="group rounded-md border px-3 py-2"
+        >
+          <summary className="cursor-pointer text-sm font-medium">
+            {copy.advancedSettings}
+          </summary>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            {advancedFields.map(renderField)}
+          </div>
+          {preservedCount > 0 ? (
+            <p className="text-muted-foreground mt-3 text-xs leading-5">
+              {copy.preservedSettings.replace(
+                "{count}",
+                String(preservedCount),
+              )}
+            </p>
+          ) : null}
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
 function ModelEditorDialog({
   accountId,
   open,
@@ -310,8 +578,17 @@ function ModelEditorDialog({
 }) {
   const { locale } = useI18n();
   const copy = adminModelSettingsCopy(locale);
-  const [provider, setProvider] = useState(
-    target?.provider_adapter ?? descriptors[0]?.id ?? "",
+  const initialProvider = target?.provider_adapter ?? descriptors[0]?.id ?? "";
+  const initialDescriptor = descriptors.find(
+    (item) => item.id === initialProvider,
+  );
+  const [provider, setProvider] = useState(initialProvider);
+  const [providerSettingsDraft, setProviderSettingsDraft] = useState(() =>
+    createAdminModelProviderSettingsDraft(
+      initialDescriptor,
+      target?.settings ?? {},
+      initialProvider,
+    ),
   );
   const [apiKey, setApiKey] = useState("");
   const [pending, setPending] = useState(false);
@@ -323,6 +600,37 @@ function ModelEditorDialog({
   const test = useTestAdminModelConnection(accountId);
   const selectedDescriptor = descriptors.find((item) => item.id === provider);
   const providerRequiresApiKey = selectedDescriptor?.api_key_required ?? false;
+  const providerSettingsIncompatible =
+    providerSettingsDraft.unknown_provider ||
+    providerSettingsDraft.incompatible_keys.length > 0;
+
+  function changeProvider(nextProvider: string) {
+    const nextDescriptor = descriptors.find((item) => item.id === nextProvider);
+    setProvider(nextProvider);
+    setProviderSettingsDraft(
+      createAdminModelProviderSettingsDraft(nextDescriptor, {}, nextProvider),
+    );
+    setApiKey("");
+    setError(null);
+    setTestResult(null);
+  }
+
+  function updateProviderSetting(name: string, value: string) {
+    setProviderSettingsDraft((current) =>
+      updateAdminModelProviderSettingDraftValue(current, name, value),
+    );
+  }
+
+  function resetProviderSetting(name: string) {
+    if (!selectedDescriptor) return;
+    setProviderSettingsDraft((current) =>
+      resetAdminModelProviderSettingDraftValue(
+        selectedDescriptor,
+        current,
+        name,
+      ),
+    );
+  }
 
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -335,7 +643,8 @@ function ModelEditorDialog({
     try {
       submission = consumeAdminModelEditorSubmission(
         new FormData(event.currentTarget),
-        provider,
+        selectedDescriptor,
+        providerSettingsDraft,
         apiKey,
         () => setApiKey(""),
         locale,
@@ -386,7 +695,8 @@ function ModelEditorDialog({
     try {
       submission = consumeAdminModelEditorSubmission(
         new FormData(form),
-        provider,
+        selectedDescriptor,
+        providerSettingsDraft,
         apiKey,
         () => setApiKey(""),
         locale,
@@ -405,6 +715,7 @@ function ModelEditorDialog({
       const result = await test.execute({
         provider_adapter: common.provider_adapter,
         provider_model: common.provider_model,
+        max_input_tokens: common.max_input_tokens,
         settings: common.settings,
         supports_vision: common.supports_vision,
         api_key: submittedKey,
@@ -434,7 +745,7 @@ function ModelEditorDialog({
       open={open}
       onOpenChange={(next) => !pending && !testPending && onOpenChange(next)}
     >
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>{target ? copy.editModel : copy.addModel}</DialogTitle>
           <DialogDescription>{copy.dialogDescription}</DialogDescription>
@@ -453,9 +764,13 @@ function ModelEditorDialog({
               {copy.provider}
               <select
                 className="border-input bg-background h-9 rounded-md border px-3 text-sm"
+                aria-label={copy.provider}
                 value={provider}
-                onChange={(event) => setProvider(event.target.value)}
+                onChange={(event) => changeProvider(event.target.value)}
               >
+                {!selectedDescriptor && provider ? (
+                  <option value={provider}>{provider}</option>
+                ) : null}
                 {descriptors.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.id}
@@ -473,13 +788,44 @@ function ModelEditorDialog({
             />
           </label>
           <label className="grid gap-2 text-sm">
-            {copy.providerSettingsJson}
-            <textarea
-              name="settings"
-              className="border-input bg-background min-h-36 rounded-md border p-3 font-mono text-sm"
-              defaultValue={JSON.stringify(target?.settings ?? {}, null, 2)}
+            {copy.maximumInputTokens}
+            <Input
+              name="max_input_tokens"
+              type="number"
+              min={1}
+              max={ADMIN_MODEL_MAX_INPUT_TOKENS}
+              step={1}
+              required
+              defaultValue={target?.max_input_tokens ?? ""}
+              aria-describedby="admin-model-max-input-tokens-hint"
             />
+            <span
+              id="admin-model-max-input-tokens-hint"
+              className="text-muted-foreground text-xs leading-5"
+            >
+              {copy.maximumInputTokensHint}
+            </span>
           </label>
+          {selectedDescriptor ? (
+            <ProviderSettingsFields
+              key={provider}
+              descriptor={selectedDescriptor}
+              draft={providerSettingsDraft}
+              locale={locale}
+              onChange={updateProviderSetting}
+              onReset={resetProviderSetting}
+            />
+          ) : null}
+          {providerSettingsIncompatible ? (
+            <p role="alert" className="text-destructive text-sm">
+              {providerSettingsDraft.unknown_provider
+                ? copy.unknownProvider.replace("{provider}", provider)
+                : copy.incompatibleSettings.replace(
+                    "{keys}",
+                    providerSettingsDraft.incompatible_keys.join(", "),
+                  )}
+            </p>
+          ) : null}
           <div className="grid gap-2 sm:grid-cols-3">
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -542,7 +888,12 @@ function ModelEditorDialog({
             <Button
               type="button"
               variant="outline"
-              disabled={pending || testPending || apiKey === ""}
+              disabled={
+                pending ||
+                testPending ||
+                apiKey === "" ||
+                providerSettingsIncompatible
+              }
               onClick={(event) =>
                 void testConnection(event.currentTarget.form!)
               }
@@ -564,6 +915,7 @@ function ModelEditorDialog({
                 creating: !target,
                 pending,
                 providerRequiresApiKey,
+                providerSettingsIncompatible,
                 testPending,
               })}
             >
@@ -617,6 +969,12 @@ function ModelCard({
             <dd>
               {item.api_key_configured ? copy.configured : copy.notConfigured}
             </dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground text-xs">
+              {copy.maximumInputTokens}
+            </dt>
+            <dd>{item.max_input_tokens.toLocaleString(locale)}</dd>
           </div>
           <div>
             <dt className="text-muted-foreground text-xs">

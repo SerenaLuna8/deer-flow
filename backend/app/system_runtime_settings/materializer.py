@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,12 +20,17 @@ from app.system_runtime_settings.repository import (
     SystemRuntimePolicyRepositoryInvariant,
 )
 from app.system_runtime_settings.validation import (
+    INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION,
     LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
     PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
     RUNTIME_POLICY_SCHEMA_VERSION,
     RuntimePolicyInvalid,
     canonical_policy_payload_for_schema,
     decode_policy_value_for_schema,
+)
+from deerflow.persistence.system_runtime_settings import (
+    RunRuntimePolicySnapshotRow,
+    SystemRuntimePolicyVersionRow,
 )
 
 
@@ -38,6 +43,7 @@ def _materialize_exact(
 ) -> RuntimePolicyValue:
     if schema_version not in {
         LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
+        INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION,
         PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
         RUNTIME_POLICY_SCHEMA_VERSION,
     }:
@@ -76,6 +82,32 @@ def materialize_agent_runtime_policy(
         schema_version=schema_version,
         value=decoded,
     )
+
+
+def _materialize_run_materials(
+    materials: Mapping[
+        str,
+        tuple[RunRuntimePolicySnapshotRow, SystemRuntimePolicyVersionRow],
+    ],
+) -> dict[str, MaterializedAgentRuntimePolicy]:
+    """Decode valid snapshot materials while omitting unverifiable Runs."""
+
+    materialized: dict[str, MaterializedAgentRuntimePolicy] = {}
+    for run_id, (snapshot, version) in materials.items():
+        try:
+            materialized[run_id] = materialize_agent_runtime_policy(
+                schema_version=int(snapshot.schema_version),
+                value=dict(version.value),
+                checksum=snapshot.payload_checksum,
+            )
+        except (
+            RuntimePolicyInvalid,
+            SystemRuntimePolicyRepositoryInvariant,
+            TypeError,
+            ValueError,
+        ):
+            continue
+    return materialized
 
 
 class SystemRuntimePolicyMaterializer:
@@ -247,6 +279,111 @@ class SystemRuntimePolicyMaterializer:
                     project_id=project_id,
                     owner_user_id=owner_user_id,
                     run_id=run_id,
+                )
+        except SystemRuntimePolicyUnavailable:
+            raise
+        except (DBAPIError, RuntimeError):
+            raise SystemRuntimePolicyUnavailable from None
+
+    @staticmethod
+    async def materialize_run_snapshot_envelopes_in_session(
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        run_ids: Collection[str],
+    ) -> dict[str, MaterializedAgentRuntimePolicy]:
+        """Materialize verifiable Run policies in one scoped database read.
+
+        Missing or structurally invalid legacy snapshots are omitted so public
+        projections can fail closed for only those Runs without hiding valid
+        neighboring history.
+        """
+
+        try:
+            materials = await SystemRuntimePolicyRepository(session).snapshot_materials(
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                run_ids=run_ids,
+                section=RuntimePolicySection.AGENT_RUNTIME,
+            )
+        except SystemRuntimePolicyUnavailable:
+            raise
+        except (
+            DBAPIError,
+            RuntimeError,
+            SystemRuntimePolicyRepositoryInvariant,
+            TypeError,
+            ValueError,
+        ):
+            raise SystemRuntimePolicyUnavailable from None
+
+        return _materialize_run_materials(materials)
+
+    async def materialize_run_snapshot_envelopes(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        run_ids: Collection[str],
+    ) -> dict[str, MaterializedAgentRuntimePolicy]:
+        try:
+            async with self._session_factory() as session, session.begin():
+                return await self.materialize_run_snapshot_envelopes_in_session(
+                    session,
+                    project_id=project_id,
+                    owner_user_id=owner_user_id,
+                    run_ids=run_ids,
+                )
+        except SystemRuntimePolicyUnavailable:
+            raise
+        except (DBAPIError, RuntimeError):
+            raise SystemRuntimePolicyUnavailable from None
+
+    @staticmethod
+    async def materialize_thread_run_snapshot_envelopes_in_session(
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        thread_id: str,
+    ) -> dict[str, MaterializedAgentRuntimePolicy]:
+        """Materialize every verifiable frozen Run policy for one Thread."""
+
+        try:
+            materials = await SystemRuntimePolicyRepository(session).snapshot_materials(
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                thread_id=thread_id,
+                section=RuntimePolicySection.AGENT_RUNTIME,
+            )
+        except SystemRuntimePolicyUnavailable:
+            raise
+        except (
+            DBAPIError,
+            RuntimeError,
+            SystemRuntimePolicyRepositoryInvariant,
+            TypeError,
+            ValueError,
+        ):
+            raise SystemRuntimePolicyUnavailable from None
+
+        return _materialize_run_materials(materials)
+
+    async def materialize_thread_run_snapshot_envelopes(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        thread_id: str,
+    ) -> dict[str, MaterializedAgentRuntimePolicy]:
+        try:
+            async with self._session_factory() as session, session.begin():
+                return await self.materialize_thread_run_snapshot_envelopes_in_session(
+                    session,
+                    project_id=project_id,
+                    owner_user_id=owner_user_id,
+                    thread_id=thread_id,
                 )
         except SystemRuntimePolicyUnavailable:
             raise

@@ -1226,6 +1226,9 @@ def test_factory_delegates_to_canonical_private_agent_with_trusted_builder_exten
     assert tuple(tool.name for tool in extension.extra_tools) == SKILL_BUILDER_TOOL_NAMES  # type: ignore[union-attr]
     assert extension.excluded_tool_names == frozenset({"ask_clarification"})  # type: ignore[union-attr]
     assert tuple(type(item) for item in extension.custom_middlewares) == (runtime_module._TerminalEnforcementMiddleware,)  # type: ignore[union-attr]
+    terminal_middleware = extension.custom_middlewares[0]  # type: ignore[union-attr]
+    assert terminal_middleware.provider_request_bounded_overlay_message_count == 1
+    assert len(terminal_middleware.provider_request_bounded_overlay_material) == 1
     assert isinstance(  # type: ignore[union-attr]
         extension.output_limit_recovery_override,
         runtime_module._SkillBuilderOutputLimitGuard,

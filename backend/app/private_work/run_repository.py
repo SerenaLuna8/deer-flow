@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.execution_profile import RequestedRunExecutionProfile
 from app.private_work.run_metadata import (
+    RunTokenBudgetUsageInvalid,
     RunVisionDispatchBudgetExceeded,
     reserve_run_vision_dispatch_budget,
+    with_run_token_budget_usage,
 )
 from app.private_work.workload_profile import RequestedRunWorkloadProfile
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
@@ -23,6 +25,7 @@ from deerflow.persistence.jobs.sql import JobRepository, JobScope
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.token_budget_usage import TokenBudgetUsageSnapshot
 from deerflow.trace_context import generate_trace_id, normalize_trace_id
 from deerflow.vision.dispatch import (
     MAX_VISION_CALLS_PER_RUN,
@@ -112,6 +115,7 @@ class PrivateRunUsageSnapshot:
     token_usage_by_model: dict[str, dict[str, int]] = field(
         default_factory=dict,
     )
+    token_budget_usage: TokenBudgetUsageSnapshot | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -149,6 +153,10 @@ class PrivateRunUsageSnapshot:
                 usage[counter_name] = counter_value
             normalized[model_name] = usage
         object.__setattr__(self, "token_usage_by_model", normalized)
+        if self.token_budget_usage is not None and type(self.token_budget_usage) is not TokenBudgetUsageSnapshot:
+            raise TypeError(
+                "token_budget_usage must be a TokenBudgetUsageSnapshot or None",
+            )
 
 
 class PrivateRunConflict(Exception):
@@ -919,6 +927,16 @@ class PrivateRunRepository:
                 for counter_name, counter_value in usage.items():
                     model_totals[counter_name] = model_totals.get(counter_name, 0) + counter_value
             run.token_usage_by_model = by_model
+            if attempt_usage.token_budget_usage is not None:
+                if attempt_usage.token_budget_usage.run_id != run.run_id:
+                    raise PrivateRunConflict
+                try:
+                    run.metadata_json = with_run_token_budget_usage(
+                        run.metadata_json,
+                        usage=attempt_usage.token_budget_usage,
+                    )
+                except RunTokenBudgetUsageInvalid:
+                    raise PrivateRunConflict from None
         run.execution_lease_token_hash = None
         run.execution_lease_expires_at = None
         run.execution_heartbeat_at = None

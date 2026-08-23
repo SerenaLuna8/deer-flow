@@ -239,6 +239,15 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
     en: "Maximum steps per Run",
     unit: "步",
   },
+  "agent_runtime.internal_tool_call_limit": {
+    zh: "每个 Run 内部工具调用上限",
+    en: "Internal tool-call limit per Run",
+    unit: "次",
+    hintZh:
+      "同一 Run 内 Lead Agent 与所有子 Agent 共享此上限；不同 Run 独立计数，达到上限后不再准入新的内部工具调用。",
+    hintEn:
+      "Lead Agent and all Sub-Agents share this limit within one Run. Each Run is counted independently, and no new internal tool calls are admitted after the limit is reached.",
+  },
   "agent_runtime.vision_bridge.model_name": {
     zh: "视觉模型",
     en: "Vision model",
@@ -1030,6 +1039,37 @@ function RuntimeGroup({
   );
 }
 
+function RuntimeSubsection({
+  children,
+  description,
+  title,
+  value,
+}: {
+  children: ReactNode;
+  description: string;
+  title: string;
+  value: string;
+}) {
+  const headingId = `runtime-subsection-${value}`;
+  return (
+    <section
+      aria-labelledby={headingId}
+      className="border-border/70 bg-muted/10 grid gap-3 rounded-xl border p-3"
+      data-settings-subsection={value}
+    >
+      <header className="px-1 py-1">
+        <h4 id={headingId} className="text-sm font-semibold tracking-tight">
+          {title}
+        </h4>
+        <p className="text-muted-foreground mt-1 text-xs leading-5">
+          {description}
+        </p>
+      </header>
+      <div className="grid gap-3">{children}</div>
+    </section>
+  );
+}
+
 function cloneWithPath<T>(value: T, path: string, next: unknown): T {
   const clone = structuredClone(value) as Record<string, unknown>;
   const parts = path.split(".");
@@ -1239,151 +1279,6 @@ function ToolThresholdOverrides({
   );
 }
 
-function ToolCallLimitsByTool({
-  name,
-  onChange,
-  value,
-}: {
-  name: string;
-  onChange: (
-    value: Record<string, { warn: number; hard_limit: number }>,
-  ) => void;
-  value: Record<string, { warn: number; hard_limit: number }>;
-}) {
-  const { locale, t } = useI18n();
-  const labels = t.adminSystemSettings.fields;
-  const entries = Object.entries(value);
-  return (
-    <div
-      data-setting-key={name}
-      data-settings-field-row={name}
-      className="border-border/70 bg-background space-y-3 rounded-lg border p-4"
-    >
-      <div>
-        <p className="text-sm font-medium">
-          {locale === "zh-CN" ? "各工具调用预算" : "Per-tool call budgets"}
-        </p>
-        <p className="text-muted-foreground mt-1 text-xs leading-5">
-          {locale === "zh-CN"
-            ? "为该 workload 和 Agent 角色设置工具级提醒与硬上限；未列出的工具使用默认预算。"
-            : "Set tool-specific warnings and hard limits for this workload and Agent role. Unlisted tools use the default budget."}
-        </p>
-      </div>
-      {entries.length ? (
-        <div className="text-muted-foreground hidden grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 px-1 text-xs sm:grid">
-          <span>{locale === "zh-CN" ? "工具" : "Tool"}</span>
-          <span>{locale === "zh-CN" ? "提醒次数" : "Warn at"}</span>
-          <span>{locale === "zh-CN" ? "终止次数" : "Stop at"}</span>
-          <span className="sr-only">{labels.removeRow}</span>
-        </div>
-      ) : null}
-      {entries.map(([tool, limits], index) => {
-        const taskReserved = tool === "task";
-        const taskErrorId = `${name}-${index}-task-reserved`;
-        return (
-          <div key={`${tool}-${index}`} className="space-y-1">
-            <div className="grid gap-2 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
-              <Input
-                aria-label={locale === "zh-CN" ? "工具名称" : "Tool name"}
-                value={tool}
-                aria-invalid={taskReserved}
-                aria-describedby={taskReserved ? taskErrorId : undefined}
-                onChange={(event) => {
-                  const next = { ...value };
-                  delete next[tool];
-                  next[event.target.value] = limits;
-                  onChange(next);
-                }}
-              />
-              <Input
-                type="number"
-                aria-label={
-                  locale === "zh-CN"
-                    ? `${tool} 的提醒次数`
-                    : `Warning count for ${tool}`
-                }
-                value={limits.warn}
-                min={1}
-                max={100_000}
-                onChange={(event) => {
-                  const next = event.currentTarget.valueAsNumber;
-                  if (Number.isFinite(next)) {
-                    onChange({ ...value, [tool]: { ...limits, warn: next } });
-                  }
-                }}
-              />
-              <Input
-                type="number"
-                aria-label={
-                  locale === "zh-CN"
-                    ? `${tool} 的终止次数`
-                    : `Stop count for ${tool}`
-                }
-                value={limits.hard_limit}
-                min={1}
-                max={100_000}
-                onChange={(event) => {
-                  const next = event.currentTarget.valueAsNumber;
-                  if (Number.isFinite(next)) {
-                    onChange({
-                      ...value,
-                      [tool]: { ...limits, hard_limit: next },
-                    });
-                  }
-                }}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label={
-                  locale === "zh-CN"
-                    ? `删除 ${tool} 规则`
-                    : `Remove ${tool} rule`
-                }
-                onClick={() => {
-                  const next = { ...value };
-                  delete next[tool];
-                  onChange(next);
-                }}
-              >
-                <XIcon aria-hidden />
-              </Button>
-            </div>
-            {taskReserved ? (
-              <p
-                id={taskErrorId}
-                role="alert"
-                className="text-destructive text-xs"
-              >
-                {locale === "zh-CN"
-                  ? "task 由 Sub-Agent 委托总量限制管理，不能配置为普通工具调用预算"
-                  : "task is governed by the Sub-Agent delegation limit and cannot be configured as an ordinary tool budget"}
-              </p>
-            ) : null}
-          </div>
-        );
-      })}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        disabled={entries.length >= 64}
-        onClick={() => {
-          let index = entries.length + 1;
-          while (`tool_${index}` in value) index += 1;
-          onChange({
-            ...value,
-            [`tool_${index}`]: { warn: 1, hard_limit: 1 },
-          });
-        }}
-      >
-        {locale === "zh-CN" ? "添加工具规则" : "Add tool rule"}
-      </Button>
-    </div>
-  );
-}
-
 function agentRuntimeGroups(locale: Locale) {
   return [
     {
@@ -1394,15 +1289,6 @@ function agentRuntimeGroups(locale: Locale) {
           ? "限制单次任务的 Token、执行步数和子 Agent 数量，避免资源占用或执行时间失控。"
           : "Limit Tokens, steps, and subagents per Run to keep resource usage and execution time under control.",
       icon: GaugeIcon,
-    },
-    {
-      value: "tool-call-budget",
-      title: locale === "zh-CN" ? "工具调用预算" : "Tool call budgets",
-      description:
-        locale === "zh-CN"
-          ? "分别配置普通对话和深度研究中 Lead Agent 与 Sub-Agent 的默认及工具级调用预算。"
-          : "Configure default and per-tool call budgets for Lead Agents and Sub-Agents in interactive and research workloads.",
-      icon: WrenchIcon,
     },
     {
       value: "assistant-experience",
@@ -1487,9 +1373,9 @@ const AGENT_RUNTIME_DESTINATION_FIELDS: Record<
     "token_usage",
     "token_budget",
     "max_recursion_limit",
+    "internal_tool_call_limit",
     "subagents",
   ],
-  "tool-call-budget": ["tool_call_budget"],
   "assistant-experience": ["title", "suggestions", "input_polish"],
   summarization: ["summarization"],
   memory: ["memory"],
@@ -1568,11 +1454,51 @@ function AgentRuntimeEditor({
   const { locale } = useI18n();
   const update = (path: string, next: unknown) =>
     onChange(cloneWithPath(value, path, next));
-  const bool = (path: string) => Boolean(pathValue(value, path));
   const number = (path: string) => Number(pathValue(value, path));
   const groups = agentRuntimeGroups(locale);
   const group = (value: (typeof groups)[number]["value"]) =>
     groups.find((item) => item.value === value)!;
+  const runLimitSections =
+    locale === "zh-CN"
+      ? {
+          tokenUsage: {
+            title: "Token 用量记录",
+            description: "仅控制 Token 用量的记录与展示。",
+          },
+          execution: {
+            title: "Run 执行上限",
+            description: "始终生效，不受 Token 预算开关影响。",
+          },
+          tokenBudget: {
+            title: "Token 预算（可选）",
+            description: "只有本区块中的上限与阈值受开关控制。",
+          },
+          subagents: {
+            title: "子 Agent 限制",
+            description: "限制同一 Run 内子 Agent 的并发数与委托总数。",
+          },
+        }
+      : {
+          tokenUsage: {
+            title: "Token usage tracking",
+            description: "Controls only Token usage recording and display.",
+          },
+          execution: {
+            title: "Run execution limits",
+            description:
+              "Always enforced independently of the Token budget toggle.",
+          },
+          tokenBudget: {
+            title: "Token budget (optional)",
+            description:
+              "The toggle controls only the limits and thresholds in this section.",
+          },
+          subagents: {
+            title: "Sub-Agent limits",
+            description:
+              "Limit Sub-Agent concurrency and total delegations within one Run.",
+          },
+        };
 
   return (
     <div>
@@ -1582,178 +1508,126 @@ function AgentRuntimeEditor({
         title={group("run-limits").title}
         description={group("run-limits").description}
       >
-        {["token_usage.enabled", "token_budget.enabled"].map((path) => (
+        <RuntimeSubsection
+          value="token-usage"
+          title={runLimitSections.tokenUsage.title}
+          description={runLimitSections.tokenUsage.description}
+        >
           <BooleanField
-            key={path}
-            name={`agent_runtime.${path}`}
-            checked={bool(path)}
-            onChange={(next) => update(path, next)}
+            name="agent_runtime.token_usage.enabled"
+            checked={value.token_usage.enabled}
+            onChange={(next) => update("token_usage.enabled", next)}
           />
-        ))}
-        <NumberField
-          name="agent_runtime.token_budget.max_tokens"
-          value={number("token_budget.max_tokens")}
-          min={1_000}
-          max={2_000_000}
-          disabled={!value.token_budget.enabled}
-          dataDependency="token-budget"
-          onChange={(next) => update("token_budget.max_tokens", next)}
-        />
-        <NullableNumberField
-          name="agent_runtime.token_budget.max_input_tokens"
-          value={value.token_budget.max_input_tokens}
-          min={1}
-          max={2_000_000}
-          disabled={!value.token_budget.enabled}
-          onChange={(next) => update("token_budget.max_input_tokens", next)}
-        />
-        <NullableNumberField
-          name="agent_runtime.token_budget.max_output_tokens"
-          value={value.token_budget.max_output_tokens}
-          min={1}
-          max={2_000_000}
-          disabled={!value.token_budget.enabled}
-          onChange={(next) => update("token_budget.max_output_tokens", next)}
-        />
-        {[
-          "token_budget.warn_threshold",
-          "token_budget.hard_stop_threshold",
-        ].map((path) => (
-          <NumberField
-            key={path}
-            name={`agent_runtime.${path}`}
-            value={number(path)}
-            min={0}
-            max={100}
-            step={1}
-            scale={0.01}
-            disabled={!value.token_budget.enabled}
-            onChange={(next) => update(path, next)}
-          />
-        ))}
-        <NumberField
-          name="agent_runtime.max_recursion_limit"
-          value={value.max_recursion_limit}
-          min={1}
-          max={100_000}
-          onChange={(next) => update("max_recursion_limit", next)}
-        />
-        <NumberField
-          name="agent_runtime.subagents.max_concurrent"
-          value={value.subagents.max_concurrent}
-          min={1}
-          max={4}
-          onChange={(next) => update("subagents.max_concurrent", next)}
-        />
-        <NumberField
-          name="agent_runtime.subagents.max_total_per_run_by_workload.interactive"
-          value={value.subagents.max_total_per_run_by_workload.interactive}
-          min={1}
-          max={50}
-          onChange={(next) =>
-            update("subagents.max_total_per_run_by_workload.interactive", next)
-          }
-        />
-        <NumberField
-          name="agent_runtime.subagents.max_total_per_run_by_workload.research"
-          value={value.subagents.max_total_per_run_by_workload.research}
-          min={1}
-          max={50}
-          onChange={(next) =>
-            update("subagents.max_total_per_run_by_workload.research", next)
-          }
-        />
-      </RuntimeGroup>
+        </RuntimeSubsection>
 
-      <RuntimeGroup
-        activeValue={activeGroup}
-        value="tool-call-budget"
-        title={group("tool-call-budget").title}
-        description={group("tool-call-budget").description}
-      >
-        {(["interactive", "research"] as const).map((profile) => (
-          <section
-            key={profile}
-            className="border-border/70 space-y-4 rounded-lg border p-4"
-          >
-            <div>
-              <h4 className="text-sm font-semibold">
-                {profile === "interactive"
-                  ? locale === "zh-CN"
-                    ? "普通对话"
-                    : "Interactive"
-                  : locale === "zh-CN"
-                    ? "深度研究"
-                    : "Research"}
-              </h4>
-              <p className="text-muted-foreground mt-1 text-xs">
-                {locale === "zh-CN"
-                  ? "每个角色独立计数；达到硬上限后只禁用已耗尽的工具。"
-                  : "Each role is counted independently. At the hard limit, only the exhausted tool is disabled."}
-              </p>
-            </div>
-            <div className="grid gap-4 xl:grid-cols-2">
-              {(["lead", "subagent"] as const).map((role) => {
-                const roleBudget =
-                  value.tool_call_budget.profiles[profile][role];
-                const basePath = `tool_call_budget.profiles.${profile}.${role}`;
-                const roleLabel =
-                  role === "lead"
-                    ? "Lead Agent"
-                    : locale === "zh-CN"
-                      ? "子 Agent"
-                      : "Sub-Agent";
-                return (
-                  <fieldset
-                    key={role}
-                    className="bg-muted/20 space-y-3 rounded-md p-3"
-                  >
-                    <legend className="px-1 text-sm font-medium">
-                      {roleLabel}
-                    </legend>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <NumberField
-                        name={`agent_runtime.${basePath}.default.warn`}
-                        label={
-                          locale === "zh-CN"
-                            ? "默认提醒次数"
-                            : "Default warning"
-                        }
-                        unit={locale === "zh-CN" ? "次" : "calls"}
-                        value={roleBudget.default.warn}
-                        min={1}
-                        max={100_000}
-                        onChange={(next) =>
-                          update(`${basePath}.default.warn`, next)
-                        }
-                      />
-                      <NumberField
-                        name={`agent_runtime.${basePath}.default.hard_limit`}
-                        label={
-                          locale === "zh-CN"
-                            ? "默认硬上限"
-                            : "Default hard limit"
-                        }
-                        unit={locale === "zh-CN" ? "次" : "calls"}
-                        value={roleBudget.default.hard_limit}
-                        min={1}
-                        max={100_000}
-                        onChange={(next) =>
-                          update(`${basePath}.default.hard_limit`, next)
-                        }
-                      />
-                    </div>
-                    <ToolCallLimitsByTool
-                      name={`agent_runtime.${basePath}.tools`}
-                      value={roleBudget.tools}
-                      onChange={(next) => update(`${basePath}.tools`, next)}
-                    />
-                  </fieldset>
-                );
-              })}
-            </div>
-          </section>
-        ))}
+        <RuntimeSubsection
+          value="run-execution"
+          title={runLimitSections.execution.title}
+          description={runLimitSections.execution.description}
+        >
+          <NumberField
+            name="agent_runtime.max_recursion_limit"
+            value={value.max_recursion_limit}
+            min={1}
+            max={100_000}
+            onChange={(next) => update("max_recursion_limit", next)}
+          />
+          <NumberField
+            name="agent_runtime.internal_tool_call_limit"
+            value={value.internal_tool_call_limit}
+            min={1}
+            max={100_000}
+            onChange={(next) => update("internal_tool_call_limit", next)}
+          />
+        </RuntimeSubsection>
+
+        <RuntimeSubsection
+          value="token-budget"
+          title={runLimitSections.tokenBudget.title}
+          description={runLimitSections.tokenBudget.description}
+        >
+          <BooleanField
+            name="agent_runtime.token_budget.enabled"
+            checked={value.token_budget.enabled}
+            onChange={(next) => update("token_budget.enabled", next)}
+          />
+          <NumberField
+            name="agent_runtime.token_budget.max_tokens"
+            value={number("token_budget.max_tokens")}
+            min={1_000}
+            max={2_000_000}
+            disabled={!value.token_budget.enabled}
+            dataDependency="token-budget"
+            onChange={(next) => update("token_budget.max_tokens", next)}
+          />
+          <NullableNumberField
+            name="agent_runtime.token_budget.max_input_tokens"
+            value={value.token_budget.max_input_tokens}
+            min={1}
+            max={2_000_000}
+            disabled={!value.token_budget.enabled}
+            onChange={(next) => update("token_budget.max_input_tokens", next)}
+          />
+          <NullableNumberField
+            name="agent_runtime.token_budget.max_output_tokens"
+            value={value.token_budget.max_output_tokens}
+            min={1}
+            max={2_000_000}
+            disabled={!value.token_budget.enabled}
+            onChange={(next) => update("token_budget.max_output_tokens", next)}
+          />
+          {[
+            "token_budget.warn_threshold",
+            "token_budget.hard_stop_threshold",
+          ].map((path) => (
+            <NumberField
+              key={path}
+              name={`agent_runtime.${path}`}
+              value={number(path)}
+              min={0}
+              max={100}
+              step={1}
+              scale={0.01}
+              disabled={!value.token_budget.enabled}
+              onChange={(next) => update(path, next)}
+            />
+          ))}
+        </RuntimeSubsection>
+
+        <RuntimeSubsection
+          value="subagents"
+          title={runLimitSections.subagents.title}
+          description={runLimitSections.subagents.description}
+        >
+          <NumberField
+            name="agent_runtime.subagents.max_concurrent"
+            value={value.subagents.max_concurrent}
+            min={1}
+            max={4}
+            onChange={(next) => update("subagents.max_concurrent", next)}
+          />
+          <NumberField
+            name="agent_runtime.subagents.max_total_per_run_by_workload.interactive"
+            value={value.subagents.max_total_per_run_by_workload.interactive}
+            min={1}
+            max={50}
+            onChange={(next) =>
+              update(
+                "subagents.max_total_per_run_by_workload.interactive",
+                next,
+              )
+            }
+          />
+          <NumberField
+            name="agent_runtime.subagents.max_total_per_run_by_workload.research"
+            value={value.subagents.max_total_per_run_by_workload.research}
+            min={1}
+            max={50}
+            onChange={(next) =>
+              update("subagents.max_total_per_run_by_workload.research", next)
+            }
+          />
+        </RuntimeSubsection>
       </RuntimeGroup>
 
       <RuntimeGroup

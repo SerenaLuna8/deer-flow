@@ -24,10 +24,6 @@ from pydantic import (
 from deerflow.config.vision_bridge_config import (
     DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS,
 )
-from deerflow.vision.dispatch import (
-    VISION_TOOL_FREQUENCY_HARD_STOP,
-    VISION_TOOL_FREQUENCY_WARN,
-)
 
 _JSON_SAFE_INTEGER = 2**53 - 1
 _MAX_CHARS = 10_000_000
@@ -239,20 +235,9 @@ class ToolOutputPolicy(_PolicyModel):
         return value
 
 
-class ToolFrequencyOverridePolicy(_PolicyModel):
-    warn: int = Field(ge=1, le=100_000)
-    hard_limit: int = Field(ge=1, le=100_000)
-
-    @model_validator(mode="after")
-    def validate_threshold_order(self) -> ToolFrequencyOverridePolicy:
-        if self.hard_limit < self.warn:
-            raise ValueError("hard_limit must be >= warn")
-        return self
-
-
 class IdenticalCallsPolicy(_PolicyModel):
     warn_threshold: int = Field(default=3, ge=1, le=100_000)
-    hard_limit: int = Field(default=5, ge=1, le=100_000)
+    hard_limit: int = Field(default=20, ge=1, le=100_000)
     window_size: int = Field(default=20, ge=1, le=100_000)
 
     @model_validator(mode="after")
@@ -266,97 +251,6 @@ class LoopDetectionPolicy(_PolicyModel):
     enabled: bool = True
     identical_calls: IdenticalCallsPolicy = Field(
         default_factory=IdenticalCallsPolicy,
-    )
-
-
-class ToolCallLimitPolicy(_PolicyModel):
-    warn: int = Field(ge=1, le=100_000)
-    hard_limit: int = Field(ge=1, le=100_000)
-
-    @model_validator(mode="after")
-    def validate_threshold_order(self) -> ToolCallLimitPolicy:
-        if self.hard_limit < self.warn:
-            raise ValueError("hard_limit must be >= warn")
-        return self
-
-
-class ToolCallRoleBudgetPolicy(_PolicyModel):
-    default: ToolCallLimitPolicy
-    tools: dict[ToolName, ToolCallLimitPolicy] = Field(max_length=64)
-
-    @field_validator("tools")
-    @classmethod
-    def exclude_delegation_tool(
-        cls,
-        value: dict[str, ToolCallLimitPolicy],
-    ) -> dict[str, ToolCallLimitPolicy]:
-        if "task" in value:
-            raise ValueError("task is governed by the Sub-Agent delegation limit")
-        return value
-
-
-class ToolCallBudgetProfilePolicy(_PolicyModel):
-    lead: ToolCallRoleBudgetPolicy
-    subagent: ToolCallRoleBudgetPolicy
-
-
-class ToolCallBudgetProfilesPolicy(_PolicyModel):
-    interactive: ToolCallBudgetProfilePolicy
-    research: ToolCallBudgetProfilePolicy
-
-
-class ToolCallBudgetPolicy(_PolicyModel):
-    profiles: ToolCallBudgetProfilesPolicy
-
-
-def _tool_limits(
-    *,
-    web_warn: int,
-    web_hard_limit: int,
-) -> dict[str, ToolCallLimitPolicy]:
-    return {
-        "web_search": ToolCallLimitPolicy(
-            warn=web_warn,
-            hard_limit=web_hard_limit,
-        ),
-        "web_fetch": ToolCallLimitPolicy(
-            warn=web_warn,
-            hard_limit=web_hard_limit,
-        ),
-        "recall_memory": ToolCallLimitPolicy(warn=6, hard_limit=10),
-        "inspect_image": ToolCallLimitPolicy(
-            warn=VISION_TOOL_FREQUENCY_WARN,
-            hard_limit=VISION_TOOL_FREQUENCY_HARD_STOP,
-        ),
-    }
-
-
-def _role_budget(
-    *,
-    web_warn: int,
-    web_hard_limit: int,
-) -> ToolCallRoleBudgetPolicy:
-    return ToolCallRoleBudgetPolicy(
-        default=ToolCallLimitPolicy(warn=30, hard_limit=50),
-        tools=_tool_limits(
-            web_warn=web_warn,
-            web_hard_limit=web_hard_limit,
-        ),
-    )
-
-
-def _default_tool_call_budget() -> ToolCallBudgetPolicy:
-    return ToolCallBudgetPolicy(
-        profiles=ToolCallBudgetProfilesPolicy(
-            interactive=ToolCallBudgetProfilePolicy(
-                lead=_role_budget(web_warn=6, web_hard_limit=10),
-                subagent=_role_budget(web_warn=6, web_hard_limit=10),
-            ),
-            research=ToolCallBudgetProfilePolicy(
-                lead=_role_budget(web_warn=20, web_hard_limit=30),
-                subagent=_role_budget(web_warn=12, web_hard_limit=20),
-            ),
-        ),
     )
 
 
@@ -401,9 +295,7 @@ class AgentRuntimePolicyValue(_PolicyModel):
     tool_search: ToolSearchPolicy = Field(default_factory=ToolSearchPolicy)
     tool_output: ToolOutputPolicy = Field(default_factory=ToolOutputPolicy)
     loop_detection: LoopDetectionPolicy = Field(default_factory=LoopDetectionPolicy)
-    tool_call_budget: ToolCallBudgetPolicy = Field(
-        default_factory=_default_tool_call_budget,
-    )
+    internal_tool_call_limit: int = Field(default=200, ge=1, le=100_000)
     read_before_write: EnabledPolicy = Field(default_factory=EnabledPolicy)
     safety_finish_reason: EnabledPolicy = Field(default_factory=EnabledPolicy)
     subagents: SubagentPolicy = Field(default_factory=SubagentPolicy)
@@ -566,11 +458,6 @@ __all__ = [
     "RuntimePolicyView",
     "SubagentPolicy",
     "SubagentTotalsByWorkloadPolicy",
-    "ToolCallBudgetPolicy",
-    "ToolCallBudgetProfilePolicy",
-    "ToolCallBudgetProfilesPolicy",
-    "ToolCallLimitPolicy",
-    "ToolCallRoleBudgetPolicy",
     "VisionBridgePolicy",
     "LockedAgentRuntimePolicy",
     "auxiliary_model_snapshot_ref",

@@ -221,23 +221,31 @@ export type ProjectSkillStatusToggleState = {
 export function projectSkillStatusToggleState(
   item: ProjectSkillStatusItem,
 ): ProjectSkillStatusToggleState {
-  return projectStatusToggleState(item, "请先激活一个版本");
+  return projectStatusToggleState(
+    item,
+    "请先激活一个版本",
+    "shared_assets.edit",
+  );
 }
 
 export function projectMcpStatusToggleState(
   item: ProjectSkillStatusItem,
 ): ProjectSkillStatusToggleState {
-  return projectStatusToggleState(item, "请先发布配置");
+  return projectStatusToggleState(
+    item,
+    "请先发布配置",
+    "shared_assets.manage_bindings",
+  );
 }
 
 function projectStatusToggleState(
   item: ProjectSkillStatusItem,
   missingCurrentReason: string,
+  requiredCapability: Capability,
 ): ProjectSkillStatusToggleState {
   const checked = item.scope === "project" && item.status === "active";
   const canManage =
-    item.scope === "project" &&
-    item.capabilities.includes("shared_assets.manage_bindings");
+    item.scope === "project" && item.capabilities.includes(requiredCapability);
   const canActivate =
     item.status === "suspended" && item.current_version_id !== null;
   const supportedStatus =

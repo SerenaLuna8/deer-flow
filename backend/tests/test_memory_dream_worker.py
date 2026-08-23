@@ -286,6 +286,7 @@ def _work() -> MemoryDreamWork:
                 "name": DREAM_MODEL_REF,
                 "provider_adapter": "deepseek",
                 "model": "deepseek-v4-flash",
+                "max_input_tokens": 64_000,
             },
             payload_checksum="a" * 64,
             secret_generation_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),

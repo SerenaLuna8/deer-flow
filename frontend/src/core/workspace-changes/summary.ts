@@ -13,6 +13,9 @@ export function getChangedFileCount(summary: WorkspaceChangeSummary) {
 
 export function getWorkspaceChangeBadgeLabel(summary: WorkspaceChangeSummary) {
   const count = getChangedFileCount(summary);
+  if (summary.additions === null || summary.deletions === null) {
+    return `${count} ${count === 1 ? "file" : "files"} changed`;
+  }
   return `${count} ${count === 1 ? "file" : "files"} changed +${summary.additions} -${summary.deletions}`;
 }
 

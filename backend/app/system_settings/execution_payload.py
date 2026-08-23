@@ -22,6 +22,7 @@ def system_model_provider_payload(
         "model_config_id": str(uuid.UUID(str(row.id))),
         "provider_adapter": row.provider_adapter,
         "provider_model": row.provider_model,
+        "max_input_tokens": row.max_input_tokens,
         "settings": dict(row.settings),
         "supports_thinking": row.supports_thinking,
         "supports_reasoning_effort": row.supports_reasoning_effort,

@@ -118,7 +118,9 @@ import {
   isRootStreamCallback,
 } from "./stream-events";
 import {
+  invalidateStartedThreadContextUsage,
   invalidateStoppedThreadCaches,
+  latestContextUsageRunObservation,
   stopThreadAndInvalidateCaches,
   upsertThreadInInfiniteCache,
   upsertThreadInSearchCache,
@@ -417,6 +419,7 @@ export function useThreadStream({
     emptyRunControlProgress,
   );
   const runControlReplayGenerationRef = useRef(0);
+  const contextUsageRunObservationRef = useRef<string | null>(null);
   const expectedTerminalFailureKeysRef = useRef<Set<string>>(new Set());
   const currentRunBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const runBaselinePreparedRef = useRef(false);
@@ -498,6 +501,7 @@ export function useThreadStream({
     () => collectRunExecutionProfiles(historyRuns ?? []),
     [historyRuns],
   );
+  const queryClient = useQueryClient();
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -518,56 +522,102 @@ export function useThreadStream({
     threadIdRef.current = normalizedThreadId;
   }, [threadId]);
 
-  const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
-    threadIdRef.current = _threadId;
-    if (!runBaselinePreparedRef.current) {
-      currentRunBaselineMessageIdsRef.current = new Set(
-        messagesRef.current
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
+  const handleStreamStart = useCallback(
+    (_threadId: string, _runId: string) => {
+      threadIdRef.current = _threadId;
+      if (!runBaselinePreparedRef.current) {
+        currentRunBaselineMessageIdsRef.current = new Set(
+          messagesRef.current
+            .map(messageIdentity)
+            .filter((id): id is string => Boolean(id)),
+        );
+      }
+      currentRunIdRef.current = _runId;
+      currentRunThreadIdRef.current = _threadId;
+      contextUsageRunObservationRef.current = `${_threadId}:${_runId}:active`;
+      runControlReplayGenerationRef.current += 1;
+      setRunControlProgress((current) =>
+        current.runId === _runId
+          ? current
+          : { runId: _runId, observations: [] },
       );
-    }
-    currentRunIdRef.current = _runId;
-    currentRunThreadIdRef.current = _threadId;
-    runControlReplayGenerationRef.current += 1;
-    setRunControlProgress((current) =>
-      current.runId === _runId ? current : { runId: _runId, observations: [] },
-    );
-    runBaselinePreparedRef.current = false;
-    setOptimisticThreadId((currentOptimisticThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
-      if (
-        currentOptimisticThreadId &&
-        (currentOptimisticThreadId === currentView ||
-          currentOptimisticThreadId === _threadId)
-      ) {
-        return _threadId;
+      runBaselinePreparedRef.current = false;
+      setOptimisticThreadId((currentOptimisticThreadId) => {
+        const currentView = currentViewThreadIdRef.current;
+        if (
+          currentOptimisticThreadId &&
+          (currentOptimisticThreadId === currentView ||
+            currentOptimisticThreadId === _threadId)
+        ) {
+          return _threadId;
+        }
+        return currentOptimisticThreadId;
+      });
+      setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
+        const currentView = currentViewThreadIdRef.current;
+        if (
+          currentLiveMessagesThreadId &&
+          (currentLiveMessagesThreadId === currentView ||
+            currentLiveMessagesThreadId === _threadId)
+        ) {
+          return _threadId;
+        }
+        return currentLiveMessagesThreadId;
+      });
+      if (!startedRef.current) {
+        try {
+          listeners.current.onStart?.(_threadId, _runId);
+        } catch {
+          // A presentation observer cannot veto a server-admitted Run.
+        }
+        startedRef.current = true;
       }
-      return currentOptimisticThreadId;
-    });
-    setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
-      if (
-        currentLiveMessagesThreadId &&
-        (currentLiveMessagesThreadId === currentView ||
-          currentLiveMessagesThreadId === _threadId)
-      ) {
-        return _threadId;
-      }
-      return currentLiveMessagesThreadId;
-    });
-    if (!startedRef.current) {
-      try {
-        listeners.current.onStart?.(_threadId, _runId);
-      } catch {
-        // A presentation observer cannot veto a server-admitted Run.
-      }
-      startedRef.current = true;
-    }
-    setOnStreamThreadId(_threadId);
-  }, []);
+      void invalidateStartedThreadContextUsage(
+        queryClient,
+        _threadId,
+        isMock,
+        privateWork.scope,
+      );
+      setOnStreamThreadId(_threadId);
+    },
+    [isMock, privateWork.scope, queryClient],
+  );
 
   const latestHistoryRunId = historyRuns?.[0]?.run_id ?? null;
+  const latestHistoryContextUsageObservation = useMemo(
+    () => latestContextUsageRunObservation(onStreamThreadId, historyRuns),
+    [historyRuns, onStreamThreadId],
+  );
+  const latestHistoryContextUsageObservationKey =
+    latestHistoryContextUsageObservation && onStreamThreadId
+      ? `${onStreamThreadId}:${latestHistoryContextUsageObservation.runId}:${latestHistoryContextUsageObservation.authority}`
+      : null;
+  useEffect(() => {
+    const targetThreadId = onStreamThreadId ?? null;
+    const observationKey = latestHistoryContextUsageObservationKey;
+    if (
+      !streamEnabled ||
+      !targetThreadId ||
+      !observationKey ||
+      contextUsageRunObservationRef.current === observationKey
+    ) {
+      return;
+    }
+    contextUsageRunObservationRef.current = observationKey;
+    void invalidateStartedThreadContextUsage(
+      queryClient,
+      targetThreadId,
+      isMock,
+      privateWork.scope,
+    );
+  }, [
+    isMock,
+    latestHistoryContextUsageObservationKey,
+    onStreamThreadId,
+    privateWork.scope,
+    queryClient,
+    streamEnabled,
+  ]);
   useEffect(() => {
     const targetThreadId = onStreamThreadId ?? null;
     const targetRunId = latestHistoryRunId;
@@ -614,7 +664,6 @@ export function useThreadStream({
     return () => controller.abort();
   }, [latestHistoryRunId, onStreamThreadId, privateWork, streamEnabled]);
 
-  const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
   const clearPreparedReplayMasks = useCallback(
     (replay: PendingPreparedReplayMask | null) => {

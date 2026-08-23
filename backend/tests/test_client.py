@@ -1059,12 +1059,7 @@ class TestEnsureAgent:
         assert profile.graph.model is model
         assert profile.subagent_enabled is True
         assert binding_factory.tool_call_control_profile.workload_profile == "research"
-        assert (
-            binding_factory.tool_call_control_profile.subagent.tool_budget.limit_for(
-                "web_search",
-            ).hard_limit
-            == 20
-        )
+        assert binding_factory.tool_call_control_profile.policy.internal_tool_call_limit == 200
         assert isinstance(
             create_agent.call_args.kwargs["middleware"][0],
             ToolCallControl,

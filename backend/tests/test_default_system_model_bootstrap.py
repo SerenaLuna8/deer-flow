@@ -58,6 +58,11 @@ def test_default_model_bootstrap_prepares_three_independent_deepseek_models(
         51_200,
         51_200,
     ]
+    assert [entry.command.max_input_tokens for entry in material.models] == [
+        1_000_000,
+        1_000_000,
+        1_000_000,
+    ]
     assert material.default_model_id == DEFAULT_MODEL_ID
     assert material.models[0].model_id == material.default_model_id
     assert material.models[-1].model_id == DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID
@@ -126,6 +131,11 @@ async def test_default_model_bootstrap_persists_flash_as_default(
             "deepseek-v4-flash": 51_200,
             "deepseek-v4-pro": 51_200,
             "deepseek-v4-flash-vision-exp": 51_200,
+        }
+        assert {model.provider_model: model.max_input_tokens for model in models} == {
+            "deepseek-v4-flash": 1_000_000,
+            "deepseek-v4-pro": 1_000_000,
+            "deepseek-v4-flash-vision-exp": 1_000_000,
         }
         assert len(secret_generations) == 3
         assert len({generation.id for generation in secret_generations}) == 3

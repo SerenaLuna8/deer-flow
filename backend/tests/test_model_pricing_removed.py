@@ -50,6 +50,7 @@ def test_factory_drops_legacy_pricing_metadata_if_validation_is_bypassed(
         description="",
         use="example:Model",
         model="provider-model",
+        max_input_tokens=64_000,
     ).model_copy(update={"pricing": {"input": 1, "output": 2}})
     app_config = AppConfig(
         models=[model],

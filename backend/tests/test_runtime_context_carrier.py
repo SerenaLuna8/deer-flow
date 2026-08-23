@@ -136,6 +136,8 @@ def test_carrier_fields_cover_the_complete_install_key_set() -> None:
         current_run_pre_existing_message_ids=frozenset({"message-1"}),
         trace_id="trace-1",
         run_journal=object(),
+        token_usage_tracking_enabled=False,
+        token_budget_usage_recorder=object(),
         recovered_llm_failure_recorder=object(),
         run_semantic_stop_recorder=object(),
         server_abort_event=object(),

@@ -7,6 +7,12 @@ export const adminModelAccountIdSchema = z.union([
 
 export const adminModelIdSchema = z.string().uuid();
 export const adminModelStatusSchema = z.enum(["active", "suspended"]);
+export const ADMIN_MODEL_MAX_INPUT_TOKENS = 2_000_000;
+export const adminModelMaxInputTokensSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(ADMIN_MODEL_MAX_INPUT_TOKENS);
 // Adapter identity comes from the backend registry. The browser constrains the
 // wire shape only; catalog descriptor membership decides authorability.
 export const adminModelProviderAdapterSchema = z
@@ -234,6 +240,13 @@ const genericAdminModelSettingsSchema: z.ZodType<
   })
   .transform((settings) => settings as Record<string, AdminModelSettingValue>);
 
+const adminModelSettingDefaultValueSchema = z
+  .unknown()
+  .superRefine((value, context) => {
+    validateGenericSettingValue(value, context, [], 0);
+  })
+  .transform((value) => value as AdminModelSettingValue);
+
 /** Generic mutation boundary; the selected descriptor adds field authority. */
 export const safeAdminModelSettingsSchema =
   genericAdminModelSettingsSchema.superRefine((settings, context) => {
@@ -264,6 +277,9 @@ export const adminModelProviderSettingFieldSchema = z
       "url",
     ]),
     advanced: z.boolean(),
+    form_control: z.enum(["input", "preserve"]),
+    default_mode: z.enum(["platform", "provider"]),
+    default_value: adminModelSettingDefaultValueSchema,
     minimum: z.number().finite().nullable(),
     maximum: z.number().finite().nullable(),
     step: z.number().finite().positive().nullable(),
@@ -327,6 +343,37 @@ export const adminModelProviderSettingFieldSchema = z
         path: ["advanced"],
         message: "JSON fields must use the advanced editor",
       });
+    }
+    if (field.form_control === "input" && field.input_type === "json") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["form_control"],
+        message: "JSON fields cannot use a free-form input",
+      });
+    }
+    if (field.form_control === "preserve" && !field.advanced) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["advanced"],
+        message: "Preserved settings must be advanced",
+      });
+    }
+    if (field.default_mode === "provider") {
+      if (field.default_value !== null) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["default_value"],
+          message: "Provider defaults must use a null sentinel",
+        });
+      }
+    } else if (field.default_value === null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["default_value"],
+        message: "Platform defaults require a concrete value",
+      });
+    } else {
+      validateDescriptorSettingValue(field, field.default_value, context);
     }
   });
 
@@ -400,12 +447,17 @@ function validateDescriptorSettingValue(
     }
     return;
   }
+  const stepRatio =
+    typeof value === "number" && field.step !== null
+      ? (value - (field.minimum ?? 0)) / field.step
+      : null;
   if (
     typeof value !== "number" ||
     !Number.isFinite(value) ||
     (field.input_type === "integer" && !Number.isInteger(value)) ||
     (field.minimum !== null && value < field.minimum) ||
-    (field.maximum !== null && value > field.maximum)
+    (field.maximum !== null && value > field.maximum) ||
+    (stepRatio !== null && Math.abs(stepRatio - Math.round(stepRatio)) > 1e-9)
   ) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -441,6 +493,7 @@ const modelVersionFields = {
   display_name: secretSafeTextSchema(120, true),
   provider_adapter: readableAdminModelProviderAdapterSchema,
   provider_model: providerFieldSchema,
+  max_input_tokens: adminModelMaxInputTokensSchema,
   settings: readableAdminModelSettingsSchema,
   supports_thinking: z.boolean(),
   supports_reasoning_effort: z.boolean(),
@@ -521,6 +574,7 @@ export const testAdminModelConnectionInputSchema = z
   .object({
     provider_adapter: adminModelProviderAdapterSchema,
     provider_model: providerFieldSchema,
+    max_input_tokens: adminModelMaxInputTokensSchema,
     settings: safeAdminModelSettingsSchema,
     supports_vision: z.boolean(),
     api_key: apiKeyInputSchema,

@@ -7,7 +7,7 @@ import shlex
 import threading
 from collections.abc import Callable, Mapping
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from langchain.tools import tool
 from langchain_core.messages import ToolMessage
@@ -599,6 +599,94 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
             return result
 
     return path
+
+
+_DELEGATED_OUTPUT_RUNTIME_PREFIX = "/mnt/user-data/workspace/.deerflow/subagents/"
+_DELEGATED_HIDDEN_RUNTIME_ROOT = "/mnt/user-data/workspace/.deerflow"
+_DELEGATED_INTERNAL_ALIAS_ROOT = "/mnt/user-data/workspace/.tool-results"
+
+
+def delegated_output_root(runtime: Runtime | None) -> str | None:
+    """Return the Worker-issued per-Task output view, if this is a delegate."""
+
+    context = getattr(runtime, "context", None)
+    authority = require_private_file_authority(context or {})
+    if authority is None:
+        return None
+    raw = getattr(authority, "delegated_output_root", None)
+    if raw is None:
+        return None
+    if type(raw) is not str:
+        raise SandboxRuntimeError("Invalid delegated output view")
+    path = PurePosixPath(raw)
+    relative = raw.removeprefix(_DELEGATED_OUTPUT_RUNTIME_PREFIX)
+    parts = relative.split("/")
+    if (
+        not raw.startswith(_DELEGATED_OUTPUT_RUNTIME_PREFIX)
+        or path.as_posix() != raw
+        or ".." in path.parts
+        or len(parts) != 2
+        or len(parts[0]) != 32
+        or any(character not in "0123456789abcdef" for character in parts[0])
+        or parts[1] != "outputs"
+    ):
+        raise SandboxRuntimeError("Invalid delegated output view")
+    return raw
+
+
+def resolve_delegated_tool_path(
+    runtime: Runtime | None,
+    path: str,
+) -> str:
+    """Map the delegate's virtual outputs to its exact private scratch view."""
+
+    output_root = delegated_output_root(runtime)
+    if output_root is None:
+        return path
+    if type(path) is not str or not path.startswith("/") or "\\" in path:
+        raise PermissionError(
+            "Delegated private file operations require an absolute path",
+        )
+    candidate = PurePosixPath(path)
+    if candidate.as_posix() != path or ".." in candidate.parts:
+        raise PermissionError("Invalid delegated private file path")
+
+    if path == _DELEGATED_HIDDEN_RUNTIME_ROOT or path.startswith(
+        f"{_DELEGATED_HIDDEN_RUNTIME_ROOT}/",
+    ):
+        raise PermissionError(
+            "Delegated runtime state is not directly accessible",
+        )
+
+    capture_root = str(PurePosixPath(output_root).parent)
+    delegated_internal_root = f"{capture_root}/internal/.tool-results"
+    if path == _DELEGATED_INTERNAL_ALIAS_ROOT:
+        return delegated_internal_root
+    if path.startswith(f"{_DELEGATED_INTERNAL_ALIAS_ROOT}/"):
+        relative = path.removeprefix(f"{_DELEGATED_INTERNAL_ALIAS_ROOT}/")
+        return f"{delegated_internal_root}/{relative}"
+
+    canonical_outputs = "/mnt/user-data/outputs"
+    if path == canonical_outputs:
+        return output_root
+    if path.startswith(f"{canonical_outputs}/"):
+        return f"{output_root}/{path.removeprefix(f'{canonical_outputs}/')}"
+
+    return path
+
+
+def _delegated_result_exposes_hidden_runtime(
+    runtime: Runtime | None,
+    path: str,
+) -> bool:
+    """Hide runtime-owned scratch when a delegate scans a workspace ancestor."""
+
+    if delegated_output_root(runtime) is None:
+        return False
+    normalized = path.replace("\\", "/").rstrip("/")
+    return normalized == _DELEGATED_HIDDEN_RUNTIME_ROOT or normalized.startswith(
+        f"{_DELEGATED_HIDDEN_RUNTIME_ROOT}/",
+    )
 
 
 def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str, str]:
@@ -2151,15 +2239,15 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
     """
     requested_path = path
     try:
+        path = resolve_delegated_tool_path(runtime, path)
         # Block access to disabled skill directories
         if not _is_trusted_run_scoped_skill_path(runtime, path) and _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        thread_data = None
+        thread_data = get_thread_data(runtime) if is_local_sandbox(runtime) or delegated_output_root(runtime) is not None else None
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
             if _is_skills_path(path) or _is_acp_workspace_path(path):
                 # Skills and ACP workspace paths are resolved by the sandbox's
@@ -2174,9 +2262,12 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
-        output = "\n".join(children)
         if thread_data is not None:
-            output = mask_local_paths_in_output(output, thread_data)
+            children = [mask_local_paths_in_output(child, thread_data) for child in children]
+        children = [child for child in children if not _delegated_result_exposes_hidden_runtime(runtime, child)]
+        if not children:
+            return "(empty)"
+        output = "\n".join(children)
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -2222,6 +2313,7 @@ def glob_tool(
     """
     requested_path = path
     try:
+        path = resolve_delegated_tool_path(runtime, path)
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         effective_max_results = _resolve_max_results(
@@ -2230,15 +2322,15 @@ def glob_tool(
             default=_DEFAULT_GLOB_MAX_RESULTS,
             upper_bound=_MAX_GLOB_MAX_RESULTS,
         )
-        thread_data = None
+        thread_data = get_thread_data(runtime) if is_local_sandbox(runtime) or delegated_output_root(runtime) is not None else None
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
             if thread_data is None:
                 raise SandboxRuntimeError("Thread data not available for local sandbox")
             path = _resolve_local_read_path(path, thread_data)
         matches, truncated = sandbox.glob(path, pattern, include_dirs=include_dirs, max_results=effective_max_results)
         if thread_data is not None:
             matches = [mask_local_paths_in_output(match, thread_data) for match in matches]
+        matches = [match for match in matches if not _delegated_result_exposes_hidden_runtime(runtime, match)]
         return _format_glob_results(requested_path, matches, truncated)
     except SandboxError as e:
         return f"Error: {e}"
@@ -2298,6 +2390,7 @@ def grep_tool(
     """
     requested_path = path
     try:
+        path = resolve_delegated_tool_path(runtime, path)
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         effective_max_results = _resolve_max_results(
@@ -2306,9 +2399,8 @@ def grep_tool(
             default=_DEFAULT_GREP_MAX_RESULTS,
             upper_bound=_MAX_GREP_MAX_RESULTS,
         )
-        thread_data = None
+        thread_data = get_thread_data(runtime) if is_local_sandbox(runtime) or delegated_output_root(runtime) is not None else None
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
             if thread_data is None:
                 raise SandboxRuntimeError("Thread data not available for local sandbox")
             path = _resolve_local_read_path(path, thread_data)
@@ -2329,6 +2421,14 @@ def grep_tool(
                 )
                 for match in matches
             ]
+        matches = [
+            match
+            for match in matches
+            if not _delegated_result_exposes_hidden_runtime(
+                runtime,
+                match.path,
+            )
+        ]
         return _format_grep_results(requested_path, matches, truncated)
     except SandboxError as e:
         return f"Error: {e}"
@@ -2378,6 +2478,7 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
     ``FileNotFoundError`` when the file does not exist; other sandbox errors
     propagate to the caller.
     """
+    path = resolve_delegated_tool_path(runtime, path)
     sandbox = ensure_sandbox_initialized(runtime)
     ensure_thread_directories_exist(runtime)
     if is_local_sandbox(runtime):
@@ -2505,8 +2606,9 @@ def write_file_tool(
     FINAL DELIVERABLES:
     If the user asks you to create or write a file, including a source-code file,
     script, configuration, or document, write the completed file under
-    `/mnt/user-data/outputs` and call `present_files` before the final response.
-    Use `/mnt/user-data/workspace` only for temporary or intermediate files.
+    `/mnt/user-data/outputs`. Use `/mnt/user-data/workspace` only for temporary or
+    intermediate files. Follow the current Agent's system instructions for the
+    role-specific handoff after writing; writing a file alone does not publish it.
 
     SIZE POLICY (issue #3189):
     A single non-append write_file call must not exceed 80 KB of UTF-8 content.
@@ -2549,6 +2651,7 @@ def write_file_tool(
                 )
     try:
         requested_path = path
+        path = resolve_delegated_tool_path(runtime, path)
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         if is_local_sandbox(runtime):
@@ -2623,6 +2726,7 @@ def str_replace_tool(
     """
     requested_path = path
     try:
+        path = resolve_delegated_tool_path(runtime, path)
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         if is_local_sandbox(runtime):

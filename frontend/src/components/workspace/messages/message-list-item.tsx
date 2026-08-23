@@ -46,7 +46,6 @@ import {
 import { SafeReasoningContent } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
-import { WorkspaceChangeBadge } from "../changes";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
@@ -61,7 +60,6 @@ export function MessageListItem({
   className,
   message,
   isLoading,
-  runId,
   threadId,
   showCopyButton = true,
   showReasoning = true,
@@ -75,7 +73,6 @@ export function MessageListItem({
   message: Message;
   isLoading?: boolean;
   threadId: string;
-  runId?: string;
   showCopyButton?: boolean;
   showReasoning?: boolean;
   canEdit?: boolean;
@@ -139,7 +136,6 @@ export function MessageListItem({
         message={message}
         isLoading={isLoading}
         threadId={threadId}
-        runId={runId}
         showReasoning={showReasoning}
         editState={
           isHuman && isEditing
@@ -270,7 +266,6 @@ function MessageContent_({
   message,
   isLoading = false,
   threadId,
-  runId,
   showReasoning,
   editState,
 }: {
@@ -278,7 +273,6 @@ function MessageContent_({
   message: Message;
   isLoading?: boolean;
   threadId: string;
-  runId?: string;
   showReasoning: boolean;
   editState?: {
     draft: string;
@@ -475,13 +469,6 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
-      {message.type === "ai" && (
-        <WorkspaceChangeBadge
-          threadId={threadId}
-          runId={runId}
-          disabled={isLoading}
-        />
-      )}
     </AIElementMessageContent>
   );
 }

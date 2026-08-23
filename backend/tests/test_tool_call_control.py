@@ -22,11 +22,9 @@ from deerflow.agents.middlewares.tool_call_control import (
     FixedToolCallControlScope,
     PerInvocationToolCallControlScope,
     RepeatedCallPolicy,
-    ResolvedToolCallBudgetPolicy,
     ResolvedToolCallControlPolicy,
     ToolCallControlBinding,
     ToolCallControlReasonCode,
-    ToolCallLimit,
     build_tool_call_control,
     default_graph_tool_call_control_profile,
 )
@@ -35,7 +33,6 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
 )
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.runtime.runs.execution_contracts import RunSemanticStopRecorder
-from deerflow.vision.dispatch import MAX_VISION_CALLS_PER_RUN
 
 
 class _ToolBindingFakeModel(GenericFakeChatModel):
@@ -64,30 +61,18 @@ def _model(responses: Iterable[AIMessage]) -> _ToolBindingFakeModel:
     return model
 
 
-def _policy(*, web_warn: int = 6, web_hard: int = 10) -> ResolvedToolCallControlPolicy:
+def _policy(*, internal_tool_call_limit: int = 10) -> ResolvedToolCallControlPolicy:
     return ResolvedToolCallControlPolicy(
         repeated_calls=RepeatedCallPolicy(
             warn_threshold=100,
             hard_limit=101,
             window_size=200,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=100, hard_limit=101),
-            tools={
-                "web_search": ToolCallLimit(
-                    warn_threshold=web_warn,
-                    hard_limit=web_hard,
-                ),
-                "web_fetch": ToolCallLimit(
-                    warn_threshold=web_warn,
-                    hard_limit=web_hard,
-                ),
-            },
-        ),
+        internal_tool_call_limit=internal_tool_call_limit,
     )
 
 
-def test_batch_budget_admits_exact_prefix_and_keeps_other_tools() -> None:
+def test_shared_limit_admits_exact_prefix_across_different_tools() -> None:
     web_queries: list[str] = []
     fetched_urls: list[str] = []
     written_paths: list[str] = []
@@ -138,7 +123,7 @@ def test_batch_budget_admits_exact_prefix_and_keeps_other_tools() -> None:
                 },
             ],
         )
-        for index in range(9)
+        for index in range(2)
     ]
     responses.extend(
         [
@@ -157,24 +142,9 @@ def test_batch_budget_admits_exact_prefix_and_keeps_other_tools() -> None:
                         "id": "boundary-2",
                     },
                     {
-                        "name": "web_search",
-                        "args": {"query": "rejected-2"},
-                        "id": "boundary-3",
-                    },
-                    {
                         "name": "web_fetch",
                         "args": {"url": "https://example.test/admitted"},
                         "id": "boundary-fetch-1",
-                    },
-                    {
-                        "name": "web_fetch",
-                        "args": {"url": "https://example.test/rejected-1"},
-                        "id": "boundary-fetch-2",
-                    },
-                    {
-                        "name": "web_fetch",
-                        "args": {"url": "https://example.test/rejected-2"},
-                        "id": "boundary-fetch-3",
                     },
                     {
                         "name": "write_file",
@@ -197,7 +167,7 @@ def test_batch_budget_admits_exact_prefix_and_keeps_other_tools() -> None:
         tools=[web_search, web_fetch, write_file, present_files],
         middleware=[
             build_tool_call_control(
-                _policy(),
+                _policy(internal_tool_call_limit=7),
                 ToolCallControlBinding(
                     role="lead",
                     scope=FixedToolCallControlScope("run-1"),
@@ -212,15 +182,24 @@ def test_batch_budget_admits_exact_prefix_and_keeps_other_tools() -> None:
         context={"run_id": "run-1"},
     )
 
-    assert web_queries == [*[f"prior-{index}" for index in range(9)], "admitted"]
+    assert web_queries == [
+        *[f"prior-{index}" for index in range(2)],
+        "admitted",
+        "rejected-1",
+    ]
     assert fetched_urls == [
-        *[f"https://example.test/prior-{index}" for index in range(9)],
+        *[f"https://example.test/prior-{index}" for index in range(2)],
         "https://example.test/admitted",
     ]
-    assert written_paths == ["outputs/report.md"]
-    assert presented_paths == ["outputs/report.md"]
+    assert written_paths == []
+    assert presented_paths == []
     assert result["messages"][-1].content == "research complete"
-    assert model.bound_tool_names[-1] == ["write_file", "present_files"]
+    boundary = next(message for message in result["messages"] if isinstance(message, AIMessage) and message.id == "boundary-batch")
+    assert [call["id"] for call in boundary.tool_calls] == [
+        "boundary-1",
+        "boundary-2",
+        "boundary-fetch-1",
+    ]
 
 
 def test_random_batches_never_admit_more_than_the_hard_limit() -> None:
@@ -236,18 +215,7 @@ def test_random_batches_never_admit_more_than_the_hard_limit() -> None:
                     hard_limit=2,
                     window_size=2,
                 ),
-                tool_budget=ResolvedToolCallBudgetPolicy(
-                    default=ToolCallLimit(
-                        warn_threshold=100,
-                        hard_limit=101,
-                    ),
-                    tools={
-                        "web_search": ToolCallLimit(
-                            warn_threshold=1,
-                            hard_limit=hard_limit,
-                        )
-                    },
-                ),
+                internal_tool_call_limit=hard_limit,
             ),
             ToolCallControlBinding(
                 role="lead",
@@ -282,10 +250,8 @@ def test_random_batches_never_admit_more_than_the_hard_limit() -> None:
             rewritten = update["messages"][0]
             admitted_total += len(rewritten.tool_calls)
             control_state = update[TOOL_CALL_CONTROL_STATE_KEY]
-            assert admitted_total == control_state["admitted_counts"].get(
-                "web_search",
-                0,
-            )
+            assert admitted_total == control_state["admitted_count"]
+            assert control_state["limit_exhausted"] is (admitted_total == hard_limit)
             assert admitted_total <= hard_limit
 
 
@@ -308,10 +274,7 @@ async def test_failed_tool_execution_still_consumes_its_admitted_budget() -> Non
             hard_limit=2,
             window_size=2,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=1, hard_limit=1),
-            tools={},
-        ),
+        internal_tool_call_limit=1,
     )
     agent = create_agent(
         model=_model(
@@ -365,7 +328,7 @@ async def test_failed_tool_execution_still_consumes_its_admitted_budget() -> Non
     assert result["messages"][-1].content == "continued with the failure fact"
 
 
-def test_budget_warning_is_advisory_after_tool_message_pairing() -> None:
+def test_limit_exhaustion_notice_follows_tool_message_pairing() -> None:
     calls: list[str] = []
     observations: list[object] = []
 
@@ -397,7 +360,7 @@ def test_budget_warning_is_advisory_after_tool_message_pairing() -> None:
     responses.extend(
         [
             AIMessage(
-                id="warning-batch",
+                id="limit-batch",
                 content="",
                 tool_calls=[
                     {
@@ -408,7 +371,7 @@ def test_budget_warning_is_advisory_after_tool_message_pairing() -> None:
                     for index in range(3)
                 ],
             ),
-            AIMessage(id="final", content="continued after the advisory"),
+            AIMessage(id="final", content="continued after exhaustion"),
         ]
     )
     model = _model(responses)
@@ -417,7 +380,7 @@ def test_budget_warning_is_advisory_after_tool_message_pairing() -> None:
         tools=[web_search],
         middleware=[
             build_tool_call_control(
-                _policy(),
+                _policy(internal_tool_call_limit=8),
                 ToolCallControlBinding(
                     role="subagent",
                     scope=FixedToolCallControlScope("execution-1"),
@@ -435,18 +398,17 @@ def test_budget_warning_is_advisory_after_tool_message_pairing() -> None:
 
     assert calls[:5] == [f"prior-{index}" for index in range(5)]
     assert sorted(calls[5:]) == [f"boundary-{index}" for index in range(3)]
-    assert result["messages"][-1].content == "continued after the advisory"
-    warning_request = model.seen_messages[-1]
-    assert isinstance(warning_request[-2], ToolMessage)
-    assert isinstance(warning_request[-1], HumanMessage)
-    warning = str(warning_request[-1].content)
-    assert "8 of 10 web_search calls" in warning
-    assert "Stop calling tools" not in warning
-    assert "produce your final answer now" not in warning
+    assert result["messages"][-1].content == "continued after exhaustion"
+    exhausted_request = model.seen_messages[-1]
+    assert isinstance(exhausted_request[-2], ToolMessage)
+    assert isinstance(exhausted_request[-1], HumanMessage)
+    notice = str(exhausted_request[-1].content)
+    assert "shared internal tool-call limit" in notice
+    assert "8 admitted calls" in notice
 
     assert len(observations) == 1
     observation = observations[0]
-    assert observation.reason_code == "tool_budget_warning"
+    assert observation.reason_code == "tool_budget_exhausted"
     assert observation.count_before == 5
     assert observation.proposed == 3
     assert observation.admitted == 3
@@ -641,7 +603,7 @@ def test_checkpoint_replay_does_not_consume_or_observe_twice() -> None:
             observations.append(observation)
 
     middleware = build_tool_call_control(
-        _policy(web_warn=2, web_hard=10),
+        _policy(internal_tool_call_limit=3),
         ToolCallControlBinding(
             role="subagent",
             scope=FixedToolCallControlScope("execution-replay"),
@@ -673,14 +635,15 @@ def test_checkpoint_replay_does_not_consume_or_observe_twice() -> None:
     replay = middleware.after_model(replay_state, Runtime(context={}))
 
     assert replay is not None
-    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {"web_search": 3}
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 3
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is True
     assert len(observations) == 1
-    assert observations[0].reason_code == "tool_budget_warning"
+    assert observations[0].reason_code == "tool_budget_exhausted"
 
 
 def test_checkpoint_replay_of_a_truncated_batch_keeps_the_same_occurrence() -> None:
     middleware = build_tool_call_control(
-        _policy(web_warn=6, web_hard=10),
+        _policy(internal_tool_call_limit=10),
         ToolCallControlBinding(
             role="lead",
             scope=FixedToolCallControlScope("run-truncated-replay"),
@@ -689,7 +652,7 @@ def test_checkpoint_replay_of_a_truncated_batch_keeps_the_same_occurrence() -> N
     initialized = middleware.before_agent({}, Runtime(context={}))
     assert initialized is not None
     prior_facts = dict(initialized[TOOL_CALL_CONTROL_STATE_KEY])
-    prior_facts["admitted_counts"] = {"web_search": 9}
+    prior_facts["admitted_count"] = 9
     proposal = AIMessage(
         id="proposal-truncated",
         content="",
@@ -714,9 +677,8 @@ def test_checkpoint_replay_of_a_truncated_batch_keeps_the_same_occurrence() -> N
     assert first is not None
     post_control = first["messages"][0]
     assert [call["id"] for call in post_control.tool_calls] == ["call-0"]
-    assert first[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {
-        "web_search": 10,
-    }
+    assert first[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 10
+    assert first[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is True
 
     replay = middleware.after_model(
         {
@@ -728,9 +690,8 @@ def test_checkpoint_replay_of_a_truncated_batch_keeps_the_same_occurrence() -> N
 
     assert replay is not None
     assert [call["id"] for call in replay["messages"][0].tool_calls] == ["call-0"]
-    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {
-        "web_search": 10,
-    }
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 10
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is True
 
 
 def test_repeated_call_hard_limit_runs_one_tool_free_finalization() -> None:
@@ -754,10 +715,7 @@ def test_repeated_call_hard_limit_runs_one_tool_free_finalization() -> None:
             hard_limit=5,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=100, hard_limit=101),
-            tools={},
-        ),
+        internal_tool_call_limit=101,
     )
     responses = [
         AIMessage(
@@ -825,10 +783,7 @@ def test_repeated_call_identity_is_independent_of_batch_permutation() -> None:
             hard_limit=5,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=100, hard_limit=101),
-            tools={},
-        ),
+        internal_tool_call_limit=101,
     )
     responses = []
     for index in range(5):
@@ -889,10 +844,7 @@ def test_web_search_auxiliary_arguments_are_part_of_repeated_call_identity() -> 
                 hard_limit=5,
                 window_size=20,
             ),
-            tool_budget=ResolvedToolCallBudgetPolicy(
-                default=ToolCallLimit(warn_threshold=100, hard_limit=101),
-                tools={},
-            ),
+            internal_tool_call_limit=101,
         ),
         ToolCallControlBinding(
             role="subagent",
@@ -950,10 +902,7 @@ def test_ls_auxiliary_arguments_are_part_of_repeated_call_identity() -> None:
                 hard_limit=5,
                 window_size=20,
             ),
-            tool_budget=ResolvedToolCallBudgetPolicy(
-                default=ToolCallLimit(warn_threshold=100, hard_limit=101),
-                tools={},
-            ),
+            internal_tool_call_limit=101,
         ),
         ToolCallControlBinding(
             role="subagent",
@@ -1014,10 +963,7 @@ def test_different_tool_arguments_are_productive_progress(
             hard_limit=5,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=100, hard_limit=101),
-            tools={},
-        ),
+        internal_tool_call_limit=101,
     )
     middleware = build_tool_call_control(
         policy,
@@ -1115,10 +1061,7 @@ def test_fresh_authenticated_reads_and_distinct_writes_are_progress() -> None:
             hard_limit=5,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=100, hard_limit=101),
-            tools={},
-        ),
+        internal_tool_call_limit=101,
     )
     middleware = build_tool_call_control(
         policy,
@@ -1170,10 +1113,7 @@ def test_disabled_repetition_keeps_tool_budget_enforcement_active() -> None:
             hard_limit=2,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=1, hard_limit=2),
-            tools={},
-        ),
+        internal_tool_call_limit=2,
     )
     responses = [
         AIMessage(
@@ -1214,10 +1154,7 @@ def test_disabled_repetition_keeps_tool_budget_enforcement_active() -> None:
     assert result["messages"][-1].content == "budget-limited answer"
     reason_codes = [observation.reason_code for observation in observations]
     assert reason_codes
-    assert set(reason_codes) <= {
-        "tool_budget_warning",
-        "tool_budget_exhausted",
-    }
+    assert set(reason_codes) == {"tool_budget_exhausted"}
     assert "tool_budget_exhausted" in reason_codes
 
 
@@ -1234,7 +1171,7 @@ def test_private_state_rejects_a_different_frozen_policy() -> None:
         ],
     )
     original = build_tool_call_control(
-        _policy(web_warn=6, web_hard=10),
+        _policy(internal_tool_call_limit=10),
         ToolCallControlBinding(
             role="lead",
             scope=FixedToolCallControlScope("run-policy"),
@@ -1246,7 +1183,7 @@ def test_private_state_rejects_a_different_frozen_policy() -> None:
     )
     assert first is not None
     changed = build_tool_call_control(
-        _policy(web_warn=12, web_hard=20),
+        _policy(internal_tool_call_limit=20),
         ToolCallControlBinding(
             role="lead",
             scope=FixedToolCallControlScope("run-policy"),
@@ -1296,10 +1233,7 @@ def test_loop_finalization_rejects_and_suppresses_another_tool_proposal() -> Non
             hard_limit=2,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=100, hard_limit=101),
-            tools={},
-        ),
+        internal_tool_call_limit=101,
     )
     agent = create_agent(
         model=_model(
@@ -1386,10 +1320,7 @@ def test_distinct_exhausted_proposals_have_distinct_observation_ids() -> None:
                 hard_limit=2,
                 window_size=20,
             ),
-            tool_budget=ResolvedToolCallBudgetPolicy(
-                default=ToolCallLimit(warn_threshold=1, hard_limit=1),
-                tools={},
-            ),
+            internal_tool_call_limit=1,
         ),
         ToolCallControlBinding(
             role="lead",
@@ -1457,10 +1388,7 @@ async def test_async_budget_path_matches_exact_batch_enforcement() -> None:
             hard_limit=2,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=1, hard_limit=2),
-            tools={},
-        ),
+        internal_tool_call_limit=2,
     )
     agent = create_agent(
         model=_model(
@@ -1538,10 +1466,7 @@ def test_cached_graph_resets_budget_for_each_explicit_invocation_scope() -> None
             hard_limit=2,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=1, hard_limit=1),
-            tools={},
-        ),
+        internal_tool_call_limit=1,
     )
     model = _model(
         [
@@ -1613,10 +1538,7 @@ def test_fixed_execution_scope_keeps_budget_across_graph_turns() -> None:
                 hard_limit=2,
                 window_size=20,
             ),
-            tool_budget=ResolvedToolCallBudgetPolicy(
-                default=ToolCallLimit(warn_threshold=1, hard_limit=1),
-                tools={},
-            ),
+            internal_tool_call_limit=1,
         ),
         ToolCallControlBinding(
             role="lead",
@@ -1664,7 +1586,8 @@ def test_fixed_execution_scope_keeps_budget_across_graph_turns() -> None:
     )
 
     assert second is not None
-    assert second[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {"lookup": 1}
+    assert second[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 1
+    assert second[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is True
     assert second["messages"][-1].tool_calls == []
 
 
@@ -1701,7 +1624,7 @@ def test_missing_explicit_invocation_scope_fails_before_model_call() -> None:
 
 def test_compacted_checkpoint_replay_uses_server_receipt_not_message_index() -> None:
     middleware = build_tool_call_control(
-        _policy(web_warn=2, web_hard=10),
+        _policy(internal_tool_call_limit=10),
         ToolCallControlBinding(
             role="lead",
             scope=FixedToolCallControlScope("run-compacted"),
@@ -1736,12 +1659,13 @@ def test_compacted_checkpoint_replay_uses_server_receipt_not_message_index() -> 
     )
 
     assert replay is not None
-    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {"web_search": 3}
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 3
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is False
 
 
 def test_compacted_checkpoint_counts_new_unstamped_proposal_at_reused_index() -> None:
     middleware = build_tool_call_control(
-        _policy(web_warn=9, web_hard=10),
+        _policy(internal_tool_call_limit=10),
         ToolCallControlBinding(
             role="lead",
             scope=FixedToolCallControlScope("run-compacted-new-proposal"),
@@ -1773,9 +1697,8 @@ def test_compacted_checkpoint_counts_new_unstamped_proposal_at_reused_index() ->
         Runtime(context={}),
     )
     assert replay is not None
-    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {
-        "web_search": 1,
-    }
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 1
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is False
     assert len(replay[TOOL_CALL_CONTROL_STATE_KEY]["recent_fingerprints"]) == 1
 
     fresh = middleware.after_model(
@@ -1790,14 +1713,13 @@ def test_compacted_checkpoint_counts_new_unstamped_proposal_at_reused_index() ->
     )
 
     assert fresh is not None
-    assert fresh[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {
-        "web_search": 2,
-    }
+    assert fresh[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 2
+    assert fresh[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is False
     assert len(fresh[TOOL_CALL_CONTROL_STATE_KEY]["recent_fingerprints"]) == 2
     assert fresh["messages"][-1].additional_kwargs[TOOL_CALL_CONTROL_RECEIPT_KEY] != stamped.additional_kwargs[TOOL_CALL_CONTROL_RECEIPT_KEY]
 
 
-def test_task_delegation_is_not_charged_to_the_general_tool_budget() -> None:
+def test_task_delegation_counts_against_the_shared_limit() -> None:
     calls: list[str] = []
 
     @tool
@@ -1814,10 +1736,7 @@ def test_task_delegation_is_not_charged_to_the_general_tool_budget() -> None:
             hard_limit=2,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=1, hard_limit=1),
-            tools={},
-        ),
+        internal_tool_call_limit=1,
     )
     agent = create_agent(
         model=_model(
@@ -1864,7 +1783,7 @@ def test_task_delegation_is_not_charged_to_the_general_tool_budget() -> None:
         context={"run_id": "run-task-policy"},
     )
 
-    assert calls == ["first", "second"]
+    assert calls == ["first"]
     assert result["messages"][-1].content == "delegations complete"
 
 
@@ -1890,10 +1809,7 @@ def test_observer_failure_does_not_change_budget_enforcement() -> None:
             hard_limit=2,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=1, hard_limit=1),
-            tools={},
-        ),
+        internal_tool_call_limit=1,
     )
     agent = create_agent(
         model=_model(
@@ -1955,10 +1871,7 @@ def test_observer_failure_does_not_change_repeated_call_enforcement() -> None:
             hard_limit=2,
             window_size=2,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=100, hard_limit=101),
-            tools={},
-        ),
+        internal_tool_call_limit=101,
     )
     agent = create_agent(
         model=_model(
@@ -2003,65 +1916,30 @@ def test_reason_code_contract_is_closed() -> None:
     assert set(get_args(ToolCallControlReasonCode)) == {
         "repeated_call_warning",
         "repeated_call_limit",
-        "tool_budget_warning",
         "tool_budget_exhausted",
     }
 
 
 @pytest.mark.parametrize(
-    ("workload_profile", "lead_web", "subagent_web"),
-    [
-        ("interactive", (6, 10), (6, 10)),
-        ("research", (20, 30), (12, 20)),
-    ],
+    "workload_profile",
+    ["interactive", "research"],
 )
-def test_default_graph_profile_matches_policy_v4_defaults(
+def test_default_graph_profile_uses_one_shared_limit(
     workload_profile: str,
-    lead_web: tuple[int, int],
-    subagent_web: tuple[int, int],
 ) -> None:
     profile = default_graph_tool_call_control_profile(workload_profile)  # type: ignore[arg-type]
 
     assert profile.workload_profile == workload_profile
-    assert (
-        profile.lead.tool_budget.limit_for("web_search").warn_threshold,
-        profile.lead.tool_budget.limit_for("web_search").hard_limit,
-    ) == lead_web
-    assert (
-        profile.subagent.tool_budget.limit_for("web_fetch").warn_threshold,
-        profile.subagent.tool_budget.limit_for("web_fetch").hard_limit,
-    ) == subagent_web
-    assert profile.lead.tool_budget.default == ToolCallLimit(30, 50)
-    assert profile.subagent.tool_budget.limit_for("recall_memory") == ToolCallLimit(
-        6,
-        10,
-    )
-    assert profile.lead.tool_budget.limit_for("inspect_image") == ToolCallLimit(
-        6,
-        MAX_VISION_CALLS_PER_RUN,
-    )
+    assert profile.lead is profile.subagent
+    assert profile.policy.internal_tool_call_limit == 200
     assert profile.lead.repeated_calls == RepeatedCallPolicy(
         warn_threshold=3,
-        hard_limit=5,
+        hard_limit=20,
         window_size=20,
     )
 
 
-def test_inspect_image_budget_cannot_exceed_the_dispatch_technical_cap() -> None:
-    budget = ResolvedToolCallBudgetPolicy(
-        default=ToolCallLimit(warn_threshold=30, hard_limit=50),
-        tools={
-            "inspect_image": ToolCallLimit(
-                warn_threshold=6,
-                hard_limit=50,
-            )
-        },
-    )
-
-    assert budget.limit_for("inspect_image") == ToolCallLimit(
-        warn_threshold=6,
-        hard_limit=8,
-    )
+def test_inspect_image_counts_against_the_shared_limit() -> None:
     middleware = build_tool_call_control(
         ResolvedToolCallControlPolicy(
             repeated_calls=RepeatedCallPolicy(
@@ -2070,7 +1948,7 @@ def test_inspect_image_budget_cannot_exceed_the_dispatch_technical_cap() -> None
                 hard_limit=2,
                 window_size=2,
             ),
-            tool_budget=budget,
+            internal_tool_call_limit=5,
         ),
         ToolCallControlBinding(
             role="lead",
@@ -2089,7 +1967,7 @@ def test_inspect_image_budget_cannot_exceed_the_dispatch_technical_cap() -> None
                             "args": {"image_path": f"uploads/{index}.png"},
                             "id": f"inspect-{index}",
                         }
-                        for index in range(9)
+                        for index in range(6)
                     ],
                 )
             ]
@@ -2098,27 +1976,9 @@ def test_inspect_image_budget_cannot_exceed_the_dispatch_technical_cap() -> None
     )
 
     assert update is not None
-    assert len(update["messages"][0].tool_calls) == MAX_VISION_CALLS_PER_RUN
-    assert update[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {
-        "inspect_image": MAX_VISION_CALLS_PER_RUN,
-    }
-
-
-def test_inspect_image_budget_preserves_a_stricter_policy_limit() -> None:
-    policy = ResolvedToolCallBudgetPolicy(
-        default=ToolCallLimit(warn_threshold=30, hard_limit=50),
-        tools={
-            "inspect_image": ToolCallLimit(
-                warn_threshold=3,
-                hard_limit=5,
-            )
-        },
-    )
-
-    assert policy.limit_for("inspect_image") == ToolCallLimit(
-        warn_threshold=3,
-        hard_limit=5,
-    )
+    assert len(update["messages"][0].tool_calls) == 5
+    assert update[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 5
+    assert update[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is True
 
 
 def test_default_graph_profile_can_disable_repeated_call_enforcement() -> None:
@@ -2147,10 +2007,7 @@ def test_subagent_tool_budget_exhaustion_records_additive_stop_reason() -> None:
             hard_limit=2,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=1, hard_limit=1),
-            tools={},
-        ),
+        internal_tool_call_limit=1,
     )
     middleware = build_tool_call_control(
         policy,
@@ -2206,10 +2063,7 @@ def test_subagent_loop_stop_reason_wins_after_tool_budget_exhaustion() -> None:
             hard_limit=2,
             window_size=20,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(warn_threshold=1, hard_limit=1),
-            tools={},
-        ),
+        internal_tool_call_limit=1,
     )
     middleware = build_tool_call_control(
         policy,
@@ -2269,10 +2123,7 @@ def test_before_agent_resets_well_formed_state_for_a_new_invocation_scope() -> N
                 hard_limit=2,
                 window_size=20,
             ),
-            tool_budget=ResolvedToolCallBudgetPolicy(
-                default=ToolCallLimit(warn_threshold=1, hard_limit=2),
-                tools={},
-            ),
+            internal_tool_call_limit=2,
         ),
         ToolCallControlBinding(
             role="lead",
@@ -2312,7 +2163,8 @@ def test_before_agent_resets_well_formed_state_for_a_new_invocation_scope() -> N
 
     assert reset is not None
     assert reset[TOOL_CALL_CONTROL_STATE_KEY]["scope_id"] == "run-b"
-    assert reset[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {}
+    assert reset[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 0
+    assert reset[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is False
 
 
 def test_before_agent_resets_a_prior_scope_when_workload_policy_changes() -> None:
@@ -2351,7 +2203,8 @@ def test_before_agent_resets_a_prior_scope_when_workload_policy_changes() -> Non
 
     assert reset is not None
     assert reset[TOOL_CALL_CONTROL_STATE_KEY]["scope_id"] == "invocation-b"
-    assert reset[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {}
+    assert reset[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 0
+    assert reset[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is False
 
 
 def test_before_agent_rejects_same_scope_policy_fingerprint_tampering() -> None:

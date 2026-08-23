@@ -14,11 +14,10 @@ from langchain_core.tools import tool
 from deerflow.agents.middlewares.tool_call_control import (
     RepeatedCallPolicy,
     ResolvedGraphToolCallControlProfile,
-    ResolvedToolCallBudgetPolicy,
     ResolvedToolCallControlPolicy,
+    RunToolCallLimitAuthority,
     ToolCallBudgetObservation,
     ToolCallControlObservation,
-    ToolCallLimit,
 )
 from deerflow.runtime.context_carrier import RuntimeContextCarrier
 from deerflow.subagents.binding import SdkFeatureSnapshot
@@ -56,23 +55,16 @@ def _profile() -> ResolvedGraphToolCallControlProfile:
             hard_limit=2,
             window_size=2,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(
-                warn_threshold=1,
-                hard_limit=2,
-            ),
-            tools={},
-        ),
+        internal_tool_call_limit=2,
     )
     return ResolvedGraphToolCallControlProfile(
         workload_profile="interactive",
-        lead=policy,
-        subagent=policy,
+        policy=policy,
     )
 
 
 @pytest.mark.asyncio
-async def test_three_tasks_use_distinct_internal_scopes_not_the_public_tool_call_id() -> None:
+async def test_three_tasks_share_parent_run_limit_but_keep_distinct_execution_scopes() -> None:
     tool_calls: list[str] = []
     observations: list[ToolCallControlObservation] = []
 
@@ -107,6 +99,7 @@ async def test_three_tasks_use_distinct_internal_scopes_not_the_public_tool_call
         loop_detection=True,
         token_budget=False,
     )
+    authority = RunToolCallLimitAuthority(hard_limit=2)
 
     def runner_factory() -> _SubagentGraphRunner:
         return _SubagentGraphRunner(
@@ -138,6 +131,8 @@ async def test_three_tasks_use_distinct_internal_scopes_not_the_public_tool_call
             tool_search_enabled=False,
             tool_call_control_profile=_profile(),
             tool_call_control_observer=Observer(),
+            tool_call_limit_authority=authority,
+            tool_call_limit_scope_id="parent-run-id",
         )
 
     binding = SubagentExecutionBinding(
@@ -172,5 +167,8 @@ async def test_three_tasks_use_distinct_internal_scopes_not_the_public_tool_call
     execution_scopes = {str(outcome.execution_id) for outcome in outcomes}
     assert len(execution_scopes) == 3
     assert _PUBLIC_TASK_TOOL_CALL_ID not in execution_scopes
-    assert {observation.scope_id for observation in observations if isinstance(observation, ToolCallBudgetObservation) and observation.reason_code == "tool_budget_warning"} == execution_scopes
-    assert tool_calls == ["delegated"] * 3
+    budget_observations = [observation for observation in observations if isinstance(observation, ToolCallBudgetObservation)]
+    assert {observation.scope_id for observation in budget_observations} <= execution_scopes
+    assert len(budget_observations) == 2
+    assert all(observation.count_after == 2 for observation in budget_observations)
+    assert tool_calls == ["delegated"] * 2

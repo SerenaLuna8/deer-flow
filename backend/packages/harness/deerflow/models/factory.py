@@ -22,6 +22,12 @@ _AGENT_MAX_TOKENS_PROVIDER_FIELDS = (
     "max_tokens",
     "max_output_tokens",
 )
+_DEEPSEEK_PROVIDER_ADAPTERS = frozenset({"deepseek", "patched_deepseek"})
+_DEEPSEEK_RUNTIME_REASONING_EFFORTS = {
+    "low": "low",
+    "medium": "high",
+    "high": "max",
+}
 
 
 class AgentModelSettingsUnsupported(ValueError):
@@ -334,6 +340,7 @@ def create_chat_model(
             "name",
             "display_name",
             "description",
+            "max_input_tokens",
             "supports_thinking",
             "supports_reasoning_effort",
             "when_thinking_enabled",
@@ -387,13 +394,30 @@ def create_chat_model(
         elif has_thinking_settings and effective_wte.get("thinking", {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
             model_settings_from_config["thinking"] = {"type": "disabled"}
+    has_runtime_reasoning_effort = "reasoning_effort" in kwargs
+    is_deepseek_adapter = model_config.system_provider_adapter in _DEEPSEEK_PROVIDER_ADAPTERS
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
-    elif "reasoning_effort" in kwargs:
+    elif is_deepseek_adapter and not thinking_enabled:
+        # DeepSeek's OpenAI-format API disables thinking through the dedicated
+        # thinking payload. Do not leak a catalog default effort into that call,
+        # even when this non-thinking caller has no explicit Run profile.
+        kwargs.pop("reasoning_effort", None)
+        model_settings_from_config.pop("reasoning_effort", None)
+    elif has_runtime_reasoning_effort:
         # The frontend supplies a per-run effort. Let it override the model
         # default instead of passing the same constructor argument twice.
         model_settings_from_config.pop("reasoning_effort", None)
+        if is_deepseek_adapter:
+            runtime_reasoning_effort = kwargs.pop("reasoning_effort")
+            if thinking_enabled:
+                try:
+                    kwargs["reasoning_effort"] = _DEEPSEEK_RUNTIME_REASONING_EFFORTS[runtime_reasoning_effort]
+                except (KeyError, TypeError):
+                    raise RuntimeModelSettingsUnsupported(
+                        "DeepSeek does not support the requested runtime reasoning effort",
+                    ) from None
 
     # Apply exact Agent/request sampling values only after every global model
     # profile and thinking-mode merge. This preserves the public precedence
@@ -429,6 +453,11 @@ def create_chat_model(
     _warn_unknown_model_settings(model_class, name, model_settings_from_config)
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
+    existing_profile = getattr(model_instance, "profile", None)
+    model_instance.profile = {
+        **(dict(existing_profile) if isinstance(existing_profile, Mapping) else {}),
+        "max_input_tokens": model_config.max_input_tokens,
+    }
 
     if attach_tracing:
         callbacks = build_tracing_callbacks()

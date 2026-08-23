@@ -39,6 +39,7 @@ from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.tool_call_control import (
     TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY,
     PerInvocationToolCallControlScope,
+    RunToolCallLimitAuthority,
     ToolCallControlBinding,
     ToolCallControlWorkloadProfile,
     build_tool_call_control,
@@ -319,12 +320,18 @@ class DeerFlowClient:
         tool_call_control_profile = default_graph_tool_call_control_profile(
             workload_profile,
         )
+        tool_call_limit_scope = PerInvocationToolCallControlScope()
+        tool_call_limit_authority = RunToolCallLimitAuthority(
+            hard_limit=tool_call_control_profile.policy.internal_tool_call_limit,
+        )
         tool_call_control = build_tool_call_control(
             tool_call_control_profile.lead,
             ToolCallControlBinding(
                 role="lead",
-                scope=PerInvocationToolCallControlScope(),
+                scope=tool_call_limit_scope,
                 workload_profile=workload_profile,
+                limit_authority=tool_call_limit_authority,
+                limit_scope=tool_call_limit_scope,
             ),
         )
 
@@ -361,6 +368,7 @@ class DeerFlowClient:
             build_middlewares(
                 config,
                 model_name=model_name,
+                context_model=lead_model,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
                 custom_middlewares=self._middlewares,
@@ -410,6 +418,8 @@ class DeerFlowClient:
                 available_skills=(tuple(sorted(self._available_skills)) if self._available_skills is not None else None),
             ),
             tool_call_control_profile=tool_call_control_profile,
+            tool_call_limit_authority=tool_call_limit_authority,
+            tool_call_limit_scope=tool_call_limit_scope,
         )
         final_tools = bind_task_tool_in_tools(final_tools, binding_factory)
         kwargs: dict[str, Any] = {

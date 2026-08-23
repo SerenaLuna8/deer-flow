@@ -43,6 +43,12 @@ from app.private_work.sandbox_files import (
     required_current_upload_snapshot_from_run_kwargs,
 )
 from app.private_work.snapshot_repository import RunSnapshotRepository
+from app.private_work.workload_profile import (
+    RUN_WORKLOAD_PROFILE_KWARG,
+    EffectiveRunWorkloadProfile,
+    RequestedRunWorkloadProfile,
+    persisted_run_workload_profile,
+)
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
@@ -262,6 +268,7 @@ def test_flash_and_image_profile_reach_openai_responses_payload() -> None:
         description="",
         use="langchain_openai:ChatOpenAI",
         model="gpt-5.6-luna",
+        max_input_tokens=64_000,
         api_key=SecretStr("unit-test-key"),
         base_url="https://opencode.ai/zen/v1",
         use_responses_api=True,
@@ -328,6 +335,10 @@ def _run_record(
             RUN_EXECUTION_PROFILE_KWARG: persisted_run_execution_profile(
                 requested,
                 effective,
+            ),
+            RUN_WORKLOAD_PROFILE_KWARG: persisted_run_workload_profile(
+                RequestedRunWorkloadProfile(),
+                EffectiveRunWorkloadProfile(name="interactive"),
             ),
         },
         origin_trace_id="a" * 32,
@@ -520,6 +531,7 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
         description="",
         use="support.fake_models:FakeVisionBridgeChatModel",
         model="sampling-test",
+        max_input_tokens=64_000,
         supports_thinking=True,
         supports_reasoning_effort=True,
     )
@@ -651,6 +663,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         description="",
         use="support.fake_models:FakeVisionBridgeChatModel",
         model="text-lead",
+        max_input_tokens=64_000,
         supports_vision=False,
     )
     lead_model._system_model_config_id = uuid.uuid4()
@@ -661,6 +674,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         description="",
         use="support.fake_models:FakeVisionBridgeChatModel",
         model="selected-visual-model",
+        max_input_tokens=64_000,
         supports_vision=True,
         **provider_settings,
     )
@@ -679,7 +693,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
     class RuntimePolicy:
         async def materialize_run_snapshot_envelope(self, **_kwargs):
             return MaterializedAgentRuntimePolicy(
-                schema_version=3,
+                schema_version=5,
                 value=runtime_policy,
             )
 
@@ -814,8 +828,8 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         PrivateRunVisionDispatchAuthority,
     )
     assert observed["tool_control_policy"].workload_profile == "interactive"
-    assert observed["tool_control_policy"].lead.tool_budget.limit_for("web_search").hard_limit == 10
-    assert observed["tool_control_policy"].subagent.tool_budget.limit_for("web_search").hard_limit == 10
+    assert observed["tool_control_policy"].lead.internal_tool_call_limit == 200
+    assert observed["tool_control_policy"].lead is observed["tool_control_policy"].subagent
     assert observed["max_concurrent_subagents"] == 3
     assert observed["max_total_subagents"] == 6
 

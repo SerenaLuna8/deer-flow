@@ -1,9 +1,12 @@
 import { describe, expect, test, rs } from "@rstest/core";
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import {
+  accountAgentRuntimeCacheHintSchema,
+  applyAccountAgentRuntimeCacheHint,
   applyProjectMemoryCacheChange,
   collectAccountProjectCacheScopes,
+  createAccountAgentRuntimeCacheHintSubscription,
   createProjectMemoryCacheHintSubscription,
   PROJECT_CACHE_HINT_CHANNEL,
   projectCacheHintSchema,
@@ -63,6 +66,18 @@ function hint(overrides: Record<string, unknown> = {}) {
     projectId: PROJECT_ID,
     domain: "memory",
     change: "pending",
+    ...overrides,
+  };
+}
+
+function agentRuntimeHint(overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: 1,
+    eventId: EVENT_ID,
+    sourceTabId: OTHER_TAB_ID,
+    accountId: ACCOUNT_ID,
+    domain: "agent_runtime",
+    change: "context_usage",
     ...overrides,
   };
 }
@@ -183,5 +198,135 @@ describe("project Memory freshness hints", () => {
       scope,
       { accountId: ACCOUNT_ID, projectId: OTHER_PROJECT_ID },
     ]);
+  });
+});
+
+describe("account agent_runtime freshness hints", () => {
+  test("publishes a content-free account hint and receives each sibling event once", () => {
+    const channel = new FakeChannel();
+    const onHint = rs.fn();
+    const subscription = createAccountAgentRuntimeCacheHintSubscription({
+      accountId: ACCOUNT_ID,
+      onHint,
+      channelFactory: (name) => {
+        expect(name).toBe(PROJECT_CACHE_HINT_CHANNEL);
+        return channel;
+      },
+      tabId: TAB_ID,
+      eventIdFactory: () => EVENT_ID,
+    });
+
+    expect(subscription.publish()).toEqual({
+      schemaVersion: 1,
+      eventId: EVENT_ID,
+      sourceTabId: TAB_ID,
+      accountId: ACCOUNT_ID,
+      domain: "agent_runtime",
+      change: "context_usage",
+    });
+    expect(
+      accountAgentRuntimeCacheHintSchema.safeParse({
+        ...agentRuntimeHint(),
+        policy: { summarization: "must not be broadcast" },
+      }).success,
+    ).toBe(false);
+
+    channel.emit(agentRuntimeHint({ sourceTabId: TAB_ID }));
+    channel.emit(agentRuntimeHint({ accountId: OTHER_ACCOUNT_ID }));
+    channel.emit(agentRuntimeHint());
+    channel.emit(agentRuntimeHint());
+    channel.emit(agentRuntimeHint({ eventId: SECOND_EVENT_ID }));
+
+    expect(onHint).toHaveBeenCalledTimes(2);
+
+    subscription.dispose();
+  });
+
+  test("refetches active context usage and marks inactive readings stale for the exact account", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const activeKey = privateWorkQueryKey(
+      scope,
+      "thread-context-usage",
+      "thread-active",
+    );
+    const inactiveKey = privateWorkQueryKey(
+      { accountId: ACCOUNT_ID, projectId: OTHER_PROJECT_ID },
+      "thread-context-usage",
+      "thread-inactive",
+    );
+    const otherAccountKey = privateWorkQueryKey(
+      { accountId: OTHER_ACCOUNT_ID, projectId: OTHER_PROJECT_ID },
+      "thread-context-usage",
+      "thread-other-account",
+    );
+    queryClient.setQueryData(activeKey, { estimated_tokens: 10 });
+    queryClient.setQueryData(inactiveKey, { estimated_tokens: 20 });
+    queryClient.setQueryData(otherAccountKey, { estimated_tokens: 30 });
+    const refetch = rs.fn(async () => ({ estimated_tokens: 11 }));
+    const observer = new QueryObserver(queryClient, {
+      queryKey: activeKey,
+      queryFn: refetch,
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const unsubscribe = observer.subscribe(() => undefined);
+
+    await applyAccountAgentRuntimeCacheHint(queryClient, ACCOUNT_ID);
+
+    expect(refetch).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryState(inactiveKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(otherAccountKey)?.isInvalidated).toBe(
+      false,
+    );
+
+    unsubscribe();
+    queryClient.clear();
+  });
+
+  test("cancels a pending first load before refetching so its late result cannot overwrite the new policy", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const queryKey = privateWorkQueryKey(
+      scope,
+      "thread-context-usage",
+      "thread-pending",
+    );
+    let resolveFirst!: (value: { estimated_tokens: number }) => void;
+    let firstSignal: AbortSignal | undefined;
+    let callCount = 0;
+    const queryFn = rs.fn(({ signal }: { signal: AbortSignal }) => {
+      callCount += 1;
+      if (callCount === 1) {
+        firstSignal = signal;
+        return new Promise<{ estimated_tokens: number }>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return Promise.resolve({ estimated_tokens: 20 });
+    });
+    const observer = new QueryObserver(queryClient, {
+      queryKey,
+      queryFn,
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const unsubscribe = observer.subscribe(() => undefined);
+    await Promise.resolve();
+
+    const refresh = applyAccountAgentRuntimeCacheHint(queryClient, ACCOUNT_ID);
+    await Promise.resolve();
+    resolveFirst({ estimated_tokens: 10 });
+    await refresh;
+    await Promise.resolve();
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect(queryFn).toHaveBeenCalledTimes(2);
+    expect(queryClient.getQueryData(queryKey)).toEqual({
+      estimated_tokens: 20,
+    });
+
+    unsubscribe();
+    queryClient.clear();
   });
 });

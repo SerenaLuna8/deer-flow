@@ -826,10 +826,6 @@ export function SkillVersionWorkbench({
         <KeyRoundIcon aria-hidden className="size-4" />
         <h3 className="text-sm font-semibold">2. 版本秘密配置</h3>
       </div>
-      <p className="text-muted-foreground text-sm leading-6">
-        当前正在编辑 SKILL.md。请先保存为精确候选版本；保存后，当前 Project
-        可在此页面为每个目标环境变量写入独立加密秘密。激活窗口只检查就绪状态，不填写秘密值。
-      </p>
     </section>
   ) : (
     secretConfiguration
@@ -1212,6 +1208,7 @@ export function SkillVersionWorkbench({
             content={skillMdContent}
             editable={isEditing}
             canBeginEdit={canAuthor && !isEditing && !secretConfigurationDirty}
+            showEmptyDescription={false}
             readOnlyReason={
               !canAuthor
                 ? "当前版本只读，你没有创建新版本的权限。"

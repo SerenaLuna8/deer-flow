@@ -34,8 +34,10 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from deerflow.agents.middlewares.tool_call_control import (
         ResolvedGraphToolCallControlProfile,
+        RunToolCallLimitAuthority,
         ToolCallControlObservation,
         ToolCallControlObserver,
+        ToolCallControlScope,
     )
     from deerflow.subagents.lifecycle import (
         SubagentExecutionBinding,
@@ -381,6 +383,8 @@ class ParentExecutionBinding(_OpaqueExecutionObject):
     barrier: ParentExecutionBarrier
     tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None
     tool_call_control_observer: ToolCallControlObserver | None = None
+    tool_call_limit_authority: RunToolCallLimitAuthority | None = None
+    tool_call_limit_scope_id: str | None = None
 
     def __post_init__(self) -> None:
         _validate_tool_call_control_profile(self.tool_call_control_profile)
@@ -394,6 +398,22 @@ class ParentExecutionBinding(_OpaqueExecutionObject):
             raise ValueError(
                 "tool_call_control_observer requires a resolved graph profile",
             )
+        if self.tool_call_control_profile is not None:
+            from deerflow.agents.middlewares.tool_call_control import (
+                RunToolCallLimitAuthority,
+            )
+
+            if not isinstance(
+                self.tool_call_limit_authority,
+                RunToolCallLimitAuthority,
+            ):
+                raise TypeError(
+                    "tool_call_limit_authority is required with a resolved graph profile",
+                )
+            if not isinstance(self.tool_call_limit_scope_id, str) or not self.tool_call_limit_scope_id.strip():
+                raise ValueError(
+                    "tool_call_limit_scope_id is required with a resolved graph profile",
+                )
 
     def to_lifecycle_binding(
         self,
@@ -432,6 +452,8 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
     profile: ParentExecutionProfile
     tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None
     tool_call_control_observer: ToolCallControlObserver | None = None
+    tool_call_limit_authority: RunToolCallLimitAuthority | None = None
+    tool_call_limit_scope: ToolCallControlScope | None = None
 
     def __post_init__(self) -> None:
         if type(self.profile) not in {
@@ -452,6 +474,27 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
             raise ValueError(
                 "tool_call_control_observer requires a resolved graph profile",
             )
+        if self.tool_call_control_profile is not None:
+            from deerflow.agents.middlewares.tool_call_control import (
+                FixedToolCallControlScope,
+                PerInvocationToolCallControlScope,
+                RunToolCallLimitAuthority,
+            )
+
+            if not isinstance(
+                self.tool_call_limit_authority,
+                RunToolCallLimitAuthority,
+            ):
+                raise TypeError(
+                    "tool_call_limit_authority is required with a resolved graph profile",
+                )
+            if not isinstance(
+                self.tool_call_limit_scope,
+                (FixedToolCallControlScope, PerInvocationToolCallControlScope),
+            ):
+                raise TypeError(
+                    "tool_call_limit_scope is required with a resolved graph profile",
+                )
 
     def bind(self, runtime: Runtime) -> ParentExecutionBinding:
         """Capture one invocation without materializing a subagent runner."""
@@ -477,6 +520,7 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
                 barrier=barrier,
             )
         )
+        limit_scope_id = None if self.tool_call_limit_scope is None else self.tool_call_limit_scope.resolve(runtime)
         return ParentExecutionBinding(
             profile=self.profile,
             state=MappingProxyType(dict(state)),
@@ -487,6 +531,8 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
             barrier=barrier,
             tool_call_control_profile=self.tool_call_control_profile,
             tool_call_control_observer=observer,
+            tool_call_limit_authority=self.tool_call_limit_authority,
+            tool_call_limit_scope_id=limit_scope_id,
         )
 
 

@@ -156,6 +156,10 @@ from deerflow.runtime.user_context import (
 )
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
+from deerflow.token_budget_usage import (
+    TokenBudgetUsageRecorder,
+    TokenBudgetUsageSnapshot,
+)
 from deerflow.trace_context import normalize_trace_id, request_trace_context
 
 logger = logging.getLogger("app.reliability.execution")
@@ -304,7 +308,10 @@ class RunAgentPrivateExecutor:
         return make_lead_agent
 
     @staticmethod
-    def _usage_snapshot(record: RunRecord) -> PrivateRunUsageSnapshot:
+    def _usage_snapshot(
+        record: RunRecord,
+        recorder: TokenBudgetUsageRecorder | None = None,
+    ) -> PrivateRunUsageSnapshot:
         return PrivateRunUsageSnapshot(
             total_input_tokens=record.total_input_tokens,
             total_output_tokens=record.total_output_tokens,
@@ -314,11 +321,13 @@ class RunAgentPrivateExecutor:
             subagent_tokens=record.subagent_tokens,
             middleware_tokens=record.middleware_tokens,
             token_usage_by_model=record.token_usage_by_model,
+            token_budget_usage=(recorder.snapshot() if recorder is not None else None),
         )
 
     @staticmethod
     def _outcome_usage_snapshot(
         usage: RunAgentUsageSnapshot,
+        recorder: TokenBudgetUsageRecorder | None = None,
     ) -> PrivateRunUsageSnapshot:
         return PrivateRunUsageSnapshot(
             total_input_tokens=usage.total_input_tokens,
@@ -329,6 +338,7 @@ class RunAgentPrivateExecutor:
             subagent_tokens=usage.subagent_tokens,
             middleware_tokens=usage.middleware_tokens,
             token_usage_by_model={model_name: dict(counters) for model_name, counters in usage.token_usage_by_model.items()},
+            token_budget_usage=(usage.token_budget_usage if usage.token_budget_usage is not None else (recorder.snapshot() if recorder is not None else None)),
         )
 
     @staticmethod
@@ -349,10 +359,11 @@ class RunAgentPrivateExecutor:
         record: RunRecord | None,
         *,
         lease_lost: bool,
+        recorder: TokenBudgetUsageRecorder | None = None,
     ) -> PermanentExecutionError:
         return PermanentExecutionError(
             PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
-            attempt_usage=(cls._usage_snapshot(record) if record is not None and not lease_lost else None),
+            attempt_usage=(cls._usage_snapshot(record, recorder) if record is not None and not lease_lost else None),
         )
 
     async def _memory_archive_context(
@@ -563,6 +574,7 @@ class RunAgentPrivateExecutor:
         record: RunRecord | None = None
         resource_ownership = RunAgentResourceOwnership()
         runtime_config_pushed = False
+        token_budget_usage_recorder: TokenBudgetUsageRecorder | None = None
         try:
             current_upload_snapshot = self._required_current_upload_snapshot(
                 execution.run.kwargs,
@@ -710,6 +722,14 @@ class RunAgentPrivateExecutor:
                 # Compatibility path for isolated unit tests. Production
                 # composition always injects the PostgreSQL materializer.
                 raise PermanentExecutionError("RUN_ASSET_STALE")
+
+            if runtime_app_config.token_budget.enabled:
+                baseline = execution.token_budget_usage or TokenBudgetUsageSnapshot.zero(
+                    execution.run.run_id,
+                )
+                if baseline.run_id != execution.run.run_id:
+                    raise PermanentExecutionError("RUN_ASSET_STALE")
+                token_budget_usage_recorder = TokenBudgetUsageRecorder(baseline)
 
             archive_context = await self._memory_archive_context(
                 execution,
@@ -882,6 +902,7 @@ class RunAgentPrivateExecutor:
                 host_execution_approval_port=(host_execution_approval_port),
                 channel_user_id=channel_user_id,
                 vision_dispatch_authority=vision_dispatch_authority,
+                token_budget_usage_recorder=token_budget_usage_recorder,
                 resource_ownership=resource_ownership,
                 tool_call_control_policy=(tool_call_control_policy.graph_profile if tool_call_control_policy is not None else None),
                 max_concurrent_subagents=(tool_call_control_policy.max_concurrent_subagents if tool_call_control_policy is not None else None),
@@ -951,7 +972,10 @@ class RunAgentPrivateExecutor:
                 )
             if type(outcome) is not RunAgentOutcome:
                 raise TypeError("Run Agent runner returned an invalid outcome")
-            attempt_usage = self._outcome_usage_snapshot(outcome.usage)
+            attempt_usage = self._outcome_usage_snapshot(
+                outcome.usage,
+                token_budget_usage_recorder,
+            )
             if boundary.cancel_requested or boundary.authorization_revoked:
                 return AgentExecutionResult.cancelled(
                     attempt_usage=attempt_usage,
@@ -1000,13 +1024,16 @@ class RunAgentPrivateExecutor:
         except SkillDesignActivityLimitExceeded:
             raise PermanentExecutionError(
                 PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
-                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+                attempt_usage=(self._usage_snapshot(record, token_budget_usage_recorder) if record is not None and not boundary.lease_lost else None),
             ) from None
         except TransientExecutionError as error:
             if error.attempt_usage is None and record is not None and not boundary.lease_lost:
                 raise TransientExecutionError(
                     error.public_error_code,
-                    attempt_usage=self._usage_snapshot(record),
+                    attempt_usage=self._usage_snapshot(
+                        record,
+                        token_budget_usage_recorder,
+                    ),
                 ) from error
             raise
         except PermanentExecutionError:
@@ -1018,22 +1045,23 @@ class RunAgentPrivateExecutor:
         except PrivateWorkMcpQuotaExceeded as error:
             raise TransientExecutionError(
                 error.code,
-                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+                attempt_usage=(self._usage_snapshot(record, token_budget_usage_recorder) if record is not None and not boundary.lease_lost else None),
             ) from None
         except MemoryAuthorityUnavailable:
             raise TransientExecutionError(
                 PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
-                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+                attempt_usage=(self._usage_snapshot(record, token_budget_usage_recorder) if record is not None and not boundary.lease_lost else None),
             ) from None
         except PublicRunError as error:
             if error.code is PublicRunErrorCode.MODEL_OUTPUT_LIMIT:
                 raise self._output_limit_error(
                     record,
                     lease_lost=boundary.lease_lost,
+                    recorder=token_budget_usage_recorder,
                 ) from error
             raise TransientExecutionError(
                 PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
-                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+                attempt_usage=(self._usage_snapshot(record, token_budget_usage_recorder) if record is not None and not boundary.lease_lost else None),
             ) from None
         except AuthorizationRevoked:
             if boundary.lease_lost:
@@ -1041,16 +1069,16 @@ class RunAgentPrivateExecutor:
                     "EXECUTION_AUTHORITY_UNAVAILABLE",
                 ) from None
             return AgentExecutionResult.cancelled(
-                attempt_usage=(self._usage_snapshot(record) if record is not None else None),
+                attempt_usage=(self._usage_snapshot(record, token_budget_usage_recorder) if record is not None else None),
             )
         except Exception:
             if boundary.ambiguous_side_effect:
                 raise AmbiguousExternalSideEffect(
-                    attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+                    attempt_usage=(self._usage_snapshot(record, token_budget_usage_recorder) if record is not None and not boundary.lease_lost else None),
                 ) from None
             raise TransientExecutionError(
                 PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
-                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+                attempt_usage=(self._usage_snapshot(record, token_budget_usage_recorder) if record is not None and not boundary.lease_lost else None),
             ) from None
         finally:
             if runtime_config_pushed:

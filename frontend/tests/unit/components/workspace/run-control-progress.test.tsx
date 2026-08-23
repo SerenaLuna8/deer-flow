@@ -64,6 +64,27 @@ function observation(
         : "advisory",
     observation_id: digestCharacter.repeat(64),
   } as const;
+  if (!repeated && toolBudgetExhausted) {
+    const event = parseToolCallBudgetEvent({
+      type: "tool_call_budget",
+      schema_version: 2,
+      reason_code: "tool_budget_exhausted",
+      workload_profile: "research",
+      role: "lead",
+      run_id: RUN_ID,
+      execution_id: null,
+      count_before: 4,
+      proposed: 1,
+      admitted: 1,
+      rejected: 0,
+      count_after: 5,
+      hard_limit: 5,
+      disposition: "exhaust_run",
+      observation_id: digestCharacter.repeat(64),
+    });
+    if (!event) throw new Error(`fixture rejected: ${reasonCode}`);
+    return event;
+  }
   const event = repeated
     ? parseRepeatedCallEvent({ type: "repeated_call", ...common })
     : parseToolCallBudgetEvent({
@@ -102,7 +123,7 @@ describe("RunControlProgress", () => {
     expect(html).toContain('data-reason-code="repeated_call_limit"');
   });
 
-  test("states that exhausted tool budget is contributing and the Run can continue", () => {
+  test("hides tool-budget warnings but keeps exhaustion visible and non-terminal", () => {
     const english = render(
       [
         observation("tool_budget_warning", "c"),
@@ -114,14 +135,20 @@ describe("RunControlProgress", () => {
       [observation("tool_budget_exhausted", "e")],
       "zh-CN",
     );
+    const warningOnly = render(
+      [observation("tool_budget_warning", "f")],
+      "zh-CN",
+    );
 
-    expect(english).toContain("web_search is nearing its call limit");
-    expect(english).toContain("web_search call budget is exhausted");
+    expect(english).not.toContain("web_search is nearing its call limit");
+    expect(english).not.toContain('data-reason-code="tool_budget_warning"');
+    expect(english).toContain("Run internal tool-call limit reached");
     expect(english).toContain(
-      "The Run can continue with existing evidence and other tools",
+      "No new internal tool calls can be admitted in this Run",
     );
     expect(english).not.toContain("Run did not finish");
-    expect(chinese).toContain("运行仍可使用已有证据和其他工具继续整理结果");
+    expect(chinese).toContain("本 Run 不再准入新的内部工具调用");
+    expect(warningOnly).toBe("");
   });
 
   test("shows the Sub-Agent total limit as a distinct progress reason", () => {

@@ -149,6 +149,7 @@ def test_sensitive_profile_builds_every_authorable_provider_adapter(
         description="",
         use=use,
         model="provider-model",
+        max_input_tokens=64_000,
         api_key="test-only",
         supports_vision=True,
         max_retries=9,

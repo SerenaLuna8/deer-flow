@@ -5,6 +5,7 @@ from functools import cache
 from typing import Annotated, Any, NotRequired, TypedDict, cast, get_type_hints
 
 from langchain.agents import AgentState
+from langchain.agents.middleware.types import PrivateStateAttr
 from langchain_core.messages import (
     AnyMessage,
     BaseMessageChunk,
@@ -431,6 +432,8 @@ class ThreadState(AgentState):
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
     memory_archive_receipt: NotRequired[MemoryArchiveReceipt | None]
+    provider_request_profile: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
+    provider_request_measurement: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
 
 
 def _normalize_messages(value: Any) -> list[AnyMessage]:

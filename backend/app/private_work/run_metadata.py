@@ -7,10 +7,28 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
+from deerflow.token_budget_usage import (
+    TOKEN_BUDGET_USAGE_SCHEMA_VERSION,
+    TokenBudgetUsageConflict,
+    TokenBudgetUsageInvalid,
+    TokenBudgetUsageSnapshot,
+    dominant_token_budget_usage,
+)
+
 RUN_VISION_DISPATCH_BUDGET_KEY: Final = "__vision_dispatch_budget_v1"
 VISION_DISPATCH_BUDGET_SCHEMA_VERSION: Final = "vision.dispatch.budget.v1"
 RUN_HOST_EXECUTION_SUSPENSION_KEY: Final = "__host_execution_suspension_v1"
 HOST_EXECUTION_SUSPENSION_SCHEMA_VERSION: Final = "host_execution.suspension.v1"
+RUN_TOKEN_BUDGET_USAGE_KEY: Final = "__token_budget_usage_v1"
+_TOKEN_BUDGET_USAGE_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "run_id",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+    }
+)
 _VISION_DISPATCH_BUDGET_KEYS: Final = frozenset(
     {
         "schema_version",
@@ -31,6 +49,57 @@ class RunVisionDispatchBudgetExceeded(RuntimeError):
 
 class RunHostExecutionSuspensionInvalid(ValueError):
     """A persisted host-execution suspension marker is malformed."""
+
+
+class RunTokenBudgetUsageInvalid(ValueError):
+    """Persisted private token-budget usage is malformed or non-monotonic."""
+
+
+def run_token_budget_usage(
+    metadata: Mapping[str, object],
+    *,
+    run_id: str,
+) -> TokenBudgetUsageSnapshot:
+    """Parse the exact private Run aggregate; absence is the zero baseline."""
+
+    if not isinstance(metadata, Mapping):
+        raise RunTokenBudgetUsageInvalid
+    try:
+        zero = TokenBudgetUsageSnapshot.zero(run_id)
+        if RUN_TOKEN_BUDGET_USAGE_KEY not in metadata:
+            return zero
+        raw = metadata[RUN_TOKEN_BUDGET_USAGE_KEY]
+        if not isinstance(raw, Mapping) or set(raw) != _TOKEN_BUDGET_USAGE_KEYS or raw.get("schema_version") != TOKEN_BUDGET_USAGE_SCHEMA_VERSION or raw.get("run_id") != run_id:
+            raise RunTokenBudgetUsageInvalid
+        return TokenBudgetUsageSnapshot(
+            run_id=raw.get("run_id"),  # type: ignore[arg-type]
+            input_tokens=raw.get("input_tokens"),  # type: ignore[arg-type]
+            output_tokens=raw.get("output_tokens"),  # type: ignore[arg-type]
+            total_tokens=raw.get("total_tokens"),  # type: ignore[arg-type]
+        )
+    except (TokenBudgetUsageInvalid, TypeError, ValueError):
+        raise RunTokenBudgetUsageInvalid from None
+
+
+def with_run_token_budget_usage(
+    metadata: Mapping[str, object],
+    *,
+    usage: TokenBudgetUsageSnapshot,
+) -> dict[str, object]:
+    """Replace the absolute aggregate only with a same-Run monotonic value."""
+
+    if not isinstance(metadata, Mapping) or type(usage) is not TokenBudgetUsageSnapshot:
+        raise RunTokenBudgetUsageInvalid
+    current = run_token_budget_usage(metadata, run_id=usage.run_id)
+    try:
+        dominant = dominant_token_budget_usage(current, usage)
+    except TokenBudgetUsageConflict:
+        raise RunTokenBudgetUsageInvalid from None
+    if dominant != usage:
+        raise RunTokenBudgetUsageInvalid
+    result = dict(metadata)
+    result[RUN_TOKEN_BUDGET_USAGE_KEY] = usage.as_dict()
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,15 +290,19 @@ def _strip_server_run_metadata_value(value: object) -> object:
 __all__ = [
     "HOST_EXECUTION_SUSPENSION_SCHEMA_VERSION",
     "RUN_HOST_EXECUTION_SUSPENSION_KEY",
+    "RUN_TOKEN_BUDGET_USAGE_KEY",
     "RUN_VISION_DISPATCH_BUDGET_KEY",
     "RunHostExecutionSuspension",
     "RunHostExecutionSuspensionInvalid",
+    "RunTokenBudgetUsageInvalid",
     "RunVisionDispatchBudget",
     "RunVisionDispatchBudgetExceeded",
     "RunVisionDispatchBudgetInvalid",
     "reserve_run_vision_dispatch_budget",
     "run_host_execution_suspension",
+    "run_token_budget_usage",
     "run_vision_dispatch_budget",
     "strip_server_run_metadata",
     "with_run_host_execution_suspension",
+    "with_run_token_budget_usage",
 ]

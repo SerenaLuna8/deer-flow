@@ -244,6 +244,7 @@ def test_exact_model_version_carrier_survives_runtime_copy_and_is_secret() -> No
         description=None,
         use="langchain_openai.ChatOpenAI",
         model="summary-model",
+        max_input_tokens=64_000,
     )
     model._system_model_config_id = exact_version
     config = AppConfig.model_validate(

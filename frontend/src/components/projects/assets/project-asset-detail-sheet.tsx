@@ -36,7 +36,6 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import { useModels } from "@/core/models/hooks";
 import type { Capability } from "@/core/projects/types";
 import {
@@ -69,7 +68,6 @@ import {
   projectSkillDeleteErrorMessage,
   projectSkillSecretSetupRequired,
   projectSkillVersionCanActivate,
-  projectSkillStatusToggleState,
 } from "./project-asset-view-model";
 import {
   ProjectAgentDeleteDialog,
@@ -89,6 +87,12 @@ export function projectAssetDetailShowsVersionHistory(
     kind === "agents" ||
     (kind === "mcp-servers" && scope === "project")
   );
+}
+
+export function projectAssetDetailShowsLifecycleControls(
+  kind: MutableAssetKind,
+): boolean {
+  return kind !== "skills";
 }
 
 export function projectAssetDetailVersionPickerPlacement(
@@ -578,15 +582,9 @@ function ErrorNotice({ error }: { error: unknown }) {
 export function ProjectAssetDetailHeader({
   kind,
   item,
-  statusPending,
-  optimisticSkillStatus,
-  onToggleProjectSkillStatus,
 }: {
   kind: MutableAssetKind;
   item: ProjectAssetItem;
-  statusPending: boolean;
-  optimisticSkillStatus?: boolean;
-  onToggleProjectSkillStatus: (checked: boolean) => void;
 }) {
   if (kind === "agents") {
     return (
@@ -619,34 +617,9 @@ export function ProjectAssetDetailHeader({
     );
   }
 
-  const toggleState = projectSkillStatusToggleState(item);
-  const checked = optimisticSkillStatus ?? toggleState.checked;
-  const showToggle = item.scope === "project";
   return (
     <SheetHeader className="border-border/70 border-b px-6 py-5 pr-12 text-left">
-      <div className="flex min-w-0 items-start justify-between gap-4">
-        <SheetTitle className="min-w-0 truncate text-xl">
-          {item.display_name}
-        </SheetTitle>
-        {showToggle ? (
-          <div className="flex shrink-0 flex-col items-end gap-1.5">
-            <Switch
-              checked={checked}
-              disabled={toggleState.disabled || statusPending}
-              className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
-              aria-busy={statusPending || undefined}
-              aria-label={`${checked ? "停用" : "启用"} ${item.display_name}`}
-              title={toggleState.disabledReason ?? undefined}
-              onCheckedChange={onToggleProjectSkillStatus}
-            />
-            {toggleState.disabledReason ? (
-              <span className="text-muted-foreground text-xs">
-                {toggleState.disabledReason}
-              </span>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
+      <SheetTitle className="truncate text-xl">{item.display_name}</SheetTitle>
       <SheetDescription className="sr-only">
         Skill 详情与版本文件
       </SheetDescription>
@@ -1095,7 +1068,7 @@ export function ProjectAssetDetailSheet({
       selectedVersion && "skill_id" in selectedVersion ? selectedVersion : null,
     );
   const lifecycleActions =
-    item.scope === "project"
+    item.scope === "project" && projectAssetDetailShowsLifecycleControls(kind)
       ? projectAssetDetailLifecycleActions(kind, item, projectCapabilities)
       : [];
   const canDeleteAsset = projectAssetCanDelete(kind, item);
@@ -1139,10 +1112,6 @@ export function ProjectAssetDetailSheet({
     deleteMcp.isPending;
   const versionSelectionPending = requestedVersionId !== null;
   const actionError = activate.error ?? publishMcp.error ?? changeStatus.error;
-  const optimisticSkillStatus =
-    kind === "skills" && changeStatus.isPending
-      ? changeStatus.variables?.action === "enable"
-      : undefined;
 
   const handleWorkbenchVersionCreated = useCallback(
     (versionId: string, options?: { focusSecrets?: boolean }) => {
@@ -1307,35 +1276,6 @@ export function ProjectAssetDetailSheet({
     }
   }
 
-  function toggleProjectSkillStatus(checked: boolean) {
-    if (kind !== "skills") return;
-    const toggleState = projectSkillStatusToggleState(item);
-    if (toggleState.disabled || toggleState.checked === checked) return;
-    changeStatus.mutate(
-      {
-        assetId: item.id,
-        action: checked ? "enable" : "suspend",
-        input: { expected_revision: item.revision },
-      },
-      {
-        onError: (error) => {
-          const repairVersionId = projectSkillSecretRepairVersionId(
-            error,
-            item.current_version_id,
-          );
-          if (!projectSkillSecretSetupRequired(error)) return;
-          if (repairVersionId) {
-            requestVersionChange(repairVersionId, {
-              focusSkillSecrets: true,
-            });
-          } else {
-            onSkillSecretSetupRequired?.(null);
-          }
-        },
-      },
-    );
-  }
-
   const versionPickerPlacement = projectAssetDetailVersionPickerPlacement(kind);
   const versionPicker = showVersionPicker ? (
     <div className="flex items-center justify-between gap-3">
@@ -1389,13 +1329,7 @@ export function ProjectAssetDetailSheet({
           closeLabel="关闭详情"
           className={`w-full gap-0 p-0 ${kind === "skills" || kind === "agents" ? "sm:max-w-[1080px]" : kind === "mcp-servers" ? "sm:max-w-[900px]" : "sm:max-w-[640px]"}`}
         >
-          <ProjectAssetDetailHeader
-            kind={kind}
-            item={item}
-            statusPending={changeStatus.isPending}
-            optimisticSkillStatus={optimisticSkillStatus}
-            onToggleProjectSkillStatus={toggleProjectSkillStatus}
-          />
+          <ProjectAssetDetailHeader kind={kind} item={item} />
 
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="space-y-6 px-6 py-5">

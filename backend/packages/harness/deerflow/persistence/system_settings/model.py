@@ -106,6 +106,7 @@ class SystemModelConfigRow(Base):
     )
     provider_adapter: Mapped[str] = mapped_column(String(64), nullable=False)
     provider_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    max_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
     settings: Mapped[dict[str, object]] = mapped_column(
         JSONB,
         nullable=False,
@@ -179,6 +180,10 @@ class SystemModelConfigRow(Base):
         CheckConstraint(
             "jsonb_typeof(settings) = 'object'",
             name="ck_system_model_configs_settings_object",
+        ),
+        CheckConstraint(
+            "max_input_tokens BETWEEN 1 AND 2000000",
+            name="ck_system_model_configs_max_input_tokens",
         ),
         CheckConstraint(
             "payload_checksum ~ '^[0-9a-f]{64}$'",

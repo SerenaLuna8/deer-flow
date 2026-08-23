@@ -53,11 +53,14 @@ from deerflow.public_error_codes import (
     LLM_PUBLIC_ERROR_CODES,
     llm_error_code_for_reason,
 )
+from deerflow.runtime.public_token_usage import (
+    project_public_run_event_metadata,
+    project_public_token_usage,
+)
 from deerflow.runtime.recovered_llm_failures import (
     RECOVERED_LLM_FAILURES_KEY,
     RunRecoveredLLMFailureRecorder,
     build_recovered_llm_failures_receipt,
-    read_recovered_llm_failures,
 )
 from deerflow.runtime.runs.execution_contracts import RunSemanticStopRecorder
 from deerflow.utils.messages import message_to_text
@@ -74,13 +77,13 @@ _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"}
 _REASONING_DURATION_KEY = "reasoning_duration_ms"
 _MAX_REASONING_DURATION_MS = 24 * 60 * 60 * 1000
 _SAFE_EXCEPTION_CLASS_MAX_LENGTH = 96
-_SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 _TOOL_CALL_CONTROL_DISPOSITIONS = frozenset(
     {
         "advisory",
         "tool_free_finalization",
         "truncate_tool_calls",
         "exhaust_tool",
+        "exhaust_run",
     }
 )
 _REPEATED_CALL_REASON_CODES = frozenset(
@@ -91,7 +94,6 @@ _REPEATED_CALL_REASON_CODES = frozenset(
 )
 _TOOL_CALL_BUDGET_REASON_CODES = frozenset(
     {
-        "tool_budget_warning",
         "tool_budget_exhausted",
     }
 )
@@ -125,6 +127,28 @@ def _safe_exception_class(error: BaseException) -> str:
     if not name or len(name) > _SAFE_EXCEPTION_CLASS_MAX_LENGTH or not name.replace("_", "").isalnum():
         return "Exception"
     return name
+
+
+def _without_recovered_llm_failure_receipts(value: Any) -> Any:
+    """Copy Run outputs while removing the retired message projection key."""
+
+    if isinstance(value, BaseMessage):
+        additional_kwargs = dict(value.additional_kwargs or {})
+        additional_kwargs.pop(RECOVERED_LLM_FAILURES_KEY, None)
+        return value.model_copy(
+            update={"additional_kwargs": additional_kwargs},
+        )
+    if isinstance(value, Mapping):
+        projected = {key: _without_recovered_llm_failure_receipts(item) for key, item in value.items()}
+        additional_kwargs = projected.get("additional_kwargs")
+        if isinstance(additional_kwargs, Mapping):
+            projected["additional_kwargs"] = {key: item for key, item in additional_kwargs.items() if key != RECOVERED_LLM_FAILURES_KEY}
+        return projected
+    if isinstance(value, list):
+        return [_without_recovered_llm_failure_receipts(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_without_recovered_llm_failure_receipts(item) for item in value)
+    return value
 
 
 class RunJournal(BaseCallbackHandler):
@@ -204,12 +228,7 @@ class RunJournal(BaseCallbackHandler):
         self._tool_run_callers: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
         self._persisted_recovered_llm_failure_count = 0
-        self._latest_lead_ai_observation_by_id: dict[
-            str,
-            tuple[str, int],
-        ] = {}
         self._lead_tool_call_messages_by_id: dict[str, AIMessage] = {}
-        self._reconciled_recovered_llm_observations: set[tuple[str, str, int]] = set()
         self._reconciled_loop_safety_message_ids: set[str] = set()
         self._tool_call_control_observation_ids: set[str] = set()
         self._subagent_limit_observation_ids: set[str] = set()
@@ -272,14 +291,14 @@ class RunJournal(BaseCallbackHandler):
             return
         self._reconcile_final_error_fallback(outputs)
         self._reconcile_suppressed_loop_proposals()
-        self._reconcile_final_recovered_llm_failures(outputs)
+        self._persist_recovered_llm_failures()
         self._reconcile_final_token_budget_message(outputs)
         self._reconcile_final_tool_messages(outputs)
         terminal_status = "error" if self._had_llm_error_fallback or (self._semantic_stop_recorder is not None and self._semantic_stop_recorder.reason == "loop_capped") else "success"
         self._put(
             event_type="run.end",
             category="outputs",
-            content=outputs,
+            content=_without_recovered_llm_failure_receipts(outputs),
             metadata={"status": terminal_status},
         )
         self._flush_sync()
@@ -295,6 +314,7 @@ class RunJournal(BaseCallbackHandler):
         if parent_run_id is not None:
             return
         self._reconcile_suppressed_loop_proposals()
+        self._persist_recovered_llm_failures()
         self._put(
             event_type="run.error",
             category="error",
@@ -469,6 +489,13 @@ class RunJournal(BaseCallbackHandler):
                 self._seen_llm_starts.add(rid)
 
             # Trace event: llm_response (OpenAI completion format)
+            event_metadata = {
+                "caller": caller,
+                "latency_ms": latency_ms,
+                "llm_call_index": call_index,
+            }
+            if self._track_tokens:
+                event_metadata["usage"] = usage_dict
             self._put(
                 event_type="llm.ai.response",
                 category="message" if caller == "lead_agent" else "trace",
@@ -476,18 +503,11 @@ class RunJournal(BaseCallbackHandler):
                     message,
                     reasoning_duration_ms=reasoning_duration_ms,
                 ),
-                metadata={
-                    "caller": caller,
-                    "usage": usage_dict,
-                    "latency_ms": latency_ms,
-                    "llm_call_index": call_index,
-                },
+                metadata=event_metadata,
             )
             if caller == "lead_agent" and isinstance(message, AIMessage):
                 message_id = message.id
                 if isinstance(message_id, str) and message_id.strip():
-                    observation = (rid, message_index)
-                    self._latest_lead_ai_observation_by_id[message_id] = observation
                     if message.tool_calls:
                         self._lead_tool_call_messages_by_id[message_id] = message.model_copy(deep=True)
                     else:
@@ -707,6 +727,7 @@ class RunJournal(BaseCallbackHandler):
         additional_kwargs = getattr(message, "additional_kwargs", None)
         projected_kwargs = dict(additional_kwargs) if isinstance(additional_kwargs, Mapping) else {}
         projected_kwargs.pop(_REASONING_DURATION_KEY, None)
+        projected_kwargs.pop(RECOVERED_LLM_FAILURES_KEY, None)
         if duration_ms is not None:
             projected_kwargs[_REASONING_DURATION_KEY] = duration_ms
         try:
@@ -717,8 +738,8 @@ class RunJournal(BaseCallbackHandler):
                 exc_info=True,
             )
 
-    @staticmethod
     def _message_payload(
+        self,
         message: Any,
         *,
         reasoning_duration_ms: int | None,
@@ -730,10 +751,17 @@ class RunJournal(BaseCallbackHandler):
         additional_kwargs = projected.get("additional_kwargs")
         projected_kwargs = dict(additional_kwargs) if isinstance(additional_kwargs, Mapping) else {}
         projected_kwargs.pop(_REASONING_DURATION_KEY, None)
+        projected_kwargs.pop(RECOVERED_LLM_FAILURES_KEY, None)
         if reasoning_duration_ms is not None:
             projected_kwargs[_REASONING_DURATION_KEY] = reasoning_duration_ms
         projected["additional_kwargs"] = projected_kwargs
-        return projected
+        return cast(
+            dict[str, Any],
+            project_public_token_usage(
+                projected,
+                tracking_enabled=self._track_tokens,
+            ),
+        )
 
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:
@@ -782,7 +810,10 @@ class RunJournal(BaseCallbackHandler):
         self._put(
             event_type="llm.tool.result",
             category="message" if caller == "lead_agent" else "trace",
-            content=message.model_dump(),
+            content=self._message_payload(
+                message,
+                reasoning_duration_ms=None,
+            ),
             metadata={"caller": caller},
         )
         if caller == "lead_agent":
@@ -903,8 +934,8 @@ class RunJournal(BaseCallbackHandler):
             )
             self._reconciled_loop_safety_message_ids.add(message_id)
 
-    def _reconcile_final_recovered_llm_failures(self, outputs: Any) -> None:
-        """Persist safe recovered-attempt facts added after on_llm_end fired."""
+    def _persist_recovered_llm_failures(self) -> None:
+        """Persist safe recovered-attempt facts outside conversation messages."""
 
         recovered_failures = self._recovered_llm_failure_recorder.snapshot()
 
@@ -923,55 +954,9 @@ class RunJournal(BaseCallbackHandler):
                         new_failures,
                     ),
                 },
-                metadata={"caller": "lead_agent"},
+                metadata={},
             )
             self._persisted_recovered_llm_failure_count = len(recovered_failures)
-        aggregate = tuple(recovered_failures)
-        for message in reversed(self._final_output_messages(outputs)):
-            if isinstance(message, HumanMessage):
-                break
-            if not isinstance(message, AIMessage):
-                continue
-            if message.additional_kwargs.get("hide_from_ui") is True:
-                continue
-            message_id = message.id
-            if not isinstance(message_id, str) or not message_id.strip():
-                break
-            observation = self._latest_lead_ai_observation_by_id.get(
-                message_id,
-            )
-            if observation is None:
-                break
-            reconciliation_key = (message_id, *observation)
-            if reconciliation_key in self._reconciled_recovered_llm_observations:
-                break
-            message_failures = read_recovered_llm_failures(
-                message.additional_kwargs.get(
-                    RECOVERED_LLM_FAILURES_KEY,
-                )
-            )
-            if message_failures != aggregate:
-                break
-            raw_reasoning_duration = message.additional_kwargs.get(
-                _REASONING_DURATION_KEY,
-            )
-            reasoning_duration_ms = raw_reasoning_duration if type(raw_reasoning_duration) is int and 0 <= raw_reasoning_duration <= _MAX_REASONING_DURATION_MS else None
-            self._put(
-                event_type="llm.ai.response",
-                category="message",
-                content=self._message_payload(
-                    message,
-                    reasoning_duration_ms=reasoning_duration_ms,
-                ),
-                metadata={
-                    "caller": "lead_agent",
-                    "source": "recovered_llm_failures",
-                },
-            )
-            self._reconciled_recovered_llm_observations.add(
-                reconciliation_key,
-            )
-            break
 
     def _reconcile_final_token_budget_message(self, outputs: Any) -> None:
         for message in reversed(self._final_output_messages(outputs)):
@@ -986,7 +971,10 @@ class RunJournal(BaseCallbackHandler):
             self._put(
                 event_type="llm.ai.response",
                 category="message",
-                content=message.model_dump(),
+                content=self._message_payload(
+                    message,
+                    reasoning_duration_ms=None,
+                ),
                 metadata={
                     "caller": "lead_agent",
                     "source": "token_budget_status",
@@ -1008,11 +996,9 @@ class RunJournal(BaseCallbackHandler):
         if isinstance(observation, RepeatedCallObservation):
             if observation.reason_code not in _REPEATED_CALL_REASON_CODES:
                 raise ValueError("repeated-call reason code is invalid")
-            tool_name = None
         else:
             if observation.reason_code not in _TOOL_CALL_BUDGET_REASON_CODES:
                 raise ValueError("tool-budget reason code is invalid")
-            tool_name = observation.tool_name
         if observation.role not in {"lead", "subagent"}:
             raise ValueError("tool-call control role is invalid")
         if observation.workload_profile not in {"interactive", "research"}:
@@ -1031,17 +1017,17 @@ class RunJournal(BaseCallbackHandler):
             observation.admitted,
             observation.rejected,
             observation.count_after,
-            observation.warn_threshold,
             observation.hard_limit,
         )
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
             raise ValueError("tool-call control counters are invalid")
-        if observation.warn_threshold < 1 or observation.hard_limit < 1:
+        if observation.hard_limit < 1:
             raise ValueError("tool-call control thresholds are invalid")
-        if observation.hard_limit < observation.warn_threshold:
-            raise ValueError("tool-call control threshold order is invalid")
-        if tool_name is not None and (not isinstance(tool_name, str) or _SAFE_TOOL_NAME.fullmatch(tool_name) is None):
-            tool_name = "unknown"
+        if isinstance(observation, RepeatedCallObservation):
+            if not isinstance(observation.warn_threshold, int) or isinstance(observation.warn_threshold, bool) or observation.warn_threshold < 1:
+                raise ValueError("tool-call control warning threshold is invalid")
+            if observation.hard_limit < observation.warn_threshold:
+                raise ValueError("tool-call control threshold order is invalid")
         execution_id = (
             hashlib.sha256(
                 f"{self.run_id}:{observation.scope_id}".encode(),
@@ -1050,7 +1036,7 @@ class RunJournal(BaseCallbackHandler):
             else None
         )
         payload: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": (2 if isinstance(observation, ToolCallBudgetObservation) else 1),
             "reason_code": observation.reason_code,
             "workload_profile": observation.workload_profile,
             "role": observation.role,
@@ -1061,13 +1047,12 @@ class RunJournal(BaseCallbackHandler):
             "admitted": observation.admitted,
             "rejected": observation.rejected,
             "count_after": observation.count_after,
-            "warn_threshold": observation.warn_threshold,
             "hard_limit": observation.hard_limit,
             "disposition": observation.disposition,
             "observation_id": observation.observation_id,
         }
-        if isinstance(observation, ToolCallBudgetObservation):
-            payload["tool_name"] = tool_name
+        if isinstance(observation, RepeatedCallObservation):
+            payload["warn_threshold"] = observation.warn_threshold
         return payload
 
     def record_tool_call_control_observation(
@@ -1142,14 +1127,22 @@ class RunJournal(BaseCallbackHandler):
         )
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
+        projected_content = project_public_token_usage(
+            content,
+            tracking_enabled=self._track_tokens,
+        )
+        projected_metadata = project_public_run_event_metadata(
+            metadata or {},
+            tracking_enabled=self._track_tokens,
+        )
         self._buffer.append(
             {
                 "thread_id": self.thread_id,
                 "run_id": self.run_id,
                 "event_type": event_type,
                 "category": category,
-                "content": content,
-                "metadata": metadata or {},
+                "content": projected_content,
+                "metadata": projected_metadata,
                 "created_at": datetime.now(UTC).isoformat(),
             }
         )

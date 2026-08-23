@@ -35,11 +35,26 @@ from deerflow.persistence.private_work.file_repository import (
 )
 from deerflow.persistence.private_work.model import (
     PrivateArtifactRow,
+    PrivateFileChunkRow,
     PrivateFileRow,
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.workspace_changes.diff import compare_snapshots
+from deerflow.workspace_changes.scanner import (
+    BINARY_EXTENSIONS,
+    SAMPLE_BYTES,
+    decode_workspace_text_bytes,
+    is_sensitive_workspace_path,
+    workspace_bytes_look_binary,
+)
+from deerflow.workspace_changes.types import (
+    FileSnapshot,
+    WorkspaceChangeLimits,
+    WorkspaceChangeResult,
+    WorkspaceSnapshot,
+)
 
 _SCAN_ROOTS = (
     ("/mnt/user-data/workspace", "workspace", "workspace"),
@@ -47,6 +62,7 @@ _SCAN_ROOTS = (
 )
 _PRESENTED_OUTPUT_PREFIX = "/mnt/user-data/outputs/"
 _WORKSPACE_RUNTIME_ROOT_NAMES = (".venv",)
+_DELEGATED_OUTPUT_RUNTIME_PREFIX = "/mnt/user-data/workspace/.deerflow/subagents/"
 _DEFAULT_PRIVATE_FINALIZATION_MAX_SCANNED_FILES = 2_000
 _DEFAULT_PRIVATE_FINALIZATION_MAX_SCAN_ENTRIES = 10_000
 
@@ -73,7 +89,8 @@ class FinalizationResult:
     files: tuple[Any, ...]
     artifacts: tuple[PrivateArtifactRecord, ...]
     deleted_file_ids: tuple[uuid.UUID, ...]
-    workspace_changes: dict[str, list[str]] | None
+    workspace_changes: WorkspaceChangeResult | None
+    produced_output_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +251,10 @@ class PrivateFileFinalizer:
                     excluded_root_names=(_WORKSPACE_RUNTIME_ROOT_NAMES if logical_root == "workspace" else ()),
                 )
                 for entry in entries:
+                    if logical_root == "workspace" and entry.path.startswith(
+                        _DELEGATED_OUTPUT_RUNTIME_PREFIX,
+                    ):
+                        continue
                     scanned_entries += 1
                     if scanned_entries > self._limits.max_scan_entries:
                         raise PrivateWorkTooLarge(run_scope.context.request_id)
@@ -438,6 +459,196 @@ class PrivateFileFinalizer:
                 raise PrivateWorkInvalid(run_scope.context.request_id)
             logical_paths.append(logical_path)
         return tuple(sorted(set(logical_paths)))
+
+    def _authoritative_file_snapshot(
+        self,
+        run_scope: PrivateFileRunScope,
+        row: PrivateFileRow,
+        *,
+        limits: WorkspaceChangeLimits,
+        chunk_rows: tuple[PrivateFileChunkRow, ...],
+    ) -> FileSnapshot:
+        virtual_path = f"/mnt/user-data/{row.logical_path}"
+        root = row.logical_path.split("/", 1)[0]
+        sensitive = is_sensitive_workspace_path(virtual_path)
+        binary = PurePosixPath(row.logical_path).suffix.lower() in BINARY_EXTENSIONS
+        unavailable_reason = None
+        text: str | None = None
+
+        if sensitive:
+            unavailable_reason = "sensitive"
+        elif binary:
+            unavailable_reason = "binary"
+        elif row.size > limits.max_file_bytes_for_diff:
+            unavailable_reason = "large"
+        else:
+            content_parts: list[bytes] = []
+            whole = hashlib.sha256()
+            total = 0
+            for expected_index, chunk in enumerate(chunk_rows):
+                content = bytes(chunk.content)
+                if chunk.chunk_index != expected_index or chunk.size != len(content) or not 0 < len(content) <= PRIVATE_FILE_CHUNK_SIZE or hashlib.sha256(content).hexdigest() != chunk.sha256:
+                    raise PrivateWorkUnavailable(run_scope.context.request_id)
+                total += len(content)
+                whole.update(content)
+                content_parts.append(content)
+            content = b"".join(content_parts)
+            if total != row.size or whole.hexdigest() != row.sha256:
+                raise PrivateWorkUnavailable(run_scope.context.request_id)
+            sample = content[:SAMPLE_BYTES]
+            if workspace_bytes_look_binary(sample):
+                binary = True
+                unavailable_reason = "binary"
+            else:
+                text = decode_workspace_text_bytes(content)
+                if text is None:
+                    binary = True
+                    unavailable_reason = "binary"
+
+        return FileSnapshot(
+            path=virtual_path,
+            root=root,
+            size=row.size,
+            mtime_ns=0,
+            sha256=row.sha256,
+            binary=binary,
+            sensitive=sensitive,
+            text=text,
+            content_unavailable_reason=unavailable_reason,
+        )
+
+    async def _authoritative_file_snapshots(
+        self,
+        session: AsyncSession,
+        run_scope: PrivateFileRunScope,
+        rows: tuple[PrivateFileRow, ...],
+        *,
+        limits: WorkspaceChangeLimits,
+    ) -> dict[uuid.UUID, FileSnapshot]:
+        """Verify all needed DB chunks in one bounded, streaming transaction query."""
+
+        unique_rows = {row.id: row for row in rows}
+        content_rows = {
+            row.id: row
+            for row in unique_rows.values()
+            if not is_sensitive_workspace_path(
+                f"/mnt/user-data/{row.logical_path}",
+            )
+            and PurePosixPath(row.logical_path).suffix.lower() not in BINARY_EXTENSIONS
+            and row.size <= limits.max_file_bytes_for_diff
+        }
+        snapshots = {
+            file_id: self._authoritative_file_snapshot(
+                run_scope,
+                row,
+                limits=limits,
+                chunk_rows=(),
+            )
+            for file_id, row in unique_rows.items()
+            if file_id not in content_rows
+        }
+        pending_content_ids = set(content_rows)
+
+        if content_rows:
+            stream = await session.stream_scalars(
+                select(PrivateFileChunkRow)
+                .where(
+                    PrivateFileChunkRow.file_id.in_(tuple(content_rows)),
+                )
+                .order_by(
+                    PrivateFileChunkRow.file_id,
+                    PrivateFileChunkRow.chunk_index,
+                )
+                .execution_options(yield_per=128)
+            )
+            active_file_id: uuid.UUID | None = None
+            active_chunks: list[PrivateFileChunkRow] = []
+
+            def finish_active_file() -> None:
+                if active_file_id is None:
+                    return
+                row = content_rows.get(active_file_id)
+                if row is None or active_file_id not in pending_content_ids:
+                    raise PrivateWorkUnavailable(run_scope.context.request_id)
+                snapshots[active_file_id] = self._authoritative_file_snapshot(
+                    run_scope,
+                    row,
+                    limits=limits,
+                    chunk_rows=tuple(active_chunks),
+                )
+                pending_content_ids.remove(active_file_id)
+
+            try:
+                async for chunk in stream:
+                    if chunk.file_id not in content_rows:
+                        raise PrivateWorkUnavailable(run_scope.context.request_id)
+                    if active_file_id is None:
+                        active_file_id = chunk.file_id
+                    elif chunk.file_id != active_file_id:
+                        finish_active_file()
+                        active_file_id = chunk.file_id
+                        active_chunks = []
+                    active_chunks.append(chunk)
+                finish_active_file()
+            finally:
+                await stream.close()
+
+        for file_id in pending_content_ids:
+            snapshots[file_id] = self._authoritative_file_snapshot(
+                run_scope,
+                content_rows[file_id],
+                limits=limits,
+                chunk_rows=(),
+            )
+
+        return {file_id: snapshots[file_id] for file_id in unique_rows}
+
+    async def _workspace_change_result(
+        self,
+        session: AsyncSession,
+        run_scope: PrivateFileRunScope,
+        *,
+        old_by_path: dict[str, PrivateFileRow],
+        promoted: list[PrivateFileRow],
+        deleted_paths: list[str],
+    ) -> WorkspaceChangeResult | None:
+        after_by_path = {row.logical_path: row for row in promoted}
+        touched_paths = set(after_by_path) | set(deleted_paths)
+        if not touched_paths:
+            return None
+        limits = WorkspaceChangeLimits()
+        all_rows = tuple(
+            {
+                row.id: row
+                for row in (
+                    *(old_by_path[path] for path in touched_paths if path in old_by_path),
+                    *(after_by_path[path] for path in touched_paths if path in after_by_path),
+                )
+            }.values()
+        )
+        snapshots = await self._authoritative_file_snapshots(
+            session,
+            run_scope,
+            all_rows,
+            limits=limits,
+        )
+        before_files: dict[str, FileSnapshot] = {}
+        after_files: dict[str, FileSnapshot] = {}
+        for logical_path in sorted(touched_paths):
+            old = old_by_path.get(logical_path)
+            if old is not None:
+                before_snapshot = snapshots[old.id]
+                before_files[before_snapshot.path] = before_snapshot
+            new = after_by_path.get(logical_path)
+            if new is not None:
+                after_snapshot = snapshots[new.id]
+                after_files[after_snapshot.path] = after_snapshot
+        result = compare_snapshots(
+            WorkspaceSnapshot(files=before_files),
+            WorkspaceSnapshot(files=after_files),
+            limits=limits,
+        )
+        return result if result.has_changes() else None
 
     async def _commit(
         self,
@@ -696,6 +907,13 @@ class PrivateFileFinalizer:
                     committed_bytes=sum(item.size for item in staged),
                 )
             await session.flush()
+            workspace_changes = await self._workspace_change_result(
+                session,
+                run_scope,
+                old_by_path=old_by_path,
+                promoted=promoted,
+                deleted_paths=deleted_paths,
+            )
             file_records = tuple(PrivateFileRepository._file_record(row) for row in promoted)
             artifact_records = tuple(
                 PrivateArtifactRecord(
@@ -717,15 +935,8 @@ class PrivateFileFinalizer:
                 files=file_records,
                 artifacts=artifact_records,
                 deleted_file_ids=tuple(deleted_ids),
-                workspace_changes=(
-                    {
-                        "created": sorted(path for path in changed_by_path if path not in before),
-                        "modified": sorted(path for path in changed_by_path if path in before),
-                        "deleted": deleted_paths,
-                    }
-                    if changed_by_path or deleted_paths
-                    else None
-                ),
+                workspace_changes=workspace_changes,
+                produced_output_paths=tuple(sorted(path for path in changed_by_path if path.startswith("outputs/"))),
             )
 
     async def finalize(

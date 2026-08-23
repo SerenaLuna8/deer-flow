@@ -20,7 +20,10 @@ export function RunControlProgress({
   observations: readonly RunControlObservation[];
 }) {
   const { t } = useI18n();
-  if (observations.length === 0) {
+  const visibleObservations = observations.filter(
+    (observation) => observation.reason_code !== "tool_budget_warning",
+  );
+  if (visibleObservations.length === 0) {
     return null;
   }
 
@@ -30,12 +33,8 @@ export function RunControlProgress({
       aria-label={t.conversation.toolCallControl.progressLabel}
       data-testid="run-control-progress"
     >
-      {observations.map((observation) => {
+      {visibleObservations.map((observation) => {
         const hard = isHardObservation(observation);
-        const toolName =
-          "tool_name" in observation
-            ? (observation.tool_name ?? "unknown")
-            : "unknown";
         let title: string;
         let description: string;
         switch (observation.reason_code) {
@@ -52,7 +51,11 @@ export function RunControlProgress({
             description =
               t.conversation.toolCallControl.repeatedLimitDescription;
             break;
-          case "tool_budget_warning":
+          case "tool_budget_warning": {
+            const toolName =
+              "tool_name" in observation && observation.tool_name
+                ? observation.tool_name
+                : "unknown";
             title =
               t.conversation.toolCallControl.toolBudgetWarningTitle(toolName);
             description =
@@ -61,9 +64,9 @@ export function RunControlProgress({
                 observation.hard_limit,
               );
             break;
+          }
           case "tool_budget_exhausted":
-            title =
-              t.conversation.toolCallControl.toolBudgetExhaustedTitle(toolName);
+            title = t.conversation.toolCallControl.toolBudgetExhaustedTitle;
             description =
               t.conversation.toolCallControl.toolBudgetExhaustedDescription;
             break;

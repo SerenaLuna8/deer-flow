@@ -13,8 +13,18 @@ from deerflow.public_error_codes import (
 )
 
 RECOVERED_LLM_FAILURES_KEY: Final[str] = "deerflow_recovered_llm_failures"
-RECOVERED_LLM_FAILURES_VERSION: Final[int] = 1
+RECOVERED_LLM_FAILURES_VERSION: Final[int] = 2
 MAX_RECOVERED_LLM_FAILURES: Final[int] = 512
+
+RecoveredLLMCaller = Literal["lead_agent", "subagent"]
+RecoveredLLMFailureSubtype = Literal[
+    "connection",
+    "timeout",
+    "http_status",
+    "provider_busy",
+    "empty_response",
+    "unknown",
+]
 
 
 class RecoveredLLMFailure(TypedDict):
@@ -22,6 +32,9 @@ class RecoveredLLMFailure(TypedDict):
     max_attempts: int
     error_code: str
     reason: str
+    caller: RecoveredLLMCaller
+    failure_subtype: RecoveredLLMFailureSubtype
+    status_code: int | None
     disposition: Literal["recovered"]
 
 
@@ -58,6 +71,9 @@ def read_recovered_llm_failures(
             "max_attempts",
             "error_code",
             "reason",
+            "caller",
+            "failure_subtype",
+            "status_code",
             "disposition",
         }:
             return ()
@@ -65,6 +81,9 @@ def read_recovered_llm_failures(
         max_attempts = raw.get("max_attempts")
         error_code = raw.get("error_code")
         reason = raw.get("reason")
+        caller = raw.get("caller")
+        failure_subtype = raw.get("failure_subtype")
+        status_code = raw.get("status_code")
         if (
             type(attempt) is not int
             or type(max_attempts) is not int
@@ -74,6 +93,20 @@ def read_recovered_llm_failures(
             or type(reason) is not str
             or normalize_llm_error_reason(reason) != reason
             or llm_error_code_for_reason(reason) != error_code
+            or type(caller) is not str
+            or caller not in {"lead_agent", "subagent"}
+            or type(failure_subtype) is not str
+            or failure_subtype
+            not in {
+                "connection",
+                "timeout",
+                "http_status",
+                "provider_busy",
+                "empty_response",
+                "unknown",
+            }
+            or (status_code is not None and (type(status_code) is not int or not 100 <= status_code <= 599))
+            or (failure_subtype == "http_status") != (status_code is not None)
             or raw.get("disposition") != "recovered"
         ):
             return ()
@@ -83,6 +116,9 @@ def read_recovered_llm_failures(
                 "max_attempts": max_attempts,
                 "error_code": error_code,
                 "reason": reason,
+                "caller": caller,
+                "failure_subtype": failure_subtype,
+                "status_code": status_code,
                 "disposition": "recovered",
             }
         )
@@ -95,6 +131,9 @@ def _copy_failure(failure: RecoveredLLMFailure) -> RecoveredLLMFailure:
         "max_attempts": failure["max_attempts"],
         "error_code": failure["error_code"],
         "reason": failure["reason"],
+        "caller": failure["caller"],
+        "failure_subtype": failure["failure_subtype"],
+        "status_code": failure["status_code"],
         "disposition": "recovered",
     }
 
@@ -136,7 +175,9 @@ __all__ = [
     "MAX_RECOVERED_LLM_FAILURES",
     "RECOVERED_LLM_FAILURES_KEY",
     "RECOVERED_LLM_FAILURES_VERSION",
+    "RecoveredLLMCaller",
     "RecoveredLLMFailure",
+    "RecoveredLLMFailureSubtype",
     "RunRecoveredLLMFailureRecorder",
     "build_recovered_llm_failures_receipt",
     "read_recovered_llm_failures",

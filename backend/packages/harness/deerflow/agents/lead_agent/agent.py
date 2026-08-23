@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import secrets
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 
 from langchain.agents import create_agent
@@ -33,11 +34,20 @@ from langchain_core.tools import BaseTool
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.assembly import (
+    append_final_provider_request_guard,
     assemble_agent_middlewares,
     build_host_execution_batch_barrier,
     build_lead_runtime_middlewares,
 )
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.provider_request_usage import (
+    FinalProviderRequestGuard,
+    build_provider_request_profile,
+    collect_custom_middleware_request_contract,
+    collect_middleware_system_prompts,
+    collect_middleware_tools,
+    provider_request_runtime_policy_identity,
+)
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
@@ -48,6 +58,7 @@ from deerflow.agents.middlewares.tool_call_control import (
     FixedToolCallControlScope,
     PerInvocationToolCallControlScope,
     ResolvedGraphToolCallControlProfile,
+    RunToolCallLimitAuthority,
     ToolCallControlBinding,
     ToolCallControlObserver,
     build_tool_call_control,
@@ -85,6 +96,7 @@ logger = logging.getLogger(__name__)
 
 _NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
 _PRIVATE_RUNTIME_DEFAULT_MODEL_REF = "default"
+_CANONICAL_BOUNDED_OVERLAY_UTF8_BYTES = 32 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,9 +200,16 @@ def _resolve_private_runtime_model_name(
     return model_name
 
 
-def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
+def _create_summarization_middleware(
+    *,
+    app_config: AppConfig | None = None,
+    context_model: BaseChatModel | None = None,
+) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
-    return create_summarization_middleware(app_config=app_config)
+    return create_summarization_middleware(
+        app_config=app_config,
+        context_model=context_model,
+    )
 
 
 def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
@@ -334,6 +353,7 @@ def build_middlewares(
     agent_name: str | None = None,
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
+    context_model: BaseChatModel | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_setup=None,
@@ -375,8 +395,8 @@ def build_middlewares(
         resolved_max_concurrent_subagents: Server-resolved per-batch limit.
         resolved_max_total_subagents: Server-resolved per-execution delegation
             total. It remains owned by ``SubagentLimitMiddleware``.
-        tool_call_control: The already-bound repeated-call and per-tool budget
-            Adapter for this graph execution profile.
+        tool_call_control: The already-bound repeated-call and shared Run
+            tool-call-limit Adapter for this graph execution profile.
 
     Returns:
         List of middleware instances.
@@ -454,7 +474,10 @@ def build_middlewares(
     )
 
     # Resolve feature-owned phases; the shared composer below owns their order.
-    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
+    summarization_middleware = _create_summarization_middleware(
+        app_config=resolved_app_config,
+        context_model=context_model,
+    )
 
     cfg = _get_runtime_config(config)
     is_plan_mode = cfg.get("is_plan_mode", False)
@@ -605,6 +628,24 @@ def _exact_runtime_skill_version_ids(
     return tuple(version_ids)
 
 
+def _max_slash_skill_overlay_utf8_bytes(
+    skills: list[Skill] | tuple[Skill, ...],
+) -> int:
+    """Return the largest exact one-Skill activation wrapper material."""
+
+    maximum = 0
+    for skill in skills:
+        content = skill.skill_file.read_text(encoding="utf-8")
+        rendered = (
+            f'<slash_skill_activation><skill name="{escape(skill.name, quote=True)}" '
+            f'category="{escape(str(skill.category), quote=True)}" '
+            f'path="{escape(skill.get_container_file_path(), quote=True)}">'
+            f"{escape(content, quote=False)}</skill></slash_skill_activation>"
+        )
+        maximum = max(maximum, len(rendered.encode("utf-8")))
+    return maximum
+
+
 def make_lead_agent(config: RunnableConfig):
     """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
     runtime_config = _get_runtime_config(config)
@@ -694,6 +735,9 @@ def _make_lead_agent(
     else:
         configured_run_id = cfg.get("run_id")
         control_scope = FixedToolCallControlScope(configured_run_id) if isinstance(configured_run_id, str) and configured_run_id else PerInvocationToolCallControlScope()
+    tool_call_limit_authority = RunToolCallLimitAuthority(
+        hard_limit=tool_call_control_profile.policy.internal_tool_call_limit,
+    )
     tool_call_control = build_tool_call_control(
         tool_call_control_profile.lead,
         ToolCallControlBinding(
@@ -701,6 +745,8 @@ def _make_lead_agent(
             scope=control_scope,
             workload_profile=tool_call_control_profile.workload_profile,
             observer=tool_call_control_observer,
+            limit_authority=tool_call_limit_authority,
+            limit_scope=control_scope,
         ),
     )
     agent_config = load_agent_config(agent_name) if private_runtime is None else None
@@ -938,6 +984,7 @@ def _make_lead_agent(
         build_middlewares(
             config,
             model_name=model_name,
+            context_model=lead_model,
             agent_name=agent_name,
             available_skills=available_skills,
             app_config=resolved_app_config,
@@ -1023,7 +1070,48 @@ def _make_lead_agent(
             parent_profile,
             tool_call_control_profile=tool_call_control_profile,
             tool_call_control_observer=tool_call_control_observer,
+            tool_call_limit_authority=tool_call_limit_authority,
+            tool_call_limit_scope=control_scope,
         ),
+    )
+    configured_run_id = cfg.get("run_id")
+    (
+        custom_overlay_material,
+        custom_overlay_message_count,
+        custom_request_unsupported_reason,
+    ) = collect_custom_middleware_request_contract(extension.custom_middlewares)
+    provider_request_profile = build_provider_request_profile(
+        model=lead_model,
+        model_name=model_name,
+        provider_adapter=model_config.system_provider_adapter,
+        provider_class_path=model_config.use,
+        system_prompt=system_prompt,
+        tools=(
+            *collect_middleware_tools(effective_middleware),
+            *final_tools,
+        ),
+        middleware_system_prompts=collect_middleware_system_prompts(
+            effective_middleware,
+        ),
+        bounded_overlay_material=custom_overlay_material,
+        bounded_overlay_utf8_bytes=(_CANONICAL_BOUNDED_OVERLAY_UTF8_BYTES + _max_slash_skill_overlay_utf8_bytes(available_skill_catalog)),
+        bounded_overlay_message_count=8 + custom_overlay_message_count,
+        supports_vision=model_config.supports_vision,
+        unsupported_reason=custom_request_unsupported_reason,
+        authority_identity=(configured_run_id if isinstance(configured_run_id, str) and configured_run_id else None),
+        capture_provider_input_tokens=bool(
+            resolved_app_config.token_usage.enabled,
+        ),
+        closure_identity=(getattr(private_runtime, "provider_request_closure_identity", None) if private_runtime is not None else None),
+        mcp_closure_present=bool(getattr(private_runtime, "provider_request_mcp_closure_present", False)),
+        runtime_policy_identity=provider_request_runtime_policy_identity(
+            resolved_app_config,
+        ),
+        workload_profile=tool_call_control_profile.workload_profile,
+    )
+    effective_middleware = append_final_provider_request_guard(
+        effective_middleware,
+        FinalProviderRequestGuard(provider_request_profile),
     )
     return create_agent(
         model=lead_model,

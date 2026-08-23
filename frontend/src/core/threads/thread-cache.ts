@@ -1,3 +1,4 @@
+import type { Run } from "@langchain/langgraph-sdk";
 import type { InfiniteData, QueryClient } from "@tanstack/react-query";
 
 import { privateWorkRoot } from "../private-work/query-keys";
@@ -22,6 +23,26 @@ function isExactScopedThreadQuery(
     return false;
   }
   return queryKey.slice(root.length).some((segment) => segment === threadId);
+}
+
+export type ContextUsageRunObservation = {
+  runId: string;
+  authority: "active" | "idle";
+};
+
+export function latestContextUsageRunObservation(
+  threadId: string | null | undefined,
+  runs: readonly Run[] | undefined,
+): ContextUsageRunObservation | null {
+  if (!threadId) return null;
+  const run = runs?.find((candidate) => candidate.thread_id === threadId);
+  if (!run || typeof run.run_id !== "string" || !run.run_id) return null;
+  if (typeof run.status !== "string") return null;
+  return {
+    runId: run.run_id,
+    authority:
+      run.status === "pending" || run.status === "running" ? "active" : "idle",
+  };
 }
 
 export async function removeDeletedThreadCaches(
@@ -132,6 +153,23 @@ export function upsertThreadInInfiniteCache(
   );
 }
 
+export async function invalidateStartedThreadContextUsage(
+  queryClient: QueryClient,
+  threadId: string | null | undefined,
+  isMock = false,
+  scope: ProjectClientScope,
+): Promise<void> {
+  if (!threadId || isMock) return;
+  const filters = {
+    queryKey: scopedThreadQueryKey(
+      scope,
+      ...threadContextUsageQueryKey(threadId),
+    ),
+  };
+  await queryClient.cancelQueries(filters);
+  await queryClient.invalidateQueries(filters);
+}
+
 export function invalidateStoppedThreadCaches(
   queryClient: QueryClient,
   threadId: string | null | undefined,
@@ -168,14 +206,14 @@ export function invalidateStoppedThreadCaches(
     ),
   });
   void queryClient.invalidateQueries({
-    queryKey: scopedThreadQueryKey(
-      scope,
-      ...threadContextUsageQueryKey(threadId),
-    ),
-  });
-  void queryClient.invalidateQueries({
     queryKey: scopedThreadQueryKey(scope, "uploads", "list", threadId),
   });
+  void invalidateStartedThreadContextUsage(
+    queryClient,
+    threadId,
+    isMock,
+    scope,
+  );
 }
 
 export const STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS = 1500;
@@ -190,7 +228,7 @@ function scheduleStoppedThreadFinalizationRefetch(
     return;
   }
   globalThis.setTimeout(() => {
-    invalidateStoppedThreadCaches(queryClient, threadId, isMock, scope);
+    void invalidateStoppedThreadCaches(queryClient, threadId, isMock, scope);
   }, STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS);
 }
 

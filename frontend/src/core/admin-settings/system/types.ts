@@ -177,57 +177,6 @@ const toolOutputOverridesSchema = z
     }
   });
 
-const toolCallLimitSchema = z
-  .object({
-    warn: boundedInteger(1, 100_000),
-    hard_limit: boundedInteger(1, 100_000),
-  })
-  .strict()
-  .refine((value) => value.hard_limit >= value.warn, {
-    path: ["hard_limit"],
-    message: "Hard limit cannot be below the warning threshold",
-  });
-const toolCallLimitsByToolSchema = z
-  .record(toolNameSchema, toolCallLimitSchema)
-  .superRefine((value, context) => {
-    if (Object.hasOwn(value, "task")) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "task is governed by the Sub-Agent delegation limit and cannot be configured as an ordinary tool budget",
-      });
-    }
-    if (Object.keys(value).length > 64) {
-      context.addIssue({
-        code: z.ZodIssueCode.too_big,
-        type: "array",
-        maximum: 64,
-        inclusive: true,
-      });
-    }
-  });
-const toolCallRoleBudgetSchema = z
-  .object({
-    default: toolCallLimitSchema,
-    tools: toolCallLimitsByToolSchema,
-  })
-  .strict();
-const toolCallBudgetProfileSchema = z
-  .object({
-    lead: toolCallRoleBudgetSchema,
-    subagent: toolCallRoleBudgetSchema,
-  })
-  .strict();
-const toolCallBudgetSchema = z
-  .object({
-    profiles: z
-      .object({
-        interactive: toolCallBudgetProfileSchema,
-        research: toolCallBudgetProfileSchema,
-      })
-      .strict(),
-  })
-  .strict();
 const identicalCallsSchema = z
   .object({
     warn_threshold: boundedInteger(1, 100_000),
@@ -328,7 +277,7 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
           identical_calls: identicalCallsSchema,
         })
         .strict(),
-      tool_call_budget: toolCallBudgetSchema,
+      internal_tool_call_limit: boundedInteger(1, 100_000),
       read_before_write: z.object({ enabled: z.boolean() }).strict(),
       safety_finish_reason: z.object({ enabled: z.boolean() }).strict(),
       subagents: z

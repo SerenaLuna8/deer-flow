@@ -55,12 +55,15 @@ export {
 } from "./send-message";
 export type { SendMessageOptions } from "./send-message";
 export {
+  latestContextUsageRunObservation,
   STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS,
+  invalidateStartedThreadContextUsage,
   invalidateStoppedThreadCaches,
   stopThreadAndInvalidateCaches,
   upsertThreadInInfiniteCache,
   upsertThreadInSearchCache,
 } from "./thread-cache";
+export type { ContextUsageRunObservation } from "./thread-cache";
 export {
   deleteThreadEverywhere,
   deleteThreadWithSidecarCleanup,

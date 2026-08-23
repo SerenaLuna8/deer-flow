@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -62,6 +63,25 @@ class RunFileAuthority(Protocol):
         relative_path: str,
         content: bytes,
     ) -> str: ...
+
+    async def write_delegated_output(
+        self,
+        output_root: str,
+        relative_path: str,
+        content: bytes,
+    ) -> str: ...
+
+    async def write_delegated_internal(
+        self,
+        output_root: str,
+        relative_path: str,
+        content: bytes,
+    ) -> str: ...
+
+    def delegated_output_scope(
+        self,
+        task_id: str,
+    ) -> AbstractAsyncContextManager[Any]: ...
 
     async def record_presented_paths(
         self,

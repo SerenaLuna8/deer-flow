@@ -21,11 +21,9 @@ from deerflow.agents.middlewares.tool_call_control import (
     TOOL_CALL_CONTROL_STATE_KEY,
     FixedToolCallControlScope,
     RepeatedCallPolicy,
-    ResolvedToolCallBudgetPolicy,
     ResolvedToolCallControlPolicy,
     ToolCallBudgetObservation,
     ToolCallControlBinding,
-    ToolCallLimit,
     build_tool_call_control,
 )
 from deerflow.agents.thread_state import (
@@ -59,13 +57,7 @@ def _control_policy(*, hard_limit: int = 2) -> ResolvedToolCallControlPolicy:
             hard_limit=2,
             window_size=2,
         ),
-        tool_budget=ResolvedToolCallBudgetPolicy(
-            default=ToolCallLimit(
-                warn_threshold=1,
-                hard_limit=hard_limit,
-            ),
-            tools={},
-        ),
+        internal_tool_call_limit=hard_limit,
     )
 
 
@@ -136,16 +128,14 @@ def test_materialized_checkpoint_replay_preserves_controlled_batch_and_hard_limi
     controlled_snapshot = next(
         snapshot
         for snapshot in graph.get_state_history(config)
-        if snapshot.values.get(TOOL_CALL_CONTROL_STATE_KEY, {}).get("admitted_counts") == {"web_search": 2}
-        and snapshot.values.get("messages")
-        and isinstance(snapshot.values["messages"][-1], AIMessage)
-        and snapshot.values["messages"][-1].id == boundary.id
+        if snapshot.values.get(TOOL_CALL_CONTROL_STATE_KEY, {}).get("admitted_count") == 2 and snapshot.values.get("messages") and isinstance(snapshot.values["messages"][-1], AIMessage) and snapshot.values["messages"][-1].id == boundary.id
     )
     materialized = graph.get_state(controlled_snapshot.config)
     facts = materialized.values[TOOL_CALL_CONTROL_STATE_KEY]
     controlled_message = materialized.values["messages"][-1]
 
-    assert facts["admitted_counts"] == {"web_search": 2}
+    assert facts["admitted_count"] == 2
+    assert facts["limit_exhausted"] is True
     assert [call["id"] for call in controlled_message.tool_calls] == [
         "call-0",
         "call-1",
@@ -160,7 +150,8 @@ def test_materialized_checkpoint_replay_preserves_controlled_batch_and_hard_limi
     )
 
     assert replay is not None
-    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {"web_search": 2}
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 2
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is True
     assert [call["id"] for call in replay["messages"][0].tool_calls] == [
         "call-0",
         "call-1",
@@ -188,7 +179,8 @@ def test_materialized_checkpoint_replay_preserves_controlled_batch_and_hard_limi
     )
 
     assert rejected is not None
-    assert rejected[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {"web_search": 2}
+    assert rejected[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 2
+    assert rejected[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is True
     assert rejected["messages"][0].tool_calls == []
 
 
@@ -338,7 +330,8 @@ async def test_private_run_scope_spans_hidden_goal_turns_but_resets_for_a_new_ru
     assert continuation_calls == 2
     assert first_calls == ["initial", "continuation-admitted"]
     assert first_facts["scope_id"] == first_record.run_id
-    assert first_facts["admitted_counts"] == {"first_search": 2}
+    assert first_facts["admitted_count"] == 2
+    assert first_facts["limit_exhausted"] is True
     assert (
         first_exhaustion.count_before,
         first_exhaustion.proposed,
@@ -409,7 +402,8 @@ async def test_private_run_scope_spans_hidden_goal_turns_but_resets_for_a_new_ru
     assert second_outcome.status == "succeeded"
     assert second_calls == ["new-run-1", "new-run-2"]
     assert second_facts["scope_id"] == second_record.run_id
-    assert second_facts["admitted_counts"] == {"second_search": 2}
+    assert second_facts["admitted_count"] == 2
+    assert second_facts["limit_exhausted"] is True
     assert (
         second_exhaustion.count_before,
         second_exhaustion.proposed,

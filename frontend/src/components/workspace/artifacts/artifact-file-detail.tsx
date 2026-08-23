@@ -361,6 +361,7 @@ export function ArtifactFileDetail({
             {isCodeFile && viewMode === "code" && (
               <CodeEditor
                 className="size-full resize-none rounded-none border-none"
+                language={language ?? "text"}
                 value={visibleContent ?? ""}
                 readonly
               />

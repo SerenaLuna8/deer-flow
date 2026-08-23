@@ -43,7 +43,7 @@ class McpToolInventoryRecord:
     attempt_secret_digest: str
     attempt_status: McpToolInventoryAttemptStatus
     public_error_code: McpToolInventoryErrorCode | None
-    tools: tuple[dict[str, str], ...]
+    tools: tuple[dict[str, str | int], ...]
     tools_payload_checksum: str | None
     tools_secret_digest: str | None
     last_attempt_at: datetime
@@ -52,13 +52,23 @@ class McpToolInventoryRecord:
 
 def normalize_mcp_tool_inventory(
     tools: Sequence[Mapping[str, object]],
-) -> tuple[dict[str, str], ...]:
+) -> tuple[dict[str, str | int], ...]:
     if not isinstance(tools, (list, tuple)) or len(tools) > MAX_MCP_TOOL_INVENTORY_ITEMS:
         raise ValueError("invalid MCP tool inventory")
-    normalized: list[dict[str, str]] = []
+    normalized: list[dict[str, str | int]] = []
     names: set[str] = set()
     for tool in tools:
-        if not isinstance(tool, Mapping) or set(tool) != {"name", "description"}:
+        if not isinstance(tool, Mapping):
+            raise ValueError("invalid MCP tool inventory")
+        keys = set(tool)
+        legacy = keys == {"name", "description"}
+        if not legacy and keys != {
+            "name",
+            "runtime_name",
+            "description",
+            "schema_utf8_bytes",
+            "schema_sha256",
+        }:
             raise ValueError("invalid MCP tool inventory")
         name = tool.get("name")
         description = tool.get("description")
@@ -73,7 +83,32 @@ def normalize_mcp_tool_inventory(
         ):
             raise ValueError("invalid MCP tool inventory")
         names.add(name)
-        normalized.append({"name": name, "description": description})
+        item: dict[str, str | int] = {
+            "name": name,
+            "description": description,
+        }
+        if not legacy:
+            runtime_name = tool.get("runtime_name")
+            schema_utf8_bytes = tool.get("schema_utf8_bytes")
+            schema_sha256 = tool.get("schema_sha256")
+            if (
+                not isinstance(runtime_name, str)
+                or not runtime_name
+                or len(runtime_name) > MAX_MCP_TOOL_INVENTORY_NAME_CHARS
+                or _TOOL_NAME.fullmatch(runtime_name) is None
+                or not isinstance(schema_utf8_bytes, int)
+                or isinstance(schema_utf8_bytes, bool)
+                or schema_utf8_bytes <= 0
+                or not isinstance(schema_sha256, str)
+                or _HEX_DIGEST.fullmatch(schema_sha256) is None
+            ):
+                raise ValueError("invalid MCP tool inventory")
+            item.update(
+                runtime_name=runtime_name,
+                schema_utf8_bytes=schema_utf8_bytes,
+                schema_sha256=schema_sha256,
+            )
+        normalized.append(item)
     return tuple(normalized)
 
 

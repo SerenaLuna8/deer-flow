@@ -56,7 +56,7 @@ def _format_todos(todos: list[Todo]) -> str:
     return "\n".join(lines)
 
 
-def _format_completion_reminder(todos: list[Todo]) -> str:
+def render_todo_completion_reminder(todos: list[Todo]) -> str:
     """Format a completion reminder for incomplete todo items."""
     incomplete = [t for t in todos if t.get("status") != "completed"]
     incomplete_text = "\n".join(f"- [{t.get('status', 'pending')}] {t.get('content', '')}" for t in incomplete)
@@ -67,6 +67,33 @@ def _format_completion_reminder(todos: list[Todo]) -> str:
         "Please continue working on these tasks. Call `write_todos` to mark items as completed "
         "as you finish them, and only respond when all items are done.\n"
         "</system_reminder>"
+    )
+
+
+def render_todo_context_loss_reminder(todos: list[Todo]) -> str:
+    """Render the exact persisted reminder used after todo history compaction."""
+
+    formatted = _format_todos(todos)
+    return (
+        "<system_reminder>\n"
+        "Your todo list from earlier is no longer visible in the current context window, "
+        "but it is still active. Here is the current state:\n\n"
+        f"{formatted}\n\n"
+        "Continue tracking and updating this todo list as you work. "
+        "Call `write_todos` whenever the status of any item changes.\n"
+        "</system_reminder>"
+    )
+
+
+def render_todo_request_reserve(todos: list[Todo]) -> str:
+    """Return the larger of the two possible one-call todo overlays."""
+
+    return max(
+        (
+            render_todo_context_loss_reminder(todos),
+            render_todo_completion_reminder(todos),
+        ),
+        key=lambda value: len(value.encode("utf-8")),
     )
 
 
@@ -134,19 +161,10 @@ class TodoMiddleware(TodoListMiddleware):
 
         # The todo list exists in state but the original write_todos call is gone.
         # Inject a reminder as a HumanMessage so the model stays aware.
-        formatted = _format_todos(todos)
         reminder = HumanMessage(
             name="todo_reminder",
             additional_kwargs={"hide_from_ui": True},
-            content=(
-                "<system_reminder>\n"
-                "Your todo list from earlier is no longer visible in the current context window, "
-                "but it is still active. Here is the current state:\n\n"
-                f"{formatted}\n\n"
-                "Continue tracking and updating this todo list as you work. "
-                "Call `write_todos` whenever the status of any item changes.\n"
-                "</system_reminder>"
-            ),
+            content=render_todo_context_loss_reminder(todos),
         )
         return {"messages": [reminder]}
 
@@ -300,7 +318,10 @@ class TodoMiddleware(TodoListMiddleware):
         # 5. Queue a reminder for the next model request and jump back. We must
         # not persist this control prompt as a normal HumanMessage, otherwise it
         # can leak into user-visible message streams and saved transcripts.
-        self._queue_completion_reminder(runtime, _format_completion_reminder(todos))
+        self._queue_completion_reminder(
+            runtime,
+            render_todo_completion_reminder(todos),
+        )
         return {"jump_to": "model"}
 
     @override

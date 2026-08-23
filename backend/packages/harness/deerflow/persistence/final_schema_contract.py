@@ -108,24 +108,24 @@ FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
         digest="3206643a11835c0e3344f01ff4cd1ccf52de91075d1dd23073863a8670ebea75",
     ),
     "columns": CatalogInvariant(
-        count=1163,
-        digest="d569d9aa37411d6a69d47b3431bf515ec13ae7e3b8a7a2187bc4f5ef3c77b2ba",
+        count=1164,
+        digest="39fc8347769d543a00c51e23dee76a17f598fd9a024483737c0f07e92f99a161",
     ),
     "table_comments": CatalogInvariant(
         count=96,
         digest="2cb1e77059219e3dc8603abc1b92955ae7658776e9dfd6d5634f054a8918185d",
     ),
     "column_comments": CatalogInvariant(
-        count=1164,
-        digest="bc98d30455d50dfe1c2ea059f1e34ef70e28c30b429764f5881dfd2f6643dd45",
+        count=1165,
+        digest="e6643fc8868b22bc7fa6ba46b8deaa9149635ff95a83b4958dcafa4b2e4939a6",
     ),
     "sequences": CatalogInvariant(
         count=4,
         digest="73cb0d46bc3afc9585d0959b1d57d093621113408f2629dad9a6b027550af894",
     ),
     "constraints": CatalogInvariant(
-        count=862,
-        digest="0f7b7a1fc24bab89cf9a82cc406f43f12b34c2d17a615eb6618f234c6dc4bdb6",
+        count=863,
+        digest="58449ffbbd7d175f82f964cb7709b2ff6fb804d00084e9b015a5fe1ddc6193c5",
     ),
     "indexes": CatalogInvariant(
         count=310,

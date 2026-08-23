@@ -22,7 +22,8 @@ from app.system_settings.models import (
 _MAX_SETTINGS_BYTES = 32 * 1024
 _PROVIDER_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}\Z")
 _SETTING_FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
-_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high"})
+_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+_DEEPSEEK_REASONING_EFFORTS = ("low", "high", "max")
 _THINKING_TYPES = frozenset({"adaptive", "disabled", "enabled"})
 _SECRET_VALUE_PATTERNS = (
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"),
@@ -58,6 +59,8 @@ ProviderSettingInputType = Literal[
     "string",
     "url",
 ]
+ProviderSettingFormControl = Literal["input", "preserve"]
+ProviderSettingDefaultMode = Literal["platform", "provider"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +71,9 @@ class ProviderSettingFieldSpec:
     label: str
     input_type: ProviderSettingInputType
     advanced: bool = True
+    form_control: ProviderSettingFormControl = "input"
+    default_mode: ProviderSettingDefaultMode = "provider"
+    default_value: object | None = None
     minimum: int | float | None = None
     maximum: int | float | None = None
     step: int | float | None = None
@@ -85,6 +91,8 @@ class ProviderSettingFieldSpec:
             or not self.label.strip()
             or len(self.label) > 120
             or self.input_type not in {"boolean", "enum", "integer", "json", "number", "string", "url"}
+            or self.form_control not in {"input", "preserve"}
+            or self.default_mode not in {"platform", "provider"}
             or (not numeric and any(value is not None for value in numeric_constraints))
             or any(value is not None and type(value) not in {int, float} for value in numeric_constraints)
             or (self.input_type == "integer" and any(value is not None and type(value) is not int for value in numeric_constraints))
@@ -95,11 +103,45 @@ class ProviderSettingFieldSpec:
             or (self.input_type == "enum" and (not self.options or not options_valid or len(set(self.options)) != len(self.options)))
             or (self.input_type != "enum" and bool(self.options))
             or not options_valid
-            or (self.input_type == "json" and not self.advanced)
+            or (self.input_type == "json" and (not self.advanced or self.form_control != "preserve"))
             or (self.input_type == "json" and self.normalizer is None)
             or (self.normalizer is not None and not callable(self.normalizer))
+            or (self.default_mode == "provider" and self.default_value is not None)
+            or (self.default_mode == "platform" and not self._platform_default_is_valid())
         ):
             raise ValueError("Provider setting field descriptor invalid")
+
+    def _platform_default_is_valid(self) -> bool:
+        value = self.default_value
+        if value is None:
+            return False
+        if self.input_type == "boolean":
+            return type(value) is bool
+        if self.input_type == "enum":
+            return type(value) is str and value in self.options
+        if self.input_type == "integer":
+            return type(value) is int and (self.minimum is None or value >= self.minimum) and (self.maximum is None or value <= self.maximum)
+        if self.input_type == "number":
+            return type(value) in {int, float} and math.isfinite(value) and (self.minimum is None or value >= self.minimum) and (self.maximum is None or value <= self.maximum)
+        if self.input_type == "url":
+            if type(value) is not str:
+                return False
+            try:
+                parsed = urlsplit(value)
+                valid = parsed.scheme in {"http", "https"} and parsed.hostname is not None and parsed.username is None and parsed.password is None and not parsed.query and not parsed.fragment
+                _ = parsed.port
+                return valid
+            except ValueError:
+                return False
+        if self.input_type == "string":
+            return type(value) is str and bool(value.strip()) and len(value) <= 2_048
+        if self.input_type == "json" and self.normalizer is not None:
+            try:
+                self.normalizer(value)
+                return True
+            except (TypeError, ValueError):
+                return False
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,7 +197,7 @@ _TEMPERATURE_FIELD = ProviderSettingFieldSpec(
     "temperature",
     "Temperature",
     "number",
-    advanced=False,
+    advanced=True,
     minimum=-2,
     maximum=2,
     step=0.01,
@@ -164,7 +206,6 @@ _REQUEST_TIMEOUT_FIELD = ProviderSettingFieldSpec(
     "request_timeout",
     "Request timeout (seconds)",
     "number",
-    advanced=False,
     minimum=0.1,
     maximum=3_600,
     step=0.1,
@@ -189,6 +230,7 @@ _TIMEOUT_FIELD = ProviderSettingFieldSpec(
     "timeout",
     "Timeout (seconds)",
     "number",
+    form_control="preserve",
     minimum=0.1,
     maximum=3_600,
     step=0.1,
@@ -261,6 +303,12 @@ def _validate_number(
 
 def _validate_reasoning_effort(value: object) -> str:
     if type(value) is not str or value not in _REASONING_EFFORTS:
+        raise ValueError
+    return value
+
+
+def _validate_deepseek_reasoning_effort(value: object) -> str:
+    if type(value) is not str or value not in _DEEPSEEK_REASONING_EFFORTS:
         raise ValueError
     return value
 
@@ -358,31 +406,40 @@ _EXTRA_BODY_FIELD = ProviderSettingFieldSpec(
     "extra_body",
     "Extra request body",
     "json",
+    form_control="preserve",
     normalizer=_validate_extra_body,
 )
 _REASONING_EFFORT_FIELD = ProviderSettingFieldSpec(
     "reasoning_effort",
     "Reasoning effort",
     "enum",
-    options=tuple(sorted(_REASONING_EFFORTS)),
+    options=_REASONING_EFFORTS,
     normalizer=_validate_reasoning_effort,
+)
+_DEEPSEEK_REASONING_EFFORT_FIELD = replace(
+    _REASONING_EFFORT_FIELD,
+    options=_DEEPSEEK_REASONING_EFFORTS,
+    normalizer=_validate_deepseek_reasoning_effort,
 )
 _THINKING_FIELD = ProviderSettingFieldSpec(
     "thinking",
     "Thinking configuration",
     "json",
+    form_control="preserve",
     normalizer=_validate_thinking,
 )
 _THINKING_ENABLED_FIELD = ProviderSettingFieldSpec(
     "when_thinking_enabled",
     "Thinking-enabled overrides",
     "json",
+    form_control="preserve",
     normalizer=_validate_thinking_enabled,
 )
 _THINKING_DISABLED_FIELD = ProviderSettingFieldSpec(
     "when_thinking_disabled",
     "Thinking-disabled overrides",
     "json",
+    form_control="preserve",
     normalizer=_validate_thinking_disabled,
 )
 _OUTPUT_VERSION_FIELD = ProviderSettingFieldSpec(
@@ -414,11 +471,12 @@ _OPENAI_COMPATIBLE_FIELDS = (
     _THINKING_DISABLED_FIELD,
     _THINKING_ENABLED_FIELD,
 )
+_DEEPSEEK_OPENAI_COMPATIBLE_FIELDS = tuple(_DEEPSEEK_REASONING_EFFORT_FIELD if field.name == "reasoning_effort" else field for field in _OPENAI_COMPATIBLE_FIELDS)
 _ANTHROPIC_FIELDS = (
     _BASE_URL_FIELD,
     _DEFAULT_REQUEST_TIMEOUT_FIELD,
     _MAX_TOKENS_FIELD,
-    _REQUEST_TIMEOUT_FIELD,
+    replace(_REQUEST_TIMEOUT_FIELD, form_control="preserve"),
     _TEMPERATURE_FIELD,
     _THINKING_FIELD,
     _TIMEOUT_FIELD,
@@ -426,43 +484,104 @@ _ANTHROPIC_FIELDS = (
     _THINKING_ENABLED_FIELD,
 )
 
+_OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS = 240.0
+
+
+def _fields_with_platform_defaults(
+    fields: tuple[ProviderSettingFieldSpec, ...],
+    *,
+    base_url: str,
+    additional: Mapping[str, object] | None = None,
+) -> tuple[ProviderSettingFieldSpec, ...]:
+    defaults = {
+        "base_url": base_url,
+        **dict(additional or {}),
+    }
+    field_names = {field.name for field in fields}
+    if not set(defaults) <= field_names:
+        raise ValueError("Provider platform default field is not declared")
+    return tuple(
+        replace(
+            field,
+            default_mode="platform",
+            default_value=defaults[field.name],
+        )
+        if field.name in defaults
+        else field
+        for field in fields
+    )
+
 
 BUILTIN_PROVIDER_ADAPTERS: Mapping[str, ProviderAdapterSpec] = MappingProxyType(
     {
         "anthropic": ProviderAdapterSpec(
             "langchain_anthropic:ChatAnthropic",
             True,
-            fields=_ANTHROPIC_FIELDS,
+            fields=_fields_with_platform_defaults(
+                _ANTHROPIC_FIELDS,
+                base_url="https://api.anthropic.com",
+            ),
             default_base_url="https://api.anthropic.com",
         ),
         "deepseek": ProviderAdapterSpec(
             "langchain_deepseek:ChatDeepSeek",
             True,
-            fields=_OPENAI_COMPATIBLE_FIELDS,
+            fields=_fields_with_platform_defaults(
+                _DEEPSEEK_OPENAI_COMPATIBLE_FIELDS,
+                base_url="https://api.deepseek.com/v1",
+                additional={
+                    "stream_chunk_timeout": _OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS,
+                },
+            ),
             default_base_url="https://api.deepseek.com/v1",
         ),
         "openai": ProviderAdapterSpec(
             "langchain_openai:ChatOpenAI",
             True,
-            fields=_OPENAI_COMPATIBLE_FIELDS + (_OUTPUT_VERSION_FIELD, _USE_RESPONSES_API_FIELD),
+            fields=_fields_with_platform_defaults(
+                _OPENAI_COMPATIBLE_FIELDS + (_OUTPUT_VERSION_FIELD, _USE_RESPONSES_API_FIELD),
+                base_url="https://api.openai.com/v1",
+                additional={
+                    "stream_chunk_timeout": _OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS,
+                },
+            ),
             default_base_url="https://api.openai.com/v1",
         ),
         "patched_deepseek": ProviderAdapterSpec(
             "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
             True,
-            fields=_OPENAI_COMPATIBLE_FIELDS,
+            fields=_fields_with_platform_defaults(
+                _DEEPSEEK_OPENAI_COMPATIBLE_FIELDS,
+                base_url="https://api.deepseek.com/v1",
+                additional={
+                    "stream_chunk_timeout": _OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS,
+                },
+            ),
             default_base_url="https://api.deepseek.com/v1",
         ),
         "patched_openai": ProviderAdapterSpec(
             "deerflow.models.patched_openai:PatchedChatOpenAI",
             True,
-            fields=_OPENAI_COMPATIBLE_FIELDS + (_OUTPUT_VERSION_FIELD, _USE_RESPONSES_API_FIELD),
+            fields=_fields_with_platform_defaults(
+                _OPENAI_COMPATIBLE_FIELDS + (_OUTPUT_VERSION_FIELD, _USE_RESPONSES_API_FIELD),
+                base_url="https://api.openai.com/v1",
+                additional={
+                    "stream_chunk_timeout": _OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS,
+                },
+            ),
             default_base_url="https://api.openai.com/v1",
         ),
         "vllm": ProviderAdapterSpec(
             "deerflow.models.vllm_provider:VllmChatModel",
             True,
-            fields=_OPENAI_COMPATIBLE_FIELDS + (_CUMULATIVE_STREAM_USAGE_FIELD,),
+            fields=_fields_with_platform_defaults(
+                _OPENAI_COMPATIBLE_FIELDS + (_CUMULATIVE_STREAM_USAGE_FIELD,),
+                base_url="https://api.openai.com/v1",
+                additional={
+                    "stream_chunk_timeout": _OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS,
+                    "cumulative_stream_usage": False,
+                },
+            ),
             default_base_url="https://api.openai.com/v1",
         ),
     }
@@ -598,11 +717,17 @@ def materialize_effective_model_settings(
     *,
     provider_adapter: str,
 ) -> dict[str, object]:
-    """Pin a provider's real default endpoint instead of consulting host env."""
+    """Pin declared platform defaults while leaving Provider defaults omitted."""
 
     result = dict(settings)
+    descriptor = provider_adapter_descriptor(provider_adapter)
+    for field in descriptor.fields:
+        if field.default_mode == "platform":
+            result.setdefault(
+                field.name,
+                _validate_setting_field(field, field.default_value),
+            )
     if "base_url" not in result:
-        descriptor = provider_adapter_descriptor(provider_adapter)
         if descriptor.api_key_required and descriptor.default_base_url is None:
             raise ModelSettingsInvalid()
         if descriptor.default_base_url is not None:
@@ -656,6 +781,7 @@ def _validate_configuration_fields(
     display_name: object,
     provider_adapter: object,
     provider_model: object,
+    max_input_tokens: object,
     settings: object,
     supports_thinking: object,
     supports_reasoning_effort: object,
@@ -667,6 +793,8 @@ def _validate_configuration_fields(
             type(provider_adapter) is not str
             or not is_provider_adapter_authorable(provider_adapter)
             or type(provider_model) is not str
+            or type(max_input_tokens) is not int
+            or not 1 <= max_input_tokens <= 2_000_000
             or type(supports_thinking) is not bool
             or type(supports_reasoning_effort) is not bool
             or type(supports_vision) is not bool
@@ -691,6 +819,7 @@ def _validate_configuration_fields(
             "display_name": display_name,
             "provider_adapter": provider_adapter,
             "provider_model": provider_model,
+            "max_input_tokens": max_input_tokens,
             "settings": validate_model_settings(
                 settings,
                 provider_adapter=provider_adapter,
@@ -716,6 +845,7 @@ def validate_create_system_model(
             display_name=command.display_name,
             provider_adapter=command.provider_adapter,
             provider_model=command.provider_model,
+            max_input_tokens=command.max_input_tokens,
             settings=command.settings,
             supports_thinking=command.supports_thinking,
             supports_reasoning_effort=command.supports_reasoning_effort,
@@ -742,6 +872,7 @@ def validate_update_system_model(
                 display_name=command.display_name,
                 provider_adapter=command.provider_adapter,
                 provider_model=command.provider_model,
+                max_input_tokens=command.max_input_tokens,
                 settings=command.settings,
                 supports_thinking=command.supports_thinking,
                 supports_reasoning_effort=command.supports_reasoning_effort,
@@ -765,6 +896,7 @@ def validate_system_model_connection_test(
             display_name="Connection test",
             provider_adapter=command.provider_adapter,
             provider_model=command.provider_model,
+            max_input_tokens=command.max_input_tokens,
             settings=command.settings,
             supports_thinking=False,
             supports_reasoning_effort=False,
@@ -778,6 +910,7 @@ def validate_system_model_connection_test(
             command,
             provider_adapter=values["provider_adapter"],
             provider_model=values["provider_model"],
+            max_input_tokens=values["max_input_tokens"],
             settings=values["settings"],
             supports_vision=values["supports_vision"],
             api_key=transient_api_key or command.api_key,
@@ -791,7 +924,7 @@ def canonical_model_payload_checksum(
     command: CreateSystemModel | UpdateSystemModel,
 ) -> str:
     try:
-        if not isinstance(model_config_id, uuid.UUID):
+        if not isinstance(model_config_id, uuid.UUID) or type(command.max_input_tokens) is not int or not 1 <= command.max_input_tokens <= 2_000_000:
             raise ValueError
         payload = canonical_model_payload(model_config_id, command)
         encoded = json.dumps(
@@ -818,13 +951,14 @@ def canonical_model_payload(
     command: CreateSystemModel | UpdateSystemModel,
 ) -> dict[str, object]:
     try:
-        if not isinstance(model_config_id, uuid.UUID):
+        if not isinstance(model_config_id, uuid.UUID) or type(command.max_input_tokens) is not int or not 1 <= command.max_input_tokens <= 2_000_000:
             raise ValueError
         return {
             "schema_version": 1,
             "model_config_id": str(model_config_id),
             "provider_adapter": command.provider_adapter,
             "provider_model": command.provider_model,
+            "max_input_tokens": command.max_input_tokens,
             "settings": validate_model_settings(
                 command.settings,
                 provider_adapter=command.provider_adapter,

@@ -12,6 +12,7 @@ from app.private_work.run_repository import (
     PrivateRunUsageSnapshot,
 )
 from app.worker.service import JobOutcome
+from deerflow.token_budget_usage import TokenBudgetUsageSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,13 @@ class PrivateRunExecution:
     stream_subgraphs: bool
     resume_from_checkpoint: bool = False
     runtime_kind: Literal["chat", "skill_builder"] = "chat"
+    token_budget_usage: TokenBudgetUsageSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        if self.token_budget_usage is not None and type(self.token_budget_usage) is not TokenBudgetUsageSnapshot:
+            raise TypeError(
+                "token_budget_usage must be a TokenBudgetUsageSnapshot or None",
+            )
 
 
 __all__ = [

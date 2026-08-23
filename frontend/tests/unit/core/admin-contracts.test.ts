@@ -90,42 +90,7 @@ function agentRuntimeSettings() {
         window_size: 20,
       },
     },
-    tool_call_budget: {
-      profiles: {
-        interactive: {
-          lead: {
-            default: { warn: 30, hard_limit: 50 },
-            tools: {
-              web_search: { warn: 6, hard_limit: 10 },
-              web_fetch: { warn: 6, hard_limit: 10 },
-            },
-          },
-          subagent: {
-            default: { warn: 30, hard_limit: 50 },
-            tools: {
-              web_search: { warn: 6, hard_limit: 10 },
-              web_fetch: { warn: 6, hard_limit: 10 },
-            },
-          },
-        },
-        research: {
-          lead: {
-            default: { warn: 30, hard_limit: 50 },
-            tools: {
-              web_search: { warn: 20, hard_limit: 30 },
-              web_fetch: { warn: 20, hard_limit: 30 },
-            },
-          },
-          subagent: {
-            default: { warn: 30, hard_limit: 50 },
-            tools: {
-              web_search: { warn: 12, hard_limit: 20 },
-              web_fetch: { warn: 12, hard_limit: 20 },
-            },
-          },
-        },
-      },
-    },
+    internal_tool_call_limit: 200,
     read_before_write: { enabled: true },
     safety_finish_reason: { enabled: true },
     subagents: {
@@ -139,7 +104,7 @@ function agentRuntimeSettings() {
 }
 
 describe("admin contracts", () => {
-  test("accepts the complete schema v4 Agent runtime policy without an outer wrapper", () => {
+  test("accepts the complete schema v5 Agent runtime policy without an outer wrapper", () => {
     const parsed = agentRuntimeSettingsValueSchema.parse(
       agentRuntimeSettings(),
     );
@@ -149,9 +114,7 @@ describe("admin contracts", () => {
       hard_limit: 5,
       window_size: 20,
     });
-    expect(
-      parsed.tool_call_budget.profiles.research.subagent.tools.web_search,
-    ).toEqual({ warn: 12, hard_limit: 20 });
+    expect(parsed.internal_tool_call_limit).toBe(200);
     expect(parsed.subagents.max_total_per_run_by_workload).toEqual({
       interactive: 6,
       research: 9,
@@ -159,20 +122,19 @@ describe("admin contracts", () => {
   });
 
   test("fails closed on incomplete, malformed, wrapped, or legacy Agent runtime policy shapes", () => {
-    const missingProfile = structuredClone(agentRuntimeSettings());
-    delete (missingProfile.tool_call_budget.profiles as Record<string, unknown>)
-      .research;
+    const missingLimit = structuredClone(agentRuntimeSettings()) as Record<
+      string,
+      unknown
+    >;
+    delete missingLimit.internal_tool_call_limit;
     expect(
-      agentRuntimeSettingsValueSchema.safeParse(missingProfile).success,
+      agentRuntimeSettingsValueSchema.safeParse(missingLimit).success,
     ).toBe(false);
 
-    const invalidOrder = structuredClone(agentRuntimeSettings());
-    invalidOrder.tool_call_budget.profiles.research.lead.default = {
-      warn: 31,
-      hard_limit: 30,
-    };
+    const invalidLimit = structuredClone(agentRuntimeSettings());
+    invalidLimit.internal_tool_call_limit = 0;
     expect(
-      agentRuntimeSettingsValueSchema.safeParse(invalidOrder).success,
+      agentRuntimeSettingsValueSchema.safeParse(invalidLimit).success,
     ).toBe(false);
 
     const legacy = structuredClone(agentRuntimeSettings()) as Record<
@@ -199,31 +161,24 @@ describe("admin contracts", () => {
     ).toBe(false);
   });
 
-  test("rejects task from Tool Call Budget with its direct ownership reason", () => {
-    const policy = agentRuntimeSettings();
-    (
-      policy.tool_call_budget.profiles.research.lead.tools as Record<
-        string,
-        { warn: number; hard_limit: number }
-      >
-    ).task = {
-      warn: 1,
-      hard_limit: 2,
+  test("rejects the removed per-tool budget contract", () => {
+    const policy = {
+      ...agentRuntimeSettings(),
+      tool_call_budget: {
+        profiles: {
+          interactive: {
+            lead: {
+              default: { warn: 30, hard_limit: 50 },
+              tools: { web_search: { warn: 6, hard_limit: 10 } },
+            },
+          },
+        },
+      },
     };
 
     const parsed = agentRuntimeSettingsValueSchema.safeParse(policy);
 
     expect(parsed.success).toBe(false);
-    if (parsed.success) return;
-    expect(parsed.error.issues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          path: ["tool_call_budget", "profiles", "research", "lead", "tools"],
-          message:
-            "task is governed by the Sub-Agent delegation limit and cannot be configured as an ordinary tool budget",
-        }),
-      ]),
-    );
   });
 
   test("rejects a repeated-call window smaller than its hard limit", () => {
@@ -250,6 +205,9 @@ describe("admin contracts", () => {
       label: "Base URL",
       input_type: "url" as const,
       advanced: false,
+      form_control: "input" as const,
+      default_mode: "platform" as const,
+      default_value: "https://api.example.test/v1",
       minimum: null,
       maximum: null,
       step: null,
@@ -260,6 +218,9 @@ describe("admin contracts", () => {
       label: "Vendor quality",
       input_type: "integer" as const,
       advanced: false,
+      form_control: "input" as const,
+      default_mode: "platform" as const,
+      default_value: 4,
       minimum: 1,
       maximum: 7,
       step: 1,
@@ -347,6 +308,34 @@ describe("admin contracts", () => {
         ],
       }).success,
     ).toBe(false);
+
+    for (const invalidDefault of [
+      { ...customNumberField, default_value: null },
+      { ...customNumberField, default_value: 4.5 },
+      { ...customNumberField, default_value: 8 },
+      {
+        ...customNumberField,
+        default_mode: "provider" as const,
+        default_value: 4,
+      },
+      {
+        ...customNumberField,
+        form_control: "preserve" as const,
+        input_type: "json" as const,
+        advanced: false,
+        default_mode: "provider" as const,
+        default_value: null,
+      },
+    ]) {
+      expect(
+        adminModelCatalogSchema.safeParse({
+          ...catalog,
+          provider_adapters: [
+            { ...newAdapterDescriptor, setting_fields: [invalidDefault] },
+          ],
+        }).success,
+      ).toBe(false);
+    }
   });
 
   test("keeps the legacy vision flag readable but optional in the public model contract", () => {
@@ -386,6 +375,7 @@ describe("admin contracts", () => {
       display_name: "Visible admin model",
       provider_adapter: "historical_adapter_v1" as const,
       provider_model: "historical-model-v1",
+      max_input_tokens: 128_000,
       settings: {},
       supports_thinking: false,
       supports_reasoning_effort: false,
@@ -414,11 +404,82 @@ describe("admin contracts", () => {
     }
   });
 
+  test("requires one bounded maximum input context across model read and write contracts", () => {
+    const versionWithoutCapacity = {
+      display_name: "Context-bounded model",
+      provider_adapter: "openai" as const,
+      provider_model: "gpt-context-bounded",
+      settings: {},
+      supports_thinking: false,
+      supports_reasoning_effort: false,
+      supports_vision: true,
+    };
+    const itemWithoutCapacity = {
+      ...versionWithoutCapacity,
+      id: "00000000-0000-4000-8000-000000000209",
+      status: "active" as const,
+      is_default: false,
+      revision: 1,
+      api_key_configured: true,
+      secret_readiness: "ready" as const,
+      secret_revision: 1,
+      updated_at: "2026-08-23T00:00:00+00:00",
+    };
+
+    expect(adminModelItemSchema.safeParse(itemWithoutCapacity).success).toBe(
+      false,
+    );
+    for (const maxInputTokens of [1, 200_000, 2_000_000]) {
+      const version = {
+        ...versionWithoutCapacity,
+        max_input_tokens: maxInputTokens,
+      };
+      expect(
+        adminModelItemSchema.safeParse({
+          ...itemWithoutCapacity,
+          max_input_tokens: maxInputTokens,
+        }).success,
+      ).toBe(true);
+      expect(
+        createAdminModelInputSchema.safeParse({
+          ...version,
+          status: "active",
+          api_key: "temporary-key",
+        }).success,
+      ).toBe(true);
+      expect(
+        replaceAdminModelInputSchema.safeParse({
+          ...version,
+          api_key: null,
+        }).success,
+      ).toBe(true);
+      expect(
+        testAdminModelConnectionInputSchema.safeParse({
+          provider_adapter: version.provider_adapter,
+          provider_model: version.provider_model,
+          settings: version.settings,
+          max_input_tokens: version.max_input_tokens,
+          supports_vision: version.supports_vision,
+          api_key: "temporary-key",
+        }).success,
+      ).toBe(true);
+    }
+    for (const invalidCapacity of [0, -1, 1.5, 2_000_001]) {
+      expect(
+        adminModelItemSchema.safeParse({
+          ...itemWithoutCapacity,
+          max_input_tokens: invalidCapacity,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   test("reads the historical retry field but rejects it from every write contract", () => {
     const version = {
       display_name: "Historical retry model",
       provider_adapter: "openai" as const,
       provider_model: "gpt-history",
+      max_input_tokens: 128_000,
       settings: { max_retries: 4 },
       supports_thinking: false,
       supports_reasoning_effort: false,
@@ -456,6 +517,7 @@ describe("admin contracts", () => {
       testAdminModelConnectionInputSchema.safeParse({
         provider_adapter: version.provider_adapter,
         provider_model: version.provider_model,
+        max_input_tokens: version.max_input_tokens,
         settings: version.settings,
         supports_vision: version.supports_vision,
         api_key: "temporary-key",
@@ -469,6 +531,7 @@ describe("admin contracts", () => {
       display_name: "Historical model",
       provider_adapter: "legacy_adapter_v1",
       provider_model: "legacy-model",
+      max_input_tokens: 128_000,
       settings: {},
       supports_thinking: false,
       supports_reasoning_effort: false,

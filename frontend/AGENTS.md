@@ -78,6 +78,11 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Every project query key starts under that account/project root; never key by
   slug. Add a new domain root to `transitionPrivateWorkScope` so scope changes
   cancel and remove it.
+- Context-usage keys also include the selected composer model. Cancel pending
+  reads before exact Thread invalidation so first-load responses cannot restore
+  stale authority; local Run admission/terminal, Automation admission, and
+  account-scoped runtime-policy freshness hints invalidate all model variants
+  for that Thread without fabricating remote Run state.
 - On account/project transition: abort in-flight work, invalidate the old
   generation, remove old queries/mutations/reconnect state/clients, then create
   the new client only after both UUIDs are known.
@@ -135,12 +140,12 @@ generator. A necessary local patch needs focused coverage and an explanation.
   after authoritative Run admission succeeds, and render the server-confirmed
   effective profile. Research is workload policy, not a capability or model
   instruction, and is unavailable on unrelated chat surfaces.
-- Repeated-call, per-tool-budget, and Sub-Agent-total progress are three strict
+- Repeated-call, Run tool-call-limit, and Sub-Agent-total progress are three strict
   event contracts. Merge live custom frames with durable Run Event replay by
   deterministic `observation_id`; refresh, reconnect, or duplicated middleware
-  execution must not double-render them. A budget-exhausted observation remains
-  non-terminal unless a later terminal failure supplies a more specific direct
-  cause.
+  execution must not double-render them. Hard-limit exhaustion stays visible and
+  means that the Lead and all Sub-Agents in that Run receive no further internal
+  tool-call admission; another Run has an independent count.
 
 ### Governed assets and runtime state
 
@@ -224,6 +229,16 @@ generator. A necessary local patch needs focused coverage and an explanation.
   replacement. Replacing or clearing a value marks discovery stale.
 - Model API keys belong to the Model configuration. Connection tests always
   require a temporary Key from the current form and never read the stored copy.
+- System Model create, update, and connection-test forms require the bounded
+  `max_input_tokens` capability (`1..2,000,000`). Present it as the Provider
+  Model's maximum input context and context-percentage denominator, never as
+  Provider output `max_tokens` or a Run token-budget setting.
+- Render Provider settings from the backend adapter descriptor as typed form
+  controls. Keep common fields visible, put `advanced=true` fields in a
+  collapsed Advanced Settings section, and distinguish platform defaults from
+  an omitted Provider default. Never restore a raw JSON settings editor;
+  preserve descriptor-declared compatibility fields unchanged and fail closed
+  on unknown historical fields or adapters.
 - Model/thinking selections are preferences. Gateway returns the effective
   execution profile; UI history and status use that server result rather than
   claiming the local selection was accepted.
@@ -244,6 +259,15 @@ generator. A necessary local patch needs focused coverage and an explanation.
   ownership and clean up late ready results in their exact original scope.
 - `present_files` is the explicit published-file boundary. Workspace previews
   and live file-tool state do not by themselves prove durable delivery.
+- Delegated output scratch files are not publishable cards. Only a Lead-promoted
+  copy under `outputs/` can cross `present_files`. Workspace-change line counts
+  may be unavailable and remain unknown rather than fabricated zeros, while
+  ordinary conversation history does not mount the change card or issue its
+  query; backend tracking and finalization remain authoritative.
+- Every `task` tool call remains visible as its own Sub-Agent card in canonical
+  message order; the generic reasoning/tool fold must never absorb Task cards.
+  Card metadata is a single bounded row whose flexible text truncates before
+  fixed status and disclosure controls.
 
 ### Admin and Automation
 

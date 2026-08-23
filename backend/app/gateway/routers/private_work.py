@@ -34,6 +34,7 @@ from app.gateway.deps import (
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.private_work_schemas import (
     PrivateRunCreateRequest,
+    PrivateThreadContextAuthorityResponse,
     PrivateThreadContextUsageResponse,
     PrivateThreadTokenUsageResponse,
     PrivateWorkRoute,
@@ -120,6 +121,10 @@ from deerflow.runtime.events.stream import (
     parse_stream_cursor,
 )
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS
+from deerflow.runtime.public_token_usage import (
+    project_public_persisted_run_event,
+    project_public_token_usage,
+)
 from deerflow.runtime.runs.private_file_lifecycle import await_despite_cancellation
 from deerflow.runtime.runs.store import RunStore
 from deerflow.utils.messages import message_to_text
@@ -861,6 +866,168 @@ async def _project_scoped_checkpoint_durations(
     return projected
 
 
+def _checkpoint_turn_run_id(message: object) -> str | None:
+    if not isinstance(message, Mapping) or message.get("type") not in {
+        "human",
+        "user",
+    }:
+        return None
+    additional_kwargs = message.get("additional_kwargs")
+    run_id = additional_kwargs.get("run_id") if isinstance(additional_kwargs, Mapping) else None
+    return run_id if isinstance(run_id, str) and run_id else None
+
+
+async def _frozen_token_tracking_by_run(
+    request: Request,
+    context: PrivateWorkContext,
+    run_ids: list[str],
+) -> dict[str, bool]:
+    """Resolve verifiable frozen token-tracking flags in one batch."""
+
+    selected = list(dict.fromkeys(run_ids))
+    tracking_by_run = dict.fromkeys(selected, False)
+    if not selected:
+        return tracking_by_run
+    materializer = getattr(
+        request.app.state,
+        "system_runtime_policy_materializer",
+        None,
+    )
+    materialize = getattr(
+        materializer,
+        "materialize_run_snapshot_envelopes",
+        None,
+    )
+    project_id = getattr(context, "project_id", None)
+    owner_user_id = getattr(context, "user_id", None)
+    if not callable(materialize) or not isinstance(project_id, uuid.UUID) or not isinstance(owner_user_id, uuid.UUID):
+        return tracking_by_run
+    try:
+        materialized_by_run = await materialize(
+            project_id=project_id,
+            owner_user_id=str(owner_user_id),
+            run_ids=selected,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return tracking_by_run
+    if not isinstance(materialized_by_run, Mapping):
+        return tracking_by_run
+    for run_id in selected:
+        materialized = materialized_by_run.get(run_id)
+        policy = getattr(materialized, "value", None)
+        token_usage = getattr(policy, "token_usage", None)
+        tracking_by_run[run_id] = getattr(token_usage, "enabled", None) is True
+    return tracking_by_run
+
+
+async def _verified_tracking_run_ids_for_thread(
+    request: Request,
+    context: PrivateWorkContext,
+    thread_id: str,
+) -> frozenset[str]:
+    """Return only Runs whose scoped frozen policy verifies tracking=true."""
+
+    materializer = getattr(
+        request.app.state,
+        "system_runtime_policy_materializer",
+        None,
+    )
+    materialize = getattr(
+        materializer,
+        "materialize_thread_run_snapshot_envelopes",
+        None,
+    )
+    project_id = getattr(context, "project_id", None)
+    owner_user_id = getattr(context, "user_id", None)
+    if not callable(materialize) or not isinstance(project_id, uuid.UUID) or not isinstance(owner_user_id, uuid.UUID):
+        return frozenset()
+    try:
+        materialized_by_run = await materialize(
+            project_id=project_id,
+            owner_user_id=str(owner_user_id),
+            thread_id=thread_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return frozenset()
+    if not isinstance(materialized_by_run, Mapping):
+        return frozenset()
+    verified: set[str] = set()
+    for run_id, materialized in materialized_by_run.items():
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        policy = getattr(materialized, "value", None)
+        token_usage = getattr(policy, "token_usage", None)
+        if getattr(token_usage, "enabled", None) is True:
+            verified.add(run_id)
+    return frozenset(verified)
+
+
+async def _project_scoped_checkpoint_token_usage(
+    request: Request,
+    context: PrivateWorkContext,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply each turn's admitted token-tracking policy to REST messages."""
+
+    messages = values.get("messages")
+    if not isinstance(messages, list):
+        return values
+
+    run_ids = list(dict.fromkeys(run_id for message in messages if (run_id := _checkpoint_turn_run_id(message)) is not None))
+    tracking_by_run = await _frozen_token_tracking_by_run(
+        request,
+        context,
+        run_ids,
+    )
+
+    projected_messages: list[Any] = []
+    current_tracking_enabled = False
+    for message in messages:
+        if isinstance(message, Mapping) and message.get("type") in {
+            "human",
+            "user",
+        }:
+            run_id = _checkpoint_turn_run_id(message)
+            current_tracking_enabled = tracking_by_run.get(run_id, False) if run_id is not None else False
+        projected_messages.append(
+            project_public_token_usage(
+                message,
+                tracking_enabled=current_tracking_enabled,
+            )
+        )
+
+    projected = dict(values)
+    projected["messages"] = projected_messages
+    return projected
+
+
+async def _project_scoped_event_token_usage(
+    request: Request,
+    context: PrivateWorkContext,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply each Run's admitted token-tracking policy to persisted events."""
+
+    run_ids = list(dict.fromkeys(run_id for record in records if isinstance((run_id := record.get("run_id")), str) and run_id))
+
+    tracking_by_run = await _frozen_token_tracking_by_run(
+        request,
+        context,
+        run_ids,
+    )
+    return [
+        project_public_persisted_run_event(
+            record,
+            tracking_enabled=tracking_by_run.get(record.get("run_id"), False),
+        )
+        for record in records
+    ]
+
+
 _FAILED_PRIVATE_RUN_STATUSES = frozenset({"error", "failed", "timeout"})
 
 
@@ -1408,12 +1575,38 @@ async def compact_private_thread(
 
 
 @router.get(
+    "/threads/{thread_id}/context-usage/authority",
+    response_model=PrivateThreadContextAuthorityResponse,
+)
+async def private_thread_context_usage_authority(
+    thread_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateThreadContextAuthorityResponse:
+    try:
+        marker = await _chat_control_service(
+            request,
+            context.request_id,
+        ).context_usage_authority_marker(
+            context,
+            str(thread_id),
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateThreadContextAuthorityResponse(
+        thread_id=str(thread_id),
+        cache_marker=marker.cache_marker,
+    )
+
+
+@router.get(
     "/threads/{thread_id}/context-usage",
     response_model=PrivateThreadContextUsageResponse,
 )
 async def private_thread_context_usage(
     thread_id: uuid.UUID,
     request: Request,
+    model_name: Annotated[uuid.UUID | None, Query()] = None,
     context: PrivateWorkContext = Depends(private_work_context),
     config: AppConfig = Depends(get_current_agent_runtime_config),
 ) -> PrivateThreadContextUsageResponse:
@@ -1425,6 +1618,7 @@ async def private_thread_context_usage(
             context,
             str(thread_id),
             app_config=config,
+            **({"selected_model_name": str(model_name)} if model_name is not None else {}),
         )
     except PrivateWorkError as error:
         _raise_http(error)
@@ -1993,7 +2187,12 @@ async def wait_private_run(
         ).aget(checkpoint_config(str(thread_id)))
         if snapshot_checkpoint_id(snapshot) is None:
             raise PrivateWorkNotFound(context.request_id)
-        return serialize_channel_values_for_api(dict(snapshot.values or {}))
+        values = serialize_channel_values_for_api(dict(snapshot.values or {}))
+        return await _project_scoped_checkpoint_token_usage(
+            request,
+            context,
+            values,
+        )
     except PrivateWorkError as error:
         _raise_http(error)
     except ReliabilityError as error:
@@ -2248,6 +2447,11 @@ async def list_private_run_messages(
             str(thread_id),
             data,
         )
+        data = await _project_scoped_event_token_usage(
+            request,
+            context,
+            data,
+        )
     except PrivateWorkError as error:
         _raise_http(error)
     return PrivateRunMessagesPageResponse(
@@ -2306,6 +2510,11 @@ async def list_private_thread_messages(
             str(thread_id),
             records,
         )
+        records = await _project_scoped_event_token_usage(
+            request,
+            context,
+            records,
+        )
     except PrivateWorkError as error:
         _raise_http(error)
     return [_public_event(record) for record in records]
@@ -2341,6 +2550,11 @@ async def _private_run_events(
         limit=limit,
         after_seq=after_seq,
         scope=context.resource_scope,
+    )
+    records = await _project_scoped_event_token_usage(
+        request,
+        context,
+        records,
     )
     return [_public_event(record) for record in records]
 
@@ -2433,12 +2647,18 @@ async def private_thread_token_usage(
             limit=1,
             offset=0,
         )
+        included_run_ids = await _verified_tracking_run_ids_for_thread(
+            request,
+            context,
+            str(thread_id),
+        )
         aggregate = await _run_store(
             request,
             context.request_id,
         ).aggregate_tokens_by_thread(
             str(thread_id),
             include_active=include_active,
+            included_run_ids=included_run_ids,
             scope=context.resource_scope,
         )
     except PrivateWorkError as error:
@@ -2707,6 +2927,11 @@ async def get_thread_state(
     created_at = coerce_iso(metadata.get("created_at", ""))
     values = serialize_channel_values_for_api(dict(snapshot.values or {}))
     try:
+        values = await _project_scoped_checkpoint_token_usage(
+            request,
+            context,
+            values,
+        )
         values = await _project_scoped_checkpoint_durations(
             request,
             context,

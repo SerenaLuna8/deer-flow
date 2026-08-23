@@ -127,7 +127,9 @@ export const enUS: Translations = {
     title: "Workspace changes",
     editedTitle: (count) => `Edited ${count} ${count === 1 ? "file" : "files"}`,
     badge: (count, additions, deletions) =>
-      `${count} ${count === 1 ? "file" : "files"} changed +${additions} -${deletions}`,
+      additions === null || deletions === null
+        ? `${count} ${count === 1 ? "file" : "files"} changed`
+        : `${count} ${count === 1 ? "file" : "files"} changed +${additions} -${deletions}`,
     viewChanges: "View changes",
     created: "Created",
     modified: "Modified",
@@ -2506,34 +2508,12 @@ export const enUS: Translations = {
         `${toolName} is nearing its call limit`,
       toolBudgetWarningDescription: (count, hardLimit) =>
         `${count} of ${hardLimit} admitted calls have been used. Remaining calls are reserved for material gaps.`,
-      toolBudgetExhaustedTitle: (toolName) =>
-        `${toolName} call budget is exhausted`,
+      toolBudgetExhaustedTitle: "Run internal tool-call limit reached",
       toolBudgetExhaustedDescription:
-        "The Run can continue with existing evidence and other tools; this budget status is not a terminal failure.",
+        "No new internal tool calls can be admitted in this Run. The Agent can finish with the evidence already collected.",
       subagentTotalLimitTitle: "Sub-Agent delegation limit reached",
       subagentTotalLimitDescription:
         "No more Sub-Agent Tasks can be admitted in this Run. The Lead Agent can continue with the results already collected.",
-    },
-    recoveredModelFailuresTitle: "Model request failures recovered",
-    recoveredModelFailuresDescription: (count) =>
-      `${count} model ${count === 1 ? "request" : "requests"} failed during this Run. Those requests recovered after retry; refer to the Run status for the final outcome.`,
-    recoveredModelFailureAttempt: (
-      index,
-      attempt,
-      maxAttempts,
-      reason,
-      errorCode,
-    ) =>
-      `Failure ${index}: model attempt ${attempt}/${maxAttempts} — ${reason} (${errorCode}).`,
-    recoveredModelFailureReasons: {
-      quota: "model quota was exhausted",
-      auth: "model authentication failed",
-      busy: "the model provider was busy",
-      transient:
-        "the model provider or network connection was temporarily unavailable",
-      generic: "the model request failed",
-      current_upload: "the current image attachment was unavailable",
-      circuit_open: "the model request circuit breaker was open",
     },
     tokenBudgetReachedTitle: "Run token budget reached",
     tokenBudgetReachedDescription:
@@ -2802,17 +2782,28 @@ export const enUS: Translations = {
 
   contextWindow: {
     title: "Context window",
-    automaticCompression: "Automatic compression progress",
+    usage: "Estimated context usage",
     loading: "Measuring the current context…",
     unavailable: "Current context usage is unavailable.",
-    disabled: "Automatic context compression is disabled.",
-    progressLabel: (percent: string) =>
-      `${percent} of the automatic compression threshold reached`,
-    current: "Current",
+    disabled: "Off",
+    progressLabel: (percent: string) => `Estimated context usage ${percent}`,
+    usageWithoutCapacity: (estimated: string) =>
+      `Estimated context ${estimated}; window limit is not configured`,
+    capacityUnavailable:
+      "The model has no configured context window limit, so usage cannot be calculated.",
+    contextWindowLimit: "Total context",
+    notConfigured: "Not configured",
+    safetyBound: "Safe occupancy bound",
+    previousProviderInput: "Previous provider measurement (input)",
+    compressionConditions: "Automatic compression conditions",
+    noCompressionConditions: "No automatic compression conditions configured.",
+    current: "Current condition value",
     triggerAt: "Compress at",
-    remaining: "Remaining",
-    estimatedContext: "Estimated context",
-    tokenThreshold: "Token threshold",
+    remaining: "Until compression",
+    triggerStatus: "Status",
+    triggerReached: "Trigger condition reached",
+    estimatedContext: "Current context",
+    tokenThreshold: "Equivalent Token threshold",
     summaryPresent: "Includes the previous compression summary",
     allConditions: "Configured conditions",
     anyCondition: "Compression starts when any condition is reached.",
@@ -2823,8 +2814,6 @@ export const enUS: Translations = {
       messages: "Message condition",
     },
     tokens: (value: string) => `${value} Tokens`,
-    tokenPair: (current: string, total: string) =>
-      `${current} / ${total} Tokens`,
     messages: (count: number) =>
       `${count.toLocaleString("en-US")} message${count === 1 ? "" : "s"}`,
   },

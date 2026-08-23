@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any, cast
 
 from deerflow.file_authority import (
@@ -104,13 +105,35 @@ class _OwnerLoopFileAuthorityProxy:
         self,
         target: RunFileAuthority,
         binding: ParentExecutionBinding,
+        *,
+        delegated_output_root: str | None = None,
     ) -> None:
         self._target = target
         self._binding = binding
+        if delegated_output_root is not None:
+            prefix = "/mnt/user-data/workspace/.deerflow/subagents/"
+            path = PurePosixPath(delegated_output_root)
+            relative = delegated_output_root.removeprefix(prefix)
+            parts = relative.split("/")
+            if (
+                not delegated_output_root.startswith(prefix)
+                or path.as_posix() != delegated_output_root
+                or ".." in path.parts
+                or len(parts) != 2
+                or len(parts[0]) != 32
+                or any(character not in "0123456789abcdef" for character in parts[0])
+                or parts[1] != "outputs"
+            ):
+                raise ValueError("Invalid delegated output root")
+        self._delegated_output_root = delegated_output_root
 
     @property
     def sandbox_id(self) -> str | None:
         return self._target.sandbox_id
+
+    @property
+    def delegated_output_root(self) -> str | None:
+        return self._delegated_output_root
 
     async def restore(self) -> AuthorityManifest:
         return await invoke_parent_operation_on_owner_loop(
@@ -119,7 +142,13 @@ class _OwnerLoopFileAuthorityProxy:
         )
 
     def thread_data_paths(self) -> dict[str, str]:
-        return self._target.thread_data_paths()
+        paths = self._target.thread_data_paths()
+        if self._delegated_output_root is None:
+            return paths
+        return {
+            **paths,
+            "outputs_path": self._delegated_output_root,
+        }
 
     def visible_uploads(self) -> tuple[dict[str, object], ...]:
         return self._target.visible_uploads()
@@ -145,6 +174,22 @@ class _OwnerLoopFileAuthorityProxy:
         )
 
     async def write_output(self, relative_path: str, content: bytes) -> str:
+        if self._delegated_output_root is not None:
+            writer = getattr(self._target, "write_delegated_output", None)
+            if not callable(writer):
+                raise RuntimeError("Private file authority is unavailable")
+            physical_path = await invoke_parent_operation_on_owner_loop(
+                self._binding,
+                writer,
+                self._delegated_output_root,
+                relative_path,
+                content,
+            )
+            return self._delegated_alias(
+                physical_path,
+                physical_root=self._delegated_output_root,
+                alias_root="/mnt/user-data/outputs",
+            )
         return await invoke_parent_operation_on_owner_loop(
             self._binding,
             self._target.write_output,
@@ -153,6 +198,24 @@ class _OwnerLoopFileAuthorityProxy:
         )
 
     async def write_internal(self, relative_path: str, content: bytes) -> str:
+        if self._delegated_output_root is not None:
+            writer = getattr(self._target, "write_delegated_internal", None)
+            if not callable(writer):
+                raise RuntimeError("Private file authority is unavailable")
+            storage_relative_path = relative_path if relative_path.startswith(".tool-results/") else f".tool-results/{relative_path}"
+            physical_path = await invoke_parent_operation_on_owner_loop(
+                self._binding,
+                writer,
+                self._delegated_output_root,
+                storage_relative_path,
+                content,
+            )
+            capture_root = str(PurePosixPath(self._delegated_output_root).parent)
+            return self._delegated_alias(
+                physical_path,
+                physical_root=f"{capture_root}/internal/.tool-results",
+                alias_root="/mnt/user-data/workspace/.tool-results",
+            )
         return await invoke_parent_operation_on_owner_loop(
             self._binding,
             self._target.write_internal,
@@ -160,12 +223,41 @@ class _OwnerLoopFileAuthorityProxy:
             content,
         )
 
+    @staticmethod
+    def _delegated_alias(
+        physical_path: object,
+        *,
+        physical_root: str,
+        alias_root: str,
+    ) -> str:
+        """Expose a canonical alias only after exact-scope path validation."""
+
+        if type(physical_path) is not str:
+            raise RuntimeError("Private file authority returned an invalid path")
+        path = PurePosixPath(physical_path)
+        root = PurePosixPath(physical_root)
+        if not path.is_absolute() or path.as_posix() != physical_path or ".." in path.parts:
+            raise RuntimeError("Private file authority returned an invalid path")
+        try:
+            relative = path.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError(
+                "Private file authority returned an invalid path",
+            ) from exc
+        if not relative.parts:
+            raise RuntimeError("Private file authority returned an invalid path")
+        return f"{alias_root}/{relative.as_posix()}"
+
     async def record_presented_paths(
         self,
         presented_paths: tuple[str, ...],
         *,
         tool_call_id: str,
     ) -> None:
+        if self._delegated_output_root is not None:
+            raise ValueError(
+                "Sub-Agent scratch files must be promoted by the Lead before presentation",
+            )
         await invoke_parent_operation_on_owner_loop(
             self._binding,
             self._target.record_presented_paths,
@@ -298,6 +390,11 @@ class DelegatedRuntimeContextProjection:
     def deerflow_trace_id(self) -> str | None:
         return self._carrier.trace_id
 
+    @property
+    def token_usage_tracking_enabled(self) -> bool:
+        value = self._carrier.token_usage_tracking_enabled
+        return True if value is None else value
+
     def build(self) -> dict[str, Any]:
         """Build a fresh child context with exact channel-identity presence."""
 
@@ -317,6 +414,7 @@ def project_delegated_runtime_context(
     fallback_trace_id: str | None,
     agent_prompt_bundle: object | None,
     runtime_skills: tuple[object, ...],
+    delegated_output_root: str | None = None,
 ) -> DelegatedRuntimeContextProjection:
     """Project one graph-authoritative parent binding into child execution."""
 
@@ -383,6 +481,7 @@ def project_delegated_runtime_context(
             file_authority = _OwnerLoopFileAuthorityProxy(
                 cast(RunFileAuthority, raw_file_authority),
                 binding,
+                delegated_output_root=delegated_output_root,
             )
         raw_authorization_boundary = parent_context.get(
             RuntimeContextKeys.AUTHORIZATION_BOUNDARY,
@@ -424,6 +523,20 @@ def project_delegated_runtime_context(
         )
         else None
     )
+    raw_token_usage_tracking_enabled = parent_context.get(
+        RuntimeContextKeys.TOKEN_USAGE_TRACKING_ENABLED,
+    )
+    if type(raw_token_usage_tracking_enabled) is bool:
+        token_usage_tracking_enabled = raw_token_usage_tracking_enabled
+    else:
+        profile_app_config = _profile_app_config(profile)
+        token_usage_tracking_enabled = bool(
+            getattr(
+                getattr(profile_app_config, "token_usage", None),
+                "enabled",
+                True,
+            )
+        )
 
     host_execution_approval_port = None
     host_execution_agent_path = None
@@ -463,6 +576,7 @@ def project_delegated_runtime_context(
         skill_scoped_secrets=skill_scoped_secrets,
         skill_secret_provider=skill_secret_provider,
         trace_id=trace_id,
+        token_usage_tracking_enabled=token_usage_tracking_enabled,
         recovered_llm_failure_recorder=recovered_llm_failure_recorder,
         host_execution_approval_port=host_execution_approval_port,
         host_execution_agent_path=host_execution_agent_path,

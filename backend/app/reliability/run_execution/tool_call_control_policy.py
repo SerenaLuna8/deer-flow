@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
 
 from app.private_work.workload_profile import (
     EffectiveRunWorkloadProfile,
@@ -15,32 +14,12 @@ from app.system_runtime_settings.app_config_projection import (
 )
 from app.system_runtime_settings.models import (
     MaterializedAgentRuntimePolicy,
-    ToolCallLimitPolicy,
-    ToolCallRoleBudgetPolicy,
 )
 from deerflow.agents.middlewares.tool_call_control import (
     RepeatedCallPolicy,
     ResolvedGraphToolCallControlProfile,
-    ResolvedToolCallBudgetPolicy,
     ResolvedToolCallControlPolicy,
-    ToolCallLimit,
 )
-
-
-def _resolved_limit(value: ToolCallLimitPolicy) -> ToolCallLimit:
-    return ToolCallLimit(
-        warn_threshold=value.warn,
-        hard_limit=value.hard_limit,
-    )
-
-
-def _resolved_budget(
-    value: ToolCallRoleBudgetPolicy,
-) -> ResolvedToolCallBudgetPolicy:
-    return ResolvedToolCallBudgetPolicy(
-        default=_resolved_limit(value.default),
-        tools={tool_name: _resolved_limit(limit) for tool_name, limit in value.tools.items()},
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,10 +57,6 @@ def resolve_run_tool_call_control_policy(
         policy_schema_version=materialized.schema_version,
     )
     value = materialized.value
-    selected_profile = getattr(
-        value.tool_call_budget.profiles,
-        workload.name,
-    )
     identical_calls = value.loop_detection.identical_calls
     repeated = RepeatedCallPolicy(
         warn_threshold=identical_calls.warn_threshold,
@@ -90,14 +65,6 @@ def resolve_run_tool_call_control_policy(
         enabled=value.loop_detection.enabled,
     )
 
-    def resolved_role(
-        role: Literal["lead", "subagent"],
-    ) -> ResolvedToolCallControlPolicy:
-        return ResolvedToolCallControlPolicy(
-            repeated_calls=repeated,
-            tool_budget=_resolved_budget(getattr(selected_profile, role)),
-        )
-
     max_total_subagents = getattr(
         value.subagents.max_total_per_run_by_workload,
         workload.name,
@@ -105,8 +72,10 @@ def resolve_run_tool_call_control_policy(
     return ResolvedRunToolCallControlPolicy(
         graph_profile=ResolvedGraphToolCallControlProfile(
             workload_profile=workload.name,
-            lead=resolved_role("lead"),
-            subagent=resolved_role("subagent"),
+            policy=ResolvedToolCallControlPolicy(
+                repeated_calls=repeated,
+                internal_tool_call_limit=value.internal_tool_call_limit,
+            ),
         ),
         max_concurrent_subagents=value.subagents.max_concurrent,
         max_total_subagents=max_total_subagents,

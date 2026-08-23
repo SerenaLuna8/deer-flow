@@ -94,6 +94,7 @@ from deerflow.persistence.jobs.sql import (
 )
 from deerflow.persistence.private_work import (
     PrivateArtifactRow,
+    PrivateFileChunkRow,
     PrivateFileRow,
     RunAssetVersionRow,
 )
@@ -904,6 +905,165 @@ async def _add_source_output(
     session.add(row)
     await session.flush()
     return row
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_finalizer_derives_markdown_line_counts_from_authoritative_db_chunks(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(
+        migrated_postgres_database_url,
+        stage=False,
+    )
+    try:
+        old_content = b"alpha\nbeta\n"
+        modified_content = b"alpha\ngamma\n"
+        created_content = b"one\ntwo\n"
+        old_sha256 = hashlib.sha256(old_content).hexdigest()
+        modified_sha256 = hashlib.sha256(modified_content).hexdigest()
+        created_sha256 = hashlib.sha256(created_content).hexdigest()
+        modified_id = uuid.uuid4()
+        created_id = uuid.uuid4()
+
+        async with scenario.seed.factory() as session, session.begin():
+            old = PrivateFileRow(
+                project_id=scenario.seed.owner_a.project_id,
+                owner_user_id=str(scenario.seed.owner_a.user_id),
+                thread_id=scenario.thread_id,
+                kind="output",
+                logical_path="outputs/report.md",
+                media_type="text/markdown",
+                size=len(old_content),
+                sha256=old_sha256,
+                status="ready",
+                version=1,
+                created_by_run_id=scenario.source_run_id,
+            )
+            session.add(old)
+            await session.flush()
+            session.add(
+                PrivateFileChunkRow(
+                    file_id=old.id,
+                    chunk_index=0,
+                    content=old_content,
+                    size=len(old_content),
+                    sha256=old_sha256,
+                )
+            )
+            repository = PrivateFileRepository(session)
+            for file_id, logical_path, content, sha256 in (
+                (
+                    modified_id,
+                    "outputs/.deerflow-staging-report",
+                    modified_content,
+                    modified_sha256,
+                ),
+                (
+                    created_id,
+                    "outputs/.deerflow-staging-new",
+                    created_content,
+                    created_sha256,
+                ),
+            ):
+                await repository.stage(
+                    scope=scenario.seed.owner_a_scope,
+                    thread_id=scenario.thread_id,
+                    kind="output",
+                    logical_path=logical_path,
+                    media_type="text/markdown",
+                    created_by_run_id=scenario.source_run_id,
+                    file_id=file_id,
+                )
+                await repository.append_chunk(
+                    scope=scenario.seed.owner_a_scope,
+                    thread_id=scenario.thread_id,
+                    file_id=file_id,
+                    chunk_index=0,
+                    content=content,
+                    size=len(content),
+                    sha256=sha256,
+                )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert run is not None
+            run.finalization_status = "finalizing"
+
+        manifest = AuthorityManifest(
+            entries=(
+                AuthorityManifestEntry(
+                    file_id=old.id,
+                    logical_path=old.logical_path,
+                    kind=old.kind,
+                    media_type=old.media_type,
+                    size=old.size,
+                    sha256=old.sha256,
+                    version=old.version,
+                ),
+            ),
+            run_id=scenario.source_run_id,
+        )
+        modified_after = _AfterFile(
+            logical_path="outputs/report.md",
+            virtual_path="/mnt/user-data/outputs/report.md",
+            kind="output",
+            size=len(modified_content),
+            media_type="text/markdown",
+        )
+        created_after = _AfterFile(
+            logical_path="outputs/new.md",
+            virtual_path="/mnt/user-data/outputs/new.md",
+            kind="output",
+            size=len(created_content),
+            media_type="text/markdown",
+        )
+        boundary = PrivateRunExecutionBoundary(
+            scenario.seed.factory,
+            context=scenario.seed.owner_a,
+            claim=scenario.claim,
+        )
+        result = await PrivateFileFinalizer(scenario.seed.factory)._commit(
+            PrivateFileRunScope(
+                scenario.seed.owner_a,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                authorization_boundary=boundary,
+            ),
+            manifest,
+            (modified_after, created_after),
+            (
+                _StagedFile(
+                    id=modified_id,
+                    after=modified_after,
+                    size=len(modified_content),
+                    sha256=modified_sha256,
+                ),
+                _StagedFile(
+                    id=created_id,
+                    after=created_after,
+                    size=len(created_content),
+                    sha256=created_sha256,
+                ),
+            ),
+            (),
+        )
+
+        assert result.workspace_changes is not None
+        assert result.workspace_changes.version == 2
+        assert result.workspace_changes.summary.created == 1
+        assert result.workspace_changes.summary.modified == 1
+        assert result.workspace_changes.summary.additions == 3
+        assert result.workspace_changes.summary.deletions == 1
+        by_path = {change.path: change for change in result.workspace_changes.files}
+        assert by_path["/mnt/user-data/outputs/report.md"].additions == 1
+        assert by_path["/mnt/user-data/outputs/report.md"].deletions == 1
+        assert by_path["/mnt/user-data/outputs/new.md"].additions == 2
+        assert by_path["/mnt/user-data/outputs/new.md"].deletions == 0
+    finally:
+        await scenario.seed.engine.dispose()
 
 
 async def _prepare_assigned_output_obligation(database_url: str):
@@ -2012,8 +2172,11 @@ async def test_continuation_intent_restore_and_artifact_delivery_are_idempotent(
         assert await port.output_delivery_requirement_paths() == (candidate_path,)
 
         extra_file_id = uuid.uuid4()
+        extra_content = b"x"
+        extra_sha256 = hashlib.sha256(extra_content).hexdigest()
         async with scenario.seed.factory() as session, session.begin():
-            await PrivateFileRepository(session).stage(
+            file_repository = PrivateFileRepository(session)
+            await file_repository.stage(
                 scope=scenario.seed.owner_a_scope,
                 thread_id=scenario.thread_id,
                 kind="output",
@@ -2021,6 +2184,15 @@ async def test_continuation_intent_restore_and_artifact_delivery_are_idempotent(
                 media_type="text/plain",
                 created_by_run_id=continuation_run_id,
                 file_id=extra_file_id,
+            )
+            await file_repository.append_chunk(
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                file_id=extra_file_id,
+                chunk_index=0,
+                content=extra_content,
+                size=len(extra_content),
+                sha256=extra_sha256,
             )
             ready_files = tuple(
                 (
@@ -2084,7 +2256,7 @@ async def test_continuation_intent_restore_and_artifact_delivery_are_idempotent(
             id=extra_file_id,
             after=after_files[-1],
             size=1,
-            sha256="6" * 64,
+            sha256=extra_sha256,
         )
 
         class _FinalizationQuotaProbe:
@@ -2145,6 +2317,12 @@ async def test_continuation_intent_restore_and_artifact_delivery_are_idempotent(
         first_artifact_ids = tuple(artifact.id for artifact in first_finalization.artifacts)
         candidate_artifact = next(artifact for artifact in first_finalization.artifacts if artifact.metadata["logical_path"] == "outputs/candidate.txt")
         assert finalization_boundary.ambiguous_side_effect is False
+        assert first_finalization.workspace_changes is not None
+        assert first_finalization.workspace_changes.summary.created == 1
+        assert first_finalization.workspace_changes.summary.additions == 1
+        assert first_finalization.workspace_changes.summary.deletions == 0
+        assert first_finalization.workspace_changes.files[0].size_after == 1
+        assert first_finalization.workspace_changes.files[0].sha256_after == extra_sha256
 
         assert quota_probe.reservations == [(extra_file_id, 1)]
         assert quota_probe.releases == []
@@ -3977,7 +4155,10 @@ class _AtomicContinuationAdmission:
                         run_id=request.run_id,
                         purpose="chat",
                         model_config_id=self._model_config_id,
-                        provider_payload={"model_ref": str(self._model_config_id)},
+                        provider_payload={
+                            "model_ref": str(self._model_config_id),
+                            "max_input_tokens": 64_000,
+                        },
                         payload_checksum=self._model_payload_checksum,
                         secret_generation_id=None,
                         secret_envelope_digest=None,
@@ -4118,6 +4299,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 status="active",
                 provider_adapter="openai",
                 provider_model="test-model",
+                max_input_tokens=64_000,
                 settings={},
                 supports_thinking=False,
                 supports_reasoning_effort=False,
@@ -4201,7 +4383,10 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                     run_id=source_run_id,
                     purpose="chat",
                     model_config_id=model_config_id,
-                    provider_payload={"model_ref": str(model_config_id)},
+                    provider_payload={
+                        "model_ref": str(model_config_id),
+                        "max_input_tokens": 64_000,
+                    },
                     payload_checksum=model_payload_checksum,
                     secret_generation_id=None,
                     secret_envelope_digest=None,

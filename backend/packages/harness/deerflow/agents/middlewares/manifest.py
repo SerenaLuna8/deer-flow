@@ -46,6 +46,7 @@ class MiddlewarePhase(IntEnum):
     CUSTOM = 1150
     RESPONSE_GATE = 1200
     INTERRUPT_TAIL = 1300
+    FINAL_PROVIDER_REQUEST = 1400
 
 
 @dataclass(frozen=True, slots=True)

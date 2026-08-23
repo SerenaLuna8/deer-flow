@@ -96,10 +96,15 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
         if authority is not None:
             paths = authority.thread_data_paths()
+            delegated_output_root = getattr(
+                authority,
+                "delegated_output_root",
+                None,
+            )
             expected_paths = {
                 "workspace_path": "/mnt/user-data/workspace",
                 "uploads_path": "/mnt/user-data/uploads",
-                "outputs_path": "/mnt/user-data/outputs",
+                "outputs_path": (delegated_output_root if isinstance(delegated_output_root, str) else "/mnt/user-data/outputs"),
             }
             if type(paths) is not dict or paths != expected_paths:
                 raise RuntimeError("Private file authority is unavailable")

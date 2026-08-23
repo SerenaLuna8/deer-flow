@@ -24,11 +24,13 @@ from app.system_runtime_settings.models import (
 from app.system_runtime_settings.schema_codec import (
     canonical_policy_value_v2,
     canonical_policy_value_v3,
+    canonical_policy_value_v4,
 )
 
 LEGACY_RUNTIME_POLICY_SCHEMA_VERSION = 2
-PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION = 3
-RUNTIME_POLICY_SCHEMA_VERSION = 4
+INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION = 3
+PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION = 4
+RUNTIME_POLICY_SCHEMA_VERSION = 5
 MAX_RUNTIME_POLICY_BYTES = 32 * 1024
 _SECRET_KEY = re.compile(
     r"(?i)(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
@@ -183,7 +185,7 @@ def canonical_policy_payload_for_schema(
     """Canonicalize a stored payload using its declared schema version.
 
     Runtime-policy rows are immutable and may already be frozen into Runs.
-    Schemas v2 and v3 therefore remain readable through version-owned codecs.
+    Schemas v2 through v4 therefore remain readable through version-owned codecs.
     Schema v2 predates ``vision_bridge``; decoding supplies the safe
     ``model_name=None`` default while checksum verification still uses each
     legacy schema's exact JSON shape.
@@ -191,12 +193,21 @@ def canonical_policy_payload_for_schema(
 
     if schema_version == RUNTIME_POLICY_SCHEMA_VERSION:
         return canonical_policy_payload(section, value)
-    if schema_version == PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION:
+    if schema_version in {
+        LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
+        INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION,
+        PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
+    }:
         try:
             parsed_section = RuntimePolicySection(section)
             raw = value.model_dump(mode="python") if isinstance(value, BaseModel) else dict(value)
             _reject_secret_material(raw)
-            normalized = canonical_policy_value_v3(parsed_section, raw)
+            canonicalizer = {
+                LEGACY_RUNTIME_POLICY_SCHEMA_VERSION: canonical_policy_value_v2,
+                INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION: canonical_policy_value_v3,
+                PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION: canonical_policy_value_v4,
+            }[schema_version]
+            normalized = canonicalizer(parsed_section, raw)
             _reject_secret_material(normalized)
             encoded = json.dumps(
                 normalized,
@@ -207,7 +218,7 @@ def canonical_policy_payload_for_schema(
             if len(encoded) > MAX_RUNTIME_POLICY_BYTES:
                 raise RuntimePolicyInvalid
             return CanonicalRuntimePolicy(
-                schema_version=PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
+                schema_version=schema_version,
                 value=normalized,
                 checksum=hashlib.sha256(encoded).hexdigest(),
             )
@@ -215,31 +226,7 @@ def canonical_policy_payload_for_schema(
             raise
         except (TypeError, ValueError, ValidationError):
             raise RuntimePolicyInvalid from None
-    if schema_version != LEGACY_RUNTIME_POLICY_SCHEMA_VERSION:
-        raise RuntimePolicyInvalid
-    try:
-        parsed_section = RuntimePolicySection(section)
-        raw = value.model_dump(mode="python") if isinstance(value, BaseModel) else dict(value)
-        _reject_secret_material(raw)
-        normalized = canonical_policy_value_v2(parsed_section, raw)
-        _reject_secret_material(normalized)
-        encoded = json.dumps(
-            normalized,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-        if len(encoded) > MAX_RUNTIME_POLICY_BYTES:
-            raise RuntimePolicyInvalid
-        return CanonicalRuntimePolicy(
-            schema_version=LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
-            value=normalized,
-            checksum=hashlib.sha256(encoded).hexdigest(),
-        )
-    except RuntimePolicyInvalid:
-        raise
-    except (TypeError, ValueError, ValidationError):
-        raise RuntimePolicyInvalid from None
+    raise RuntimePolicyInvalid
 
 
 def _decode_legacy_agent_runtime(
@@ -257,13 +244,11 @@ def _decode_legacy_agent_runtime(
     overrides = legacy_loop["tool_freq_overrides"]
     if not isinstance(overrides, Mapping):
         raise RuntimePolicyInvalid
-    role_budget = {
-        "default": {
-            "warn": legacy_loop["tool_freq_warn"],
-            "hard_limit": legacy_loop["tool_freq_hard_limit"],
-        },
-        "tools": {name: deepcopy(limit) for name, limit in overrides.items() if name != "task"},
-    }
+    hard_limits = [legacy_loop["tool_freq_hard_limit"]]
+    for limit in overrides.values():
+        if not isinstance(limit, Mapping):
+            raise RuntimePolicyInvalid
+        hard_limits.append(limit["hard_limit"])
     upgraded["loop_detection"] = {
         "enabled": legacy_loop["enabled"],
         "identical_calls": {
@@ -272,16 +257,7 @@ def _decode_legacy_agent_runtime(
             "window_size": legacy_loop["window_size"],
         },
     }
-    budget = upgraded["tool_call_budget"]
-    if not isinstance(budget, dict):
-        raise RuntimePolicyInvalid
-    profiles = budget["profiles"]
-    if not isinstance(profiles, dict):
-        raise RuntimePolicyInvalid
-    profiles["interactive"] = {
-        "lead": deepcopy(role_budget),
-        "subagent": deepcopy(role_budget),
-    }
+    upgraded["internal_tool_call_limit"] = max(hard_limits)
     upgraded["subagents"] = {
         "max_concurrent": 3,
         "max_total_per_run_by_workload": {
@@ -289,6 +265,43 @@ def _decode_legacy_agent_runtime(
             "research": 9,
         },
     }
+    parsed = parse_policy_value(RuntimePolicySection.AGENT_RUNTIME, upgraded)
+    if not isinstance(parsed, AgentRuntimePolicyValue):
+        raise RuntimePolicyInvalid
+    return parsed
+
+
+def _decode_v4_agent_runtime(
+    value: Mapping[str, object],
+) -> AgentRuntimePolicyValue:
+    upgraded = AgentRuntimePolicyValue().model_dump(mode="python")
+    for key, item in value.items():
+        if key != "tool_call_budget":
+            upgraded[key] = deepcopy(item)
+
+    budget = value["tool_call_budget"]
+    if not isinstance(budget, Mapping):
+        raise RuntimePolicyInvalid
+    profiles = budget["profiles"]
+    if not isinstance(profiles, Mapping):
+        raise RuntimePolicyInvalid
+    hard_limits: list[object] = []
+    for profile in profiles.values():
+        if not isinstance(profile, Mapping):
+            raise RuntimePolicyInvalid
+        for role in profile.values():
+            if not isinstance(role, Mapping):
+                raise RuntimePolicyInvalid
+            default = role["default"]
+            tools = role["tools"]
+            if not isinstance(default, Mapping) or not isinstance(tools, Mapping):
+                raise RuntimePolicyInvalid
+            hard_limits.append(default["hard_limit"])
+            for limit in tools.values():
+                if not isinstance(limit, Mapping):
+                    raise RuntimePolicyInvalid
+                hard_limits.append(limit["hard_limit"])
+    upgraded["internal_tool_call_limit"] = max(hard_limits)
     parsed = parse_policy_value(RuntimePolicySection.AGENT_RUNTIME, upgraded)
     if not isinstance(parsed, AgentRuntimePolicyValue):
         raise RuntimePolicyInvalid
@@ -314,11 +327,13 @@ def decode_policy_value_for_schema(
             schema_version
             in {
                 LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
-                PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
+                INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION,
             }
             and parsed_section is RuntimePolicySection.AGENT_RUNTIME
         ):
             return _decode_legacy_agent_runtime(canonical.value)
+        if schema_version == PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION and parsed_section is RuntimePolicySection.AGENT_RUNTIME:
+            return _decode_v4_agent_runtime(canonical.value)
         return parse_policy_value(parsed_section, canonical.value)
     except RuntimePolicyInvalid:
         raise
@@ -330,6 +345,7 @@ __all__ = [
     "CanonicalRuntimePolicy",
     "MAX_RUNTIME_POLICY_BYTES",
     "LEGACY_RUNTIME_POLICY_SCHEMA_VERSION",
+    "INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION",
     "PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION",
     "RUNTIME_POLICY_SCHEMA_VERSION",
     "RuntimePolicyInvalid",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from deerflow.memory_contract.history import (
     validate_snip_output,
 )
 
+logger = logging.getLogger(__name__)
+
 MAX_CONTINUITY_CHARS = 2000
 SNIP_ARCHIVE_PROMPT_VERSION = "snip-archive-prompt-v2"
 MEMORY_ARCHIVE_CONTEXT_KEY = "__memory_archive_context"
@@ -30,6 +33,7 @@ MEMORY_ARCHIVE_RECEIPT_VERSION = "memory-archive-receipt-v1"
 _SOURCE_DIGEST_DOMAIN = "deerflow.snip.source.v1"
 _CONTINUITY_OPEN = "<continuity>"
 _CONTINUITY_CLOSE = "</continuity>"
+_CONTINUITY_TRUNCATION_MARKER = "\n…\n"
 
 # Appended verbatim for the single bounded repair retry after SnipOutputInvalid.
 # It restates the output contract and never echoes the invalid output.
@@ -122,10 +126,10 @@ def parse_snip_dual_output(raw: str) -> tuple[str, str]:
     """Split one dual-segment SNIP response into ``(continuity, tagged_text)``.
 
     The continuity segment is bounded free prose for Thread continuation and
-    only ever flows into ``summary_text``. The tagged segment keeps the exact
-    single-segment contract (:func:`validate_snip_output`): line grammar, the
-    1000-character bound, and ``(nothing)`` semantics — so the memory pipeline
-    input stays byte-identical.
+    only ever flows into ``summary_text``. Every tagged fact keeps the exact
+    single-segment line grammar. If an otherwise-valid multi-line tagged segment
+    exceeds its aggregate bound, only its complete-line prefix is retained; an
+    overlong individual line or invalid tail still fails closed.
     """
 
     normalized = normalize_snip_output(raw)
@@ -138,11 +142,56 @@ def parse_snip_dual_output(raw: str) -> tuple[str, str]:
     remainder = normalized[close_index + len(_CONTINUITY_CLOSE) :]
     if not continuity:
         raise SnipOutputInvalid("SNIP continuity segment is empty")
-    if len(continuity) > MAX_CONTINUITY_CHARS:
-        raise SnipOutputInvalid("SNIP continuity segment is over the character limit")
     if _CONTINUITY_OPEN in continuity or _CONTINUITY_OPEN in remainder or _CONTINUITY_CLOSE in remainder:
         raise SnipOutputInvalid("SNIP output has more than one continuity segment")
-    return continuity, validate_snip_output(remainder)
+    tagged_text = _validate_and_bound_tagged_text(remainder)
+    if len(continuity) > MAX_CONTINUITY_CHARS:
+        logger.warning(
+            "SNIP continuity exceeded the character limit; applying bounded head-tail fallback (actual=%d, max=%d)",
+            len(continuity),
+            MAX_CONTINUITY_CHARS,
+        )
+        content_budget = MAX_CONTINUITY_CHARS - len(
+            _CONTINUITY_TRUNCATION_MARKER,
+        )
+        head_length = content_budget * 2 // 3
+        tail_length = content_budget - head_length
+        continuity = continuity[:head_length] + _CONTINUITY_TRUNCATION_MARKER + continuity[-tail_length:]
+    return continuity, tagged_text
+
+
+def _validate_and_bound_tagged_text(raw: str) -> str:
+    """Validate every tagged line before bounding an oversized line sequence."""
+
+    normalized = normalize_snip_output(raw)
+    if len(normalized) <= MAX_SNIP_OUTPUT_CHARS:
+        return validate_snip_output(normalized)
+
+    lines = normalized.split("\n")
+    for line in lines:
+        if line:
+            validate_snip_line(line)
+
+    kept_lines: list[str] = []
+    kept_length = 0
+    for line in lines:
+        added_length = len(line) + (1 if kept_lines else 0)
+        if kept_length + added_length > MAX_SNIP_OUTPUT_CHARS:
+            break
+        kept_lines.append(line)
+        kept_length += added_length
+
+    bounded = "\n".join(kept_lines)
+    if not bounded:
+        raise SnipOutputInvalid("SNIP output is empty or over the character limit")
+    logger.warning(
+        "SNIP tagged facts exceeded the character limit; retaining a bounded complete-line prefix (actual=%d, max=%d, kept_lines=%d, total_lines=%d)",
+        len(normalized),
+        MAX_SNIP_OUTPUT_CHARS,
+        len(kept_lines),
+        len(lines),
+    )
+    return validate_snip_output(bounded)
 
 
 def _message_identity(message: object) -> dict[str, Any]:

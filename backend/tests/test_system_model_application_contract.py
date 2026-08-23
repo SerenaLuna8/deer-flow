@@ -85,6 +85,7 @@ async def test_admin_create_uses_the_model_uuid_as_its_only_stable_identity(
             status="active",
             provider_adapter="vision_bridge_fake",
             provider_model="vision-bridge-fake-v1",
+            max_input_tokens=64_000,
             settings={},
             supports_thinking=False,
             supports_reasoning_effort=False,
@@ -94,7 +95,9 @@ async def test_admin_create_uses_the_model_uuid_as_its_only_stable_identity(
     )
 
     assert repository.created_model.id == model_id
+    assert repository.created_model.max_input_tokens == 64_000
     assert created.id == model_id
+    assert created.max_input_tokens == 64_000
     assert state.default_model_config_id == model_id
 
 
@@ -127,6 +130,7 @@ def test_admin_and_public_api_contracts_omit_removed_model_metadata() -> None:
                 "status": "suspended",
                 "provider_adapter": "vision_bridge_fake",
                 "provider_model": "vision-bridge-fake-v1",
+                "max_input_tokens": 64_000,
                 "settings": {},
                 "supports_thinking": False,
                 "supports_reasoning_effort": False,
@@ -145,6 +149,7 @@ def test_admin_model_api_is_write_only_and_has_no_credential_or_version_contract
             "status": "active",
             "provider_adapter": "patched_deepseek",
             "provider_model": "deepseek-v4-flash",
+            "max_input_tokens": 64_000,
             "settings": {"base_url": "https://api.deepseek.com"},
             "api_key": "transient-create-key",
         }
@@ -179,6 +184,7 @@ def test_admin_model_api_is_write_only_and_has_no_credential_or_version_contract
             {
                 "provider_adapter": "patched_deepseek",
                 "provider_model": "deepseek-v4-flash",
+                "max_input_tokens": 64_000,
                 "settings": {"base_url": "https://api.deepseek.com"},
                 "supports_vision": False,
             }
@@ -188,11 +194,39 @@ def test_admin_model_api_is_write_only_and_has_no_credential_or_version_contract
             {
                 "provider_adapter": "patched_deepseek",
                 "provider_model": "deepseek-v4-flash",
+                "max_input_tokens": 64_000,
                 "settings": {"base_url": "https://api.deepseek.com"},
                 "supports_vision": False,
                 "api_key": "",
             }
         )
+
+
+def test_admin_model_max_input_tokens_is_required_and_bounded() -> None:
+    payload = {
+        "display_name": "DeepSeek Flash",
+        "status": "active",
+        "provider_adapter": "patched_deepseek",
+        "provider_model": "deepseek-v4-flash",
+        "settings": {"base_url": "https://api.deepseek.com"},
+        "max_input_tokens": 64_000,
+    }
+
+    created = AdminModelCreateRequest.model_validate(payload)
+
+    assert created.max_input_tokens == 64_000
+    for contract in (
+        AdminModelCreateRequest,
+        AdminModelUpdateRequest,
+        AdminModelConnectionTestRequest,
+        AdminModelItemResponse,
+    ):
+        assert contract.model_fields["max_input_tokens"].is_required()
+    with pytest.raises(ValidationError):
+        AdminModelCreateRequest.model_validate({key: value for key, value in payload.items() if key != "max_input_tokens"})
+    for invalid in (0, 2_000_001, True, 1.5):
+        with pytest.raises(ValidationError):
+            AdminModelCreateRequest.model_validate({**payload, "max_input_tokens": invalid})
 
 
 @pytest.mark.anyio
@@ -210,6 +244,7 @@ async def test_unready_active_model_is_not_auto_selected_or_accepted_as_default(
         status="suspended",
         provider_adapter="patched_deepseek",
         provider_model="deepseek-v4-flash",
+        max_input_tokens=64_000,
         settings={"base_url": "https://api.deepseek.com"},
         supports_thinking=False,
         supports_reasoning_effort=False,

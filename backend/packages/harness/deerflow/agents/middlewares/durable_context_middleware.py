@@ -83,7 +83,14 @@ def _insert_after_leading_system_messages(messages: list, injected: list) -> lis
     return [*messages[:index], *injected, *messages[index:]]
 
 
-def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list) -> str:
+def render_durable_context_data(summary_text: str | None, ledger: list, skills: list) -> str:
+    """Render the one canonical provider-facing Durable Context data block.
+
+    Context metering calls this same pure renderer before automatic SNIP so
+    trigger accounting cannot drift from the middleware that shapes the
+    provider request.
+    """
+
     data_parts: list[str] = []
     if summary_text:
         bounded_summary = _bound_text(str(summary_text), _SUMMARY_RENDER_CHAR_BUDGET)
@@ -100,6 +107,28 @@ def _render_durable_context_data(summary_text: str | None, ledger: list, skills:
     if not data_parts:
         return ""
     return "<durable_context_data>\n" + "\n\n".join(data_parts) + "\n</durable_context_data>"
+
+
+def render_durable_context_messages(
+    summary_text: str | None,
+    ledger: list,
+    skills: list,
+) -> tuple[SystemMessage, HumanMessage] | ():
+    """Return the exact hidden message pair injected for Durable Context."""
+
+    data_block = render_durable_context_data(summary_text, ledger, skills)
+    if not data_block:
+        return ()
+    return (
+        SystemMessage(content=_AUTHORITY_CONTRACT),
+        HumanMessage(
+            content=data_block,
+            additional_kwargs={
+                "hide_from_ui": True,
+                _DURABLE_CONTEXT_DATA_KEY: True,
+            },
+        ),
+    )
 
 
 def _retained_delegation_window(delegations: list[dict], existing: list[dict]) -> list[dict]:
@@ -323,25 +352,16 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         state = request.state or {}
-        data_block = _render_durable_context_data(
+        durable_messages = render_durable_context_messages(
             state.get("summary_text"),
             state.get("delegations") or [],
             state.get("skill_context") or [],
         )
-        if not data_block:
+        if not durable_messages:
             return request
         messages = _insert_after_leading_system_messages(
             list(request.messages),
-            [
-                SystemMessage(content=_AUTHORITY_CONTRACT),
-                HumanMessage(
-                    content=data_block,
-                    additional_kwargs={
-                        "hide_from_ui": True,
-                        _DURABLE_CONTEXT_DATA_KEY: True,
-                    },
-                ),
-            ],
+            list(durable_messages),
         )
         return request.override(messages=messages)
 

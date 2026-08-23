@@ -219,6 +219,7 @@ async def prepare_replay_runtime_catalog(
                     status="active",
                     provider_adapter="vision_bridge_fake",
                     provider_model="replay",
+                    max_input_tokens=64_000,
                     settings={},
                     supports_thinking=True,
                     supports_reasoning_effort=False,

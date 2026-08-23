@@ -32,14 +32,12 @@ describe("Project MCP form language", () => {
           nameLabel: "请求头名称",
           namePlaceholder: "Authorization",
           valueLabel: "凭证值",
-          help: "按 MCP 服务文档填写，例如 Authorization 或 X-API-Key。",
         },
         query: {
           itemLabel: "查询参数",
           nameLabel: "查询参数名称",
           namePlaceholder: "api_key",
           valueLabel: "凭证值",
-          help: "仅在 MCP 服务明确要求时使用，例如 api_key。请勿把凭证直接写入上方 URL。",
         },
       },
     });

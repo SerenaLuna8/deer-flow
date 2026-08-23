@@ -698,7 +698,7 @@ def test_resolver_accepts_only_worker_shaped_authorities() -> None:
     assert resolve_memory_authority(load_only, method="load_snapshot") is not None
 
 
-def test_recall_tool_is_async_only_and_has_tool_call_budget_defaults() -> None:
+def test_recall_tool_is_async_only_and_uses_the_shared_tool_call_limit() -> None:
     assert recall_memory_tool.name == "recall_memory"
     assert recall_memory_tool.coroutine is not None
 
@@ -706,22 +706,9 @@ def test_recall_tool_is_async_only_and_has_tool_call_budget_defaults() -> None:
     from deerflow.agents.middlewares.tool_call_control import (
         default_graph_tool_call_control_profile,
     )
-    from deerflow.vision.dispatch import MAX_VISION_CALLS_PER_RUN
 
-    raw_policy_expected = {
-        "web_fetch": (6, 10),
-        "web_search": (6, 10),
-        "recall_memory": (6, 10),
-        "inspect_image": (6, 9),
-    }
-    effective_harness_expected = {
-        **raw_policy_expected,
-        "inspect_image": (6, MAX_VISION_CALLS_PER_RUN),
-    }
-    policy_limits = AgentRuntimePolicyValue().tool_call_budget.profiles.interactive.lead.tools
-    harness_limits = default_graph_tool_call_control_profile().lead.tool_budget.tools
-    assert {name: (limit.warn, limit.hard_limit) for name, limit in policy_limits.items()} == raw_policy_expected
-    assert {name: (limit.warn_threshold, limit.hard_limit) for name, limit in harness_limits.items()} == effective_harness_expected
+    assert AgentRuntimePolicyValue().internal_tool_call_limit == 200
+    assert default_graph_tool_call_control_profile().policy.internal_tool_call_limit == 200
 
 
 def test_example_config_omits_database_runtime_policy_tombstones() -> None:

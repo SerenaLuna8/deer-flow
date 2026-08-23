@@ -9,6 +9,7 @@ from langgraph.types import Command
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.file_authority import require_private_file_authority
+from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
 
@@ -132,6 +133,18 @@ async def present_file_tool(
     Args:
         filepaths: List of absolute file paths to present to the user. **Only** files in `/mnt/user-data/outputs` can be presented.
     """
+    context = runtime.context
+    if isinstance(context, dict) and context.get(RuntimeContextKeys.IS_SUBAGENT) is True:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        "Error: Sub-Agent files must be promoted and presented by the Lead",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            },
+        )
     authority = _private_file_authority(runtime)
     try:
         if authority is None:

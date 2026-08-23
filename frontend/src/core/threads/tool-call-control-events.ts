@@ -33,7 +33,7 @@ const legacyToolCallControlReasonCodeSchema = z.union([
 ]);
 
 const controlPayloadCommonShape = {
-  schema_version: z.literal(1),
+  schema_version: z.union([z.literal(1), z.literal(2)]),
   workload_profile: z.enum(["interactive", "research"]),
   role: z.enum(["lead", "subagent"]),
   run_id: z.string().uuid(),
@@ -43,12 +43,13 @@ const controlPayloadCommonShape = {
   admitted: z.number().int().nonnegative(),
   rejected: z.number().int().nonnegative(),
   count_after: z.number().int().nonnegative(),
-  warn_threshold: z.number().int().positive(),
+  warn_threshold: z.number().int().positive().optional(),
   hard_limit: z.number().int().positive(),
   observation_id: z.string().regex(OBSERVATION_ID_PATTERN),
 } as const;
 
 type CommonControlPayload = {
+  schema_version: 1 | 2;
   workload_profile: "interactive" | "research";
   role: "lead" | "subagent";
   run_id: string;
@@ -58,7 +59,7 @@ type CommonControlPayload = {
   admitted: number;
   rejected: number;
   count_after: number;
-  warn_threshold: number;
+  warn_threshold?: number;
   hard_limit: number;
   observation_id: string;
 };
@@ -74,7 +75,10 @@ function validateCommonControlPayload(
       path: ["proposed"],
     });
   }
-  if (value.hard_limit < value.warn_threshold) {
+  if (
+    value.warn_threshold !== undefined &&
+    value.hard_limit < value.warn_threshold
+  ) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       message: "hard_limit must be greater than or equal to warn_threshold",
@@ -113,6 +117,13 @@ function validateRepeatedCallPayload(
   context: z.RefinementCtx,
 ) {
   validateCommonControlPayload(value, context);
+  if (value.schema_version !== 1 || value.warn_threshold === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "repeated-call observations require schema version 1",
+      path: ["schema_version"],
+    });
+  }
   if (value.proposed !== 1 || value.count_after !== value.count_before + 1) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -167,14 +178,19 @@ export type RepeatedCallEvent = z.infer<typeof repeatedCallEventSchema>;
 const toolCallBudgetPayloadShape = {
   ...controlPayloadCommonShape,
   reason_code: toolCallBudgetReasonCodeSchema,
-  tool_name: z.string().regex(SAFE_TOOL_NAME_PATTERN),
-  disposition: z.enum(["advisory", "truncate_tool_calls", "exhaust_tool"]),
+  tool_name: z.string().regex(SAFE_TOOL_NAME_PATTERN).optional(),
+  disposition: z.enum([
+    "advisory",
+    "truncate_tool_calls",
+    "exhaust_tool",
+    "exhaust_run",
+  ]),
 } as const;
 
 type ToolCallBudgetPayload = CommonControlPayload & {
   reason_code: string;
   disposition: string;
-  tool_name: string;
+  tool_name?: string;
 };
 
 function validateToolCallBudgetPayload(
@@ -188,6 +204,30 @@ function validateToolCallBudgetPayload(
       message: "tool-budget counters do not reconcile",
       path: ["count_after"],
     });
+  }
+  if (value.schema_version === 2) {
+    if (
+      value.reason_code !== "tool_budget_exhausted" ||
+      value.warn_threshold !== undefined ||
+      value.tool_name !== undefined ||
+      (value.disposition !== "truncate_tool_calls" &&
+        value.disposition !== "exhaust_run")
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Run tool-call limit payload is invalid",
+        path: ["disposition"],
+      });
+    }
+    return;
+  }
+  if (value.warn_threshold === undefined || value.tool_name === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "legacy tool-budget observations require a tool and warning",
+      path: ["tool_name"],
+    });
+    return;
   }
   if (
     value.reason_code === "tool_budget_warning" &&
@@ -232,6 +272,8 @@ export type ToolCallBudgetEvent = z.infer<typeof toolCallBudgetEventSchema>;
 
 const legacyToolCallControlPayloadShape = {
   ...controlPayloadCommonShape,
+  schema_version: z.literal(1),
+  warn_threshold: z.number().int().positive(),
   reason_code: legacyToolCallControlReasonCodeSchema,
   tool_name: z.string().regex(SAFE_TOOL_NAME_PATTERN).nullable(),
   disposition: z.enum([
@@ -592,6 +634,13 @@ function fetchedRowToObservation(
     });
   }
   if (row.event_type === TOOL_CALL_BUDGET_RUN_EVENT_TYPE) {
+    const current = toolCallBudgetPayloadSchema.safeParse(row.content);
+    if (current.success) {
+      return toolCallBudgetEventSchema.parse({
+        type: TOOL_CALL_BUDGET_EVENT_TYPE,
+        ...current.data,
+      });
+    }
     const normalized = normalizeLegacyToolCallControlPayload(row.content);
     if (!normalized) {
       throw new Error("Durable tool-call control event was not normalized.");

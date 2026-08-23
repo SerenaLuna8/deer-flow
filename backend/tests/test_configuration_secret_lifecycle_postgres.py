@@ -68,6 +68,7 @@ def _model_update(
         display_name=display_name,
         provider_adapter="patched_deepseek",
         provider_model="deepseek-v4-flash",
+        max_input_tokens=64_000,
         settings={"base_url": base_url},
         supports_thinking=True,
         supports_reasoning_effort=True,
@@ -111,6 +112,7 @@ async def test_system_model_update_keeps_json_settings_and_checksum_atomic(
                 status="active",
                 provider_adapter="patched_deepseek",
                 provider_model="deepseek-v4-flash",
+                max_input_tokens=64_000,
                 settings={
                     "base_url": "https://api.deepseek.com",
                     "request_timeout": 600.0,
@@ -129,6 +131,7 @@ async def test_system_model_update_keeps_json_settings_and_checksum_atomic(
                 display_name="DeepSeek numeric settings",
                 provider_adapter="patched_deepseek",
                 provider_model="deepseek-v4-flash",
+                max_input_tokens=64_000,
                 settings={
                     "base_url": "https://api.deepseek.com",
                     # Browser JSON round-tripping serializes 600.0 as 600.
@@ -188,6 +191,7 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
                 status="active",
                 provider_adapter="patched_deepseek",
                 provider_model="deepseek-v4-pro",
+                max_input_tokens=64_000,
                 settings={"base_url": "https://api.deepseek.com"},
                 supports_thinking=True,
                 supports_reasoning_effort=True,
@@ -220,6 +224,7 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
                 status="active",
                 provider_adapter="patched_deepseek",
                 provider_model="deepseek-v4-flash",
+                max_input_tokens=64_000,
                 settings={"base_url": "https://api.deepseek.com"},
                 supports_thinking=True,
                 supports_reasoning_effort=True,

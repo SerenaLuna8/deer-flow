@@ -55,7 +55,7 @@ export function WorkspaceChangePanel({
   });
   const changes = data ?? {
     available: true,
-    version: 1,
+    version: 2,
     summary: fallbackSummary,
     files: [],
     limits: {},
@@ -131,12 +131,16 @@ function WorkspaceChangeFile({
               </div>
               <div className="text-muted-foreground mt-1 flex items-center gap-2 text-xs">
                 <span>{statusLabel(file.status, t)}</span>
-                {(file.additions > 0 || file.deletions > 0) && (
-                  <span>
-                    <span className="text-emerald-500">+{file.additions}</span>{" "}
-                    <span className="text-red-500">-{file.deletions}</span>
-                  </span>
-                )}
+                {file.additions !== null &&
+                  file.deletions !== null &&
+                  (file.additions > 0 || file.deletions > 0) && (
+                    <span>
+                      <span className="text-emerald-500">
+                        +{file.additions}
+                      </span>{" "}
+                      <span className="text-red-500">-{file.deletions}</span>
+                    </span>
+                  )}
               </div>
             </div>
           </div>

@@ -64,6 +64,7 @@ def _app_config() -> AppConfig:
         description="",
         use="langchain_openai:ChatOpenAI",
         model="provider-owned-model-id",
+        max_input_tokens=64_000,
         api_key="test-only",
         supports_vision=True,
     )

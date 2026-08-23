@@ -111,6 +111,11 @@ or downgrade an application database.
 
 - `make setup-db` accepts a new empty target only and initializes application,
   LangGraph, system-asset, and default-project state.
+- Fresh setup seeds one internal tool-call hard limit at `200`. Every internal
+  tool occurrence counts uniformly; the Lead and all delegated Agents share one
+  count within a Run, while different Runs remain isolated. This seed belongs to
+  `default_policy_value()` and must not rewrite existing immutable policy
+  versions or historical v2/v3/v4 payloads.
 - Every initialized application table and column has a checked-in
   Chinese comment. LangGraph comments are applied after its third-party setup,
   and each physical `run_events` partition copies the parent comments. Run
@@ -161,11 +166,12 @@ or downgrade an application database.
   may choose only their own single invocation profile.
 - Every automatically assembled Lead, SDK/Embedded, and delegated Agent Graph
   has exactly one `ToolCallControl`. It alone owns repeated-call identity,
-  per-tool admitted-occurrence budgets, complete-batch arbitration, advisory
-  delivery, scope, and replay receipts. Repeated-call, tool-budget, and
-  Sub-Agent-total observations use distinct types and durable event kinds;
-  `SubagentLimitMiddleware` remains a separate policy. Do not reintroduce the
-  retired frequency enforcement or register a second control middleware.
+  complete-batch arbitration, replay receipts, and the Run-scoped internal
+  tool-call count. Every internal tool occurrence counts against the same hard
+  limit shared by the Lead and all delegated Agents; reaching it rejects further
+  internal tool calls in that Run, without affecting another Run.
+  `SubagentLimitMiddleware` remains a separate policy. Keep enforcement
+  Run-scoped and register only one control middleware.
 - The public SDK graph adapter generates a fresh internal ToolCallControl scope
   for every top-level `invoke`, `stream`, `ainvoke`, and `astream` call while
   preserving a copied caller context. Callers never supply or reuse that
@@ -210,9 +216,12 @@ or downgrade an application database.
   suppression of unexecuted proposals on both graph success and error paths. A
   loop-capped Lead Run is terminal error `LOOP_SAFETY_LIMIT`; any answer or files
   already produced are partial results. Recovered LLM retry attempts use a
-  separate bounded, redacted Run receipt shared with delegated graphs. The
-  receipt may explain recovered attempts but never overrides the durable Run
-  terminal or exposes raw exception text.
+  separate bounded, redacted Run receipt shared with delegated graphs.
+  `run.recovered_issue` trace is the sole durable authority for that receipt; it
+  is never attached to an `AIMessage` or projected into conversation history.
+  Its safe v2 attribution stores only the closed caller/subtype and bounded HTTP
+  status fields, never raw exception text, provider bodies, or URLs. The receipt
+  may explain recovered attempts but never overrides the durable Run terminal.
 - Harness Execution resource ownership transfers exactly once at runner entry.
   Before transfer, the external executor owns materialization fallback; after
   transfer, `run_agent()` alone joins File Finalization and private-resource
@@ -242,6 +251,21 @@ or downgrade an application database.
 - Runtime-only dependency environments belong under `/tmp`. The secure
   finalization scan prunes only the exact top-level workspace `.venv` tree;
   other workspace/output symlinks and special files still fail closed.
+- Each private Sub-Agent Task receives a distinct server-generated
+  `workspace/.deerflow/subagents/<scope>/outputs` view. Its canonical
+  `/mnt/user-data/outputs` file-tool paths map only to that view, so parallel
+  Tasks and Lead output writes cannot consume or overwrite one another. The
+  Task reports only its own promotion candidates; a Lead copy plus
+  `present_files` is required for delivery. Lead-only promotion mappings remain
+  in model-visible Task results; public Sub-Agent card metadata contains only
+  the Sub-Agent result and never scratch paths or publication instructions.
+  Sub-Agents do not receive `present_files` and report completed output paths
+  without treating that boundary as an error. Scratch is cleared before
+  restore, finalization, failure settlement, and lease release, and is never
+  persisted as a file, Artifact, or workspace change. Private Sub-Agent `bash`
+  remains fail-closed until a provider supplies a real per-Task filesystem
+  namespace; command rewriting is not an isolation boundary. Ordinary Sub-Agent
+  workspace edits remain subject to normal finalization.
 - Conditional composer cleanup takes the same Thread lock as Run admission. It
   retains uploads present in any frozen current-upload snapshot, while admission
   rejects the whole request if any selected upload is no longer ready.
@@ -397,6 +421,18 @@ or downgrade an application database.
   latest turn. Every hierarchical leaf, reduction, and repair prompt stays
   within the admitted trim budget, and permanent planning failures terminate
   with a typed reason. Custom summary prompts never acquire this projection.
+- Context Gauge and automatic compaction share the immutable provider-request
+  profile created after Lead tools and request-shaping middleware are assembled.
+  The profile stores only bounded facts and digests, while the final provider
+  guard records the same estimator's measurement. Idle Gauge reuse is valid only
+  for the same model, Agent closure, runtime-policy fingerprint, interactive
+  workload, and an MCP-free closure; every unprovable case fails with the typed
+  unsupported result rather than using the legacy messages-only estimate.
+- A Run's frozen `token_usage.enabled` value governs every public usage lane:
+  Journal, SSE, Sub-Agent events, settlement, and REST checkpoint projection.
+  Mixed checkpoint history is projected per Human-message `run_id`; missing or
+  stale provenance fails closed. The projection removes only recognized token
+  metadata and preserves business payloads named `usage`.
 - Model work runs outside database transactions. Admission freezes its inputs;
   settlement re-locks and rejects stale policy, model, preference, document, Job,
   or lease state before publishing results.
@@ -424,6 +460,29 @@ repository-root `config.yaml`. Infrastructure settings are restart-required.
 Model definitions, runtime/auth/Memory/quota/Automation policy, and model-owned
 API Keys are PostgreSQL authority and must not be reintroduced as YAML or
 ambient-key fallbacks.
+
+Every System Model stores a required `max_input_tokens` capability in the
+bounded range `1..2,000,000`. It is frozen with the exact model execution
+payload and supplies the Provider Model profile capacity used by Context Gauge
+and automatic compaction. Keep it distinct from Provider output `max_tokens`
+and Run token-budget policy. Fresh DeepSeek v4 bootstrap rows use `1,000,000`.
+
+The authorable adapter descriptor is also the Model admin form authority. Each
+setting declares whether it is an editable input or a preserve-only historical
+value, whether it is common or advanced, and whether its default is fixed by
+the platform or intentionally omitted for the Provider to decide. Runtime
+materialization must apply platform defaults with explicit model settings
+taking precedence; do not invent Provider defaults or expose raw JSON
+authoring for structured compatibility settings.
+
+The `openai`, `patched_openai`, and `vllm` adapter forms expose reasoning-effort
+choices in this order: `none`, `low`, `medium`, `high`, `xhigh`, and `max`.
+
+The `deepseek` and `patched_deepseek` adapters expose only DeepSeek's
+provider-native `low`, `high`, and `max` reasoning-effort settings. Per-Run
+product modes remain canonical: the Worker translates `thinking` to `low`,
+`pro` to `high`, and `ultra` to `max`; `flash` uses the configured
+thinking-disabled payload and does not forward a reasoning-effort value.
 
 #### Model adapters and `inspect_image`
 
@@ -517,6 +576,9 @@ source constant changes, update this section and the owning detailed document.
 
 ### Execution and asset limits
 
+- Fresh System Runtime Policy and SDK/Embedded fallback repeated-call defaults
+  are warning `3`, hard limit `20`, and window `20`; existing immutable policy
+  versions and historical v2/v3 payloads keep their frozen values.
 - Subagent concurrency is canonically clamped to `1..4`; the per-Run total remains independently bounded to `1..50`.
 - SkillScan rejects unsafe archives while retaining the final 100 MiB and the
   16384-file, bounded-log contract.

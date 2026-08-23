@@ -32,7 +32,7 @@ Consider the setup successful when all of the following are true:
 - For Docker setup, `make docker-init` completed successfully and Docker prerequisites are prepared, but services are not assumed to be running yet.
 - For local setup, `make check` passed or reported no missing prerequisites, and `make install` completed successfully.
 - The user receives the exact next command to launch ActWeave.
-- `make setup-db` seeds active `deepseek-v4-flash`, `deepseek-v4-pro`, and multimodal `deepseek-v4-flash-vision-exp` model configurations. Each owns an independently encrypted API Key copy. Flash is the default lead model and the vision model is the default Vision Bridge selection. A system administrator manages both under `/admin/settings/models` and `/admin/settings/system`.
+- `make setup-db` seeds active `deepseek-v4-flash`, `deepseek-v4-pro`, and multimodal `deepseek-v4-flash-vision-exp` model configurations. Each owns an independently encrypted API Key copy and a required `max_input_tokens=1,000,000`; the separate `settings.max_tokens=51,200` remains the output limit. Flash is the default lead model and the vision model is the default Vision Bridge selection. A system administrator manages both under `/admin/settings/models` and `/admin/settings/system`.
 
 ## Steps
 
@@ -55,6 +55,7 @@ Consider the setup successful when all of the following are true:
   - If prerequisites are satisfied, run `make install`.
   - Tell the user the recommended next command is `make dev`.
 - Do not inspect `config.yaml` for model entries: top-level `models:` is removed and rejected. Model definitions and provider secrets are PostgreSQL system settings.
+- System Model create, update, and connection-test forms require `max_input_tokens` in the range `1..2,000,000`. Configure the Provider Model's maximum accepted input, not its output `max_tokens` or a Run token budget; context occupancy and automatic compaction use this frozen model value as their capacity denominator.
 - Do not print or copy values from `.env`, `frontend/.env`, or other secret-bearing files. Let `make setup-db` load the root `.env` when present; explicit environment variables also work without the file. Runtime imports must not load dotenv implicitly. After startup, tell a system administrator that each bootstrapped DeepSeek model owns its encrypted API Key copy; all can be inspected or changed at `/admin/settings/models`, and Flash is initially the default.
 - If the repository already appears configured, avoid repeating expensive work unless it is necessary to verify the environment.
 

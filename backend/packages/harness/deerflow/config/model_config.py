@@ -15,6 +15,12 @@ class ModelConfig(BaseModel):
         description="Class path of the model provider(e.g. langchain_openai.ChatOpenAI)",
     )
     model: str = Field(..., description="Model name")
+    max_input_tokens: int = Field(
+        ...,
+        ge=1,
+        le=2_000_000,
+        description="Maximum input-token capacity used for context accounting",
+    )
     model_config = ConfigDict(extra="allow")
     _system_model_config_id: uuid.UUID | None = PrivateAttr(default=None)
     _system_model_payload_checksum: str | None = PrivateAttr(default=None)

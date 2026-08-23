@@ -24,6 +24,7 @@ def compare_snapshots(
     all_paths = sorted(set(before.files) | set(after.files))
     changes: list[WorkspaceFileChange] = []
     created = modified = deleted = additions = deletions = 0
+    line_counts_available = True
     total_diff_bytes = 0
     truncated = before.truncated or after.truncated
 
@@ -51,23 +52,27 @@ def compare_snapshots(
             total_diff_bytes += len(diff.encode("utf-8"))
         if diff_truncated or reason in {"large", "truncated"}:
             truncated = True
-        additions += line_additions
-        deletions += line_deletions
+        if line_additions is None or line_deletions is None:
+            line_counts_available = False
+        else:
+            additions += line_additions
+            deletions += line_deletions
 
         if len(changes) < resolved_limits.max_files:
             sample = after_file or before_file
             assert sample is not None
+            sensitive = bool(sample.sensitive)
             changes.append(
                 WorkspaceFileChange(
                     path=path,
                     root=sample.root,
                     status=status,
                     binary=bool((after_file or before_file).binary if (after_file or before_file) else False),
-                    sensitive=bool((after_file or before_file).sensitive if (after_file or before_file) else False),
+                    sensitive=sensitive,
                     size_before=before_file.size if before_file else None,
                     size_after=after_file.size if after_file else None,
-                    sha256_before=before_file.sha256 if before_file else None,
-                    sha256_after=after_file.sha256 if after_file else None,
+                    sha256_before=(before_file.sha256 if before_file is not None and not sensitive else None),
+                    sha256_after=(after_file.sha256 if after_file is not None and not sensitive else None),
                     diff=diff,
                     diff_truncated=diff_truncated,
                     diff_unavailable_reason=reason,
@@ -83,8 +88,8 @@ def compare_snapshots(
             created=created,
             modified=modified,
             deleted=deleted,
-            additions=additions,
-            deletions=deletions,
+            additions=additions if line_counts_available else None,
+            deletions=deletions if line_counts_available else None,
             truncated=truncated,
         ),
         files=changes,
@@ -126,18 +131,24 @@ def _build_diff(
     after_file: FileSnapshot | None,
     *,
     remaining_bytes: int,
-) -> tuple[str, int, int, bool, DiffUnavailableReason | None]:
+) -> tuple[
+    str,
+    int | None,
+    int | None,
+    bool,
+    DiffUnavailableReason | None,
+]:
     reason = _diff_unavailable_reason(before_file, after_file)
     if reason is not None:
-        return "", 0, 0, False, reason
+        return "", None, None, False, reason
 
     before_text = _snapshot_text(before_file) if before_file else ""
     after_text = _snapshot_text(after_file) if after_file else ""
 
     if before_file is not None and before_text is None:
-        return "", 0, 0, False, None
+        return "", None, None, False, "unavailable"
     if after_file is not None and after_text is None:
-        return "", 0, 0, False, None
+        return "", None, None, False, "unavailable"
 
     lines = list(
         difflib.unified_diff(

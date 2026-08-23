@@ -17,6 +17,9 @@ from langchain_core.tools import StructuredTool
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.tool_call_control import (
+    TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY,
+    FixedToolCallControlScope,
+    RunToolCallLimitAuthority,
     ToolCallBudgetObservation,
     ToolCallControlObservation,
     default_graph_tool_call_control_profile,
@@ -104,6 +107,7 @@ async def test_sdk_task_adapter_forces_graph_binding_over_forged_context(
         state={"messages": []},
         context={
             RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: forged_factory,
+            TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY: "sdk-invocation",
             RuntimeContextKeys.PRIVATE_SCOPE: "caller-forged-private-marker",
             "extension": "kept",
         },
@@ -363,6 +367,8 @@ async def test_graph_owned_control_observer_is_marshaled_to_parent_owner_loop() 
         profile,
         tool_call_control_profile=control_profile,
         tool_call_control_observer=observer,
+        tool_call_limit_authority=RunToolCallLimitAuthority(hard_limit=200),
+        tool_call_limit_scope=FixedToolCallControlScope("parent-run"),
     )
     runtime = ToolRuntime(
         state={"messages": []},
@@ -378,14 +384,12 @@ async def test_graph_owned_control_observer_is_marshaled_to_parent_owner_loop() 
         role="subagent",
         scope_id="internal-execution-id",
         workload_profile="research",
-        tool_name="web_search",
-        count_before=19,
+        count_before=199,
         proposed=2,
         admitted=1,
         rejected=1,
-        count_after=20,
-        warn_threshold=12,
-        hard_limit=20,
+        count_after=200,
+        hard_limit=200,
         disposition="truncate_tool_calls",
         observation_id="observation-1",
     )
@@ -411,10 +415,13 @@ async def test_owner_loop_control_observer_failure_is_receipted_and_suppressed()
 
     owner_loop = asyncio.get_running_loop()
     profile = _sdk_binding(owner_loop).profile
+    control_profile = default_graph_tool_call_control_profile()
     factory = ParentExecutionBindingFactory(
         profile,
-        tool_call_control_profile=default_graph_tool_call_control_profile(),
+        tool_call_control_profile=control_profile,
         tool_call_control_observer=_FailingObserver(),
+        tool_call_limit_authority=RunToolCallLimitAuthority(hard_limit=200),
+        tool_call_limit_scope=FixedToolCallControlScope("parent-run"),
     )
     runtime = ToolRuntime(
         state={"messages": []},
@@ -426,19 +433,17 @@ async def test_owner_loop_control_observer_failure_is_receipted_and_suppressed()
     )
     binding = factory.bind(runtime)
     observation = ToolCallBudgetObservation(
-        reason_code="tool_budget_warning",
+        reason_code="tool_budget_exhausted",
         role="subagent",
         scope_id="internal-execution-id",
         workload_profile="interactive",
-        tool_name="web_search",
-        count_before=5,
+        count_before=199,
         proposed=1,
         admitted=1,
         rejected=0,
-        count_after=6,
-        warn_threshold=6,
-        hard_limit=10,
-        disposition="advisory",
+        count_after=200,
+        hard_limit=200,
+        disposition="exhaust_run",
         observation_id="observation-2",
     )
 

@@ -26,6 +26,9 @@ from deerflow.agents.middlewares.manifest import (
 from deerflow.config.app_config import AppConfig
 
 if TYPE_CHECKING:
+    from deerflow.agents.middlewares.provider_request_usage import (
+        FinalProviderRequestGuard,
+    )
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 
@@ -112,6 +115,40 @@ def _validate_middleware_invariants(
             expected = " -> ".join(type(middleware).__name__ for middleware in enabled)
             hook_note = f"; {invariant.reverse_hook} dispatches in reverse registration order" if invariant.reverse_hook is not None else ""
             raise RuntimeError(f"Middleware invariant '{invariant.name}' violated: expected relative registration order {expected}{hook_note}")
+
+
+def append_final_provider_request_guard(
+    middlewares: Sequence[AgentMiddleware],
+    guard: FinalProviderRequestGuard,
+) -> list[AgentMiddleware]:
+    """Append the one innermost read-only provider request meter.
+
+    The guard is constructed only after the final task-bound tool set exists,
+    so it cannot participate in the earlier generic assembly function.  This
+    seam preserves Clarification's existing relative tail while making the
+    provider guard structurally last across every wrap-model-call shaper.
+    """
+
+    from deerflow.agents.middlewares.provider_request_usage import (
+        FinalProviderRequestGuard,
+    )
+
+    if not isinstance(guard, FinalProviderRequestGuard):
+        raise TypeError("final provider request guard has an invalid type")
+    result = list(middlewares)
+    if any(isinstance(middleware, FinalProviderRequestGuard) for middleware in result):
+        raise ValueError("final provider request guard is already installed")
+    result.append(
+        _layer(
+            guard,
+            layer_id="final_provider_request_guard",
+            phase=MiddlewarePhase.FINAL_PROVIDER_REQUEST,
+            slot=10,
+            why="The final shaped request is measured immediately before provider invocation.",
+        )
+    )
+    validate_middleware_phase_ladder(result)
+    return result
 
 
 def build_sandbox_infrastructure(

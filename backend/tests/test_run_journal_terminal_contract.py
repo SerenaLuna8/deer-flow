@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from langchain.agents.middleware.types import ModelResponse
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
-    RECOVERED_LLM_FAILURES_KEY,
     LLMErrorHandlingMiddleware,
 )
 from deerflow.agents.middlewares.tool_call_control import (
@@ -23,6 +23,8 @@ from deerflow.agents.middlewares.tool_call_control import (
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.runtime.journal import RunJournal, RunJournalToolCallControlObserver
 from deerflow.runtime.recovered_llm_failures import (
+    RECOVERED_LLM_FAILURES_KEY,
+    RecoveredLLMFailure,
     RunRecoveredLLMFailureRecorder,
     build_recovered_llm_failures_receipt,
 )
@@ -37,6 +39,141 @@ class _RecordingEventStore:
         self.events.extend(events)
 
 
+def _recovered_failure(
+    *,
+    error_code: str = "LLM_PROVIDER_UNAVAILABLE",
+    reason: str = "transient",
+    failure_subtype: str = "connection",
+) -> RecoveredLLMFailure:
+    return {
+        "attempt": 1,
+        "max_attempts": 3,
+        "error_code": error_code,
+        "reason": reason,
+        "caller": "lead_agent",
+        "failure_subtype": failure_subtype,
+        "status_code": None,
+        "disposition": "recovered",
+    }
+
+
+@pytest.mark.anyio
+async def test_disabled_token_tracking_sanitizes_nested_run_end_projection_without_mutating_outputs() -> None:
+    store = _RecordingEventStore()
+    journal = RunJournal(
+        "run-no-public-usage",
+        "thread-no-public-usage",
+        store,
+        track_token_usage=False,
+        flush_threshold=100,
+    )
+    message = AIMessage(
+        id="run-end-usage-message",
+        content="Finished",
+        additional_kwargs={
+            "usage": "business message instructions",
+            "subagent_status": "completed",
+            "subagent_token_usage": {
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "total_tokens": 5,
+            },
+            "subagent_usage_receipt_id": "receipt-run-end",
+            "subagent_usage_completeness": "final_observed",
+        },
+        response_metadata={
+            "model_name": "provider-model",
+            "token_usage": {"total_tokens": 5},
+        },
+        usage_metadata={
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+        },
+    )
+    tool_message = ToolMessage(
+        id="run-end-business-tool-message",
+        content=[
+            {
+                "type": "text",
+                "text": "tool result",
+                "usage": "business tool content",
+            }
+        ],
+        tool_call_id="run-end-business-tool-call",
+        additional_kwargs={
+            "usage": "business tool envelope",
+            "subagent_usage_receipt_id": "receipt-tool-result",
+        },
+    )
+    outputs = {
+        "messages": [
+            message,
+            {
+                "type": "ai",
+                "content": "Nested serialized message",
+                "usage_metadata": {"total_tokens": 7},
+                "additional_kwargs": {
+                    "token_usage_attribution": {"lead": 7},
+                    "subagent_usage_receipt_state": {
+                        "version": 1,
+                        "baseline": {"total_tokens": 7},
+                    },
+                    "subagent_status": "completed",
+                },
+                "response_metadata": {
+                    "usage": {"total_tokens": 7},
+                },
+            },
+            tool_message,
+        ],
+        "business_state": {
+            "status": "completed",
+            "usage": "business state instructions",
+        },
+    }
+
+    journal.on_chain_end(
+        outputs,
+        run_id=uuid.uuid4(),
+        parent_run_id=None,
+    )
+    await journal.flush()
+
+    run_end = next(event for event in store.events if event["event_type"] == "run.end")
+    serialized = json.dumps(run_end["content"], default=str, sort_keys=True)
+    for forbidden in (
+        "usage_metadata",
+        "token_usage_attribution",
+        "subagent_token_usage",
+        "subagent_usage_receipt",
+    ):
+        assert forbidden not in serialized
+    assert run_end["content"]["business_state"] == {
+        "status": "completed",
+        "usage": "business state instructions",
+    }
+    assert run_end["content"]["messages"][0]["additional_kwargs"] == {
+        "usage": "business message instructions",
+        "subagent_status": "completed",
+    }
+    assert run_end["content"]["messages"][0]["response_metadata"] == {
+        "model_name": "provider-model",
+    }
+    assert run_end["content"]["messages"][1]["response_metadata"] == {}
+    assert run_end["content"]["messages"][2]["content"][0]["usage"] == ("business tool content")
+    assert run_end["content"]["messages"][2]["additional_kwargs"] == {
+        "usage": "business tool envelope",
+    }
+    assert message.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+    }
+    assert message.additional_kwargs["subagent_usage_receipt_id"] == ("receipt-run-end")
+    assert tool_message.additional_kwargs["subagent_usage_receipt_id"] == ("receipt-tool-result")
+
+
 def _budget_observation(
     *,
     observation_id: str = "a" * 64,
@@ -48,14 +185,12 @@ def _budget_observation(
         role=role,
         scope_id=scope_id,
         workload_profile="research",
-        tool_name="web_search",
-        count_before=9,
+        count_before=199,
         proposed=3,
         admitted=1,
         rejected=2,
-        count_after=10,
-        warn_threshold=6,
-        hard_limit=10,
+        count_after=200,
+        hard_limit=200,
         disposition="truncate_tool_calls",
         observation_id=observation_id,
     )
@@ -108,20 +243,18 @@ async def test_tool_call_control_observation_is_safe_deduplicated_and_precedes_t
     ]
     payload = store.events[0]["content"]
     assert payload == {
-        "schema_version": 1,
+        "schema_version": 2,
         "reason_code": "tool_budget_exhausted",
         "workload_profile": "research",
         "role": "lead",
         "run_id": "run-budget",
         "execution_id": None,
-        "tool_name": "web_search",
-        "count_before": 9,
+        "count_before": 199,
         "proposed": 3,
         "admitted": 1,
         "rejected": 2,
-        "count_after": 10,
-        "warn_threshold": 6,
-        "hard_limit": 10,
+        "count_after": 200,
+        "hard_limit": 200,
         "disposition": "truncate_tool_calls",
         "observation_id": "a" * 64,
     }
@@ -151,7 +284,7 @@ async def test_repeated_call_and_tool_budget_use_distinct_observation_types_and_
         "middleware:tool_call_budget",
     ]
     assert "tool_name" not in store.events[0]["content"]
-    assert store.events[1]["content"]["tool_name"] == "web_search"
+    assert "tool_name" not in store.events[1]["content"]
 
 
 @pytest.mark.anyio
@@ -296,20 +429,7 @@ async def test_recovered_llm_failure_is_durable_and_contains_no_raw_error() -> N
     message = AIMessage(
         id="answer-1",
         content="Recovered answer",
-        additional_kwargs={
-            RECOVERED_LLM_FAILURES_KEY: {
-                "schema_version": 1,
-                "failures": [
-                    {
-                        "attempt": 1,
-                        "max_attempts": 3,
-                        "error_code": "LLM_PROVIDER_UNAVAILABLE",
-                        "reason": "transient",
-                        "disposition": "recovered",
-                    }
-                ],
-            }
-        },
+        additional_kwargs={RECOVERED_LLM_FAILURES_KEY: build_recovered_llm_failures_receipt((_recovered_failure(),))},
     )
 
     journal.on_llm_error(
@@ -334,26 +454,46 @@ async def test_recovered_llm_failure_is_durable_and_contains_no_raw_error() -> N
     assert "secret provider URL" not in serialized
     recovered = [event for event in store.events if event["event_type"] == "run.recovered_issue"]
     assert len(recovered) == 1
+    assert recovered[0]["metadata"] == {}
     assert recovered[0]["content"] == {
         "kind": "llm_retry_recovered",
-        "schema_version": 1,
-        "failures": [
-            {
-                "attempt": 1,
-                "max_attempts": 3,
-                "error_code": "LLM_PROVIDER_UNAVAILABLE",
-                "reason": "transient",
-                "disposition": "recovered",
-            }
-        ],
+        "schema_version": 2,
+        "failures": [_recovered_failure()],
     }
-    reconciled = [event for event in store.events if event["event_type"] == "llm.ai.response" and event["metadata"].get("source") == "recovered_llm_failures"]
-    assert len(reconciled) == 1
-    assert reconciled[0]["content"]["id"] == "answer-1"
-    assert reconciled[0]["content"]["additional_kwargs"][RECOVERED_LLM_FAILURES_KEY]["failures"][0]["error_code"] == "LLM_PROVIDER_UNAVAILABLE"
+    assert not [event for event in store.events if event["event_type"] == "llm.ai.response" and event["metadata"].get("source") == "recovered_llm_failures"]
+    run_end = next(event for event in store.events if event["event_type"] == "run.end")
+    projected_message = run_end["content"]["messages"][0]
+    assert RECOVERED_LLM_FAILURES_KEY not in projected_message.additional_kwargs
     llm_errors = [event for event in store.events if event["event_type"] == "llm.error"]
     assert llm_errors[0]["content"] == "LLM request failed"
     assert llm_errors[0]["metadata"] == {"exception_class": "RuntimeError"}
+
+
+@pytest.mark.anyio
+async def test_recovered_llm_failure_trace_survives_later_run_error() -> None:
+    store = _RecordingEventStore()
+    recorder = RunRecoveredLLMFailureRecorder()
+    journal = RunJournal(
+        "run-recovered-before-error",
+        "thread-recovered-before-error",
+        store,
+        flush_threshold=100,
+        recovered_llm_failure_recorder=recorder,
+    )
+    recorder.record(
+        build_recovered_llm_failures_receipt((_recovered_failure(),)),
+    )
+
+    journal.on_chain_error(
+        RuntimeError("terminal secret detail"),
+        run_id=uuid.uuid4(),
+        parent_run_id=None,
+    )
+    await journal.flush()
+
+    event_types = [event["event_type"] for event in store.events]
+    assert event_types == ["run.recovered_issue", "run.error"]
+    assert "terminal secret detail" not in repr(store.events)
 
 
 @pytest.mark.anyio
@@ -370,36 +510,20 @@ async def test_idless_recovered_responses_aggregate_without_duplicate_ai_events(
     messages = [
         AIMessage(
             content="First recovered answer",
-            additional_kwargs={
-                RECOVERED_LLM_FAILURES_KEY: {
-                    "schema_version": 1,
-                    "failures": [
-                        {
-                            "attempt": 1,
-                            "max_attempts": 3,
-                            "error_code": "LLM_PROVIDER_UNAVAILABLE",
-                            "reason": "transient",
-                            "disposition": "recovered",
-                        }
-                    ],
-                }
-            },
+            additional_kwargs={RECOVERED_LLM_FAILURES_KEY: build_recovered_llm_failures_receipt((_recovered_failure(),))},
         ),
         AIMessage(
             content="Second recovered answer",
             additional_kwargs={
-                RECOVERED_LLM_FAILURES_KEY: {
-                    "schema_version": 1,
-                    "failures": [
-                        {
-                            "attempt": 1,
-                            "max_attempts": 3,
-                            "error_code": "LLM_PROVIDER_BUSY",
-                            "reason": "busy",
-                            "disposition": "recovered",
-                        }
-                    ],
-                }
+                RECOVERED_LLM_FAILURES_KEY: build_recovered_llm_failures_receipt(
+                    (
+                        _recovered_failure(
+                            error_code="LLM_PROVIDER_BUSY",
+                            reason="busy",
+                            failure_subtype="provider_busy",
+                        ),
+                    )
+                )
             },
         ),
     ]
@@ -423,26 +547,18 @@ async def test_idless_recovered_responses_aggregate_without_duplicate_ai_events(
     recovered = [event for event in store.events if event["event_type"] == "run.recovered_issue"]
     assert len(recovered) == 1
     assert recovered[0]["content"]["failures"] == [
-        {
-            "attempt": 1,
-            "max_attempts": 3,
-            "error_code": "LLM_PROVIDER_UNAVAILABLE",
-            "reason": "transient",
-            "disposition": "recovered",
-        },
-        {
-            "attempt": 1,
-            "max_attempts": 3,
-            "error_code": "LLM_PROVIDER_BUSY",
-            "reason": "busy",
-            "disposition": "recovered",
-        },
+        _recovered_failure(),
+        _recovered_failure(
+            error_code="LLM_PROVIDER_BUSY",
+            reason="busy",
+            failure_subtype="provider_busy",
+        ),
     ]
     assert not [event for event in store.events if event["event_type"] == "llm.ai.response" and event["metadata"].get("source") == "recovered_llm_failures"]
 
 
 @pytest.mark.anyio
-async def test_final_response_carries_run_aggregate_recovered_receipt() -> None:
+async def test_final_response_keeps_run_aggregate_outside_conversation_message() -> None:
     store = _RecordingEventStore()
     recorder = RunRecoveredLLMFailureRecorder()
     journal = RunJournal(
@@ -496,9 +612,9 @@ async def test_final_response_carries_run_aggregate_recovered_receipt() -> None:
     final = final_response.result[0]
     assert isinstance(final, AIMessage)
 
-    aggregate = final.additional_kwargs[RECOVERED_LLM_FAILURES_KEY]
-    assert aggregate["schema_version"] == 1
-    assert len(aggregate["failures"]) == 2
+    aggregate = recorder.snapshot()
+    assert RECOVERED_LLM_FAILURES_KEY not in final.additional_kwargs
+    assert len(aggregate) == 2
 
     journal.on_chain_end(
         {"messages": [first, second, final]},
@@ -509,7 +625,7 @@ async def test_final_response_carries_run_aggregate_recovered_receipt() -> None:
 
     recovered = [event for event in store.events if event["event_type"] == "run.recovered_issue"]
     assert len(recovered) == 1
-    assert recovered[0]["content"]["failures"] == aggregate["failures"]
+    assert recovered[0]["content"]["failures"] == list(aggregate)
     assert not [event for event in store.events if event["event_type"] == "llm.ai.response" and event["metadata"].get("source") == "recovered_llm_failures"]
 
 
@@ -524,20 +640,12 @@ async def test_continuation_persists_only_new_failures_and_each_final_aggregate(
         flush_threshold=100,
         recovered_llm_failure_recorder=recorder,
     )
-    first_failure = {
-        "attempt": 1,
-        "max_attempts": 3,
-        "error_code": "LLM_PROVIDER_UNAVAILABLE",
-        "reason": "transient",
-        "disposition": "recovered",
-    }
-    second_failure = {
-        "attempt": 1,
-        "max_attempts": 3,
-        "error_code": "LLM_PROVIDER_BUSY",
-        "reason": "busy",
-        "disposition": "recovered",
-    }
+    first_failure = _recovered_failure()
+    second_failure = _recovered_failure(
+        error_code="LLM_PROVIDER_BUSY",
+        reason="busy",
+        failure_subtype="provider_busy",
+    )
 
     shared_message_id = "provider-reused-final-id"
     _observe_lead_ai_message(
@@ -547,13 +655,12 @@ async def test_continuation_persists_only_new_failures_and_each_final_aggregate(
             content="First turn answer",
         ),
     )
-    first_aggregate = recorder.record(
+    recorder.record(
         build_recovered_llm_failures_receipt((first_failure,)),
     )
     first_final = AIMessage(
         id=shared_message_id,
         content="First turn answer",
-        additional_kwargs={RECOVERED_LLM_FAILURES_KEY: (build_recovered_llm_failures_receipt(first_aggregate))},
     )
     journal.on_chain_end(
         {"messages": [first_final]},
@@ -568,13 +675,12 @@ async def test_continuation_persists_only_new_failures_and_each_final_aggregate(
             content="Second turn answer",
         ),
     )
-    second_aggregate = recorder.record(
+    recorder.record(
         build_recovered_llm_failures_receipt((second_failure,)),
     )
     second_final = AIMessage(
         id=shared_message_id,
         content="Second turn answer",
-        additional_kwargs={RECOVERED_LLM_FAILURES_KEY: (build_recovered_llm_failures_receipt(second_aggregate))},
     )
     journal.on_chain_end(
         {"messages": [first_final, second_final]},
@@ -593,12 +699,9 @@ async def test_continuation_persists_only_new_failures_and_each_final_aggregate(
         [first_failure],
         [second_failure],
     ]
-    reconciled = [event for event in store.events if event["event_type"] == "llm.ai.response" and event["metadata"].get("source") == "recovered_llm_failures"]
-    assert [event["content"]["id"] for event in reconciled] == [
-        shared_message_id,
-        shared_message_id,
-    ]
-    assert len(reconciled[-1]["content"]["additional_kwargs"][RECOVERED_LLM_FAILURES_KEY]["failures"]) == 2
+    assert RECOVERED_LLM_FAILURES_KEY not in first_final.additional_kwargs
+    assert RECOVERED_LLM_FAILURES_KEY not in second_final.additional_kwargs
+    assert not [event for event in store.events if event["event_type"] == "llm.ai.response" and event["metadata"].get("source") == "recovered_llm_failures"]
 
 
 @pytest.mark.anyio

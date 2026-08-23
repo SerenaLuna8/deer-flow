@@ -125,7 +125,9 @@ export const zhCN: Translations = {
     title: "工作区变更",
     editedTitle: (count) => `已编辑 ${count} 个文件`,
     badge: (count, additions, deletions) =>
-      `${count} 个文件已更改 +${additions} -${deletions}`,
+      additions === null || deletions === null
+        ? `${count} 个文件已更改`
+        : `${count} 个文件已更改 +${additions} -${deletions}`,
     viewChanges: "查看更改",
     created: "新增",
     modified: "修改",
@@ -2365,32 +2367,12 @@ export const zhCN: Translations = {
       toolBudgetWarningTitle: (toolName) => `${toolName} 即将达到调用额度`,
       toolBudgetWarningDescription: (count, hardLimit) =>
         `已准入 ${count}/${hardLimit} 次调用，剩余额度应保留给尚缺的关键证据。`,
-      toolBudgetExhaustedTitle: (toolName) => `${toolName} 调用额度已用尽`,
+      toolBudgetExhaustedTitle: "已达到本 Run 的内部工具调用上限",
       toolBudgetExhaustedDescription:
-        "运行仍可使用已有证据和其他工具继续整理结果；额度状态本身不是终止失败。",
+        "本 Run 不再准入新的内部工具调用；Agent 可基于已经收集的证据完成结果。",
       subagentTotalLimitTitle: "已达到 Sub-Agent 委托总数上限",
       subagentTotalLimitDescription:
         "本次运行不能再准入新的 Sub-Agent Task；Lead Agent 可继续使用已经收集的结果。",
-    },
-    recoveredModelFailuresTitle: "模型调用失败后已恢复",
-    recoveredModelFailuresDescription: (count) =>
-      `本轮有 ${count} 次模型请求失败。这些请求经重试后恢复；本轮最终状态以运行提示为准。`,
-    recoveredModelFailureAttempt: (
-      index,
-      attempt,
-      maxAttempts,
-      reason,
-      errorCode,
-    ) =>
-      `失败 ${index}：第 ${attempt}/${maxAttempts} 次模型请求——${reason}（${errorCode}）。`,
-    recoveredModelFailureReasons: {
-      quota: "模型配额不足",
-      auth: "模型认证失败",
-      busy: "模型服务繁忙",
-      transient: "模型服务或网络连接暂时不可用",
-      generic: "模型请求失败",
-      current_upload: "当前图片附件不可用",
-      circuit_open: "模型请求熔断器处于打开状态",
     },
     tokenBudgetReachedTitle: "已达到本次运行的 Token 预算",
     tokenBudgetReachedDescription: "本次运行已提前停止，当前回复可能不完整。",
@@ -2650,16 +2632,27 @@ export const zhCN: Translations = {
 
   contextWindow: {
     title: "上下文窗口",
-    automaticCompression: "自动压缩进度",
+    usage: "估算上下文使用情况",
     loading: "正在测量当前上下文…",
     unavailable: "当前上下文用量暂不可用。",
-    disabled: "自动上下文压缩已关闭。",
-    progressLabel: (percent: string) => `已达到自动压缩阈值的 ${percent}`,
-    current: "当前",
+    disabled: "已关闭",
+    progressLabel: (percent: string) => `估算上下文占用 ${percent}`,
+    usageWithoutCapacity: (estimated: string) =>
+      `估算上下文 ${estimated}，窗口上限未配置`,
+    capacityUnavailable: "模型未配置上下文窗口上限，无法计算使用率。",
+    contextWindowLimit: "总上下文",
+    notConfigured: "未配置",
+    safetyBound: "安全占用上界",
+    previousProviderInput: "上次供应商实测（输入）",
+    compressionConditions: "自动压缩条件",
+    noCompressionConditions: "未配置自动压缩条件。",
+    current: "当前条件值",
     triggerAt: "压缩触发",
-    remaining: "剩余",
-    estimatedContext: "估算上下文",
-    tokenThreshold: "Token 阈值",
+    remaining: "距压缩触发",
+    triggerStatus: "状态",
+    triggerReached: "已达到触发条件",
+    estimatedContext: "当前上下文",
+    tokenThreshold: "换算 Token 阈值",
     summaryPresent: "已包含上次压缩摘要",
     allConditions: "已配置条件",
     anyCondition: "多个条件任一达到即自动压缩。",
@@ -2670,8 +2663,6 @@ export const zhCN: Translations = {
       messages: "消息数触发条件",
     },
     tokens: (value: string) => `${value} Tokens`,
-    tokenPair: (current: string, total: string) =>
-      `${current} / ${total} Tokens`,
     messages: (count: number) => `${count.toLocaleString("zh-CN")} 条消息`,
   },
 

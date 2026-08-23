@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
 
@@ -452,7 +453,14 @@ class RunRepository(RunStore):
             )
             await session.commit()
 
-    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False, scope=None) -> dict[str, Any]:
+    async def aggregate_tokens_by_thread(
+        self,
+        thread_id: str,
+        *,
+        include_active: bool = False,
+        included_run_ids: Collection[str] | None = None,
+        scope=None,
+    ) -> dict[str, Any]:
         """Aggregate token usage for a thread.
 
         ``by_model`` is reduced in Python from each row's ``token_usage_by_model``
@@ -483,6 +491,9 @@ class RunRepository(RunStore):
             RunRow.middleware_tokens,
             RunRow.token_usage_by_model,
         ).where(_thread, _completed, *self._scope_predicates(scope))
+        if included_run_ids is not None:
+            selected = {run_id for run_id in included_run_ids if isinstance(run_id, str) and run_id}
+            stmt = stmt.where(RunRow.run_id.in_(selected))
 
         async with self._sf() as session:
             rows = (await session.execute(stmt)).all()

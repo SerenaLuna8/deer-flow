@@ -29,10 +29,24 @@ export const projectCacheHintSchema = projectClientScopeSchema
   })
   .strict();
 
+export const accountAgentRuntimeCacheHintSchema = projectClientScopeSchema
+  .pick({ accountId: true })
+  .extend({
+    schemaVersion: z.literal(1),
+    eventId: z.string().uuid(),
+    sourceTabId: z.string().uuid(),
+    domain: z.literal("agent_runtime"),
+    change: z.literal("context_usage"),
+  })
+  .strict();
+
 export type ProjectMemoryCacheChange = z.infer<
   typeof projectMemoryCacheChangeSchema
 >;
 export type ProjectCacheHint = z.infer<typeof projectCacheHintSchema>;
+export type AccountAgentRuntimeCacheHint = z.infer<
+  typeof accountAgentRuntimeCacheHintSchema
+>;
 
 type CacheHintMessageEvent = { readonly data: unknown };
 
@@ -156,11 +170,132 @@ export function createProjectMemoryCacheHintSubscription({
   };
 }
 
+export function createAccountAgentRuntimeCacheHintSubscription({
+  accountId,
+  onHint,
+  channelFactory = defaultChannelFactory,
+  tabId = currentSourceTabId(),
+  eventIdFactory = randomUUID,
+  deduplicationLimit = DEFAULT_DEDUPLICATION_LIMIT,
+}: {
+  accountId: string;
+  onHint: (hint: AccountAgentRuntimeCacheHint) => void;
+  channelFactory?: ProjectCacheHintChannelFactory;
+  tabId?: string | null;
+  eventIdFactory?: () => string | null;
+  deduplicationLimit?: number;
+}) {
+  const parsedAccountId =
+    projectClientScopeSchema.shape.accountId.parse(accountId);
+  const channel = tabId ? channelFactory(PROJECT_CACHE_HINT_CHANNEL) : null;
+  const seenEventIds = new Set<string>();
+  let disposed = false;
+
+  const rememberEvent = (eventId: string) => {
+    seenEventIds.add(eventId);
+    if (seenEventIds.size <= deduplicationLimit) return;
+    const oldest = seenEventIds.values().next().value;
+    if (oldest !== undefined) seenEventIds.delete(oldest);
+  };
+
+  const receive = (event: CacheHintMessageEvent) => {
+    if (disposed) return;
+    const parsed = accountAgentRuntimeCacheHintSchema.safeParse(event.data);
+    if (!parsed.success) return;
+    const hint = parsed.data;
+    if (
+      hint.sourceTabId === tabId ||
+      hint.accountId !== parsedAccountId ||
+      seenEventIds.has(hint.eventId)
+    ) {
+      return;
+    }
+    rememberEvent(hint.eventId);
+    onHint(hint);
+  };
+
+  channel?.addEventListener("message", receive);
+
+  return {
+    publish(): AccountAgentRuntimeCacheHint | null {
+      if (disposed || !channel || !tabId) return null;
+      const eventId = eventIdFactory();
+      if (!eventId) return null;
+      const hint = accountAgentRuntimeCacheHintSchema.parse({
+        schemaVersion: 1,
+        eventId,
+        sourceTabId: tabId,
+        accountId: parsedAccountId,
+        domain: "agent_runtime",
+        change: "context_usage",
+      });
+      channel.postMessage(hint);
+      return hint;
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      channel?.removeEventListener("message", receive);
+      channel?.close();
+      seenEventIds.clear();
+    },
+  };
+}
+
 function memoryQueryKey(
   scope: ProjectClientScope,
   ...segments: readonly unknown[]
 ) {
   return privateWorkQueryKey(scope, "memory", ...segments);
+}
+
+export async function applyAccountAgentRuntimeCacheHint(
+  queryClient: QueryClient,
+  accountId: string,
+): Promise<void> {
+  const parsedAccountId =
+    projectClientScopeSchema.shape.accountId.parse(accountId);
+  const predicate = (query: { readonly queryKey: readonly unknown[] }) => {
+    const key = query.queryKey;
+    return (
+      key[0] === "account" &&
+      key[1] === parsedAccountId &&
+      key[2] === "project" &&
+      key[4] === "private-work" &&
+      key[5] === "thread-context-usage"
+    );
+  };
+  await queryClient.cancelQueries({ predicate });
+  await queryClient.invalidateQueries({ predicate });
+}
+
+export function createAccountAgentRuntimeCacheHintListener({
+  queryClient,
+  accountId,
+  channelFactory,
+  tabId,
+  eventIdFactory,
+  deduplicationLimit,
+}: {
+  queryClient: QueryClient;
+  accountId: string;
+  channelFactory?: ProjectCacheHintChannelFactory;
+  tabId?: string | null;
+  eventIdFactory?: () => string | null;
+  deduplicationLimit?: number;
+}) {
+  return createAccountAgentRuntimeCacheHintSubscription({
+    accountId,
+    channelFactory,
+    tabId,
+    eventIdFactory,
+    deduplicationLimit,
+    onHint: () => {
+      void applyAccountAgentRuntimeCacheHint(queryClient, accountId).catch(
+        () => undefined,
+      );
+    },
+  });
 }
 
 export async function applyProjectMemoryCacheChange(
@@ -230,6 +365,36 @@ export function broadcastProjectMemoryCacheHint(
   } catch {
     subscription.dispose();
     return null;
+  }
+}
+
+export function broadcastAccountAgentRuntimeCacheHint(
+  accountId: string,
+  channelFactory: ProjectCacheHintChannelFactory = defaultChannelFactory,
+): AccountAgentRuntimeCacheHint | null {
+  const subscription = createAccountAgentRuntimeCacheHintSubscription({
+    accountId,
+    onHint: () => undefined,
+    channelFactory,
+  });
+  try {
+    const hint = subscription.publish();
+    queueMicrotask(() => subscription.dispose());
+    return hint;
+  } catch {
+    subscription.dispose();
+    return null;
+  }
+}
+
+export async function commitAccountAgentRuntimeCacheHint(
+  queryClient: QueryClient,
+  accountId: string,
+): Promise<void> {
+  try {
+    await applyAccountAgentRuntimeCacheHint(queryClient, accountId);
+  } finally {
+    broadcastAccountAgentRuntimeCacheHint(accountId);
   }
 }
 
@@ -331,4 +496,12 @@ export function useProjectMemoryCacheHintListener(
       subscription.dispose();
     };
   }, [accountId, projectId, queryClient]);
+
+  useEffect(() => {
+    const listener = createAccountAgentRuntimeCacheHintListener({
+      queryClient,
+      accountId,
+    });
+    return () => listener.dispose();
+  }, [accountId, queryClient]);
 }

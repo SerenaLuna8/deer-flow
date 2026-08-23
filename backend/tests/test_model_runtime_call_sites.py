@@ -140,6 +140,7 @@ def test_memory_dream_builds_through_private_oneshot_profile(
         display_name="Dream model",
         use="langchain_openai:ChatOpenAI",
         model="provider-model",
+        max_input_tokens=64_000,
         api_key=SecretStr("unit-test-key"),
     )
     handler = object.__new__(MemoryDreamJobHandler)

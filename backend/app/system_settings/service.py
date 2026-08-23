@@ -118,7 +118,7 @@ def _freeze_json(value: object) -> object:
 
 def _model_view(row: SystemModelConfigRow) -> SystemModelView:
     frozen_settings = _freeze_json(dict(row.settings))
-    if not isinstance(frozen_settings, Mapping):
+    if not isinstance(frozen_settings, Mapping) or type(row.max_input_tokens) is not int or not 1 <= row.max_input_tokens <= 2_000_000:
         raise SystemModelRepositoryInvariant
     configured = row.current_secret_generation_id is not None
     eligible = is_provider_adapter_eligible_for_new_binding(row.provider_adapter)
@@ -129,6 +129,7 @@ def _model_view(row: SystemModelConfigRow) -> SystemModelView:
         status=row.status,
         provider_adapter=row.provider_adapter,
         provider_model=row.provider_model,
+        max_input_tokens=row.max_input_tokens,
         settings=frozen_settings,
         supports_thinking=row.supports_thinking,
         supports_reasoning_effort=row.supports_reasoning_effort,
@@ -147,22 +148,33 @@ def _model_view(row: SystemModelConfigRow) -> SystemModelView:
 
 def _snapshot_payload(
     row: RunModelConfigSnapshotRow,
-) -> tuple[str, str, dict[str, object], bool, bool, bool]:
+) -> tuple[str, str, int, dict[str, object], bool, bool, bool]:
     payload = row.provider_payload
     try:
         if not isinstance(payload, dict) or payload.get("schema_version") != 1:
             raise ValueError
         adapter = payload["provider_adapter"]
         provider_model = payload["provider_model"]
+        max_input_tokens = payload["max_input_tokens"]
         settings = payload["settings"]
         thinking = payload["supports_thinking"]
         reasoning_effort = payload["supports_reasoning_effort"]
         vision = payload["supports_vision"]
-        if type(adapter) is not str or type(provider_model) is not str or not isinstance(settings, dict) or type(thinking) is not bool or type(reasoning_effort) is not bool or type(vision) is not bool:
+        if (
+            type(adapter) is not str
+            or type(provider_model) is not str
+            or type(max_input_tokens) is not int
+            or not 1 <= max_input_tokens <= 2_000_000
+            or not isinstance(settings, dict)
+            or type(thinking) is not bool
+            or type(reasoning_effort) is not bool
+            or type(vision) is not bool
+        ):
             raise ValueError
         return (
             adapter,
             provider_model,
+            max_input_tokens,
             dict(settings),
             thinking,
             reasoning_effort,
@@ -173,7 +185,7 @@ def _snapshot_payload(
 
 
 def _snapshot_view(row: RunModelConfigSnapshotRow) -> RunModelConfigSnapshotView:
-    adapter, provider_model, settings, thinking, reasoning_effort, vision = _snapshot_payload(row)
+    adapter, provider_model, max_input_tokens, settings, thinking, reasoning_effort, vision = _snapshot_payload(row)
     return RunModelConfigSnapshotView(
         project_id=uuid.UUID(str(row.project_id)),
         owner_user_id=row.owner_user_id,
@@ -183,6 +195,7 @@ def _snapshot_view(row: RunModelConfigSnapshotRow) -> RunModelConfigSnapshotView
         model_ref=str(uuid.UUID(str(row.model_config_id))),
         provider_adapter=adapter,
         provider_model=provider_model,
+        max_input_tokens=max_input_tokens,
         provider_settings=settings,
         model_config_id=uuid.UUID(str(row.model_config_id)),
         payload_checksum=row.payload_checksum,
@@ -474,6 +487,7 @@ class SystemModelCatalogService:
                 status=command.status,
                 provider_adapter=command.provider_adapter,
                 provider_model=command.provider_model,
+                max_input_tokens=command.max_input_tokens,
                 settings=dict(command.settings),
                 supports_thinking=command.supports_thinking,
                 supports_reasoning_effort=command.supports_reasoning_effort,
@@ -570,6 +584,7 @@ class SystemModelCatalogService:
             model.display_name = command.display_name
             model.provider_adapter = command.provider_adapter
             model.provider_model = command.provider_model
+            model.max_input_tokens = command.max_input_tokens
             model.settings = dict(command.settings)
             # JSON numbers such as 600 and 600.0 compare equal in Python even
             # though their canonical JSON bytes (and therefore checksum) differ.

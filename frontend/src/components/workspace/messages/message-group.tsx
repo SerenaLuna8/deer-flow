@@ -112,6 +112,13 @@ export function MessageGroup({
     }
     return [];
   }, [lastToolCallStep, steps]);
+  const foldableAboveLastToolCallSteps = useMemo(
+    () =>
+      aboveLastToolCallSteps.filter(
+        (step) => step.type === "reasoning" || step.name !== "task",
+      ),
+    [aboveLastToolCallSteps],
+  );
   const afterLastToolCallReasoningSteps = useMemo(() => {
     if (lastToolCallStep) {
       const index = steps.indexOf(lastToolCallStep);
@@ -351,7 +358,7 @@ export function MessageGroup({
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
     >
-      {aboveLastToolCallSteps.length > 0 && !showAllSteps && (
+      {foldableAboveLastToolCallSteps.length > 0 && !showAllSteps && (
         <Button
           key="above"
           className="w-full items-start justify-start text-left"
@@ -363,7 +370,9 @@ export function MessageGroup({
               <span className="opacity-60">
                 {showAbove
                   ? t.toolCalls.lessSteps
-                  : t.toolCalls.moreSteps(aboveLastToolCallSteps.length)}
+                  : t.toolCalls.moreSteps(
+                      foldableAboveLastToolCallSteps.length,
+                    )}
               </span>
             }
             icon={
@@ -379,20 +388,25 @@ export function MessageGroup({
       )}
       {lastToolCallStep && (
         <ChainOfThoughtContent className="px-4 pb-2">
-          {showAbove &&
-            aboveLastToolCallSteps.flatMap((step) => {
-              const stepIndex = steps.indexOf(step);
-              if (step.type === "reasoning") {
-                return renderReasoningRound(step, {
-                  defaultOpen: isLoading,
-                });
-              }
+          {aboveLastToolCallSteps.flatMap((step) => {
+            if (
+              !showAbove &&
+              (step.type === "reasoning" || step.name !== "task")
+            ) {
+              return [];
+            }
+            const stepIndex = steps.indexOf(step);
+            if (step.type === "reasoning") {
+              return renderReasoningRound(step, {
+                defaultOpen: isLoading,
+              });
+            }
 
-              return [
-                renderDebugSummary(step.messageId, stepIndex),
-                renderProcessToolCall(step),
-              ];
-            })}
+            return [
+              renderDebugSummary(step.messageId, stepIndex),
+              renderProcessToolCall(step),
+            ];
+          })}
           {renderDebugSummary(
             lastToolCallStep.messageId,
             steps.indexOf(lastToolCallStep),

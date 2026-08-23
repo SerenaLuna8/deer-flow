@@ -73,6 +73,7 @@ def _full_feature_app_config() -> AppConfig:
                 description="",
                 use="langchain_openai:ChatOpenAI",
                 model=GOLDEN_MODEL,
+                max_input_tokens=64_000,
                 api_key=SecretStr("unit-test-key"),
                 base_url="https://example.invalid/v1",
                 supports_thinking=False,
@@ -110,7 +111,13 @@ def _projection(names: list[str], shared: set[str]) -> list[str]:
 def _assert_load_bearing_order(names: list[str]) -> None:
     """Apply all conditional order invariants to one materialized chain."""
 
-    assert names[-1] == "ClarificationMiddleware"
+    if "FinalProviderRequestGuard" in names:
+        assert names[-2:] == [
+            "ClarificationMiddleware",
+            "FinalProviderRequestGuard",
+        ]
+    else:
+        assert names[-1] == "ClarificationMiddleware"
     error_index = names.index("ToolErrorHandlingMiddleware")
     if "ToolProgressMiddleware" in names:
         assert names.index("ToolProgressMiddleware") < error_index
@@ -154,6 +161,7 @@ NON_PRIVATE_LEAD_GOLDEN_CHAIN = [
     "TokenBudgetMiddleware",
     "SafetyFinishReasonMiddleware",
     "ClarificationMiddleware",
+    "FinalProviderRequestGuard",
 ]
 
 PRIVATE_LEAD_GOLDEN_CHAIN = [
@@ -188,6 +196,7 @@ PRIVATE_LEAD_GOLDEN_CHAIN = [
     "TokenBudgetMiddleware",
     "SafetyFinishReasonMiddleware",
     "ClarificationMiddleware",
+    "FinalProviderRequestGuard",
 ]
 
 PRIVATE_LEAD_HOOK_GOLDEN = {
@@ -200,6 +209,7 @@ PRIVATE_LEAD_HOOK_GOLDEN = {
         "TodoMiddleware",
         "ToolCallControl",
         "TokenBudgetMiddleware",
+        "FinalProviderRequestGuard",
     ),
     MiddlewareHook.BEFORE_MODEL: (
         "DynamicContextMiddleware",
@@ -226,6 +236,7 @@ PRIVATE_LEAD_HOOK_GOLDEN = {
         "SystemMessageCoalescingMiddleware",
         "ToolCallControl",
         "TokenBudgetMiddleware",
+        "FinalProviderRequestGuard",
     ),
     MiddlewareHook.WRAP_TOOL_CALL: (
         "ToolOutputBudgetMiddleware",
@@ -450,7 +461,7 @@ def _build_subagent_chain() -> list[AgentMiddleware]:
     )
 
 
-EMBEDDED_GOLDEN_CHAIN = NON_PRIVATE_LEAD_GOLDEN_CHAIN
+EMBEDDED_GOLDEN_CHAIN = [name for name in NON_PRIVATE_LEAD_GOLDEN_CHAIN if name != "FinalProviderRequestGuard"]
 
 
 @pytest.mark.parametrize(
@@ -465,6 +476,26 @@ EMBEDDED_GOLDEN_CHAIN = NON_PRIVATE_LEAD_GOLDEN_CHAIN
 )
 def test_each_assembly_path_matches_its_exact_golden(builder, golden) -> None:
     assert _names(builder()) == golden
+
+
+def test_lead_middleware_builder_binds_summarization_to_the_lead_context_model() -> None:
+    lead_model = MagicMock()
+    summary_model = MagicMock()
+    summary_model.profile = {"max_input_tokens": 200_000}
+    with patch.object(
+        lead_agent_module.ModelRuntime,
+        "build_chat_model",
+        return_value=summary_model,
+    ):
+        chain = build_middlewares(
+            {"configurable": {}},
+            model_name=GOLDEN_MODEL,
+            app_config=_full_feature_app_config(),
+            context_model=lead_model,
+        )
+
+    summarization = next(middleware for middleware in chain if type(middleware).__name__ == "DeerFlowSummarizationMiddleware")
+    assert summarization._context_model is lead_model
 
 
 @pytest.mark.parametrize(
@@ -657,6 +688,7 @@ LEAD_ONLY_MIDDLEWARES = {
     "DeerFlowSummarizationMiddleware",
     "McpRoutingMiddleware",
     "DeferredToolFilterMiddleware",
+    "FinalProviderRequestGuard",
 }
 
 

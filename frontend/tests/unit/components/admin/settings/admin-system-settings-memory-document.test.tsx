@@ -34,6 +34,15 @@ function renderEnglish(node: React.ReactNode): string {
   );
 }
 
+function settingsSubsection(html: string, value: string): string {
+  const marker = `data-settings-subsection="${value}"`;
+  const markerIndex = html.indexOf(marker);
+  if (markerIndex < 0) return "";
+  const sectionStart = html.lastIndexOf("<section", markerIndex);
+  const sectionEnd = html.indexOf("</section>", markerIndex);
+  return html.slice(sectionStart, sectionEnd + "</section>".length);
+}
+
 function catalog(): SystemSettingsCatalog {
   return {
     catalog_revision: 9,
@@ -79,7 +88,7 @@ function catalog(): SystemSettingsCatalog {
       agent_runtime: {
         section: "agent_runtime",
         revision: 6,
-        schema_version: 4,
+        schema_version: 5,
         effective_revision: 6,
         effect_scope: "new_requests_and_runs",
         updated_at: TIMESTAMP,
@@ -147,42 +156,7 @@ function catalog(): SystemSettingsCatalog {
               window_size: 20,
             },
           },
-          tool_call_budget: {
-            profiles: {
-              interactive: {
-                lead: {
-                  default: { warn: 30, hard_limit: 50 },
-                  tools: {
-                    web_search: { warn: 6, hard_limit: 10 },
-                    web_fetch: { warn: 6, hard_limit: 10 },
-                  },
-                },
-                subagent: {
-                  default: { warn: 30, hard_limit: 50 },
-                  tools: {
-                    web_search: { warn: 6, hard_limit: 10 },
-                    web_fetch: { warn: 6, hard_limit: 10 },
-                  },
-                },
-              },
-              research: {
-                lead: {
-                  default: { warn: 30, hard_limit: 50 },
-                  tools: {
-                    web_search: { warn: 20, hard_limit: 30 },
-                    web_fetch: { warn: 20, hard_limit: 30 },
-                  },
-                },
-                subagent: {
-                  default: { warn: 30, hard_limit: 50 },
-                  tools: {
-                    web_search: { warn: 12, hard_limit: 20 },
-                    web_fetch: { warn: 12, hard_limit: 20 },
-                  },
-                },
-              },
-            },
-          },
+          internal_tool_call_limit: 200,
           read_before_write: { enabled: true },
           safety_finish_reason: { enabled: true },
           subagents: {
@@ -208,8 +182,21 @@ function catalog(): SystemSettingsCatalog {
 }
 
 describe("admin Memory document settings", () => {
-  test("renders editable schema v4 tool budgets by workload and Agent role", () => {
-    const html = renderEnglish(
+  test("renders one shared schema v5 internal tool-call limit under Run budget", () => {
+    const english = renderEnglish(
+      <AdminSystemSettingsStateView
+        activeModels={[]}
+        lastResults={{}}
+        modelsStatus="ready"
+        onRetry={rs.fn()}
+        onSave={rs.fn(async () => null)}
+        pendingSection={null}
+        retrying={false}
+        sectionErrors={{}}
+        state={{ status: "ready", data: catalog() }}
+      />,
+    );
+    const chinese = renderChinese(
       <AdminSystemSettingsStateView
         activeModels={[]}
         lastResults={{}}
@@ -223,62 +210,47 @@ describe("admin Memory document settings", () => {
       />,
     );
 
-    expect(html).toContain('data-settings-destination="tool-call-budget"');
-    expect(html).toContain(
-      'name="agent_runtime.tool_call_budget.profiles.interactive.lead.default.warn"',
+    expect(english).toContain('data-settings-destination="run-limits"');
+    expect(english).toContain('name="agent_runtime.internal_tool_call_limit"');
+    expect(english).toContain("Internal tool-call limit per Run");
+    expect(english).toContain(
+      "Lead Agent and all Sub-Agents share this limit within one Run. Each Run is counted independently, and no new internal tool calls are admitted after the limit is reached.",
     );
-    expect(html).toContain(
-      'name="agent_runtime.tool_call_budget.profiles.research.subagent.default.hard_limit"',
+    expect(chinese).toContain("每个 Run 内部工具调用上限");
+    expect(chinese).toContain(
+      "同一 Run 内 Lead Agent 与所有子 Agent 共享此上限；不同 Run 独立计数，达到上限后不再准入新的内部工具调用。",
     );
-    expect(html).toContain(
+    expect(english).not.toContain(
+      'data-settings-destination="tool-call-budget"',
+    );
+    expect(english).not.toContain("agent_runtime.tool_call_budget");
+    expect(english).toContain(
       'name="agent_runtime.loop_detection.identical_calls.window_size"',
     );
-    expect(html).toContain(
+    expect(english).toContain(
       'name="agent_runtime.subagents.max_total_per_run_by_workload.research"',
     );
-    expect(html).not.toContain("tool_freq_hard_limit");
-  });
+    expect(english).not.toContain("tool_freq_hard_limit");
 
-  test("shows the direct ownership reason beside a reserved task budget row", () => {
-    const data = catalog();
-    data.sections.agent_runtime.value.tool_call_budget.profiles.research.lead.tools.task =
-      { warn: 1, hard_limit: 2 };
-
-    const english = renderEnglish(
-      <AdminSystemSettingsStateView
-        activeModels={[]}
-        lastResults={{}}
-        modelsStatus="ready"
-        onRetry={rs.fn()}
-        onSave={rs.fn(async () => null)}
-        pendingSection={null}
-        retrying={false}
-        sectionErrors={{}}
-        state={{ status: "ready", data }}
-      />,
+    const executionLimits = settingsSubsection(english, "run-execution");
+    const tokenBudget = settingsSubsection(english, "token-budget");
+    expect(executionLimits).toContain(
+      'name="agent_runtime.max_recursion_limit"',
     );
-    const chinese = renderChinese(
-      <AdminSystemSettingsStateView
-        activeModels={[]}
-        lastResults={{}}
-        modelsStatus="ready"
-        onRetry={rs.fn()}
-        onSave={rs.fn(async () => null)}
-        pendingSection={null}
-        retrying={false}
-        sectionErrors={{}}
-        state={{ status: "ready", data }}
-      />,
+    expect(executionLimits).toContain(
+      'name="agent_runtime.internal_tool_call_limit"',
     );
-
-    expect(english).toContain('value="task"');
-    expect(english).toContain('aria-invalid="true"');
-    expect(english).toContain(
-      "task is governed by the Sub-Agent delegation limit and cannot be configured as an ordinary tool budget",
+    expect(executionLimits).not.toContain("agent_runtime.token_budget");
+    expect(tokenBudget).toContain('name="agent_runtime.token_budget.enabled"');
+    expect(tokenBudget).toContain(
+      'name="agent_runtime.token_budget.max_tokens"',
     );
-    expect(chinese).toContain(
-      "task 由 Sub-Agent 委托总量限制管理，不能配置为普通工具调用预算",
-    );
+    expect(tokenBudget).not.toContain("agent_runtime.internal_tool_call_limit");
+    expect(
+      english.indexOf('data-settings-subsection="run-execution"'),
+    ).toBeLessThan(english.indexOf('data-settings-subsection="token-budget"'));
+    expect(chinese).toContain("始终生效，不受 Token 预算开关影响。");
+    expect(chinese).toContain("只有本区块中的上限与阈值受开关控制。");
   });
 
   test("treats a same-page hash target as navigation within the current document", () => {
@@ -306,7 +278,7 @@ describe("admin Memory document settings", () => {
     const data = catalog();
     const runtimeBase = data.sections.agent_runtime.value;
     const runtimeDraft = structuredClone(runtimeBase);
-    runtimeDraft.token_budget.max_tokens += 1_000;
+    runtimeDraft.internal_tool_call_limit += 1;
     runtimeDraft.title.max_chars += 1;
 
     expect(

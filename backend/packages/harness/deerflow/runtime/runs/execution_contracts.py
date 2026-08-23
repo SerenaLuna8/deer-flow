@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
 
+from deerflow.token_budget_usage import TokenBudgetUsageSnapshot
+
 RunSemanticStopReason = Literal["loop_capped"]
 
 
@@ -72,6 +74,7 @@ class RunAgentUsageSnapshot:
     subagent_tokens: int
     middleware_tokens: int
     token_usage_by_model: Mapping[str, Mapping[str, int]]
+    token_budget_usage: TokenBudgetUsageSnapshot | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -111,6 +114,10 @@ class RunAgentUsageSnapshot:
             "token_usage_by_model",
             MappingProxyType(frozen_models),
         )
+        if self.token_budget_usage is not None and type(self.token_budget_usage) is not TokenBudgetUsageSnapshot:
+            raise TypeError(
+                "token_budget_usage must be a TokenBudgetUsageSnapshot or None",
+            )
 
 
 @dataclass(frozen=True, slots=True)

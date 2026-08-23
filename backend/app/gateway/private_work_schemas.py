@@ -252,10 +252,29 @@ PrivateThreadContextTriggerResponse = Annotated[
 ]
 
 
+class PrivateThreadContextUsageComponentResponse(StrictPrivateWorkResponse):
+    estimated_tokens: int = Field(ge=0)
+    error_allowance_tokens: int = Field(ge=0)
+    safety_bound_tokens: int = Field(ge=0)
+
+
+class PrivateThreadContextUsageComponentsResponse(StrictPrivateWorkResponse):
+    compressible: PrivateThreadContextUsageComponentResponse
+    fixed: PrivateThreadContextUsageComponentResponse
+    ephemeral: PrivateThreadContextUsageComponentResponse
+
+
 class PrivateThreadContextUsageResponse(StrictPrivateWorkResponse):
     thread_id: str
     enabled: bool
     estimated_tokens: int = Field(ge=0)
+    error_allowance_tokens: int = Field(ge=0)
+    safety_bound_tokens: int = Field(ge=0)
+    provider_input_tokens: int | None = Field(default=None, ge=0)
+    estimator_revision: str | None = Field(default=None, min_length=1, max_length=128)
+    error_contract: str | None = Field(default=None, min_length=1, max_length=512)
+    components: PrivateThreadContextUsageComponentsResponse
+    fixed_over_trigger: bool
     message_count: int = Field(ge=0)
     summary_present: bool
     context_window_tokens: int | None = Field(default=None, ge=1)
@@ -264,6 +283,11 @@ class PrivateThreadContextUsageResponse(StrictPrivateWorkResponse):
         max_length=8,
     )
     primary_trigger: PrivateThreadContextTriggerResponse | None = None
+
+
+class PrivateThreadContextAuthorityResponse(StrictPrivateWorkResponse):
+    thread_id: str
+    cache_marker: str = Field(min_length=6, max_length=71)
 
 
 class PrivateWorkRoute(APIRoute):
@@ -294,6 +318,7 @@ __all__ = [
     "PrivateRunCheckpoint",
     "PrivateRunCreateRequest",
     "PrivateRunExecutionProfileRequest",
+    "PrivateThreadContextAuthorityResponse",
     "PrivateThreadContextUsageResponse",
     "PrivateThreadTokenUsageResponse",
     "PrivateWorkRoute",

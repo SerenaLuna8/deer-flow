@@ -47,6 +47,7 @@ def _material() -> tuple[
         status="active",
         provider_adapter="patched_deepseek",
         provider_model="deepseek-v4-flash",
+        max_input_tokens=64_000,
         settings={"base_url": "https://api.deepseek.com"},
         supports_thinking=True,
         supports_reasoning_effort=True,
@@ -81,6 +82,7 @@ def _material() -> tuple[
         status="active",
         provider_adapter=command.provider_adapter,
         provider_model=command.provider_model,
+        max_input_tokens=command.max_input_tokens,
         settings=dict(command.settings),
         supports_thinking=command.supports_thinking,
         supports_reasoning_effort=command.supports_reasoning_effort,
@@ -96,7 +98,7 @@ def _material() -> tuple[
 
 
 def test_model_execution_materializes_only_the_exact_owned_generation() -> None:
-    key, model, generation, _payload = _material()
+    key, model, generation, payload = _material()
 
     runtime = SystemModelExecutionAdapter(secret_key=key).materialize(
         LockedSystemModelMaterial(
@@ -109,6 +111,8 @@ def test_model_execution_materializes_only_the_exact_owned_generation() -> None:
     assert runtime._system_model_config_id == model.id
     assert runtime._system_model_payload_checksum == model.payload_checksum
     assert runtime._system_model_secret_generation_id == generation.id
+    assert payload["max_input_tokens"] == 64_000
+    assert runtime.max_input_tokens == 64_000
     assert "runtime-only-api-key" not in repr(runtime)
 
 
@@ -129,6 +133,7 @@ def test_provider_default_origin_is_pinned_for_recipient_and_execution() -> None
             command=SystemModelConnectionCheck(
                 provider_adapter="patched_deepseek",
                 provider_model="deepseek-v4-flash",
+                max_input_tokens=64_000,
                 settings={},
                 supports_vision=False,
                 api_key="transient-test-key",
@@ -177,6 +182,7 @@ def test_run_snapshot_keeps_payload_but_destroyed_generation_fails_closed() -> N
         secret_envelope_digest=snapshot.secret_envelope_digest,
     )
     model.provider_model = "later-model-edit"
+    model.max_input_tokens = 128_000
 
     runtime = SystemModelExecutionAdapter(secret_key=key).materialize(
         LockedSystemModelMaterial(
@@ -186,6 +192,8 @@ def test_run_snapshot_keeps_payload_but_destroyed_generation_fails_closed() -> N
         )
     )
     assert runtime.model == "deepseek-v4-flash"
+    assert execution.max_input_tokens == 64_000
+    assert runtime.max_input_tokens == 64_000
 
     with pytest.raises(
         SystemModelMaterializationUnavailable,

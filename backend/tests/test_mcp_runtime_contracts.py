@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -15,8 +16,11 @@ from app.private_work.mcp_runtime_contracts import (
     validate_project_mcp_snapshot_policy,
 )
 from app.private_work.snapshot_repository import RunSnapshotAssetStale
+from app.shared_assets.mcp_service import _mcp_tool_inventory_view
 from app.shared_assets.mcp_tool_inventory_repository import (
     MAX_MCP_TOOL_INVENTORY_DESCRIPTION_CHARS,
+    McpToolInventoryRecord,
+    normalize_mcp_tool_inventory,
 )
 from app.shared_assets.models import AssetScope
 from deerflow.mcp_definition_policy import McpDefinitionPolicyError
@@ -48,12 +52,50 @@ def test_inventory_payload_uses_provider_names_and_normalized_descriptions() -> 
         args_schema=_Args,
     )
 
-    assert mcp_tool_inventory_payload((tool,)) == (
-        {
-            "name": "lookup",
-            "description": "Search records",
-        },
+    payload = mcp_tool_inventory_payload((tool,))
+
+    assert payload[0]["name"] == "lookup"
+    assert payload[0]["runtime_name"] == "project_123_lookup"
+    assert payload[0]["description"] == "Search records"
+    assert isinstance(payload[0]["schema_utf8_bytes"], int)
+    assert payload[0]["schema_utf8_bytes"] > 0
+    assert len(payload[0]["schema_sha256"]) == 64
+    assert normalize_mcp_tool_inventory(payload) == payload
+
+
+def test_old_inventory_remains_readable_but_has_no_schema_contract() -> None:
+    assert normalize_mcp_tool_inventory(({"name": "lookup", "description": "Search records"},)) == ({"name": "lookup", "description": "Search records"},)
+
+
+def test_public_inventory_view_does_not_project_private_schema_facts() -> None:
+    now = datetime.now(UTC)
+    inventory = McpToolInventoryRecord(
+        attempt_payload_checksum="payload",
+        attempt_secret_digest="secret",
+        attempt_status="succeeded",
+        public_error_code=None,
+        tools=(
+            {
+                "name": "lookup",
+                "runtime_name": "project_lookup",
+                "description": "Search records",
+                "schema_utf8_bytes": 123,
+                "schema_sha256": "a" * 64,
+            },
+        ),
+        tools_payload_checksum="payload",
+        tools_secret_digest="secret",
+        last_attempt_at=now,
+        last_success_at=now,
     )
+
+    view = _mcp_tool_inventory_view(
+        payload_checksum="payload",
+        secret_digest="secret",
+        inventory=inventory,
+    )
+
+    assert [(tool.name, tool.description) for tool in view.tools] == [("lookup", "Search records")]
 
 
 def test_project_mcp_material_accepts_headers_and_query_only() -> None:

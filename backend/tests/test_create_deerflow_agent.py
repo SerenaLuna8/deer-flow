@@ -578,7 +578,7 @@ def test_unanchored_after_model_extra_uses_protected_custom_band(
 
 
 @patch("deerflow.agents.factory.create_agent")
-def test_anchored_after_model_extra_keeps_position_without_tool_call_control(
+def test_anchored_after_model_extra_is_rejected_when_loop_detection_is_disabled(
     mock_create_agent,
 ):
     from langchain.agents.middleware import AgentMiddleware
@@ -595,14 +595,15 @@ def test_anchored_after_model_extra_keeps_position_without_tool_call_control(
     custom = PositionedAfterModel()
     mock_create_agent.return_value = MagicMock()
 
-    create_deerflow_agent(
-        _make_mock_model(),
-        features=RuntimeFeatures(sandbox=False, loop_detection=False),
-        extra_middleware=[custom],
-    )
-
-    chain = mock_create_agent.call_args.kwargs["middleware"]
-    assert chain.index(custom) == next(index for index, middleware in enumerate(chain) if isinstance(middleware, ClarificationMiddleware)) - 1
+    with pytest.raises(
+        ValueError,
+        match="after_model hooks cannot use @Next/@Prev while ToolCallControl is active",
+    ):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False, loop_detection=False),
+            extra_middleware=[custom],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +783,7 @@ def test_tool_call_control_before_clarification(mock_create_agent):
 
 
 # ---------------------------------------------------------------------------
-# 30b. loop_detection=False skips ToolCallControl
+# 30b. loop_detection=False disables repetition detection, not the Run limit
 # ---------------------------------------------------------------------------
 @patch("deerflow.agents.factory.create_agent")
 def test_loop_detection_disabled(mock_create_agent):
@@ -793,8 +794,10 @@ def test_loop_detection_disabled(mock_create_agent):
     )
 
     call_kwargs = mock_create_agent.call_args[1]
-    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
-    assert "ToolCallControl" not in mw_types
+    control = next(middleware for middleware in call_kwargs["middleware"] if isinstance(middleware, ToolCallControl))
+    assert control._policy.repeated_calls.enabled is False
+    assert control._policy.internal_tool_call_limit == 200
+    mw_types = [type(middleware).__name__ for middleware in call_kwargs["middleware"]]
     assert "LoopDetectionMiddleware" not in mw_types
 
 
@@ -881,9 +884,8 @@ def test_cached_sdk_control_requires_and_isolates_invocation_scope(
         runtime,
     )
     assert admitted is not None
-    assert admitted[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {
-        "web_search": 1,
-    }
+    assert admitted[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 1
+    assert admitted[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is False
 
     runtime.context = {
         TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY: "sdk-invocation-b",
@@ -898,7 +900,8 @@ def test_cached_sdk_control_requires_and_isolates_invocation_scope(
 
     assert first[TOOL_CALL_CONTROL_STATE_KEY]["scope_id"] == "sdk-invocation-a"
     assert second[TOOL_CALL_CONTROL_STATE_KEY]["scope_id"] == "sdk-invocation-b"
-    assert second[TOOL_CALL_CONTROL_STATE_KEY]["admitted_counts"] == {}
+    assert second[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 0
+    assert second[TOOL_CALL_CONTROL_STATE_KEY]["limit_exhausted"] is False
 
 
 def test_sdk_graph_invoke_supplies_invocation_scope_and_calls_the_model():
@@ -1074,8 +1077,8 @@ def test_research_profile_is_bound_for_delegated_sdk_execution(
     profile = binding_factory.tool_call_control_profile
 
     assert profile.workload_profile == "research"
-    assert profile.lead.tool_budget.limit_for("web_search").hard_limit == 30
-    assert profile.subagent.tool_budget.limit_for("web_search").hard_limit == 20
+    assert profile.policy.internal_tool_call_limit == 200
+    assert profile.lead is profile.subagent
 
 
 # ---------------------------------------------------------------------------

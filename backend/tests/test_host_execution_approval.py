@@ -666,6 +666,12 @@ def test_delegated_approval_anchor_builds_parent_checkpoint_command() -> None:
         usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
         usage_receipt_id="execution-1",
         usage_completeness="final_observed",
+        delegated_output_promotions=(
+            SimpleNamespace(
+                source_path="/mnt/user-data/outputs/pre-approval.txt",
+                scratch_path=("/mnt/user-data/workspace/.deerflow/subagents/0123456789abcdef0123456789abcdef/outputs/pre-approval.txt"),
+            ),
+        ),
     )
 
     assert command.goto == END
@@ -684,6 +690,9 @@ def test_delegated_approval_anchor_builds_parent_checkpoint_command() -> None:
         "subagent_usage_receipt_id": "execution-1",
         "subagent_usage_completeness": "final_observed",
     }
+    assert "discarded" in parent_message.content
+    assert "/mnt/user-data/outputs/pre-approval.txt" not in parent_message.content
+    assert ".deerflow/subagents" not in parent_message.content
 
 
 def test_approval_result_enforces_pending_artifact_shape() -> None:

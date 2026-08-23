@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, rs, test } from "@rstest/core";
 import type { QueryClient } from "@tanstack/react-query";
 
@@ -18,7 +21,24 @@ const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 const ASSET_ID = "33333333-3333-4333-8333-333333333333";
 const SOURCE_VERSION_ID = "44444444-4444-4444-8444-444444444444";
 
+function source(path: string): string {
+  return readFileSync(resolve(process.cwd(), "src", path), "utf8");
+}
+
 describe("Skill version conflict recovery", () => {
+  test("omits redundant declaration and draft-secret instructions", () => {
+    const declarationEditor = source(
+      "components/projects/assets/skill-secret-declarations-editor.tsx",
+    );
+    const versionWorkbench = source(
+      "components/projects/assets/skill-version-workbench.tsx",
+    );
+
+    expect(declarationEditor).toContain("showEmptyDescription");
+    expect(versionWorkbench).toContain("showEmptyDescription={false}");
+    expect(versionWorkbench).not.toContain("当前正在编辑 SKILL.md");
+  });
+
   test("focuses Runtime secrets after saving a Candidate with declarations", () => {
     const events: unknown[][] = [];
     notifySkillCandidateVersionCreated((...args) => events.push(args), {

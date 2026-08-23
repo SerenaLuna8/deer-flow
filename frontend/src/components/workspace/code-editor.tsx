@@ -13,10 +13,8 @@ import CodeMirror from "@uiw/react-codemirror";
 import { useTheme } from "next-themes";
 import { useMemo } from "react";
 
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-import { useThread } from "./messages/context";
 const customDarkTheme = monokaiInit({
   settings: {
     background: "transparent",
@@ -34,10 +32,41 @@ const customLightTheme = basicLightInit({
   },
 });
 
+function languageExtensions(language: string | undefined) {
+  switch (language?.toLowerCase()) {
+    case "html":
+      return [html()];
+    case "css":
+      return [css()];
+    case "javascript":
+      return [javascript()];
+    case "jsx":
+      return [javascript({ jsx: true })];
+    case "typescript":
+      return [javascript({ typescript: true })];
+    case "tsx":
+      return [javascript({ jsx: true, typescript: true })];
+    case "json":
+      return [json()];
+    case "markdown":
+      return [
+        markdown({
+          base: markdownLanguage,
+          codeLanguages: languages,
+        }),
+      ];
+    case "python":
+      return [python()];
+    default:
+      return [];
+  }
+}
+
 export function CodeEditor({
   className,
   placeholder,
   value,
+  language,
   readonly,
   disabled,
   autoFocus,
@@ -46,29 +75,15 @@ export function CodeEditor({
   className?: string;
   placeholder?: string;
   value: string;
+  language?: string;
   readonly?: boolean;
   disabled?: boolean;
   autoFocus?: boolean;
   settings?: unknown;
 }) {
-  const {
-    thread: { isLoading },
-  } = useThread();
   const { resolvedTheme } = useTheme();
 
-  const extensions = useMemo(() => {
-    return [
-      css(),
-      html(),
-      javascript({}),
-      json(),
-      markdown({
-        base: markdownLanguage,
-        codeLanguages: languages,
-      }),
-      python(),
-    ];
-  }, []);
+  const extensions = useMemo(() => languageExtensions(language), [language]);
 
   return (
     <div
@@ -77,38 +92,26 @@ export function CodeEditor({
         className,
       )}
     >
-      {isLoading ? (
-        <Textarea
-          className={cn(
-            "h-full overflow-auto font-mono [&_.cm-editor]:h-full [&_.cm-focused]:outline-none!",
-            "resize-none p-4! [&_.cm-line]:px-2! [&_.cm-line]:py-0!",
-            "border-none",
-          )}
-          readOnly
-          value={value}
-        />
-      ) : (
-        <CodeMirror
-          readOnly={readonly ?? disabled}
-          placeholder={placeholder}
-          className={cn(
-            "h-full overflow-auto font-mono [&_.cm-editor]:h-full [&_.cm-focused]:outline-none!",
-            "px-2 py-0! [&_.cm-line]:px-2! [&_.cm-line]:py-0!",
-          )}
-          theme={resolvedTheme === "dark" ? customDarkTheme : customLightTheme}
-          extensions={extensions}
-          basicSetup={{
-            foldGutter:
-              (settings as { foldGutter?: boolean })?.foldGutter ?? false,
-            highlightActiveLine: false,
-            highlightActiveLineGutter: false,
-            lineNumbers:
-              (settings as { lineNumbers?: boolean })?.lineNumbers ?? false,
-          }}
-          autoFocus={autoFocus}
-          value={value}
-        />
-      )}
+      <CodeMirror
+        readOnly={readonly ?? disabled}
+        placeholder={placeholder}
+        className={cn(
+          "h-full overflow-auto font-mono [&_.cm-editor]:h-full [&_.cm-focused]:outline-none!",
+          "px-2 py-0! [&_.cm-line]:px-2! [&_.cm-line]:py-0!",
+        )}
+        theme={resolvedTheme === "dark" ? customDarkTheme : customLightTheme}
+        extensions={extensions}
+        basicSetup={{
+          foldGutter:
+            (settings as { foldGutter?: boolean })?.foldGutter ?? false,
+          highlightActiveLine: false,
+          highlightActiveLineGutter: false,
+          lineNumbers:
+            (settings as { lineNumbers?: boolean })?.lineNumbers ?? false,
+        }}
+        autoFocus={autoFocus}
+        value={value}
+      />
     </div>
   );
 }

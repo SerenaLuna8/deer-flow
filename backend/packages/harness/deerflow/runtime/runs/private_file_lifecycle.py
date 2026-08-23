@@ -11,9 +11,11 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any
 
 from deerflow.file_authority import RunFileAuthority
+from deerflow.workspace_changes.types import WorkspaceChangeResult
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +147,47 @@ class PrivateFileLifecycle:
     def output_delivery_satisfied(self) -> bool:
         """Require one trusted current-Run artifact when this turn made outputs."""
 
+        raw_produced_outputs = getattr(
+            self._finalization_result,
+            "produced_output_paths",
+            None,
+        )
+        if raw_produced_outputs is not None:
+            if not isinstance(raw_produced_outputs, tuple):
+                return False
+            produced_outputs: set[str] = set()
+            for logical_path in raw_produced_outputs:
+                if type(logical_path) is not str or "\\" in logical_path:
+                    return False
+                path = PurePosixPath(logical_path)
+                if path.is_absolute() or path.as_posix() != logical_path or ".." in path.parts or len(path.parts) < 2 or path.parts[0] != "outputs":
+                    return False
+                produced_outputs.add(logical_path)
+        else:
+            produced_outputs = set()
         changes = self.workspace_changes
-        if not isinstance(changes, Mapping):
+        if raw_produced_outputs is None and isinstance(
+            changes,
+            WorkspaceChangeResult,
+        ):
+            for change in changes.files:
+                if change.root != "outputs" or change.status not in {
+                    "created",
+                    "modified",
+                }:
+                    continue
+                prefix = "/mnt/user-data/"
+                if not change.path.startswith(prefix):
+                    return False
+                logical_path = change.path.removeprefix(prefix)
+                path = PurePosixPath(logical_path)
+                if path.as_posix() != logical_path or ".." in path.parts or len(path.parts) < 2 or path.parts[0] != "outputs":
+                    return False
+                produced_outputs.add(logical_path)
+        elif raw_produced_outputs is None and isinstance(changes, Mapping):
+            produced_outputs = {path for state in ("created", "modified") for path in changes.get(state, ()) if isinstance(path, str) and path.startswith("outputs/")}
+        elif raw_produced_outputs is None:
             return True
-        produced_outputs = {path for state in ("created", "modified") for path in changes.get(state, ()) if isinstance(path, str) and path.startswith("outputs/")}
         if not produced_outputs:
             return True
 

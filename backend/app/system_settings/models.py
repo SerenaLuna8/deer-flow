@@ -20,6 +20,7 @@ class CreateSystemModel:
     status: str
     provider_adapter: str
     provider_model: str
+    max_input_tokens: int
     settings: Mapping[str, object]
     supports_thinking: bool
     supports_reasoning_effort: bool
@@ -32,6 +33,7 @@ class UpdateSystemModel:
     display_name: str
     provider_adapter: str
     provider_model: str
+    max_input_tokens: int
     settings: Mapping[str, object]
     supports_thinking: bool
     supports_reasoning_effort: bool
@@ -45,6 +47,7 @@ class SystemModelConnectionCheck:
 
     provider_adapter: str
     provider_model: str
+    max_input_tokens: int
     settings: Mapping[str, object]
     supports_vision: bool
     api_key: str = field(repr=False)
@@ -57,6 +60,7 @@ class SystemModelView:
     status: str
     provider_adapter: str
     provider_model: str
+    max_input_tokens: int
     settings: Mapping[str, object]
     supports_thinking: bool
     supports_reasoning_effort: bool
@@ -107,6 +111,7 @@ class RunModelConfigSnapshotView:
     model_ref: str
     provider_adapter: str
     provider_model: str
+    max_input_tokens: int
     provider_settings: Mapping[str, object]
     model_config_id: uuid.UUID
     payload_checksum: str

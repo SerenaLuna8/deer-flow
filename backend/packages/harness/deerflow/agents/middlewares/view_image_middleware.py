@@ -292,12 +292,18 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             return None
 
         try:
+            from deerflow.sandbox.tools import resolve_delegated_tool_path
+
             sandbox = sandbox_from_runtime(runtime, state=state)
             if sandbox.id != file_ref.get("sandbox_id"):
                 return None
+            effective_image_path = resolve_delegated_tool_path(
+                runtime,
+                image_path,
+            )
             image_bytes = read_bounded_image_bytes(
                 sandbox,
-                image_path,
+                effective_image_path,
                 max_bytes=MAX_IMAGE_BYTES,
                 cancel_event=cancel_event,
             )

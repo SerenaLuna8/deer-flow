@@ -30,6 +30,9 @@ from deerflow.runtime.skill_context_authority import (
 from deerflow.subagents.runtime_catalog import (
     RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
 )
+from deerflow.token_budget_usage import (
+    TOKEN_BUDGET_USAGE_RECORDER_CONTEXT_KEY,
+)
 from deerflow.trace_context import ACT_WEAVE_TRACE_METADATA_KEY
 
 CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: Final[str] = "__deerflow_pre_run_message_ids"
@@ -66,6 +69,8 @@ class RuntimeContextKeys:
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS: Final[str] = CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
     TRACE_ID: Final[str] = ACT_WEAVE_TRACE_METADATA_KEY
     RUN_JOURNAL: Final[str] = "__run_journal"
+    TOKEN_USAGE_TRACKING_ENABLED: Final[str] = "__token_usage_tracking_enabled"
+    TOKEN_BUDGET_USAGE_RECORDER: Final[str] = TOKEN_BUDGET_USAGE_RECORDER_CONTEXT_KEY
     RECOVERED_LLM_FAILURE_RECORDER: Final[str] = "__recovered_llm_failure_recorder"
     RUN_SEMANTIC_STOP_RECORDER: Final[str] = "__run_semantic_stop_recorder"
     SERVER_ABORT_EVENT: Final[str] = "__server_abort_event"
@@ -115,6 +120,8 @@ class RuntimeContextKeys:
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS,
             TRACE_ID,
             RUN_JOURNAL,
+            TOKEN_USAGE_TRACKING_ENABLED,
+            TOKEN_BUDGET_USAGE_RECORDER,
             RECOVERED_LLM_FAILURE_RECORDER,
             RUN_SEMANTIC_STOP_RECORDER,
             SERVER_ABORT_EVENT,

@@ -1,19 +1,49 @@
 import { describe, expect, test } from "@rstest/core";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  ProjectAssetDetailHeader,
   projectAssetDetailContentVersion,
+  projectAssetDetailShowsLifecycleControls,
   projectAssetDetailRevisionCopy,
   projectAssetDetailShowsVersionHistory,
   projectAssetDetailVersionPickerPlacement,
   projectAssetVersionPickerStatusLabel,
   projectMcpCurrentConfigurationLabel,
 } from "@/components/projects/assets/project-asset-detail-sheet";
+import { Sheet } from "@/components/ui/sheet";
 import type {
   AssetVersion,
+  ProjectAssetItem,
   ProjectMcpEditableConfigurationResponse,
 } from "@/core/shared-assets";
 
 describe("Project asset detail version picker placement", () => {
+  test("keeps Skill status controls on the catalog instead of the detail surface", () => {
+    const item = {
+      capabilities: ["shared_assets.edit", "shared_assets.manage_bindings"],
+      current_version_id: "version-2",
+      display_name: "trans-text-route-query",
+      scope: "project",
+      status: "active",
+    } as ProjectAssetItem;
+
+    expect(projectAssetDetailShowsLifecycleControls("skills")).toBe(false);
+    expect(
+      renderToStaticMarkup(
+        createElement(
+          Sheet,
+          { open: true },
+          createElement(ProjectAssetDetailHeader, {
+            kind: "skills",
+            item,
+          }),
+        ),
+      ),
+    ).not.toContain('role="switch"');
+  });
+
   test("places the Agent picker before its editor while preserving the Skill history layout", () => {
     expect(projectAssetDetailVersionPickerPlacement("agents")).toBe(
       "before-editor",

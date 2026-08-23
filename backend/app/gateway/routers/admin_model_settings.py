@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, BeforeValidator, ConfigDict, SecretStr, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr, field_validator
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,6 +79,7 @@ class AdminModelCreateRequest(_StrictModel):
     status: Literal["active", "suspended"] = "suspended"
     provider_adapter: str
     provider_model: str
+    max_input_tokens: int = Field(ge=1, le=2_000_000)
     settings: dict[str, object]
     supports_thinking: bool = False
     supports_reasoning_effort: bool = False
@@ -90,6 +91,7 @@ class AdminModelUpdateRequest(_StrictModel):
     display_name: str
     provider_adapter: str
     provider_model: str
+    max_input_tokens: int = Field(ge=1, le=2_000_000)
     settings: dict[str, object]
     supports_thinking: bool = False
     supports_reasoning_effort: bool = False
@@ -112,6 +114,7 @@ class AdminModelSecretClearRequest(_StrictModel):
 class AdminModelConnectionTestRequest(_StrictModel):
     provider_adapter: str
     provider_model: str
+    max_input_tokens: int = Field(ge=1, le=2_000_000)
     settings: dict[str, object]
     supports_vision: bool
     api_key: SecretStr
@@ -129,6 +132,7 @@ class AdminModelItemResponse(_StrictModel):
     display_name: str
     provider_adapter: str
     provider_model: str
+    max_input_tokens: int = Field(ge=1, le=2_000_000)
     settings: dict[str, object]
     supports_thinking: bool
     supports_reasoning_effort: bool
@@ -155,6 +159,9 @@ class AdminModelProviderSettingFieldResponse(_StrictModel):
         "url",
     ]
     advanced: bool
+    form_control: Literal["input", "preserve"]
+    default_mode: Literal["platform", "provider"]
+    default_value: bool | float | int | str | None
     minimum: int | float | None
     maximum: int | float | None
     step: int | float | None
@@ -206,6 +213,7 @@ def _item_response(
         display_name=item.display_name,
         provider_adapter=item.provider_adapter,
         provider_model=item.provider_model,
+        max_input_tokens=item.max_input_tokens,
         settings=settings,
         supports_thinking=item.supports_thinking,
         supports_reasoning_effort=item.supports_reasoning_effort,
@@ -242,6 +250,9 @@ def _catalog_response(
                         label=field.label,
                         input_type=field.input_type,
                         advanced=field.advanced,
+                        form_control=field.form_control,
+                        default_mode=field.default_mode,
+                        default_value=field.default_value,
                         minimum=field.minimum,
                         maximum=field.maximum,
                         step=field.step,
@@ -349,6 +360,7 @@ async def create_admin_model(
                 status=body.status,
                 provider_adapter=body.provider_adapter,
                 provider_model=body.provider_model,
+                max_input_tokens=body.max_input_tokens,
                 settings=body.settings,
                 supports_thinking=body.supports_thinking,
                 supports_reasoning_effort=(body.supports_reasoning_effort),
@@ -395,6 +407,7 @@ async def test_admin_model_connection(
             SystemModelConnectionCheck(
                 provider_adapter=body.provider_adapter,
                 provider_model=body.provider_model,
+                max_input_tokens=body.max_input_tokens,
                 settings=body.settings,
                 supports_vision=body.supports_vision,
                 api_key=body.api_key.get_secret_value(),
@@ -435,6 +448,7 @@ async def update_admin_model(
                 display_name=body.display_name,
                 provider_adapter=body.provider_adapter,
                 provider_model=body.provider_model,
+                max_input_tokens=body.max_input_tokens,
                 settings=body.settings,
                 supports_thinking=body.supports_thinking,
                 supports_reasoning_effort=(body.supports_reasoning_effort),

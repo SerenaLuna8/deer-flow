@@ -49,14 +49,12 @@ export function projectMcpCredentialCopy() {
         nameLabel: "请求头名称",
         namePlaceholder: "Authorization",
         valueLabel: "凭证值",
-        help: "按 MCP 服务文档填写，例如 Authorization 或 X-API-Key。",
       },
       query: {
         itemLabel: "查询参数",
         nameLabel: "查询参数名称",
         namePlaceholder: "api_key",
         valueLabel: "凭证值",
-        help: "仅在 MCP 服务明确要求时使用，例如 api_key。请勿把凭证直接写入上方 URL。",
       },
     },
     valueLabel: (field: string) => `${field} 的凭证值`,
@@ -477,7 +475,6 @@ export function ProjectMcpFormDialog({
             <div className="space-y-3">
               {fields.map((field, index) => {
                 const fieldCopy = credentialCopy.fields[field.target];
-                const fieldHelpId = `project-mcp-credential-field-${field.id}-help`;
                 return (
                   <div
                     key={field.id}
@@ -522,7 +519,7 @@ export function ProjectMcpFormDialog({
                         disabled={preservesMultipleSecretSlots}
                         placeholder={fieldCopy.namePlaceholder}
                         maxLength={field.target === "headers" ? 255 : 128}
-                        aria-describedby={`project-mcp-credential-fields-help ${fieldHelpId}`}
+                        aria-describedby="project-mcp-credential-fields-help"
                         onChange={(event) => {
                           setFields((current) =>
                             current.map((candidate) =>
@@ -533,12 +530,6 @@ export function ProjectMcpFormDialog({
                           );
                         }}
                       />
-                      <span
-                        id={fieldHelpId}
-                        className="text-muted-foreground block text-xs"
-                      >
-                        {fieldCopy.help}
-                      </span>
                     </label>
                     <label className="space-y-1">
                       <span className="text-muted-foreground text-xs">

@@ -11,6 +11,7 @@ PRIVATE_WORK_ERROR_STATUS = {
     "RUN_MODEL_SELECTION_LOCKED": 409,
     "RUN_MODEL_UNAVAILABLE": 409,
     "RUN_EXECUTION_PROFILE_UNSUPPORTED": 409,
+    "CONTEXT_USAGE_UNSUPPORTED": 409,
     "RUN_WORKLOAD_PROFILE_UNSUPPORTED": 409,
     "MEMORY_DREAM_MODEL_UNAVAILABLE": 409,
     "DEFAULT_AGENT_UNAVAILABLE": 409,
@@ -84,6 +85,11 @@ class PrivateWorkRunModelUnavailable(PrivateWorkError):
 class PrivateWorkRunExecutionProfileUnsupported(PrivateWorkError):
     code = "RUN_EXECUTION_PROFILE_UNSUPPORTED"
     public_message = "The selected model does not support the Run execution profile."
+
+
+class PrivateWorkContextUsageUnsupported(PrivateWorkError):
+    code = "CONTEXT_USAGE_UNSUPPORTED"
+    public_message = "Context usage cannot be measured safely for this Thread."
 
 
 class PrivateWorkRunWorkloadProfileUnsupported(PrivateWorkError):

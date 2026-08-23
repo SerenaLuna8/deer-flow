@@ -26,6 +26,10 @@ from deerflow.subagents.delegated_context import (
     DelegatedRuntimeContextProjection,
     project_delegated_runtime_context,
 )
+from deerflow.token_budget_usage import (
+    TokenBudgetUsageRecorder,
+    TokenBudgetUsageSnapshot,
+)
 
 
 def _private_binding(
@@ -122,6 +126,12 @@ async def test_private_projection_owns_identity_copy_tristate_and_exclusions() -
             RuntimeContextKeys.TRACE_ID: "trace-context",
             RuntimeContextKeys.MEMORY_AUTHORITY: object(),
             RuntimeContextKeys.RUN_JOURNAL: object(),
+            RuntimeContextKeys.TOKEN_USAGE_TRACKING_ENABLED: False,
+            RuntimeContextKeys.TOKEN_BUDGET_USAGE_RECORDER: (
+                TokenBudgetUsageRecorder(
+                    TokenBudgetUsageSnapshot.zero("run-issued"),
+                )
+            ),
             RuntimeContextKeys.RUN_SEMANTIC_STOP_RECORDER: object(),
             RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: object(),
             "extension_context": "must-not-cross",
@@ -151,6 +161,7 @@ async def test_private_projection_owns_identity_copy_tristate_and_exclusions() -
     assert projection.run_id == "run-issued"
     assert projection.user_id == "user-issued"
     assert projection.deerflow_trace_id == "trace-context"
+    assert projection.token_usage_tracking_enabled is False
 
     first = projection.build()
     second = projection.build()
@@ -169,6 +180,8 @@ async def test_private_projection_owns_identity_copy_tristate_and_exclusions() -
     assert first[RuntimeContextKeys.SKILL_SCOPED_SECRETS] is not second[RuntimeContextKeys.SKILL_SCOPED_SECRETS]
     assert RuntimeContextKeys.MEMORY_AUTHORITY not in first
     assert RuntimeContextKeys.RUN_JOURNAL not in first
+    assert first[RuntimeContextKeys.TOKEN_USAGE_TRACKING_ENABLED] is False
+    assert RuntimeContextKeys.TOKEN_BUDGET_USAGE_RECORDER not in first
     assert RuntimeContextKeys.RUN_SEMANTIC_STOP_RECORDER not in first
     assert RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY not in first
     assert "extension_context" not in first
@@ -203,6 +216,9 @@ async def test_private_projection_shares_only_thread_safe_recovered_failure_reco
                 "max_attempts": 3,
                 "error_code": "LLM_PROVIDER_UNAVAILABLE",
                 "reason": "transient",
+                "caller": "subagent",
+                "failure_subtype": "connection",
+                "status_code": None,
                 "disposition": "recovered",
             },
         )
@@ -219,13 +235,16 @@ async def test_private_projection_shares_only_thread_safe_recovered_failure_reco
     assert len(recorder.snapshot()) == 64
 
     malformed = {
-        "schema_version": 1,
+        "schema_version": 2,
         "failures": [
             {
                 "attempt": 1,
                 "max_attempts": 3,
                 "error_code": [],
                 "reason": "transient",
+                "caller": "subagent",
+                "failure_subtype": "connection",
+                "status_code": None,
                 "disposition": "recovered",
             }
         ],

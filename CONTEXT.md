@@ -177,11 +177,11 @@ The immutable set of exact Agent and Skill definitions, a copied System Model Co
 _Avoid_: Current configuration
 
 **Run Workload Profile**:
-The server-confirmed `interactive` or `research` workload policy frozen into one Run Snapshot. It selects bounded tool-call and Sub-Agent workload limits, is inherited by hidden Graph Turns and Job Attempts of that Run, and never grants additional tools, project capabilities, or data authority.
+The server-confirmed `interactive` or `research` workload policy frozen into one Run Snapshot. It selects bounded Sub-Agent workload limits, is inherited by hidden Graph Turns and Job Attempts of that Run, and never grants additional tools, project capabilities, or data authority.
 _Avoid_: Agent mode, permission profile, model-selected research
 
 **ToolCallControl**:
-The single Harness arbitration seam that applies frozen repeated-call and per-tool occurrence policy to a model-proposed batch before ToolNode execution. It owns scope and replay receipts, but does not own Sub-Agent concurrency, Token Budget, tool authorization, or approval authority.
+The single Harness arbitration seam that applies frozen repeated-call policy and one internal tool-call hard limit before ToolNode execution. It counts every internal tool occurrence uniformly across the Lead and all Sub-Agent Tasks in one Run, stops further admission at the limit, and isolates the count between Runs. It owns scope and replay receipts, but does not own Sub-Agent concurrency, Token Budget, tool authorization, or approval authority.
 _Avoid_: Loop detector, tool permission policy
 
 **Job**:
@@ -213,7 +213,7 @@ The root Agent in a Run that owns the user-facing response and may delegate boun
 _Avoid_: Harness
 
 **Sub-Agent Task**:
-A delegated Agent execution inside its parent Run. It may have its own graph, tools, model, and budget, but inherits the parent Run's authority and is not a Run, Job, or Job Attempt.
+A delegated Agent execution inside its parent Run. It may have its own graph, tools, model, and other execution constraints, but shares the parent Run's internal tool-call count and authority; it is not a Run, Job, or Job Attempt.
 _Avoid_: Child Run, background Job
 
 **Goal Continuation**:

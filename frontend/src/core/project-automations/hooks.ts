@@ -15,6 +15,7 @@ import {
   type PrivateWorkAccess,
   type ProjectClientScope,
 } from "@/core/private-work/types";
+import { invalidateStartedThreadContextUsage } from "@/core/threads/thread-cache";
 
 import {
   AutomationApiError,
@@ -206,7 +207,8 @@ export function automationTriggerMutationOptions(
   transport: AutomationTriggerTransport = triggerAutomation,
   createKey: () => string = createAutomationIdempotencyKey,
 ) {
-  return automationMutationOptions(
+  const originScope = access.scope;
+  const options = automationMutationOptions(
     queryClient,
     access,
     "trigger",
@@ -224,6 +226,27 @@ export function automationTriggerMutationOptions(
       }
     },
   );
+  return {
+    ...options,
+    onSuccess: async (run: AutomationRun) => {
+      await options.onSuccess();
+      if (
+        !sameScope(originScope, access.scope) ||
+        !isPrivateWorkAccessActive(access) ||
+        !run.thread_id ||
+        !run.run_id ||
+        !ACTIVE_AUTOMATION_RUN_STATUSES.has(run.status)
+      ) {
+        return;
+      }
+      await invalidateStartedThreadContextUsage(
+        queryClient,
+        run.thread_id,
+        false,
+        originScope,
+      );
+    },
+  };
 }
 
 export function useProjectAutomations(

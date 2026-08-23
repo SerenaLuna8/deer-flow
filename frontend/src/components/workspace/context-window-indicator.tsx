@@ -11,16 +11,13 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTokenCount } from "@/core/messages/usage";
-import type {
-  ContextUsageTrigger,
-  ThreadContextUsageResponse,
-} from "@/core/threads/context-usage";
+import type { ThreadContextUsageResponse } from "@/core/threads/context-usage";
 import { cn } from "@/lib/utils";
 
 const GAUGE_RADIUS = 8;
 const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS;
 
-type IndicatorState = "ready" | "loading" | "unavailable" | "disabled";
+type IndicatorState = "ready" | "loading" | "unavailable";
 
 function percent(value: number, locale: string) {
   return new Intl.NumberFormat(locale, {
@@ -29,50 +26,38 @@ function percent(value: number, locale: string) {
   }).format(value);
 }
 
-function triggerLabel(
-  trigger: ContextUsageTrigger,
-  labels: {
-    tokens: string;
-    fraction: string;
-    messages: string;
-  },
-) {
-  return labels[trigger.type];
-}
-
-function triggerValue(
-  trigger: ContextUsageTrigger,
-  value: number,
-  locale: string,
+function compressionTriggerValue(
+  usage: ThreadContextUsageResponse,
   tokens: (value: string) => string,
   messages: (count: number) => string,
+  disabled: string,
+  notConfigured: string,
 ) {
-  switch (trigger.type) {
-    case "fraction":
-      return percent(value, locale);
-    case "messages":
-      return messages(value);
-    case "tokens":
-      return tokens(formatTokenCount(value));
+  if (!usage.enabled) return disabled;
+  const trigger = usage.primary_trigger;
+  if (!trigger) return notConfigured;
+  if (trigger.type === "messages") {
+    return messages(trigger.threshold_value);
   }
+  return tokens(formatTokenCount(trigger.threshold_tokens));
 }
 
-function sameTrigger(left: ContextUsageTrigger, right: ContextUsageTrigger) {
-  return (
-    left.type === right.type &&
-    left.configured_value === right.configured_value &&
-    left.threshold_value === right.threshold_value
-  );
+function contextWindowProgress(usage: ThreadContextUsageResponse) {
+  if (usage.context_window_tokens === null) return null;
+  const percentage =
+    (usage.estimated_tokens / usage.context_window_tokens) * 100;
+  const clamped = Math.max(0, Math.min(100, percentage));
+  return Math.round(clamped * 100) / 100;
 }
 
 function ContextGauge({
   progress,
   loading,
 }: {
-  progress: number;
+  progress: number | null;
   loading: boolean;
 }) {
-  const clampedProgress = Math.max(0, Math.min(100, progress));
+  const clampedProgress = Math.max(0, Math.min(100, progress ?? 0));
   const dashOffset = GAUGE_CIRCUMFERENCE * (1 - clampedProgress / 100);
 
   return (
@@ -112,119 +97,64 @@ export function ContextWindowDetails({
 }: {
   usage: ThreadContextUsageResponse;
 }) {
-  const { locale, t } = useI18n();
-  const primary = usage.primary_trigger;
-
-  if (!usage.enabled) {
-    return (
-      <div className="text-muted-foreground p-3 text-xs">
-        {t.contextWindow.disabled}
-      </div>
-    );
-  }
-  if (!primary) {
-    return (
-      <div className="text-muted-foreground p-3 text-xs">
-        {t.contextWindow.unavailable}
-      </div>
-    );
-  }
-
-  const value = (amount: number) =>
-    triggerValue(
-      primary,
-      amount,
-      locale,
-      t.contextWindow.tokens,
-      t.contextWindow.messages,
-    );
-  const renderedProgress = percent(primary.progress_percent / 100, locale);
+  const { t } = useI18n();
+  const progress = contextWindowProgress(usage);
+  const trigger = compressionTriggerValue(
+    usage,
+    t.contextWindow.tokens,
+    t.contextWindow.messages,
+    t.contextWindow.disabled,
+    t.contextWindow.notConfigured,
+  );
 
   return (
     <div className="w-72 text-xs" data-context-window-details>
       <div className="space-y-3 p-3">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="font-medium">{t.contextWindow.title}</div>
-            <div className="text-muted-foreground mt-0.5">
-              {triggerLabel(primary, t.contextWindow.triggerTypes)}
-            </div>
-          </div>
-          <span className="font-mono font-medium">{renderedProgress}</span>
-        </div>
+        <div className="font-medium">{t.contextWindow.title}</div>
         <Progress
-          aria-label={t.contextWindow.automaticCompression}
-          aria-valuemax={100}
-          aria-valuemin={0}
-          aria-valuenow={primary.progress_percent}
-          className="h-1.5"
-          value={primary.progress_percent}
+          aria-disabled={progress === null ? true : undefined}
+          aria-label={
+            progress === null
+              ? t.contextWindow.capacityUnavailable
+              : t.contextWindow.usage
+          }
+          aria-valuemax={progress === null ? undefined : 100}
+          aria-valuemin={progress === null ? undefined : 0}
+          aria-valuenow={progress ?? undefined}
+          aria-valuetext={
+            progress === null ? t.contextWindow.capacityUnavailable : undefined
+          }
+          className={cn(
+            "h-1.5",
+            progress === null &&
+              "bg-muted [&_[data-slot=progress-indicator]]:hidden",
+          )}
+          data-context-progress-state={
+            progress === null ? "unavailable" : "ready"
+          }
+          value={progress ?? 0}
         />
         <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1.5">
-          <dt className="text-muted-foreground">{t.contextWindow.current}</dt>
-          <dd className="font-mono">{value(primary.current_value)}</dd>
-          <dt className="text-muted-foreground">{t.contextWindow.triggerAt}</dt>
-          <dd className="font-mono">{value(primary.threshold_value)}</dd>
-          <dt className="text-muted-foreground">{t.contextWindow.remaining}</dt>
-          <dd className="font-mono">{value(primary.remaining_value)}</dd>
           <dt className="text-muted-foreground">
             {t.contextWindow.estimatedContext}
           </dt>
           <dd className="font-mono">
+            {t.contextWindow.tokens(formatTokenCount(usage.estimated_tokens))}
+          </dd>
+          <dt className="text-muted-foreground">{t.contextWindow.triggerAt}</dt>
+          <dd className="font-mono">{trigger}</dd>
+          <dt className="text-muted-foreground">
+            {t.contextWindow.contextWindowLimit}
+          </dt>
+          <dd className="font-mono">
             {usage.context_window_tokens === null
-              ? t.contextWindow.tokens(formatTokenCount(usage.estimated_tokens))
-              : t.contextWindow.tokenPair(
-                  formatTokenCount(usage.estimated_tokens),
+              ? t.contextWindow.notConfigured
+              : t.contextWindow.tokens(
                   formatTokenCount(usage.context_window_tokens),
                 )}
           </dd>
-          {"threshold_tokens" in primary && (
-            <>
-              <dt className="text-muted-foreground">
-                {t.contextWindow.tokenThreshold}
-              </dt>
-              <dd className="font-mono">
-                {t.contextWindow.tokens(
-                  formatTokenCount(primary.threshold_tokens),
-                )}
-              </dd>
-            </>
-          )}
         </dl>
-        {usage.summary_present && (
-          <p className="text-muted-foreground">
-            {t.contextWindow.summaryPresent}
-          </p>
-        )}
       </div>
-      {usage.triggers.length > 1 && (
-        <div className="border-t p-3">
-          <div className="font-medium">{t.contextWindow.allConditions}</div>
-          <p className="text-muted-foreground mt-0.5">
-            {t.contextWindow.anyCondition}
-          </p>
-          <ul className="mt-2 space-y-1.5">
-            {usage.triggers.map((trigger, index) => (
-              <li
-                className="flex items-center justify-between gap-3"
-                key={`${trigger.type}-${trigger.configured_value}-${index}`}
-              >
-                <span className="min-w-0 truncate">
-                  {triggerLabel(trigger, t.contextWindow.triggerTypes)}
-                  {sameTrigger(trigger, primary) && (
-                    <span className="text-muted-foreground ml-1">
-                      · {t.contextWindow.primary}
-                    </span>
-                  )}
-                </span>
-                <span className="shrink-0 font-mono">
-                  {percent(trigger.progress_percent / 100, locale)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }
@@ -247,21 +177,20 @@ export function ContextWindowIndicator({
     ? "loading"
     : error || !usage
       ? "unavailable"
-      : !usage.enabled
-        ? "disabled"
-        : usage.primary_trigger
-          ? "ready"
-          : "unavailable";
+      : "ready";
   const progress =
-    state === "ready" ? (usage?.primary_trigger?.progress_percent ?? 0) : 0;
-  const renderedProgress = percent(progress / 100, locale);
+    state === "ready" && usage ? contextWindowProgress(usage) : null;
+  const renderedProgress =
+    progress === null ? null : percent(progress / 100, locale);
   const label =
     state === "loading"
       ? t.contextWindow.loading
-      : state === "disabled"
-        ? t.contextWindow.disabled
-        : state === "unavailable"
-          ? t.contextWindow.unavailable
+      : state === "unavailable" || !usage
+        ? t.contextWindow.unavailable
+        : renderedProgress === null
+          ? t.contextWindow.usageWithoutCapacity(
+              t.contextWindow.tokens(formatTokenCount(usage.estimated_tokens)),
+            )
           : t.contextWindow.progressLabel(renderedProgress);
   const open = hoverOpen || pinned;
 
@@ -279,7 +208,7 @@ export function ContextWindowIndicator({
           aria-label={label}
           className={cn("text-muted-foreground", className)}
           data-context-window-state={state}
-          data-progress={progress}
+          data-progress={progress ?? undefined}
           size="icon-sm"
           type="button"
           variant="ghost"

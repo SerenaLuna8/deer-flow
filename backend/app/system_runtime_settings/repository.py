@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -180,6 +181,69 @@ class SystemRuntimePolicyRepository:
         if result is None:
             return None
         return result
+
+    async def snapshot_materials(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        run_ids: Collection[str] | None = None,
+        thread_id: str | None = None,
+        section: RuntimePolicySection,
+    ) -> dict[
+        str,
+        tuple[RunRuntimePolicySnapshotRow, SystemRuntimePolicyVersionRow],
+    ]:
+        """Read exact snapshot/version pairs for scoped Runs in one query."""
+
+        if (run_ids is None) == (thread_id is None):
+            raise SystemRuntimePolicyRepositoryInvariant
+        statement = (
+            select(
+                RunRuntimePolicySnapshotRow,
+                SystemRuntimePolicyVersionRow,
+            )
+            .join(
+                SystemRuntimePolicyVersionRow,
+                (SystemRuntimePolicyVersionRow.section == RunRuntimePolicySnapshotRow.section)
+                & (SystemRuntimePolicyVersionRow.id == RunRuntimePolicySnapshotRow.policy_version_id)
+                & (SystemRuntimePolicyVersionRow.schema_version == RunRuntimePolicySnapshotRow.schema_version)
+                & (SystemRuntimePolicyVersionRow.payload_checksum == RunRuntimePolicySnapshotRow.payload_checksum),
+            )
+            .where(
+                RunRuntimePolicySnapshotRow.project_id == project_id,
+                RunRuntimePolicySnapshotRow.owner_user_id == owner_user_id,
+                RunRuntimePolicySnapshotRow.section == section.value,
+            )
+            .with_for_update(
+                read=True,
+                of=(
+                    RunRuntimePolicySnapshotRow,
+                    SystemRuntimePolicyVersionRow,
+                ),
+            )
+        )
+        if run_ids is not None:
+            selected = {run_id for run_id in run_ids if isinstance(run_id, str) and run_id}
+            if not selected:
+                return {}
+            statement = statement.where(
+                RunRuntimePolicySnapshotRow.run_id.in_(selected),
+            )
+        else:
+            statement = statement.where(
+                RunRuntimePolicySnapshotRow.thread_id == thread_id,
+            )
+        rows = (await self.session.execute(statement)).all()
+        materials: dict[
+            str,
+            tuple[RunRuntimePolicySnapshotRow, SystemRuntimePolicyVersionRow],
+        ] = {}
+        for snapshot, version in rows:
+            if snapshot.run_id in materials:
+                raise SystemRuntimePolicyRepositoryInvariant
+            materials[snapshot.run_id] = (snapshot, version)
+        return materials
 
 
 __all__ = [

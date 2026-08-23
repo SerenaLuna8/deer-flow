@@ -48,10 +48,13 @@ class FrozenSystemModelExecution:
             self.secret_generation_id is not None,
             self.secret_envelope_digest is not None,
         )
+        max_input_tokens = self.provider_payload.get("max_input_tokens") if isinstance(self.provider_payload, Mapping) else None
         if (
             not isinstance(self.model_config_id, uuid.UUID)
             or not isinstance(self.provider_payload, Mapping)
             or not self.provider_payload
+            or type(max_input_tokens) is not int
+            or not 1 <= max_input_tokens <= 2_000_000
             or type(self.payload_checksum) is not str
             or _DIGEST.fullmatch(self.payload_checksum) is None
             or secret_group not in {(False, False), (True, True)}
@@ -59,6 +62,13 @@ class FrozenSystemModelExecution:
             or (self.secret_envelope_digest is not None and _DIGEST.fullmatch(self.secret_envelope_digest) is None)
         ):
             raise ValueError("Frozen System Model execution is invalid")
+
+    @property
+    def max_input_tokens(self) -> int:
+        value = self.provider_payload["max_input_tokens"]
+        if type(value) is not int or not 1 <= value <= 2_000_000:
+            raise ValueError("Frozen System Model execution is invalid")
+        return value
 
     @property
     def provenance(self) -> SystemModelExecutionProvenance:

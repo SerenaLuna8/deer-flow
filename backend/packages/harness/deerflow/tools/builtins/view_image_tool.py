@@ -79,14 +79,18 @@ def view_image_tool(
     - When you need to view an image file.
 
     When NOT to use the view_image tool:
-    - For non-image files (use present_files instead)
-    - For multiple files at once (use present_files instead)
+    - For non-image files
+    - For presenting multiple files rather than inspecting one image; follow the
+      current Agent's file-handoff instructions instead
 
     Args:
         image_path: Absolute /mnt/user-data virtual path to the image file. Common formats supported: jpg, jpeg, png, webp.
     """
     from deerflow.sandbox.exceptions import SandboxError
-    from deerflow.sandbox.tools import get_thread_data
+    from deerflow.sandbox.tools import (
+        get_thread_data,
+        resolve_delegated_tool_path,
+    )
 
     thread_data = get_thread_data(runtime)
 
@@ -119,7 +123,11 @@ def view_image_tool(
 
     try:
         sandbox = image_sandbox(runtime)
-        image_data = read_bounded_image_bytes(sandbox, image_path)
+        effective_image_path = resolve_delegated_tool_path(
+            runtime,
+            image_path,
+        )
+        image_data = read_bounded_image_bytes(sandbox, effective_image_path)
         file_ref = _run_bound_file_ref(runtime, sandbox, image_path)
     except ImageTooLargeError:
         return Command(

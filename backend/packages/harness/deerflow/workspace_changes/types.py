@@ -8,7 +8,13 @@ WORKSPACE_CHANGES_EVENT_TYPE = "workspace_changes"
 WORKSPACE_CHANGES_METADATA_KEY = "workspace_changes"
 
 WorkspaceChangeStatus = Literal["created", "modified", "deleted"]
-DiffUnavailableReason = Literal["binary", "large", "sensitive", "truncated"]
+DiffUnavailableReason = Literal[
+    "binary",
+    "large",
+    "sensitive",
+    "truncated",
+    "unavailable",
+]
 
 
 @dataclass(frozen=True)
@@ -68,8 +74,8 @@ class WorkspaceFileChange:
     diff: str = ""
     diff_truncated: bool = False
     diff_unavailable_reason: DiffUnavailableReason | None = None
-    additions: int = 0
-    deletions: int = 0
+    additions: int | None = 0
+    deletions: int | None = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -80,8 +86,8 @@ class WorkspaceChangeSummary:
     created: int = 0
     modified: int = 0
     deleted: int = 0
-    additions: int = 0
-    deletions: int = 0
+    additions: int | None = 0
+    deletions: int | None = 0
     truncated: bool = False
 
     def to_dict(self) -> dict:
@@ -93,7 +99,9 @@ class WorkspaceChangeResult:
     summary: WorkspaceChangeSummary
     files: list[WorkspaceFileChange]
     limits: WorkspaceChangeLimits = field(default_factory=WorkspaceChangeLimits)
-    version: int = 1
+    # Version 2 widens per-file and summary line counts to nullable. Version 1
+    # remains readable by API/UI consumers and always carries numeric counts.
+    version: int = 2
 
     def has_changes(self) -> bool:
         return bool(self.summary.created or self.summary.modified or self.summary.deleted or self.summary.additions or self.summary.deletions)

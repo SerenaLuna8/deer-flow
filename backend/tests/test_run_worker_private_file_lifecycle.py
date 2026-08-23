@@ -9,6 +9,11 @@ from deerflow.error_codes import PublicRunErrorCode
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.workspace_changes.types import (
+    WorkspaceChangeResult,
+    WorkspaceChangeSummary,
+    WorkspaceFileChange,
+)
 
 
 class _SuccessfulAgent:
@@ -137,6 +142,61 @@ async def test_delivered_source_candidate_satisfies_any_one_with_new_output() ->
 
     assert record.status is RunStatus.success
     assert record.error is None
+
+
+@pytest.mark.anyio
+async def test_workspace_change_v2_requires_present_files_for_new_output() -> None:
+    class Authority:
+        async def restore(self) -> object:
+            return object()
+
+        async def finalize(self) -> object:
+            return SimpleNamespace(
+                workspace_changes=WorkspaceChangeResult(
+                    summary=WorkspaceChangeSummary(created=1),
+                    files=[
+                        WorkspaceFileChange(
+                            path="/mnt/user-data/outputs/unpresented.txt",
+                            root="outputs",
+                            status="created",
+                            binary=False,
+                            sensitive=False,
+                            size_before=None,
+                            size_after=12,
+                            sha256_before=None,
+                            sha256_after="a" * 64,
+                            additions=1,
+                            deletions=0,
+                        )
+                    ],
+                ),
+                artifacts=(),
+            )
+
+        async def output_delivery_status(self) -> str:
+            return "not_required"
+
+        async def mark_failed(self) -> None:
+            pass
+
+        async def release(self) -> None:
+            pass
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-output-delivery-v2")
+
+    await run_agent(
+        _bridge([]),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, file_authority=Authority()),
+        agent_factory=lambda **_kwargs: _SuccessfulAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status is RunStatus.error
+    assert record.error == ("Run produced output files but did not present a current-run output")
 
 
 def _bridge(events: list[str]) -> SimpleNamespace:

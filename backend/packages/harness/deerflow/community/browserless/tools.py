@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -20,6 +21,7 @@ from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.file_authority import require_private_file_authority
+from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.tools.types import Runtime
 from deerflow.utils.readability import ReadabilityExtractor
 
@@ -438,18 +440,21 @@ async def web_capture_tool(
                 output_name,
                 result.content,
             )
-            presenter = _private_file_authority(
-                runtime,
-                method="record_presented_paths",
-            )
-            if presenter is None:
-                raise RuntimeError("Private file authority is unavailable")
-            recorded = presenter.record_presented_paths(
-                (virtual_path,),
-                tool_call_id=tool_call_id,
-            )
-            if inspect.isawaitable(recorded):
-                await recorded
+            runtime_context = getattr(runtime, "context", None)
+            delegated = isinstance(runtime_context, Mapping) and runtime_context.get(RuntimeContextKeys.IS_SUBAGENT) is True
+            if not delegated:
+                presenter = _private_file_authority(
+                    runtime,
+                    method="record_presented_paths",
+                )
+                if presenter is None:
+                    raise RuntimeError("Private file authority is unavailable")
+                recorded = presenter.record_presented_paths(
+                    (virtual_path,),
+                    tool_call_id=tool_call_id,
+                )
+                if inspect.isawaitable(recorded):
+                    await recorded
         message = f"Captured screenshot: {virtual_path}{_target_status_warning(result)}"
         return Command(
             update={

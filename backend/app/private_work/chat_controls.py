@@ -7,6 +7,7 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -34,11 +35,21 @@ from app.private_work.errors import (
     PrivateWorkAssetStale,
     PrivateWorkCompactionDisabled,
     PrivateWorkConflict,
+    PrivateWorkContextUsageUnsupported,
     PrivateWorkError,
     PrivateWorkInvalid,
     PrivateWorkNotFound,
+    PrivateWorkRunExecutionProfileUnsupported,
+    PrivateWorkRunModelSelectionLocked,
+    PrivateWorkRunModelUnavailable,
     PrivateWorkThreadBusy,
     PrivateWorkUnavailable,
+)
+from app.private_work.execution_profile import (
+    RequestedRunExecutionProfile,
+    RunExecutionProfileUnsupported,
+    RunModelSelectionLocked,
+    selected_run_model_ref,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import PrivateRunRecord, PrivateRunRepository
@@ -54,6 +65,11 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
+from app.system_runtime_settings import (
+    SystemRuntimePolicyMaterializer,
+    project_memory_compaction_app_config_policy,
+)
+from app.system_runtime_settings.errors import SystemRuntimePolicyUnavailable
 from app.system_settings import (
     SystemModelMaterializationUnavailable,
     SystemModelMaterializer,
@@ -61,6 +77,14 @@ from app.system_settings import (
 from app.system_settings.execution_payload import model_execution_provenance
 from app.system_settings.model_refs import ConfiguredModelRefResolver
 from deerflow.agents.memory.snip import SnipArchiveContext
+from deerflow.agents.middlewares.provider_request_usage import (
+    ProviderRequestUsageUnsupported,
+    provider_request_closure_identity,
+    provider_request_runtime_policy_identity,
+)
+from deerflow.agents.provider_request_contract import (
+    PROVIDER_REQUEST_PROFILE_STATE_KEY,
+)
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.models import ModelRuntimeProfile
@@ -71,6 +95,7 @@ from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
+    ContextUsageUnsupported,
     ThreadCompactionResult,
     ThreadContextUsage,
     commit_thread_compaction,
@@ -90,6 +115,32 @@ _HISTORY_SCAN_LIMIT = 200
 _SUGGESTION_MESSAGE_LIMIT = 6
 _SUGGESTION_MESSAGE_CHARS = 4000
 _SUGGESTION_TOTAL_CHARS = 12000
+_CONTEXT_USAGE_AUTHORITY_RETRY_LIMIT = 3
+
+
+def _context_usage_active_run_predicate():
+    """Keep Gauge marker and full-read Run authority exactly aligned."""
+
+    return or_(
+        RunRow.status.in_(("pending", "running")),
+        RunRow.finalization_status == "finalizing",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ContextUsageAuthorityMarker:
+    """Cheap cache identity for the exact Thread's Gauge authority."""
+
+    cache_marker: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ContextUsageAuthority:
+    """One authoritative source for the Gauge's Lead model and runtime policy."""
+
+    run_id: str | None
+    lead_model_ref: str
+    closure_identity: str | None = None
 
 
 class ProjectChatControlService:
@@ -105,6 +156,7 @@ class ProjectChatControlService:
         resolver: ProjectAssetResolver | None = None,
         endpoint_policy: McpEndpointPolicy | None = None,
         model_materializer: SystemModelMaterializer | None = None,
+        runtime_policy_materializer: SystemRuntimePolicyMaterializer | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._project_scoped_checkpointer = project_scoped_checkpointer
@@ -117,6 +169,7 @@ class ProjectChatControlService:
         )
         self._revalidator = PrivateWorkRevalidator()
         self._model_materializer = model_materializer
+        self._runtime_policy_materializer = runtime_policy_materializer
 
     async def get_goal(
         self,
@@ -341,34 +394,58 @@ class ProjectChatControlService:
         thread_id: str,
         *,
         app_config: AppConfig,
+        selected_model_name: str | None = None,
     ) -> ThreadContextUsage:
         """Measure the authorized materialized Thread head without writing it."""
 
         context = require_issued_private_work_context(context)
         try:
-            await self._validate_control_authority(
+            authority = await self._resolve_context_usage_authority(
                 context,
                 thread_id,
-                reject_incomplete_run=False,
+                selected_model_name=selected_model_name,
             )
-            runtime_config = await self._materialize_compaction_config(
-                context,
-                thread_id,
-                app_config,
-            )
-            snapshot = await self._state(
-                context,
-                runtime_config,
-                as_node="context_usage",
-            ).aget(checkpoint_config(thread_id))
-            if snapshot_checkpoint_id(snapshot) is None:
-                raise PrivateWorkNotFound(context.request_id)
-            return measure_thread_context_usage(
-                snapshot,
-                app_config=runtime_config,
-            )
+            for _attempt in range(_CONTEXT_USAGE_AUTHORITY_RETRY_LIMIT):
+                runtime_config, context_model_name = await self._materialize_context_usage_config(
+                    context,
+                    app_config,
+                    authority=authority,
+                    selected_model_name=selected_model_name,
+                )
+                snapshot = await self._state(
+                    context,
+                    runtime_config,
+                    as_node="context_usage",
+                ).aget(checkpoint_config(thread_id))
+                if snapshot_checkpoint_id(snapshot) is None:
+                    raise PrivateWorkNotFound(context.request_id)
+                current_authority = await self._resolve_context_usage_authority(
+                    context,
+                    thread_id,
+                    selected_model_name=selected_model_name,
+                )
+                if current_authority == authority:
+                    idle_profile = None
+                    if authority.run_id is None:
+                        idle_profile = self._idle_provider_request_profile(
+                            snapshot,
+                            runtime_config=runtime_config,
+                            authority=authority,
+                        )
+                    return measure_thread_context_usage(
+                        snapshot,
+                        app_config=runtime_config,
+                        context_model_name=context_model_name,
+                        provider_request_profile=idle_profile,
+                        expected_authority_identity=authority.run_id,
+                        require_provider_request_profile=True,
+                    )
+                authority = current_authority
+            raise PrivateWorkUnavailable(context.request_id)
         except PrivateWorkError:
             raise
+        except ContextUsageUnsupported:
+            raise PrivateWorkContextUsageUnsupported(context.request_id) from None
         except (ContextCompactionFailed, ValueError):
             raise PrivateWorkUnavailable(context.request_id) from None
         except DBAPIError:
@@ -378,6 +455,301 @@ class ProjectChatControlService:
                 "Project context usage measurement failed: request_id=%s",
                 context.request_id,
             )
+            raise PrivateWorkUnavailable(context.request_id) from None
+
+    async def context_usage_authority_marker(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+    ) -> ContextUsageAuthorityMarker:
+        """Project only Run identity; never materialize Gauge inputs."""
+
+        context = require_issued_private_work_context(context)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_CREATE,
+                    Capability.SHARED_ASSETS_EXECUTE,
+                    lock=False,
+                )
+                thread = await PrivateThreadRepository(session).get(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                    lock=False,
+                )
+                if thread is None:
+                    raise PrivateWorkNotFound(context.request_id)
+
+                private_run_scope = (
+                    RunRow.project_id == context.project_id,
+                    RunRow.owner_user_id == str(context.user_id),
+                    RunRow.thread_id == thread_id,
+                )
+                active_run_id = (
+                    select(RunRow.run_id)
+                    .where(
+                        *private_run_scope,
+                        _context_usage_active_run_predicate(),
+                    )
+                    .order_by(RunRow.created_at.asc(), RunRow.run_id.asc())
+                    .limit(1)
+                    .scalar_subquery()
+                )
+                latest_run_id = (
+                    select(RunRow.run_id)
+                    .where(
+                        *private_run_scope,
+                        RunRow.status != "deleted",
+                    )
+                    .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
+                    .limit(1)
+                    .scalar_subquery()
+                )
+                active, latest = (
+                    await session.execute(
+                        select(
+                            active_run_id.label("active_run_id"),
+                            latest_run_id.label("latest_run_id"),
+                        )
+                    )
+                ).one()
+                if active is not None:
+                    if not isinstance(active, str) or not active:
+                        raise PrivateWorkUnavailable(context.request_id)
+                    return ContextUsageAuthorityMarker(
+                        cache_marker=f"active:{active}",
+                    )
+                if latest is not None and (not isinstance(latest, str) or not latest):
+                    raise PrivateWorkUnavailable(context.request_id)
+                return ContextUsageAuthorityMarker(
+                    cache_marker=f"idle:{latest or 'none'}",
+                )
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+
+    @staticmethod
+    def _idle_provider_request_profile(
+        snapshot: object,
+        *,
+        runtime_config: AppConfig,
+        authority: _ContextUsageAuthority,
+    ) -> Mapping[str, object]:
+        """Reuse only a same-model, same-catalog, policy-identical frozen profile."""
+
+        values = getattr(snapshot, "values", None)
+        profile = values.get(PROVIDER_REQUEST_PROFILE_STATE_KEY) if isinstance(values, Mapping) else None
+        try:
+            policy_identity = provider_request_runtime_policy_identity(runtime_config)
+        except ProviderRequestUsageUnsupported:
+            raise ContextUsageUnsupported("Idle Gauge runtime policy identity is unavailable.") from None
+        if (
+            not isinstance(profile, Mapping)
+            or authority.closure_identity is None
+            or profile.get("model_name") != authority.lead_model_ref
+            or profile.get("closure_identity") != authority.closure_identity
+            or profile.get("runtime_policy_identity") != policy_identity
+            or profile.get("workload_profile") != "interactive"
+            or profile.get("mcp_closure_present") is not False
+        ):
+            raise ContextUsageUnsupported("Idle Gauge cannot prove that the frozen provider profile still matches the next Run.")
+        return profile
+
+    async def _materialize_context_usage_config(
+        self,
+        context: PrivateWorkContext,
+        app_config: AppConfig,
+        *,
+        authority: _ContextUsageAuthority,
+        selected_model_name: str | None,
+    ) -> tuple[AppConfig, str]:
+        """Bind Gauge policy and models to the same authority as the next call."""
+
+        model_materializer = self._model_materializer
+        if model_materializer is None:
+            raise PrivateWorkUnavailable(context.request_id)
+
+        runtime_config = app_config
+        try:
+            if authority.run_id is not None:
+                policy_materializer = self._runtime_policy_materializer
+                if policy_materializer is None:
+                    raise SystemRuntimePolicyUnavailable
+                frozen_policy = await policy_materializer.materialize_run_snapshot_envelope(
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    run_id=authority.run_id,
+                )
+                runtime_config = app_config.with_runtime_policy(
+                    project_memory_compaction_app_config_policy(
+                        frozen_policy.value,
+                    )
+                )
+                lead_model = await model_materializer.materialize_snapshot(
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    run_id=authority.run_id,
+                    purpose="lead",
+                )
+            else:
+                lead_model = await model_materializer.materialize_active(
+                    authority.lead_model_ref,
+                )
+
+            if lead_model.name != authority.lead_model_ref and authority.lead_model_ref != "default":
+                raise SystemModelMaterializationUnavailable
+
+            runtime_models = [lead_model]
+            summary_model_ref = runtime_config.summarization.model_name
+            if summary_model_ref is not None and summary_model_ref != lead_model.name:
+                if authority.run_id is not None:
+                    summary_model = await model_materializer.materialize_snapshot(
+                        project_id=context.project_id,
+                        owner_user_id=str(context.user_id),
+                        run_id=authority.run_id,
+                        purpose="summarization",
+                    )
+                else:
+                    summary_model = await model_materializer.materialize_active(
+                        summary_model_ref,
+                    )
+                if summary_model.name != summary_model_ref and summary_model_ref != "default":
+                    raise SystemModelMaterializationUnavailable
+                if summary_model.name == lead_model.name:
+                    if summary_model != lead_model:
+                        raise SystemModelMaterializationUnavailable
+                else:
+                    runtime_models.append(summary_model)
+
+            # A Run with title generation enabled and no explicit title model
+            # freezes the catalog default, then binds that concrete name into
+            # its runtime AppConfig.  Reproduce the same binding for an idle
+            # Gauge; otherwise its policy fingerprint can never match the
+            # immutable provider profile written by the next Run.
+            title_bound_name: str | None = None
+            title_config = getattr(runtime_config, "title", None)
+            if authority.run_id is None and bool(getattr(title_config, "enabled", False)) and getattr(title_config, "model_name", None) is None:
+                title_model = await model_materializer.materialize_active(None)
+                existing = next(
+                    (model for model in runtime_models if model.name == title_model.name),
+                    None,
+                )
+                if existing is not None and existing != title_model:
+                    raise SystemModelMaterializationUnavailable
+                if existing is None:
+                    runtime_models.append(title_model)
+                title_bound_name = title_model.name
+
+            runtime_config = runtime_config.with_runtime_models(
+                tuple(runtime_models),
+            )
+            if title_bound_name is not None:
+                runtime_config = runtime_config.model_copy(
+                    update={
+                        "title": runtime_config.title.model_copy(
+                            update={"model_name": title_bound_name},
+                        ),
+                    },
+                )
+            return (
+                runtime_config,
+                lead_model.name,
+            )
+        except SystemRuntimePolicyUnavailable:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except SystemModelMaterializationUnavailable:
+            if authority.run_id is None and selected_model_name is not None:
+                raise PrivateWorkRunModelUnavailable(context.request_id) from None
+            raise PrivateWorkUnavailable(context.request_id) from None
+
+    async def _resolve_context_usage_authority(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+        *,
+        selected_model_name: str | None,
+    ) -> _ContextUsageAuthority:
+        """Resolve active-Run snapshots or the next composer's selected model."""
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                current = await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_CREATE,
+                    Capability.SHARED_ASSETS_EXECUTE,
+                    lock=True,
+                )
+                thread = await PrivateThreadRepository(session).get(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                    lock=True,
+                )
+                if thread is None:
+                    raise PrivateWorkNotFound(context.request_id)
+
+                active_run = (
+                    await session.execute(
+                        select(RunRow.run_id, RunRow.model_name)
+                        .where(
+                            RunRow.project_id == context.project_id,
+                            RunRow.owner_user_id == str(context.user_id),
+                            RunRow.thread_id == thread_id,
+                            _context_usage_active_run_predicate(),
+                        )
+                        .order_by(RunRow.created_at.asc(), RunRow.run_id.asc())
+                        .limit(1)
+                    )
+                ).one_or_none()
+                if active_run is not None:
+                    run_id, model_name = active_run
+                    if not isinstance(model_name, str) or not model_name:
+                        raise PrivateWorkUnavailable(context.request_id)
+                    return _ContextUsageAuthority(
+                        run_id=run_id,
+                        lead_model_ref=model_name,
+                    )
+
+                resolved = await self._resolver.resolve_project_asset_snapshot_in_session(
+                    session,
+                    current,
+                    AssetSelection(AssetKind.AGENT, thread.agent_asset_id),
+                )
+                if type(resolved) is not ResolvedAgentSnapshot or resolved.scope.value != thread.agent_scope:
+                    raise PrivateWorkAssetStale(context.request_id)
+                lead_model_ref = selected_run_model_ref(
+                    resolved.payload.model_ref,
+                    RequestedRunExecutionProfile(
+                        model_name=selected_model_name,
+                    ),
+                )
+                return _ContextUsageAuthority(
+                    run_id=None,
+                    lead_model_ref=lead_model_ref,
+                    closure_identity=provider_request_closure_identity(
+                        agent_facts=((str(resolved.version_id), resolved.checksum),),
+                        catalog_generation=resolved.catalog_generation,
+                    ),
+                )
+        except PrivateWorkError:
+            raise
+        except RunModelSelectionLocked:
+            raise PrivateWorkRunModelSelectionLocked(context.request_id) from None
+        except RunExecutionProfileUnsupported:
+            raise PrivateWorkRunExecutionProfileUnsupported(context.request_id) from None
+        except TypeError:
+            raise PrivateWorkRunExecutionProfileUnsupported(context.request_id) from None
+        except (
+            AssetForbidden,
+            AssetValidationFailed,
+            AssetResolutionUnavailable,
+            RunSnapshotAssetStale,
+        ):
+            raise PrivateWorkAssetStale(context.request_id) from None
+        except (AssetStorageUnavailable, DBAPIError):
             raise PrivateWorkUnavailable(context.request_id) from None
 
     async def _materialize_compaction_config(

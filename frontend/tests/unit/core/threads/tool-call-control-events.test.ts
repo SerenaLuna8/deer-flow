@@ -38,22 +38,34 @@ function repeatedCallEvent(overrides: Record<string, unknown> = {}) {
 function toolBudgetEvent(overrides: Record<string, unknown> = {}) {
   return {
     type: "tool_call_budget",
-    schema_version: 1,
+    schema_version: 2,
     reason_code: "tool_budget_exhausted",
     workload_profile: "research",
     role: "lead",
     run_id: RUN_ID,
     execution_id: null,
-    tool_name: "web_search",
-    count_before: 9,
+    count_before: 199,
     proposed: 3,
     admitted: 1,
     rejected: 2,
+    count_after: 200,
+    hard_limit: 200,
+    disposition: "truncate_tool_calls",
+    observation_id: "b".repeat(64),
+    ...overrides,
+  };
+}
+
+function legacyToolBudgetEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    ...toolBudgetEvent(),
+    schema_version: 1,
+    tool_name: "web_search",
+    count_before: 9,
     count_after: 10,
     warn_threshold: 6,
     hard_limit: 10,
-    disposition: "truncate_tool_calls",
-    observation_id: "b".repeat(64),
+    disposition: "exhaust_tool",
     ...overrides,
   };
 }
@@ -116,7 +128,7 @@ describe("Run-control event contracts", () => {
       ),
     ).toBeNull();
     expect(
-      parseToolCallBudgetEvent(toolBudgetEvent({ tool_name: null })),
+      parseToolCallBudgetEvent(toolBudgetEvent({ tool_name: "web_search" })),
     ).toBeNull();
   });
 
@@ -129,10 +141,10 @@ describe("Run-control event contracts", () => {
     expect(repeated).toEqual(repeatedCallEvent());
 
     const budget = parseRunControlLiveEvent({
-      ...toolBudgetEvent(),
+      ...legacyToolBudgetEvent(),
       type: "tool_call_control",
     });
-    expect(budget).toEqual(toolBudgetEvent());
+    expect(budget).toEqual(legacyToolBudgetEvent());
   });
 
   test("keeps the Sub-Agent total limit on its independent strict live contract", () => {

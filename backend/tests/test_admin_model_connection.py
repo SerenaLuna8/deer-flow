@@ -251,6 +251,7 @@ async def test_admin_model_connection_route_uses_requested_probe_profile(
             json={
                 "provider_adapter": "vision_bridge_fake",
                 "provider_model": "vision-test",
+                "max_input_tokens": 64_000,
                 "settings": {},
                 "supports_vision": supports_vision,
                 "api_key": "request-only-test-key",
@@ -307,6 +308,7 @@ async def test_admin_visual_connection_route_uses_transient_key_without_leak(
             json={
                 "provider_adapter": "openai",
                 "provider_model": "vision-test",
+                "max_input_tokens": 64_000,
                 "settings": {"base_url": "https://vision.example.test/v1"},
                 "supports_vision": True,
                 "api_key": secret,
@@ -331,6 +333,7 @@ def test_connection_test_materializer_uses_requested_probe_profile(
     command = SystemModelConnectionCheck(
         provider_adapter="vision_bridge_fake",
         provider_model="vision-test",
+        max_input_tokens=64_000,
         settings={},
         supports_vision=supports_vision,
         api_key="request-only-test-key",
@@ -349,6 +352,7 @@ def test_connection_test_reuses_provider_and_credential_validation() -> None:
     command = SystemModelConnectionCheck(
         provider_adapter="vision_bridge_fake",
         provider_model="gpt-5.2",
+        max_input_tokens=64_000,
         settings={},
         supports_vision=False,
         api_key="request-only-test-key",
@@ -361,6 +365,7 @@ def test_connection_test_reuses_provider_and_credential_validation() -> None:
             SystemModelConnectionCheck(
                 provider_adapter="openai",
                 provider_model="gpt-5.2",
+                max_input_tokens=64_000,
                 settings={},
                 supports_vision=False,
                 api_key="",

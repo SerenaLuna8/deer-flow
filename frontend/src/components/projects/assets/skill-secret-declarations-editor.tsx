@@ -201,6 +201,7 @@ export function SkillSecretDeclarationsEditor({
   canEdit,
   editable,
   canBeginEdit = false,
+  showEmptyDescription = true,
   readOnlyReason,
   disabled = false,
   beforeAdvancedSettings,
@@ -215,6 +216,7 @@ export function SkillSecretDeclarationsEditor({
   canEdit?: boolean;
   editable?: boolean;
   canBeginEdit?: boolean;
+  showEmptyDescription?: boolean;
   readOnlyReason?: string;
   disabled?: boolean;
   beforeAdvancedSettings?: ReactNode;
@@ -602,30 +604,36 @@ export function SkillSecretDeclarationsEditor({
 
           <div className="space-y-3">
             {status.projection.required_secrets.length === 0 ? (
-              <div className="space-y-3 rounded-lg border border-dashed p-4">
-                {access.editable ? (
-                  <p className="text-muted-foreground text-sm">{copy.empty}</p>
-                ) : null}
-                {access.canBeginEdit && onBeginEdit ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={disabled}
-                    onClick={() => {
-                      focusNameAfterBeginEditRef.current = true;
-                      onBeginEdit();
-                    }}
-                  >
-                    <PlusIcon aria-hidden className="size-4" />
-                    {copy.beginEdit}
-                  </Button>
-                ) : null}
-                {!access.editable && readOnlyReason ? (
-                  <p className="text-muted-foreground text-xs leading-5">
-                    {readOnlyReason}
-                  </p>
-                ) : null}
-              </div>
+              (showEmptyDescription && access.editable) ||
+              (access.canBeginEdit && onBeginEdit) ||
+              (!access.editable && readOnlyReason) ? (
+                <div className="space-y-3 rounded-lg border border-dashed p-4">
+                  {showEmptyDescription && access.editable ? (
+                    <p className="text-muted-foreground text-sm">
+                      {copy.empty}
+                    </p>
+                  ) : null}
+                  {access.canBeginEdit && onBeginEdit ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={disabled}
+                      onClick={() => {
+                        focusNameAfterBeginEditRef.current = true;
+                        onBeginEdit();
+                      }}
+                    >
+                      <PlusIcon aria-hidden className="size-4" />
+                      {copy.beginEdit}
+                    </Button>
+                  ) : null}
+                  {!access.editable && readOnlyReason ? (
+                    <p className="text-muted-foreground text-xs leading-5">
+                      {readOnlyReason}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null
             ) : (
               status.projection.required_secrets.map((requirement) => (
                 <div

@@ -12,14 +12,17 @@ from langgraph.runtime import Runtime
 from openai import APIStatusError, AuthenticationError
 
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
-    RECOVERED_LLM_FAILURES_KEY,
     LLMErrorHandlingMiddleware,
-    read_recovered_llm_failures,
+)
+from deerflow.agents.middlewares.provider_request_usage import (
+    ProviderRequestProfileDrift,
 )
 from deerflow.error_codes import CURRENT_UPLOAD_FAILURE_DETAIL
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.runtime.recovered_llm_failures import (
+    RECOVERED_LLM_FAILURES_KEY,
     RunRecoveredLLMFailureRecorder,
+    read_recovered_llm_failures,
 )
 
 
@@ -34,18 +37,178 @@ def _middleware() -> LLMErrorHandlingMiddleware:
     )
 
 
+@pytest.mark.parametrize(
+    ("jitter_sample", "expected_waits"),
+    [
+        (0.0, [0.5, 1.0]),
+        (1.0, [1.0, 2.0]),
+    ],
+)
+def test_retry_backoff_uses_injected_bounded_jitter_without_changing_attempts(
+    monkeypatch,
+    jitter_sample: float,
+    expected_waits: list[float],
+) -> None:
+    middleware = LLMErrorHandlingMiddleware(
+        app_config=SimpleNamespace(
+            circuit_breaker=SimpleNamespace(
+                failure_threshold=5,
+                recovery_timeout_sec=60,
+            )
+        ),
+        retry_jitter_source=lambda: jitter_sample,
+    )
+    waits: list[float] = []
+    monkeypatch.setattr(time, "sleep", waits.append)
+    attempts = 0
+    provider_request = httpx.Request(
+        "POST",
+        "https://provider.invalid/v1/responses",
+    )
+
+    def handler(_request) -> ModelResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ConnectError(
+                "secret transport detail",
+                request=provider_request,
+            )
+        return ModelResponse(result=[AIMessage(content="completed")])
+
+    response = middleware.wrap_model_call(object(), handler)  # type: ignore[arg-type]
+
+    assert isinstance(response, ModelResponse)
+    assert attempts == 3
+    assert waits == expected_waits
+
+
+def test_structured_retry_after_bypasses_jitter_and_is_recorded_as_http_status(
+    monkeypatch,
+) -> None:
+    def unexpected_jitter() -> float:
+        pytest.fail("Retry-After must bypass local jitter")
+
+    middleware = LLMErrorHandlingMiddleware(
+        app_config=SimpleNamespace(
+            circuit_breaker=SimpleNamespace(
+                failure_threshold=5,
+                recovery_timeout_sec=60,
+            )
+        ),
+        retry_jitter_source=unexpected_jitter,
+    )
+    recorder = RunRecoveredLLMFailureRecorder()
+    model_request = _run_request(recorder)
+    waits: list[float] = []
+    monkeypatch.setattr(time, "sleep", waits.append)
+    provider_request = httpx.Request(
+        "POST",
+        "https://provider.invalid/v1/responses",
+    )
+    response = httpx.Response(
+        503,
+        request=provider_request,
+        headers={"retry-after-ms": "1750"},
+    )
+    with pytest.raises(httpx.HTTPStatusError) as captured:
+        response.raise_for_status()
+    attempts = 0
+
+    def handler(_request) -> ModelResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise captured.value
+        return ModelResponse(result=[AIMessage(content="completed")])
+
+    middleware.wrap_model_call(model_request, handler)  # type: ignore[arg-type]
+
+    assert attempts == 2
+    assert waits == [1.75]
+    failure = recorder.snapshot()[0]
+    assert failure["failure_subtype"] == "http_status"
+    assert failure["status_code"] == 503
+
+
+def test_subagent_timeout_receipt_uses_closed_safe_attribution() -> None:
+    middleware = _middleware()
+    middleware.retry_base_delay_ms = 0
+    recorder = RunRecoveredLLMFailureRecorder()
+    model_request = _run_request(recorder, is_subagent=True)
+    provider_request = httpx.Request(
+        "POST",
+        "https://provider.invalid/v1/responses",
+    )
+    attempts = 0
+
+    def handler(_request) -> ModelResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ReadTimeout(
+                "secret timeout at https://provider.invalid/private",
+                request=provider_request,
+            )
+        return ModelResponse(result=[AIMessage(content="completed")])
+
+    middleware.wrap_model_call(model_request, handler)  # type: ignore[arg-type]
+
+    failure = recorder.snapshot()[0]
+    assert failure == {
+        "attempt": 1,
+        "max_attempts": 3,
+        "error_code": "LLM_PROVIDER_UNAVAILABLE",
+        "reason": "transient",
+        "caller": "subagent",
+        "failure_subtype": "timeout",
+        "status_code": None,
+        "disposition": "recovered",
+    }
+    assert "secret" not in repr(failure)
+    assert "provider.invalid" not in repr(failure)
+
+
 def _provider_response(status_code: int) -> httpx.Response:
     request = httpx.Request("POST", "https://provider.invalid/v1/responses")
     return httpx.Response(status_code, request=request)
 
 
+def test_public_provider_request_failure_is_not_converted_to_llm_fallback() -> None:
+    error = ProviderRequestProfileDrift("test drift")
+
+    with pytest.raises(ProviderRequestProfileDrift) as caught:
+        _middleware().wrap_model_call(
+            SimpleNamespace(),
+            lambda _request: (_ for _ in ()).throw(error),
+        )
+
+    assert caught.value is error
+
+
+@pytest.mark.asyncio
+async def test_async_public_provider_request_failure_is_not_converted_to_llm_fallback() -> None:
+    error = ProviderRequestProfileDrift("test drift")
+
+    async def handler(_request):
+        raise error
+
+    with pytest.raises(ProviderRequestProfileDrift) as caught:
+        await _middleware().awrap_model_call(SimpleNamespace(), handler)
+
+    assert caught.value is error
+
+
 def _run_request(
     recorder: RunRecoveredLLMFailureRecorder,
+    *,
+    is_subagent: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         runtime=Runtime(
             context={
                 RuntimeContextKeys.RECOVERED_LLM_FAILURE_RECORDER: recorder,
+                RuntimeContextKeys.IS_SUBAGENT: is_subagent,
             },
         )
     )
@@ -58,16 +221,48 @@ def test_malformed_recovered_failure_error_code_fails_closed(
     assert (
         read_recovered_llm_failures(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "failures": [
                     {
                         "attempt": 1,
                         "max_attempts": 3,
                         "error_code": malformed_error_code,
                         "reason": "transient",
+                        "caller": "lead_agent",
+                        "failure_subtype": "connection",
+                        "status_code": None,
                         "disposition": "recovered",
                     }
                 ],
+            }
+        )
+        == ()
+    )
+
+
+@pytest.mark.parametrize("field", ["caller", "failure_subtype"])
+@pytest.mark.parametrize("malformed_value", [[], {}])
+def test_malformed_recovered_failure_attribution_fails_closed_without_raising(
+    field: str,
+    malformed_value: object,
+) -> None:
+    failure = {
+        "attempt": 1,
+        "max_attempts": 3,
+        "error_code": "LLM_PROVIDER_UNAVAILABLE",
+        "reason": "transient",
+        "caller": "lead_agent",
+        "failure_subtype": "connection",
+        "status_code": None,
+        "disposition": "recovered",
+    }
+    failure[field] = malformed_value
+
+    assert (
+        read_recovered_llm_failures(
+            {
+                "schema_version": 2,
+                "failures": [failure],
             }
         )
         == ()
@@ -78,13 +273,16 @@ def test_recovered_failure_reason_and_error_code_must_match() -> None:
     assert (
         read_recovered_llm_failures(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "failures": [
                     {
                         "attempt": 1,
                         "max_attempts": 3,
                         "error_code": "LLM_PROVIDER_BUSY",
                         "reason": "transient",
+                        "caller": "lead_agent",
+                        "failure_subtype": "connection",
+                        "status_code": None,
                         "disposition": "recovered",
                     }
                 ],
@@ -229,9 +427,11 @@ def test_terminal_warning_logs_only_safe_provider_classifiers(caplog) -> None:
     assert "raw-body" not in text
 
 
-def test_success_after_retry_carries_safe_recovered_failure_receipt() -> None:
+def test_success_after_retry_records_diagnostic_without_decorating_ai_message() -> None:
     middleware = _middleware()
     middleware.retry_base_delay_ms = 0
+    recorder = RunRecoveredLLMFailureRecorder()
+    model_request = _run_request(recorder)
     attempts = 0
     request = httpx.Request("POST", "https://provider.invalid/v1/responses")
 
@@ -242,30 +442,33 @@ def test_success_after_retry_carries_safe_recovered_failure_receipt() -> None:
             raise httpx.ConnectError("connection secret detail", request=request)
         return ModelResponse(result=[AIMessage(content="completed answer")])
 
-    response = middleware.wrap_model_call(object(), handler)  # type: ignore[arg-type]
+    response = middleware.wrap_model_call(model_request, handler)  # type: ignore[arg-type]
 
     assert isinstance(response, ModelResponse)
     message = response.result[0]
     assert isinstance(message, AIMessage)
-    assert message.additional_kwargs[RECOVERED_LLM_FAILURES_KEY] == {
-        "schema_version": 1,
-        "failures": [
-            {
-                "attempt": 1,
-                "max_attempts": 3,
-                "error_code": "LLM_PROVIDER_UNAVAILABLE",
-                "reason": "transient",
-                "disposition": "recovered",
-            }
-        ],
-    }
+    assert RECOVERED_LLM_FAILURES_KEY not in message.additional_kwargs
+    assert recorder.snapshot() == (
+        {
+            "attempt": 1,
+            "max_attempts": 3,
+            "error_code": "LLM_PROVIDER_UNAVAILABLE",
+            "reason": "transient",
+            "caller": "lead_agent",
+            "failure_subtype": "connection",
+            "status_code": None,
+            "disposition": "recovered",
+        },
+    )
     assert "secret" not in str(message.additional_kwargs)
 
 
 @pytest.mark.anyio
-async def test_async_success_after_retry_carries_safe_recovered_failure_receipt() -> None:
+async def test_async_success_after_retry_records_diagnostic_without_decorating_ai_message() -> None:
     middleware = _middleware()
     middleware.retry_base_delay_ms = 0
+    recorder = RunRecoveredLLMFailureRecorder()
+    model_request = _run_request(recorder)
     attempts = 0
     request = httpx.Request("POST", "https://provider.invalid/v1/responses")
 
@@ -279,23 +482,13 @@ async def test_async_success_after_retry_carries_safe_recovered_failure_receipt(
             )
         return ModelResponse(result=[AIMessage(content="completed async answer")])
 
-    response = await middleware.awrap_model_call(object(), handler)  # type: ignore[arg-type]
+    response = await middleware.awrap_model_call(model_request, handler)  # type: ignore[arg-type]
 
     assert isinstance(response, ModelResponse)
     message = response.result[0]
     assert isinstance(message, AIMessage)
-    assert message.additional_kwargs[RECOVERED_LLM_FAILURES_KEY] == {
-        "schema_version": 1,
-        "failures": [
-            {
-                "attempt": 1,
-                "max_attempts": 3,
-                "error_code": "LLM_PROVIDER_UNAVAILABLE",
-                "reason": "transient",
-                "disposition": "recovered",
-            }
-        ],
-    }
+    assert RECOVERED_LLM_FAILURES_KEY not in message.additional_kwargs
+    assert len(recorder.snapshot()) == 1
     assert "secret" not in str(message.additional_kwargs)
 
 
@@ -322,7 +515,7 @@ def test_exhausted_retry_does_not_carry_recovered_failure_receipt() -> None:
     assert RECOVERED_LLM_FAILURES_KEY not in response.additional_kwargs
 
 
-def test_terminal_fallback_keeps_only_prior_run_recovered_failures() -> None:
+def test_terminal_fallback_does_not_project_prior_run_recovered_failures() -> None:
     middleware = _middleware()
     middleware.retry_base_delay_ms = 0
     middleware.retry_max_attempts = 2
@@ -357,13 +550,12 @@ def test_terminal_fallback_keeps_only_prior_run_recovered_failures() -> None:
     )
 
     assert isinstance(terminal, AIMessage)
-    failures = terminal.additional_kwargs[RECOVERED_LLM_FAILURES_KEY]["failures"]
-    assert len(failures) == 1
-    assert failures[0]["disposition"] == "recovered"
+    assert RECOVERED_LLM_FAILURES_KEY not in terminal.additional_kwargs
+    assert len(recorder.snapshot()) == 1
 
 
 @pytest.mark.anyio
-async def test_async_terminal_fallback_keeps_prior_run_recovered_failures() -> None:
+async def test_async_terminal_fallback_does_not_project_prior_run_recovered_failures() -> None:
     middleware = _middleware()
     middleware.retry_base_delay_ms = 0
     middleware.retry_max_attempts = 2
@@ -402,10 +594,11 @@ async def test_async_terminal_fallback_keeps_prior_run_recovered_failures() -> N
     )
 
     assert isinstance(terminal, AIMessage)
-    assert len(terminal.additional_kwargs[RECOVERED_LLM_FAILURES_KEY]["failures"]) == 1
+    assert RECOVERED_LLM_FAILURES_KEY not in terminal.additional_kwargs
+    assert len(recorder.snapshot()) == 1
 
 
-def test_circuit_open_fallback_keeps_prior_run_recovered_failures() -> None:
+def test_circuit_open_fallback_does_not_project_prior_run_recovered_failures() -> None:
     middleware = _middleware()
     middleware.retry_base_delay_ms = 0
     recorder = RunRecoveredLLMFailureRecorder()
@@ -438,4 +631,5 @@ def test_circuit_open_fallback_keeps_prior_run_recovered_failures() -> None:
 
     assert isinstance(terminal, AIMessage)
     assert terminal.additional_kwargs["error_reason"] == "circuit_open"
-    assert len(terminal.additional_kwargs[RECOVERED_LLM_FAILURES_KEY]["failures"]) == 1
+    assert RECOVERED_LLM_FAILURES_KEY not in terminal.additional_kwargs
+    assert len(recorder.snapshot()) == 1

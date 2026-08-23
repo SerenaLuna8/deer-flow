@@ -632,24 +632,24 @@ def test_runtime_checkpoint_must_match_explicit_manual_source() -> None:
     )
     middleware = _middleware(model)
 
-    result = middleware.compact_state(
-        {
-            "messages": [
-                HumanMessage(id="old-human", content="old"),
-                AIMessage(id="old-ai", content="old answer"),
-                HumanMessage(id="current-human", content="current"),
-            ]
-        },
-        _runtime(
-            archive_context=_archive_context(
-                source_checkpoint_id="explicit-checkpoint",
+    with pytest.raises(summarization_module.SnipCompactionFailed):
+        middleware.compact_state(
+            {
+                "messages": [
+                    HumanMessage(id="old-human", content="old"),
+                    AIMessage(id="old-ai", content="old answer"),
+                    HumanMessage(id="current-human", content="current"),
+                ]
+            },
+            _runtime(
+                archive_context=_archive_context(
+                    source_checkpoint_id="explicit-checkpoint",
+                ),
+                execution_checkpoint_id="different-runtime-checkpoint",
             ),
-            execution_checkpoint_id="different-runtime-checkpoint",
-        ),
-        force=True,
-    )
+            force=True,
+        )
 
-    assert result is None
     assert model.call_count == 1
 
 
@@ -1571,8 +1571,11 @@ async def test_prepare_force_reports_invalid_model_output_as_compaction_failed(
     prepared = await prepare_thread_compaction(
         _SnapshotAccessor(
             [
-                HumanMessage(id="complete-human", content="complete"),
-                AIMessage(id="complete-ai", content="complete answer"),
+                HumanMessage(id="first-human", content="first"),
+                AIMessage(id="first-ai", content="first answer"),
+                HumanMessage(id="second-human", content="second"),
+                AIMessage(id="second-ai", content="second answer"),
+                HumanMessage(id="open-human", content="still open"),
             ]
         ),
         "thread-1",
@@ -1584,6 +1587,39 @@ async def test_prepare_force_reports_invalid_model_output_as_compaction_failed(
     assert prepared.result.compacted is False
     assert prepared.result.reason == "compaction_failed"
     assert model.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_force_reports_provider_failure_as_compaction_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _model()
+    middleware = _middleware(model)
+    monkeypatch.setattr(
+        context_compaction_module,
+        "_create_compaction_middleware",
+        lambda **_kwargs: middleware,
+    )
+
+    prepared = await prepare_thread_compaction(
+        _SnapshotAccessor(
+            [
+                HumanMessage(id="first-human", content="first"),
+                AIMessage(id="first-ai", content="first answer"),
+                HumanMessage(id="second-human", content="second"),
+                AIMessage(id="second-ai", content="second answer"),
+                HumanMessage(id="open-human", content="still open"),
+            ]
+        ),
+        "thread-1",
+        keep=None,
+        force=True,
+        app_config=object(),  # type: ignore[arg-type]
+    )
+
+    assert prepared.result.compacted is False
+    assert prepared.result.reason == "compaction_failed"
+    assert model.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -1854,6 +1890,41 @@ def test_configured_custom_prompt_reaches_the_production_factory(
     assert middleware._dual_output_contract is False
 
 
+def test_production_factory_binds_fraction_triggers_to_the_lead_context_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        enabled=True,
+        model_name=None,
+        trigger=SimpleNamespace(to_tuple=lambda: ("fraction", 0.5)),
+        keep=SimpleNamespace(to_tuple=lambda: ("messages", 1)),
+        trim_tokens_to_summarize=20_000,
+        summary_prompt=None,
+    )
+    app_config = SimpleNamespace(summarization=config)
+    summary_model = _RecordingModel(
+        responses=[_dual("Continue the task.", "(nothing)")],
+        profile={"max_input_tokens": 200_000},
+    )
+    lead_model = _RecordingModel(
+        responses=["unused"],
+        profile={"max_input_tokens": 64_000},
+    )
+    monkeypatch.setattr(
+        summarization_module.ModelRuntime,
+        "build_chat_model",
+        lambda _self, **_kwargs: summary_model,
+    )
+
+    middleware = summarization_module.create_summarization_middleware(
+        app_config=app_config,
+        context_model=lead_model,
+    )
+
+    assert middleware is not None
+    assert middleware._get_profile_limits() == 64_000
+
+
 def test_explicit_custom_prompt_equal_to_packaged_text_stays_single_segment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1951,20 +2022,20 @@ def test_twice_invalid_snip_output_preserves_state_after_two_calls(
     )
     middleware = _middleware(model)
 
-    result = middleware.compact_state(
-        {
-            "messages": [
-                HumanMessage(id="old-human", content="old"),
-                AIMessage(id="old-ai", content="old answer"),
-                HumanMessage(id="current-human", content="current"),
-            ],
-            "summary_text": "- [permanent] Keep me.",
-        },
-        _runtime(archive_context=_archive_context()),
-        force=True,
-    )
+    with pytest.raises(summarization_module.SnipModelOutputInvalid):
+        middleware.compact_state(
+            {
+                "messages": [
+                    HumanMessage(id="old-human", content="old"),
+                    AIMessage(id="old-ai", content="old answer"),
+                    HumanMessage(id="current-human", content="current"),
+                ],
+                "summary_text": "- [permanent] Keep me.",
+            },
+            _runtime(archive_context=_archive_context()),
+            force=True,
+        )
 
-    assert result is None
     assert model.call_count == 2
     validation_logs = [record.getMessage() for record in caplog.records if "SNIP model output failed validation" in record.getMessage()]
     assert validation_logs == [
@@ -1973,6 +2044,28 @@ def test_twice_invalid_snip_output_preserves_state_after_two_calls(
     ]
     assert "Preamble" not in "\n".join(validation_logs)
     assert "Still invalid output" not in "\n".join(validation_logs)
+
+
+def test_automatic_twice_invalid_snip_output_still_preserves_state() -> None:
+    model = _model("invalid first output", "invalid repair output")
+    middleware = _middleware(model)
+
+    result = middleware.compact_state(
+        {
+            "messages": [
+                HumanMessage(id="first-human", content="first"),
+                AIMessage(id="first-ai", content="first answer"),
+                HumanMessage(id="second-human", content="second"),
+                AIMessage(id="second-ai", content="second answer"),
+                HumanMessage(id="current-human", content="current"),
+            ],
+        },
+        _runtime(archive_context=_archive_context()),
+        force=False,
+    )
+
+    assert result is None
+    assert model.call_count == 2
 
 
 def test_nothing_still_updates_continuity_summary_but_clears_receipt() -> None:

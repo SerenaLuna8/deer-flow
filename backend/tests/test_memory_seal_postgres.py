@@ -90,6 +90,7 @@ async def _seed_summary_model(seed: PrivateThreadSeed) -> ModelConfig:
         description=None,
         use="support.fake_models:GovernedFakeListChatModel",
         model=model_name,
+        max_input_tokens=64_000,
         responses=[
             f"<continuity>\n{_CONTINUITY}\n</continuity>\n{_TAGGED_TEXT}",
         ],

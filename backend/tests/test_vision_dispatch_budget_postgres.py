@@ -20,16 +20,21 @@ from app.gateway.routers.private_work import _run_response
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_metadata import (
     RUN_HOST_EXECUTION_SUSPENSION_KEY,
+    RUN_TOKEN_BUDGET_USAGE_KEY,
     RUN_VISION_DISPATCH_BUDGET_KEY,
     RunHostExecutionSuspension,
     RunVisionDispatchBudget,
     RunVisionDispatchBudgetInvalid,
+    run_token_budget_usage,
     run_vision_dispatch_budget,
 )
 from app.private_work.run_repository import (
+    PrivateRunConflict,
     PrivateRunCreate,
+    PrivateRunExecutionLeaseLost,
     PrivateRunRecord,
     PrivateRunRepository,
+    PrivateRunUsageSnapshot,
 )
 from app.private_work.thread_repository import (
     PrivateThreadRepository,
@@ -52,6 +57,7 @@ from deerflow.persistence.jobs.sql import (
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.sandbox.sandbox import AuthorizationRevoked
+from deerflow.token_budget_usage import TokenBudgetUsageSnapshot
 from deerflow.vision.contracts import VisionUsageReceipt
 from deerflow.vision.dispatch import (
     MAX_VISION_CALLS_PER_RUN,
@@ -189,6 +195,7 @@ def _vision_model() -> ModelConfig:
         description="",
         use="langchain_openai:ChatOpenAI",
         model="small-vlm",
+        max_input_tokens=64_000,
         base_url="https://vision.example.test/v1",
         api_key=SecretStr("test-secret"),
         supports_vision=True,
@@ -288,6 +295,19 @@ def _record(
         model_name="test-model",
         created_at=now,
         updated_at=now,
+    )
+
+
+def _token_budget_usage(
+    run_id: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> TokenBudgetUsageSnapshot:
+    return TokenBudgetUsageSnapshot(
+        run_id=run_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
     )
 
 
@@ -492,6 +512,150 @@ async def test_postgres_retry_unsafe_expired_job_refuses_automatic_takeover(
             assert job.retry_safety == "unknown"
             assert job.attempt_count == 1
             assert attempt.outcome == "dead"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_postgres_token_budget_settlement_is_absolute_and_lease_gated(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    try:
+        active = await _seed_active_run(seed)
+        settled_at = datetime.now(UTC)
+        prior = _token_budget_usage(active.run_id, 450, 450)
+        async with seed.factory() as session, session.begin():
+            settlement = await PrivateRunRepository(session).settle_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=active.run_id,
+                job_id=active.job_id,
+                lease_token=active.lease_token,
+                outcome="failed",
+                public_error_code="LLM_PROVIDER_UNAVAILABLE",
+                retryable_failure=True,
+                attempt_usage=PrivateRunUsageSnapshot(
+                    token_budget_usage=prior,
+                ),
+                now=settled_at,
+            )
+            assert settlement.run.status == "pending"
+
+        stale = _token_budget_usage(active.run_id, 600, 600)
+        with pytest.raises(PrivateRunExecutionLeaseLost):
+            async with seed.factory() as session, session.begin():
+                await PrivateRunRepository(session).settle_execution(
+                    scope=seed.owner_a.resource_scope,
+                    run_id=active.run_id,
+                    job_id=active.job_id,
+                    lease_token=active.lease_token,
+                    outcome="failed",
+                    public_error_code="LLM_PROVIDER_UNAVAILABLE",
+                    attempt_usage=PrivateRunUsageSnapshot(
+                        token_budget_usage=stale,
+                    ),
+                    now=settled_at + timedelta(seconds=1),
+                )
+
+        claimed_at = settled_at + timedelta(seconds=5)
+        async with seed.factory() as session, session.begin():
+            claim = await JobRepository(
+                session,
+                owner_ref_hasher=_job_owner_ref,
+            ).claim_next(
+                worker_id=active.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=60,
+                now=claimed_at,
+            )
+            assert claim is not None
+            assert await JobRepository(session).mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+                now=claimed_at,
+            )
+            state = await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=active.run_id,
+                job_id=active.job_id,
+                lease_token=claim.lease_token,
+                now=claimed_at,
+            )
+            assert (
+                run_token_budget_usage(
+                    state.run.metadata,
+                    run_id=active.run_id,
+                )
+                == prior
+            )
+
+        with pytest.raises(PrivateRunConflict):
+            async with seed.factory() as session, session.begin():
+                await PrivateRunRepository(session).settle_execution(
+                    scope=seed.owner_a.resource_scope,
+                    run_id=active.run_id,
+                    job_id=active.job_id,
+                    lease_token=claim.lease_token,
+                    outcome="succeeded",
+                    attempt_usage=PrivateRunUsageSnapshot(
+                        token_budget_usage=_token_budget_usage(
+                            active.run_id,
+                            400,
+                            400,
+                        ),
+                    ),
+                    now=claimed_at + timedelta(seconds=1),
+                )
+
+        current = _token_budget_usage(active.run_id, 550, 550)
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).settle_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=active.run_id,
+                job_id=active.job_id,
+                lease_token=claim.lease_token,
+                outcome="succeeded",
+                attempt_usage=PrivateRunUsageSnapshot(
+                    token_budget_usage=current,
+                ),
+                now=claimed_at + timedelta(seconds=2),
+            )
+
+        # A duplicate terminal ACK cannot use its stale lease to advance usage.
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).settle_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=active.run_id,
+                job_id=active.job_id,
+                lease_token=claim.lease_token,
+                outcome="succeeded",
+                attempt_usage=PrivateRunUsageSnapshot(
+                    token_budget_usage=_token_budget_usage(
+                        active.run_id,
+                        700,
+                        700,
+                    ),
+                ),
+                now=claimed_at + timedelta(seconds=3),
+            )
+
+        async with seed.factory() as session:
+            run = await session.get(RunRow, active.run_id)
+            assert run is not None
+            assert (
+                run_token_budget_usage(
+                    run.metadata_json,
+                    run_id=active.run_id,
+                )
+                == current
+            )
+            assert RUN_TOKEN_BUDGET_USAGE_KEY in run.metadata_json
+            # Public tracking stayed disabled: the private enforcement channel
+            # remains independent from the public Run usage aggregates.
+            assert run.total_input_tokens == 0
+            assert run.total_output_tokens == 0
+            assert run.total_tokens == 0
     finally:
         await seed.engine.dispose()
 

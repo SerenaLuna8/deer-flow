@@ -102,7 +102,11 @@ export interface Translations {
   workspaceChanges: {
     title: string;
     editedTitle: (count: number) => string;
-    badge: (count: number, additions: number, deletions: number) => string;
+    badge: (
+      count: number,
+      additions: number | null,
+      deletions: number | null,
+    ) => string;
     viewChanges: string;
     created: string;
     modified: string;
@@ -2133,28 +2137,10 @@ export interface Translations {
         count: number,
         hardLimit: number,
       ) => string;
-      toolBudgetExhaustedTitle: (toolName: string) => string;
+      toolBudgetExhaustedTitle: string;
       toolBudgetExhaustedDescription: string;
       subagentTotalLimitTitle: string;
       subagentTotalLimitDescription: string;
-    };
-    recoveredModelFailuresTitle: string;
-    recoveredModelFailuresDescription: (count: number) => string;
-    recoveredModelFailureAttempt: (
-      index: number,
-      attempt: number,
-      maxAttempts: number,
-      reason: string,
-      errorCode: string,
-    ) => string;
-    recoveredModelFailureReasons: {
-      quota: string;
-      auth: string;
-      busy: string;
-      transient: string;
-      generic: string;
-      current_upload: string;
-      circuit_open: string;
     };
     tokenBudgetReachedTitle: string;
     tokenBudgetReachedDescription: string;
@@ -2397,14 +2383,24 @@ export interface Translations {
   // Context Window
   contextWindow: {
     title: string;
-    automaticCompression: string;
+    usage: string;
     loading: string;
     unavailable: string;
     disabled: string;
     progressLabel: (percent: string) => string;
+    usageWithoutCapacity: (estimated: string) => string;
+    capacityUnavailable: string;
+    contextWindowLimit: string;
+    notConfigured: string;
+    safetyBound: string;
+    previousProviderInput: string;
+    compressionConditions: string;
+    noCompressionConditions: string;
     current: string;
     triggerAt: string;
     remaining: string;
+    triggerStatus: string;
+    triggerReached: string;
     estimatedContext: string;
     tokenThreshold: string;
     summaryPresent: string;
@@ -2417,7 +2413,6 @@ export interface Translations {
       messages: string;
     };
     tokens: (value: string) => string;
-    tokenPair: (current: string, total: string) => string;
     messages: (count: number) => string;
   };
 

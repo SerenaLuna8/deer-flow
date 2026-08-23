@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.tools import tool
 from langgraph.runtime import Runtime
 
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.tool_call_control import (
     TOOL_CALL_CONTROL_STATE_KEY,
+    RunToolCallLimitAuthority,
     ToolCallControlLoopFinalizationFailed,
     ToolCallControlStateInvalid,
     default_graph_tool_call_control_profile,
@@ -27,7 +30,12 @@ from deerflow.subagents.binding import (
 from deerflow.subagents.change_signal import SubagentChangeSignal
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.delegated_context import DelegatedRuntimeContextProjection
-from deerflow.subagents.executor import _SubagentGraphRunner
+from deerflow.subagents.executor import (
+    _SubagentGraphResult,
+    _SubagentGraphRunner,
+    _SubagentGraphStatus,
+)
+from deerflow.tools.builtins.present_file_tool import present_file_tool
 
 
 def _config() -> SubagentConfig:
@@ -42,16 +50,255 @@ def _delegated_context(
     *,
     app_config: object | None = None,
     run_id: str | None = None,
+    token_usage_tracking_enabled: bool | None = None,
 ) -> DelegatedRuntimeContextProjection:
     return DelegatedRuntimeContextProjection(
         _carrier=RuntimeContextCarrier(
             app_config=app_config,
             is_subagent=True,
             run_id=run_id,
+            token_usage_tracking_enabled=token_usage_tracking_enabled,
         ),
         channel_identity_mode="absent",
         agent_prompt_bundle=None,
         runtime_skills=(),
+    )
+
+
+@pytest.mark.parametrize("disallowed_tools", [None, [], ["task"]])
+def test_subagent_runner_never_exposes_lead_only_present_files(
+    disallowed_tools: list[str] | None,
+) -> None:
+    @tool("safe_lookup")
+    def safe_lookup(query: str) -> str:
+        """Return a safe lookup result."""
+
+        return query
+
+    runner = _SubagentGraphRunner(
+        config=SubagentConfig(
+            name="runtime-agent",
+            description="delegated work",
+            model="inherit",
+            disallowed_tools=disallowed_tools,
+        ),
+        tools=[safe_lookup, present_file_tool],
+        delegated_context=_delegated_context(),
+        model_override=MagicMock(name="sdk-model"),
+        tool_search_enabled=False,
+    )
+
+    assert [candidate.name for candidate in runner.tools] == ["safe_lookup"]
+
+
+@pytest.mark.asyncio
+async def test_every_subagent_receives_platform_file_handoff_instruction() -> None:
+    configurable_instruction = "After writing a deliverable, call `present_files`; if it is missing, tell the user that no download link can be created."
+    skill_instruction = "Skill requirement: call `present_files` after creating the report."
+    runner = _SubagentGraphRunner(
+        config=SubagentConfig(
+            name="runtime-agent",
+            description="delegated work",
+            system_prompt=configurable_instruction,
+            model="inherit",
+        ),
+        tools=[],
+        delegated_context=_delegated_context(),
+        model_override=MagicMock(name="sdk-model"),
+        tool_search_enabled=False,
+    )
+    runner._load_skill_messages = AsyncMock(  # type: ignore[method-assign]
+        return_value=[SystemMessage(content=skill_instruction)],
+    )
+
+    state, _, _ = await runner._build_initial_state("create the report")
+
+    system_prompt = str(state["messages"][0].content)
+    normalized_system_prompt = " ".join(system_prompt.split())
+    handoff_instruction = "If a Skill or delegated instruction asks you to call `present_files`, treat that step as Lead-owned."
+    assert configurable_instruction in system_prompt
+    assert skill_instruction in system_prompt
+    assert handoff_instruction in system_prompt
+    assert system_prompt.index(configurable_instruction) < system_prompt.index(skill_instruction)
+    assert system_prompt.index(skill_instruction) < system_prompt.index(handoff_instruction)
+    assert "do not report `present_files` as unavailable, invalid, or missing" in normalized_system_prompt
+    assert "report the completed result and generated file paths only" in normalized_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_frozen_disabled_token_tracking_does_not_install_or_aggregate_subagent_collector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.subagents import executor as executor_module
+
+    collector_factory = MagicMock(
+        side_effect=AssertionError(
+            "disabled token tracking must not install the Sub-Agent collector",
+        )
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "SubagentTokenCollector",
+        collector_factory,
+    )
+    monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(
+        executor_module,
+        "inject_langfuse_metadata",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "is_trace_correlation_enabled",
+        lambda _config: False,
+    )
+
+    # The explicit frozen Run flag wins even if the retained AppConfig object
+    # would otherwise enable tracking.
+    app_config = SimpleNamespace(
+        token_usage=SimpleNamespace(enabled=True),
+    )
+    runner = _SubagentGraphRunner(
+        config=_config(),
+        tools=[],
+        delegated_context=_delegated_context(
+            app_config=app_config,
+            run_id="parent-run",
+            token_usage_tracking_enabled=False,
+        ),
+        parent_model="provider-model",
+        model_override=MagicMock(name="sdk-model"),
+        middleware_override=(),
+        tool_search_enabled=False,
+    )
+    captured_callbacks: list[object] = []
+
+    class Agent:
+        async def astream(
+            self,
+            _state,
+            *,
+            config,
+            context,
+            stream_mode,
+        ):
+            del context
+            assert stream_mode == "values"
+            captured_callbacks.extend(config.get("callbacks") or [])
+            yield {"messages": [AIMessage(content="delegated result")]}
+
+    async def build_initial_state(_task: str):
+        return (
+            {},
+            [],
+            SimpleNamespace(deferred_names=frozenset()),
+        )
+
+    runner._build_initial_state = build_initial_state  # type: ignore[method-assign]
+    runner._create_agent = MagicMock(return_value=Agent())  # type: ignore[method-assign]
+    result = _SubagentGraphResult(
+        execution_id=uuid.uuid4(),
+        trace_id=runner.trace_id,
+        status=_SubagentGraphStatus.PENDING,
+    )
+
+    outcome = await runner._aexecute("inspect delegated state", result)
+
+    assert outcome.status is _SubagentGraphStatus.COMPLETED
+    assert outcome.token_usage_records == []
+    assert captured_callbacks == []
+    collector_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_frozen_enabled_token_tracking_preserves_subagent_collector_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.subagents import executor as executor_module
+
+    usage_records = [
+        {
+            "source_run_id": "subagent-call-1",
+            "caller": "subagent:general-purpose",
+            "model_name": "provider-model",
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
+        }
+    ]
+    collector = MagicMock()
+    collector.snapshot_records.return_value = usage_records
+    collector_factory = MagicMock(return_value=collector)
+    monkeypatch.setattr(
+        executor_module,
+        "SubagentTokenCollector",
+        collector_factory,
+    )
+    monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(
+        executor_module,
+        "inject_langfuse_metadata",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "is_trace_correlation_enabled",
+        lambda _config: False,
+    )
+
+    runner = _SubagentGraphRunner(
+        config=_config(),
+        tools=[],
+        delegated_context=_delegated_context(
+            app_config=SimpleNamespace(
+                token_usage=SimpleNamespace(enabled=False),
+            ),
+            run_id="parent-run",
+            token_usage_tracking_enabled=True,
+        ),
+        parent_model="provider-model",
+        model_override=MagicMock(name="sdk-model"),
+        middleware_override=(),
+        tool_search_enabled=False,
+    )
+    captured_callbacks: list[object] = []
+
+    class Agent:
+        async def astream(
+            self,
+            _state,
+            *,
+            config,
+            context,
+            stream_mode,
+        ):
+            del context
+            assert stream_mode == "values"
+            captured_callbacks.extend(config.get("callbacks") or [])
+            yield {"messages": [AIMessage(content="delegated result")]}
+
+    async def build_initial_state(_task: str):
+        return (
+            {},
+            [],
+            SimpleNamespace(deferred_names=frozenset()),
+        )
+
+    runner._build_initial_state = build_initial_state  # type: ignore[method-assign]
+    runner._create_agent = MagicMock(return_value=Agent())  # type: ignore[method-assign]
+    result = _SubagentGraphResult(
+        execution_id=uuid.uuid4(),
+        trace_id=runner.trace_id,
+        status=_SubagentGraphStatus.PENDING,
+    )
+
+    outcome = await runner._aexecute("inspect delegated state", result)
+
+    assert outcome.status is _SubagentGraphStatus.COMPLETED
+    assert outcome.token_usage_records == usage_records
+    assert captured_callbacks == [collector]
+    collector_factory.assert_called_once_with(
+        caller="subagent:general-purpose",
     )
 
 
@@ -111,7 +358,6 @@ def test_sdk_full_takeover_does_not_inject_graph_tool_call_control(
         model_override=model,
         middleware_override=(caller_middleware,),
         tool_search_enabled=False,
-        tool_call_control_profile=default_graph_tool_call_control_profile(),
     )
 
     runner._create_agent([], execution_id=uuid.uuid4())
@@ -169,6 +415,8 @@ def test_sdk_feature_profile_preserves_explicit_extra_middleware_once_for_delega
         sdk_feature_snapshot=profile.features,
         tool_search_enabled=False,
         tool_call_control_profile=binding_factory.tool_call_control_profile,
+        tool_call_limit_authority=binding_factory.tool_call_limit_authority,
+        tool_call_limit_scope_id="sdk-invocation",
     )
 
     runner._create_agent([], execution_id=uuid.uuid4())
@@ -251,6 +499,7 @@ def test_configured_subagent_control_uses_lifecycle_internal_execution_id(
         lambda **_kwargs: object(),
     )
     execution_id = uuid.uuid4()
+    control_profile = default_graph_tool_call_control_profile("research")
     runner = _SubagentGraphRunner(
         config=_config(),
         tools=[],
@@ -259,7 +508,9 @@ def test_configured_subagent_control_uses_lifecycle_internal_execution_id(
             run_id="parent-run-id",
         ),
         parent_model="parent-model",
-        tool_call_control_profile=default_graph_tool_call_control_profile("research"),
+        tool_call_control_profile=control_profile,
+        tool_call_limit_authority=RunToolCallLimitAuthority(hard_limit=200),
+        tool_call_limit_scope_id="parent-run-id",
     )
 
     runner._create_agent([], execution_id=execution_id)

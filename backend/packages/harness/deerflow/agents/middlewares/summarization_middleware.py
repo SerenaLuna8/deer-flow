@@ -8,6 +8,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Literal, NotRequired, TypedDict, cast, override
 
 from langchain.agents import AgentState
@@ -21,6 +22,7 @@ from langchain_core.messages import (
     ToolMessage,
     get_buffer_string,
 )
+from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -39,6 +41,13 @@ from deerflow.agents.memory.snip import (
     validate_snip_output,
 )
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+from deerflow.agents.middlewares.provider_request_usage import (
+    ProviderRequestContextMeasurement,
+    measure_profile_snapshot_context,
+)
+from deerflow.agents.provider_request_contract import (
+    PROVIDER_REQUEST_PROFILE_STATE_KEY,
+)
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import validate_summary_prompt_template
 from deerflow.models import ModelRuntime, ModelRuntimeProfile
@@ -55,12 +64,36 @@ MAX_SNIP_HIERARCHICAL_LEAVES = 7
 MAX_SNIP_HIERARCHICAL_MODEL_CALLS = 32
 
 
+def _context_model_token_counter(model: Any) -> Any:
+    """Mirror LangChain's public approximate counter tuning for the Lead model."""
+
+    llm_type = getattr(model, "_llm_type", "")
+    if isinstance(llm_type, str) and llm_type.startswith("anthropic-chat"):
+        return partial(
+            count_tokens_approximately,
+            use_usage_metadata_scaling=True,
+            chars_per_token=3.3,
+        )
+    return partial(
+        count_tokens_approximately,
+        use_usage_metadata_scaling=True,
+    )
+
+
 class SnipPromptBudgetTooSmall(RuntimeError):
     """The configured budget cannot contain the packaged SNIP prompt itself."""
 
 
 class SnipSourceTooLarge(RuntimeError):
     """One complete turn exceeds the bounded hierarchical SNIP workload."""
+
+
+class SnipCompactionFailed(RuntimeError):
+    """A planned SNIP attempt could not produce a committable summary."""
+
+
+class SnipModelOutputInvalid(SnipCompactionFailed):
+    """The summary model violated the SNIP output contract twice."""
 
 
 def _server_abort_event(runtime_context: object | None) -> AsyncAbortEvent | None:
@@ -197,10 +230,29 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self,
         *args,
         compact_all_complete_turns: bool = False,
+        context_model: Any | None = None,
         dual_output_contract: bool | None = None,
         **kwargs,
     ) -> None:
+        # The summary model owns SNIP generation only. Fraction triggers and
+        # retained-context reporting must use the Lead model that will receive
+        # the provider request.
+        self._context_model = context_model
+        requested_token_counter = kwargs.get(
+            "token_counter",
+            count_tokens_approximately,
+        )
+        use_context_model_counter = context_model is not None and requested_token_counter is count_tokens_approximately
         super().__init__(*args, **kwargs)
+        if use_context_model_counter:
+            # Keep the framework's provider-specific approximation semantics,
+            # but bind them to the model that receives the Lead request rather
+            # than the separate model that generates the SNIP summary.
+            self.token_counter = _context_model_token_counter(context_model)
+            self._partial_token_counter = partial(
+                self.token_counter,
+                use_usage_metadata_scaling=False,
+            )
         self._compact_all_complete_turns = compact_all_complete_turns
         # The summary LLM call runs inside a LangGraph middleware hook, so its token
         # stream would otherwise be captured by the messages-tuple stream callback and
@@ -219,6 +271,17 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # middleware with a custom summary prompt keep the original
         # single-segment semantics.
         self._dual_output_contract = self.summary_prompt == SNIP_ARCHIVE_PROMPT if dual_output_contract is None else dual_output_contract
+
+    @override
+    def _get_profile_limits(self) -> int | None:
+        model = self._context_model
+        if model is None:
+            return super()._get_profile_limits()
+        profile = getattr(model, "profile", None)
+        if not isinstance(profile, Mapping):
+            return None
+        max_input_tokens = profile.get("max_input_tokens")
+        return max_input_tokens if isinstance(max_input_tokens, int) else None
 
     def _parse_snip_response(self, raw: str) -> _SnipSummary:
         if self._dual_output_contract:
@@ -286,11 +349,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                     exc,
                 )
                 continue
-            except Exception:
+            except Exception as exc:
                 logger.exception("SNIP generation failed; skipping compaction this turn")
-                return None
+                raise SnipCompactionFailed from exc
         logger.warning("SNIP model returned invalid output twice; skipping compaction this turn")
-        return None
+        raise SnipModelOutputInvalid
 
     async def _ainvoke_snip_prompt(
         self,
@@ -341,11 +404,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                     exc,
                 )
                 continue
-            except Exception:
+            except Exception as exc:
                 logger.exception("SNIP generation failed; skipping compaction this turn")
-                return None
+                raise SnipCompactionFailed from exc
         logger.warning("SNIP model returned invalid output twice; skipping compaction this turn")
-        return None
+        raise SnipModelOutputInvalid
 
     @staticmethod
     def _intermediate_summary_text(summaries: list[_SnipSummary]) -> str:
@@ -585,7 +648,29 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         context_window_tokens = self._get_profile_limits()
         if context_window_tokens is not None and context_window_tokens <= 0:
             raise ValueError("Model max_input_tokens must be positive")
+        triggers, primary_trigger = self._measure_trigger_usage(
+            token_value=estimated_tokens,
+            message_count=message_count,
+            context_window_tokens=context_window_tokens,
+            reported_token_messages=trigger_messages,
+        )
+        return ContextUsageMeasurement(
+            estimated_tokens=estimated_tokens,
+            message_count=message_count,
+            summary_present=bool(summary_text),
+            context_window_tokens=context_window_tokens,
+            triggers=triggers,
+            primary_trigger=primary_trigger,
+        )
 
+    def _measure_trigger_usage(
+        self,
+        *,
+        token_value: int,
+        message_count: int,
+        context_window_tokens: int | None,
+        reported_token_messages: list[AnyMessage] | None = None,
+    ) -> tuple[tuple[ContextTriggerUsage, ...], ContextTriggerUsage | None]:
         triggers: list[ContextTriggerUsage] = []
         for trigger_type, configured_value in self._trigger_conditions:
             if trigger_type == "messages":
@@ -606,19 +691,22 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
             if trigger_type == "tokens":
                 threshold_tokens = int(configured_value)
-                reached = estimated_tokens >= threshold_tokens or self._should_summarize_based_on_reported_tokens(
-                    trigger_messages,
-                    float(threshold_tokens),
+                reached = token_value >= threshold_tokens or (
+                    reported_token_messages is not None
+                    and self._should_summarize_based_on_reported_tokens(
+                        reported_token_messages,
+                        float(threshold_tokens),
+                    )
                 )
                 triggers.append(
                     ContextTriggerUsage(
                         type="tokens",
                         configured_value=threshold_tokens,
-                        current_value=estimated_tokens,
+                        current_value=token_value,
                         threshold_value=threshold_tokens,
-                        remaining_value=max(0, threshold_tokens - estimated_tokens),
+                        remaining_value=max(0, threshold_tokens - token_value),
                         progress_percent=self._context_progress(
-                            estimated_tokens,
+                            token_value,
                             threshold_tokens,
                         ),
                         reached=reached,
@@ -631,10 +719,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 raise ValueError("Model max_input_tokens is required for fraction triggers")
             threshold_fraction = float(configured_value)
             threshold_tokens = max(1, int(context_window_tokens * threshold_fraction))
-            current_fraction = round(estimated_tokens / context_window_tokens, 6)
-            reached = estimated_tokens >= threshold_tokens or self._should_summarize_based_on_reported_tokens(
-                trigger_messages,
-                float(threshold_tokens),
+            current_fraction = round(token_value / context_window_tokens, 6)
+            reached = token_value >= threshold_tokens or (
+                reported_token_messages is not None
+                and self._should_summarize_based_on_reported_tokens(
+                    reported_token_messages,
+                    float(threshold_tokens),
+                )
             )
             triggers.append(
                 ContextTriggerUsage(
@@ -656,17 +747,34 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 )
             )
 
-        primary_trigger = max(
+        return tuple(triggers), max(
             triggers,
             key=lambda trigger: trigger["progress_percent"],
             default=None,
         )
-        return ContextUsageMeasurement(
-            estimated_tokens=estimated_tokens,
-            message_count=message_count,
-            summary_present=bool(summary_text),
+
+    def measure_provider_request_usage(
+        self,
+        measurement: ProviderRequestContextMeasurement,
+        *,
+        summary_present: bool,
+        context_window_tokens: int | None,
+    ) -> ContextUsageMeasurement:
+        """Expose the exact safety value used by automatic profile triggers."""
+
+        if context_window_tokens is not None and context_window_tokens <= 0:
+            raise ValueError("Model max_input_tokens must be positive")
+        triggers, primary_trigger = self._measure_trigger_usage(
+            token_value=measurement.safety_bound_tokens,
+            message_count=measurement.message_count,
             context_window_tokens=context_window_tokens,
-            triggers=tuple(triggers),
+        )
+        return ContextUsageMeasurement(
+            estimated_tokens=measurement.estimated_tokens,
+            message_count=measurement.message_count,
+            summary_present=summary_present,
+            context_window_tokens=context_window_tokens,
+            triggers=triggers,
             primary_trigger=primary_trigger,
         )
 
@@ -1253,6 +1361,69 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     def _snip_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
         return [message for message in messages if not is_dynamic_context_reminder(message)]
 
+    def _profile_trigger_reached(
+        self,
+        profile_snapshot: object,
+        measurement: ProviderRequestContextMeasurement,
+    ) -> bool:
+        """Evaluate automatic OR triggers from the shared safety measurement."""
+
+        if not isinstance(profile_snapshot, Mapping):
+            return False
+        context_window = profile_snapshot.get("max_input_tokens")
+        for trigger_type, configured_value in self._trigger_conditions:
+            if trigger_type == "messages":
+                if measurement.message_count >= int(configured_value):
+                    return True
+                continue
+            if trigger_type == "tokens":
+                if measurement.safety_bound_tokens >= int(configured_value):
+                    return True
+                continue
+            if not isinstance(context_window, int) or context_window <= 0:
+                raise ValueError("Provider request profile requires max_input_tokens for fraction triggers")
+            if measurement.safety_bound_tokens >= max(
+                1,
+                int(context_window * float(configured_value)),
+            ):
+                return True
+        return False
+
+    def fixed_component_over_trigger(
+        self,
+        profile_snapshot: object,
+        measurement: ProviderRequestContextMeasurement,
+    ) -> bool:
+        """Return whether immutable request material alone crosses a token trigger."""
+
+        if not isinstance(profile_snapshot, Mapping):
+            return False
+        fixed = measurement.components.get("fixed")
+        if fixed is None:
+            return False
+        context_window = profile_snapshot.get("max_input_tokens")
+        for trigger_type, configured_value in self._trigger_conditions:
+            if trigger_type == "tokens":
+                if fixed.safety_bound_tokens >= int(configured_value):
+                    return True
+                continue
+            if trigger_type != "fraction":
+                continue
+            if not isinstance(context_window, int) or context_window <= 0:
+                raise ValueError("Provider request profile requires max_input_tokens for fraction triggers")
+            if fixed.safety_bound_tokens >= max(
+                1,
+                int(context_window * float(configured_value)),
+            ):
+                return True
+        return False
+
+    def _profile_message_trigger_reached(
+        self,
+        measurement: ProviderRequestContextMeasurement,
+    ) -> bool:
+        return any(trigger_type == "messages" and measurement.message_count >= int(configured_value) for trigger_type, configured_value in self._trigger_conditions)
+
     def _prepare_compaction(
         self,
         state: AgentState,
@@ -1264,8 +1435,26 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
         previous_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
         trigger_messages = self._messages_for_trigger_count(messages, previous_summary)
-        total_tokens = self.token_counter(trigger_messages)
-        if not force and not self._should_summarize(trigger_messages, total_tokens):
+        profile_measurement: ProviderRequestContextMeasurement | None = None
+        profile_snapshot = state.get(PROVIDER_REQUEST_PROFILE_STATE_KEY)
+        if not force and isinstance(profile_snapshot, Mapping):
+            profile_measurement = measure_profile_snapshot_context(
+                profile_snapshot,
+                state,
+            )
+        total_tokens = profile_measurement.safety_bound_tokens if profile_measurement is not None else self.token_counter(trigger_messages)
+        should_summarize = self._profile_trigger_reached(profile_snapshot, profile_measurement) if profile_measurement is not None else self._should_summarize(trigger_messages, total_tokens)
+        if not force and not should_summarize:
+            return None
+        if (
+            not force
+            and profile_measurement is not None
+            and self.fixed_component_over_trigger(
+                profile_snapshot,
+                profile_measurement,
+            )
+            and not self._profile_message_trigger_reached(profile_measurement)
+        ):
             return None
 
         requested_cutoff = self._requested_cutoff(messages)
@@ -1403,16 +1592,23 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
-        summary = self._summarize_with(
-            list(prepared.snip_messages),
-            previous_summary=prepared.previous_summary,
-        )
+        try:
+            summary = self._summarize_with(
+                list(prepared.snip_messages),
+                previous_summary=prepared.previous_summary,
+            )
+        except SnipCompactionFailed:
+            if force:
+                raise
+            return None
         if summary is None:
             return None
         try:
             receipt = self._receipt(prepared, summary.tagged_text, runtime)
-        except (SnipOutputInvalid, ValueError):
+        except (SnipOutputInvalid, ValueError) as exc:
             logger.warning("SNIP receipt identity invalid; skipping compaction this turn")
+            if force:
+                raise SnipCompactionFailed from exc
             return None
         return ContextCompactionResult(
             summary_text=summary.continuity,
@@ -1432,17 +1628,24 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
-        summary = await self._asummarize_with(
-            list(prepared.snip_messages),
-            previous_summary=prepared.previous_summary,
-            authorization_context=runtime.context,
-        )
+        try:
+            summary = await self._asummarize_with(
+                list(prepared.snip_messages),
+                previous_summary=prepared.previous_summary,
+                authorization_context=runtime.context,
+            )
+        except SnipCompactionFailed:
+            if force:
+                raise
+            return None
         if summary is None:
             return None
         try:
             receipt = self._receipt(prepared, summary.tagged_text, runtime)
-        except (SnipOutputInvalid, ValueError):
+        except (SnipOutputInvalid, ValueError) as exc:
             logger.warning("SNIP receipt identity invalid; skipping compaction this turn")
+            if force:
+                raise SnipCompactionFailed from exc
             return None
         return ContextCompactionResult(
             summary_text=summary.continuity,
@@ -1482,6 +1685,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 def create_summarization_middleware(
     *,
     app_config: Any | None = None,
+    context_model: Any | None = None,
     keep: tuple[str, int | float] | None = None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
@@ -1519,6 +1723,7 @@ def create_summarization_middleware(
     effective_keep = ("messages", 1) if compact_all_complete_turns else requested_keep
     kwargs: dict[str, Any] = {
         "model": model,
+        "context_model": context_model,
         "trigger": trigger,
         "keep": effective_keep,
         "compact_all_complete_turns": compact_all_complete_turns,

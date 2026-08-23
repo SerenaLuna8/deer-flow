@@ -70,6 +70,7 @@ def test_legacy_vision_adapter_has_no_production_descriptor() -> None:
                 status="suspended",
                 provider_adapter=VISION_RETIRED_PROVIDER_ADAPTER,
                 provider_model="legacy-vision",
+                max_input_tokens=64_000,
                 settings={
                     "base_url": "https://legacy-vision.example.test/v1",
                 },
@@ -85,6 +86,7 @@ def test_legacy_vision_adapter_has_no_production_descriptor() -> None:
                 display_name="Legacy vision",
                 provider_adapter=VISION_RETIRED_PROVIDER_ADAPTER,
                 provider_model="legacy-vision",
+                max_input_tokens=64_000,
                 settings={
                     "base_url": "https://legacy-vision.example.test/v1",
                 },
@@ -99,6 +101,7 @@ def test_legacy_vision_adapter_has_no_production_descriptor() -> None:
             SystemModelConnectionCheck(
                 provider_adapter=VISION_RETIRED_PROVIDER_ADAPTER,
                 provider_model="legacy-vision",
+                max_input_tokens=64_000,
                 settings={
                     "base_url": "https://legacy-vision.example.test/v1",
                 },
@@ -153,6 +156,7 @@ async def test_retired_vision_adapter_remains_admin_readable() -> None:
         status="suspended",
         provider_adapter=VISION_RETIRED_PROVIDER_ADAPTER,
         provider_model="legacy-vision",
+        max_input_tokens=64_000,
         settings={"base_url": "https://legacy-vision.example.test/v1"},
         supports_thinking=False,
         supports_reasoning_effort=False,

@@ -9,6 +9,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
 )
+from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.tools.builtins.present_file_tool import present_file_tool
 
 
@@ -79,6 +80,32 @@ async def test_present_files_never_reports_success_when_intent_persistence_fails
             filepaths=["/mnt/user-data/outputs/report.txt"],
             tool_call_id="present-1",
         )
+
+
+@pytest.mark.anyio
+async def test_subagent_present_files_is_rejected_before_persisting_intent() -> None:
+    authority = _Authority()
+    runtime = SimpleNamespace(
+        context={
+            "private_scope": object(),
+            "__file_authority": authority,
+            RuntimeContextKeys.IS_SUBAGENT: True,
+        },
+        state=None,
+        config={},
+    )
+
+    command = await present_file_tool.coroutine(
+        runtime=runtime,
+        filepaths=["/mnt/user-data/outputs/report.txt"],
+        tool_call_id="present-subagent-1",
+    )
+
+    assert authority.calls == []
+    assert "artifacts" not in command.update
+    message = command.update["messages"][0]
+    assert message.tool_call_id == "present-subagent-1"
+    assert message.content == ("Error: Sub-Agent files must be promoted and presented by the Lead")
 
 
 @pytest.mark.asyncio

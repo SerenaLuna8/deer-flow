@@ -17,8 +17,12 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 
 import { branchThreadFromTurn, fetchThreadTokenUsage } from "./api";
 import {
+  CONTEXT_AUTHORITY_REFETCH_INTERVAL_MS,
+  fetchThreadContextAuthority,
   fetchThreadContextUsage,
-  threadContextUsageQueryKey,
+  threadContextAuthorityQueryKey,
+  threadContextUsageReadingQueryKey,
+  type ThreadContextAuthorityResponse,
   type ThreadContextUsageResponse,
 } from "./context-usage";
 import { removeDeletedThreadCaches } from "./thread-cache";
@@ -201,14 +205,40 @@ export function useThreadContextUsage(
   threadId?: string | null,
   {
     enabled = true,
+    modelName,
     privateWork: explicitPrivateWork,
-  }: { enabled?: boolean; privateWork?: ProjectPrivateWorkScope } = {},
+  }: {
+    enabled?: boolean;
+    modelName?: string | null;
+    privateWork?: ProjectPrivateWorkScope;
+  } = {},
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
-  return useQuery<ThreadContextUsageResponse | null>({
+  const authority = useQuery<ThreadContextAuthorityResponse | null>({
     queryKey: scopedThreadQueryKey(
       privateWork.scope,
-      ...threadContextUsageQueryKey(threadId),
+      ...threadContextAuthorityQueryKey(threadId),
+    ),
+    queryFn: async ({ signal }) => {
+      if (!threadId) {
+        return null;
+      }
+      return fetchThreadContextAuthority(threadId, {
+        apiBaseURL: privateWork.apiBaseURL,
+        signal,
+      });
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchInterval: CONTEXT_AUTHORITY_REFETCH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  });
+  const cacheMarker = authority.data?.cache_marker;
+  const usage = useQuery<ThreadContextUsageResponse | null>({
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      ...threadContextUsageReadingQueryKey(threadId, modelName, cacheMarker),
     ),
     queryFn: async ({ signal }) => {
       if (!threadId) {
@@ -216,13 +246,22 @@ export function useThreadContextUsage(
       }
       return fetchThreadContextUsage(threadId, {
         apiBaseURL: privateWork.apiBaseURL,
+        modelName,
         signal,
       });
     },
-    enabled: enabled && Boolean(threadId),
+    enabled: enabled && Boolean(threadId) && Boolean(cacheMarker),
     retry: false,
     refetchOnWindowFocus: false,
   });
+  return {
+    ...usage,
+    data: authority.data === null ? null : usage.data,
+    error: authority.error ?? usage.error,
+    isError: authority.isError || usage.isError,
+    isFetching: authority.isFetching || usage.isFetching,
+    isLoading: authority.isLoading || (Boolean(cacheMarker) && usage.isLoading),
+  };
 }
 
 export function useBranchThread(explicitPrivateWork?: ProjectPrivateWorkScope) {

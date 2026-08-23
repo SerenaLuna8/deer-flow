@@ -133,30 +133,60 @@ def test_parse_snip_dual_output_accepts_nothing_tagged_segment() -> None:
     assert tagged_text == SNIP_NOTHING
 
 
-def test_parse_snip_dual_output_bounds_each_segment_independently() -> None:
+def test_parse_snip_dual_output_bounds_each_segment_independently(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     max_continuity = "c" * MAX_CONTINUITY_CHARS
     continuity, tagged_text = parse_snip_dual_output(f"<continuity>\n{max_continuity}\n</continuity>\n(nothing)")
     assert continuity == max_continuity
     assert tagged_text == SNIP_NOTHING
 
-    oversized_continuity = (
-        "HEAD-" + "c" * (MAX_CONTINUITY_CHARS * 2) + "-TAIL"
-    )
-    bounded_continuity, tagged_text = parse_snip_dual_output(
-        f"<continuity>\n{oversized_continuity}\n</continuity>\n(nothing)"
-    )
-    assert len(bounded_continuity) <= MAX_CONTINUITY_CHARS
+    oversized_continuity = "HEAD-" + "c" * (MAX_CONTINUITY_CHARS * 2) + "-TAIL"
+    bounded_continuity, tagged_text = parse_snip_dual_output(f"<continuity>\n{oversized_continuity}\n</continuity>\n(nothing)")
+    assert len(bounded_continuity) == MAX_CONTINUITY_CHARS
     assert bounded_continuity.startswith("HEAD-")
     assert bounded_continuity.endswith("-TAIL")
-    assert "\n...\n" in bounded_continuity
+    assert "\n…\n" in bounded_continuity
     assert tagged_text == SNIP_NOTHING
+    fallback_logs = [record.getMessage() for record in caplog.records if "SNIP continuity exceeded" in record.getMessage()]
+    assert fallback_logs == [f"SNIP continuity exceeded the character limit; applying bounded head-tail fallback (actual={len(oversized_continuity)}, max={MAX_CONTINUITY_CHARS})"]
+    assert "HEAD-" not in fallback_logs[0]
+    assert "-TAIL" not in fallback_logs[0]
 
     prefix = "- [durable] "
     max_tagged = prefix + "x" * (MAX_SNIP_OUTPUT_CHARS - len(prefix))
     assert parse_snip_dual_output(f"<continuity>\nok\n</continuity>\n{max_tagged}")[1] == max_tagged
 
+    first_fact = "- [correction] " + "a" * 400
+    second_fact = "- [permanent] " + "b" * 400
+    dropped_fact = "- [durable] " + "c" * 400
+    oversized_tagged = "\n".join(
+        (first_fact, second_fact, dropped_fact),
+    )
+    continuity, bounded_tagged = parse_snip_dual_output(f"<continuity>\nok\n</continuity>\n{oversized_tagged}")
+    assert continuity == "ok"
+    assert bounded_tagged == f"{first_fact}\n{second_fact}"
+    assert len(bounded_tagged) <= MAX_SNIP_OUTPUT_CHARS
+    tagged_fallback_logs = [record.getMessage() for record in caplog.records if "SNIP tagged facts exceeded" in record.getMessage()]
+    assert tagged_fallback_logs == [f"SNIP tagged facts exceeded the character limit; retaining a bounded complete-line prefix (actual={len(oversized_tagged)}, max={MAX_SNIP_OUTPUT_CHARS}, kept_lines=2, total_lines=3)"]
+    assert first_fact not in tagged_fallback_logs[0]
+    assert dropped_fact not in tagged_fallback_logs[0]
+
     with pytest.raises(SnipOutputInvalid):
         parse_snip_dual_output(f"<continuity>\nok\n</continuity>\n{max_tagged}y")
+
+
+def test_overlong_tagged_segment_does_not_hide_an_invalid_tail() -> None:
+    first_fact = "- [durable] " + "a" * 480
+    second_fact = "- [ephemeral] " + "b" * 480
+    invalid_tail = "plain prose must remain invalid"
+    tagged = "\n".join((first_fact, second_fact, invalid_tail))
+    assert len(tagged) > MAX_SNIP_OUTPUT_CHARS
+
+    with pytest.raises(SnipOutputInvalid):
+        parse_snip_dual_output(
+            f"<continuity>\nok\n</continuity>\n{tagged}",
+        )
 
 
 @pytest.mark.parametrize(
@@ -171,6 +201,7 @@ def test_parse_snip_dual_output_bounds_each_segment_independently() -> None:
         "<continuity>\nok\n</continuity>\nplain prose instead of tagged lines",
         "<continuity>\nfirst\n</continuity>\n<continuity>\nsecond\n</continuity>\n(nothing)",
         "<continuity>\nnested <continuity> marker\n</continuity>\n(nothing)",
+        f"<continuity>\n{'c' * (MAX_CONTINUITY_CHARS + 1)}<continuity>nested\n</continuity>\n(nothing)",
         "<continuity>\nok\n</continuity>\n- [durable] A fact.\n</continuity>",
     ],
 )

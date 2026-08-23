@@ -33,6 +33,7 @@ from app.private_work.output_delivery_obligation import (
     settle_continuation_output_delivery,
 )
 from app.private_work.run_admission import PersistedRunSnapshot
+from app.private_work.run_metadata import run_token_budget_usage
 from app.private_work.run_repository import (
     PrivateRunExecutionLeaseLost,
     PrivateRunRepository,
@@ -647,6 +648,10 @@ class PrivateRunJobHandler:
                 stream_subgraphs=bool(kwargs.get("stream_subgraphs", False)),
                 resume_from_checkpoint=resume_from_checkpoint,
                 runtime_kind=runtime_kind,
+                token_budget_usage=run_token_budget_usage(
+                    state.run.metadata,
+                    run_id=state.run.run_id,
+                ),
             ),
             state.cancel_requested,
             None,

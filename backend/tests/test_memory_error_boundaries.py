@@ -158,6 +158,7 @@ async def test_durable_executor_maps_memory_authority_unavailable_to_existing_re
         description="",
         use="support.fake_models:FakeVisionBridgeChatModel",
         model="memory-boundary-model",
+        max_input_tokens=64_000,
     )
     app_config = AppConfig(
         models=[model],

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,8 +52,21 @@ from deerflow.subagents.runtime_catalog import (
     build_runtime_agent_catalog,
     build_runtime_agent_profile,
 )
+from deerflow.subagents.status_contract import (
+    SUBAGENT_ERROR_KEY,
+    SUBAGENT_RESULT_BRIEF_KEY,
+)
 
 task_module = importlib.import_module("deerflow.tools.builtins.task_tool")
+
+
+class _PrivateFileAuthorityStub:
+    @asynccontextmanager
+    async def delegated_output_scope(self, _task_id: str):
+        yield SimpleNamespace(
+            output_root=("/mnt/user-data/workspace/.deerflow/subagents/33333333333333333333333333333333/outputs"),
+            promotions=(),
+        )
 
 
 def _binding_factory(*, model_name: str = "parent-model") -> ParentExecutionBindingFactory:
@@ -76,6 +90,29 @@ def _binding_factory(*, model_name: str = "parent-model") -> ParentExecutionBind
             subagent_enabled=True,
             agent_name="lead",
             available_skills=None,
+        )
+    )
+
+
+def _private_binding_factory() -> ParentExecutionBindingFactory:
+    return ParentExecutionBindingFactory(
+        PrivateRunParentExecutionProfile(
+            graph=AgentGraphExecutionInputs(
+                model=object(),
+                tools=(),
+                middleware=(),
+                system_prompt=None,
+                state_schema=dict,
+            ),
+            app_config=SimpleNamespace(),
+            asset_context=None,
+            private_runtime=object(),
+            model_name="private-model",
+            thinking_enabled=False,
+            reasoning_effort=None,
+            runtime_skills=(),
+            runtime_agent_catalog=None,
+            tool_groups=(),
         )
     )
 
@@ -196,7 +233,10 @@ async def test_task_adapter_passes_one_delegated_context_projection_to_runner(
         tool_call_id="call-projection",
     )
 
-    assert _tool_message(command).additional_kwargs["subagent_status"] == "completed"
+    message = _tool_message(command)
+    assert message.additional_kwargs["subagent_status"] == "completed"
+    assert message.content == "Task Succeeded. Result: done"
+    assert "present_files" not in str(message.content)
     projection = captured["delegated_context"]
     assert type(projection) is DelegatedRuntimeContextProjection
     assert projection.build()[RuntimeContextKeys.IS_SUBAGENT] is True
@@ -226,6 +266,184 @@ async def test_task_adapter_passes_one_delegated_context_projection_to_runner(
         "host_execution_approval_port",
         "host_execution_agent_path",
     }.isdisjoint(captured)
+
+
+@pytest.mark.asyncio
+async def test_private_task_reports_isolated_output_mapping_to_the_lead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    scope_calls: list[str] = []
+
+    class FileAuthority:
+        @asynccontextmanager
+        async def delegated_output_scope(self, task_id: str):
+            scope_calls.append(task_id)
+            capture = SimpleNamespace(
+                output_root=("/mnt/user-data/workspace/.deerflow/subagents/11111111111111111111111111111111/outputs"),
+                promotions=(),
+            )
+            yield capture
+            capture.promotions = (
+                SimpleNamespace(
+                    source_path="/mnt/user-data/outputs/research.md",
+                    scratch_path=("/mnt/user-data/workspace/.deerflow/subagents/capture/outputs/research.md"),
+                ),
+            )
+
+    class Lifecycle:
+        async def run(self, call, binding, *, observers=()):  # type: ignore[no-untyped-def]
+            return SubagentCompleted(
+                execution_id=uuid.uuid4(),
+                task_id=call.task_id,
+                trace_id="trace",
+                queued_at=now,
+                started_at=now,
+                completed_at=now,
+                ai_messages=(),
+                usage=None,
+                usage_completeness=SubagentUsageCompleteness.FINAL_OBSERVED,
+                quiescent=True,
+                result="Created /mnt/user-data/outputs/research.md",
+                stop_reason=None,
+            )
+
+    monkeypatch.setattr(task_module, "subagent_task_lifecycle", Lifecycle())
+    monkeypatch.setattr(task_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(
+        task_module,
+        "get_available_subagent_names",
+        lambda **_kwargs: ["general-purpose"],
+    )
+    monkeypatch.setattr(
+        task_module,
+        "get_subagent_config",
+        lambda *_args, **_kwargs: SubagentConfig(
+            name="general-purpose",
+            description="research",
+            model="inherit",
+            timeout_seconds=2,
+        ),
+    )
+
+    command = await task_module.task_tool.coroutine(
+        runtime=_runtime(
+            _private_binding_factory(),
+            context_updates={
+                RuntimeContextKeys.FILE_AUTHORITY: FileAuthority(),
+                RuntimeContextKeys.PRIVATE_SCOPE: object(),
+            },
+        ),
+        description="delegate research",
+        prompt="write one research report",
+        subagent_type="general-purpose",
+        tool_call_id="call-isolated-output",
+    )
+
+    message = _tool_message(command)
+    assert scope_calls == ["call-isolated-output"]
+    assert "/mnt/user-data/outputs/research.md" in str(message.content)
+    assert "/mnt/user-data/workspace/.deerflow/subagents/capture/outputs/research.md" in str(message.content)
+    assert "copy" in str(message.content).lower()
+    assert str(message.content).count("present_files") == 1
+    assert "unavailable" not in str(message.content).lower()
+    assert "invalid tool" not in str(message.content).lower()
+    assert message.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY] == ("Created /mnt/user-data/outputs/research.md")
+    assert ".deerflow/subagents/" not in str(
+        message.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY],
+    )
+    assert "present_files" not in str(
+        message.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY],
+    )
+
+
+@pytest.mark.asyncio
+async def test_private_failed_task_reports_only_its_own_partial_output_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+
+    class FileAuthority:
+        @asynccontextmanager
+        async def delegated_output_scope(self, _task_id: str):
+            capture = SimpleNamespace(
+                output_root=("/mnt/user-data/workspace/.deerflow/subagents/22222222222222222222222222222222/outputs"),
+                promotions=(),
+            )
+            yield capture
+            capture.promotions = (
+                SimpleNamespace(
+                    source_path="/mnt/user-data/outputs/partial.md",
+                    scratch_path=("/mnt/user-data/workspace/.deerflow/subagents/22222222222222222222222222222222/outputs/partial.md"),
+                ),
+            )
+
+    class Lifecycle:
+        async def run(self, call, binding, *, observers=()):  # type: ignore[no-untyped-def]
+            return SubagentFailed(
+                execution_id=uuid.uuid4(),
+                task_id=call.task_id,
+                trace_id="trace",
+                queued_at=now,
+                started_at=now,
+                completed_at=now,
+                ai_messages=(),
+                usage=None,
+                usage_completeness=SubagentUsageCompleteness.FINAL_OBSERVED,
+                quiescent=True,
+                failure_code=SubagentFailureCode.EXECUTION_FAILED,
+                detail="last sibling failed",
+                stop_reason=None,
+            )
+
+    monkeypatch.setattr(task_module, "subagent_task_lifecycle", Lifecycle())
+    monkeypatch.setattr(task_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(
+        task_module,
+        "get_available_subagent_names",
+        lambda **_kwargs: ["general-purpose"],
+    )
+    monkeypatch.setattr(
+        task_module,
+        "get_subagent_config",
+        lambda *_args, **_kwargs: SubagentConfig(
+            name="general-purpose",
+            description="research",
+            model="inherit",
+            timeout_seconds=2,
+        ),
+    )
+
+    command = await task_module.task_tool.coroutine(
+        runtime=_runtime(
+            _private_binding_factory(),
+            context_updates={
+                RuntimeContextKeys.FILE_AUTHORITY: FileAuthority(),
+                RuntimeContextKeys.PRIVATE_SCOPE: object(),
+            },
+        ),
+        description="delegate research",
+        prompt="write a partial report, then fail",
+        subagent_type="general-purpose",
+        tool_call_id="call-last-failed-output",
+    )
+
+    message = _tool_message(command)
+    assert message.additional_kwargs["subagent_status"] == "failed"
+    assert "last sibling failed" in str(message.content)
+    assert "/mnt/user-data/outputs/partial.md" in str(message.content)
+    assert "22222222222222222222222222222222/outputs/partial.md" in str(
+        message.content,
+    )
+    assert str(message.content).count("present_files") == 1
+    assert "unavailable" not in str(message.content).lower()
+    assert "invalid tool" not in str(message.content).lower()
+    assert ".deerflow/subagents/" not in str(
+        message.additional_kwargs[SUBAGENT_ERROR_KEY],
+    )
+    assert "present_files" not in str(
+        message.additional_kwargs[SUBAGENT_ERROR_KEY],
+    )
 
 
 @pytest.mark.asyncio
@@ -382,7 +600,7 @@ async def test_disabled_bash_is_preflight_rejected_before_start(
                     tool_groups=(),
                 )
             ),
-            {},
+            {RuntimeContextKeys.FILE_AUTHORITY: _PrivateFileAuthorityStub()},
             SubagentQuiescencePolicy.REQUIRED_BEFORE_RETURN,
         ),
     ],
@@ -570,7 +788,12 @@ async def test_private_runtime_agent_keeps_its_own_skill_snapshot(
     monkeypatch.setattr(task_module, "_new_subagent_graph_runner", build_runner)
 
     command = await task_module.task_tool.coroutine(
-        runtime=_runtime(factory),
+        runtime=_runtime(
+            factory,
+            context_updates={
+                RuntimeContextKeys.FILE_AUTHORITY: _PrivateFileAuthorityStub(),
+            },
+        ),
         description="profile skills",
         prompt="use delegate skill",
         subagent_type="project/delegate",

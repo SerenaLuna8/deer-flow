@@ -79,6 +79,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SUBAGENT_COORDINATION_GRACE_SECONDS = 60.0
+_PRIVATE_SUBAGENT_BASH_DISABLED_MESSAGE = "Private Sub-Agent bash is unavailable because this Sandbox cannot provide a per-Task filesystem namespace"
 
 
 def _trusted_private_mcp_tools(
@@ -427,6 +428,7 @@ def _outcome_command(
     tool_call_id: str,
     model_name: str | None,
     execution_timeout_seconds: int,
+    delegated_output_promotions: object = (),
 ) -> Command:
     usage = _usage_payload(outcome.usage)
     receipt_id = str(outcome.execution_id)
@@ -437,12 +439,17 @@ def _outcome_command(
             usage=usage,
             usage_receipt_id=receipt_id,
             usage_completeness=outcome.usage_completeness.value,
+            delegated_output_promotions=delegated_output_promotions,
         )
     if isinstance(outcome, SubagentCompleted):
         return _task_result_command(
             tool_call_id=tool_call_id,
             status="completed",
             result=outcome.result,
+            lead_result=_result_with_delegated_output_promotions(
+                outcome.result,
+                delegated_output_promotions,
+            ),
             stop_reason=outcome.stop_reason,
             model_name=model_name,
             usage=usage,
@@ -450,10 +457,15 @@ def _outcome_command(
             usage_completeness=outcome.usage_completeness.value,
         )
     if isinstance(outcome, SubagentFailed):
+        error = _failure_presentation(outcome)
         return _task_result_command(
             tool_call_id=tool_call_id,
             status="failed",
-            error=_failure_presentation(outcome),
+            error=error,
+            lead_error=_result_with_delegated_output_promotions(
+                error,
+                delegated_output_promotions,
+            ),
             stop_reason=outcome.stop_reason,
             model_name=model_name,
             usage=usage,
@@ -461,10 +473,15 @@ def _outcome_command(
             usage_completeness=outcome.usage_completeness.value,
         )
     if isinstance(outcome, SubagentCancelled):
+        error = _cancellation_presentation(outcome)
         return _task_result_command(
             tool_call_id=tool_call_id,
             status="cancelled",
-            error=_cancellation_presentation(outcome),
+            error=error,
+            lead_error=_result_with_delegated_output_promotions(
+                error,
+                delegated_output_promotions,
+            ),
             model_name=model_name,
             usage=usage,
             usage_receipt_id=receipt_id,
@@ -474,19 +491,29 @@ def _outcome_command(
         if outcome.timeout_phase is SubagentTimeoutPhase.QUEUE or not outcome.quiescent:
             timeout_minutes = execution_timeout_seconds // 60
             status = "pending" if outcome.started_at is None else "running"
+            error = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {status}"
             return _task_result_command(
                 tool_call_id=tool_call_id,
                 status="polling_timed_out",
-                error=(f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {status}"),
+                error=error,
+                lead_error=_result_with_delegated_output_promotions(
+                    error,
+                    delegated_output_promotions,
+                ),
                 model_name=model_name,
                 usage=usage,
                 usage_receipt_id=receipt_id,
                 usage_completeness=outcome.usage_completeness.value,
             )
+        error = f"Execution timed out after {execution_timeout_seconds} seconds"
         return _task_result_command(
             tool_call_id=tool_call_id,
             status="timed_out",
-            error=(f"Execution timed out after {execution_timeout_seconds} seconds"),
+            error=error,
+            lead_error=_result_with_delegated_output_promotions(
+                error,
+                delegated_output_promotions,
+            ),
             model_name=model_name,
             usage=usage,
             usage_receipt_id=receipt_id,
@@ -495,19 +522,75 @@ def _outcome_command(
     raise TypeError("unsupported Sub-Agent Task outcome")
 
 
+def _result_with_delegated_output_promotions(
+    result: str,
+    raw_promotions: object,
+) -> str:
+    """Tell the Lead where delegated outputs were isolated for promotion."""
+
+    if not isinstance(raw_promotions, tuple):
+        raise RuntimeError("Delegated output isolation returned an invalid result")
+    if not raw_promotions:
+        return result
+    mappings: list[tuple[str, str]] = []
+    for promotion in raw_promotions:
+        source_path = getattr(promotion, "source_path", None)
+        scratch_path = getattr(promotion, "scratch_path", None)
+        if (
+            type(source_path) is not str
+            or not source_path.startswith("/mnt/user-data/outputs/")
+            or type(scratch_path) is not str
+            or not scratch_path.startswith(
+                "/mnt/user-data/workspace/.deerflow/subagents/",
+            )
+        ):
+            raise RuntimeError(
+                "Delegated output isolation returned an invalid result",
+            )
+        mappings.append((source_path, scratch_path))
+
+    lines = [
+        "Delegated output files were isolated as scratch files and are not final Run outputs:",
+        *(f"- {source} -> {scratch}" for source, scratch in mappings),
+        ("To deliver one, copy the selected scratch file to a new /mnt/user-data/outputs path, then call present_files."),
+    ]
+    return f"{result.rstrip()}\n\n" + "\n".join(lines)
+
+
 def _task_result_command(
     *,
     tool_call_id: str,
     status: SubagentStatusValue,
     result: str | None = None,
     error: str | None = None,
+    lead_result: str | None = None,
+    lead_error: str | None = None,
     stop_reason: SubagentStopReasonValue | None = None,
     model_name: str | None = None,
     usage: dict[str, int] | None = None,
     usage_receipt_id: str | None = None,
     usage_completeness: SubagentUsageCompletenessValue | None = None,
 ) -> Command:
-    content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
+    """Build one Task result with separate Lead and user-card projections.
+
+    ``ToolMessage.content`` remains model-visible and may include private
+    delegated-output promotion mappings. Structured metadata feeds the public
+    Sub-Agent card and therefore retains only the Sub-Agent's original result
+    or error, without Lead-only scratch paths or publication instructions.
+    """
+
+    content, _ = format_subagent_result_message(
+        status,
+        result=lead_result if lead_result is not None else result,
+        error=lead_error if lead_error is not None else error,
+        stop_reason=stop_reason,
+    )
+    _, metadata_error = format_subagent_result_message(
+        status,
+        result=result,
+        error=error,
+        stop_reason=stop_reason,
+    )
     return Command(
         update={
             "messages": [
@@ -538,14 +621,21 @@ def _host_execution_approval_command(
     usage: dict[str, int] | None,
     usage_receipt_id: str,
     usage_completeness: SubagentUsageCompletenessValue,
+    delegated_output_promotions: object = (),
 ) -> Command:
     """Bubble a delegated approval anchor into the parent Agent checkpoint."""
+
+    if not isinstance(delegated_output_promotions, tuple):
+        raise RuntimeError("Delegated output isolation returned an invalid result")
+    content = "Delegated host command execution requires approval."
+    if delegated_output_promotions:
+        content += " Scratch files created before this approval pause are discarded; regenerate them after approval if needed."
 
     return Command(
         update={
             "messages": [
                 ToolMessage(
-                    content=("Delegated host command execution requires approval."),
+                    content=content,
                     tool_call_id=tool_call_id,
                     name="task",
                     artifact={
@@ -608,6 +698,13 @@ async def _assemble_subagent_tools(
         available_tools_kwargs["asset_context"] = asset_context
 
     tools = await asyncio.to_thread(get_available_tools, **available_tools_kwargs)
+    if private_run:
+        # A shared private sandbox cannot provide a per-process mount namespace
+        # for arbitrary shell paths. File tools are routed through the exact
+        # delegated output view below; unrestricted bash could still reach the
+        # Lead's canonical outputs through relative paths, variables, or scripts.
+        # Keep the isolation boundary strong by failing that capability closed.
+        tools = [tool for tool in tools if tool.name != "bash"]
     if runtime_agent_profile is None:
         parent_tool_names = {tool.name for tool in profile.graph.tools}
         tools = [tool for tool in tools if tool.name in parent_tool_names]
@@ -654,6 +751,14 @@ async def _run_task_through_lifecycle(
     profile = parent_binding.profile
     parent_context = dict(parent_binding.context)
     private_run = type(profile) is PrivateRunParentExecutionProfile
+    file_authority = parent_context.get(RuntimeContextKeys.FILE_AUTHORITY)
+    delegated_output_scope = getattr(file_authority, "delegated_output_scope", None) if private_run else None
+    if private_run and not callable(delegated_output_scope):
+        return _task_result_command(
+            tool_call_id=tool_call_id,
+            status="failed",
+            error=SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
+        )
     app_config = _profile_app_config(profile)
     runtime_agent_catalog = trusted_runtime_agent_catalog(profile.runtime_agent_catalog) if private_run else None
     runtime_agent_profile = runtime_agent_catalog.get(subagent_type) if runtime_agent_catalog is not None else None
@@ -698,6 +803,12 @@ async def _run_task_through_lifecycle(
         )
 
     if subagent_type == "bash":
+        if private_run:
+            return _task_result_command(
+                tool_call_id=tool_call_id,
+                status="failed",
+                error=_PRIVATE_SUBAGENT_BASH_DISABLED_MESSAGE,
+            )
         if type(profile) is SdkParentExecutionProfile:
             host_bash_allowed = "bash" in static_subagent_names
             approval_unavailable = False
@@ -761,16 +872,18 @@ async def _run_task_through_lifecycle(
     # static delegates inherit the Run snapshot; other profiles materialize
     # Skills from their graph/profile inputs and never from raw invocation keys.
     runtime_skills = runtime_agent_profile.runtime_skills if runtime_agent_profile is not None else profile.runtime_skills if private_run else ()
-    delegated_context = project_delegated_runtime_context(
-        parent_binding,
-        subagent_name=config.name,
-        fallback_user_id=resolve_runtime_user_id(runtime),
-        fallback_trace_id=get_current_trace_id(),
-        agent_prompt_bundle=agent_prompt_bundle,
-        runtime_skills=tuple(runtime_skills),
-    )
+    delegated_output_root: str | None = None
 
     async def materialize_graph_runner() -> _SubagentGraphRunner:
+        delegated_context = project_delegated_runtime_context(
+            parent_binding,
+            subagent_name=config.name,
+            fallback_user_id=resolve_runtime_user_id(runtime),
+            fallback_trace_id=get_current_trace_id(),
+            agent_prompt_bundle=agent_prompt_bundle,
+            runtime_skills=tuple(runtime_skills),
+            delegated_output_root=delegated_output_root,
+        )
         tools = await _assemble_subagent_tools(
             parent_binding=parent_binding,
             parent_context=parent_context,
@@ -789,6 +902,8 @@ async def _run_task_through_lifecycle(
             "delegated_context": delegated_context,
             "tool_call_control_profile": parent_binding.tool_call_control_profile,
             "tool_call_control_observer": parent_binding.tool_call_control_observer,
+            "tool_call_limit_authority": parent_binding.tool_call_limit_authority,
+            "tool_call_limit_scope_id": parent_binding.tool_call_limit_scope_id,
         }
         if runtime_agent_profile is not None:
             executor_kwargs["agent_model_settings"] = runtime_agent_profile.model_settings
@@ -815,22 +930,47 @@ async def _run_task_through_lifecycle(
         model_name=effective_model,
         execution_timeout_seconds=config.timeout_seconds,
     )
-    outcome = await subagent_task_lifecycle.run(
-        SubagentTaskCall(
-            task_id=tool_call_id,
-            prompt=prompt,
-            queue_timeout_seconds=wait_budget_seconds,
-            execution_timeout_seconds=float(config.timeout_seconds),
-            quiescence_timeout_seconds=_SUBAGENT_COORDINATION_GRACE_SECONDS,
-        ),
-        lifecycle_binding,
-        observers=(event_adapter,),
+    lifecycle_call = SubagentTaskCall(
+        task_id=tool_call_id,
+        prompt=prompt,
+        queue_timeout_seconds=wait_budget_seconds,
+        execution_timeout_seconds=float(config.timeout_seconds),
+        quiescence_timeout_seconds=_SUBAGENT_COORDINATION_GRACE_SECONDS,
     )
+    delegated_output_capture: object | None = None
+    if callable(delegated_output_scope):
+        async with delegated_output_scope(tool_call_id) as delegated_output_capture:
+            raw_output_root = getattr(
+                delegated_output_capture,
+                "output_root",
+                None,
+            )
+            if type(raw_output_root) is not str or not raw_output_root:
+                raise RuntimeError(
+                    "Delegated output isolation returned an invalid root",
+                )
+            delegated_output_root = raw_output_root
+            outcome = await subagent_task_lifecycle.run(
+                lifecycle_call,
+                lifecycle_binding,
+                observers=(event_adapter,),
+            )
+    else:
+        outcome = await subagent_task_lifecycle.run(
+            lifecycle_call,
+            lifecycle_binding,
+            observers=(event_adapter,),
+        )
     return _outcome_command(
         outcome,
         tool_call_id=tool_call_id,
         model_name=effective_model,
         execution_timeout_seconds=config.timeout_seconds,
+        delegated_output_promotions=getattr(
+            delegated_output_capture,
+            "promotions",
+            (),
+        ),
     )
 
 

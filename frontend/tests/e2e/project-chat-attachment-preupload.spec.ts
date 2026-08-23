@@ -116,6 +116,9 @@ async function mockProjectChat(
     effectiveWorkloadProfiles?: readonly ("interactive" | "research")[];
     liveRunControlEvents?: readonly MockRunControlEvent[];
     duplicateLiveRunControlEvents?: boolean;
+    liveValuesMessages?: readonly Record<string, unknown>[];
+    continuationValuesMessages?: readonly Record<string, unknown>[];
+    followupSuggestions?: readonly string[];
   } = {
     filename: FILE_NAME,
     mediaType: "text/plain",
@@ -132,6 +135,7 @@ async function mockProjectChat(
   let runPostCount = 0;
   let runListGetCount = 0;
   let runMessagesGetCount = 0;
+  let suggestionPostCount = 0;
   let failedRunVisible = false;
   let completedRunId: string | null = null;
   let effectiveWorkloadProfile: "interactive" | "research" | null = null;
@@ -262,6 +266,11 @@ async function mockProjectChat(
       method === "GET"
     ) {
       runListGetCount += 1;
+      const successfulRunIds = completedRunId
+        ? upload.continuationValuesMessages && runPostCount >= 2
+          ? [SECOND_RUN_ID, RUN_ID]
+          : [completedRunId]
+        : [];
       return json(
         route,
         failedRunVisible && upload.firstRunError
@@ -286,29 +295,25 @@ async function mockProjectChat(
                 workload_profile: effectiveWorkloadProfile,
               },
             ]
-          : completedRunId
-            ? [
-                {
-                  run_id: completedRunId,
-                  thread_id: THREAD_ID,
-                  assistant_id: AGENT_ID,
-                  created_at: TIMESTAMP,
-                  updated_at: TIMESTAMP,
-                  status: "success",
-                  metadata: {},
-                  multitask_strategy: "reject",
-                  error: null,
-                  model_name: MODEL_ID,
-                  execution_profile: {
-                    model_name: MODEL_ID,
-                    thinking_enabled: false,
-                    reasoning_effort: null,
-                    supports_vision: true,
-                  },
-                  workload_profile: effectiveWorkloadProfile,
-                },
-              ]
-            : [],
+          : successfulRunIds.map((runId) => ({
+              run_id: runId,
+              thread_id: THREAD_ID,
+              assistant_id: AGENT_ID,
+              created_at: TIMESTAMP,
+              updated_at: TIMESTAMP,
+              status: "success",
+              metadata: {},
+              multitask_strategy: "reject",
+              error: null,
+              model_name: MODEL_ID,
+              execution_profile: {
+                model_name: MODEL_ID,
+                thinking_enabled: false,
+                reasoning_effort: null,
+                supports_vision: true,
+              },
+              workload_profile: effectiveWorkloadProfile,
+            })),
       );
     }
     if (
@@ -334,8 +339,23 @@ async function mockProjectChat(
       method === "GET"
     ) {
       runMessagesGetCount += 1;
-      if (path.includes(SECOND_RUN_ID)) {
-        return json(route, { data: [], has_more: false });
+      const requestedRunId = path.includes(SECOND_RUN_ID)
+        ? SECOND_RUN_ID
+        : RUN_ID;
+      const durableMessages = path.includes(SECOND_RUN_ID)
+        ? upload.continuationValuesMessages?.slice(-1)
+        : upload.liveValuesMessages;
+      if (durableMessages) {
+        return json(route, {
+          data: durableMessages.map((content, index) => ({
+            run_id: requestedRunId,
+            seq: String(index + 1),
+            content,
+            metadata: { caller: "lead_agent" },
+            created_at: TIMESTAMP,
+          })),
+          has_more: false,
+        });
       }
       if (!upload.firstRunError) {
         return json(route, { data: [], has_more: false });
@@ -381,6 +401,16 @@ async function mockProjectChat(
         context_window_tokens: 100_000,
         triggers: [],
         primary_trigger: null,
+      });
+    }
+    if (
+      path ===
+        `${privateWorkBase}/threads/${THREAD_ID}/context-usage/authority` &&
+      method === "GET"
+    ) {
+      return json(route, {
+        thread_id: THREAD_ID,
+        cache_marker: completedRunId ? `idle:${completedRunId}` : "idle:none",
       });
     }
     if (
@@ -501,11 +531,23 @@ async function mockProjectChat(
         "id: 1",
         "",
       ];
+      const liveValuesMessages =
+        runPostCount === 1
+          ? upload.liveValuesMessages
+          : upload.continuationValuesMessages;
+      if (liveValuesMessages) {
+        streamLines.push(
+          "event: values",
+          `data: ${JSON.stringify({ messages: liveValuesMessages })}`,
+          "id: 2",
+          "",
+        );
+      }
       liveFrames.forEach((event, index) => {
         streamLines.push(
           "event: custom",
           `data: ${JSON.stringify(event)}`,
-          `id: ${index + 2}`,
+          `id: ${index + (liveValuesMessages ? 3 : 2)}`,
           "",
         );
       });
@@ -516,7 +558,7 @@ async function mockProjectChat(
             ? { status: "error", error_code: upload.firstRunError }
             : { status: "success" },
         )}`,
-        `id: ${liveFrames.length + 2}`,
+        `id: ${liveFrames.length + (liveValuesMessages ? 3 : 2)}`,
         "",
         "",
       );
@@ -528,6 +570,15 @@ async function mockProjectChat(
           Location: `/threads/${THREAD_ID}/runs/${currentRunId}/stream`,
         },
         body: streamLines.join("\n"),
+      });
+    }
+    if (
+      path === `${privateWorkBase}/threads/${THREAD_ID}/suggestions` &&
+      method === "POST"
+    ) {
+      suggestionPostCount += 1;
+      return json(route, {
+        suggestions: upload.followupSuggestions ?? [],
       });
     }
     if (
@@ -555,6 +606,7 @@ async function mockProjectChat(
     runPostCount: () => runPostCount,
     runListGetCount: () => runListGetCount,
     runMessagesGetCount: () => runMessagesGetCount,
+    suggestionPostCount: () => suggestionPostCount,
     runRequestBodies,
     unexpectedRequests,
     uploadPostCount: () => uploadPostCount,
@@ -562,6 +614,117 @@ async function mockProjectChat(
     uploadPath,
   };
 }
+
+test("does not offer follow-up suggestions while the user is answering a clarification", async ({
+  page,
+}) => {
+  const clarificationRequestId = "clarification:call-scope";
+  const prematureSuggestion = "Compare the two Harness scopes.";
+  const clarificationMessages: Record<string, unknown>[] = [
+    {
+      id: "human-research",
+      type: "human",
+      content: "Research Harness history.",
+      additional_kwargs: { run_id: RUN_ID },
+    },
+    {
+      id: "ai-clarification",
+      type: "ai",
+      content: "",
+      additional_kwargs: { run_id: RUN_ID },
+      tool_calls: [
+        {
+          id: "call-scope",
+          name: "ask_clarification",
+          args: { question: "Which Harness scope should I cover?" },
+        },
+      ],
+    },
+    {
+      id: clarificationRequestId,
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "call-scope",
+      content: "Which Harness scope should I cover?",
+      additional_kwargs: { run_id: RUN_ID },
+      artifact: {
+        human_input: {
+          version: 1,
+          kind: "human_input_request",
+          source: "ask_clarification",
+          request_id: clarificationRequestId,
+          tool_call_id: "call-scope",
+          clarification_type: "scope",
+          question: "Which Harness scope should I cover?",
+          input_mode: "choice_with_other",
+          options: [
+            {
+              id: "agent-and-harness",
+              label: "Agent + Harness",
+              value: "agent+harness",
+            },
+          ],
+        },
+      },
+    },
+  ];
+  const answerResponse = {
+    version: 1,
+    kind: "human_input_response",
+    source: "ask_clarification",
+    request_id: clarificationRequestId,
+    response_kind: "option",
+    option_id: "agent-and-harness",
+    value: "agent+harness",
+  };
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    followupSuggestions: [prematureSuggestion],
+    liveValuesMessages: clarificationMessages,
+    continuationValuesMessages: [
+      ...clarificationMessages,
+      {
+        id: "human-clarification-response",
+        type: "human",
+        content:
+          'For your clarification "Which Harness scope should I cover?", my answer is: agent+harness',
+        additional_kwargs: {
+          hide_from_ui: true,
+          human_input_response: answerResponse,
+          run_id: SECOND_RUN_ID,
+        },
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("Research Harness history.");
+  await composer.press("Enter");
+
+  await expect(
+    page.getByText("Which Harness scope should I cover?", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(prematureSuggestion)).toHaveCount(0);
+  await expect.poll(requests.suggestionPostCount).toBe(0);
+
+  const humanInputCard = page.getByTestId("human-input-card");
+  await humanInputCard.getByRole("radio", { name: "Agent + Harness" }).click();
+  await humanInputCard
+    .getByRole("button", { name: /Submit answer|提交回答/u })
+    .click();
+  await expect.poll(requests.runPostCount).toBe(2);
+  await expect(humanInputCard).toHaveAttribute(
+    "data-human-input-state",
+    "answered",
+  );
+  await expect(humanInputCard).toContainText(/Answered:|已回答：/u);
+  await expect(page.getByText(prematureSuggestion)).toHaveCount(0);
+  await expect.poll(requests.suggestionPostCount).toBe(0);
+  expect(requests.unexpectedRequests).toEqual([]);
+});
 
 test("uploads an attachment before send while keeping the composer interactive", async ({
   page,
@@ -876,19 +1039,17 @@ test("deduplicates live and durable Run-control progress across refresh", async 
   } as const;
   const toolObservation = {
     type: "tool_call_budget",
-    schema_version: 1,
+    schema_version: 2,
     reason_code: "tool_budget_exhausted",
     workload_profile: "research",
     role: "lead",
     run_id: RUN_ID,
     execution_id: null,
-    tool_name: "web_search",
     count_before: 9,
     proposed: 3,
     admitted: 1,
     rejected: 2,
     count_after: 10,
-    warn_threshold: 6,
     hard_limit: 10,
     disposition: "truncate_tool_calls",
     observation_id: "b".repeat(64),
@@ -966,21 +1127,19 @@ test("keeps a specific terminal failure authoritative after a tool budget receip
     liveRunControlEvents: [
       {
         type: "tool_call_budget",
-        schema_version: 1,
+        schema_version: 2,
         reason_code: "tool_budget_exhausted",
         workload_profile: "research",
         role: "lead",
         run_id: RUN_ID,
         execution_id: null,
-        tool_name: "web_search",
         count_before: 9,
         proposed: 1,
         admitted: 1,
         rejected: 0,
         count_after: 10,
-        warn_threshold: 6,
         hard_limit: 10,
-        disposition: "exhaust_tool",
+        disposition: "exhaust_run",
         observation_id: "d".repeat(64),
       },
     ],

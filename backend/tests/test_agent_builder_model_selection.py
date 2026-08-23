@@ -43,6 +43,7 @@ def _frozen_model() -> FrozenSystemModelExecution:
             "model_config_id": GENERATION_MODEL_REF,
             "provider_adapter": "deepseek",
             "provider_model": "deepseek-v4-flash",
+            "max_input_tokens": 64_000,
             "settings": {},
             "supports_thinking": True,
             "supports_reasoning_effort": True,

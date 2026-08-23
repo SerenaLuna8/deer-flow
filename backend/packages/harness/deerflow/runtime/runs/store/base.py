@@ -11,6 +11,7 @@ When user_id is None, no user filtering is applied (single-user mode).
 from __future__ import annotations
 
 import abc
+from collections.abc import Collection
 from typing import Any
 
 from deerflow.runtime.private_scope import PrivateResourceScope
@@ -194,6 +195,7 @@ class RunStore(abc.ABC):
         thread_id: str,
         *,
         include_active: bool = False,
+        included_run_ids: Collection[str] | None = None,
         scope: PrivateResourceScope | None = None,
     ) -> dict[str, Any]:
         """Aggregate token usage for completed runs in a thread.
@@ -201,5 +203,8 @@ class RunStore(abc.ABC):
         Returns a dict with keys: total_tokens, total_input_tokens,
         total_output_tokens, total_runs, by_model (model_name → {tokens, runs}),
         by_caller ({lead_agent, subagent, middleware}).
+
+        ``included_run_ids=None`` preserves the general store behavior. Public
+        token-usage projections pass a verified set; an empty set returns zero.
         """
         pass

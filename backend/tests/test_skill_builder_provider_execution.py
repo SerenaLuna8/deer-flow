@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,7 +46,6 @@ from deerflow.sandbox.sandbox_provider import (
     PrivateSandboxLease,
     RunScopedReadOnlyMount,
 )
-from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
 from deerflow.subagents.binding import (
     AgentGraphExecutionInputs,
     ParentExecutionBindingFactory,
@@ -131,6 +131,7 @@ def _execution_bundle(
         description="",
         use="support.fake_models:FakeVisionBridgeChatModel",
         model="skill-builder-provider-test",
+        max_input_tokens=64_000,
     )
     app_config = AppConfig(
         models=[model],
@@ -265,6 +266,7 @@ def _tool_policy_config(*, aio: bool) -> AppConfig:
         description="",
         use="support.fake_models:FakeVisionBridgeChatModel",
         model="skill-builder-tool-policy-test",
+        max_input_tokens=64_000,
     )
     sandbox: dict[str, object] = {
         "use": ("deerflow.sandbox.aio:AioSandboxProvider" if aio else "deerflow.sandbox.local:LocalSandboxProvider"),
@@ -492,8 +494,16 @@ def test_skill_builder_local_approval_hides_direct_bash(
 
 
 @pytest.mark.asyncio
-async def test_skill_builder_local_approval_blocks_delegated_bash() -> None:
+async def test_skill_builder_private_run_blocks_delegated_bash() -> None:
     app_config = _tool_policy_config(aio=False)
+
+    @asynccontextmanager
+    async def delegated_output_scope(_task_id: str):
+        yield SimpleNamespace(
+            output_root=("/mnt/user-data/workspace/.deerflow/subagents/44444444444444444444444444444444/outputs"),
+            promotions=(),
+        )
+
     binding_factory = ParentExecutionBindingFactory(
         PrivateRunParentExecutionProfile(
             graph=AgentGraphExecutionInputs(
@@ -518,6 +528,9 @@ async def test_skill_builder_local_approval_blocks_delegated_bash() -> None:
         runtime=SimpleNamespace(
             context={
                 RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: binding_factory,
+                RuntimeContextKeys.FILE_AUTHORITY: SimpleNamespace(
+                    delegated_output_scope=delegated_output_scope,
+                ),
                 RuntimeContextKeys.NON_INTERACTIVE: True,
             },
             state={},
@@ -531,7 +544,7 @@ async def test_skill_builder_local_approval_blocks_delegated_bash() -> None:
     )
 
     message = result.update["messages"][0]
-    assert LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE in message.content
+    assert "per-Task filesystem namespace" in message.content
 
 
 def test_skill_builder_aio_keeps_isolated_bash(

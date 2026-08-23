@@ -42,6 +42,7 @@ from deerflow.secrets import (
 _BOOTSTRAP_LOCK_KEY = 0x0DEE_12F1_4D4F_444C
 _ID_NAMESPACE = uuid.UUID("e9ef2794-807b-5d89-967c-c67be15b42e7")
 _BOOTSTRAP_API_KEY_ENV = "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY"
+DEEPSEEK_V4_MAX_INPUT_TOKENS = 1_000_000
 
 DEEPSEEK_V4_PRO_MODEL_ID = uuid.uuid5(_ID_NAMESPACE, "deepseek-v4:model")
 DEEPSEEK_V4_FLASH_MODEL_ID = uuid.uuid5(
@@ -103,6 +104,7 @@ def _deepseek_model_command(
             status="active",
             provider_adapter="patched_deepseek",
             provider_model=provider_model,
+            max_input_tokens=DEEPSEEK_V4_MAX_INPUT_TOKENS,
             settings={
                 "base_url": "https://api.deepseek.com",
                 "request_timeout": 600.0,
@@ -244,6 +246,7 @@ async def _validate_existing_catalog(session: AsyncSession) -> None:
                 status=model.status,
                 provider_adapter=model.provider_adapter,
                 provider_model=model.provider_model,
+                max_input_tokens=model.max_input_tokens,
                 settings=dict(model.settings),
                 supports_thinking=model.supports_thinking,
                 supports_reasoning_effort=model.supports_reasoning_effort,
@@ -295,6 +298,7 @@ async def _bootstrap_fresh_catalog(
             status=command.status,
             provider_adapter=command.provider_adapter,
             provider_model=command.provider_model,
+            max_input_tokens=command.max_input_tokens,
             settings=dict(command.settings),
             supports_thinking=command.supports_thinking,
             supports_reasoning_effort=command.supports_reasoning_effort,
@@ -367,6 +371,7 @@ async def bootstrap_default_system_model(
 
 __all__ = [
     "DEFAULT_MODEL_ID",
+    "DEEPSEEK_V4_MAX_INPUT_TOKENS",
     "DEEPSEEK_V4_FLASH_MODEL_ID",
     "DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID",
     "DEEPSEEK_V4_PRO_MODEL_ID",

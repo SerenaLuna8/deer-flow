@@ -9,6 +9,7 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
     _is_trusted_read_only_tool,
 )
 from deerflow.sandbox.exceptions import SandboxError
+from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import HostBashExecutionMode
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
@@ -25,10 +26,14 @@ from deerflow.sandbox.tools import (
     _resolve_skills_path,
     bash_tool,
     ensure_thread_directories_exist,
+    glob_tool,
+    grep_tool,
+    ls_tool,
     mask_local_paths_in_output,
     read_file_tool,
     replace_virtual_path,
     replace_virtual_paths_in_command,
+    resolve_delegated_tool_path,
     str_replace_tool,
     validate_local_bash_command_paths,
     validate_local_tool_path,
@@ -37,6 +42,7 @@ from deerflow.sandbox.tools import (
 from deerflow.tools.builtins.list_uploaded_files_tool import (
     list_uploaded_files_tool,
 )
+from deerflow.tools.builtins.view_image_tool import view_image_tool
 
 _THREAD_DATA = {
     "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
@@ -44,12 +50,38 @@ _THREAD_DATA = {
     "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
 }
 
+_DELEGATED_OUTPUT_ROOT = "/mnt/user-data/workspace/.deerflow/subagents/0123456789abcdef0123456789abcdef/outputs"
+
+
+def _delegated_private_runtime() -> SimpleNamespace:
+    return SimpleNamespace(
+        state={
+            "thread_data": {
+                "workspace_path": "/mnt/user-data/workspace",
+                "uploads_path": "/mnt/user-data/uploads",
+                "outputs_path": _DELEGATED_OUTPUT_ROOT,
+            },
+        },
+        context={
+            "private_scope": object(),
+            "__file_authority": SimpleNamespace(
+                delegated_output_root=_DELEGATED_OUTPUT_ROOT,
+            ),
+        },
+    )
+
 
 def test_only_canonical_read_only_tools_bypass_the_side_effect_boundary() -> None:
     assert _is_trusted_read_only_tool(
         SimpleNamespace(tool=list_uploaded_files_tool),
     )
     assert not _is_trusted_read_only_tool(SimpleNamespace(tool=object()))
+
+
+def test_write_file_description_does_not_assign_lead_delivery_to_subagents() -> None:
+    assert "/mnt/user-data/outputs" in write_file_tool.description
+    assert "present_files" not in write_file_tool.description
+    assert "present_files" not in view_image_tool.description
 
 
 def test_private_local_sandbox_does_not_create_virtual_mnt_directories() -> None:
@@ -73,6 +105,234 @@ def test_private_local_sandbox_does_not_create_virtual_mnt_directories() -> None
         ensure_thread_directories_exist(runtime)
 
     makedirs.assert_not_called()
+
+
+# ---------- delegated output view ----------
+
+
+def test_delegated_output_path_maps_canonical_outputs_to_exact_task_view() -> None:
+    runtime = _delegated_private_runtime()
+
+    assert resolve_delegated_tool_path(runtime, "/mnt/user-data/outputs") == _DELEGATED_OUTPUT_ROOT
+    assert (
+        resolve_delegated_tool_path(
+            runtime,
+            "/mnt/user-data/outputs/reports/final.md",
+        )
+        == f"{_DELEGATED_OUTPUT_ROOT}/reports/final.md"
+    )
+    assert (
+        resolve_delegated_tool_path(
+            runtime,
+            "/mnt/user-data/workspace/notes.md",
+        )
+        == "/mnt/user-data/workspace/notes.md"
+    )
+
+
+def test_delegated_output_path_rejects_relative_and_other_task_scratch() -> None:
+    runtime = _delegated_private_runtime()
+    other_task = "/mnt/user-data/workspace/.deerflow/subagents/fedcba9876543210fedcba9876543210/outputs/report.md"
+
+    with pytest.raises(PermissionError, match="absolute path"):
+        resolve_delegated_tool_path(runtime, "outputs/report.md")
+    with pytest.raises(PermissionError, match="not directly accessible"):
+        resolve_delegated_tool_path(runtime, other_task)
+    with pytest.raises(PermissionError, match="not directly accessible"):
+        resolve_delegated_tool_path(
+            runtime,
+            "/mnt/user-data/workspace/.deerflow",
+        )
+
+
+def test_delegated_write_file_reaches_only_exact_task_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Sandbox:
+        def __init__(self) -> None:
+            self.writes: list[tuple[str, str, bool]] = []
+
+        def write_file(
+            self,
+            path: str,
+            content: str,
+            append: bool = False,
+        ) -> None:
+            self.writes.append((path, content, append))
+
+    runtime = _delegated_private_runtime()
+    sandbox = Sandbox()
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda _runtime: sandbox,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda _runtime: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.is_local_sandbox",
+        lambda _runtime: False,
+    )
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="write delegated output",
+        path="/mnt/user-data/outputs/report.txt",
+        content="delegate result",
+    )
+
+    assert result == "OK"
+    assert sandbox.writes == [
+        (
+            f"{_DELEGATED_OUTPUT_ROOT}/report.txt",
+            "delegate result",
+            False,
+        )
+    ]
+
+
+def test_delegated_read_file_resolves_internal_alias_to_exact_task_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_path = f"{_DELEGATED_OUTPUT_ROOT.rsplit('/', 1)[0]}/internal/.tool-results/full-result.txt"
+
+    class Sandbox:
+        def __init__(self) -> None:
+            self.reads: list[str] = []
+
+        def read_file(self, path: str) -> str:
+            self.reads.append(path)
+            return "full delegated result"
+
+    runtime = _delegated_private_runtime()
+    sandbox = Sandbox()
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda _runtime: sandbox,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda _runtime: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.is_local_sandbox",
+        lambda _runtime: False,
+    )
+
+    result = read_file_tool.func(
+        runtime=runtime,
+        description="read complete delegated result",
+        path="/mnt/user-data/workspace/.tool-results/full-result.txt",
+    )
+
+    assert result == "full delegated result"
+    assert sandbox.reads == [expected_path]
+
+
+def test_delegated_workspace_scans_hide_every_task_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sibling_file = "/mnt/user-data/workspace/.deerflow/subagents/fedcba9876543210fedcba9876543210/outputs/secret.txt"
+    visible_file = "/mnt/user-data/workspace/notes.txt"
+
+    class Sandbox:
+        def list_dir(self, _path: str) -> list[str]:
+            return [visible_file, sibling_file]
+
+        def glob(
+            self,
+            _path: str,
+            _pattern: str,
+            *,
+            include_dirs: bool,
+            max_results: int,
+        ) -> tuple[list[str], bool]:
+            del include_dirs, max_results
+            return [visible_file, sibling_file], False
+
+        def grep(
+            self,
+            _path: str,
+            _pattern: str,
+            *,
+            glob: str | None,
+            literal: bool,
+            case_sensitive: bool,
+            max_results: int,
+        ) -> tuple[list[GrepMatch], bool]:
+            del glob, literal, case_sensitive, max_results
+            return (
+                [
+                    GrepMatch(visible_file, 1, "visible"),
+                    GrepMatch(sibling_file, 1, "secret"),
+                ],
+                False,
+            )
+
+    runtime = _delegated_private_runtime()
+    sandbox = Sandbox()
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda _runtime: sandbox,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda _runtime: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.is_local_sandbox",
+        lambda _runtime: False,
+    )
+
+    results = [
+        ls_tool.func(
+            runtime=runtime,
+            description="list workspace",
+            path="/mnt/user-data/workspace",
+        ),
+        glob_tool.func(
+            runtime=runtime,
+            description="find files",
+            pattern="**/*",
+            path="/mnt/user-data/workspace",
+        ),
+        grep_tool.func(
+            runtime=runtime,
+            description="search files",
+            pattern="text",
+            path="/mnt/user-data/workspace",
+        ),
+    ]
+
+    for result in results:
+        assert visible_file in result
+        assert ".deerflow" not in result
+        assert "secret.txt" not in result
+
+
+@pytest.mark.parametrize(
+    "delegated_root",
+    [
+        "/mnt/user-data/workspace/.deerflow/subagents/not-a-uuid/outputs",
+        ("/mnt/user-data/workspace/.deerflow/subagents/0123456789abcdef0123456789abcdef/internal"),
+        "/mnt/user-data/outputs",
+    ],
+)
+def test_delegated_output_path_rejects_untrusted_authority_root(
+    delegated_root: str,
+) -> None:
+    runtime = SimpleNamespace(
+        context={
+            "private_scope": object(),
+            "__file_authority": SimpleNamespace(
+                delegated_output_root=delegated_root,
+            ),
+        },
+    )
+
+    with pytest.raises(SandboxError, match="Invalid delegated output view"):
+        resolve_delegated_tool_path(runtime, "/mnt/user-data/outputs/report.md")
 
 
 # ---------- replace_virtual_path ----------

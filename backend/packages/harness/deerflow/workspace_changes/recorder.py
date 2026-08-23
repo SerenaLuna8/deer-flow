@@ -28,9 +28,21 @@ _TRUSTED_CHANGE_STATUSES = ("created", "modified", "deleted")
 _TRUSTED_LOGICAL_ROOTS = {"workspace", "outputs"}
 
 
-def trusted_workspace_change_result(changes: object) -> WorkspaceChangeResult | None:
-    """Adapt the finalizer's trusted logical paths to the public v1 event schema."""
+def workspace_change_event_content(result: WorkspaceChangeResult) -> str:
+    """Format one truthful durable event summary from calculated metrics."""
 
+    summary = result.summary
+    changed_file_count = summary.created + summary.modified + summary.deleted
+    if summary.additions is None or summary.deletions is None:
+        return f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed (line counts unavailable)"
+    return f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed +{summary.additions} -{summary.deletions}"
+
+
+def trusted_workspace_change_result(changes: object) -> WorkspaceChangeResult | None:
+    """Adapt finalizer authority to the current public event schema."""
+
+    if isinstance(changes, WorkspaceChangeResult):
+        return changes
     if not isinstance(changes, dict):
         return None
     files: list[WorkspaceFileChange] = []
@@ -65,7 +77,9 @@ def trusted_workspace_change_result(changes: object) -> WorkspaceChangeResult | 
                     sha256_before=None,
                     sha256_after=None,
                     diff="",
-                    diff_unavailable_reason=("sensitive" if sensitive else None),
+                    diff_unavailable_reason=("sensitive" if sensitive else "unavailable"),
+                    additions=None,
+                    deletions=None,
                 )
             )
     if not files:
@@ -77,6 +91,8 @@ def trusted_workspace_change_result(changes: object) -> WorkspaceChangeResult | 
             created=counts["created"],
             modified=counts["modified"],
             deleted=counts["deleted"],
+            additions=None,
+            deletions=None,
         ),
         files=files,
     )
@@ -151,9 +167,7 @@ async def record_workspace_changes(
             return None
 
         payload = result.to_dict()
-        summary = result.summary
-        changed_file_count = summary.created + summary.modified + summary.deleted
-        content = f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed +{summary.additions} -{summary.deletions}"
+        content = workspace_change_event_content(result)
         return await event_store.put(
             thread_id=thread_id,
             run_id=run_id,

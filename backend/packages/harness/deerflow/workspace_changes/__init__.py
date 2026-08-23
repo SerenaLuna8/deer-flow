@@ -4,6 +4,7 @@ from .recorder import (
     capture_workspace_snapshot,
     record_workspace_changes,
     trusted_workspace_change_result,
+    workspace_change_event_content,
 )
 from .scanner import scan_workspace_roots
 from .types import (
@@ -35,4 +36,5 @@ __all__ = [
     "record_workspace_changes",
     "scan_workspace_roots",
     "trusted_workspace_change_result",
+    "workspace_change_event_content",
 ]

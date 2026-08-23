@@ -136,6 +136,9 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
         "RUN_POLICY_STALE",
         "TOOL_CALL_CONTROL_STATE_INVALID",
         "LOOP_FINALIZATION_FAILED",
+        "PROVIDER_REQUEST_USAGE_UNSUPPORTED",
+        "PROVIDER_REQUEST_PROFILE_DRIFT",
+        "PROVIDER_REQUEST_CAPACITY_EXCEEDED",
     }
     assert StreamFrame.end(
         status="error",

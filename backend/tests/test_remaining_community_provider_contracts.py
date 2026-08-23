@@ -24,6 +24,7 @@ from deerflow.community.jina_ai.jina_client import _jina_http_error
 from deerflow.community.searxng import tools as searxng_tools
 from deerflow.community.searxng.searxng_client import _searxng_http_error
 from deerflow.community.tavily import tools as tavily_tools
+from deerflow.runtime.context_keys import RuntimeContextKeys
 
 _PRIVATE_URL = "http://2130706433/internal"
 _SECRET_EXCEPTION = "secret-provider-detail"
@@ -465,3 +466,80 @@ async def test_browserless_capture_private_url_returns_structured_tool_message(
 
     assert payload["retryable"] is False
     assert provider_called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("is_subagent", "expected_presentations"),
+    [(True, 0), (False, 1)],
+)
+async def test_browserless_capture_only_lead_records_delivery_intent(
+    monkeypatch: pytest.MonkeyPatch,
+    is_subagent: bool,
+    expected_presentations: int,
+) -> None:
+    class Authority:
+        def __init__(self) -> None:
+            self.writes: list[tuple[str, bytes]] = []
+            self.presentations: list[tuple[tuple[str, ...], str]] = []
+
+        async def write_output(self, relative_path: str, content: bytes) -> str:
+            self.writes.append((relative_path, content))
+            return f"/mnt/user-data/outputs/{relative_path}"
+
+        async def record_presented_paths(
+            self,
+            paths: tuple[str, ...],
+            *,
+            tool_call_id: str,
+        ) -> None:
+            self.presentations.append((paths, tool_call_id))
+
+    class Client:
+        async def capture_screenshot(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                content=b"image",
+                target_status_code="200",
+                target_status="OK",
+            )
+
+    authority = Authority()
+    context = {
+        "private_scope": object(),
+        "__file_authority": authority,
+    }
+    if is_subagent:
+        context[RuntimeContextKeys.IS_SUBAGENT] = True
+    runtime = SimpleNamespace(
+        state={
+            "thread_data": {
+                "outputs_path": "/mnt/user-data/outputs",
+            },
+        },
+        context=context,
+    )
+    monkeypatch.setattr(
+        browserless_tools,
+        "_validate_capture_url",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        browserless_tools,
+        "_get_browserless_client",
+        lambda *_args, **_kwargs: Client(),
+    )
+
+    command = await _async_tool_call(
+        browserless_tools.web_capture_tool,
+        runtime,
+        "https://example.com/report",
+        "capture-1",
+        "report.png",
+    )
+
+    assert authority.writes == [("report.png", b"image")]
+    assert len(authority.presentations) == expected_presentations
+    assert command.update["artifacts"] == [
+        "/mnt/user-data/outputs/report.png",
+    ]
+    assert ".deerflow" not in repr(command.update)

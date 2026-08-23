@@ -4,14 +4,15 @@ export type DiffUnavailableReason =
   | "binary"
   | "large"
   | "sensitive"
-  | "truncated";
+  | "truncated"
+  | "unavailable";
 
 export interface WorkspaceChangeSummary {
   created: number;
   modified: number;
   deleted: number;
-  additions: number;
-  deletions: number;
+  additions: number | null;
+  deletions: number | null;
   truncated: boolean;
 }
 
@@ -28,8 +29,8 @@ export interface WorkspaceFileChange {
   diff: string;
   diff_truncated: boolean;
   diff_unavailable_reason: DiffUnavailableReason | null;
-  additions: number;
-  deletions: number;
+  additions: number | null;
+  deletions: number | null;
 }
 
 export interface WorkspaceChangesResponse {

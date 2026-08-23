@@ -14,6 +14,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langsmith.run_helpers import get_tracing_context, tracing_context
+from pydantic import SecretStr
 
 import deerflow.models.runtime as model_runtime_module
 from deerflow.config.app_config import AppConfig
@@ -565,6 +566,7 @@ def test_shared_factory_runtime_override_replaces_catalog_retry_without_duplicat
         description="",
         use="example:RetryAwareModel",
         model="provider-model",
+        max_input_tokens=64_000,
         max_retries=9,
     )
     app_config = AppConfig(
@@ -581,6 +583,283 @@ def test_shared_factory_runtime_override_replaces_catalog_retry_without_duplicat
 
     assert instance.kwargs["max_retries"] == 0
     assert "runtime_overrides" not in instance.kwargs
+
+
+def test_shared_factory_applies_catalog_input_limit_to_model_profile_without_provider_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ProfileAwareModel:
+        model_fields: dict[str, object] = {}
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.profile = {
+                "max_input_tokens": 128_000,
+                "supports_tool_calling": True,
+            }
+
+    monkeypatch.setattr(
+        "deerflow.models.factory.resolve_class",
+        lambda *_args, **_kwargs: ProfileAwareModel,
+    )
+    model = ModelConfig(
+        name="runtime-model",
+        display_name="Runtime model",
+        description="",
+        use="example:ProfileAwareModel",
+        model="provider-model",
+        max_input_tokens=64_000,
+    )
+    app_config = AppConfig(
+        models=[model],
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+    )
+
+    instance = create_chat_model(
+        name=model.name,
+        app_config=app_config,
+        attach_tracing=False,
+    )
+
+    assert "max_input_tokens" not in instance.kwargs
+    assert instance.profile == {
+        "max_input_tokens": 64_000,
+        "supports_tool_calling": True,
+    }
+
+
+def _reasoning_capture_model(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    provider_adapter: str,
+    catalog_effort: str | None = None,
+) -> tuple[ModelConfig, AppConfig]:
+    class ReasoningCaptureModel:
+        model_fields: dict[str, object] = {}
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "deerflow.models.factory.resolve_class",
+        lambda *_args, **_kwargs: ReasoningCaptureModel,
+    )
+    model_kwargs: dict[str, object] = {
+        "name": "reasoning-model",
+        "display_name": "Reasoning model",
+        "description": "",
+        "use": "example:ReasoningCaptureModel",
+        "model": "provider-model",
+        "max_input_tokens": 64_000,
+        "supports_thinking": True,
+        "supports_reasoning_effort": True,
+    }
+    if catalog_effort is not None:
+        model_kwargs["reasoning_effort"] = catalog_effort
+    model = ModelConfig(**model_kwargs)
+    model._system_provider_adapter = provider_adapter
+    return model, AppConfig(
+        models=[model],
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+    )
+
+
+@pytest.mark.parametrize("provider_adapter", ["deepseek", "patched_deepseek"])
+@pytest.mark.parametrize(
+    ("canonical_effort", "provider_effort"),
+    [("low", "low"), ("medium", "high"), ("high", "max")],
+)
+def test_shared_factory_maps_run_reasoning_effort_for_deepseek(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_adapter: str,
+    canonical_effort: str,
+    provider_effort: str,
+) -> None:
+    model, app_config = _reasoning_capture_model(
+        monkeypatch,
+        provider_adapter=provider_adapter,
+        catalog_effort="low",
+    )
+
+    instance = create_chat_model(
+        name=model.name,
+        thinking_enabled=True,
+        reasoning_effort=canonical_effort,
+        app_config=app_config,
+        attach_tracing=False,
+    )
+
+    assert instance.kwargs["reasoning_effort"] == provider_effort
+
+
+@pytest.mark.parametrize(
+    ("canonical_effort", "provider_effort"),
+    [("low", "low"), ("medium", "high"), ("high", "max")],
+)
+def test_shared_factory_deepseek_effort_reaches_openai_wire_payload(
+    canonical_effort: str,
+    provider_effort: str,
+) -> None:
+    model = ModelConfig(
+        name="deepseek-wire-model",
+        display_name="DeepSeek wire model",
+        description="",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="deepseek-v4-flash",
+        max_input_tokens=1_000_000,
+        api_key=SecretStr("unit-test-key"),
+        base_url="https://api.deepseek.com",
+        max_tokens=51_200,
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        when_thinking_enabled={
+            "extra_body": {"thinking": {"type": "enabled"}},
+        },
+        when_thinking_disabled={
+            "extra_body": {"thinking": {"type": "disabled"}},
+        },
+    )
+    model._system_provider_adapter = "patched_deepseek"
+    app_config = AppConfig(
+        models=[model],
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+    )
+
+    chat_model = create_chat_model(
+        name=model.name,
+        thinking_enabled=True,
+        reasoning_effort=canonical_effort,
+        app_config=app_config,
+        attach_tracing=False,
+    )
+    payload = chat_model._get_request_payload([HumanMessage(content="hello")])
+
+    assert payload["reasoning_effort"] == provider_effort
+    assert payload["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+def test_shared_factory_deepseek_flash_reaches_disabled_wire_payload() -> None:
+    model = ModelConfig(
+        name="deepseek-flash-wire-model",
+        display_name="DeepSeek flash wire model",
+        description="",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="deepseek-v4-flash",
+        max_input_tokens=1_000_000,
+        api_key=SecretStr("unit-test-key"),
+        base_url="https://api.deepseek.com",
+        reasoning_effort="high",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        when_thinking_enabled={
+            "extra_body": {"thinking": {"type": "enabled"}},
+        },
+        when_thinking_disabled={
+            "extra_body": {"thinking": {"type": "disabled"}},
+        },
+    )
+    model._system_provider_adapter = "patched_deepseek"
+    app_config = AppConfig(
+        models=[model],
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+    )
+
+    chat_model = create_chat_model(
+        name=model.name,
+        thinking_enabled=False,
+        app_config=app_config,
+        attach_tracing=False,
+    )
+    payload = chat_model._get_request_payload([HumanMessage(content="hello")])
+
+    assert "reasoning_effort" not in payload
+    assert payload["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.parametrize("provider_adapter", ["deepseek", "patched_deepseek"])
+def test_shared_factory_run_flash_clears_deepseek_catalog_reasoning_default(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_adapter: str,
+) -> None:
+    model, app_config = _reasoning_capture_model(
+        monkeypatch,
+        provider_adapter=provider_adapter,
+        catalog_effort="high",
+    )
+
+    instance = create_chat_model(
+        name=model.name,
+        thinking_enabled=False,
+        reasoning_effort="none",
+        app_config=app_config,
+        attach_tracing=False,
+    )
+
+    assert "reasoning_effort" not in instance.kwargs
+
+
+@pytest.mark.parametrize("provider_adapter", ["deepseek", "patched_deepseek"])
+def test_shared_factory_preserves_deepseek_provider_effort_without_run_override(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_adapter: str,
+) -> None:
+    model, app_config = _reasoning_capture_model(
+        monkeypatch,
+        provider_adapter=provider_adapter,
+        catalog_effort="max",
+    )
+
+    instance = create_chat_model(
+        name=model.name,
+        thinking_enabled=True,
+        app_config=app_config,
+        attach_tracing=False,
+    )
+
+    assert instance.kwargs["reasoning_effort"] == "max"
+
+
+@pytest.mark.parametrize("provider_adapter", ["deepseek", "patched_deepseek"])
+@pytest.mark.parametrize("canonical_effort", ["none", "minimal"])
+def test_shared_factory_rejects_unsupported_run_reasoning_for_deepseek(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_adapter: str,
+    canonical_effort: str,
+) -> None:
+    model, app_config = _reasoning_capture_model(
+        monkeypatch,
+        provider_adapter=provider_adapter,
+        catalog_effort="high",
+    )
+
+    with pytest.raises(RuntimeModelSettingsUnsupported):
+        create_chat_model(
+            name=model.name,
+            thinking_enabled=True,
+            reasoning_effort=canonical_effort,
+            app_config=app_config,
+            attach_tracing=False,
+        )
+
+
+def test_shared_factory_keeps_non_deepseek_run_reasoning_effort_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model, app_config = _reasoning_capture_model(
+        monkeypatch,
+        provider_adapter="openai",
+        catalog_effort="high",
+    )
+
+    instance = create_chat_model(
+        name=model.name,
+        thinking_enabled=True,
+        reasoning_effort="medium",
+        app_config=app_config,
+        attach_tracing=False,
+    )
+
+    assert instance.kwargs["reasoning_effort"] == "medium"
 
 
 def test_shared_factory_rejects_unregistered_runtime_overrides(
@@ -601,6 +880,7 @@ def test_shared_factory_rejects_unregistered_runtime_overrides(
         description="",
         use="example:RetryAwareModel",
         model="provider-model",
+        max_input_tokens=64_000,
     )
     app_config = AppConfig(
         models=[model],

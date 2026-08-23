@@ -5,11 +5,19 @@ from types import SimpleNamespace
 
 import pytest
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool
 from pydantic import SecretStr
 
 import deerflow.agents.lead_agent.agent as lead_agent_module
 from deerflow.agents.lead_agent.agent import TrustedLeadAgentExtension
+from deerflow.agents.middlewares.manifest import (
+    MiddlewarePhase,
+    assign_middleware_layer,
+)
+from deerflow.agents.middlewares.provider_request_usage import (
+    FinalProviderRequestGuard,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.subagents.binding import (
@@ -34,6 +42,27 @@ class _BuilderOutputLimitMiddleware(AgentMiddleware):
     pass
 
 
+class _AfterModelOnlyMiddleware(AgentMiddleware):
+    def after_model(self, state, runtime):  # type: ignore[no-untyped-def]
+        return None
+
+
+class _UnboundedRequestShaperMiddleware(AgentMiddleware):
+    def wrap_model_call(self, request, handler):  # type: ignore[no-untyped-def]
+        return handler(request)
+
+
+class _BoundedRequestShaperMiddleware(_UnboundedRequestShaperMiddleware):
+    provider_request_bounded_overlay_material = (
+        HumanMessage(
+            content="bounded trusted reminder",
+            name="trusted_reminder",
+            additional_kwargs={"hide_from_ui": True},
+        ),
+    )
+    provider_request_bounded_overlay_message_count = 1
+
+
 def _tool(name: str) -> StructuredTool:
     def invoke() -> str:
         return name
@@ -54,6 +83,7 @@ def _app_config() -> AppConfig:
                 description="",
                 use="langchain_openai:ChatOpenAI",
                 model="test-model",
+                max_input_tokens=64_000,
                 api_key=SecretStr("unit-test-key"),
                 supports_thinking=False,
                 supports_reasoning_effort=False,
@@ -79,6 +109,8 @@ def _private_runtime(tmp_path: Path) -> object:
         soul="builder prompt",
         agent_catalog=None,
         capability_notice="",
+        provider_request_closure_identity="closure-test",
+        provider_request_mcp_closure_present=False,
     )
 
 
@@ -96,7 +128,19 @@ def _install_factory_spies(
 
     def build_middlewares(*_args, **kwargs):  # type: ignore[no-untyped-def]
         captured["middleware_kwargs"] = kwargs
-        return list(kwargs.get("custom_middlewares") or ())
+        return [
+            assign_middleware_layer(
+                middleware,
+                layer_id=f"custom_{index}",
+                phase=MiddlewarePhase.CUSTOM,
+                slot=index,
+                why="Test custom middleware layer.",
+            )
+            for index, middleware in enumerate(
+                kwargs.get("custom_middlewares") or (),
+                start=1,
+            )
+        ]
 
     def create_agent(**kwargs):  # type: ignore[no-untyped-def]
         captured["agent_kwargs"] = kwargs
@@ -127,6 +171,11 @@ def _install_factory_spies(
     )
     monkeypatch.setattr(lead_agent_module, "create_agent", create_agent)
     monkeypatch.setattr("deerflow.tools.get_available_tools", available_tools)
+
+
+def _provider_guard(captured: dict[str, object]) -> FinalProviderRequestGuard:
+    middleware = captured["agent_kwargs"]["middleware"]  # type: ignore[index]
+    return next(item for item in middleware if isinstance(item, FinalProviderRequestGuard))
 
 
 def test_trusted_extension_adds_and_excludes_tools_and_uses_canonical_middleware_slots(
@@ -164,6 +213,54 @@ def test_trusted_extension_adds_and_excludes_tools_and_uses_canonical_middleware
     assert middleware_kwargs["output_limit_recovery_override"] is output_limit  # type: ignore[index]
     assert captured["agent_kwargs"]["system_prompt"] == BUILDER_SYSTEM_PROMPT  # type: ignore[index]
     assert captured.get("prompt_calls") is None
+
+
+@pytest.mark.parametrize(
+    "middleware",
+    (_AfterModelOnlyMiddleware(), _BoundedRequestShaperMiddleware()),
+)
+def test_trusted_extension_profile_allows_non_shaping_or_bounded_middleware(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    middleware: AgentMiddleware,
+) -> None:
+    captured: dict[str, object] = {}
+    _install_factory_spies(monkeypatch, captured=captured)
+
+    lead_agent_module._make_lead_agent(
+        {"configurable": {"thinking_enabled": False}},
+        app_config=_app_config(),
+        private_runtime=_private_runtime(tmp_path),
+        trusted_extension=TrustedLeadAgentExtension(
+            custom_middlewares=(middleware,),
+        ),
+    )
+
+    assert _provider_guard(captured).profile.supported is True
+    assert _provider_guard(captured).profile.closure_identity == "closure-test"
+    assert _provider_guard(captured).profile.runtime_policy_identity is not None
+    assert _provider_guard(captured).profile.workload_profile == "interactive"
+
+
+def test_trusted_extension_profile_fails_closed_for_unbounded_request_shaper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    _install_factory_spies(monkeypatch, captured=captured)
+
+    lead_agent_module._make_lead_agent(
+        {"configurable": {"thinking_enabled": False}},
+        app_config=_app_config(),
+        private_runtime=_private_runtime(tmp_path),
+        trusted_extension=TrustedLeadAgentExtension(
+            custom_middlewares=(_UnboundedRequestShaperMiddleware(),),
+        ),
+    )
+
+    profile = _provider_guard(captured).profile
+    assert profile.supported is False
+    assert profile.unsupported_reason == ("provider_request_usage_unsupported: custom request shaper has no bounded contract")
 
 
 def test_runtime_config_cannot_construct_a_trusted_extension(

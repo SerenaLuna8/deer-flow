@@ -32,7 +32,7 @@ import { Callout } from "nextra/components";
 9. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
 10. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
 11. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
-12. `ToolCallControl` — 仲裁重复调用与单工具调用预算
+12. `ToolCallControl` — 仲裁重复调用与 Run 内部工具调用 hard limit
 13. `HostExecutionBatchBarrierMiddleware` — 隔离 Local 主机执行审批批次（仅 Local approval profile）
 14. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
 15. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
@@ -54,11 +54,11 @@ import { Callout } from "nextra/components";
 
 ### ToolCallControl
 
-在 ToolNode 执行前仲裁完整工具调用批次。它把重复调用检测与单工具 occurrence 预算保持为两种独立语义，只准入确定性的可执行前缀；某个工具耗尽时，其他工具仍可继续执行。
+在 ToolNode 执行前仲裁完整工具调用批次。它把重复调用检测与单一内部工具调用 hard limit 保持为两种独立语义，并只准入确定性的可执行前缀。所有内部工具统一计数；同一 Run 的 Lead 与所有 Sub-Agent 共用一个计数，不同 Run 相互独立。
 
-Warning 是中性的 advisory，会等已有 ToolMessage 配对完成后再注入。相同 checkpoint receipt 的重放不会重复消费预算。只有相同调用集合达到 hard stop 时才执行一次无工具 finalization；单工具预算耗尽只产生非终止 observation，不会阻止文件写入和交付等其他已准入工具。
+相同 checkpoint receipt 的重放不会重复消费上限。达到共享 hard limit 后，该 Run 不再准入新的内部工具调用。
 
-**配置**：平台设置 `/admin/settings/system` 中的 System Runtime Policy；每个已准入 Run 使用冻结值。
+**配置**：平台设置 `/admin/settings/system` 中 System Runtime Policy 的单一内部工具调用 hard limit；每个已准入 Run 使用冻结值。
 
 ---
 
