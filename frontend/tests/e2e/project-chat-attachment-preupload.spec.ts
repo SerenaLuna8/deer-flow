@@ -119,6 +119,7 @@ async function mockProjectChat(
     liveValuesMessages?: readonly Record<string, unknown>[];
     continuationValuesMessages?: readonly Record<string, unknown>[];
     followupSuggestions?: readonly string[];
+    gateFirstRunAdmission?: boolean;
   } = {
     filename: FILE_NAME,
     mediaType: "text/plain",
@@ -128,6 +129,7 @@ async function mockProjectChat(
   const privateWorkBase = `/api/projects/${PROJECT_ID}/private-work`;
   const uploadPath = `${privateWorkBase}/threads/${THREAD_ID}/uploads`;
   const releaseUpload = deferred<void>();
+  const firstRunAdmissionGate = deferred<void>();
   const unexpectedRequests: string[] = [];
   const uploadRequests: string[] = [];
   const runRequestBodies: unknown[] = [];
@@ -470,6 +472,9 @@ async function mockProjectChat(
       runPostCount += 1;
       const requestBody = request.postDataJSON() as Record<string, unknown>;
       runRequestBodies.push(requestBody);
+      if (runPostCount === 1 && upload.gateFirstRunAdmission) {
+        await firstRunAdmissionGate.promise;
+      }
       effectiveWorkloadProfile =
         upload.effectiveWorkloadProfiles?.[runPostCount - 1] ??
         (requestBody.workload_profile === "research"
@@ -603,6 +608,7 @@ async function mockProjectChat(
 
   return {
     releaseUpload: () => releaseUpload.resolve(),
+    releaseFirstRunAdmission: () => firstRunAdmissionGate.resolve(),
     runPostCount: () => runPostCount,
     runListGetCount: () => runListGetCount,
     runMessagesGetCount: () => runMessagesGetCount,
@@ -1016,6 +1022,42 @@ test("keeps the one-Run Research choice after a pre-admission failure", async ({
   expect(requests.unexpectedRequests).toEqual([]);
 });
 
+test("shows immediate send feedback and restores the draft when Run Admission is rejected", async ({
+  page,
+}) => {
+  const message = "Confirm";
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    gateFirstRunAdmission: true,
+    firstRunAdmissionError: "RUN_ADMISSION_REJECTED",
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  try {
+    await composer.fill(message);
+    await composer.press("Enter");
+    await expect.poll(requests.runPostCount).toBe(1);
+
+    await expect(page.getByTestId("run-activity")).toBeVisible();
+    await expect(composer).toHaveValue("");
+    await expect(composer).toBeDisabled();
+
+    requests.releaseFirstRunAdmission();
+    await expect(composer).toHaveValue(message);
+    await expect(composer).toBeEnabled();
+    await expect(composer).toBeFocused();
+    await expect(page.getByTestId("run-activity")).toHaveCount(0);
+
+    expect(requests.runRequestBodies).toHaveLength(1);
+    expect(requests.unexpectedRequests).toEqual([]);
+  } finally {
+    requests.releaseFirstRunAdmission();
+  }
+});
+
 test("deduplicates live and durable Run-control progress across refresh", async ({
   page,
 }) => {
@@ -1098,7 +1140,7 @@ test("deduplicates live and durable Run-control progress across refresh", async 
     progress.locator('[data-reason-code="subagent_total_limit"]'),
   ).toHaveCount(1);
   await expect(progress).toContainText(
-    /Run can continue with existing evidence|运行仍可使用已有证据/u,
+    /finish with the evidence already collected|基于已有证据完成结果/u,
   );
   await expect(page.getByTestId("run-failure-alert")).toHaveCount(0);
 

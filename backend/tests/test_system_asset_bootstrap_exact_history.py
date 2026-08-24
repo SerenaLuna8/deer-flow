@@ -3,13 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from app.shared_assets import skill_service as skill_service_module
 from app.shared_assets.bootstrap import catalog as catalog_module
 from app.shared_assets.bootstrap import service as bootstrap_service
 from app.shared_assets.bootstrap.skill_archive import (
@@ -17,7 +15,6 @@ from app.shared_assets.bootstrap.skill_archive import (
     load_skill_archive,
 )
 from app.shared_assets.models import SkillArchiveFile
-from deerflow.skills.skillscan import StaticScannerError
 
 
 def _entry(source_key: str, version: int) -> catalog_module.BootstrapEntry:
@@ -136,229 +133,64 @@ def test_authenticated_mcp_payload_rejects_coerced_slot_required(
         )
 
 
-def test_legacy_scan_metadata_drift_does_not_rewrite_history() -> None:
-    entry = _entry("builtin:skill:legacy-scan", 1)
-    preview = SimpleNamespace(
-        scan_decision="warn",
-        scan_summary={
-            "rule_ids": ["new-rule"],
-            "severity_counts": {"LOW": 1},
-        },
-    )
-
-    assert bootstrap_service._entry_scan_snapshot(
-        entry,
-        preview,
-        is_latest=True,
-    ) == (preview.scan_decision, preview.scan_summary)
-
-
-def test_latest_snapshotted_release_must_match_current_scanner() -> None:
-    raw = _entry("builtin:skill:snapshotted-scan", 1).model_dump()
-    raw.update(
-        {
-            "scan_decision": "allow",
-            "scan_summary": {"rule_ids": [], "severity_counts": {}},
-        }
-    )
-    entry = bootstrap_service.BootstrapEntry.model_validate(raw)
-    preview = SimpleNamespace(
-        scan_decision="warn",
-        scan_summary={
-            "rule_ids": ["new-rule"],
-            "severity_counts": {"LOW": 1},
-        },
-    )
-
-    with pytest.raises(
-        bootstrap_service.BootstrapCatalogError,
-        match="scan snapshot is stale",
-    ):
-        bootstrap_service._entry_scan_snapshot(
-            entry,
-            preview,
-            is_latest=True,
-        )
-
-
-def test_historical_snapshotted_release_uses_immutable_manifest_snapshot() -> None:
-    raw = _entry("builtin:skill:snapshotted-history", 1).model_dump()
-    manifest_summary = {"rule_ids": [], "severity_counts": {}}
-    raw.update(
-        {
-            "scan_decision": "allow",
-            "scan_summary": manifest_summary,
-        }
-    )
-    entry = bootstrap_service.BootstrapEntry.model_validate(raw)
-    preview = SimpleNamespace(
-        scan_decision="warn",
-        scan_summary={
-            "rule_ids": ["new-rule"],
-            "severity_counts": {"LOW": 1},
-        },
-    )
-
-    assert bootstrap_service._entry_scan_snapshot(
-        entry,
-        preview,
-        is_latest=False,
-    ) == ("allow", manifest_summary)
-
-
 @pytest.mark.asyncio
-async def test_system_skill_catalog_rejects_multi_version_history(
+async def test_system_skill_bootstrap_ignores_legacy_scan_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    name = "historical-scan-boundary"
-    source_key = f"builtin:skill:{name}"
-
-    def release_payload(version: int, marker: str) -> bytes:
-        return dump_skill_archive(
-            (
-                SkillArchiveFile(
-                    path="SKILL.md",
-                    media_type="text/markdown",
-                    content=(f"---\nname: {name}\ndescription: Version {version}.\n---\n\n# {name}\n\nrelease-marker: {marker}\n").encode(),
-                ),
-            )
+    entry = _entry("builtin:skill:legacy-columns", 1)
+    archive = dump_skill_archive(
+        (
+            SkillArchiveFile(
+                path="SKILL.md",
+                media_type="text/markdown",
+                content=b"---\nname: legacy-columns\ndescription: Legacy columns.\n---\n",
+            ),
         )
-
-    payload_one = release_payload(1, "historical")
-    payload_two = release_payload(2, "latest")
-
-    def snapshotted_entry(version: int, payload: bytes) -> catalog_module.BootstrapEntry:
-        raw = _entry(source_key, version).model_dump()
-        raw.update(
-            {
-                "sha256": hashlib.sha256(payload).hexdigest(),
-                "scan_decision": "allow",
-                "scan_summary": {"rule_ids": [], "severity_counts": {}},
-            }
-        )
-        return catalog_module.BootstrapEntry.model_validate(raw)
-
-    entry_one = snapshotted_entry(1, payload_one)
-    entry_two = snapshotted_entry(2, payload_two)
-    with pytest.raises(ValueError, match="require one v1"):
-        catalog_module.BootstrapCatalog.model_validate(
-            {
-                "schema_version": 3,
-                "entries": [entry_one.model_dump(), entry_two.model_dump()],
-            }
-        )
-    catalog = None
-    return
-    catalog._payloads = MappingProxyType(
-        {
-            (source_key, 1): payload_one,
-            (source_key, 2): payload_two,
-        }
     )
-
-    normalized_files = {
-        entry.version: bootstrap_service.normalize_skill_files(
-            load_skill_archive(payload),
-            request_id=source_key,
-        )
-        for entry, payload in (
-            (entry_one, payload_one),
-            (entry_two, payload_two),
-        )
-    }
-    previews = {
-        entry.version: bootstrap_service._validated_skill_preview(
-            entry,
-            normalized_files[entry.version],
-        )
-        for entry in (entry_one, entry_two)
-    }
-
-    asset_id = bootstrap_service._stable_id(source_key)
-    version_ids = {entry.version: bootstrap_service._version_id(entry) for entry in (entry_one, entry_two)}
+    entry = entry.model_copy(update={"sha256": hashlib.sha256(archive).hexdigest()})
+    catalog = catalog_module.BootstrapCatalog.model_validate({"schema_version": 3, "entries": [entry.model_dump(mode="json")]})
+    catalog._payloads = MappingProxyType({(entry.source_key, 1): archive})
+    files = bootstrap_service.normalize_skill_files(
+        load_skill_archive(archive),
+        request_id=entry.source_key,
+    )
+    preview = bootstrap_service._validated_skill_preview(entry, files)
+    asset_id = bootstrap_service._stable_id(entry.source_key)
+    version_id = bootstrap_service._version_id(entry)
     asset = SimpleNamespace(
         id=asset_id,
         scope="system",
         project_id=None,
-        slug=name,
-        display_name=name,
+        slug=entry.slug,
+        display_name=entry.display_name,
         status="active",
-        version=2,
-        source_key=source_key,
+        current_version_id=version_id,
+        revision=1,
+        source_key=entry.source_key,
         created_by_user_id=str(bootstrap_service.BUILTIN_ASSET_USER_ID),
-        current_published_version_id=version_ids[2],
     )
-
-    def version_row(version: int) -> SimpleNamespace:
-        preview = previews[version]
-        return SimpleNamespace(
-            id=version_ids[version],
-            skill_id=asset_id,
-            version_number=version,
-            workflow_status="published",
-            description=preview.description,
-            frontmatter=dict(preview.frontmatter),
-            compatibility=preview.compatibility,
-            secret_requirements=[{"name": requirement.name, "optional": requirement.optional} for requirement in preview.secret_requirements],
-            scan_decision="allow",
-            scan_summary={"rule_ids": [], "severity_counts": {}},
-            supersedes_version_id=version_ids[version - 1] if version > 1 else None,
-            payload_checksum=preview.checksum,
-            submitted_at=None,
-            reviewed_at=None,
-            reviewed_by_user_id=None,
-            review_note=None,
-            created_by_user_id=str(bootstrap_service.BUILTIN_ASSET_USER_ID),
-        )
-
-    versions = {version: version_row(version) for version in (1, 2)}
-
-    def persisted_file_result(version: int) -> SimpleNamespace:
-        rows = [
-            SimpleNamespace(
-                skill_version_id=version_ids[version],
-                path=file.path,
-                media_type=file.media_type,
-                size_bytes=len(file.content),
-                sha256=hashlib.sha256(file.content).hexdigest(),
-                content=file.content,
-            )
-            for file in normalized_files[version]
-        ]
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: rows))
-
-    history_result = SimpleNamespace(all=lambda: [(version_ids[1], 1), (version_ids[2], 2)])
-
-    class Session:
-        execute = AsyncMock(
+    version = SimpleNamespace(
+        id=version_id,
+        skill_id=asset_id,
+        version_number=1,
+        description=preview.description,
+        frontmatter=dict(preview.frontmatter),
+        compatibility=preview.compatibility,
+        secret_requirements=[],
+        scan_decision="block",
+        scan_summary={"rule_ids": ["legacy-rule"]},
+        supersedes_version_id=None,
+        payload_checksum=preview.checksum,
+        created_by_user_id=str(bootstrap_service.BUILTIN_ASSET_USER_ID),
+    )
+    persisted_files = bootstrap_service._skill_file_rows(version_id, files)
+    session = SimpleNamespace(
+        execute=AsyncMock(
             side_effect=[
-                persisted_file_result(1),
-                persisted_file_result(2),
-                history_result,
+                SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [version])),
+                SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: persisted_files)),
             ]
         )
-
-        async def get(self, _model, version_id):
-            return next(row for version, row in versions.items() if version_ids[version] == version_id)
-
-    preflight = Mock(wraps=skill_service_module._preflight_skill_frontmatter)
-    checksum = Mock(wraps=skill_service_module._snapshot_checksum)
-    scanner_calls: list[str] = []
-
-    def future_scanner(root: Path, *, skill_name: str):
-        marker = "historical" if "release-marker: historical" in (root / "SKILL.md").read_text() else "latest"
-        scanner_calls.append(marker)
-        if marker == "historical":
-            raise StaticScannerError("future scanner cannot evaluate the historical release")
-        return {"findings": [], "blocked": False, "scanner_errors": []}
-
-    monkeypatch.setattr(skill_service_module, "_preflight_skill_frontmatter", preflight)
-    monkeypatch.setattr(skill_service_module, "_snapshot_checksum", checksum)
-    monkeypatch.setattr(skill_service_module, "enforce_static_scan_result", future_scanner)
-    monkeypatch.setattr(
-        bootstrap_service.asyncio,
-        "to_thread",
-        AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
     )
     monkeypatch.setattr(
         bootstrap_service,
@@ -366,11 +198,7 @@ async def test_system_skill_catalog_rejects_multi_version_history(
         AsyncMock(return_value=asset),
     )
 
-    assert await bootstrap_service._seed_skill(Session(), catalog, entry_one) is False
-    assert await bootstrap_service._seed_skill(Session(), catalog, entry_two) is False
-    assert scanner_calls == ["latest"]
-    assert preflight.call_count == 2
-    assert checksum.call_count == 2
+    assert await bootstrap_service._seed_skill(session, catalog, entry) is False
 
 
 @pytest.mark.asyncio

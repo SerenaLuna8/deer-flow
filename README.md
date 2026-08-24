@@ -42,9 +42,10 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   Agent/Skill 只有自动成为 Current Version 的 v1，用户不能创建、保存或手工激活版本。
   项目 Skill 仅可通过 AI 对话创建/修订，或上传 `.zip`、`.skill`、`.tar`、`.tar.gz`
   或 `.tgz` 包；常见 macOS 归档元数据会被忽略。超出上传、解压、单文件或成员数限制
-  的包会以明确的大小限制错误拒绝。上传包若仅命中可确认的 Shell 调用或环境导出风险，
-  用户可显式确认并保存为 `scan_decision=block` 的 suspended Candidate；修复阻断项前不能
-  激活或运行。密钥、可执行文件、反向 Shell 等不可确认风险仍直接拒绝。Skill 详情可把
+  的包会以明确的大小限制错误拒绝。项目与系统 Skill 的上传、Builder、导入、保存、安装和激活
+  均不执行静态内容安全扫描，也不提供风险确认或扫描结论；仍校验归档路径、大小、文件数、格式、
+  `SKILL.md`、frontmatter、权限以及版本文件与 checksum 完整性。Skill 内容需要由上传、保存和
+  激活它的项目成员自行审查。Skill 详情可把
   当前选中的已持久化版本导出为
   `<slug>-v<version_number>.zip` 标准分发包；`SKILL.md` 位于包根目录，包内不含
   Secret 值、密钥或版本历史，被治理撤销的 System Skill v1 不可导出。

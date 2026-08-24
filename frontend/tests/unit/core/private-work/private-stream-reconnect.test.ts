@@ -15,6 +15,7 @@ import {
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   PROJECT_STREAM_INCOMPLETE,
+  SIDE_EFFECT_STATE_UNKNOWN,
   projectReconnectStorage,
   projectRunTerminalFailureEventToError,
   projectStreamFrameForUI,
@@ -1040,6 +1041,25 @@ describe("private stream reconnect", () => {
         type: "project_run_terminal_failure",
         error: failureCode,
         message: failureCode,
+      },
+    });
+  });
+
+  test("preserves unknown side-effect state at the durable terminal", () => {
+    const terminal = {
+      id: "9",
+      event: "end",
+      data: { status: "error", error_code: SIDE_EFFECT_STATE_UNKNOWN },
+    };
+
+    expect(projectStreamFailureName(terminal)).toBe(SIDE_EFFECT_STATE_UNKNOWN);
+    expect(projectStreamFrameForUI(terminal)).toEqual({
+      id: "9",
+      event: "custom",
+      data: {
+        type: "project_run_terminal_failure",
+        error: SIDE_EFFECT_STATE_UNKNOWN,
+        message: SIDE_EFFECT_STATE_UNKNOWN,
       },
     });
   });

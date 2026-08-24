@@ -75,8 +75,6 @@ function describe(
       ...common,
       [copy.description]: value(version.description),
       [copy.compatibility]: value(version.compatibility),
-      [copy.scanDecision]: value(version.scan_decision),
-      [copy.scanRules]: list(version.scan_rule_ids, separator),
       [copy.files]: version.file_views
         .map(
           (file) =>

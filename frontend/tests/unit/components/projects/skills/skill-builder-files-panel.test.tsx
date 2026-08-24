@@ -50,7 +50,6 @@ function workbench(
       validation={null}
       canValidate={false}
       canCommit={false}
-      acknowledgeWarnings={false}
       errorMessage={null}
       onSelectPath={() => undefined}
       onDraftContentChange={() => undefined}
@@ -60,7 +59,6 @@ function workbench(
       onSave={() => undefined}
       onDiscard={() => undefined}
       onValidate={() => undefined}
-      onAcknowledgeWarningsChange={() => undefined}
       onCommit={() => undefined}
       onClose={overrides.onClose}
     />
@@ -144,7 +142,6 @@ describe("SkillBuilderCandidateWorkbench", () => {
         validation={null}
         canValidate={false}
         canCommit
-        acknowledgeWarnings={false}
         errorMessage={null}
         sessionKind="revise"
         baseVersionNumber={2}
@@ -170,7 +167,6 @@ describe("SkillBuilderCandidateWorkbench", () => {
         onSave={() => undefined}
         onDiscard={() => undefined}
         onValidate={() => undefined}
-        onAcknowledgeWarningsChange={() => undefined}
         onCommit={() => undefined}
       />,
     );

@@ -236,7 +236,7 @@ class SkillDesignValidateRequest(_StrictModel):
 
 
 class SkillDesignCommitRequest(SkillDesignValidateRequest):
-    acknowledge_warnings: bool
+    pass
 
 
 class SkillDesignCancelRequest(_StrictModel):
@@ -350,7 +350,7 @@ class SkillDesignTerminalActivityPayloadResponse(_StrictModel):
 
 
 class SkillDesignValidationStageActivityPayloadResponse(_StrictModel):
-    stage: Literal["package_files", "safety_scan"]
+    stage: Literal["package_files"]
 
 
 class SkillDesignEmptyActivityResponse(_SkillDesignActivityBaseResponse):
@@ -455,9 +455,6 @@ class SkillDesignValidationResponse(_StrictModel):
     frontmatter: dict[str, object]
     compatibility: str | None
     secret_requirements: tuple[SkillDesignSecretRequirementResponse, ...]
-    scan_decision: Literal["allow", "warn"]
-    scan_rule_ids: tuple[str, ...]
-    scan_summary: dict[str, object]
 
 
 class SkillDesignActiveRunResponse(_StrictModel):
@@ -1259,7 +1256,6 @@ async def commit_skill_design_session(
             CommitSkillDesignSession(
                 expected_revision=body.expected_revision,
                 expected_draft_checksum=body.expected_draft_checksum,
-                acknowledge_warnings=body.acknowledge_warnings,
                 idempotency_key=body.idempotency_key,
             ),
         )

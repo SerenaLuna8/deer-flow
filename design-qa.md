@@ -68,6 +68,10 @@ Date: 2026-08-16
 
 ## Visual truth and rendered evidence
 
+Repository note: the temporary `.codex-qa` screenshots used for this acceptance
+were removed during later repository housekeeping. The measured dimensions and
+comparison findings below remain the durable QA record.
+
 - Source visual truth: `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-2d1fea3d-dab5-4b88-90db-a24c948cfd8e.png`
 - Desktop implementation: `/Users/jiangfeng/.codex/visualizations/2026/08/15/01a00628-5027-79d1-9610-9565f5b02ab1/chat-message-layout-desktop.png`
 - Mobile implementation: `/Users/jiangfeng/.codex/visualizations/2026/08/15/01a00628-5027-79d1-9610-9565f5b02ab1/chat-message-layout-mobile.png`
@@ -191,28 +195,21 @@ Date: 2026-08-23
 - Composer source visual truth:
   `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-93be51be-ac11-4f12-979a-e228de5e4a33.png`
   at `1834 × 292` pixels. Its CSS size and density are unknown.
-- Desktop implementation:
-  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-desktop-final.png`
-  at a `1966 × 1009` CSS viewport and `1966 × 1009` output pixels. The browser
+- Desktop implementation used a `1966 × 1009` CSS viewport and `1966 × 1009`
+  output pixels. The browser
   reported `devicePixelRatio=2`; the capture API normalized output to CSS-pixel
   dimensions.
-- Focused composer implementation:
-  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-composer.png`
-  at `776 × 148` CSS/output pixels.
-- Mobile implementation:
-  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-mobile-workbench.png`
-  and
-  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-mobile-conversation.png`,
-  each at a `390 × 844` CSS viewport and `390 × 844` output pixels.
+- Focused composer implementation used `776 × 148` CSS/output pixels.
+- Both mobile implementation views used a `390 × 844` CSS viewport and
+  `390 × 844` output pixels.
 - State: authenticated Chinese `code-reviewer` Builder session with four generated
   documents, one displayed conflict, the blueprint workbench open, and every
   durable Activity operation terminal.
 
 ## Full-view and focused comparison
 
-The full-page source and implementation were opened together in
-`/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/full-view-comparison.png`.
-Both inputs were normalized to a `1966 × 1009` comparison canvas by proportional
+The full-page source and implementation were compared together. Both inputs were
+normalized to a `1966 × 1009` comparison canvas by proportional
 scaling and horizontal white padding. The source is interaction context rather
 than a pixel-identical viewport target: it excludes the project navigation,
 selects Documents, and still shows the former non-terminal Activity row. The
@@ -220,9 +217,8 @@ implementation keeps the same conversation/workbench split, exposes Overview and
 Documents as dedicated surfaces, preserves the fixed create footer, and now shows
 the last Activity as completed.
 
-The ordinary-chat reference and Builder composer were opened together in
-`/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/composer-comparison.png`.
-The source remained `1834 × 292`; the implementation crop was proportionally
+The ordinary-chat reference and Builder composer were compared together. The
+source remained `1834 × 292`; the implementation crop was proportionally
 scaled to `292` pixels high and centered on an `1834 × 292` white canvas. The
 Builder now matches the source hierarchy: quiet outlined rounded container,
 placeholder in the upper input area, mode at lower left, model and circular
@@ -282,14 +278,14 @@ Date: 2026-08-23
 
 ## Visual truth and rendered evidence
 
+Repository note: the temporary `.codex-qa` comparison screenshots used for this
+follow-up were removed during later repository housekeeping.
+
 - Source annotation:
   `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-0e123057-bf8e-4ec4-84d6-7ed0b222c262.png`
   at `3438 × 632` pixels.
-- Final implementation crop:
-  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-bottom-spacing-after-1966x361.png`
-  at `1966 × 361` CSS/output pixels.
-- Combined reference-above, implementation-below comparison:
-  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-bottom-spacing-reference-vs-after.png`.
+- Final implementation crop used `1966 × 361` CSS/output pixels.
+- A combined reference-above, implementation-below comparison was inspected.
 - State: the same authenticated `code-reviewer` Builder session with the
   conversation and Agent blueprint workbench visible.
 

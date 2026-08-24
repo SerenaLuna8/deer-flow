@@ -122,7 +122,7 @@ const skillBuilderValidationStartedActivitySchema =
         z.object({}).strict(),
         z
           .object({
-            stage: z.enum(["package_files", "safety_scan"]),
+            stage: z.literal("package_files"),
           })
           .strict(),
       ]),
@@ -455,9 +455,6 @@ export const skillBuilderValidationSchema = z
     frontmatter: z.record(z.unknown()),
     compatibility: z.string().nullable(),
     secret_requirements: z.array(skillBuilderSecretRequirementSchema),
-    scan_decision: z.enum(["allow", "warn"]),
-    scan_rule_ids: z.array(z.string().trim().min(1)),
-    scan_summary: z.record(z.unknown()),
   })
   .strict();
 
@@ -805,11 +802,7 @@ export const validateSkillBuilderSessionInputSchema = z
   .strict();
 
 export const commitSkillBuilderSessionInputSchema =
-  validateSkillBuilderSessionInputSchema
-    .extend({
-      acknowledge_warnings: z.boolean(),
-    })
-    .strict();
+  validateSkillBuilderSessionInputSchema;
 
 export const cancelSkillBuilderSessionInputSchema = z
   .object({

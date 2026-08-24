@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    _is_trusted_idempotent_tool,
     _is_trusted_read_only_tool,
 )
 from deerflow.sandbox.exceptions import SandboxError
@@ -39,6 +40,7 @@ from deerflow.sandbox.tools import (
     validate_local_tool_path,
     write_file_tool,
 )
+from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
 from deerflow.tools.builtins.list_uploaded_files_tool import (
     list_uploaded_files_tool,
 )
@@ -75,7 +77,21 @@ def test_only_canonical_read_only_tools_bypass_the_side_effect_boundary() -> Non
     assert _is_trusted_read_only_tool(
         SimpleNamespace(tool=list_uploaded_files_tool),
     )
+    assert _is_trusted_read_only_tool(SimpleNamespace(tool=read_file_tool))
     assert not _is_trusted_read_only_tool(SimpleNamespace(tool=object()))
+    assert not _is_trusted_read_only_tool(
+        SimpleNamespace(tool=SimpleNamespace(name="read_file")),
+    )
+
+
+def test_canonical_clarification_is_run_idempotent_not_read_only() -> None:
+    request = SimpleNamespace(tool=ask_clarification_tool)
+
+    assert _is_trusted_idempotent_tool(request)
+    assert not _is_trusted_read_only_tool(request)
+    assert not _is_trusted_idempotent_tool(
+        SimpleNamespace(tool=SimpleNamespace(name="ask_clarification")),
+    )
 
 
 def test_write_file_description_does_not_assign_lead_delivery_to_subagents() -> None:

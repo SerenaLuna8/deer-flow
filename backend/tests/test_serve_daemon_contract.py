@@ -1,3 +1,6 @@
+import os
+import subprocess
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,3 +34,42 @@ def test_make_stop_tolerates_listener_exit_during_port_reporting() -> None:
     block = source[start : source.index("_kill_repo_processes() {", start)]
 
     assert 'files=$(lsof -b -w -p "$pid" 2>/dev/null) || continue' in block
+
+
+def test_foreground_supervisor_fails_and_stops_peers_when_a_child_exits() -> None:
+    source = SERVE_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("# ── Cleanup handler")
+    block = source[start : source.index("# ── Helper: start a service", start)]
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f"""
+{block}
+(sleep 0.1) &
+remember_started_pid "$!" "Worker"
+(sleep 30) &
+printf 'survivor_pid=%s\n' "$!"
+remember_started_pid "$!" "Gateway"
+supervise_started_processes || cleanup "$?"
+""",
+            "serve-supervisor-test",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert completed.returncode == 1
+    assert "Worker exited after startup" in completed.stderr
+    survivor_pid = int(next(line.removeprefix("survivor_pid=") for line in completed.stdout.splitlines() if line.startswith("survivor_pid=")))
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        try:
+            os.kill(survivor_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("supervisor left a peer child process running")

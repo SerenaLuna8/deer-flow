@@ -127,10 +127,6 @@ def _replace_content_root_with_symlink(tmp_path: Path) -> Path:
     return external
 
 
-def _scan_preview(name: str, *, decision: str, summary: dict[str, object]) -> SimpleNamespace:
-    return SimpleNamespace(frontmatter={"name": name}, scan_decision=decision, scan_summary=summary)
-
-
 def test_generator_replaces_authenticated_system_skill_v1_in_place(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -370,55 +366,20 @@ async def test_bootstrap_orders_system_skill_before_mcp_and_agent(monkeypatch: p
     assert result.counts == {"agent": 1, "skill": 1, "mcp": 1}
 
 
-def test_generator_new_skill_v1_contains_scan_snapshot(
+def test_generator_new_skill_v1_omits_scan_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    name = "new-snapshot"
+    name = "new-system-skill"
     source_root, _, _ = _configure_generator(tmp_path, monkeypatch, entries=[])
     _write_source(source_root, name, "Initial behavior.")
-    monkeypatch.setattr(
-        generator,
-        "_analyze_skill_files",
-        lambda *_args, **_kwargs: _scan_preview(name, decision="allow", summary={"rule_ids": [], "severity_counts": {}}),
-    )
 
     catalog_bytes, _ = generator._expected_outputs()
     entry = json.loads(catalog_bytes)["entries"][0]
 
     assert entry["version"] == 1
-    assert entry["scan_decision"] == "allow"
-    assert entry["scan_summary"] == {"rule_ids": [], "severity_counts": {}}
-
-
-def test_generator_scan_change_replaces_v1_snapshot_without_new_version(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    name = "scan-change"
-    archive = _skill_archive(name, "Stable behavior.")
-    old_entry = {
-        **_skill_entry(name, archive),
-        "scan_decision": "allow",
-        "scan_summary": {"rule_ids": [], "severity_counts": {}},
-    }
-    source_root, output_root, _ = _configure_generator(tmp_path, monkeypatch, entries=[old_entry])
-    (output_root / f"{name}-v1.skill.json").write_bytes(archive)
-    _write_source(source_root, name, "Stable behavior.")
-    current_summary = {"rule_ids": ["network-local-http"], "severity_counts": {"LOW": 1}}
-    monkeypatch.setattr(
-        generator,
-        "_analyze_skill_files",
-        lambda *_args, **_kwargs: _scan_preview(name, decision="warn", summary=current_summary),
-    )
-
-    catalog_bytes, payloads = generator._expected_outputs()
-    skill_entries = [entry for entry in json.loads(catalog_bytes)["entries"] if entry["kind"] == "skill"]
-
-    assert [entry["version"] for entry in skill_entries] == [1]
-    assert skill_entries[0]["scan_decision"] == "warn"
-    assert skill_entries[0]["scan_summary"] == current_summary
-    assert payloads[str(skill_entries[0]["payload_path"])] == archive
+    assert "scan_decision" not in entry
+    assert "scan_summary" not in entry
 
 
 def test_generator_rejects_legacy_multi_version_system_skill_catalog(

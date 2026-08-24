@@ -203,12 +203,8 @@ def test_skill_archive_rejects_coerced_schema_version(
         load_skill_archive(payload)
 
 
-def _snapshot_skill_entry(
-    version: int,
-    *,
-    include_snapshot: bool = False,
-) -> dict[str, object]:
-    entry: dict[str, object] = {
+def _system_skill_entry(version: int) -> dict[str, object]:
+    return {
         "source_key": "builtin:skill:snapshot-contract",
         "kind": "skill",
         "slug": "snapshot-contract",
@@ -218,27 +214,17 @@ def _snapshot_skill_entry(
         "payload_format": "skill_archive_v1",
         "sha256": f"{version}" * 64,
     }
-    if include_snapshot:
-        entry.update(
-            {
-                "scan_decision": "allow",
-                "scan_summary": {"rule_ids": [], "severity_counts": {}},
-            }
-        )
-    return entry
 
 
-def test_schema_v3_allows_a_legacy_v1_without_scan_snapshot() -> None:
+def test_schema_v3_accepts_one_system_skill_v1_without_scan_metadata() -> None:
     catalog = catalog_module.BootstrapCatalog.model_validate(
         {
             "schema_version": 3,
-            "entries": [_snapshot_skill_entry(1)],
+            "entries": [_system_skill_entry(1)],
         }
     )
 
     assert catalog.entries[0].version == 1
-    assert catalog.entries[0].scan_decision is None
-    assert catalog.entries[0].scan_summary is None
 
 
 def test_schema_v3_rejects_system_skill_version_history() -> None:
@@ -247,33 +233,18 @@ def test_schema_v3_rejects_system_skill_version_history() -> None:
             {
                 "schema_version": 3,
                 "entries": [
-                    _snapshot_skill_entry(1),
-                    _snapshot_skill_entry(2),
-                    _snapshot_skill_entry(3, include_snapshot=True),
+                    _system_skill_entry(1),
+                    _system_skill_entry(2),
+                    _system_skill_entry(3),
                 ],
             }
         )
 
 
-def test_schema_v3_rejects_a_missing_snapshot_after_snapshot_history_begins() -> None:
+@pytest.mark.parametrize("field", ["scan_decision", "scan_summary"])
+def test_schema_v3_rejects_removed_scan_metadata(field: str) -> None:
+    entry = _system_skill_entry(1)
+    entry[field] = "allow" if field == "scan_decision" else {}
+
     with pytest.raises(ValueError):
-        catalog_module.BootstrapCatalog.model_validate(
-            {
-                "schema_version": 3,
-                "entries": [
-                    _snapshot_skill_entry(1, include_snapshot=True),
-                    _snapshot_skill_entry(2),
-                ],
-            }
-        )
-
-
-def test_schema_v3_requires_scan_snapshot_fields_as_a_pair() -> None:
-    complete = _snapshot_skill_entry(1, include_snapshot=True)
-    catalog_module.BootstrapCatalog.model_validate({"schema_version": 3, "entries": [complete]})
-
-    for missing_field in ("scan_decision", "scan_summary"):
-        incomplete = dict(complete)
-        incomplete.pop(missing_field)
-        with pytest.raises(ValueError):
-            catalog_module.BootstrapCatalog.model_validate({"schema_version": 3, "entries": [incomplete]})
+        catalog_module.BootstrapCatalog.model_validate({"schema_version": 3, "entries": [entry]})

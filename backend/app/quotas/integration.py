@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
     PrivateWorkMcpQuotaExceeded,
+    PrivateWorkQuotaUnavailable,
     PrivateWorkRunQuotaExceeded,
     PrivateWorkStorageQuotaExceeded,
     PrivateWorkUnavailable,
@@ -165,6 +166,8 @@ class ProjectQuotaEnforcer:
             )
         except QuotaExceeded:
             raise PrivateWorkStorageQuotaExceeded(context.request_id) from None
+        except QuotaUnavailable:
+            raise PrivateWorkQuotaUnavailable(context.request_id) from None
         except QuotaError:
             raise PrivateWorkUnavailable(context.request_id) from None
 

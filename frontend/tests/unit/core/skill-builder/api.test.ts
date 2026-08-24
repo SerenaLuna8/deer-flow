@@ -217,7 +217,7 @@ describe("Skill Builder Activity API", () => {
     ).resolves.toEqual(response);
   });
 
-  test("accepts only the two public validation stage names", async () => {
+  test("accepts only the package-file validation stage", async () => {
     const base = {
       operation_id: "55555555-5555-4555-8555-555555555555",
       run_id: null,
@@ -226,10 +226,7 @@ describe("Skill Builder Activity API", () => {
       created_at: NOW,
     };
     const response = {
-      data: [
-        { ...base, seq: "1", payload: { stage: "package_files" } },
-        { ...base, seq: "2", payload: { stage: "safety_scan" } },
-      ],
+      data: [{ ...base, seq: "1", payload: { stage: "package_files" } }],
       request_id: "request-validation-activity",
     };
     rs.stubGlobal("document", { cookie: "csrf_token=builder-token" });
@@ -242,7 +239,7 @@ describe("Skill Builder Activity API", () => {
     rs.stubGlobal("fetch", async () =>
       Response.json({
         ...response,
-        data: [{ ...base, seq: "3", payload: { stage: "provider_scan" } }],
+        data: [{ ...base, seq: "2", payload: { stage: "unexpected_stage" } }],
       }),
     );
     await expect(

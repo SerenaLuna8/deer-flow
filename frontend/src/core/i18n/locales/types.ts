@@ -937,11 +937,6 @@ export interface Translations {
       skillVersions: string;
       mcpVersions: string;
       compatibility: string;
-      scanDecision: string;
-      scanAllow: string;
-      scanWarn: string;
-      scanBlock: string;
-      scanRules: string;
       files: string;
       secretRequirements: string;
       transport: string;
@@ -1812,9 +1807,7 @@ export interface Translations {
         saving: string;
         save: string;
         checkPassed: string;
-        checkPassedWithWarnings: string;
         requiredSecrets: string;
-        acknowledgeWarnings: string;
         checkSkill: string;
         commitCreate: string;
         commitRevise: string;
@@ -1833,7 +1826,6 @@ export interface Translations {
         sizeBytes: (count: number) => string;
         validationStages: {
           package_files: string;
-          safety_scan: string;
         };
         stop: string;
         stopping: string;
@@ -2145,6 +2137,8 @@ export interface Translations {
     tokenBudgetReachedDescription: string;
     outputDeliveryIncompleteTitle: string;
     outputDeliveryIncompleteDescription: string;
+    sideEffectStateUnknownTitle: string;
+    sideEffectStateUnknownDescription: string;
     currentUploadUnavailableTitle: string;
     currentUploadUnavailableDescription: string;
     agentSuspendedTitle: string;

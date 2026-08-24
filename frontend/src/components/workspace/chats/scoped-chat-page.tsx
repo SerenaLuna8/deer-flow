@@ -24,6 +24,7 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { ExecutionApprovalCard } from "@/components/workspace/messages/execution-approval-card";
 import { RunControlProgress } from "@/components/workspace/run-control-progress";
 import {
+  canReplayRunFailure,
   canRestoreRunFailureInput,
   canRetryModelOutputLimit,
   RunFailureAlert,
@@ -631,6 +632,7 @@ export function ScopedChatPage({
     hasTerminalRunFailure,
     streamError: thread.error,
   });
+  const messageReplayAllowed = canReplayRunFailure(runFailureCode);
   const recoverableFailedInput = useMemo(() => {
     if (
       !hasRunFailure ||
@@ -795,10 +797,11 @@ export function ScopedChatPage({
                     !isStaticWebsiteOnly() &&
                     !isUploading &&
                     !agentModelBlocked &&
+                    messageReplayAllowed &&
                     !thread.isLoading
                   }
                   onRegenerateMessage={
-                    scope.regenerateVisible === false
+                    scope.regenerateVisible === false || !messageReplayAllowed
                       ? undefined
                       : handleRegenerate
                   }
@@ -810,13 +813,14 @@ export function ScopedChatPage({
                     !isStaticWebsiteOnly() &&
                     !isUploading &&
                     !agentModelBlocked &&
+                    messageReplayAllowed &&
                     !thread.isLoading &&
                     !branchThread.isPending &&
                     !hasGoal &&
                     !hasOpenHumanInputCard
                   }
                   onEditAndRegenerateMessage={
-                    scope.regenerateVisible === false
+                    scope.regenerateVisible === false || !messageReplayAllowed
                       ? undefined
                       : handleEditAndRegenerate
                   }

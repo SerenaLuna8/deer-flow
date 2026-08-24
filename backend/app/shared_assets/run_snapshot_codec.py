@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
+import posixpath
 import re
+import struct
+import unicodedata
 import uuid
+import zlib
 from collections.abc import Mapping, Sequence
+from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 
 from pydantic import ValidationError
@@ -26,13 +32,37 @@ from app.shared_assets.models import (
     SkillAssetRef,
     SkillSecretRequirementSnapshot,
 )
+from app.shared_assets.skill_archive import (
+    MAX_SKILL_ARCHIVE_BYTES,
+    MAX_SKILL_ARCHIVE_FILE_BYTES,
+    MAX_SKILL_ARCHIVE_FILES,
+)
 
-RUN_ASSET_SNAPSHOT_SCHEMA_VERSION = 2
+RUN_ASSET_SNAPSHOT_SCHEMA_VERSION = 3
+_LEGACY_RUN_ASSET_SNAPSHOT_SCHEMA_VERSION = 2
+# Bound the one JSONB parameter before persistence.  The 80 MiB budget admits
+# the measured compressed ppt-master payload class; deployment memory safety
+# still requires the real PostgreSQL acceptance gate.
+MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES = 80 * 1024 * 1024
+
+_SKILL_ARCHIVE_CODEC = "canonical-frame-zlib-6"
+_SKILL_ARCHIVE_COMPRESSION_LEVEL = 6
+_SKILL_FRAME_MAGIC = b"DFSKV3\x00\x01"
+_SKILL_FRAME_HEADER = struct.Struct(">8sIQ")
+_SKILL_FILE_HEADER = struct.Struct(">IIQ")
+_MAX_SKILL_PATH_CHARS = 1024
+_MAX_SKILL_MEDIA_TYPE_CHARS = 255
+_MAX_SKILL_PATH_BYTES = _MAX_SKILL_PATH_CHARS * 4
+_MAX_SKILL_MEDIA_TYPE_BYTES = _MAX_SKILL_MEDIA_TYPE_CHARS * 4
 _CHECKSUM = re.compile(r"^[0-9a-f]{64}$")
 
 
 class RunAssetSnapshotInvalid(ValueError):
     pass
+
+
+class RunAssetSnapshotTooLarge(RunAssetSnapshotInvalid):
+    """The final encoded Run snapshot exceeds its persistence budget."""
 
 
 def encode_run_asset_snapshot(snapshot: ResolvedAssetSnapshot) -> dict[str, object]:
@@ -65,15 +95,20 @@ def encode_run_asset_snapshot(snapshot: ResolvedAssetSnapshot) -> dict[str, obje
             "resolved_skill_version_ids": [str(value) for value in snapshot.skill_version_ids],
         }
     elif type(snapshot) is ResolvedSkillSnapshot:
+        files, content_size = _validated_skill_files(snapshot.files)
+        if _skill_checksum(files) != snapshot.checksum:
+            raise RunAssetSnapshotInvalid("Run Skill snapshot checksum is invalid")
+        compressed, uncompressed_size = _compress_skill_frame(
+            files,
+            content_size=content_size,
+        )
         base["skill"] = {
-            "files": [
-                {
-                    "path": item.path,
-                    "media_type": item.media_type,
-                    "content_base64": base64.b64encode(item.content).decode("ascii"),
-                }
-                for item in snapshot.files
-            ],
+            "codec": _SKILL_ARCHIVE_CODEC,
+            "file_count": len(files),
+            "content_size": content_size,
+            "uncompressed_size": uncompressed_size,
+            "compressed_size": len(compressed),
+            "archive_base64": base64.b64encode(compressed).decode("ascii"),
             "secret_requirements": [
                 {
                     "name": item.name,
@@ -91,6 +126,10 @@ def encode_run_asset_snapshot(snapshot: ResolvedAssetSnapshot) -> dict[str, obje
         }
     else:
         raise RunAssetSnapshotInvalid("unsupported Run asset snapshot")
+    if encoded_run_asset_snapshot_json_size(base) > MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES:
+        raise RunAssetSnapshotTooLarge(
+            "Run asset snapshot exceeds the encoded JSON size limit",
+        )
     return base
 
 
@@ -108,7 +147,11 @@ def decode_run_asset_snapshot(value: Mapping[str, object]) -> ResolvedAssetSnaps
             AssetKind(str(value["kind"])).value,
         }:
             raise RunAssetSnapshotInvalid("Run asset snapshot shape is invalid")
-        if value["schema_version"] != RUN_ASSET_SNAPSHOT_SCHEMA_VERSION:
+        schema_version = value["schema_version"]
+        if type(schema_version) is not int or schema_version not in {
+            _LEGACY_RUN_ASSET_SNAPSHOT_SCHEMA_VERSION,
+            RUN_ASSET_SNAPSHOT_SCHEMA_VERSION,
+        }:
             raise RunAssetSnapshotInvalid("Run asset snapshot schema is unsupported")
         kind = AssetKind(str(value["kind"]))
         scope = AssetScope(str(value["scope"]))
@@ -186,44 +229,17 @@ def decode_run_asset_snapshot(value: Mapping[str, object]) -> ResolvedAssetSnaps
             )
         if kind is AssetKind.SKILL:
             raw = _mapping(value["skill"])
-            if set(raw) != {"files", "secret_requirements"}:
-                raise RunAssetSnapshotInvalid("Run Skill snapshot shape is invalid")
-            files = tuple(
-                SkillArchiveFile(
-                    path=_string(item["path"]),
-                    media_type=_string(item["media_type"]),
-                    content=base64.b64decode(
-                        _string(item["content_base64"]),
-                        validate=True,
-                    ),
-                )
-                for item in _mapping_sequence(
-                    raw["files"],
-                    {"path", "media_type", "content_base64"},
-                )
-            )
+            if schema_version == _LEGACY_RUN_ASSET_SNAPSHOT_SCHEMA_VERSION:
+                files = _decode_legacy_skill_files(raw)
+            else:
+                files = _decode_compressed_skill_files(value, raw)
             if _skill_checksum(files) != checksum:
                 raise RunAssetSnapshotInvalid("Run Skill snapshot checksum is invalid")
-            requirements: list[SkillSecretRequirementSnapshot] = []
-            for item in _mapping_sequence(
-                raw["secret_requirements"],
-                {"name", "target_env", "optional"},
-            ):
-                if not isinstance(item["optional"], bool):
-                    raise RunAssetSnapshotInvalid(
-                        "Run Skill secret requirement is invalid",
-                    )
-                requirements.append(
-                    SkillSecretRequirementSnapshot(
-                        name=_string(item["name"]),
-                        target_env=_string(item["target_env"]),
-                        optional=item["optional"],
-                    )
-                )
+            requirements = _decode_skill_requirements(raw["secret_requirements"])
             return ResolvedSkillSnapshot(
                 **common,
                 files=files,
-                secret_requirements=tuple(requirements),
+                secret_requirements=requirements,
             )
         raw = _mapping(value["mcp"])
         if set(raw) != {"definition", "secret_generation_ids", "secret_digest"}:
@@ -241,6 +257,336 @@ def decode_run_asset_snapshot(value: Mapping[str, object]) -> ResolvedAssetSnaps
         raise
     except (KeyError, TypeError, ValueError, ValidationError) as error:
         raise RunAssetSnapshotInvalid("Run asset snapshot is invalid") from error
+
+
+def _validated_skill_files(
+    value: Sequence[SkillArchiveFile],
+) -> tuple[tuple[SkillArchiveFile, ...], int]:
+    if isinstance(value, (str, bytes, bytearray)):
+        raise RunAssetSnapshotInvalid("Run Skill files are invalid")
+    files = tuple(value)
+    if not files or len(files) > MAX_SKILL_ARCHIVE_FILES:
+        raise RunAssetSnapshotInvalid("Run Skill file count is invalid")
+    if any(type(item) is not SkillArchiveFile or type(item.content) is not bytes or not isinstance(item.path, str) or not isinstance(item.media_type, str) for item in files):
+        raise RunAssetSnapshotInvalid("Run Skill file is invalid")
+    if files != tuple(sorted(files, key=lambda item: item.path)):
+        raise RunAssetSnapshotInvalid("Run Skill file order is not canonical")
+
+    paths: set[str] = set()
+    filesystem_identities: set[str] = set()
+    total_size = 0
+    for item in files:
+        path = item.path
+        media_type = item.media_type
+        canonical_path = _canonical_skill_path(path)
+        filesystem_identity = unicodedata.normalize("NFC", path.casefold())
+        if canonical_path != path or len(path.encode("utf-8")) > _MAX_SKILL_PATH_BYTES or path in paths or filesystem_identity in filesystem_identities:
+            raise RunAssetSnapshotInvalid("Run Skill file path is invalid")
+        if not isinstance(media_type, str) or not media_type or media_type != media_type.strip() or len(media_type) > _MAX_SKILL_MEDIA_TYPE_CHARS or len(media_type.encode("utf-8")) > _MAX_SKILL_MEDIA_TYPE_BYTES:
+            raise RunAssetSnapshotInvalid("Run Skill media type is invalid")
+        size = len(item.content)
+        total_size += size
+        if size > MAX_SKILL_ARCHIVE_FILE_BYTES or total_size > MAX_SKILL_ARCHIVE_BYTES:
+            raise RunAssetSnapshotInvalid("Run Skill file content is too large")
+        paths.add(path)
+        filesystem_identities.add(filesystem_identity)
+    for identity in filesystem_identities:
+        parts = PurePosixPath(identity).parts
+        if any(PurePosixPath(*parts[:index]).as_posix() in filesystem_identities for index in range(1, len(parts))):
+            raise RunAssetSnapshotInvalid("Run Skill file path is invalid")
+    return files, total_size
+
+
+def _canonical_skill_path(raw_path: str) -> str:
+    windows_path = PureWindowsPath(raw_path)
+    posix_path = raw_path.replace("\\", "/")
+    if not raw_path or "\x00" in raw_path or ":" in raw_path or windows_path.drive or windows_path.is_absolute() or posix_path.startswith("/") or ".." in PurePosixPath(posix_path).parts:
+        raise RunAssetSnapshotInvalid("Run Skill file path is invalid")
+    normalized = unicodedata.normalize(
+        "NFC",
+        posixpath.normpath(posix_path).removeprefix("./"),
+    )
+    if not normalized or normalized == "." or len(normalized) > _MAX_SKILL_PATH_CHARS:
+        raise RunAssetSnapshotInvalid("Run Skill file path is invalid")
+    return normalized
+
+
+def _compress_skill_frame(
+    files: tuple[SkillArchiveFile, ...],
+    *,
+    content_size: int,
+) -> tuple[bytes, int]:
+    output = io.BytesIO()
+    compressor = zlib.compressobj(_SKILL_ARCHIVE_COMPRESSION_LEVEL)
+    uncompressed_size = 0
+
+    def feed(value: bytes) -> None:
+        nonlocal uncompressed_size
+        uncompressed_size += len(value)
+        output.write(compressor.compress(value))
+        if output.tell() > _max_compressed_skill_archive_bytes():
+            raise RunAssetSnapshotTooLarge(
+                "Run Skill snapshot exceeds the encoded JSON size limit",
+            )
+
+    feed(
+        _SKILL_FRAME_HEADER.pack(
+            _SKILL_FRAME_MAGIC,
+            len(files),
+            content_size,
+        )
+    )
+    for item in files:
+        path = item.path.encode("utf-8")
+        media_type = item.media_type.encode("utf-8")
+        feed(_SKILL_FILE_HEADER.pack(len(path), len(media_type), len(item.content)))
+        feed(path)
+        feed(media_type)
+        feed(item.content)
+    output.write(compressor.flush())
+    compressed = output.getvalue()
+    if len(compressed) > _max_compressed_skill_archive_bytes():
+        raise RunAssetSnapshotTooLarge(
+            "Run Skill snapshot exceeds the encoded JSON size limit",
+        )
+    return compressed, uncompressed_size
+
+
+def _decode_legacy_skill_files(
+    raw: Mapping[str, object],
+) -> tuple[SkillArchiveFile, ...]:
+    if set(raw) != {"files", "secret_requirements"}:
+        raise RunAssetSnapshotInvalid("Run Skill snapshot shape is invalid")
+    raw_files = raw["files"]
+    if not isinstance(raw_files, list) or not raw_files or len(raw_files) > MAX_SKILL_ARCHIVE_FILES:
+        raise RunAssetSnapshotInvalid("Run Skill file count is invalid")
+    items = _mapping_sequence(
+        raw_files,
+        {"path", "media_type", "content_base64"},
+    )
+    encoded_files: list[tuple[str, str, str]] = []
+    declared_total_size = 0
+    for item in items:
+        encoded = _string(item["content_base64"])
+        decoded_size = _base64_decoded_size(encoded)
+        declared_total_size += decoded_size
+        if decoded_size > MAX_SKILL_ARCHIVE_FILE_BYTES or declared_total_size > MAX_SKILL_ARCHIVE_BYTES:
+            raise RunAssetSnapshotInvalid("Run Skill file content is too large")
+        encoded_files.append(
+            (
+                _string(item["path"]),
+                _string(item["media_type"]),
+                encoded,
+            )
+        )
+    files = tuple(
+        SkillArchiveFile(
+            path=path,
+            media_type=media_type,
+            content=base64.b64decode(
+                encoded,
+                validate=True,
+            ),
+        )
+        for path, media_type, encoded in encoded_files
+    )
+    validated, actual_total_size = _validated_skill_files(files)
+    if actual_total_size != declared_total_size:
+        raise RunAssetSnapshotInvalid("Run Skill file content size is invalid")
+    return validated
+
+
+def _base64_decoded_size(encoded: str) -> int:
+    if not encoded.isascii():
+        raise RunAssetSnapshotInvalid("Run Skill snapshot base64 is invalid") from None
+    if len(encoded) % 4 != 0:
+        raise RunAssetSnapshotInvalid("Run Skill snapshot base64 is invalid")
+    padding = len(encoded) - len(encoded.rstrip("="))
+    if padding > 2 or "=" in encoded[: len(encoded) - padding]:
+        raise RunAssetSnapshotInvalid("Run Skill snapshot base64 is invalid")
+    return (len(encoded) // 4) * 3 - padding
+
+
+def _decode_compressed_skill_files(
+    snapshot: Mapping[str, object],
+    raw: Mapping[str, object],
+) -> tuple[SkillArchiveFile, ...]:
+    if set(raw) != {
+        "archive_base64",
+        "codec",
+        "compressed_size",
+        "content_size",
+        "file_count",
+        "secret_requirements",
+        "uncompressed_size",
+    }:
+        raise RunAssetSnapshotInvalid("Run Skill snapshot shape is invalid")
+    if raw["codec"] != _SKILL_ARCHIVE_CODEC:
+        raise RunAssetSnapshotInvalid("Run Skill snapshot codec is unsupported")
+
+    file_count = _bounded_int(
+        raw["file_count"],
+        minimum=1,
+        maximum=MAX_SKILL_ARCHIVE_FILES,
+    )
+    content_size = _bounded_int(
+        raw["content_size"],
+        minimum=0,
+        maximum=MAX_SKILL_ARCHIVE_BYTES,
+    )
+    uncompressed_size = _bounded_int(
+        raw["uncompressed_size"],
+        minimum=_SKILL_FRAME_HEADER.size,
+        maximum=_max_skill_frame_bytes(),
+    )
+    compressed_size = _bounded_int(
+        raw["compressed_size"],
+        minimum=1,
+        maximum=_max_compressed_skill_archive_bytes(),
+    )
+    encoded = _string(raw["archive_base64"])
+    if len(encoded) != ((compressed_size + 2) // 3) * 4:
+        raise RunAssetSnapshotInvalid("Run Skill snapshot base64 size is invalid")
+    if encoded_run_asset_snapshot_json_size(snapshot) > MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES:
+        raise RunAssetSnapshotTooLarge(
+            "Run Skill snapshot exceeds the encoded JSON size limit",
+        )
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        raise RunAssetSnapshotInvalid("Run Skill snapshot base64 is invalid") from None
+    if len(compressed) != compressed_size:
+        raise RunAssetSnapshotInvalid("Run Skill compressed size is invalid")
+
+    decompressor = zlib.decompressobj()
+    try:
+        frame = decompressor.decompress(compressed, uncompressed_size + 1)
+    except zlib.error:
+        raise RunAssetSnapshotInvalid("Run Skill compressed archive is invalid") from None
+    if len(frame) != uncompressed_size or not decompressor.eof or decompressor.unconsumed_tail or decompressor.unused_data:
+        raise RunAssetSnapshotInvalid("Run Skill uncompressed size is invalid")
+    return _parse_skill_frame(
+        frame,
+        declared_file_count=file_count,
+        declared_content_size=content_size,
+    )
+
+
+def _parse_skill_frame(
+    frame: bytes,
+    *,
+    declared_file_count: int,
+    declared_content_size: int,
+) -> tuple[SkillArchiveFile, ...]:
+    if len(frame) < _SKILL_FRAME_HEADER.size:
+        raise RunAssetSnapshotInvalid("Run Skill archive header is invalid")
+    magic, file_count, content_size = _SKILL_FRAME_HEADER.unpack_from(frame)
+    if magic != _SKILL_FRAME_MAGIC or file_count != declared_file_count or content_size != declared_content_size:
+        raise RunAssetSnapshotInvalid("Run Skill archive declaration is invalid")
+
+    view = memoryview(frame)
+    offset = _SKILL_FRAME_HEADER.size
+    files: list[SkillArchiveFile] = []
+    actual_content_size = 0
+    for _index in range(file_count):
+        if offset + _SKILL_FILE_HEADER.size > len(view):
+            raise RunAssetSnapshotInvalid("Run Skill archive is truncated")
+        path_size, media_type_size, file_size = _SKILL_FILE_HEADER.unpack_from(
+            view,
+            offset,
+        )
+        offset += _SKILL_FILE_HEADER.size
+        if path_size < 1 or path_size > _MAX_SKILL_PATH_BYTES or media_type_size < 1 or media_type_size > _MAX_SKILL_MEDIA_TYPE_BYTES or file_size > MAX_SKILL_ARCHIVE_FILE_BYTES:
+            raise RunAssetSnapshotInvalid("Run Skill archive member is invalid")
+        member_end = offset + path_size + media_type_size + file_size
+        if member_end > len(view):
+            raise RunAssetSnapshotInvalid("Run Skill archive is truncated")
+        try:
+            path = bytes(view[offset : offset + path_size]).decode("utf-8")
+            offset += path_size
+            media_type = bytes(
+                view[offset : offset + media_type_size],
+            ).decode("utf-8")
+            offset += media_type_size
+        except UnicodeDecodeError:
+            raise RunAssetSnapshotInvalid("Run Skill archive text is invalid") from None
+        content = bytes(view[offset:member_end])
+        offset = member_end
+        actual_content_size += len(content)
+        if actual_content_size > MAX_SKILL_ARCHIVE_BYTES:
+            raise RunAssetSnapshotInvalid("Run Skill archive content is too large")
+        files.append(SkillArchiveFile(path, content, media_type))
+    if offset != len(view) or actual_content_size != content_size:
+        raise RunAssetSnapshotInvalid("Run Skill archive size is invalid")
+    validated, validated_content_size = _validated_skill_files(files)
+    if validated_content_size != content_size:
+        raise RunAssetSnapshotInvalid("Run Skill archive content size is invalid")
+    return validated
+
+
+def _decode_skill_requirements(
+    value: object,
+) -> tuple[SkillSecretRequirementSnapshot, ...]:
+    requirements: list[SkillSecretRequirementSnapshot] = []
+    for item in _mapping_sequence(
+        value,
+        {"name", "target_env", "optional"},
+    ):
+        if not isinstance(item["optional"], bool):
+            raise RunAssetSnapshotInvalid(
+                "Run Skill secret requirement is invalid",
+            )
+        requirements.append(
+            SkillSecretRequirementSnapshot(
+                name=_string(item["name"]),
+                target_env=_string(item["target_env"]),
+                optional=item["optional"],
+            )
+        )
+    return tuple(requirements)
+
+
+def _bounded_int(value: object, *, minimum: int, maximum: int) -> int:
+    if type(value) is not int or value < minimum or value > maximum:
+        raise RunAssetSnapshotInvalid("Run Skill snapshot size is invalid")
+    return value
+
+
+def _max_compressed_skill_archive_bytes() -> int:
+    # Base64 expands bytes by 4/3.  This is an early bound; the exact final
+    # JSON size is checked after the complete snapshot object is assembled.
+    return (MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES // 4) * 3
+
+
+def _max_skill_frame_bytes() -> int:
+    return _SKILL_FRAME_HEADER.size + MAX_SKILL_ARCHIVE_BYTES + MAX_SKILL_ARCHIVE_FILES * (_SKILL_FILE_HEADER.size + _MAX_SKILL_PATH_BYTES + _MAX_SKILL_MEDIA_TYPE_BYTES)
+
+
+def encoded_run_asset_snapshot_json_size(value: Mapping[str, object]) -> int:
+    """Return the persistence JSON byte size without copying a large blob."""
+
+    skill = value.get(AssetKind.SKILL.value)
+    if value.get("schema_version") == RUN_ASSET_SNAPSHOT_SCHEMA_VERSION and value.get("kind") == AssetKind.SKILL.value and isinstance(skill, Mapping) and isinstance(skill.get("archive_base64"), str):
+        encoded_archive = skill["archive_base64"]
+        compact_skill = dict(skill)
+        compact_skill["archive_base64"] = ""
+        compact_snapshot = dict(value)
+        compact_snapshot[AssetKind.SKILL.value] = compact_skill
+        fixed_size = len(
+            json.dumps(
+                compact_snapshot,
+                ensure_ascii=False,
+            ).encode()
+        )
+        # Base64 contains no JSON escape characters, so replacing the empty
+        # string adds exactly one byte for every encoded character.
+        return fixed_size + len(encoded_archive)
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+        ).encode()
+    )
 
 
 def _skill_checksum(files: Sequence[SkillArchiveFile]) -> str:

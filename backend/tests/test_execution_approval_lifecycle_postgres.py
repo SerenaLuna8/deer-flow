@@ -6,6 +6,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -123,6 +124,72 @@ from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
 from deerflow.runtime.host_execution_runner import (
     execute_frozen_host_execution_continuation,
 )
+
+
+class _OneShotSessionFailureFactory:
+    """Inject one transaction-body failure or one lost COMMIT acknowledgement."""
+
+    def __init__(self, factory: Any, *, failure_point: str) -> None:
+        if failure_point not in {"flush", "commit_ack"}:
+            raise ValueError("unsupported session failure point")
+        self._factory = factory
+        self.failure_point = failure_point
+        self.pending = True
+
+    def __call__(self) -> _OneShotSessionFailureSession:
+        return _OneShotSessionFailureSession(self._factory(), self)
+
+
+class _OneShotSessionFailureSession:
+    def __init__(
+        self,
+        session: Any,
+        owner: _OneShotSessionFailureFactory,
+    ) -> None:
+        self._session = session
+        self._owner = owner
+
+    async def __aenter__(self) -> _OneShotSessionFailureSession:
+        await self._session.__aenter__()
+        return self
+
+    async def __aexit__(self, *args: Any) -> Any:
+        return await self._session.__aexit__(*args)
+
+    def begin(self) -> _OneShotSessionFailureTransaction:
+        return _OneShotSessionFailureTransaction(
+            self._session.begin(),
+            self._owner,
+        )
+
+    async def flush(self, *args: Any, **kwargs: Any) -> None:
+        await self._session.flush(*args, **kwargs)
+        if self._owner.pending and self._owner.failure_point == "flush":
+            self._owner.pending = False
+            raise ConnectionError("simulated transaction-body disconnect")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+
+class _OneShotSessionFailureTransaction:
+    def __init__(
+        self,
+        transaction: Any,
+        owner: _OneShotSessionFailureFactory,
+    ) -> None:
+        self._transaction = transaction
+        self._owner = owner
+
+    async def __aenter__(self) -> Any:
+        return await self._transaction.__aenter__()
+
+    async def __aexit__(self, *args: Any) -> Any:
+        result = await self._transaction.__aexit__(*args)
+        if args[0] is None and self._owner.pending and self._owner.failure_point == "commit_ack":
+            self._owner.pending = False
+            raise ConnectionError("simulated lost COMMIT acknowledgement")
+        return result
 
 
 async def _running_job(
@@ -2298,8 +2365,12 @@ async def test_continuation_intent_restore_and_artifact_delivery_are_idempotent(
             run_id=continuation_run_id,
             authorization_boundary=finalization_boundary,
         )
-        finalizer = PrivateFileFinalizer(
+        commit_ack_loss_factory = _OneShotSessionFailureFactory(
             scenario.seed.factory,
+            failure_point="commit_ack",
+        )
+        finalizer = PrivateFileFinalizer(
+            commit_ack_loss_factory,
             quota=quota_probe,
             output_delivery_port=port,
         )
@@ -2326,11 +2397,18 @@ async def test_continuation_intent_restore_and_artifact_delivery_are_idempotent(
 
         assert quota_probe.reservations == [(extra_file_id, 1)]
         assert quota_probe.releases == []
+        assert commit_ack_loss_factory.pending is False
 
-        # Simulate commit ACK loss after file promotion, Artifact delivery, and
-        # quota reservation commit. A new Worker rebuilds its manifest from DB
-        # authority, then must reuse every durable object without a new quota
-        # mutation.
+        # Cleanup from a stale exception path must never downgrade the durable
+        # commit receipt after the transaction itself reached PostgreSQL.
+        await finalizer.mark_failed(run_scope)
+        async with scenario.seed.factory() as session:
+            committed_run = await session.get(RunRow, continuation_run_id)
+            assert committed_run is not None
+            assert committed_run.finalization_status == "complete"
+
+        # A new Worker can rebuild its manifest from DB authority and reuse
+        # every durable object without a new quota mutation.
         async with scenario.seed.factory() as session, session.begin():
             replay_ready_files = tuple(
                 (
@@ -2381,7 +2459,15 @@ async def test_continuation_intent_restore_and_artifact_delivery_are_idempotent(
             )
             for row in replay_ready_files
         )
-        replayed_finalization = await finalizer._commit(
+        body_failure_factory = _OneShotSessionFailureFactory(
+            scenario.seed.factory,
+            failure_point="flush",
+        )
+        replayed_finalization = await PrivateFileFinalizer(
+            body_failure_factory,
+            quota=quota_probe,
+            output_delivery_port=port,
+        )._commit(
             run_scope,
             replay_manifest,
             replay_after_files,
@@ -2389,6 +2475,7 @@ async def test_continuation_intent_restore_and_artifact_delivery_are_idempotent(
             presented_logical_paths,
         )
         assert tuple(artifact.id for artifact in replayed_finalization.artifacts) == first_artifact_ids
+        assert body_failure_factory.pending is False
         assert finalization_boundary.ambiguous_side_effect is False
         assert quota_probe.reservations == [(extra_file_id, 1)]
         assert quota_probe.releases == []

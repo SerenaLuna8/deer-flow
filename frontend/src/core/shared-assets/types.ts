@@ -16,7 +16,6 @@ export const VERSION_RELATIONS = [
   "candidate",
   "historical",
 ] as const;
-export const SKILL_SCAN_DECISIONS = ["allow", "warn", "block"] as const;
 export const SKILL_FILE_PREVIEW_STATUSES = [
   "ready",
   "binary",
@@ -66,7 +65,6 @@ export const assetScopeSchema = z.enum(["system", "project"]);
 export const assetStatusSchema = z.enum(ASSET_STATUSES);
 export const assetWorkflowStatusSchema = z.enum(ASSET_WORKFLOW_STATUSES);
 export const versionRelationSchema = z.enum(VERSION_RELATIONS);
-export const skillScanDecisionSchema = z.enum(SKILL_SCAN_DECISIONS);
 export const skillFilePreviewStatusSchema = z.enum(SKILL_FILE_PREVIEW_STATUSES);
 export const mcpTransportSchema = z.enum(MCP_TRANSPORTS);
 export const mcpToolInventoryStatusSchema = z.enum(MCP_TOOL_INVENTORY_STATUSES);
@@ -419,9 +417,6 @@ export const skillVersionSchema = z
     frontmatter: safeJsonObjectSchema,
     compatibility: z.string().nullable(),
     secret_requirements: z.array(skillSecretRequirementSchema),
-    scan_decision: skillScanDecisionSchema,
-    scan_rule_ids: z.array(z.string()),
-    scan_summary: safeJsonObjectSchema,
     file_views: z.array(skillFileViewSchema),
     supersedes_version_id: assetIdSchema.nullable(),
     payload_checksum: z.string().min(1),

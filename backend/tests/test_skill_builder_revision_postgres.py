@@ -316,7 +316,6 @@ async def _commit_session(
         CommitSkillDesignSession(
             expected_revision=session.revision,
             expected_draft_checksum=session.draft_checksum,
-            acknowledge_warnings=True,
             idempotency_key=key,
         ),
     )
@@ -324,7 +323,7 @@ async def _commit_session(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_validate_records_package_scan_result_and_terminal_stages(
+async def test_validate_records_package_and_terminal_stages(
     migrated_postgres_database_url: str,
 ) -> None:
     seed, context, skills, design, _quota = await _environment(
@@ -361,10 +360,6 @@ async def test_validate_records_package_scan_result_and_terminal_stages(
             (
                 SkillDesignActivityKind.VALIDATION_STARTED,
                 {"stage": "package_files"},
-            ),
-            (
-                SkillDesignActivityKind.VALIDATION_STARTED,
-                {"stage": "safety_scan"},
             ),
             (SkillDesignActivityKind.VALIDATION_PASSED, {}),
             (
@@ -428,10 +423,6 @@ async def test_validation_unexpected_failure_has_durable_terminal(
             (
                 SkillDesignActivityKind.VALIDATION_STARTED,
                 {"stage": "package_files"},
-            ),
-            (
-                SkillDesignActivityKind.VALIDATION_STARTED,
-                {"stage": "safety_scan"},
             ),
             (SkillDesignActivityKind.VALIDATION_FAILED, {}),
             (
@@ -691,7 +682,6 @@ async def test_commit_revalidation_failure_has_durable_terminal(
                 CommitSkillDesignSession(
                     expected_revision=validated.revision - 1,
                     expected_draft_checksum=validated.draft_checksum,
-                    acknowledge_warnings=True,
                     idempotency_key="stale-commit-with-terminal",
                 ),
             )
@@ -1093,12 +1083,10 @@ async def test_revision_seed_matches_published_bytes_and_allows_manual_validate(
         assert [item.kind.value for item in activities] == [
             "request_accepted",
             "validation_started",
-            "validation_started",
             "validation_passed",
             "run_terminal",
         ]
         assert activities[1].payload == {"stage": "package_files"}
-        assert activities[2].payload == {"stage": "safety_scan"}
         assert activities[-1].payload == {"status": "completed"}
     finally:
         await seed.engine.dispose()
@@ -1128,17 +1116,12 @@ async def test_revision_seed_dry_run_rejects_unsupported_published_shapes(
             _skill_md("binary-note", _template_body()),
             SkillArchiveFile("notes/raw.txt", b"\xff\xfe not utf-8", "text/plain"),
         )
-        blocked = (
-            _skill_md("scan-blocked", _template_body()),
-            SkillArchiveFile("tools/run.py", b'exec("print(1)")\n', "text/x-python"),
-        )
         cases = (
             ("too-many-files", too_many),
             ("oversized-file", oversized),
             ("dotted-path", dotted),
             ("secret-material", secret),
             ("binary-note", binary),
-            ("scan-blocked", blocked),
         )
         for slug, files in cases:
             skill_id = await _insert_current_skill(seed, context, slug=slug, files=files)
@@ -1517,7 +1500,6 @@ async def test_revision_delete_fails_open_sessions_and_revokes_in_flight_tools(
                 CommitSkillDesignSession(
                     expected_revision=closed.revision,
                     expected_draft_checksum=closed.draft_checksum or ("d" * 64),
-                    acknowledge_warnings=True,
                     idempotency_key="delete-commit",
                 ),
             )

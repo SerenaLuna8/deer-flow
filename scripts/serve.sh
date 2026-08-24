@@ -572,18 +572,22 @@ echo ""
 
 # ── Cleanup handler ──────────────────────────────────────────────────────────
 
-STARTED_PIDS=""
+STARTED_PIDS=()
+STARTED_PROCESS_NAMES=()
 
 remember_started_pid() {
-    STARTED_PIDS="$STARTED_PIDS $1"
+    STARTED_PIDS+=("$1")
+    STARTED_PROCESS_NAMES+=("$2")
 }
 
 stop_started() {
     local pid
-    for pid in $STARTED_PIDS; do
+    for pid in "${STARTED_PIDS[@]}"; do
+        [ -n "$pid" ] || continue
         kill_process_tree "$pid"
     done
-    STARTED_PIDS=""
+    STARTED_PIDS=()
+    STARTED_PROCESS_NAMES=()
 }
 
 kill_process_tree() {
@@ -607,6 +611,32 @@ cleanup() {
     echo ""
     stop_started
     exit "$status"
+}
+
+# Bash 3.2 (the macOS system Bash) has no `wait -n`. Poll every child that this
+# launcher started so one required process exiting tears down the whole stack.
+# Returning a fixed non-zero status lets launchd's keepalive restart a complete
+# stack instead of leaving Gateway/Frontend alive without Worker execution.
+supervise_started_processes() {
+    local index pid name child_status
+    while true; do
+        for ((index = 0; index < ${#STARTED_PIDS[@]}; index++)); do
+            pid="${STARTED_PIDS[$index]}"
+            [ -n "$pid" ] || continue
+            kill -0 "$pid" 2>/dev/null && continue
+
+            if wait "$pid"; then
+                child_status=0
+            else
+                child_status=$?
+            fi
+            STARTED_PIDS[$index]=""
+            name="${STARTED_PROCESS_NAMES[$index]}"
+            echo "✗ $name exited after startup (status $child_status); stopping the remaining services." >&2
+            return 1
+        done
+        sleep 1
+    done
 }
 
 trap 'cleanup 130' INT
@@ -634,7 +664,7 @@ run_service() {
     else
         sh -c "$cmd" &
     fi
-    remember_started_pid "$!"
+    remember_started_pid "$!" "$name"
 
     ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
         local logfile="$LOG_ROOT/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
@@ -657,7 +687,7 @@ run_process() {
         sh -c "$cmd" &
     fi
     pid=$!
-    remember_started_pid "$pid"
+    remember_started_pid "$pid" "$name"
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 "$pid" 2>/dev/null || {
             echo "✗ $name failed to start."
@@ -722,5 +752,5 @@ if $DAEMON_MODE; then
     trap - INT TERM
 else
     echo "  Press Ctrl+C to stop all services"
-    wait
+    supervise_started_processes || cleanup "$?"
 fi

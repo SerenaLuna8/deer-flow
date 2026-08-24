@@ -2,20 +2,26 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import mimetypes
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
     PrivateWorkError,
     PrivateWorkInvalid,
+    PrivateWorkRetryableUnavailable,
     PrivateWorkTooLarge,
     PrivateWorkUnavailable,
 )
@@ -41,6 +47,7 @@ from deerflow.persistence.private_work.model import (
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.workspace_changes.diff import compare_snapshots
 from deerflow.workspace_changes.scanner import (
     BINARY_EXTENSIONS,
@@ -55,6 +62,8 @@ from deerflow.workspace_changes.types import (
     WorkspaceChangeResult,
     WorkspaceSnapshot,
 )
+
+logger = logging.getLogger(__name__)
 
 _SCAN_ROOTS = (
     ("/mnt/user-data/workspace", "workspace", "workspace"),
@@ -91,6 +100,60 @@ class FinalizationResult:
     deleted_file_ids: tuple[uuid.UUID, ...]
     workspace_changes: WorkspaceChangeResult | None
     produced_output_paths: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class _FinalizationCommitState:
+    result: FinalizationResult | None = None
+    body_complete: bool = False
+    phase: str = "commit_authority"
+
+
+class _RetryableFinalizationCommit(Exception):
+    """One transaction attempt rolled back before a durable commit receipt."""
+
+    def __init__(self, *, phase: str, failure_type: str) -> None:
+        self.phase = phase
+        self.failure_type = failure_type
+        super().__init__(phase)
+
+
+_TRANSIENT_POSTGRES_STATES = frozenset({"57P01", "57P02", "57P03"})
+
+
+def _database_sqlstate(error: BaseException) -> str | None:
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        for attribute in ("sqlstate", "pgcode"):
+            value = getattr(current, attribute, None)
+            if isinstance(value, str) and value:
+                return value
+        for nested in (
+            getattr(current, "orig", None),
+            current.__cause__,
+            current.__context__,
+        ):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return None
+
+
+def _is_transient_database_error(error: BaseException) -> bool:
+    if isinstance(error, (IntegrityError, ProgrammingError)):
+        return False
+    if isinstance(error, SQLAlchemyTimeoutError):
+        return True
+    if isinstance(error, DBAPIError) and error.connection_invalidated:
+        return True
+    if isinstance(error, (ConnectionError, TimeoutError)):
+        return True
+    sqlstate = _database_sqlstate(error)
+    return sqlstate is not None and (sqlstate.startswith("08") or sqlstate in _TRANSIENT_POSTGRES_STATES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +269,8 @@ class PrivateFileFinalizer:
         run_scope: PrivateFileRunScope,
         status: str,
     ) -> None:
+        if status not in {"finalizing", "failed"}:
+            raise ValueError("unsupported private file finalization transition")
         async with self._session_factory() as session, session.begin():
             await self._revalidator.require(
                 session,
@@ -222,11 +287,30 @@ class PrivateFileFinalizer:
                     RunRow.owner_user_id == str(run_scope.context.user_id),
                     RunRow.thread_id == run_scope.thread_id,
                     RunRow.status.in_(("pending", "running")),
+                    RunRow.finalization_status.in_(
+                        ("pending", "finalizing", "failed"),
+                    ),
                 )
                 .values(finalization_status=status, updated_at=datetime.now(UTC))
             )
-            if result.rowcount != 1:
-                raise PrivateWorkUnavailable(run_scope.context.request_id)
+            if result.rowcount == 1:
+                return
+            if status == "failed":
+                committed = await session.scalar(
+                    select(RunRow.run_id)
+                    .where(
+                        RunRow.run_id == run_scope.run_id,
+                        RunRow.project_id == run_scope.context.project_id,
+                        RunRow.owner_user_id == str(run_scope.context.user_id),
+                        RunRow.thread_id == run_scope.thread_id,
+                        RunRow.status.in_(("pending", "running")),
+                        RunRow.finalization_status == "complete",
+                    )
+                    .with_for_update(of=RunRow)
+                )
+                if committed is not None:
+                    return
+            raise PrivateWorkUnavailable(run_scope.context.request_id)
 
     async def mark_failed(self, run_scope: PrivateFileRunScope) -> None:
         try:
@@ -658,13 +742,169 @@ class PrivateFileFinalizer:
         staged: tuple[_StagedFile, ...],
         presented_logical_paths: tuple[str, ...],
     ) -> FinalizationResult:
+        for attempt in range(2):
+            try:
+                return await self._commit_attempt(
+                    run_scope,
+                    before_manifest,
+                    after_files,
+                    staged,
+                    presented_logical_paths,
+                )
+            except _RetryableFinalizationCommit as error:
+                if attempt == 0:
+                    logger.warning(
+                        "Private file finalization transaction failed phase=%s outcome=retrying failure_type=%s",
+                        error.phase,
+                        error.failure_type,
+                    )
+                    continue
+                logger.error(
+                    "Private file finalization transaction failed phase=%s outcome=failed failure_type=%s",
+                    error.phase,
+                    error.failure_type,
+                )
+                raise PrivateWorkUnavailable(
+                    run_scope.context.request_id,
+                ) from None
+        raise AssertionError("private file finalization retry loop exhausted")
+
+    async def _read_finalization_receipt(
+        self,
+        run_scope: PrivateFileRunScope,
+    ) -> str | None:
+        async with self._session_factory() as session, session.begin():
+            await self._revalidator.require(
+                session,
+                run_scope.context,
+                Capability.PRIVATE_WORK_CREATE,
+                lock=True,
+            )
+            thread = (
+                await session.execute(
+                    select(ThreadMetaRow.thread_id)
+                    .where(
+                        ThreadMetaRow.project_id == run_scope.context.project_id,
+                        ThreadMetaRow.owner_user_id == str(run_scope.context.user_id),
+                        ThreadMetaRow.thread_id == run_scope.thread_id,
+                        ThreadMetaRow.deleted_at.is_(None),
+                        ThreadMetaRow.frozen_at.is_(None),
+                    )
+                    .with_for_update(of=ThreadMetaRow)
+                )
+            ).scalar_one_or_none()
+            if thread is None:
+                raise PrivateWorkUnavailable(run_scope.context.request_id)
+            # Preserve the mutation lock order while observing the atomic Run
+            # receipt: project/member -> Thread -> Job -> Run/Attempt.
+            await self._authorize_mutation(run_scope, session)
+            return await session.scalar(
+                select(RunRow.finalization_status)
+                .where(
+                    RunRow.run_id == run_scope.run_id,
+                    RunRow.project_id == run_scope.context.project_id,
+                    RunRow.owner_user_id == str(run_scope.context.user_id),
+                    RunRow.thread_id == run_scope.thread_id,
+                    RunRow.status.in_(("pending", "running")),
+                )
+                .with_for_update(of=RunRow)
+            )
+
+    @asynccontextmanager
+    async def _commit_transaction(
+        self,
+        run_scope: PrivateFileRunScope,
+        state: _FinalizationCommitState,
+    ) -> AsyncIterator[AsyncSession]:
+        try:
+            async with self._session_factory() as session, session.begin():
+                yield session
+        except PrivateWorkRetryableUnavailable as error:
+            logger.warning(
+                "Private file finalization transaction failed phase=%s outcome=retrying reason_code=%s failure_type=%s",
+                state.phase,
+                error.reason_code,
+                type(error).__name__,
+            )
+            raise _RetryableFinalizationCommit(
+                phase=state.phase,
+                failure_type=type(error).__name__,
+            ) from None
+        except PrivateWorkUnavailable as error:
+            logger.error(
+                "Private file finalization transaction failed phase=%s outcome=failed reason_code=private_work_unavailable failure_type=%s",
+                state.phase,
+                type(error).__name__,
+            )
+            raise
+        except (PrivateWorkError, AuthorizationRevoked):
+            raise
+        except Exception as error:
+            failure_type = type(error).__name__
+            if state.body_complete and state.result is not None:
+                receipt: str | None = None
+                for receipt_attempt in range(2):
+                    try:
+                        receipt = await self._read_finalization_receipt(run_scope)
+                        break
+                    except Exception as receipt_error:
+                        if isinstance(
+                            receipt_error,
+                            (PrivateWorkError, AuthorizationRevoked),
+                        ) and not isinstance(receipt_error, PrivateWorkUnavailable):
+                            raise
+                        if receipt_attempt == 0:
+                            logger.warning(
+                                "Private file finalization transaction failed phase=commit_reconcile outcome=retrying failure_type=%s reconcile_failure_type=%s",
+                                failure_type,
+                                type(receipt_error).__name__,
+                            )
+                            continue
+                        logger.error(
+                            "Private file finalization transaction failed phase=commit_reconcile outcome=unknown failure_type=%s reconcile_failure_type=%s",
+                            failure_type,
+                            type(receipt_error).__name__,
+                        )
+                        raise PrivateWorkUnavailable(
+                            run_scope.context.request_id,
+                        ) from None
+                if receipt == "complete":
+                    logger.warning(
+                        "Private file finalization transaction failed phase=commit_ack outcome=recovered failure_type=%s",
+                        failure_type,
+                    )
+                    return
+                if receipt != "finalizing":
+                    logger.error(
+                        "Private file finalization transaction failed phase=commit_reconcile outcome=invalid_receipt failure_type=%s",
+                        failure_type,
+                    )
+                    raise PrivateWorkUnavailable(
+                        run_scope.context.request_id,
+                    ) from None
+            if _is_transient_database_error(error):
+                raise _RetryableFinalizationCommit(
+                    phase=state.phase,
+                    failure_type=failure_type,
+                ) from None
+            raise
+
+    async def _commit_attempt(
+        self,
+        run_scope: PrivateFileRunScope,
+        before_manifest: AuthorityManifest,
+        after_files: tuple[_AfterFile, ...],
+        staged: tuple[_StagedFile, ...],
+        presented_logical_paths: tuple[str, ...],
+    ) -> FinalizationResult:
         now = datetime.now(UTC)
         before = before_manifest.by_logical_path()
         after_paths = {item.logical_path for item in after_files}
         changed_by_path = {item.after.logical_path: item for item in staged}
         deleted_paths = sorted(path for path, entry in before.items() if entry.kind in {"workspace", "output"} and path not in after_paths)
         touched_paths = sorted(set(changed_by_path) | set(deleted_paths))
-        async with self._session_factory() as session, session.begin():
+        state = _FinalizationCommitState()
+        async with self._commit_transaction(run_scope, state) as session:
             await self._revalidator.require(
                 session,
                 run_scope.context,
@@ -752,6 +992,7 @@ class PrivateFileFinalizer:
             if len({entry.logical_path for entry in before_manifest.entries}) != len(before_manifest.entries) or current_authority != expected_authority:
                 raise PrivateWorkUnavailable(run_scope.context.request_id)
 
+            state.phase = "commit_quota"
             current_by_path = {row.logical_path: row for row in current_rows}
             old_rows = [current_by_path[path] for path in touched_paths if path in current_by_path]
             old_by_path = {row.logical_path: row for row in old_rows}
@@ -770,6 +1011,7 @@ class PrivateFileFinalizer:
                     file_id=item.id,
                     size=item.size,
                 )
+            state.phase = "commit_files"
             deleted_ids: list[uuid.UUID] = []
             for row in old_rows:
                 row.status = "deleted"
@@ -809,6 +1051,7 @@ class PrivateFileFinalizer:
             unchanged_paths = sorted(after_paths - set(changed_by_path))
             after_ready.update({path: current_by_path[path] for path in unchanged_paths if path in current_by_path})
 
+            state.phase = "commit_artifacts"
             existing_artifact_rows = (
                 (
                     await session.execute(
@@ -887,6 +1130,7 @@ class PrivateFileFinalizer:
 
             run.finalization_status = "complete"
             run.updated_at = now
+            state.phase = "commit_audit"
             if self._audit is not None:
                 try:
                     job_id = uuid.UUID(str(run.job_id))
@@ -907,6 +1151,7 @@ class PrivateFileFinalizer:
                     committed_bytes=sum(item.size for item in staged),
                 )
             await session.flush()
+            state.phase = "commit_diff"
             workspace_changes = await self._workspace_change_result(
                 session,
                 run_scope,
@@ -931,13 +1176,18 @@ class PrivateFileFinalizer:
                 )
                 for row in artifacts
             )
-            return FinalizationResult(
+            state.result = FinalizationResult(
                 files=file_records,
                 artifacts=artifact_records,
                 deleted_file_ids=tuple(deleted_ids),
                 workspace_changes=workspace_changes,
                 produced_output_paths=tuple(sorted(path for path in changed_by_path if path.startswith("outputs/"))),
             )
+            state.body_complete = True
+            state.phase = "commit_ack"
+        if state.result is None:
+            raise PrivateWorkUnavailable(run_scope.context.request_id)
+        return state.result
 
     async def finalize(
         self,
@@ -949,15 +1199,19 @@ class PrivateFileFinalizer:
         staged: list[_StagedFile] = []
         staging_ids: list[uuid.UUID] = []
         committed = False
+        phase = "begin"
         try:
             await self._set_run_finalization(run_scope, "finalizing")
+            phase = "authorization"
             boundary = run_scope.authorization_boundary
             checker = getattr(boundary, "before_file_finalization", None)
             if callable(checker):
                 await checker()
+            phase = "scan"
             after_files = await _joined_to_thread(self._scan, run_scope, sandbox)
             before = before_manifest.by_logical_path()
             changed_files: list[_AfterFile] = []
+            phase = "hash"
             for after in after_files:
                 old = before.get(after.logical_path)
                 if old is not None and old.size == after.size:
@@ -972,6 +1226,7 @@ class PrivateFileFinalizer:
                         continue
                 changed_files.append(after)
             self._validate_changed_files(run_scope, tuple(changed_files))
+            phase = "stage"
             for after in changed_files:
                 file_id = uuid.uuid4()
                 staging_ids.append(file_id)
@@ -983,6 +1238,7 @@ class PrivateFileFinalizer:
                         file_id=file_id,
                     )
                 )
+            phase = "verify"
             verified_after_files = await _joined_to_thread(
                 self._scan,
                 run_scope,
@@ -1012,6 +1268,7 @@ class PrivateFileFinalizer:
                 verified_after_files,
                 presented_paths,
             )
+            phase = "commit"
             result = await self._commit(
                 run_scope,
                 before_manifest,
@@ -1021,9 +1278,22 @@ class PrivateFileFinalizer:
             )
             committed = True
             return result
-        except PrivateWorkError:
+        except PrivateWorkUnavailable as error:
+            logger.error(
+                "Private file finalization failed phase=%s reason_code=%s failure_type=%s",
+                phase,
+                getattr(error, "reason_code", "private_work_unavailable"),
+                type(error).__name__,
+            )
             raise
-        except Exception:
+        except (PrivateWorkError, AuthorizationRevoked):
+            raise
+        except Exception as error:
+            logger.error(
+                "Private file finalization failed phase=%s failure_type=%s",
+                phase,
+                type(error).__name__,
+            )
             raise PrivateWorkUnavailable(run_scope.context.request_id) from None
         finally:
             if not committed:

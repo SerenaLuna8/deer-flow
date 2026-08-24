@@ -5,6 +5,7 @@ import {
   CURRENT_UPLOAD_UNAVAILABLE,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
+  SIDE_EFFECT_STATE_UNKNOWN,
 } from "@/core/private-work/api-client";
 import {
   findTerminalFailureRunIdsToReload,
@@ -144,6 +145,27 @@ describe("run failure recovery", () => {
     liveError.name = OUTPUT_DELIVERY_INCOMPLETE;
     expect(resolveRunFailureCode(liveError, [])).toBe(
       OUTPUT_DELIVERY_INCOMPLETE,
+    );
+    expect(resolveRunFailureRunId(liveError, "run-live", [])).toBe("run-live");
+  });
+
+  test("recognizes unknown side-effect state from live and durable terminals", () => {
+    const durableFailure = [run("error", SIDE_EFFECT_STATE_UNKNOWN)];
+
+    expect(latestRunFailureCode(durableFailure)).toBe(
+      SIDE_EFFECT_STATE_UNKNOWN,
+    );
+    expect(resolveRunFailureCode(undefined, durableFailure)).toBe(
+      SIDE_EFFECT_STATE_UNKNOWN,
+    );
+    expect(resolveRunFailureRunId(undefined, null, durableFailure)).toBe(
+      "run-1",
+    );
+
+    const liveError = new Error(SIDE_EFFECT_STATE_UNKNOWN);
+    liveError.name = SIDE_EFFECT_STATE_UNKNOWN;
+    expect(resolveRunFailureCode(liveError, [])).toBe(
+      SIDE_EFFECT_STATE_UNKNOWN,
     );
     expect(resolveRunFailureRunId(liveError, "run-live", [])).toBe("run-live");
   });

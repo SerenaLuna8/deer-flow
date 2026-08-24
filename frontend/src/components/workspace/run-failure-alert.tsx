@@ -8,6 +8,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
+  SIDE_EFFECT_STATE_UNKNOWN,
   type ProjectRunFailureCode,
 } from "@/core/private-work/api-client";
 import { resolveRunFailureCopy } from "@/core/threads/run-failure-presentation";
@@ -31,9 +32,15 @@ export function canRetryModelOutputLimit({
 export function canRestoreRunFailureInput(
   failureCode: ProjectRunFailureCode | null,
 ): boolean {
+  return failureCode !== MODEL_OUTPUT_LIMIT && canReplayRunFailure(failureCode);
+}
+
+export function canReplayRunFailure(
+  failureCode: ProjectRunFailureCode | null,
+): boolean {
   return (
-    failureCode !== MODEL_OUTPUT_LIMIT &&
-    failureCode !== OUTPUT_DELIVERY_INCOMPLETE
+    failureCode !== OUTPUT_DELIVERY_INCOMPLETE &&
+    failureCode !== SIDE_EFFECT_STATE_UNKNOWN
   );
 }
 

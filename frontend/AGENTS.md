@@ -191,10 +191,12 @@ generator. A necessary local patch needs focused coverage and an explanation.
 
 - Project Skill creation exposes exactly two user flows: AI Builder and validated
   archive upload. Do not reintroduce a manual metadata or starter-template form.
-- Archive upload shows risk confirmation only when the server returns a bounded
-  confirmation for the still-selected file. Confirmation is never persisted in
-  browser state and creates only a suspended, blocked Candidate; it does not
-  imply scan success or activation eligibility.
+- Archive upload has one submit path and sends only the selected archive. Do not
+  add a browser risk-confirmation retry or scan-result presentation. Project and
+  System Skill surfaces present structural validation, immutable version content,
+  and activation readiness without a static content-security decision.
+- Save failures in the Skill version workbench must render next to the save
+  controls, before the potentially large file editor, so they are immediately visible.
 - Skill secret declaration forms are a server-parsed projection of the current
   `SKILL.md` buffer, never a second source of truth or a browser YAML parser.
   Parse/patch races must preserve newer local edits; invalid or pending source

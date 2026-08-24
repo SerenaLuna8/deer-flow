@@ -19,6 +19,7 @@ from app.private_work.errors import (
     PrivateWorkRunModelSelectionLocked,
     PrivateWorkRunModelUnavailable,
     PrivateWorkRunWorkloadProfileUnsupported,
+    PrivateWorkTooLarge,
     PrivateWorkUnavailable,
 )
 from app.private_work.execution_profile import (
@@ -71,11 +72,17 @@ from app.shared_assets.models import (
     AssetKind,
     AssetScope,
     ResolvedAgentSnapshot,
+    ResolvedAssetSnapshot,
     ResolvedRunAssetClosure,
     ResolvedRunAssetFact,
     SkillAssetRef,
 )
-from app.shared_assets.run_snapshot_codec import encode_run_asset_snapshot
+from app.shared_assets.run_snapshot_codec import (
+    MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES,
+    RunAssetSnapshotTooLarge,
+    encode_run_asset_snapshot,
+    encoded_run_asset_snapshot_json_size,
+)
 from app.shared_assets.skill_secret_closure import (
     AdmittedSkillSecretReference,
     LockedSkillSecretClosure,
@@ -144,6 +151,22 @@ _FORBIDDEN_PERSISTED_KEY_PARTS = (
     "ciphertext",
     "storage_locator",
 )
+
+
+@dataclass(slots=True)
+class _RunAssetSnapshotAdmissionEncoder:
+    request_id: str
+    encoded_json_bytes: int = 0
+
+    def encode(self, snapshot: ResolvedAssetSnapshot) -> dict[str, object]:
+        try:
+            encoded = encode_run_asset_snapshot(snapshot)
+        except RunAssetSnapshotTooLarge:
+            raise PrivateWorkTooLarge(self.request_id) from None
+        self.encoded_json_bytes += encoded_run_asset_snapshot_json_size(encoded)
+        if self.encoded_json_bytes > MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES:
+            raise PrivateWorkTooLarge(self.request_id)
+        return encoded
 
 
 def agent_model_snapshot_purpose(version_id: uuid.UUID) -> str:
@@ -1112,6 +1135,9 @@ class RunSnapshotRepository:
                 thread_id=thread_id,
                 continuation_source_run_id=continuation_source_run_id,
             )
+        asset_snapshot_encoder = _RunAssetSnapshotAdmissionEncoder(
+            request_id=context.request_id,
+        )
         asset_rows = [
             RunAssetVersionRow(
                 project_id=context.project_id,
@@ -1125,7 +1151,7 @@ class RunSnapshotRepository:
                 version_id=lead_agent.version_id,
                 payload_checksum=lead_agent.checksum,
                 catalog_generation=lead_agent.catalog_generation,
-                snapshot_json=encode_run_asset_snapshot(lead_agent),
+                snapshot_json=asset_snapshot_encoder.encode(lead_agent),
             )
         ]
         dependency_order = 1
@@ -1144,7 +1170,7 @@ class RunSnapshotRepository:
                         version_id=delegated_agent.version_id,
                         payload_checksum=delegated_agent.checksum,
                         catalog_generation=lead_agent.catalog_generation,
-                        snapshot_json=encode_run_asset_snapshot(delegated_agent),
+                        snapshot_json=asset_snapshot_encoder.encode(delegated_agent),
                     )
                 )
                 dependency_order += 1
@@ -1170,7 +1196,7 @@ class RunSnapshotRepository:
                     version_id=version.id,
                     payload_checksum=version.payload_checksum,
                     catalog_generation=lead_agent.catalog_generation,
-                    snapshot_json=encode_run_asset_snapshot(skill_snapshot),
+                    snapshot_json=asset_snapshot_encoder.encode(skill_snapshot),
                 )
             )
             dependency_order += 1
@@ -1192,7 +1218,7 @@ class RunSnapshotRepository:
                     version_id=version.id,
                     payload_checksum=version.payload_checksum,
                     catalog_generation=lead_agent.catalog_generation,
-                    snapshot_json=encode_run_asset_snapshot(mcp_snapshot),
+                    snapshot_json=asset_snapshot_encoder.encode(mcp_snapshot),
                 )
             )
             dependency_order += 1

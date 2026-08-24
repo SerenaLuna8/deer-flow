@@ -4,10 +4,11 @@
 functions of their inputs; async callers must dispatch them off the event
 loop. Policy is one code constant — ``CRITICAL`` blocks, everything else is a
 warning — applied by ``enforce_static_scan()`` and
-``enforce_static_scan_result()``. Deterministic scanning is a mandatory safety
-boundary and cannot be disabled through application configuration. Rule specs
-live next to the analyzers that match them so a rule is authored, read, and
-tested in one place.
+``enforce_static_scan_result()``. For explicit scanner and review callers, the
+deterministic policy cannot be changed through application configuration; Skill
+lifecycle flows decide separately whether to invoke this scanner. Rule specs live
+next to the analyzers that match them so a rule is authored, read, and tested in
+one place.
 """
 
 from __future__ import annotations

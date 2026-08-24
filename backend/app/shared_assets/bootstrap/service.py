@@ -153,17 +153,14 @@ def _agent_checksum(payload: AgentPayload) -> str:
     return agent_payload_checksum(payload, payload_schema_version=4)
 
 
-def _validated_skill_preview_with_scan_mode(
+def _validated_skill_preview(
     entry: BootstrapEntry,
     archive_files: tuple[SkillArchiveFile, ...],
-    *,
-    run_static_scan: bool,
 ):
     try:
         preview = _analyze_skill_files(
             archive_files,
             entry.source_key,
-            run_static_scan=run_static_scan,
         )
     except AssetValidationFailed as error:
         raise BootstrapCatalogError("bootstrap Skill archive is invalid") from error
@@ -172,44 +169,6 @@ def _validated_skill_preview_with_scan_mode(
     if not preview.description.strip():
         raise BootstrapCatalogError("bootstrap Skill description is invalid")
     return preview
-
-
-def _validated_skill_preview(
-    entry: BootstrapEntry,
-    archive_files: tuple[SkillArchiveFile, ...],
-):
-    return _validated_skill_preview_with_scan_mode(
-        entry,
-        archive_files,
-        run_static_scan=True,
-    )
-
-
-def _validated_historical_skill_preview(
-    entry: BootstrapEntry,
-    archive_files: tuple[SkillArchiveFile, ...],
-):
-    return _validated_skill_preview_with_scan_mode(
-        entry,
-        archive_files,
-        run_static_scan=False,
-    )
-
-
-def _entry_scan_snapshot(
-    entry: BootstrapEntry,
-    preview,
-    *,
-    is_latest: bool,
-) -> tuple[str, dict[str, object]]:
-    current_decision = preview.scan_decision
-    current_summary = dict(preview.scan_summary)
-    if entry.scan_decision is None or entry.scan_summary is None:
-        return current_decision, current_summary
-    persisted_summary = dict(entry.scan_summary)
-    if is_latest and (entry.scan_decision != current_decision or persisted_summary != current_summary):
-        raise BootstrapCatalogError("bootstrap Skill catalog scan snapshot is stale")
-    return entry.scan_decision, persisted_summary
 
 
 async def _ensure_builtin_principal(session: AsyncSession) -> None:
@@ -407,11 +366,6 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
     except AssetValidationFailed as error:
         raise BootstrapCatalogError("bootstrap Skill archive is invalid") from error
     preview = await asyncio.to_thread(_validated_skill_preview, entry, archive_files)
-    scan_decision, scan_summary = _entry_scan_snapshot(
-        entry,
-        preview,
-        is_latest=True,
-    )
     requirements = [
         {
             "name": item.name,
@@ -445,8 +399,10 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
             frontmatter=dict(preview.frontmatter),
             compatibility=preview.compatibility,
             secret_requirements=requirements,
-            scan_decision=scan_decision,
-            scan_summary=scan_summary,
+            # Legacy non-null database columns. Skill admission no longer
+            # computes or consumes static-scan metadata.
+            scan_decision="allow",
+            scan_summary={},
             supersedes_version_id=None,
             payload_checksum=preview.checksum,
             created_by_user_id=str(BUILTIN_ASSET_USER_ID),
@@ -475,8 +431,6 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         frontmatter=dict(preview.frontmatter),
         compatibility=preview.compatibility,
         secret_requirements=requirements,
-        scan_decision=scan_decision,
-        scan_summary=scan_summary,
         supersedes_version_id=None,
         payload_checksum=preview.checksum,
         created_by_user_id=str(BUILTIN_ASSET_USER_ID),

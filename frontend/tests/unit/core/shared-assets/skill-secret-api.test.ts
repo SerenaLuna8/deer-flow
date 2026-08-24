@@ -131,9 +131,6 @@ describe("Skill domain secret API", () => {
         secret_requirements: [
           { name: "API_KEY", target_env: "API_KEY", optional: false },
         ],
-        scan_decision: "allow",
-        scan_rule_ids: [],
-        scan_summary: {},
         file_views: [],
         supersedes_version_id: null,
         payload_checksum: SHA,

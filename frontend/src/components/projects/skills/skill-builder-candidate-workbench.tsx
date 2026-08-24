@@ -4,12 +4,10 @@ import {
   CheckCircle2Icon,
   Code2Icon,
   EyeIcon,
-  FileWarningIcon,
   FilesIcon,
   KeyRoundIcon,
   Loader2Icon,
   SaveIcon,
-  ShieldCheckIcon,
   XIcon,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useState, type KeyboardEvent } from "react";
@@ -129,7 +127,6 @@ export function SkillBuilderCandidateWorkbench({
   validation,
   canValidate,
   canCommit,
-  acknowledgeWarnings,
   errorMessage,
   sessionKind = "create",
   baseFiles = [],
@@ -142,7 +139,6 @@ export function SkillBuilderCandidateWorkbench({
   onSave,
   onDiscard,
   onValidate,
-  onAcknowledgeWarningsChange,
   onCommit,
   onClose,
 }: {
@@ -161,7 +157,6 @@ export function SkillBuilderCandidateWorkbench({
   validation: SkillBuilderValidation | null;
   canValidate: boolean;
   canCommit: boolean;
-  acknowledgeWarnings: boolean;
   errorMessage: string | null;
   sessionKind?: SkillBuilderSessionKind;
   baseFiles?: SkillBuilderBaseFile[];
@@ -174,7 +169,6 @@ export function SkillBuilderCandidateWorkbench({
   onSave: () => void;
   onDiscard: () => void;
   onValidate: () => void;
-  onAcknowledgeWarningsChange: (value: boolean) => void;
   onCommit: () => void;
   onClose?: () => void;
 }) {
@@ -192,7 +186,6 @@ export function SkillBuilderCandidateWorkbench({
   const [secretEditorRevision, setSecretEditorRevision] = useState(0);
   const selectedFile = files.find((file) => file.path === selectedPath) ?? null;
   const markdown = selectedFile ? isMarkdown(selectedFile) : false;
-  const warning = validation?.scan_decision === "warn";
   const revising = sessionKind === "revise";
   const revisionDiff = useMemo(
     () => (revising ? skillBuilderRevisionDiff(files, baseFiles) : null),
@@ -503,24 +496,12 @@ export function SkillBuilderCandidateWorkbench({
         {validation ? (
           <div className="space-y-2 text-xs">
             <p className="flex items-center gap-2 font-medium">
-              {warning ? (
-                <FileWarningIcon
-                  aria-hidden
-                  className="size-4 text-amber-600"
-                />
-              ) : (
-                <CheckCircle2Icon
-                  aria-hidden
-                  className="size-4 text-emerald-600"
-                />
-              )}
-              {warning ? copy.checkPassedWithWarnings : copy.checkPassed}
+              <CheckCircle2Icon
+                aria-hidden
+                className="size-4 text-emerald-600"
+              />
+              {copy.checkPassed}
             </p>
-            {validation.scan_rule_ids.length > 0 ? (
-              <p className="font-mono break-all">
-                {validation.scan_rule_ids.join(" · ")}
-              </p>
-            ) : null}
             {validation.secret_requirements.length > 0 ? (
               <p className="text-muted-foreground">
                 {copy.requiredSecrets}
@@ -530,21 +511,6 @@ export function SkillBuilderCandidateWorkbench({
               </p>
             ) : null}
           </div>
-        ) : null}
-
-        {warning ? (
-          <label className="flex cursor-pointer items-start gap-2 text-xs">
-            <input
-              type="checkbox"
-              className="mt-0.5 size-4"
-              checked={acknowledgeWarnings}
-              disabled={!canAuthor || pending}
-              onChange={(event) =>
-                onAcknowledgeWarningsChange(event.target.checked)
-              }
-            />
-            <span>{copy.acknowledgeWarnings}</span>
-          </label>
         ) : null}
 
         {errorMessage ? (
@@ -564,15 +530,13 @@ export function SkillBuilderCandidateWorkbench({
               {pending ? (
                 <Loader2Icon aria-hidden className="size-4 animate-spin" />
               ) : (
-                <ShieldCheckIcon aria-hidden className="size-4" />
+                <CheckCircle2Icon aria-hidden className="size-4" />
               )}
               {copy.checkSkill}
             </Button>
             <Button
               type="button"
-              disabled={
-                !canCommit || pending || (warning && !acknowledgeWarnings)
-              }
+              disabled={!canCommit || pending}
               onClick={onCommit}
             >
               {revising ? copy.commitRevise : copy.commitCreate}

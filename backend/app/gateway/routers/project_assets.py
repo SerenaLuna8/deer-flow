@@ -16,7 +16,6 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
-    Form,
     HTTPException,
     Query,
     Request,
@@ -43,7 +42,6 @@ from app.projects.errors import (
 )
 from app.shared_assets import (
     MAX_AGENT_INSTRUCTION_FIELD_BYTES,
-    SKILL_ARCHIVE_SECURITY_RISK_ACCEPTANCE,
     AgentCapabilityBindings,
     AgentDesignConflictUnresolved,
     AgentDesignGenerationProfileStale,
@@ -74,8 +72,6 @@ from app.shared_assets import (
     SharedAssetError,
     SkillArchiveFile,
     SkillArchiveLimitExceeded,
-    SkillArchiveSecurityBlocked,
-    SkillArchiveSecurityRiskAcceptance,
     SkillAssetRef,
     SkillDesignNoChanges,
     SkillDesignTargetDeleted,
@@ -662,9 +658,6 @@ class SkillVersionItemResponse(_StrictModel):
     frontmatter: dict[str, Any]
     compatibility: str | None
     secret_requirements: list[SkillSecretRequirementResponse]
-    scan_decision: Literal["allow", "warn", "block"]
-    scan_rule_ids: list[str]
-    scan_summary: dict[str, Any]
     file_views: list[SkillFileResponse]
     supersedes_version_id: uuid.UUID | None
     payload_checksum: str
@@ -1442,29 +1435,6 @@ async def _read_skill_archive_upload(
     return bytes(payload), filename
 
 
-def _skill_archive_security_risk_acceptance(
-    *,
-    acceptance: str | None,
-    payload_checksum: str | None,
-    findings_checksum: str | None,
-    request_id: str,
-) -> SkillArchiveSecurityRiskAcceptance | None:
-    if acceptance is None and payload_checksum is None and findings_checksum is None:
-        return None
-    if (
-        acceptance != SKILL_ARCHIVE_SECURITY_RISK_ACCEPTANCE
-        or not isinstance(payload_checksum, str)
-        or re.fullmatch(r"[0-9a-f]{64}", payload_checksum) is None
-        or not isinstance(findings_checksum, str)
-        or re.fullmatch(r"[0-9a-f]{64}", findings_checksum) is None
-    ):
-        raise AssetValidationFailed(request_id)
-    return SkillArchiveSecurityRiskAcceptance(
-        payload_checksum=payload_checksum,
-        findings_checksum=findings_checksum,
-    )
-
-
 def _mcp_definition(body: McpVersionRequest | McpConfiguredRequest) -> McpDefinition:
     return McpDefinition(
         description=body.description,
@@ -1878,20 +1848,8 @@ async def import_project_skill_archive(
     archive: Annotated[UploadFile, File(description="Skill package archive")],
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[SkillService, Depends(get_skill_service)],
-    security_risk_acceptance: Annotated[
-        Literal["accept-blocked-skill-archive"] | None,
-        Form(),
-    ] = None,
-    security_risk_payload_checksum: Annotated[str | None, Form()] = None,
-    security_risk_findings_checksum: Annotated[str | None, Form()] = None,
 ):
     try:
-        risk_acceptance = _skill_archive_security_risk_acceptance(
-            acceptance=security_risk_acceptance,
-            payload_checksum=security_risk_payload_checksum,
-            findings_checksum=security_risk_findings_checksum,
-            request_id=context.request_id,
-        )
         payload, filename = await _read_skill_archive_upload(
             archive,
             context.request_id,
@@ -1900,7 +1858,6 @@ async def import_project_skill_archive(
             context,
             payload,
             filename=filename,
-            security_risk_acceptance=risk_acceptance,
         )
         return SkillArchiveImportResponse(
             item=_current_version_asset_item(result.asset),
@@ -1909,32 +1866,6 @@ async def import_project_skill_archive(
             ),
             request_id=context.request_id,
         )
-    except SkillArchiveSecurityBlocked as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": exc.code,
-                "message": exc.public_message,
-                "request_id": context.request_id,
-                "diagnostics": [
-                    {
-                        "rule_id": item.rule_id,
-                        "file": item.file,
-                        "line": item.line,
-                    }
-                    for item in exc.diagnostics
-                ],
-                "risk_confirmation": (
-                    {
-                        "acceptance": SKILL_ARCHIVE_SECURITY_RISK_ACCEPTANCE,
-                        "payload_checksum": exc.risk_confirmation.payload_checksum,
-                        "findings_checksum": exc.risk_confirmation.findings_checksum,
-                    }
-                    if exc.risk_confirmation is not None
-                    else None
-                ),
-            },
-        ) from None
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 

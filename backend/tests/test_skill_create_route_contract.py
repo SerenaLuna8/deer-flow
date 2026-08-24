@@ -17,10 +17,6 @@ import app.shared_assets as shared_assets
 from app.gateway.routers import admin_assets, project_assets, project_skill_builder
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
-from app.shared_assets.errors import (
-    AssetValidationFailed,
-    SkillArchiveSecurityRiskAcceptance,
-)
 from app.shared_assets.models import AssetScope, VersionRelation
 from app.shared_assets.skill_archive import load_skill_archive_package
 from app.shared_assets.skill_repository import SkillRepository
@@ -56,10 +52,7 @@ def _project_context() -> ProjectContext:
     )
 
 
-def _archive_create_result(
-    *,
-    scan_decision: str = "allow",
-) -> ProjectSkillArchiveCreateResult:
+def _archive_create_result() -> ProjectSkillArchiveCreateResult:
     now = datetime(2026, 8, 18, tzinfo=UTC)
     return ProjectSkillArchiveCreateResult(
         asset=SkillAssetView(
@@ -88,18 +81,6 @@ def _archive_create_result(
             },
             compatibility=None,
             secret_requirements=(),
-            scan_decision=scan_decision,
-            scan_rule_ids=("python-shell-exec",) if scan_decision == "block" else (),
-            scan_summary=(
-                {
-                    "findings_checksum": "b" * 64,
-                    "risk_acknowledged": True,
-                    "rule_ids": ["python-shell-exec"],
-                    "severity_counts": {"CRITICAL": 1},
-                }
-                if scan_decision == "block"
-                else {}
-            ),
             file_views=(),
             supersedes_version_id=None,
             payload_checksum="b" * 64,
@@ -130,14 +111,7 @@ def _security_blocked_archive() -> bytes:
 
 @dataclass
 class _RecordingSkillService:
-    calls: list[
-        tuple[
-            ProjectContext,
-            bytes,
-            str,
-            SkillArchiveSecurityRiskAcceptance | None,
-        ]
-    ]
+    calls: list[tuple[ProjectContext, bytes, str]]
 
     async def create_project_from_archive_upload(
         self,
@@ -145,12 +119,9 @@ class _RecordingSkillService:
         payload: bytes,
         *,
         filename: str,
-        security_risk_acceptance: SkillArchiveSecurityRiskAcceptance | None = None,
     ) -> ProjectSkillArchiveCreateResult:
-        self.calls.append((actor, payload, filename, security_risk_acceptance))
-        return _archive_create_result(
-            scan_decision="block" if security_risk_acceptance else "allow",
-        )
+        self.calls.append((actor, payload, filename))
+        return _archive_create_result()
 
 
 def _has_post_route(path: str) -> bool:
@@ -214,7 +185,7 @@ async def test_project_skill_archive_import_forwards_multipart_upload_and_return
         )
 
     assert response.status_code == 201
-    assert service.calls == [(context, b"archive-route-payload", "route-import.skill", None)]
+    assert service.calls == [(context, b"archive-route-payload", "route-import.skill")]
     assert response.json() == {
         "item": {
             "id": str(_SKILL_ID),
@@ -241,9 +212,6 @@ async def test_project_skill_archive_import_forwards_multipart_upload_and_return
             },
             "compatibility": None,
             "secret_requirements": [],
-            "scan_decision": "allow",
-            "scan_rule_ids": [],
-            "scan_summary": {},
             "file_views": [],
             "supersedes_version_id": None,
             "payload_checksum": "b" * 64,
@@ -260,154 +228,19 @@ async def test_project_skill_archive_import_forwards_multipart_upload_and_return
 
 
 @pytest.mark.asyncio
-async def test_project_skill_archive_import_accepts_explicit_blocked_scan_risk() -> None:
-    service = _RecordingSkillService(calls=[])
-    context = _project_context()
-    application = FastAPI()
-    application.include_router(project_assets.project_router)
-    application.dependency_overrides[project_assets.project_asset_context] = lambda: context
-    application.dependency_overrides[project_assets.get_skill_service] = lambda: service
-
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=application),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/skills/import",
-            data={
-                "security_risk_acceptance": "accept-blocked-skill-archive",
-                "security_risk_payload_checksum": "a" * 64,
-                "security_risk_findings_checksum": "b" * 64,
-            },
-            files={
-                "archive": (
-                    "blocked-upload.zip",
-                    b"blocked-archive-route-payload",
-                    "application/zip",
-                )
-            },
-        )
-
-    assert response.status_code == 201
-    assert service.calls == [
-        (
-            context,
-            b"blocked-archive-route-payload",
-            "blocked-upload.zip",
-            SkillArchiveSecurityRiskAcceptance(
-                payload_checksum="a" * 64,
-                findings_checksum="b" * 64,
-            ),
-        )
-    ]
-    assert response.json()["version"]["scan_decision"] == "block"
-    assert response.json()["version"]["scan_summary"] == {
-        "findings_checksum": "b" * 64,
-        "risk_acknowledged": True,
-        "rule_ids": ["python-shell-exec"],
-        "severity_counts": {"CRITICAL": 1},
-    }
-
-
-@pytest.mark.asyncio
-async def test_project_skill_archive_import_rejects_partial_risk_acceptance() -> None:
-    service = _RecordingSkillService(calls=[])
-    context = _project_context()
-    application = FastAPI()
-    application.include_router(project_assets.project_router)
-    application.dependency_overrides[project_assets.project_asset_context] = lambda: context
-    application.dependency_overrides[project_assets.get_skill_service] = lambda: service
-
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=application),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/skills/import",
-            data={
-                "security_risk_acceptance": "accept-blocked-skill-archive",
-                "security_risk_payload_checksum": "a" * 64,
-            },
-            files={
-                "archive": (
-                    "blocked-upload.zip",
-                    b"blocked-archive-route-payload",
-                    "application/zip",
-                )
-            },
-        )
-
-    assert response.status_code == 422
-    assert response.json()["detail"] == {
-        "code": "asset_validation_failed",
-        "message": "Asset validation failed",
-        "request_id": _REQUEST_ID,
-    }
-    assert service.calls == []
-
-
-@pytest.mark.asyncio
-async def test_project_skill_archive_import_returns_actionable_security_findings_before_persistence() -> None:
-    def fail_if_database_is_opened():
-        raise AssertionError("security-blocked upload must not open a database session")
-
-    context = _project_context()
-    application = FastAPI()
-    application.include_router(project_assets.project_router)
-    application.dependency_overrides[project_assets.project_asset_context] = lambda: context
-    application.dependency_overrides[project_assets.get_skill_service] = lambda: SkillService(
-        fail_if_database_is_opened,
-    )
-
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=application),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/skills/import",
-            files={
-                "archive": (
-                    "blocked-upload.zip",
-                    _security_blocked_archive(),
-                    "application/zip",
-                )
-            },
-        )
-
-    assert response.status_code == 422
-    assert response.json() == {
-        "detail": {
-            "code": "SKILL_ARCHIVE_SECURITY_BLOCKED",
-            "message": "Skill archive failed security scan",
-            "request_id": _REQUEST_ID,
-            "diagnostics": [
-                {
-                    "rule_id": "python-shell-exec",
-                    "file": "scripts/run.py",
-                    "line": 2,
-                }
-            ],
-            "risk_confirmation": {
-                "acceptance": "accept-blocked-skill-archive",
-                "payload_checksum": "86916dd87561bdda6bf56ba31d58b9a029c74334ccda4aa4465beac5925f4959",
-                "findings_checksum": "3d3f612d45f2b204c3635ca8a45c6ce5add2634fa23513f42e5376fd09170722",
-            },
-        }
-    }
-
-
-@pytest.mark.asyncio
-async def test_non_upload_skill_preview_keeps_generic_security_error() -> None:
+async def test_skill_preview_applies_structural_validation_without_security_scan() -> None:
     files = load_skill_archive_package(
         _security_blocked_archive(),
         filename="blocked-preview.zip",
         request_id=_REQUEST_ID,
     )
 
-    with pytest.raises(AssetValidationFailed) as exc_info:
-        await SkillService(lambda: None).preview_archive(_project_context(), files)
+    preview = await SkillService(lambda: None).preview_archive(
+        _project_context(),
+        files,
+    )
 
-    assert type(exc_info.value) is AssetValidationFailed
+    assert preview.frontmatter["name"] == "blocked-upload"
 
 
 def test_archive_import_and_ai_builder_create_routes_remain_available() -> None:

@@ -15,7 +15,6 @@ import { projectKeys } from "@/core/projects/query-keys";
 
 import {
   SharedAssetApiError,
-  type SkillArchiveSecurityRiskConfirmation,
   activateAdminProjectAssetVersion,
   activateProjectAssetVersion,
   changeAdminProjectAssetStatus,
@@ -981,18 +980,9 @@ export function useImportProjectSkillArchive(
       "skills",
       "import",
     ),
-    mutationFn: ({
-      archive,
-      securityRiskConfirmation,
-    }: {
-      archive: File;
-      securityRiskConfirmation?: SkillArchiveSecurityRiskConfirmation;
-    }) =>
+    mutationFn: ({ archive }: { archive: File }) =>
       runMutation((signal) =>
-        importProjectSkillArchive(projectId, archive, {
-          securityRiskConfirmation,
-          signal,
-        }),
+        importProjectSkillArchive(projectId, archive, { signal }),
       ),
     onSuccess: whenActive(invalidate),
   });

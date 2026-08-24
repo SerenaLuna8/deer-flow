@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  canReplayRunFailure,
   canRetryModelOutputLimit,
   RunFailureAlert,
   shouldShowRunFailureAlert,
@@ -18,6 +19,7 @@ import {
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   RUN_POLICY_STALE,
+  SIDE_EFFECT_STATE_UNKNOWN,
   TOOL_CALL_CONTROL_STATE_INVALID,
   TOOL_EXECUTION_FAILED,
   type ProjectRunFailureCode,
@@ -115,6 +117,32 @@ describe("RunFailureAlert", () => {
     expect(html).toContain("Resending may repeat an already completed command");
     expect(html).not.toContain("Check the selected model");
     expect(html).not.toContain("Retry without deep thinking");
+  });
+
+  test("warns that an unknown side effect must not be replayed or restored", () => {
+    const chinese = render(SIDE_EFFECT_STATE_UNKNOWN, "zh-CN", false, true);
+    const english = render(SIDE_EFFECT_STATE_UNKNOWN, "en-US", false, true);
+
+    expect(chinese).toContain(
+      `data-run-failure-code="${SIDE_EFFECT_STATE_UNKNOWN}"`,
+    );
+    expect(chinese).toContain("运行状态无法确认");
+    expect(chinese).toContain("部分操作可能已经执行");
+    expect(chinese).toContain("请勿直接重新发送");
+    expect(chinese).not.toContain("检查所选模型、依赖资产和凭据");
+    expect(chinese).not.toContain("恢复到输入框");
+    expect(english).toContain("Run state could not be confirmed");
+    expect(english).toContain("Some operations may already have completed");
+    expect(english).toContain("do not resend this message directly");
+    expect(english).not.toContain("Restore to composer");
+    expect(english).not.toContain("Retry without deep thinking");
+  });
+
+  test("blocks message replay when durable side effects may already exist", () => {
+    expect(canReplayRunFailure(SIDE_EFFECT_STATE_UNKNOWN)).toBe(false);
+    expect(canReplayRunFailure(OUTPUT_DELIVERY_INCOMPLETE)).toBe(false);
+    expect(canReplayRunFailure(MODEL_OUTPUT_LIMIT)).toBe(true);
+    expect(canReplayRunFailure(null)).toBe(true);
   });
 
   test("renders a diagnosable current-upload failure with input recovery", () => {

@@ -26,6 +26,18 @@ function source(path: string): string {
 }
 
 describe("Skill version conflict recovery", () => {
+  test("places save errors before the potentially large file editor", () => {
+    const workbench = source(
+      "components/projects/assets/skill-version-workbench.tsx",
+    );
+    const errorAlert = workbench.indexOf("{(localError ?? fork.error) && (");
+    const filesPanel = workbench.indexOf("id={filesPanelId}");
+
+    expect(errorAlert).toBeGreaterThan(-1);
+    expect(filesPanel).toBeGreaterThan(-1);
+    expect(errorAlert).toBeLessThan(filesPanel);
+  });
+
   test("omits redundant declaration and draft-secret instructions", () => {
     const declarationEditor = source(
       "components/projects/assets/skill-secret-declarations-editor.tsx",

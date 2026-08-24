@@ -288,9 +288,9 @@ or downgrade an application database.
 - Server-owned Builder Agents are absent from every regular project, global-admin,
   and runtime System Agent catalog, including direct detail and version-history
   lookup. Only bootstrap and the dedicated internal resolver may address them.
-- A packaged Skill's catalog scan snapshot is immutable for its authenticated v1
-  bytes. Retrospective denial uses explicit System governance revocation. A
-  same-byte bootstrap preserves revocation; changed authenticated bytes clear it.
+- A packaged Skill's authenticated v1 bytes are immutable. Retrospective denial
+  uses explicit System governance revocation. A same-byte bootstrap preserves
+  revocation; changed authenticated bytes clear it.
   New bindings and Run Admission reject a revoked v1. Already admitted Runs retain
   their immutable Run Snapshot and are not force-aborted.
 
@@ -304,10 +304,14 @@ or downgrade an application database.
   and content cannot be moved backward under a higher version number.
 - Project Skill creation is available only through a validated archive upload
   or an AI Builder commit; there is no metadata-only or template-create API.
-  Archive upload may explicitly acknowledge only the server-issued narrow
-  code-risk confirmation and persist a suspended Candidate with
-  `scan_decision=block`; it never moves `current_version_id`, and activation
-  must still reject the unchanged blocked bytes.
+  Browser archive upload persists a suspended Candidate and never moves
+  `current_version_id`. Project and System Skill upload, Builder, import, manual
+  save, bootstrap, and activation validate structure and integrity without a
+  static content-security classification. The legacy database scan columns are
+  inert compatibility storage and are absent from business and API contracts.
+  Archive structure, `SKILL.md`, frontmatter, content checksums, compatibility,
+  runtime-secret readiness, optimistic revision, and runtime-name uniqueness
+  remain authoritative.
 - Skill export is a read-only, audit-required distribution operation over one
   exact persisted version. Project exports require `shared_assets.edit` and may
   select any persisted Project version; System exports require the eligible
@@ -388,8 +392,8 @@ or downgrade an application database.
   baseline shared by all Job attempts; stop/failure settlement restores it
   before writing the unique terminal. Whole-session cancellation must complete
   that stop/restore/terminal flow before clearing Activity and draft content.
-  Validation records request, package-file validation, safety scan, result, and
-  terminal stages; Commit success remains atomic with Skill/Candidate Version,
+  Validation records request, package-file validation, result, and terminal
+  stages; Commit success remains atomic with Skill/Candidate Version,
   while a rolled-back Commit records a separate failed terminal projection.
   Authoring-owner reads with edit capability fail stale in-progress Commit
   operations and restore a stranded `committing` session to its still-validated
@@ -564,16 +568,15 @@ model configuration.
 
 ### System Skill or project asset flow
 
-- Validate all archive paths, sizes, file types, frontmatter, and static scan
-  results before persistence or activation. The only persistence exception is
-  the checksum-bound, server-confirmable archive-upload flow, which saves a
-  blocked suspended Candidate; activation has no such exception.
+- Validate all archive paths, sizes, file types, frontmatter, and content
+  checksums before persistence or activation. Project and System Skill lifecycle
+  flows apply these structural and integrity gates without a static content scan.
 - Keep packaged System assets separate from project-authored assets and bindings.
 - Authoring services use optimistic revisions and one transaction; failed flows
   must not leave an asset without its initial version or activate a partial
   dependency closure.
-- Run deterministic review for each changed public Skill:
-  `uv run python -m deerflow.skills.review.cli ../skills/public/<slug> --format text --fail-on error --fail-on-incomplete`.
+- Regenerate and verify the authenticated System Skill catalog after changing a
+  public Skill: `uv run python -m scripts.generate_public_system_skill_catalog --check`.
 
 ## Guarded operational limits
 
@@ -586,14 +589,13 @@ source constant changes, update this section and the owning detailed document.
   are warning `3`, hard limit `20`, and window `20`; existing immutable policy
   versions and historical v2/v3 payloads keep their frozen values.
 - Subagent concurrency is canonically clamped to `1..4`; the per-Run total remains independently bounded to `1..50`.
-- SkillScan rejects unsafe archives while retaining the final 100 MiB and the
-  16384-file, bounded-log contract. Archive upload may save only explicitly
-  acknowledged `python-shell-exec` or `python-env-dump-exfil` findings as a
-  blocked suspended Candidate; secrets, executables, reverse shells, resource
-  exhaustion, and every other blocking rule remain non-confirmable.
 - Project Skill archives remain limited to 100 MiB total, 64 MiB per regular
   file, and 16384 regular files; archive-create routes have a scoped
   160 MiB wire limit.
+- Run asset snapshots use the self-contained v3 codec. Skill bytes are stored as
+  one canonical zlib-6 frame; each encoded asset and the cumulative encoded
+  assets for one Run are independently limited to 80 MiB. Legacy v2 snapshots
+  remain readable under the archive file-count, per-file, and total-size bounds.
 - Current-message vision injects at most four unique images with a 20 MiB per-image limit.
 - Fresh installs seed the `inspect_image` end-to-end deadline at 60 seconds; administrators may set `5..120`, and each Run freezes the selected value.
 - Agent Builder's one-turn model-generation deadline defaults to and is capped at 600 seconds; its dedicated proxy route retains a 60-second settlement margin.

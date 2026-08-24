@@ -9,12 +9,7 @@
       "version": 1,
       "payload_path": "content/public-skills/academic-paper-review-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "bd3c59b7078d9f30c0e6ba60f272a9138fe35b6c134abadc3eb341c0665c251c",
-      "scan_decision": "allow",
-      "scan_summary": {
-        "rule_ids": [],
-        "severity_counts": {}
-      }
+      "sha256": "bd3c59b7078d9f30c0e6ba60f272a9138fe35b6c134abadc3eb341c0665c251c"
     },
     {
       "source_key": "builtin:skill:bootstrap",
@@ -24,12 +19,7 @@
       "version": 1,
       "payload_path": "content/public-skills/bootstrap-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "03979b721ea93a8a7147d7adaf5da05db836ef9bc03bf5eb308ecb169d1c1147",
-      "scan_decision": "allow",
-      "scan_summary": {
-        "rule_ids": [],
-        "severity_counts": {}
-      }
+      "sha256": "03979b721ea93a8a7147d7adaf5da05db836ef9bc03bf5eb308ecb169d1c1147"
     },
     {
       "source_key": "builtin:skill:chart-visualization",
@@ -39,12 +29,7 @@
       "version": 1,
       "payload_path": "content/public-skills/chart-visualization-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "59047997703d934c2ff77e63ffbd54fddf74ad34fe5384cadb692f253572415c",
-      "scan_decision": "allow",
-      "scan_summary": {
-        "rule_ids": [],
-        "severity_counts": {}
-      }
+      "sha256": "59047997703d934c2ff77e63ffbd54fddf74ad34fe5384cadb692f253572415c"
     },
     {
       "source_key": "builtin:skill:code-documentation",
@@ -54,12 +39,7 @@
       "version": 1,
       "payload_path": "content/public-skills/code-documentation-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "a0a8c7bab0003e85104638e969197b809beea5698f46d36984b4fd070fbcd904",
-      "scan_decision": "allow",
-      "scan_summary": {
-        "rule_ids": [],
-        "severity_counts": {}
-      }
+      "sha256": "a0a8c7bab0003e85104638e969197b809beea5698f46d36984b4fd070fbcd904"
     },
     {
       "source_key": "builtin:skill:consulting-analysis",
@@ -69,12 +49,7 @@
       "version": 1,
       "payload_path": "content/public-skills/consulting-analysis-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "140825a82c8f55d6099f99fa2c8711bf64bcbb099d1732c6d43d387ddf466a0d",
-      "scan_decision": "allow",
-      "scan_summary": {
-        "rule_ids": [],
-        "severity_counts": {}
-      }
+      "sha256": "140825a82c8f55d6099f99fa2c8711bf64bcbb099d1732c6d43d387ddf466a0d"
     },
     {
       "source_key": "builtin:skill:data-analysis",
@@ -84,16 +59,7 @@
       "version": 1,
       "payload_path": "content/public-skills/data-analysis-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "47c564eb525c57ddb3ced01fccc3a499a8056fe070bb775f518ebd9cf21b3a55",
-      "scan_decision": "warn",
-      "scan_summary": {
-        "rule_ids": [
-          "python-subprocess"
-        ],
-        "severity_counts": {
-          "HIGH": 2
-        }
-      }
+      "sha256": "47c564eb525c57ddb3ced01fccc3a499a8056fe070bb775f518ebd9cf21b3a55"
     },
     {
       "source_key": "builtin:skill:deep-research",
@@ -103,12 +69,7 @@
       "version": 1,
       "payload_path": "content/public-skills/deep-research-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "2a99fe96df03cd61d1eec4e53a871bb9bbe007e496e38e4b076203221dd5fd7c",
-      "scan_decision": "allow",
-      "scan_summary": {
-        "rule_ids": [],
-        "severity_counts": {}
-      }
+      "sha256": "2a99fe96df03cd61d1eec4e53a871bb9bbe007e496e38e4b076203221dd5fd7c"
     },
     {
       "source_key": "builtin:skill:frontend-design",
@@ -118,16 +79,7 @@
       "version": 1,
       "payload_path": "content/public-skills/frontend-design-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "ae40a8cdc9a22a8f064897d8c9d9737187b2c524965b4a60e1144787aff64d3b",
-      "scan_decision": "warn",
-      "scan_summary": {
-        "rule_ids": [
-          "network-cleartext-http"
-        ],
-        "severity_counts": {
-          "MEDIUM": 1
-        }
-      }
+      "sha256": "ae40a8cdc9a22a8f064897d8c9d9737187b2c524965b4a60e1144787aff64d3b"
     },
     {
       "source_key": "builtin:skill:github-deep-research",
@@ -137,16 +89,7 @@
       "version": 1,
       "payload_path": "content/public-skills/github-deep-research-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "40166480d45fa196761cd05e156bfb1d6f3e303620188de9dcaf299154ef2f58",
-      "scan_decision": "warn",
-      "scan_summary": {
-        "rule_ids": [
-          "secret-env-assignment"
-        ],
-        "severity_counts": {
-          "HIGH": 1
-        }
-      }
+      "sha256": "40166480d45fa196761cd05e156bfb1d6f3e303620188de9dcaf299154ef2f58"
     },
     {
       "source_key": "builtin:skill:newsletter-generation",
@@ -156,12 +99,7 @@
       "version": 1,
       "payload_path": "content/public-skills/newsletter-generation-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "570796893db146b2e0354b7085ea95a37e0b3e307e0d414b348ab6e9f2ffc995",
-      "scan_decision": "allow",
-      "scan_summary": {
-        "rule_ids": [],
-        "severity_counts": {}
-      }
+      "sha256": "570796893db146b2e0354b7085ea95a37e0b3e307e0d414b348ab6e9f2ffc995"
     },
     {
       "source_key": "builtin:skill:skill-creator",
@@ -171,21 +109,7 @@
       "version": 1,
       "payload_path": "content/public-skills/skill-creator-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "f3e76d13cdb0dfedc40fb8a272f7908080972845663eb443284bacf222f69a85",
-      "scan_decision": "warn",
-      "scan_summary": {
-        "rule_ids": [
-          "network-cleartext-http",
-          "network-local-http",
-          "python-subprocess",
-          "secret-env-assignment"
-        ],
-        "severity_counts": {
-          "HIGH": 4,
-          "LOW": 1,
-          "MEDIUM": 1
-        }
-      }
+      "sha256": "f3e76d13cdb0dfedc40fb8a272f7908080972845663eb443284bacf222f69a85"
     },
     {
       "source_key": "builtin:skill:surprise-me",
@@ -195,12 +119,7 @@
       "version": 1,
       "payload_path": "content/public-skills/surprise-me-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "b5a87a8cc81698845f72eed3bbdbfabd1b77a00adb80f519b7d9c178ae325f80",
-      "scan_decision": "allow",
-      "scan_summary": {
-        "rule_ids": [],
-        "severity_counts": {}
-      }
+      "sha256": "b5a87a8cc81698845f72eed3bbdbfabd1b77a00adb80f519b7d9c178ae325f80"
     },
     {
       "source_key": "builtin:skill:systematic-literature-review",
@@ -210,16 +129,7 @@
       "version": 1,
       "payload_path": "content/public-skills/systematic-literature-review-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "cbc9978a0723c1c2a57303543818e2efbe9981d3db1eb780a699868851d567df",
-      "scan_decision": "warn",
-      "scan_summary": {
-        "rule_ids": [
-          "network-cleartext-http"
-        ],
-        "severity_counts": {
-          "MEDIUM": 1
-        }
-      }
+      "sha256": "cbc9978a0723c1c2a57303543818e2efbe9981d3db1eb780a699868851d567df"
     },
     {
       "source_key": "builtin:skill:web-design-guidelines",
@@ -229,12 +139,7 @@
       "version": 1,
       "payload_path": "content/public-skills/web-design-guidelines-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "15337866f334317451c18e5700a2e0a66f9469c9bbea0f61050012fcb06152c2",
-      "scan_decision": "allow",
-      "scan_summary": {
-        "rule_ids": [],
-        "severity_counts": {}
-      }
+      "sha256": "15337866f334317451c18e5700a2e0a66f9469c9bbea0f61050012fcb06152c2"
     },
     {
       "source_key": "builtin:agent:project-assistant",

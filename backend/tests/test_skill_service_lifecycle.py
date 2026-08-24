@@ -5,7 +5,6 @@ import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -21,8 +20,6 @@ from app.shared_assets.errors import (
     AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
     AssetValidationFailed,
-    SkillArchiveSecurityBlocked,
-    SkillArchiveSecurityRiskAcceptance,
     SkillRuntimeNameConflict,
     SkillSecretsIncomplete,
 )
@@ -59,8 +56,6 @@ def _files_with_required_secret(
 
 def _blocked_upload_archive(
     name: str,
-    *,
-    include_unreadable_file: bool = False,
 ) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -72,8 +67,6 @@ def _blocked_upload_archive(
             "scripts/run.py",
             'import subprocess\nsubprocess.Popen(["echo", "unsafe"], shell=True)\n',
         )
-        if include_unreadable_file:
-            archive.writestr("scripts/unreadable.py", "print('unreadable')\n")
     return buffer.getvalue()
 
 
@@ -88,21 +81,6 @@ def _private_key_upload_archive(name: str) -> bytes:
             "secrets/key.pem",
             "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
         )
-    return buffer.getvalue()
-
-
-def _many_blocked_findings_archive(name: str) -> bytes:
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            "SKILL.md",
-            f"---\nname: {name}\ndescription: Reject undisclosed findings\n---\n\n# Many findings\n",
-        )
-        for index in range(21):
-            archive.writestr(
-                f"scripts/run_{index:02d}.py",
-                'import subprocess\nsubprocess.Popen(["echo", "unsafe"], shell=True)\n',
-            )
     return buffer.getvalue()
 
 
@@ -520,39 +498,108 @@ async def test_builder_preview_create_allows_required_secret_without_binding(
 
 
 @pytest.mark.asyncio
-async def test_acknowledged_blocking_upload_creates_non_activatable_candidate(
+async def test_archive_upload_and_activation_have_no_static_security_scan_dependency(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-
-    payload = _blocked_upload_archive("acknowledged-block")
-    with pytest.raises(SkillArchiveSecurityBlocked) as blocked:
-        await harness.service.create_project_from_archive_upload(
-            actor,
-            payload,
-            filename="acknowledged-block.zip",
-        )
-    assert blocked.value.risk_confirmation is not None
+    assert not hasattr(skill_service_module, "enforce_static_scan_result")
 
     result = await harness.service.create_project_from_archive_upload(
         actor,
-        payload,
-        filename="acknowledged-block.zip",
-        security_risk_acceptance=blocked.value.risk_confirmation,
+        _blocked_upload_archive("unscanned-upload"),
+        filename="unscanned-upload.zip",
     )
 
     assert result.asset.status == "suspended"
     assert result.asset.current_version_id is None
     assert result.version.relation is VersionRelation.CANDIDATE
-    assert result.version.scan_decision == "block"
-    assert result.version.scan_rule_ids == ("python-shell-exec",)
-    assert result.version.scan_summary == {
-        "findings_checksum": "3d3f612d45f2b204c3635ca8a45c6ce5add2634fa23513f42e5376fd09170722",
+
+    persisted_version = harness.store.versions[result.version.id].row
+    persisted_version.scan_decision = "block"
+    persisted_version.scan_summary = {
+        "rule_ids": ["python-shell-exec"],
+        "severity_counts": {"CRITICAL": 1},
+    }
+
+    activated = await harness.service.activate_version(
+        actor,
+        result.asset.id,
+        result.version.id,
+        expected_asset_version=result.asset.revision,
+        expected_payload_checksum=result.version.payload_checksum,
+        expected_secret_revision=0,
+    )
+    persisted_asset = harness.store.assets[result.asset.id]
+    assert activated.relation is VersionRelation.CURRENT
+    assert persisted_asset.status == "active"
+    assert persisted_asset.current_version_id == result.version.id
+    assert persisted_asset.revision == 3
+    assert [event["action"] for event in harness.store.governance] == [
+        "skill.create",
+        "skill.version.create",
+        "skill.version.activate",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_manual_skill_version_save_ignores_legacy_scan_metadata(
+    harness: _Harness,
+) -> None:
+    actor = _admin_context()
+    uploaded = await harness.service.create_project_from_archive_upload(
+        actor,
+        _blocked_upload_archive("unscanned-version-save"),
+        filename="unscanned-version-save.zip",
+    )
+    await harness.service.activate_version(
+        actor,
+        uploaded.asset.id,
+        uploaded.version.id,
+        expected_asset_version=uploaded.asset.revision,
+        expected_payload_checksum=uploaded.version.payload_checksum,
+        expected_secret_revision=0,
+    )
+    legacy_source = harness.store.versions[uploaded.version.id].row
+    legacy_source.scan_decision = "block"
+    legacy_source.scan_summary = {
+        "findings_checksum": "legacy-findings-checksum",
         "risk_acknowledged": True,
         "rule_ids": ["python-shell-exec"],
         "severity_counts": {"CRITICAL": 1},
     }
-    assert result.version.payload_checksum == blocked.value.risk_confirmation.payload_checksum
+
+    created = await harness.service.fork_version(
+        actor,
+        uploaded.asset.id,
+        uploaded.version.id,
+        (
+            skill_service_module.SkillFileChange(
+                "replace",
+                "SKILL.md",
+                "---\nname: unscanned-version-save\ndescription: Save an edited uploaded Skill\n---\n\n# Revised without a static scan\n",
+                "text/markdown",
+            ),
+        ),
+        expected_asset_version=harness.store.assets[uploaded.asset.id].revision,
+        expected_source_payload_checksum=uploaded.version.payload_checksum,
+    )
+
+    assert created.version_number == 2
+    assert created.relation is VersionRelation.CANDIDATE
+
+
+@pytest.mark.asyncio
+async def test_activation_still_rejects_tampered_persisted_archive(
+    harness: _Harness,
+) -> None:
+    actor = _admin_context()
+    result = await harness.service.create_project_from_archive_upload(
+        actor,
+        _blocked_upload_archive("tampered-upload"),
+        filename="tampered-upload.zip",
+    )
+    record = harness.store.versions[result.version.id]
+    record.files[0].content += b"tampered"
 
     with pytest.raises(AssetValidationFailed):
         await harness.service.activate_version(
@@ -563,120 +610,28 @@ async def test_acknowledged_blocking_upload_creates_non_activatable_candidate(
             expected_payload_checksum=result.version.payload_checksum,
             expected_secret_revision=0,
         )
+
     persisted_asset = harness.store.assets[result.asset.id]
     assert persisted_asset.status == "suspended"
     assert persisted_asset.current_version_id is None
-    assert persisted_asset.revision == 2
-    assert [event["action"] for event in harness.store.governance] == [
-        "skill.create",
-        "skill.version.create",
-    ]
 
 
 @pytest.mark.asyncio
-async def test_blocking_upload_rejects_confirmation_for_different_findings(
+async def test_archive_upload_persists_content_without_static_secret_scan(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    payload = _blocked_upload_archive("mismatched-confirmation")
-
-    with pytest.raises(SkillArchiveSecurityBlocked) as blocked:
-        await harness.service.create_project_from_archive_upload(
-            actor,
-            payload,
-            filename="mismatched-confirmation.zip",
-        )
-    assert blocked.value.risk_confirmation is not None
-    mismatched = SkillArchiveSecurityRiskAcceptance(
-        payload_checksum=blocked.value.risk_confirmation.payload_checksum,
-        findings_checksum="0" * 64,
+    result = await harness.service.create_project_from_archive_upload(
+        actor,
+        _private_key_upload_archive("unscanned-secret-content"),
+        filename="unscanned-secret-content.zip",
     )
 
-    with pytest.raises(SkillArchiveSecurityBlocked) as retry:
-        await harness.service.create_project_from_archive_upload(
-            actor,
-            payload,
-            filename="mismatched-confirmation.zip",
-            security_risk_acceptance=mismatched,
-        )
-
-    assert retry.value.risk_confirmation == blocked.value.risk_confirmation
-    assert harness.store.assets == {}
-    assert harness.store.versions == {}
-
-
-@pytest.mark.asyncio
-async def test_blocking_upload_with_scanner_error_cannot_be_acknowledged(
-    harness: _Harness,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    actor = _admin_context()
-    payload = _blocked_upload_archive(
-        "incomplete-scan",
-        include_unreadable_file=True,
-    )
-    read_bytes = Path.read_bytes
-
-    def fail_one_read(path: Path) -> bytes:
-        if path.name == "unreadable.py":
-            raise OSError("simulated read failure")
-        return read_bytes(path)
-
-    monkeypatch.setattr(Path, "read_bytes", fail_one_read)
-
-    with pytest.raises(AssetValidationFailed) as rejected:
-        await harness.service.create_project_from_archive_upload(
-            actor,
-            payload,
-            filename="incomplete-scan.zip",
-        )
-
-    assert type(rejected.value) is AssetValidationFailed
-    assert harness.store.assets == {}
-    assert harness.store.versions == {}
-
-
-@pytest.mark.asyncio
-async def test_blocking_upload_does_not_confirm_undisclosed_findings(
-    harness: _Harness,
-) -> None:
-    actor = _admin_context()
-
-    with pytest.raises(SkillArchiveSecurityBlocked) as blocked:
-        await harness.service.create_project_from_archive_upload(
-            actor,
-            _many_blocked_findings_archive("too-many-findings"),
-            filename="too-many-findings.zip",
-        )
-
-    assert blocked.value.risk_confirmation is None
-    assert len(blocked.value.diagnostics) == 20
-    assert harness.store.assets == {}
-    assert harness.store.versions == {}
-
-
-@pytest.mark.asyncio
-async def test_embedded_private_key_cannot_be_acknowledged_into_persistence(
-    harness: _Harness,
-) -> None:
-    actor = _admin_context()
-    payload = _private_key_upload_archive("unconfirmable-secret")
-
-    with pytest.raises(SkillArchiveSecurityBlocked) as blocked:
-        await harness.service.create_project_from_archive_upload(
-            actor,
-            payload,
-            filename="unconfirmable-secret.zip",
-            security_risk_acceptance=SkillArchiveSecurityRiskAcceptance(
-                payload_checksum="0" * 64,
-                findings_checksum="0" * 64,
-            ),
-        )
-
-    assert blocked.value.risk_confirmation is None
-    assert [item.rule_id for item in blocked.value.diagnostics] == ["secret-private-key"]
-    assert harness.store.assets == {}
-    assert harness.store.versions == {}
+    assert result.version.relation is VersionRelation.CANDIDATE
+    assert {item.path for item in result.version.file_views} == {
+        "SKILL.md",
+        "secrets/key.pem",
+    }
 
 
 @pytest.mark.asyncio

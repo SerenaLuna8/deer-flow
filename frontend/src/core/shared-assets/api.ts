@@ -122,41 +122,6 @@ export type SkillDistributionDownload = {
 
 const SKILL_DISTRIBUTION_FILENAME_PATTERN =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?-v[1-9][0-9]*\.zip$/u;
-const SKILL_ARCHIVE_SECURITY_RISK_ACCEPTANCE =
-  "accept-blocked-skill-archive" as const;
-
-export const skillArchiveSecurityDiagnosticSchema = z
-  .object({
-    rule_id: z
-      .string()
-      .min(1)
-      .max(128)
-      .regex(/^[a-z0-9-]+$/u),
-    file: z
-      .string()
-      .min(1)
-      .max(1024)
-      .refine((value) => !/[\u0000-\u001f\u007f]/u.test(value))
-      .nullable(),
-    line: z.number().int().positive().nullable(),
-  })
-  .strict();
-
-export type SkillArchiveSecurityDiagnostic = z.infer<
-  typeof skillArchiveSecurityDiagnosticSchema
->;
-
-export const skillArchiveSecurityRiskConfirmationSchema = z
-  .object({
-    acceptance: z.literal(SKILL_ARCHIVE_SECURITY_RISK_ACCEPTANCE),
-    payload_checksum: z.string().regex(/^[0-9a-f]{64}$/u),
-    findings_checksum: z.string().regex(/^[0-9a-f]{64}$/u),
-  })
-  .strict();
-
-export type SkillArchiveSecurityRiskConfirmation = z.infer<
-  typeof skillArchiveSecurityRiskConfirmationSchema
->;
 
 const serverErrorCodeSchema = z.enum([
   "asset_not_found",
@@ -184,22 +149,9 @@ const standardErrorDetailSchema = z
   })
   .strict();
 
-const skillArchiveSecurityErrorDetailSchema = z
-  .object({
-    code: z.literal("SKILL_ARCHIVE_SECURITY_BLOCKED"),
-    message: z.string().min(1),
-    request_id: z.string().min(1).optional(),
-    diagnostics: z.array(skillArchiveSecurityDiagnosticSchema).min(1).max(20),
-    risk_confirmation: skillArchiveSecurityRiskConfirmationSchema.nullable(),
-  })
-  .strict();
-
 const errorEnvelopeSchema = z
   .object({
-    detail: z.union([
-      skillArchiveSecurityErrorDetailSchema,
-      standardErrorDetailSchema,
-    ]),
+    detail: standardErrorDetailSchema,
   })
   .strict();
 
@@ -223,10 +175,6 @@ const SAFE_SERVER_ERRORS = {
   SKILL_ARCHIVE_LIMIT_EXCEEDED: [
     "ASSET_UPLOAD_TOO_LARGE",
     "Skill archive exceeds the allowed size or member limit",
-  ],
-  SKILL_ARCHIVE_SECURITY_BLOCKED: [
-    "SKILL_ARCHIVE_SECURITY_BLOCKED",
-    "Skill archive failed security scan",
   ],
   SKILL_RUNTIME_NAME_CONFLICT: [
     "SKILL_RUNTIME_NAME_CONFLICT",
@@ -269,7 +217,6 @@ export const SHARED_ASSET_ERROR_CODES = [
   "SKILL_SECRET_CONFIGURATION_INVALID",
   "SKILL_SECRET_REVISION_STALE",
   "ASSET_UPLOAD_TOO_LARGE",
-  "SKILL_ARCHIVE_SECURITY_BLOCKED",
   "AUTH_REQUIRED",
   "ASSET_NETWORK_ERROR",
   "ASSET_RESPONSE_INVALID",
@@ -282,30 +229,18 @@ export class SharedAssetApiError extends Error {
   readonly status: number;
   readonly code: SharedAssetErrorCode;
   readonly diagnostics: readonly SkillFrontmatterDiagnostic[] | undefined;
-  readonly skillArchiveSecurityDiagnostics:
-    | readonly SkillArchiveSecurityDiagnostic[]
-    | undefined;
-  readonly skillArchiveSecurityRiskConfirmation:
-    | SkillArchiveSecurityRiskConfirmation
-    | null
-    | undefined;
 
   constructor(
     status: number,
     code: SharedAssetErrorCode,
     message: string,
     diagnostics?: readonly SkillFrontmatterDiagnostic[],
-    skillArchiveSecurityDiagnostics?: readonly SkillArchiveSecurityDiagnostic[],
-    skillArchiveSecurityRiskConfirmation?: SkillArchiveSecurityRiskConfirmation | null,
   ) {
     super(message);
     this.name = "SharedAssetApiError";
     this.status = status;
     this.code = code;
     this.diagnostics = diagnostics;
-    this.skillArchiveSecurityDiagnostics = skillArchiveSecurityDiagnostics;
-    this.skillArchiveSecurityRiskConfirmation =
-      skillArchiveSecurityRiskConfirmation;
   }
 }
 
@@ -375,25 +310,11 @@ async function throwResponseError(response: Response): Promise<never> {
     );
   }
   const [code, message] = SAFE_SERVER_ERRORS[parsed.data.detail.code];
-  const archiveSecurityDiagnostics =
-    parsed.data.detail.code === "SKILL_ARCHIVE_SECURITY_BLOCKED"
-      ? parsed.data.detail.diagnostics
-      : undefined;
-  const frontmatterDiagnostics =
-    parsed.data.detail.code === "SKILL_ARCHIVE_SECURITY_BLOCKED"
-      ? undefined
-      : parsed.data.detail.diagnostics;
-  const archiveSecurityRiskConfirmation =
-    parsed.data.detail.code === "SKILL_ARCHIVE_SECURITY_BLOCKED"
-      ? parsed.data.detail.risk_confirmation
-      : undefined;
   throw new SharedAssetApiError(
     response.status,
     code,
     message,
-    frontmatterDiagnostics,
-    archiveSecurityDiagnostics,
-    archiveSecurityRiskConfirmation,
+    parsed.data.detail.diagnostics,
   );
 }
 
@@ -873,7 +794,6 @@ export async function importProjectSkillArchive(
   projectId: string,
   archive: File,
   options: {
-    securityRiskConfirmation?: SkillArchiveSecurityRiskConfirmation;
     signal?: AbortSignal;
   } = {},
 ): Promise<ProjectSkillImportResponse> {
@@ -886,20 +806,6 @@ export async function importProjectSkillArchive(
   }
   const body = new FormData();
   body.append("archive", archive, archive.name);
-  if (options.securityRiskConfirmation) {
-    body.append(
-      "security_risk_acceptance",
-      options.securityRiskConfirmation.acceptance,
-    );
-    body.append(
-      "security_risk_payload_checksum",
-      options.securityRiskConfirmation.payload_checksum,
-    );
-    body.append(
-      "security_risk_findings_checksum",
-      options.securityRiskConfirmation.findings_checksum,
-    );
-  }
   const response = await request(
     `${projectAssetUrl(projectId, "skills")}/import`,
     {

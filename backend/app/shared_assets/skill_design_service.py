@@ -302,7 +302,6 @@ class ValidateSkillDesignSession:
 class CommitSkillDesignSession:
     expected_revision: int
     expected_draft_checksum: str
-    acknowledge_warnings: bool
     idempotency_key: str
 
 
@@ -363,9 +362,6 @@ class SkillDesignValidation:
     frontmatter: Mapping[str, object]
     compatibility: str | None
     secret_requirements: tuple[SkillDesignSecretRequirement, ...]
-    scan_decision: str
-    scan_rule_ids: tuple[str, ...]
-    scan_summary: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -975,7 +971,7 @@ class SkillDesignService:
         context: ProjectContext,
         files: tuple[SkillArchiveFile, ...],
     ) -> None:
-        """Re-run frontmatter parsing and SkillScan under current rules."""
+        """Re-run structural and frontmatter validation under current rules."""
 
         try:
             await self._skill_service.preview_archive(context, files)
@@ -2272,15 +2268,6 @@ class SkillDesignService:
                         source_event_id="validation-package-files-started",
                     )
             files = self._validate_builder_files(context, files)
-            async with self._session_factory() as session, session.begin():
-                await SkillDesignActivityRepository(session).append(
-                    context,
-                    session_id=session_id,
-                    operation_id=operation.id,
-                    kind=SkillDesignActivityKind.VALIDATION_STARTED,
-                    payload={"stage": "safety_scan"},
-                    source_event_id="validation-safety-scan-started",
-                )
             preview = await self._skill_service.preview_archive(context, files)
             self._require_preview_name(context, preview, row.slug)
             validation = self._validation_from_preview(
@@ -2421,7 +2408,6 @@ class SkillDesignService:
                 "session_id": session_id,
                 "expected_revision": command.expected_revision,
                 "expected_draft_checksum": command.expected_draft_checksum,
-                "acknowledge_warnings": command.acknowledge_warnings,
             }
         )
         repeated_session: SkillDesignSessionView | None = None
@@ -2564,8 +2550,6 @@ class SkillDesignService:
                             context,
                             row.validation_json,
                         )
-                        if validation.scan_decision == "warn" and not command.acknowledge_warnings:
-                            raise AssetConflict(context.request_id)
                         files = await repository.load_draft_files(
                             context,
                             row.id,
@@ -3981,13 +3965,11 @@ class SkillDesignService:
             or not SkillDesignService._valid_revision(command.expected_revision)
             or not isinstance(command.expected_draft_checksum, str)
             or _CHECKSUM_PATTERN.fullmatch(command.expected_draft_checksum) is None
-            or type(command.acknowledge_warnings) is not bool
         ):
             raise AssetValidationFailed(context.request_id)
         return CommitSkillDesignSession(
             expected_revision=command.expected_revision,
             expected_draft_checksum=command.expected_draft_checksum,
-            acknowledge_warnings=command.acknowledge_warnings,
             idempotency_key=SkillDesignService._validate_idempotency_key(
                 context,
                 command.idempotency_key,
@@ -4333,9 +4315,6 @@ class SkillDesignService:
                 )
                 for item in preview.secret_requirements
             ),
-            scan_decision=preview.scan_decision,
-            scan_rule_ids=preview.scan_rule_ids,
-            scan_summary=dict(preview.scan_summary),
         )
 
     @staticmethod
@@ -4367,9 +4346,6 @@ class SkillDesignService:
                 }
                 for item in validation.secret_requirements
             ],
-            "scan_decision": validation.scan_decision,
-            "scan_rule_ids": list(validation.scan_rule_ids),
-            "scan_summary": dict(validation.scan_summary),
         }
 
     @staticmethod
@@ -4386,9 +4362,6 @@ class SkillDesignService:
             frontmatter = value["frontmatter"]
             compatibility = value["compatibility"]
             requirements = value["secret_requirements"]
-            decision = value["scan_decision"]
-            rule_ids = value["scan_rule_ids"]
-            summary = value["scan_summary"]
         except (KeyError, TypeError, ValueError):
             raise AssetValidationFailed(context.request_id) from None
         if (
@@ -4398,11 +4371,7 @@ class SkillDesignService:
             or not isinstance(frontmatter, dict)
             or compatibility is not None
             and not isinstance(compatibility, str)
-            or decision not in {"allow", "warn"}
             or not isinstance(requirements, list)
-            or not isinstance(rule_ids, list)
-            or not all(isinstance(item, str) for item in rule_ids)
-            or not isinstance(summary, dict)
         ):
             raise AssetValidationFailed(context.request_id)
         parsed_requirements: list[SkillDesignSecretRequirement] = []
@@ -4423,9 +4392,6 @@ class SkillDesignService:
             frontmatter=frontmatter,
             compatibility=compatibility,
             secret_requirements=tuple(parsed_requirements),
-            scan_decision=decision,
-            scan_rule_ids=tuple(rule_ids),
-            scan_summary=summary,
         )
 
     @staticmethod

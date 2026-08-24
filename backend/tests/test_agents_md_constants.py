@@ -16,6 +16,9 @@ import pytest
 from app.shared_assets.agent_design_generation import (
     DEFAULT_GENERATION_TIMEOUT_SECONDS,
 )
+from app.shared_assets.run_snapshot_codec import (
+    MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES,
+)
 from app.shared_assets.skill_archive import (
     MAX_SKILL_ARCHIVE_BYTES,
     MAX_SKILL_ARCHIVE_FILE_BYTES,
@@ -50,10 +53,6 @@ from deerflow.persistence.private_work.memory_document_repository import (
     REMEMBER_BACKLOG_LIMIT,
     REMEMBER_RUN_LIMIT,
     TOOL_ENTRY_DUE_MINUTES,
-)
-from deerflow.skills.skillscan.orchestrator import (
-    _MAX_ARCHIVE_MEMBERS,
-    MAX_TOTAL_ARCHIVE_BYTES,
 )
 from deerflow.tools.builtins.view_image_tool import _MAX_IMAGE_BYTES
 
@@ -141,16 +140,6 @@ DOCUMENTED_CONSTANTS = (
         source="deerflow.config.subagents_config per-Run total bounds",
     ),
     DocumentedConstant(
-        pattern=r"retaining the final (\d+) MiB",
-        expected=str(MAX_TOTAL_ARCHIVE_BYTES // MIB),
-        source="deerflow.skills.skillscan.orchestrator.MAX_TOTAL_ARCHIVE_BYTES",
-    ),
-    DocumentedConstant(
-        pattern=r"(\d+)-file, bounded-log",
-        expected=str(_MAX_ARCHIVE_MEMBERS),
-        source="deerflow.skills.skillscan.orchestrator._MAX_ARCHIVE_MEMBERS",
-    ),
-    DocumentedConstant(
         pattern=r"archives remain limited to (\d+) MiB",
         expected=str(MAX_SKILL_ARCHIVE_BYTES // MIB),
         source="app.shared_assets.skill_archive.MAX_SKILL_ARCHIVE_BYTES",
@@ -169,6 +158,11 @@ DOCUMENTED_CONSTANTS = (
         pattern=r"scoped\s+(\d+) MiB\s+wire limit",
         expected=str(MAX_SKILL_ARCHIVE_UPLOAD_BYTES // MIB),
         source="app.shared_assets.skill_archive.MAX_SKILL_ARCHIVE_UPLOAD_BYTES",
+    ),
+    DocumentedConstant(
+        pattern=r"cumulative encoded\s+assets for one Run are independently limited to (\d+) MiB",
+        expected=str(MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES // MIB),
+        source="app.shared_assets.run_snapshot_codec.MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES",
     ),
     DocumentedConstant(
         pattern=r"injects at most (\w+) unique images",

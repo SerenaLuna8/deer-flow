@@ -1137,11 +1137,6 @@ export const zhCN: Translations = {
       skillVersions: "Skill 版本",
       mcpVersions: "MCP 配置",
       compatibility: "兼容性",
-      scanDecision: "扫描结论",
-      scanAllow: "允许",
-      scanWarn: "警告",
-      scanBlock: "阻断",
-      scanRules: "扫描规则",
       files: "文件",
       secretRequirements: "秘密要求",
       transport: "传输方式",
@@ -2013,9 +2008,7 @@ export const zhCN: Translations = {
         saving: "保存中…",
         save: "保存修改",
         checkPassed: "检查通过",
-        checkPassedWithWarnings: "检查通过，但有警告",
         requiredSecrets: "所需秘密：",
-        acknowledgeWarnings: "确认并接受上述警告",
         checkSkill: "检查 Skill",
         commitCreate: "创建 Skill（默认停用）",
         commitRevise: "保存候选版本",
@@ -2036,7 +2029,6 @@ export const zhCN: Translations = {
         sizeBytes: (count) => `${count} 字节`,
         validationStages: {
           package_files: "开始校验包文件",
-          safety_scan: "开始安全扫描",
         },
         stop: "停止本轮生成",
         stopping: "正在停止…",
@@ -2051,7 +2043,7 @@ export const zhCN: Translations = {
           validation_started: "开始确定性校验",
           validation_passed: "确定性校验通过",
           validation_failed: "确定性校验失败",
-          repair_started: "开始安全修复重试",
+          repair_started: "开始修复重试",
           run_terminal: "本次操作结束",
           commit_accepted: "已接收创建请求",
           commit_validation_started: "开始校验候选",
@@ -2377,6 +2369,9 @@ export const zhCN: Translations = {
     outputDeliveryIncompleteTitle: "结果文件未完成交付",
     outputDeliveryIncompleteDescription:
       "需要交付的结果文件已经生成，但没有发布到当前对话。重新发送可能重复执行已经完成的命令，请先检查运行记录。",
+    sideEffectStateUnknownTitle: "运行状态无法确认",
+    sideEffectStateUnknownDescription:
+      "部分操作可能已经执行，但 Worker 无法确认最终状态。为避免重复执行，请勿直接重新发送；请先检查运行记录。",
     currentUploadUnavailableTitle: "当前图片附件不可用",
     currentUploadUnavailableDescription:
       "本次运行无法安全读取或校验当前图片附件。请恢复原输入并重试；若仍失败，请移除后重新粘贴图片。",

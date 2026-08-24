@@ -112,12 +112,13 @@ def mark_deferred_external_dispatch_tool(tool: object) -> object:
 def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
     """Recognize only canonical code-registered read-only tool objects."""
 
+    from deerflow.sandbox.tools import read_file_tool
     from deerflow.tools.builtins.list_uploaded_files_tool import (
         list_uploaded_files_tool,
     )
 
     tool = getattr(request, "tool", None)
-    if tool is list_uploaded_files_tool:
+    if tool is list_uploaded_files_tool or tool is read_file_tool:
         return True
     return any(
         getattr(
@@ -131,9 +132,15 @@ def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
 
 
 def _is_trusted_idempotent_tool(request: ToolCallRequest) -> bool:
+    from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
     from deerflow.tools.builtins.present_file_tool import present_file_tool
 
     tool = getattr(request, "tool", None)
+    if tool is ask_clarification_tool:
+        # ClarificationMiddleware derives the request and ToolMessage identity
+        # from the immutable tool-call id. Re-entry replaces that same graph
+        # state instead of creating another external or durable side effect.
+        return True
     if tool is present_file_tool:
         # Private present_files persists an exact Run/tool-call intent and the
         # finalizer reuses the exact active Artifact. Re-entry cannot dispatch

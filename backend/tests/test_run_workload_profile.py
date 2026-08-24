@@ -459,7 +459,7 @@ def test_legacy_policy_cannot_claim_a_research_workload_profile() -> None:
         )
 
 
-@pytest.mark.parametrize("policy_schema_version", [1, 5, True])
+@pytest.mark.parametrize("policy_schema_version", [1, 6, True])
 def test_unknown_policy_schema_version_fails_closed(
     policy_schema_version: object,
 ) -> None:
@@ -501,7 +501,7 @@ def test_malformed_frozen_workload_profile_fails_closed(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_v4_freezes_workload_and_continuation_inherits_source_effective(
+async def test_postgres_v5_freezes_workload_and_continuation_inherits_source_effective(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -591,7 +591,7 @@ async def test_postgres_v4_freezes_workload_and_continuation_inherits_source_eff
         assert set(by_run) == {source_run_id, continuation_run_id}
         source_kwargs, source_schema = by_run[source_run_id]
         continuation_kwargs, continuation_schema = by_run[continuation_run_id]
-        assert source_schema == continuation_schema == 4
+        assert source_schema == continuation_schema == 5
         assert parse_persisted_run_workload_profile(source_kwargs[RUN_WORKLOAD_PROFILE_KWARG]) == (
             RequestedRunWorkloadProfile(name="research"),
             EffectiveRunWorkloadProfile(name="research"),

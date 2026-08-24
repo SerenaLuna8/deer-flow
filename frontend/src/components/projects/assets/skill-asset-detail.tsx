@@ -18,12 +18,6 @@ function formatBytes(value: number): string {
   return `${Number((kibibytes / 1024).toFixed(1))} MB`;
 }
 
-const SCAN_LABEL = {
-  allow: "通过",
-  warn: "警告",
-  block: "阻止",
-} as const;
-
 export const SKILL_FILE_SNAPSHOT_LIMIT = 20;
 
 type SkillWorkspaceProps = Omit<
@@ -110,23 +104,6 @@ function SkillMetadata({ version }: { version: SkillAssetVersion }) {
           <p className="text-muted-foreground text-xs">兼容性</p>
           <p className="mt-2 text-sm">{version.compatibility ?? "未声明"}</p>
         </div>
-        <div className="border-border/70 rounded-xl border p-4">
-          <p className="text-muted-foreground text-xs">扫描结果</p>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Badge
-              variant={
-                version.scan_decision === "allow" ? "default" : "secondary"
-              }
-            >
-              {SCAN_LABEL[version.scan_decision]}
-            </Badge>
-            {version.scan_rule_ids.map((rule) => (
-              <span key={rule} className="font-mono text-xs">
-                {rule}
-              </span>
-            ))}
-          </div>
-        </div>
       </section>
 
       <section className="space-y-3">
@@ -189,14 +166,9 @@ function SkillMetadata({ version }: { version: SkillAssetVersion }) {
         <summary className="cursor-pointer text-sm font-medium">
           结构化元数据
         </summary>
-        <div className="mt-3 grid gap-3">
-          <pre className="bg-muted/45 overflow-x-auto rounded-lg p-3 text-xs">
-            {JSON.stringify(version.frontmatter, null, 2)}
-          </pre>
-          <pre className="bg-muted/45 overflow-x-auto rounded-lg p-3 text-xs">
-            {JSON.stringify(version.scan_summary, null, 2)}
-          </pre>
-        </div>
+        <pre className="bg-muted/45 mt-3 overflow-x-auto rounded-lg p-3 text-xs">
+          {JSON.stringify(version.frontmatter, null, 2)}
+        </pre>
       </details>
     </div>
   );

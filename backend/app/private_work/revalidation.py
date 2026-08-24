@@ -3,7 +3,11 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.context import PrivateWorkContext, require_issued_private_work_context
-from app.private_work.errors import PrivateWorkForbidden, PrivateWorkNotFound, PrivateWorkUnavailable
+from app.private_work.errors import (
+    PrivateWorkDatabaseUnavailable,
+    PrivateWorkForbidden,
+    PrivateWorkNotFound,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext, resolve_project_context_in_transaction
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
@@ -29,7 +33,7 @@ class PrivateWorkRevalidator:
         except ProjectNotFound:
             raise PrivateWorkNotFound(context.request_id) from None
         except ProjectDatabaseUnavailable:
-            raise PrivateWorkUnavailable(context.request_id) from None
+            raise PrivateWorkDatabaseUnavailable(context.request_id) from None
         if type(current) is not ProjectContext or current.user_id != context.user_id or current.project_id != context.project_id or current.membership_id != context.membership_id or current.membership_version != context.membership_version:
             raise PrivateWorkNotFound(context.request_id)
         for capability in capabilities:

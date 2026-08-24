@@ -46,11 +46,7 @@ def _skill_preview(files):
     name = preview.frontmatter.get("name")
     if not isinstance(name, str) or _SLUG.fullmatch(name) is None:
         raise ValueError("public Skill name is invalid")
-    return name, preview
-
-
-def _scan_snapshot(preview) -> tuple[str, dict[str, object]]:
-    return preview.scan_decision, dict(preview.scan_summary)
+    return name
 
 
 def _released_skill_histories(
@@ -125,9 +121,6 @@ def _new_skill_entry(
     name: str,
     version: int,
     archive: bytes,
-    *,
-    scan_decision: str,
-    scan_summary: dict[str, object],
 ) -> dict[str, object]:
     relative_path = f"{_PAYLOAD_PREFIX}{name}-v{version}.skill.json"
     return {
@@ -139,8 +132,6 @@ def _new_skill_entry(
         "payload_path": relative_path,
         "payload_format": "skill_archive_v1",
         "sha256": hashlib.sha256(archive).hexdigest(),
-        "scan_decision": scan_decision,
-        "scan_summary": scan_summary,
     }
 
 
@@ -177,12 +168,11 @@ def _expected_outputs() -> tuple[bytes, dict[str, bytes]]:
 
     sources = load_project_skill_sources(_SOURCE_ROOT)
     for source in sources:
-        name, preview = _skill_preview(source.files)
+        name = _skill_preview(source.files)
         if name in seen_names:
             raise ValueError("public Skill names must be unique")
         seen_names.add(name)
         archive = dump_skill_archive(source.files)
-        scan_decision, scan_summary = _scan_snapshot(preview)
         history = histories.get(name, [])
         for released in history:
             _released_archive(released)
@@ -190,8 +180,6 @@ def _expected_outputs() -> tuple[bytes, dict[str, bytes]]:
             name,
             1,
             archive,
-            scan_decision=scan_decision,
-            scan_summary=scan_summary,
         )
         payloads[str(entry["payload_path"])] = archive
         generated_entries.append(entry)

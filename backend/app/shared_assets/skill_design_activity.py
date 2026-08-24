@@ -91,10 +91,11 @@ def _public_payload(
             # Upgrade-created history used an empty payload for this stage.
             return {}
         stage = value.get("stage")
-        if set(value) != {"stage"} or stage not in {
-            "package_files",
-            "safety_scan",
-        }:
+        if set(value) == {"stage"} and stage == "safety_scan":
+            # Older sessions may contain this retired stage. Keep replay valid
+            # without exposing it as a current validation step.
+            return {}
+        if set(value) != {"stage"} or stage != "package_files":
             raise TypeError("validation stage must be public and known")
         return {"stage": stage}
     if kind is SkillDesignActivityKind.REASONING:

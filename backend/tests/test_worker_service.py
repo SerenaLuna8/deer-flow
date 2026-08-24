@@ -10,6 +10,8 @@ from collections import deque
 from pathlib import Path
 
 import pytest
+from asyncpg.exceptions import CannotConnectNowError
+from sqlalchemy.exc import DBAPIError, ProgrammingError
 
 from app.reliability.workers import WorkerRegistry
 from app.worker.service import (
@@ -35,6 +37,8 @@ class _Transaction:
 
     async def __aexit__(self, *_args):
         self.backend.transaction_active = False
+        if self.backend.transaction_exit_errors:
+            raise self.backend.transaction_exit_errors.popleft()
         return False
 
 
@@ -72,6 +76,8 @@ class _FakeBackend:
         self.heartbeat_error: Exception | None = None
         self.claim_calls = 0
         self.claim_kwargs: list[dict[str, object]] = []
+        self.claim_errors: deque[BaseException] = deque()
+        self.transaction_exit_errors: deque[BaseException] = deque()
         self.transaction_active = False
         self.claim_gate: asyncio.Event | None = None
         self.claim_started: asyncio.Event | None = None
@@ -86,6 +92,8 @@ class _FakeRepository:
         self.backend.claim_kwargs.append(dict(_kwargs))
         if self.backend.claim_started is not None:
             self.backend.claim_started.set()
+        if self.backend.claim_errors:
+            raise self.backend.claim_errors.popleft()
         if self.backend.claim_gate is not None:
             await self.backend.claim_gate.wait()
         return self.backend.claims.popleft() if self.backend.claims else None
@@ -117,18 +125,24 @@ class _FakeRegistry:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.heartbeat_result = True
+        self.heartbeat_errors: deque[BaseException] = deque()
         self.heartbeat_called: asyncio.Event | None = None
         self.heartbeat_gate: asyncio.Event | None = None
         self.heartbeat_cancel_suppressed: asyncio.Event | None = None
+        self.register_error: BaseException | None = None
         self.mark_draining_error: Exception | None = None
 
     async def register(self, *_args, **_kwargs) -> None:
         self.calls.append("register")
+        if self.register_error is not None:
+            raise self.register_error
 
     async def heartbeat(self, *_args, **_kwargs) -> bool:
         self.calls.append("heartbeat")
         if self.heartbeat_called is not None:
             self.heartbeat_called.set()
+        if self.heartbeat_errors:
+            raise self.heartbeat_errors.popleft()
         if self.heartbeat_gate is not None:
             try:
                 await self.heartbeat_gate.wait()
@@ -223,6 +237,208 @@ async def test_after_claim_commit_hook_runs_outside_claim_transaction() -> None:
 
     assert await service._claim_next() is None
     assert observations == [(False, 1)]
+
+
+@pytest.mark.asyncio
+async def test_run_recovers_from_postgres_recovery_before_claim_returns() -> None:
+    backend = _FakeBackend(job_count=1)
+    backend.claim_errors.append(
+        CannotConnectNowError("database recovery detail must stay private"),
+    )
+    stop_event = asyncio.Event()
+
+    async def handler(_claim, _authority):
+        stop_event.set()
+        return JobOutcome.succeeded()
+
+    registry = _FakeRegistry()
+    service = WorkerService(
+        _Factory(backend),
+        registry,
+        {"retention_purge": handler},
+        _config(max_concurrent_jobs=1, poll_interval_seconds=0.001),
+        repository_builder=_FakeRepository,
+    )
+
+    await asyncio.wait_for(service.run(stop_event), timeout=1)
+
+    assert backend.claim_calls == 2
+    assert len(backend.succeeded) == 1
+    assert registry.calls == ["register", "mark_draining", "remove"]
+
+
+@pytest.mark.asyncio
+async def test_claim_commit_ack_failure_is_not_retried() -> None:
+    backend = _FakeBackend(job_count=1)
+    backend.transaction_exit_errors.append(
+        DBAPIError(
+            "COMMIT",
+            {},
+            ConnectionError("commit acknowledgement detail must stay private"),
+            connection_invalidated=True,
+        ),
+    )
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"retention_purge": object()},
+        _config(poll_interval_seconds=0.001),
+        repository_builder=_FakeRepository,
+    )
+
+    with pytest.raises(DBAPIError):
+        await asyncio.wait_for(service.run(asyncio.Event()), timeout=1)
+
+    assert backend.claim_calls == 1
+    assert backend.marked_running == []
+
+
+@pytest.mark.asyncio
+async def test_after_claim_commit_database_failure_is_not_retried() -> None:
+    backend = _FakeBackend(job_count=1)
+
+    async def after_claim_commit() -> None:
+        raise CannotConnectNowError("reconciliation detail must stay private")
+
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"retention_purge": object()},
+        _config(poll_interval_seconds=0.001),
+        repository_builder=_FakeRepository,
+        after_claim_commit=after_claim_commit,
+    )
+
+    with pytest.raises(CannotConnectNowError):
+        await asyncio.wait_for(service.run(asyncio.Event()), timeout=1)
+
+    assert backend.claim_calls == 1
+    assert backend.marked_running == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "claim_error",
+    [
+        RuntimeError("claim invariant failed"),
+        PermissionError("claim authority failed"),
+        ProgrammingError(
+            "SELECT broken",
+            {},
+            Exception("database programming detail"),
+        ),
+    ],
+)
+async def test_non_transient_claim_failure_is_not_retried(
+    claim_error: BaseException,
+) -> None:
+    backend = _FakeBackend(job_count=0)
+    backend.claim_errors.append(claim_error)
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {},
+        _config(poll_interval_seconds=0.001),
+        repository_builder=_FakeRepository,
+    )
+
+    with pytest.raises(type(claim_error)):
+        await asyncio.wait_for(service.run(asyncio.Event()), timeout=1)
+
+    assert backend.claim_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_authority_failure_with_database_context_is_not_retried() -> None:
+    backend = _FakeBackend(job_count=0)
+    authority_error = PermissionError("claim authority failed")
+    authority_error.__cause__ = CannotConnectNowError(
+        "prior database detail must not redefine authority failure",
+    )
+    backend.claim_errors.append(authority_error)
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {},
+        _config(poll_interval_seconds=0.001),
+        repository_builder=_FakeRepository,
+    )
+
+    with pytest.raises(PermissionError, match="claim authority failed"):
+        await asyncio.wait_for(service.run(asyncio.Event()), timeout=0.2)
+
+    assert backend.claim_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_register_database_failure_remains_a_startup_failure() -> None:
+    backend = _FakeBackend(job_count=0)
+    registry = _FakeRegistry()
+    registry.register_error = CannotConnectNowError(
+        "startup database recovery detail must stay private",
+    )
+    service = WorkerService(
+        _Factory(backend),
+        registry,
+        {},
+        _config(poll_interval_seconds=0.001),
+        repository_builder=_FakeRepository,
+    )
+
+    with pytest.raises(CannotConnectNowError):
+        await asyncio.wait_for(service.run(asyncio.Event()), timeout=1)
+
+    assert backend.claim_calls == 0
+    assert registry.calls == ["register"]
+
+
+@pytest.mark.asyncio
+async def test_stop_interrupts_claim_reconnect_backoff() -> None:
+    backend = _FakeBackend(job_count=0)
+    backend.claim_started = asyncio.Event()
+    backend.claim_errors.append(
+        CannotConnectNowError("database recovery detail must stay private"),
+    )
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {},
+        _config(poll_interval_seconds=30),
+        repository_builder=_FakeRepository,
+    )
+    stop_event = asyncio.Event()
+    running = asyncio.create_task(service.run(stop_event))
+
+    await asyncio.wait_for(backend.claim_started.wait(), timeout=1)
+    stop_event.set()
+    await asyncio.wait_for(running, timeout=0.1)
+
+    assert backend.claim_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_primary_claim_failure_survives_shutdown_database_failure() -> None:
+    backend = _FakeBackend(job_count=0)
+    backend.claim_errors.append(RuntimeError("claim invariant failed"))
+    registry = _FakeRegistry()
+    registry.mark_draining_error = CannotConnectNowError(
+        "shutdown database recovery detail must stay private",
+    )
+    service = WorkerService(
+        _Factory(backend),
+        registry,
+        {},
+        _config(poll_interval_seconds=0.001),
+        repository_builder=_FakeRepository,
+    )
+
+    with pytest.raises(RuntimeError, match="claim invariant failed") as caught:
+        await asyncio.wait_for(service.run(asyncio.Event()), timeout=1)
+
+    assert caught.value.__notes__ == [
+        "worker shutdown also failed: CannotConnectNowError",
+    ]
+    assert registry.calls == ["register", "mark_draining", "remove"]
 
 
 @pytest.mark.asyncio
@@ -890,6 +1106,36 @@ async def test_fleet_registration_loss_stops_claiming_and_drains() -> None:
     with pytest.raises(RuntimeError, match="registry ownership was lost"):
         await asyncio.wait_for(service.run(asyncio.Event()), timeout=1)
 
+    assert registry.calls[-2:] == ["mark_draining", "remove"]
+
+
+@pytest.mark.asyncio
+async def test_fleet_heartbeat_recovers_from_postgres_recovery() -> None:
+    backend = _FakeBackend(job_count=0)
+    stop_event = asyncio.Event()
+
+    class RecoveringRegistry(_FakeRegistry):
+        async def heartbeat(self, *args, **kwargs) -> bool:
+            result = await super().heartbeat(*args, **kwargs)
+            if self.calls.count("heartbeat") == 2:
+                stop_event.set()
+            return result
+
+    registry = RecoveringRegistry()
+    registry.heartbeat_errors.append(
+        CannotConnectNowError("fleet recovery detail must stay private"),
+    )
+    service = WorkerService(
+        _Factory(backend),
+        registry,
+        {},
+        _config(heartbeat_seconds=0.001, poll_interval_seconds=0.001),
+        repository_builder=_FakeRepository,
+    )
+
+    await asyncio.wait_for(service.run(stop_event), timeout=1)
+
+    assert registry.calls.count("heartbeat") == 2
     assert registry.calls[-2:] == ["mark_draining", "remove"]
 
 

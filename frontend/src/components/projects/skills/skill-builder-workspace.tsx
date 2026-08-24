@@ -951,8 +951,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const [mobileSurface, setMobileSurface] = useState<
     "conversation" | "workbench"
   >("conversation");
-  const [acknowledgedValidationToken, setAcknowledgedValidationToken] =
-    useState<string | null>(null);
   const [draftBaselineChecksum, setDraftBaselineChecksum] = useState<
     string | null
   >(null);
@@ -1115,16 +1113,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
         secretDeclarationValid ? "valid" : "pending",
       )
     : false;
-  const validationToken = useMemo(
-    () =>
-      session?.validation
-        ? skillBuilderSemanticSignature(session.validation)
-        : null,
-    [session?.validation],
-  );
-  const acknowledgeWarnings = Boolean(
-    validationToken && acknowledgedValidationToken === validationToken,
-  );
   const canValidate = session
     ? skillBuilderCanValidateCandidate(
         session,
@@ -1169,7 +1157,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     previousFilesRef.current = session.files;
     if (previousChecksumRef.current !== session.draft_checksum) {
       previousChecksumRef.current = session.draft_checksum;
-      setAcknowledgedValidationToken(null);
     }
   }, [session]);
 
@@ -1523,7 +1510,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     validate.mutate(command, {
       onSuccess: () => {
         idempotency.complete("validate", signature);
-        setAcknowledgedValidationToken(null);
       },
       onError: (error) => refreshAfterConflict("validate", signature, error),
     });
@@ -1538,8 +1524,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
         session,
         drafts,
         secretDeclarationValid ? "valid" : "pending",
-      ) ||
-      (session.validation?.scan_decision === "warn" && !acknowledgeWarnings)
+      )
     ) {
       return;
     }
@@ -1547,12 +1532,10 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     const signature = skillBuilderSemanticSignature({
       draft_checksum: draftChecksum,
       expected_revision: session.revision,
-      acknowledge_warnings: acknowledgeWarnings,
     });
     const command = idempotency.acquire("commit", signature, (key) => ({
       expected_revision: session.revision,
       expected_draft_checksum: draftChecksum,
-      acknowledge_warnings: acknowledgeWarnings,
       idempotency_key: key,
     }));
     commit.mutate(command, {
@@ -1902,7 +1885,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                     drafts,
                     secretDeclarationValid ? "valid" : "pending",
                   )}
-                  acknowledgeWarnings={acknowledgeWarnings}
                   baselineStale={draftBaselineStale}
                   sessionKind={session.session_kind}
                   baseFiles={session.base_files}
@@ -1929,12 +1911,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                     resetErrors();
                   }}
                   onValidate={runValidation}
-                  onAcknowledgeWarningsChange={(value) => {
-                    setAcknowledgedValidationToken(
-                      value ? validationToken : null,
-                    );
-                    if (requestError) resetErrors();
-                  }}
                   onCommit={() => setCommitOpen(true)}
                   onClose={() => {
                     setWorkbenchOpen(false);

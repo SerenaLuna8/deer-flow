@@ -139,6 +139,7 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
         "PROVIDER_REQUEST_USAGE_UNSUPPORTED",
         "PROVIDER_REQUEST_PROFILE_DRIFT",
         "PROVIDER_REQUEST_CAPACITY_EXCEEDED",
+        "SIDE_EFFECT_STATE_UNKNOWN",
     }
     assert StreamFrame.end(
         status="error",
@@ -153,6 +154,13 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
     ).data == {
         "status": "error",
         "error_code": "LOOP_SAFETY_LIMIT",
+    }
+    assert StreamFrame.end(
+        status="error",
+        error_code="SIDE_EFFECT_STATE_UNKNOWN",
+    ).data == {
+        "status": "error",
+        "error_code": "SIDE_EFFECT_STATE_UNKNOWN",
     }
     assert StreamFrame.end(
         status="error",

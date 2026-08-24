@@ -41,8 +41,6 @@ class BootstrapEntry(BaseModel):
     payload_path: str
     payload_format: Literal["document", "skill_archive_v1"] = "document"
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    scan_decision: Literal["allow", "warn"] | None = None
-    scan_summary: dict[str, object] | None = None
 
     @model_validator(mode="after")
     def _source_kind_matches(self) -> BootstrapEntry:
@@ -50,28 +48,6 @@ class BootstrapEntry(BaseModel):
             raise ValueError("bootstrap source key kind does not match entry kind")
         if self.payload_format == "skill_archive_v1" and self.kind != "skill":
             raise ValueError("bootstrap Skill archives require Skill entries")
-        if (self.scan_decision is None) != (self.scan_summary is None):
-            raise ValueError("bootstrap Skill scan snapshot must be complete")
-        if self.scan_summary is not None:
-            if self.kind != "skill" or set(self.scan_summary) != {
-                "rule_ids",
-                "severity_counts",
-            }:
-                raise ValueError("bootstrap Skill scan snapshot is invalid")
-            rule_ids = self.scan_summary["rule_ids"]
-            severity_counts = self.scan_summary["severity_counts"]
-            if (
-                not isinstance(rule_ids, list)
-                or any(not isinstance(rule_id, str) or not rule_id for rule_id in rule_ids)
-                or rule_ids != sorted(set(rule_ids))
-                or not isinstance(severity_counts, dict)
-                or any(severity not in {"HIGH", "MEDIUM", "LOW"} or not isinstance(count, int) or isinstance(count, bool) or count < 1 for severity, count in severity_counts.items())
-            ):
-                raise ValueError("bootstrap Skill scan snapshot is invalid")
-            if self.scan_decision == "allow" and (rule_ids or severity_counts):
-                raise ValueError("bootstrap Skill allow snapshot must be empty")
-            if self.scan_decision == "warn" and (not rule_ids or not severity_counts):
-                raise ValueError("bootstrap Skill warn snapshot must be nonempty")
         _safe_relative_path(self.payload_path)
         return self
 
@@ -128,17 +104,7 @@ class BootstrapCatalog(BaseModel):
                 raise ValueError("bootstrap release metadata must remain stable")
             if first.kind in {"agent", "skill"} and (len(history) != 1 or first.version != 1):
                 raise ValueError(f"bootstrap {first.kind.title()} assets require one v1 definition")
-            if first.kind == "skill":
-                if self.schema_version < 3 and any(entry.scan_summary is not None for entry in history):
-                    raise ValueError("bootstrap schema v3 is required for scan snapshots")
-                if self.schema_version == 3:
-                    snapshot_seen = False
-                    for entry in history:
-                        has_snapshot = entry.scan_summary is not None
-                        if snapshot_seen and not has_snapshot:
-                            raise ValueError("bootstrap Skill scan snapshots cannot disappear")
-                        snapshot_seen = snapshot_seen or has_snapshot
-            elif first.kind == "mcp" and (len(history) != 1 or first.version != 1):
+            if first.kind == "mcp" and (len(history) != 1 or first.version != 1):
                 raise ValueError("bootstrap MCP assets currently require one v1 release")
         return self
 

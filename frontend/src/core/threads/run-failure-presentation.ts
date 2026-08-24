@@ -12,6 +12,7 @@ import {
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   RUN_POLICY_STALE,
+  SIDE_EFFECT_STATE_UNKNOWN,
   TOOL_CALL_CONTROL_STATE_INVALID,
   TOOL_EXECUTION_FAILED,
   type ProjectRunFailureCode,
@@ -46,6 +47,11 @@ export function resolveRunFailureCopy(
       return {
         title: conversation.outputDeliveryIncompleteTitle,
         description: conversation.outputDeliveryIncompleteDescription,
+      };
+    case SIDE_EFFECT_STATE_UNKNOWN:
+      return {
+        title: conversation.sideEffectStateUnknownTitle,
+        description: conversation.sideEffectStateUnknownDescription,
       };
     case CURRENT_UPLOAD_UNAVAILABLE:
       return {

@@ -1192,11 +1192,6 @@ export const enUS: Translations = {
       skillVersions: "Skill versions",
       mcpVersions: "MCP configurations",
       compatibility: "Compatibility",
-      scanDecision: "Scan decision",
-      scanAllow: "Allowed",
-      scanWarn: "Warning",
-      scanBlock: "Blocked",
-      scanRules: "Scan rules",
       files: "Files",
       secretRequirements: "Secret requirements",
       transport: "Transport",
@@ -2136,9 +2131,7 @@ export const enUS: Translations = {
         saving: "Saving…",
         save: "Save changes",
         checkPassed: "Checks passed",
-        checkPassedWithWarnings: "Checks passed with warnings",
         requiredSecrets: "Required secrets:",
-        acknowledgeWarnings: "I understand and accept the warnings above",
         checkSkill: "Check Skill",
         commitCreate: "Create Skill (disabled by default)",
         commitRevise: "Save Candidate Version",
@@ -2159,7 +2152,6 @@ export const enUS: Translations = {
         sizeBytes: (count) => `${count} bytes`,
         validationStages: {
           package_files: "Package file validation started",
-          safety_scan: "Safety scan started",
         },
         stop: "Stop this turn",
         stopping: "Stopping…",
@@ -2174,7 +2166,7 @@ export const enUS: Translations = {
           validation_started: "Deterministic validation started",
           validation_passed: "Deterministic validation passed",
           validation_failed: "Deterministic validation failed",
-          repair_started: "Safe retry started",
+          repair_started: "Repair retry started",
           run_terminal: "Operation finished",
           commit_accepted: "Create request received",
           commit_validation_started: "Candidate validation started",
@@ -2519,6 +2511,9 @@ export const enUS: Translations = {
     outputDeliveryIncompleteTitle: "Output file was not delivered",
     outputDeliveryIncompleteDescription:
       "A required output file was created but was not published to this conversation. Resending may repeat an already completed command, so review the run first.",
+    sideEffectStateUnknownTitle: "Run state could not be confirmed",
+    sideEffectStateUnknownDescription:
+      "Some operations may already have completed, but the Worker could not confirm the final state. To avoid repeating them, do not resend this message directly; review the run first.",
     currentUploadUnavailableTitle: "Image attachment could not be read",
     currentUploadUnavailableDescription:
       "This Run could not securely read or validate the current image attachment. Restore the original input and retry; if it still fails, remove and paste the image again.",

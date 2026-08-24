@@ -298,6 +298,7 @@ export function InputBox({
       privateWork.scope.projectId,
     ],
   );
+  const [messageAdmissionPending, setMessageAdmissionPending] = useState(false);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const inlineSkillTextRef = useRef<HTMLSpanElement | null>(null);
@@ -322,9 +323,21 @@ export function InputBox({
   const draftSaveTimerRef = useRef<number | null>(null);
   const handledRestoreRequestIdRef = useRef<string | null>(null);
   const commandRequestsCleanupRef = useRef<() => void>(() => undefined);
+  const pendingComposerAdmissionRef = useRef<{
+    threadId: string;
+    text: string;
+    skill: SlashSuggestion | null;
+  } | null>(null);
+  const composerFocusAfterAdmissionRef = useRef<"text" | "skill" | null>(null);
 
   useEffect(() => {
+    pendingComposerAdmissionRef.current = null;
+    composerFocusAfterAdmissionRef.current = null;
+    setMessageAdmissionPending(false);
     setWorkloadProfile(DEFAULT_RUN_WORKLOAD_PROFILE);
+    return () => {
+      pendingComposerAdmissionRef.current = null;
+    };
   }, [threadId]);
 
   const [followups, setFollowups] = useState<string[]>([]);
@@ -334,7 +347,8 @@ export function InputBox({
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
   const [polishingInput, setPolishingInput] = useState(false);
-  const composerLocked = disabled === true || polishingInput;
+  const composerLocked =
+    disabled === true || polishingInput || messageAdmissionPending;
   const [inputPolishUndo, setInputPolishUndo] = useState<{
     originalText: string;
     rewrittenText: string;
@@ -346,6 +360,16 @@ export function InputBox({
   const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
   const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
     useState<string | null>(null);
+  useEffect(() => {
+    if (messageAdmissionPending) return;
+    const target = composerFocusAfterAdmissionRef.current;
+    composerFocusAfterAdmissionRef.current = null;
+    if (target === "skill") {
+      focusContentEditableEnd(inlineSkillTextRef.current);
+    } else if (target === "text") {
+      textareaRef.current?.focus();
+    }
+  }, [messageAdmissionPending]);
   const clearMemoryCommandInput = useCallback(() => {
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
@@ -749,7 +773,9 @@ export function InputBox({
   ]);
 
   useEffect(() => {
-    if (hydratedDraftKey !== draftKey) return;
+    // The Admission transaction already persisted the exact submitted draft.
+    // Do not replace it with the synthetic empty composer shown while waiting.
+    if (hydratedDraftKey !== draftKey || messageAdmissionPending) return;
     const draft: ComposerDraft = {
       text: textInput.value ?? "",
       skillName:
@@ -763,7 +789,13 @@ export function InputBox({
       draftSaveTimerRef.current = null;
       writeComposerDraft(getSessionComposerDraftStorage(), draftKey, draft);
     }, COMPOSER_DRAFT_SAVE_DELAY_MS);
-  }, [draftKey, hydratedDraftKey, selectedSlashSkill, textInput.value]);
+  }, [
+    draftKey,
+    hydratedDraftKey,
+    messageAdmissionPending,
+    selectedSlashSkill,
+    textInput.value,
+  ]);
 
   useEffect(() => {
     if (
@@ -1187,13 +1219,52 @@ export function InputBox({
       if (submitAction.kind === "empty") {
         return;
       }
-      await submitThreadMessageWithFollowup(messageWithSlashSkill);
+      // Move locally validated input out of the composer immediately, but keep
+      // PromptInput's attachment and Admission failure transaction intact.
+      const pendingAdmission = {
+        threadId,
+        text: message.text,
+        skill: selectedSlashSkill,
+      };
+      const pendingDraft: ComposerDraft = {
+        text: message.text,
+        skillName:
+          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+      };
+      pendingComposerAdmissionRef.current = pendingAdmission;
+      latestDraftRef.current = { key: draftKey, draft: pendingDraft };
+      writeComposerDraft(
+        getSessionComposerDraftStorage(),
+        draftKey,
+        pendingDraft,
+      );
+      setMessageAdmissionPending(true);
+      setTextInput("");
       if (selectedSlashSkill) {
         setSelectedSlashSkill(null);
+      }
+      try {
+        await submitThreadMessageWithFollowup(messageWithSlashSkill);
+      } catch (error) {
+        if (pendingComposerAdmissionRef.current === pendingAdmission) {
+          setTextInput(pendingAdmission.text);
+          setSelectedSlashSkill(pendingAdmission.skill);
+          composerFocusAfterAdmissionRef.current = pendingAdmission.skill
+            ? "skill"
+            : "text";
+        }
+        throw error;
+      } finally {
+        if (pendingComposerAdmissionRef.current === pendingAdmission) {
+          pendingComposerAdmissionRef.current = null;
+          composerFocusAfterAdmissionRef.current ??= "text";
+          setMessageAdmissionPending(false);
+        }
       }
     },
     [
       abortVoiceInput,
+      draftKey,
       handleCompactCommand,
       handleDreamCommand,
       handleDreamLogCommand,
@@ -1203,6 +1274,7 @@ export function InputBox({
       goalCommandsEnabled,
       onStop,
       selectedSlashSkill,
+      setTextInput,
       status,
       submitThreadMessageWithFollowup,
       t.inputBox.dreamAttachmentsUnsupported,
@@ -1210,6 +1282,7 @@ export function InputBox({
       t.inputBox.dreamLogInvalidArguments,
       t.inputBox.dreamRestoreInvalidArguments,
       t.inputBox.pleaseWaitStreaming,
+      threadId,
     ],
   );
 

@@ -12,6 +12,14 @@ from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from sqlalchemy.exc import (
+    DBAPIError,
+    IntegrityError,
+    ProgrammingError,
+)
+from sqlalchemy.exc import (
+    TimeoutError as SQLAlchemyTimeoutError,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.config.worker_config import WorkerConfig
@@ -20,6 +28,9 @@ from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
 from deerflow.trace_context import normalize_trace_id, request_trace_context
 
 _PUBLIC_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_TRANSIENT_POSTGRES_STATES = frozenset({"57P01", "57P02", "57P03"})
+_CLAIM_RETRY_MIN_SECONDS = 0.1
+_CLAIM_RETRY_MAX_SECONDS = 30.0
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +40,44 @@ class LeaseLost(RuntimeError):
     def __init__(self, job_id: uuid.UUID) -> None:
         self.job_id = job_id
         super().__init__("job lease ownership was lost")
+
+
+def _database_sqlstate(error: BaseException) -> str | None:
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        candidate = pending.pop()
+        if id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        for attribute in ("sqlstate", "pgcode"):
+            value = getattr(candidate, attribute, None)
+            if isinstance(value, str) and value:
+                return value
+        nested = getattr(candidate, "orig", None)
+        if isinstance(nested, BaseException):
+            pending.append(nested)
+    return None
+
+
+def _is_transient_database_connectivity_error(error: BaseException) -> bool:
+    if isinstance(error, (IntegrityError, ProgrammingError)):
+        return False
+    if isinstance(error, SQLAlchemyTimeoutError):
+        return True
+    if isinstance(error, DBAPIError) and error.connection_invalidated:
+        return True
+    sqlstate = _database_sqlstate(error)
+    return sqlstate is not None and (sqlstate.startswith("08") or sqlstate in _TRANSIENT_POSTGRES_STATES)
+
+
+class _TransientClaimDatabaseUnavailable(RuntimeError):
+    """A safe-to-retry database failure before claim ownership was returned."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.failure_type = type(error).__name__
+        self.sqlstate = _database_sqlstate(error)
+        super().__init__("worker claim database is temporarily unavailable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,13 +342,20 @@ class WorkerService:
             yield self._repository_builder(session)
 
     async def _claim_next(self) -> JobClaim | None:
-        async with self._repository() as repository:
-            claim = await repository.claim_next(
-                worker_id=self.worker_id,
-                capabilities=frozenset(self._handlers),
-                lease_seconds=self._config.lease_seconds,
-                execution_domain_affinity=self._execution_domain_affinity,
-            )
+        claim_returned = False
+        try:
+            async with self._repository() as repository:
+                claim = await repository.claim_next(
+                    worker_id=self.worker_id,
+                    capabilities=frozenset(self._handlers),
+                    lease_seconds=self._config.lease_seconds,
+                    execution_domain_affinity=self._execution_domain_affinity,
+                )
+                claim_returned = True
+        except Exception as error:
+            if not claim_returned and _is_transient_database_connectivity_error(error):
+                raise _TransientClaimDatabaseUnavailable(error) from error
+            raise
         if self._after_claim_commit is not None:
             await self._after_claim_commit()
         return claim
@@ -489,7 +545,14 @@ class WorkerService:
             except TimeoutError:
                 try:
                     alive = await self._registry.heartbeat(self.worker_id)
-                except Exception:
+                except Exception as error:
+                    if _is_transient_database_connectivity_error(error):
+                        logger.warning(
+                            "Worker fleet heartbeat database unavailable; retrying failure_type=%s sqlstate=%s",
+                            type(error).__name__,
+                            _database_sqlstate(error) or "unknown",
+                        )
+                        continue
                     self._accepting = False
                     raise
                 if not alive:
@@ -578,12 +641,38 @@ class WorkerService:
             self._fleet_heartbeat(stop_event),
             name=f"worker-fleet-heartbeat-{_task_key(self.worker_id)}",
         )
+        initial_claim_retry_seconds = max(
+            _CLAIM_RETRY_MIN_SECONDS,
+            min(self._config.poll_interval_seconds, _CLAIM_RETRY_MAX_SECONDS),
+        )
+        claim_retry_seconds = initial_claim_retry_seconds
         try:
             while not stop_event.is_set() and self._accepting:
                 if fleet_task.done():
                     await fleet_task
                 await self._reap_completed()
-                await self._fill_capacity(stop_event)
+                try:
+                    await self._fill_capacity(stop_event)
+                except _TransientClaimDatabaseUnavailable as error:
+                    logger.warning(
+                        "Worker claim database unavailable; retrying failure_type=%s sqlstate=%s retry_seconds=%.3f",
+                        error.failure_type,
+                        error.sqlstate or "unknown",
+                        claim_retry_seconds,
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            stop_event.wait(),
+                            timeout=claim_retry_seconds,
+                        )
+                    except TimeoutError:
+                        pass
+                    claim_retry_seconds = min(
+                        claim_retry_seconds * 2,
+                        _CLAIM_RETRY_MAX_SECONDS,
+                    )
+                    continue
+                claim_retry_seconds = initial_claim_retry_seconds
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(),
@@ -593,7 +682,16 @@ class WorkerService:
                     pass
             if fleet_task.done():
                 await fleet_task
-        finally:
+        except BaseException as error:
+            try:
+                await self._cancel_task_bounded(fleet_task)
+                await self._shutdown()
+            except BaseException as shutdown_error:
+                error.add_note(
+                    f"worker shutdown also failed: {type(shutdown_error).__name__}",
+                )
+            raise
+        else:
             await self._cancel_task_bounded(fleet_task)
             await self._shutdown()
 

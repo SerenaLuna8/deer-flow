@@ -937,6 +937,12 @@ export function SkillVersionWorkbench({
         </section>
       )}
 
+      {(localError ?? fork.error) && (
+        <p role="alert" className="text-destructive text-sm">
+          {localError ?? adminAssetErrorMessage(fork.error)}
+        </p>
+      )}
+
       <div
         id={filesPanelId}
         hidden={surface !== "files"}
@@ -1254,12 +1260,6 @@ export function SkillVersionWorkbench({
           </div>
         )}
       </div>
-
-      {(localError ?? fork.error) && (
-        <p role="alert" className="text-destructive text-sm">
-          {localError ?? adminAssetErrorMessage(fork.error)}
-        </p>
-      )}
 
       <Dialog
         open={pathDialog !== null}

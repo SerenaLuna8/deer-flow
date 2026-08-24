@@ -137,6 +137,20 @@ class PrivateWorkUnavailable(PrivateWorkError):
     public_message = "Private work is unavailable."
 
 
+class PrivateWorkRetryableUnavailable(PrivateWorkUnavailable):
+    """Internal marker for an explicitly transient dependency failure."""
+
+    reason_code: ClassVar[str] = "transient_dependency_unavailable"
+
+
+class PrivateWorkDatabaseUnavailable(PrivateWorkRetryableUnavailable):
+    reason_code = "database_unavailable"
+
+
+class PrivateWorkQuotaUnavailable(PrivateWorkRetryableUnavailable):
+    reason_code = "quota_unavailable"
+
+
 class ExecutionApprovalNotFound(PrivateWorkError):
     code = "EXECUTION_APPROVAL_NOT_FOUND"
     public_message = "Execution approval was not found."
