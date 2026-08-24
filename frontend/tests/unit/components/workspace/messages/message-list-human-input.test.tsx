@@ -35,13 +35,29 @@ const requestMessage = {
   },
 } as unknown as Message;
 
-function renderMessageList(isHistoryLoading: boolean) {
+const requestCallMessage = {
+  id: "request-call",
+  type: "ai",
+  content: "Provide deployment details",
+  tool_calls: [
+    {
+      id: "call-form",
+      name: "ask_clarification",
+      args: { question: "Provide deployment details" },
+    },
+  ],
+} as unknown as Message;
+
+function renderMessageList(
+  isHistoryLoading: boolean,
+  messages: Message[] = [requestMessage],
+) {
   const thread = {
     error: undefined,
     getMessagesMetadata: () => undefined,
     isLoading: false,
     isThreadLoading: false,
-    messages: [requestMessage],
+    messages,
   } as unknown as BaseStream<AgentThreadState>;
 
   return renderToStaticMarkup(
@@ -78,5 +94,11 @@ describe("MessageList human input hydration", () => {
 
     expect(html).toContain('data-human-input-state="open"');
     expect(submitButton(html)).not.toContain('disabled=""');
+  });
+
+  test("renders an ask_clarification question only in its response card", () => {
+    const html = renderMessageList(false, [requestCallMessage, requestMessage]);
+
+    expect(html.split("Provide deployment details")).toHaveLength(2);
   });
 });

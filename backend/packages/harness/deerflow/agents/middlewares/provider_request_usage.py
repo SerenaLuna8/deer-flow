@@ -526,9 +526,9 @@ def provider_request_closure_identity(
     return hashlib.sha256(material).hexdigest()
 
 
-def provider_request_runtime_policy_identity(app_config: object) -> str:
-    """Fingerprint the secret-free config sections that can shape a request."""
-
+def _provider_request_runtime_policy_material(
+    app_config: object,
+) -> dict[str, object]:
     if not hasattr(app_config, "model_dump"):
         raise ProviderRequestUsageUnsupported("provider_request_usage_unsupported: runtime policy identity is unavailable")
     value = app_config.model_dump(mode="json")
@@ -551,7 +551,26 @@ def provider_request_runtime_policy_identity(app_config: object) -> str:
         "tool_search",
         "vision_bridge",
     )
-    material = {name: value.get(name) for name in sections}
+    return {name: value.get(name) for name in sections}
+
+
+def provider_request_runtime_policy_identity(app_config: object) -> str:
+    """Fingerprint the secret-free config sections that can shape a request."""
+
+    return hashlib.sha256(_canonical_json(_provider_request_runtime_policy_material(app_config))).hexdigest()
+
+
+def provider_request_runtime_policy_compatibility_identity(
+    app_config: object,
+) -> str:
+    """Fingerprint request policy while allowing Gauge trigger changes."""
+
+    material = _provider_request_runtime_policy_material(app_config)
+    summarization = material.get("summarization")
+    if isinstance(summarization, Mapping):
+        compatible_summarization = dict(summarization)
+        compatible_summarization.pop("trigger", None)
+        material["summarization"] = compatible_summarization
     return hashlib.sha256(_canonical_json(material)).hexdigest()
 
 
@@ -1080,5 +1099,6 @@ __all__ = [
     "provider_request_closure_identity",
     "provider_tool_schema_fact",
     "provider_request_runtime_policy_identity",
+    "provider_request_runtime_policy_compatibility_identity",
     "resolve_provider_adapter",
 ]

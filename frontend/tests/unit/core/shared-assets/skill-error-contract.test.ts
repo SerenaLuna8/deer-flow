@@ -84,6 +84,37 @@ describe("Project Skill error contract", () => {
     } satisfies Partial<SharedAssetApiError>);
   });
 
+  test("omits risk-acceptance fields from an ordinary archive upload", async () => {
+    rs.stubGlobal("document", { cookie: "csrf_token=asset-token" });
+    let submittedBody: FormData | undefined;
+    rs.stubGlobal(
+      "fetch",
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.body instanceof FormData) submittedBody = init.body;
+        return errorResponse(
+          "asset_validation_failed",
+          "Asset validation failed",
+          422,
+        );
+      },
+    );
+
+    await expect(
+      importProjectSkillArchive(
+        PROJECT_ID,
+        new File(["archive"], "ordinary-upload.zip"),
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      code: "ASSET_VALIDATION_FAILED",
+    } satisfies Partial<SharedAssetApiError>);
+
+    expect(submittedBody).toBeInstanceOf(FormData);
+    expect(submittedBody?.get("security_risk_acceptance")).toBeNull();
+    expect(submittedBody?.get("security_risk_payload_checksum")).toBeNull();
+    expect(submittedBody?.get("security_risk_findings_checksum")).toBeNull();
+  });
+
   test("accepts the backend archive-limit code on parsed error routes", async () => {
     rs.stubGlobal("document", { cookie: "csrf_token=asset-token" });
     rs.stubGlobal("fetch", async () =>
@@ -102,5 +133,100 @@ describe("Project Skill error contract", () => {
       status: 413,
       code: "ASSET_UPLOAD_TOO_LARGE",
     } satisfies Partial<SharedAssetApiError>);
+  });
+
+  test("preserves bounded security diagnostics from archive import", async () => {
+    rs.stubGlobal("document", { cookie: "csrf_token=asset-token" });
+    rs.stubGlobal("fetch", async () =>
+      Response.json(
+        {
+          detail: {
+            code: "SKILL_ARCHIVE_SECURITY_BLOCKED",
+            message: "Skill archive failed security scan",
+            request_id: "request-1",
+            diagnostics: [
+              {
+                rule_id: "python-shell-exec",
+                file: "scripts/run.py",
+                line: 2,
+              },
+            ],
+            risk_confirmation: {
+              acceptance: "accept-blocked-skill-archive",
+              payload_checksum: "a".repeat(64),
+              findings_checksum: "b".repeat(64),
+            },
+          },
+        },
+        { status: 422 },
+      ),
+    );
+
+    await expect(
+      importProjectSkillArchive(
+        PROJECT_ID,
+        new File(["archive"], "blocked-upload.zip"),
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      code: "SKILL_ARCHIVE_SECURITY_BLOCKED",
+      skillArchiveSecurityDiagnostics: [
+        {
+          rule_id: "python-shell-exec",
+          file: "scripts/run.py",
+          line: 2,
+        },
+      ],
+      skillArchiveSecurityRiskConfirmation: {
+        acceptance: "accept-blocked-skill-archive",
+        payload_checksum: "a".repeat(64),
+        findings_checksum: "b".repeat(64),
+      },
+    });
+  });
+
+  test("binds explicit risk acceptance to the confirmed archive retry", async () => {
+    rs.stubGlobal("document", { cookie: "csrf_token=asset-token" });
+    let submittedBody: FormData | undefined;
+    rs.stubGlobal(
+      "fetch",
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.body instanceof FormData) submittedBody = init.body;
+        return errorResponse(
+          "asset_validation_failed",
+          "Asset validation failed",
+          422,
+        );
+      },
+    );
+    const archive = new File(["blocked archive"], "blocked-upload.zip");
+
+    await expect(
+      importProjectSkillArchive(PROJECT_ID, archive, {
+        securityRiskConfirmation: {
+          acceptance: "accept-blocked-skill-archive",
+          payload_checksum: "a".repeat(64),
+          findings_checksum: "b".repeat(64),
+        },
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      code: "ASSET_VALIDATION_FAILED",
+    } satisfies Partial<SharedAssetApiError>);
+
+    expect(submittedBody).toBeInstanceOf(FormData);
+    expect(submittedBody?.get("security_risk_acceptance")).toBe(
+      "accept-blocked-skill-archive",
+    );
+    expect(submittedBody?.get("security_risk_payload_checksum")).toBe(
+      "a".repeat(64),
+    );
+    expect(submittedBody?.get("security_risk_findings_checksum")).toBe(
+      "b".repeat(64),
+    );
+    expect(submittedBody?.get("archive")).toMatchObject({
+      name: "blocked-upload.zip",
+      size: archive.size,
+    });
   });
 });

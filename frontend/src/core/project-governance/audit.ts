@@ -95,15 +95,21 @@ const assetOperationSchema = z.enum([
   "skill.export",
   "skill.delete",
   "skill.enable",
+  "skill.secret.configure",
   "skill.secret.replace",
   "skill.secret.clear",
+  "skill.secret.copy",
+  "skill.secret.invalidate",
   "skill.suspend",
   "mcp.create",
   "mcp.version.create",
   "mcp.submit_approval",
   "mcp.approve",
+  "mcp.secret.configure",
   "mcp.secret.replace",
   "mcp.secret.clear",
+  "mcp.secret.copy",
+  "mcp.secret.invalidate",
   "mcp.publish",
   "mcp.archive",
   "mcp.suspend",
@@ -114,6 +120,12 @@ const assetOperationSchema = z.enum([
   "binding.rollback",
   "binding.sync_current",
   "binding.disable",
+  "model.secret.configure",
+  "model.secret.replace",
+  "model.secret.clear",
+  "channel.secret.configure",
+  "channel.secret.replace",
+  "channel.secret.clear",
 ]);
 const versionedAgentOperations = new Set([
   "agent.version.create",
@@ -126,12 +138,37 @@ const versionedSkillOperations = new Set([
   "skill.version.activate",
   "skill.version.revoke",
   "skill.export",
+  "skill.secret.configure",
+  "skill.secret.replace",
+  "skill.secret.clear",
+  "skill.secret.copy",
+  "skill.secret.invalidate",
 ]);
 const currentAssetMetadataSchema = z
   .object({
-    asset_kind: z.enum(["agent", "skill", "mcp"]),
+    asset_kind: z.enum(["agent", "skill", "mcp", "model", "channel"]),
     operation: assetOperationSchema,
     version_number: z.number().int().positive().optional(),
+    version_id: z.string().uuid().optional(),
+    slot_id: z.string().uuid().optional(),
+    secret_name: z.string().min(1).max(255).optional(),
+    generation_id: z.string().uuid().optional(),
+    revision: z.number().int().positive().optional(),
+    result: z
+      .enum(["configured", "cleared", "copied", "invalidated"])
+      .optional(),
+    reason: z
+      .enum([
+        "created",
+        "replaced",
+        "cleared",
+        "compatible_copy",
+        "definition_change",
+        "recipient_changed",
+        "deleted",
+      ])
+      .optional(),
+    readiness: z.enum(["ready", "unready"]).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -151,6 +188,75 @@ const currentAssetMetadataSchema = z
       context.addIssue({
         code: "custom",
         message: "Asset audit metadata is inconsistent",
+      });
+    }
+
+    const secretOperation = value.operation.includes(".secret.");
+    const secretCoordinates = [
+      value.version_id,
+      value.slot_id,
+      value.secret_name,
+      value.generation_id,
+      value.revision,
+      value.result,
+      value.reason,
+      value.readiness,
+    ];
+    if (!secretOperation) {
+      if (secretCoordinates.some((coordinate) => coordinate !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          message: "Non-secret asset audit contains secret coordinates",
+        });
+      }
+      return;
+    }
+
+    if (
+      value.revision === undefined ||
+      value.result === undefined ||
+      value.reason === undefined ||
+      value.readiness === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Secret audit lifecycle metadata is incomplete",
+      });
+    }
+
+    const skillCoordinatesMatch =
+      value.version_id !== undefined &&
+      value.secret_name !== undefined &&
+      value.slot_id === undefined;
+    const mcpCoordinatesMatch =
+      value.version_id !== undefined &&
+      value.slot_id !== undefined &&
+      value.secret_name !== undefined;
+    const configurationCoordinatesMatch =
+      value.version_id === undefined &&
+      value.slot_id === undefined &&
+      value.secret_name === undefined;
+    const coordinatesMatch =
+      (value.asset_kind === "skill" && skillCoordinatesMatch) ||
+      (value.asset_kind === "mcp" && mcpCoordinatesMatch) ||
+      (["model", "channel"].includes(value.asset_kind) &&
+        configurationCoordinatesMatch);
+    if (!coordinatesMatch) {
+      context.addIssue({
+        code: "custom",
+        message: "Secret audit coordinates are inconsistent",
+      });
+    }
+
+    if (
+      [".configure", ".replace", ".copy"].some((suffix) =>
+        value.operation.endsWith(suffix),
+      ) &&
+      value.generation_id === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Configured secret audit requires a Generation",
       });
     }
   });

@@ -10,8 +10,12 @@ rs.mock("@/core/private-work/provider", () => ({
   usePrivateWorkAccess: rs.fn((explicit) => explicit),
 }));
 
+import { GatewayApiError } from "@/core/api/errors";
 import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
-import { CONTEXT_AUTHORITY_REFETCH_INTERVAL_MS } from "@/core/threads/context-usage";
+import {
+  ACTIVE_CONTEXT_USAGE_RETRY_DELAY_MS,
+  CONTEXT_AUTHORITY_REFETCH_INTERVAL_MS,
+} from "@/core/threads/context-usage";
 import { useThreadContextUsage } from "@/core/threads/thread-actions";
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
@@ -27,6 +31,8 @@ type QueryOptions = {
   refetchInterval?: number;
   refetchIntervalInBackground?: boolean;
   refetchOnWindowFocus?: boolean;
+  retry?: boolean | ((failureCount: number, error: unknown) => boolean);
+  retryDelay?: number;
 };
 
 const privateWork = {
@@ -90,7 +96,19 @@ describe("Thread context authority freshness hook", () => {
     expect(firstReading).toMatchObject({
       enabled: true,
       refetchOnWindowFocus: false,
+      retryDelay: ACTIVE_CONTEXT_USAGE_RETRY_DELAY_MS,
     });
+    expect(firstReading.retry).toBeTypeOf("function");
+    expect(
+      (firstReading.retry as (failureCount: number, error: unknown) => boolean)(
+        0,
+        new GatewayApiError(
+          503,
+          "PRIVATE_WORK_UNAVAILABLE",
+          "Profile is not ready",
+        ),
+      ),
+    ).toBe(true);
     expect(firstReading.queryKey.at(-1)).toBe(`active:${RUN_A}`);
 
     mockedUseQuery.mockClear();

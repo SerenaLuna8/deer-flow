@@ -135,6 +135,11 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Conversation rendering is a lead-Agent projection. Subagent/middleware events
   use their dedicated task/progress surfaces and must not be attached to an
   arbitrary assistant message.
+- A Lead Agent's ordinary text on a tool-calling message is process output, not
+  a terminal answer. Preserve it in canonical model-call order outside the
+  turn-level process disclosure, keep each reasoning round independently
+  collapsible, and let specialized surfaces such as `present_files` retain sole
+  ownership of their transition text.
 - The Main Project Chat composer may select `Research` for the next Run only.
   Promote that choice through the reserved admission context, clear it only
   after authoritative Run admission succeeds, and render the server-confirmed
@@ -186,6 +191,10 @@ generator. A necessary local patch needs focused coverage and an explanation.
 
 - Project Skill creation exposes exactly two user flows: AI Builder and validated
   archive upload. Do not reintroduce a manual metadata or starter-template form.
+- Archive upload shows risk confirmation only when the server returns a bounded
+  confirmation for the still-selected file. Confirmation is never persisted in
+  browser state and creates only a suspended, blocked Candidate; it does not
+  imply scan success or activation eligibility.
 - Skill secret declaration forms are a server-parsed projection of the current
   `SKILL.md` buffer, never a second source of truth or a browser YAML parser.
   Parse/patch races must preserve newer local edits; invalid or pending source

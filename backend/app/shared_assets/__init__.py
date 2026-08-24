@@ -17,6 +17,7 @@ from app.shared_assets.default_agent_service import (
     ProjectDefaultAgentService,
 )
 from app.shared_assets.errors import (
+    SKILL_ARCHIVE_SECURITY_RISK_ACCEPTANCE,
     AgentArchived,
     AgentDesignConflictUnresolved,
     AgentDesignGenerationProfileStale,
@@ -33,6 +34,9 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
     SharedAssetError,
     SkillArchiveLimitExceeded,
+    SkillArchiveSecurityBlocked,
+    SkillArchiveSecurityDiagnostic,
+    SkillArchiveSecurityRiskAcceptance,
     SkillDesignNoChanges,
     SkillDesignTargetDeleted,
     SkillDesignTargetSessionExists,
@@ -96,6 +100,7 @@ from app.shared_assets.skill_service import (
 )
 
 __all__ = [
+    "SKILL_ARCHIVE_SECURITY_RISK_ACCEPTANCE",
     "AGENT_INSTRUCTION_FIELDS",
     "AgentDesignConflictUnresolved",
     "AgentDesignGenerationProfileStale",
@@ -147,6 +152,9 @@ __all__ = [
     "ResolvedSkillSnapshot",
     "SharedAssetError",
     "SkillArchiveLimitExceeded",
+    "SkillArchiveSecurityBlocked",
+    "SkillArchiveSecurityDiagnostic",
+    "SkillArchiveSecurityRiskAcceptance",
     "SkillDesignNoChanges",
     "SkillDesignTargetDeleted",
     "SkillDesignTargetSessionExists",

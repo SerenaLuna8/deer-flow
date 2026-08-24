@@ -273,6 +273,17 @@ def test_public_gauge_requirement_fails_closed_without_frozen_profile() -> None:
         )
 
 
+def test_active_run_gauge_treats_missing_profile_as_transient() -> None:
+    with pytest.raises(context_compaction_module.ContextCompactionFailed) as exc_info:
+        context_compaction_module.measure_thread_context_usage(
+            SimpleNamespace(values={"messages": []}),
+            app_config=object(),
+            expected_authority_identity="run-active",
+            require_provider_request_profile=True,
+        )
+    assert type(exc_info.value) is context_compaction_module.ContextCompactionFailed
+
+
 def test_thread_context_usage_builds_the_selected_lead_model_for_measurement(
     monkeypatch,
 ) -> None:

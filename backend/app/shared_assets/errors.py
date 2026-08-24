@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import ClassVar
+
+SKILL_ARCHIVE_SECURITY_RISK_ACCEPTANCE = "accept-blocked-skill-archive"
+MAX_SKILL_ARCHIVE_SECURITY_DIAGNOSTICS = 20
 
 
 class SharedAssetError(Exception):
@@ -50,6 +54,37 @@ class SkillArchiveLimitExceeded(AssetValidationFailed):
     code = "SKILL_ARCHIVE_LIMIT_EXCEEDED"
     status_code = 413
     public_message = "Skill archive exceeds the allowed size or member limit"
+
+
+@dataclass(frozen=True)
+class SkillArchiveSecurityDiagnostic:
+    rule_id: str
+    file: str | None
+    line: int | None
+
+
+@dataclass(frozen=True)
+class SkillArchiveSecurityRiskAcceptance:
+    payload_checksum: str
+    findings_checksum: str
+
+
+class SkillArchiveSecurityBlocked(AssetValidationFailed):
+    """An uploaded Skill archive has blocking static-scan findings."""
+
+    code = "SKILL_ARCHIVE_SECURITY_BLOCKED"
+    public_message = "Skill archive failed security scan"
+
+    def __init__(
+        self,
+        request_id: str,
+        diagnostics: tuple[SkillArchiveSecurityDiagnostic, ...],
+        *,
+        risk_confirmation: SkillArchiveSecurityRiskAcceptance | None = None,
+    ) -> None:
+        self.diagnostics = diagnostics[:MAX_SKILL_ARCHIVE_SECURITY_DIAGNOSTICS]
+        self.risk_confirmation = risk_confirmation
+        super().__init__(request_id)
 
 
 class SkillRuntimeNameConflict(AssetConflict):

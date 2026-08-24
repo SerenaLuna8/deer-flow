@@ -226,6 +226,7 @@ def enforce_static_scan_result(
         )
         raise StaticScanBlockedError(
             blocked,
+            scanner_errors=result["scanner_errors"],
             skill_name=skill_name,
             message=(f"Static security scan blocked skill '{bounded_skill_name}': {detail}" if bounded_skill_name else f"Static security scan blocked skill content: {detail}"),
         )

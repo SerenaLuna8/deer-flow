@@ -2,7 +2,10 @@ import { describe, expect, test } from "@rstest/core";
 
 import { describeAuditItem } from "@/components/projects/governance/project-audit-view-model";
 import { adminAuditItemSchema } from "@/core/admin-operations/types";
-import { auditItemSchema } from "@/core/project-governance/audit";
+import {
+  auditItemSchema,
+  auditPageSchema,
+} from "@/core/project-governance/audit";
 
 const recallAuditItem = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -21,6 +24,52 @@ const recallAuditItem = {
 } as const;
 
 describe("project audit contract", () => {
+  test("accepts configuration-secret lifecycle rows returned by the audit API", () => {
+    const items = [
+      {
+        ...recallAuditItem,
+        actor: "user",
+        action: "asset.updated",
+        target_kind: "asset",
+        metadata: {
+          asset_kind: "skill",
+          operation: "skill.secret.configure",
+          version_number: 2,
+          version_id: "22222222-2222-4222-8222-222222222222",
+          secret_name: "ROUTE_DB_PASSWORD",
+          generation_id: "33333333-3333-4333-8333-333333333333",
+          revision: 1,
+          result: "configured",
+          reason: "created",
+          readiness: "ready",
+        },
+      },
+      {
+        ...recallAuditItem,
+        id: "44444444-4444-4444-8444-444444444444",
+        actor: "user",
+        action: "asset.updated",
+        target_kind: "asset",
+        metadata: {
+          asset_kind: "mcp",
+          operation: "mcp.secret.configure",
+          version_id: "55555555-5555-4555-8555-555555555555",
+          slot_id: "66666666-6666-4666-8666-666666666666",
+          secret_name: "Authorization",
+          generation_id: "77777777-7777-4777-8777-777777777777",
+          revision: 1,
+          result: "configured",
+          reason: "created",
+          readiness: "ready",
+        },
+      },
+    ] as const;
+
+    expect(
+      auditPageSchema.safeParse({ items, next_cursor: null }).success,
+    ).toBe(true);
+  });
+
   test("accepts the complete closed memory recall metadata vocabulary", () => {
     expect(auditItemSchema.parse(recallAuditItem).metadata).toEqual(
       recallAuditItem.metadata,

@@ -77,7 +77,6 @@ export interface Translations {
   // Welcome
   welcome: {
     greeting: string;
-    description: string;
     createYourOwnSkill: string;
     createYourOwnSkillDescription: string;
   };

@@ -72,6 +72,7 @@ from app.shared_assets.models import (
     AssetScope,
     ResolvedAgentSnapshot,
     ResolvedRunAssetClosure,
+    ResolvedRunAssetFact,
     SkillAssetRef,
 )
 from app.shared_assets.run_snapshot_codec import encode_run_asset_snapshot
@@ -1526,6 +1527,57 @@ class RunSnapshotRepository:
                 snapshot_json=dict(row.snapshot_json),
             )
             for row in rows
+        )
+
+    async def list_asset_facts_in_session(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        thread_id: str,
+        run_id: str,
+    ) -> tuple[ResolvedRunAssetFact, ...]:
+        """Read ordered frozen asset metadata without loading snapshot JSON."""
+
+        context = require_issued_private_work_context(context)
+        rows = (
+            await session.execute(
+                select(
+                    RunAssetVersionRow.asset_kind,
+                    RunAssetVersionRow.dependency_order,
+                    RunAssetVersionRow.asset_scope,
+                    RunAssetVersionRow.asset_id,
+                    RunAssetVersionRow.version_id,
+                    RunAssetVersionRow.payload_checksum,
+                    RunAssetVersionRow.catalog_generation,
+                )
+                .where(
+                    RunAssetVersionRow.project_id == context.project_id,
+                    RunAssetVersionRow.owner_user_id == str(context.user_id),
+                    RunAssetVersionRow.thread_id == thread_id,
+                    RunAssetVersionRow.run_id == run_id,
+                )
+                .order_by(RunAssetVersionRow.dependency_order)
+            )
+        ).all()
+        return tuple(
+            ResolvedRunAssetFact(
+                kind=AssetKind(asset_kind),
+                dependency_order=dependency_order,
+                scope=AssetScope(asset_scope),
+                asset_id=asset_id,
+                version_id=version_id,
+                checksum=payload_checksum,
+                catalog_generation=catalog_generation,
+            )
+            for (
+                asset_kind,
+                dependency_order,
+                asset_scope,
+                asset_id,
+                version_id,
+                payload_checksum,
+                catalog_generation,
+            ) in rows
         )
 
     async def list_mcp_secrets(

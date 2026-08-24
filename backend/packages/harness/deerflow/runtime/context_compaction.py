@@ -140,10 +140,10 @@ def measure_thread_context_usage(
     summary_text = summary_value if isinstance(summary_value, str) else None
     raw_profile = provider_request_profile if provider_request_profile is not None else channel_values.get(PROVIDER_REQUEST_PROFILE_STATE_KEY)
     profile = raw_profile if isinstance(raw_profile, Mapping) else None
-    if profile is None and require_provider_request_profile:
-        raise ContextUsageUnsupported("Context Gauge requires an immutable provider request profile.")
     if profile is None and expected_authority_identity is not None:
         raise ContextCompactionFailed("The active Run has not persisted its provider request profile.")
+    if profile is None and require_provider_request_profile:
+        raise ContextUsageUnsupported("Context Gauge requires an immutable provider request profile.")
     if profile is not None:
         if provider_request_profile is None and expected_authority_identity is None and profile.get("authority_identity") is not None:
             raise ContextCompactionFailed("A completed Run profile cannot authorize an idle Gauge.")

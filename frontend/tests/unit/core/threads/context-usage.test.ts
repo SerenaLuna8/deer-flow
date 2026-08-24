@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, test, rs } from "@rstest/core";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
+import { GatewayApiError } from "@/core/api/errors";
 import {
+  ACTIVE_CONTEXT_USAGE_RETRY_LIMIT,
   CONTEXT_AUTHORITY_REFETCH_INTERVAL_MS,
   fetchThreadContextAuthority,
   fetchThreadContextUsage,
+  shouldRetryActiveContextUsage,
   threadContextAuthorityQueryKey,
   threadContextUsageReadingQueryKey,
   threadContextUsageQueryKey,
@@ -147,6 +150,78 @@ describe("thread context usage client", () => {
       MODEL_NAME,
       `active:${ACTIVE_RUN_ID}`,
     ]);
+  });
+
+  test("retries only transient active-Run usage reads", () => {
+    const unavailable = new GatewayApiError(
+      503,
+      "PRIVATE_WORK_UNAVAILABLE",
+      "Profile is not ready",
+    );
+    const unsupported = new GatewayApiError(
+      409,
+      "CONTEXT_USAGE_UNSUPPORTED",
+      "Gauge is unsupported",
+    );
+
+    expect(
+      shouldRetryActiveContextUsage(0, unavailable, `active:${ACTIVE_RUN_ID}`),
+    ).toBe(true);
+    expect(
+      shouldRetryActiveContextUsage(
+        ACTIVE_CONTEXT_USAGE_RETRY_LIMIT,
+        unavailable,
+        `active:${ACTIVE_RUN_ID}`,
+      ),
+    ).toBe(false);
+    expect(
+      shouldRetryActiveContextUsage(0, unsupported, `active:${ACTIVE_RUN_ID}`),
+    ).toBe(false);
+    expect(
+      shouldRetryActiveContextUsage(0, unavailable, "idle:run-previous"),
+    ).toBe(false);
+  });
+
+  test("recovers on the same active marker when the Run profile becomes ready", async () => {
+    const marker = `active:${ACTIVE_RUN_ID}`;
+    const queryClient = new QueryClient();
+    const queryFn = rs.fn(async () => {
+      if (queryFn.mock.calls.length === 1) {
+        throw new GatewayApiError(
+          503,
+          "PRIVATE_WORK_UNAVAILABLE",
+          "Profile is not ready",
+        );
+      }
+      return fractionUsage();
+    });
+    const observer = new QueryObserver(queryClient, {
+      queryKey: threadContextUsageReadingQueryKey(
+        THREAD_ID,
+        MODEL_NAME,
+        marker,
+      ),
+      queryFn,
+      retry: (failureCount, error) =>
+        shouldRetryActiveContextUsage(failureCount, error, marker),
+      retryDelay: 0,
+    });
+    const unsubscribe = observer.subscribe(() => undefined);
+
+    for (
+      let index = 0;
+      index < 20 && observer.getCurrentResult().status !== "success";
+      index += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(queryFn).toHaveBeenCalledTimes(2);
+    expect(observer.getCurrentResult().status).toBe("success");
+    expect(observer.getCurrentResult().data).toEqual(fractionUsage());
+
+    unsubscribe();
+    queryClient.clear();
   });
 
   test("includes the composer-selected model in both request and query identity", async () => {

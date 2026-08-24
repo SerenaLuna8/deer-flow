@@ -17,9 +17,11 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 
 import { branchThreadFromTurn, fetchThreadTokenUsage } from "./api";
 import {
+  ACTIVE_CONTEXT_USAGE_RETRY_DELAY_MS,
   CONTEXT_AUTHORITY_REFETCH_INTERVAL_MS,
   fetchThreadContextAuthority,
   fetchThreadContextUsage,
+  shouldRetryActiveContextUsage,
   threadContextAuthorityQueryKey,
   threadContextUsageReadingQueryKey,
   type ThreadContextAuthorityResponse,
@@ -251,7 +253,9 @@ export function useThreadContextUsage(
       });
     },
     enabled: enabled && Boolean(threadId) && Boolean(cacheMarker),
-    retry: false,
+    retry: (failureCount, error) =>
+      shouldRetryActiveContextUsage(failureCount, error, cacheMarker),
+    retryDelay: ACTIVE_CONTEXT_USAGE_RETRY_DELAY_MS,
     refetchOnWindowFocus: false,
   });
   return {

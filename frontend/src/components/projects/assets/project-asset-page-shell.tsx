@@ -67,6 +67,7 @@ import {
   type ProjectAssetItem,
   type ProjectAssetList,
   type ProjectMcpEditableConfigurationResponse,
+  type SkillArchiveSecurityRiskConfirmation,
   type SyncCurrentSystemMcpBindingInput,
 } from "@/core/shared-assets";
 
@@ -85,6 +86,7 @@ import { ProjectMcpEditDialog } from "./project-mcp-edit-dialog";
 import {
   ProjectSkillImportDialog,
   projectSkillImportErrorMessage,
+  resolveProjectSkillArchiveRiskConfirmation,
 } from "./project-skill-import-dialog";
 import { SystemBindingDialog } from "./system-binding-dialog";
 
@@ -1518,9 +1520,15 @@ function ProjectAssetCatalog({
     );
   }
 
-  async function submitProjectSkillArchive(archive: File) {
+  async function submitProjectSkillArchive(
+    archive: File,
+    securityRiskConfirmation?: SkillArchiveSecurityRiskConfirmation,
+  ) {
     try {
-      const result = await importSkill.mutateAsync(archive);
+      const result = await importSkill.mutateAsync({
+        archive,
+        securityRiskConfirmation,
+      });
       setImportOpen(false);
       setSourceTouched(true);
       setSourceFilter("project");
@@ -1883,12 +1891,19 @@ function ProjectAssetCatalog({
               ? projectSkillImportErrorMessage(importSkill.error)
               : null
           }
+          securityRiskConfirmation={resolveProjectSkillArchiveRiskConfirmation(
+            importSkill.error,
+            importSkill.isPending,
+            importSkill.variables?.securityRiskConfirmation,
+          )}
           onOpenChange={(next) => {
             if (!next) importSkill.reset();
             setImportOpen(next);
           }}
           onSelectionChange={() => importSkill.reset()}
-          onSubmit={(archive) => void submitProjectSkillArchive(archive)}
+          onSubmit={(archive, confirmation) =>
+            void submitProjectSkillArchive(archive, confirmation)
+          }
         />
       ) : null}
 

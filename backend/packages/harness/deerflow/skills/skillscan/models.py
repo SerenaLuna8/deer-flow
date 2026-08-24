@@ -50,10 +50,19 @@ class StaticScanBlockedError(ValueError):
     """Raised when deterministic findings block a skill write or install."""
 
     findings: list[SecurityFinding]
+    scanner_errors: list[str]
     skill_name: str | None
 
-    def __init__(self, findings: list[SecurityFinding], *, skill_name: str | None = None, message: str | None = None) -> None:
+    def __init__(
+        self,
+        findings: list[SecurityFinding],
+        *,
+        scanner_errors: list[str] | None = None,
+        skill_name: str | None = None,
+        message: str | None = None,
+    ) -> None:
         self.findings = [dict(finding) for finding in findings]  # type: ignore[list-item]
+        self.scanner_errors = list(scanner_errors or ())
         self.skill_name = skill_name
         subject = f"skill '{skill_name}'" if skill_name else "skill content"
         super().__init__(message or f"Static security scan blocked {subject}")

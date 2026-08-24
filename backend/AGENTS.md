@@ -304,6 +304,10 @@ or downgrade an application database.
   and content cannot be moved backward under a higher version number.
 - Project Skill creation is available only through a validated archive upload
   or an AI Builder commit; there is no metadata-only or template-create API.
+  Archive upload may explicitly acknowledge only the server-issued narrow
+  code-risk confirmation and persist a suspended Candidate with
+  `scan_decision=block`; it never moves `current_version_id`, and activation
+  must still reject the unchanged blocked bytes.
 - Skill export is a read-only, audit-required distribution operation over one
   exact persisted version. Project exports require `shared_assets.edit` and may
   select any persisted Project version; System exports require the eligible
@@ -561,7 +565,9 @@ model configuration.
 ### System Skill or project asset flow
 
 - Validate all archive paths, sizes, file types, frontmatter, and static scan
-  results before persistence or activation.
+  results before persistence or activation. The only persistence exception is
+  the checksum-bound, server-confirmable archive-upload flow, which saves a
+  blocked suspended Candidate; activation has no such exception.
 - Keep packaged System assets separate from project-authored assets and bindings.
 - Authoring services use optimistic revisions and one transaction; failed flows
   must not leave an asset without its initial version or activate a partial
@@ -581,7 +587,10 @@ source constant changes, update this section and the owning detailed document.
   versions and historical v2/v3 payloads keep their frozen values.
 - Subagent concurrency is canonically clamped to `1..4`; the per-Run total remains independently bounded to `1..50`.
 - SkillScan rejects unsafe archives while retaining the final 100 MiB and the
-  16384-file, bounded-log contract.
+  16384-file, bounded-log contract. Archive upload may save only explicitly
+  acknowledged `python-shell-exec` or `python-env-dump-exfil` findings as a
+  blocked suspended Candidate; secrets, executables, reverse shells, resource
+  exhaustion, and every other blocking rule remain non-confirmable.
 - Project Skill archives remain limited to 100 MiB total, 64 MiB per regular
   file, and 16384 regular files; archive-create routes have a scoped
   160 MiB wire limit.

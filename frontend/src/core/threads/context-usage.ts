@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { throwGatewayApiError } from "@/core/api/errors";
+import { GatewayApiError, throwGatewayApiError } from "@/core/api/errors";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 
@@ -101,6 +101,8 @@ const threadContextAuthorityResponseSchema = z
   .strict();
 
 export const CONTEXT_AUTHORITY_REFETCH_INTERVAL_MS = 5_000;
+export const ACTIVE_CONTEXT_USAGE_RETRY_LIMIT = 15;
+export const ACTIVE_CONTEXT_USAGE_RETRY_DELAY_MS = 1_000;
 
 export type ContextUsageTrigger = z.infer<typeof contextUsageTriggerSchema>;
 export type ThreadContextUsageResponse = z.infer<
@@ -109,6 +111,19 @@ export type ThreadContextUsageResponse = z.infer<
 export type ThreadContextAuthorityResponse = z.infer<
   typeof threadContextAuthorityResponseSchema
 >;
+
+export function shouldRetryActiveContextUsage(
+  failureCount: number,
+  error: unknown,
+  cacheMarker?: string | null,
+) {
+  return (
+    failureCount < ACTIVE_CONTEXT_USAGE_RETRY_LIMIT &&
+    cacheMarker?.startsWith("active:") === true &&
+    error instanceof GatewayApiError &&
+    error.status === 503
+  );
+}
 
 export function threadContextUsageQueryKey(
   threadId?: string | null,

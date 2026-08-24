@@ -24,6 +24,7 @@ from app.projects.context import ProjectContext
 from app.quotas.models import QuotaError, QuotaExceeded
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import (
+    MAX_SKILL_ARCHIVE_SECURITY_DIAGNOSTICS,
     AssetConflict,
     AssetForbidden,
     AssetNotFound,
@@ -32,6 +33,9 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
     SharedAssetError,
     SkillArchiveLimitExceeded,
+    SkillArchiveSecurityBlocked,
+    SkillArchiveSecurityDiagnostic,
+    SkillArchiveSecurityRiskAcceptance,
     SkillSecretConfigurationInvalid,
     SkillSecretRevisionStale,
     SkillSecretsIncomplete,
@@ -68,6 +72,7 @@ from deerflow.skills.frontmatter import (
 )
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.skillscan import (
+    SecurityFinding,
     StaticScanBlockedError,
     StaticScannerError,
     enforce_static_scan_result,
@@ -111,6 +116,12 @@ _EXECUTABLE_MEDIA_TYPES = frozenset(
         "application/x-mach-binary",
         "application/x-pie-executable",
         "application/x-sharedlib",
+    }
+)
+_CONFIRMABLE_UPLOAD_BLOCK_RULE_IDS = frozenset(
+    {
+        "python-env-dump-exfil",
+        "python-shell-exec",
     }
 )
 _CONFLICT_CONSTRAINTS = frozenset(
@@ -505,6 +516,46 @@ def _snapshot_checksum_for_files(files: Sequence[SkillArchiveFile]) -> str:
     return _snapshot_checksum(_file_views(files))
 
 
+def _blocking_findings_checksum(
+    findings: Sequence[SecurityFinding],
+) -> str:
+    canonical = json.dumps(
+        sorted(
+            (
+                {
+                    "file": finding["file"],
+                    "line": finding["line"],
+                    "rule_id": finding["rule_id"],
+                    "severity": finding["severity"],
+                }
+                for finding in findings
+            ),
+            key=lambda item: (
+                str(item["rule_id"]),
+                str(item["file"] or ""),
+                int(item["line"] or 0),
+                str(item["severity"]),
+            ),
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _security_risk_confirmation(
+    files: Sequence[SkillArchiveFile],
+    findings: Sequence[SecurityFinding],
+) -> SkillArchiveSecurityRiskAcceptance | None:
+    if not 0 < len(findings) <= MAX_SKILL_ARCHIVE_SECURITY_DIAGNOSTICS or any(finding["rule_id"] not in _CONFIRMABLE_UPLOAD_BLOCK_RULE_IDS for finding in findings):
+        return None
+    return SkillArchiveSecurityRiskAcceptance(
+        payload_checksum=_snapshot_checksum_for_files(files),
+        findings_checksum=_blocking_findings_checksum(findings),
+    )
+
+
 def _preflight_skill_frontmatter(
     skill_file: Path,
     request_id: str,
@@ -528,7 +579,10 @@ def _analyze_skill_files(
     request_id: str,
     *,
     run_static_scan: bool = True,
+    upload_security_diagnostics: bool = False,
+    security_risk_acceptance: SkillArchiveSecurityRiskAcceptance | None = None,
 ) -> SkillArchivePreview:
+    risk_acknowledged = False
     try:
         with tempfile.TemporaryDirectory(prefix="deerflow-skill-preview-") as temp_dir:
             root = Path(temp_dir)
@@ -596,13 +650,40 @@ def _analyze_skill_files(
                 raise AssetValidationFailed(request_id) from None
 
             if run_static_scan:
-                scan_result = enforce_static_scan_result(
-                    root,
-                    skill_name=parsed.name,
-                )
-                if scan_result["scanner_errors"]:
-                    raise AssetValidationFailed(request_id)
-                findings = scan_result["findings"]
+                try:
+                    scan_result = enforce_static_scan_result(
+                        root,
+                        skill_name=parsed.name,
+                    )
+                except StaticScanBlockedError as exc:
+                    if exc.scanner_errors:
+                        raise AssetValidationFailed(request_id) from None
+                    risk_confirmation = _security_risk_confirmation(
+                        files,
+                        exc.findings,
+                    )
+                    if security_risk_acceptance is not None and security_risk_acceptance == risk_confirmation:
+                        findings = exc.findings
+                        risk_acknowledged = True
+                    elif upload_security_diagnostics:
+                        raise SkillArchiveSecurityBlocked(
+                            request_id,
+                            tuple(
+                                SkillArchiveSecurityDiagnostic(
+                                    rule_id=finding["rule_id"],
+                                    file=finding["file"],
+                                    line=finding["line"],
+                                )
+                                for finding in exc.findings
+                            ),
+                            risk_confirmation=risk_confirmation,
+                        ) from None
+                    else:
+                        raise
+                else:
+                    if scan_result["scanner_errors"]:
+                        raise AssetValidationFailed(request_id)
+                    findings = scan_result["findings"]
             else:
                 findings = []
     except AssetValidationFailed:
@@ -620,11 +701,14 @@ def _analyze_skill_files(
     views = _file_views(files)
     rule_ids = tuple(sorted({finding["rule_id"] for finding in findings}))
     severity_counts = dict(sorted(Counter(finding["severity"] for finding in findings).items()))
-    decision = "warn" if findings else "allow"
+    decision = "block" if risk_acknowledged else ("warn" if findings else "allow")
     scan_summary: dict[str, object] = {
         "rule_ids": list(rule_ids),
         "severity_counts": severity_counts,
     }
+    if risk_acknowledged:
+        scan_summary["risk_acknowledged"] = True
+        scan_summary["findings_checksum"] = _blocking_findings_checksum(findings)
     return SkillArchivePreview(
         checksum=_snapshot_checksum(views),
         files=files,
@@ -656,10 +740,26 @@ class SkillService:
         actor: _Actor,
         files: Sequence[SkillArchiveFile],
     ) -> SkillArchivePreview:
+        return await self._preview_archive(actor, files)
+
+    async def _preview_archive(
+        self,
+        actor: _Actor,
+        files: Sequence[SkillArchiveFile],
+        *,
+        upload_security_diagnostics: bool = False,
+        security_risk_acceptance: SkillArchiveSecurityRiskAcceptance | None = None,
+    ) -> SkillArchivePreview:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
         request_id = getattr(actor, "request_id", "unknown")
         normalized = normalize_skill_files(files, request_id=request_id)
-        return await asyncio.to_thread(_analyze_skill_files, normalized, request_id)
+        return await asyncio.to_thread(
+            _analyze_skill_files,
+            normalized,
+            request_id,
+            upload_security_diagnostics=upload_security_diagnostics,
+            security_risk_acceptance=security_risk_acceptance,
+        )
 
     async def prepare_draft_snapshot(
         self,
@@ -719,12 +819,15 @@ class SkillService:
         payload: bytes,
         *,
         filename: str,
+        security_risk_acceptance: SkillArchiveSecurityRiskAcceptance | None = None,
     ) -> ProjectSkillArchiveCreateResult:
         """Create one suspended Project Skill with an immutable Candidate v1."""
 
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
         if not isinstance(actor, ProjectContext):
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        if security_risk_acceptance is not None and type(security_risk_acceptance) is not SkillArchiveSecurityRiskAcceptance:
+            raise AssetValidationFailed(actor.request_id)
         files = await asyncio.to_thread(
             load_skill_archive_package,
             payload,
@@ -734,6 +837,8 @@ class SkillService:
         prepared = await self._prepare_project_archive_imports(
             actor,
             (ProjectSkillArchiveImport(files=files),),
+            upload_security_diagnostics=True,
+            security_risk_acceptance=security_risk_acceptance,
         )
         if len(prepared) != 1:
             raise AssetValidationFailed(actor.request_id)
@@ -1469,6 +1574,9 @@ class SkillService:
         self,
         actor: ProjectContext,
         imports: Sequence[ProjectSkillArchiveImport],
+        *,
+        upload_security_diagnostics: bool = False,
+        security_risk_acceptance: SkillArchiveSecurityRiskAcceptance | None = None,
     ) -> tuple[_PreparedProjectSkillArchive, ...]:
         try:
             snapshot = tuple(imports)
@@ -1501,7 +1609,15 @@ class SkillService:
         prepared: list[_PreparedProjectSkillArchive] = []
         identities: set[str] = set()
         for item in normalized_imports:
-            preview = await self.preview_archive(actor, item.files)
+            if upload_security_diagnostics:
+                preview = await self._preview_archive(
+                    actor,
+                    item.files,
+                    upload_security_diagnostics=True,
+                    security_risk_acceptance=security_risk_acceptance,
+                )
+            else:
+                preview = await self.preview_archive(actor, item.files)
             name = preview.frontmatter.get("name")
             if not isinstance(name, str):
                 raise AssetValidationFailed(actor.request_id)

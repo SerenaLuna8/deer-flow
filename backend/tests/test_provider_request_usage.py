@@ -28,6 +28,8 @@ from deerflow.agents.middlewares.provider_request_usage import (
     collect_middleware_system_prompts,
     collect_middleware_tools,
     measure_profile_context,
+    provider_request_runtime_policy_compatibility_identity,
+    provider_request_runtime_policy_identity,
     provider_tool_schema_fact,
 )
 from deerflow.runtime.context_keys import RuntimeContextKeys
@@ -102,6 +104,40 @@ def _request(
         state=state,
         runtime=Runtime(context=runtime_context),
     )
+
+
+class _PolicyConfig:
+    def __init__(
+        self,
+        *,
+        trigger: tuple[str, int | float],
+        tool_search_enabled: bool = True,
+    ) -> None:
+        self._value = {
+            "summarization": {
+                "enabled": True,
+                "trigger": trigger,
+                "keep": ("messages", 20),
+            },
+            "tool_search": {"enabled": tool_search_enabled},
+        }
+
+    def model_dump(self, *, mode: str):
+        assert mode == "json"
+        return deepcopy(self._value)
+
+
+def test_runtime_policy_compatibility_excludes_only_summarization_trigger() -> None:
+    original = _PolicyConfig(trigger=("tokens", 100_000))
+    changed_trigger = _PolicyConfig(trigger=("fraction", 0.8))
+    changed_request_policy = _PolicyConfig(
+        trigger=("tokens", 100_000),
+        tool_search_enabled=False,
+    )
+
+    assert provider_request_runtime_policy_identity(original) != provider_request_runtime_policy_identity(changed_trigger)
+    assert provider_request_runtime_policy_compatibility_identity(original) == provider_request_runtime_policy_compatibility_identity(changed_trigger)
+    assert provider_request_runtime_policy_compatibility_identity(original) != provider_request_runtime_policy_compatibility_identity(changed_request_policy)
 
 
 def test_profile_trigger_counts_first_call_system_all_tools_and_durable_context() -> None:

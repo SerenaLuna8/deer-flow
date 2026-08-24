@@ -7,7 +7,7 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -53,17 +53,28 @@ from app.private_work.execution_profile import (
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import PrivateRunRecord, PrivateRunRepository
-from app.private_work.snapshot_repository import RunSnapshotAssetStale, RunSnapshotRepository
+from app.private_work.snapshot_repository import (
+    RunSnapshotAssetStale,
+    RunSnapshotRepository,
+)
 from app.private_work.thread_repository import PrivateThreadRecord, PrivateThreadRepository
 from app.private_work.thread_service import PrivateThreadService
 from app.projects.capabilities import Capability
+from app.reliability.run_execution.tool_call_control_policy import (
+    resolve_run_tool_call_control_policy,
+)
 from app.shared_assets.errors import (
     AssetForbidden,
     AssetResolutionUnavailable,
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
-from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
+from app.shared_assets.models import (
+    AssetKind,
+    AssetSelection,
+    ResolvedAgentSnapshot,
+    ResolvedRunAssetFact,
+)
 from app.shared_assets.resolver import ProjectAssetResolver
 from app.system_runtime_settings import (
     SystemRuntimePolicyMaterializer,
@@ -80,18 +91,21 @@ from deerflow.agents.memory.snip import SnipArchiveContext
 from deerflow.agents.middlewares.provider_request_usage import (
     ProviderRequestUsageUnsupported,
     provider_request_closure_identity,
+    provider_request_runtime_policy_compatibility_identity,
     provider_request_runtime_policy_identity,
 )
 from deerflow.agents.provider_request_contract import (
     PROVIDER_REQUEST_PROFILE_STATE_KEY,
 )
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.model_config import ModelConfig
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.models import ModelRuntimeProfile
 from deerflow.persistence.private_work.memory_document_repository import (
     DEFAULT_MEMORY_NAMESPACE,
 )
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.system_settings import RunModelConfigSnapshotRow
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
@@ -141,6 +155,19 @@ class _ContextUsageAuthority:
     run_id: str | None
     lead_model_ref: str
     closure_identity: str | None = None
+    profile_authority_identity: str | None = None
+    profile_closure_identity: str | None = None
+    asset_facts: tuple[ResolvedRunAssetFact, ...] | None = None
+    profile_asset_facts: tuple[ResolvedRunAssetFact, ...] | None = None
+    profile_run_kwargs: Mapping[str, object] | None = None
+    profile_proof_attempted: bool = False
+    profile_runtime_policy_identity: str | None = None
+    profile_runtime_policy_compatibility_identity: str | None = None
+    lead_model_payload_checksum: str | None = None
+    profile_lead_model_payload_checksum: str | None = None
+    resolved_lead_model_name: str | None = None
+    profile_lead_model_name: str | None = None
+    profile_title_model_name: str | None = None
 
 
 class ProjectChatControlService:
@@ -406,7 +433,11 @@ class ProjectChatControlService:
                 selected_model_name=selected_model_name,
             )
             for _attempt in range(_CONTEXT_USAGE_AUTHORITY_RETRY_LIMIT):
-                runtime_config, context_model_name = await self._materialize_context_usage_config(
+                (
+                    runtime_config,
+                    context_model_name,
+                    current_lead_model,
+                ) = await self._materialize_context_usage_config(
                     context,
                     app_config,
                     authority=authority,
@@ -419,14 +450,40 @@ class ProjectChatControlService:
                 ).aget(checkpoint_config(thread_id))
                 if snapshot_checkpoint_id(snapshot) is None:
                     raise PrivateWorkNotFound(context.request_id)
+                profile_authority_identity = None
+                if authority.run_id is None:
+                    values = getattr(snapshot, "values", None)
+                    profile = values.get(PROVIDER_REQUEST_PROFILE_STATE_KEY) if isinstance(values, Mapping) else None
+                    value = profile.get("authority_identity") if isinstance(profile, Mapping) else None
+                    if isinstance(value, str) and value:
+                        profile_authority_identity = value
                 current_authority = await self._resolve_context_usage_authority(
                     context,
                     thread_id,
                     selected_model_name=selected_model_name,
+                    profile_authority_identity=profile_authority_identity,
                 )
-                if current_authority == authority:
+                if self._same_context_usage_current_authority(
+                    current_authority,
+                    authority,
+                ):
+                    authority = current_authority
                     idle_profile = None
                     if authority.run_id is None:
+                        if (
+                            getattr(
+                                authority,
+                                "profile_authority_identity",
+                                None,
+                            )
+                            is not None
+                        ):
+                            authority = await self._prove_idle_provider_profile(
+                                context,
+                                authority=authority,
+                                runtime_config=runtime_config,
+                                current_lead_model=current_lead_model,
+                            )
                         idle_profile = self._idle_provider_request_profile(
                             snapshot,
                             runtime_config=runtime_config,
@@ -532,26 +589,72 @@ class ProjectChatControlService:
             raise PrivateWorkUnavailable(context.request_id) from None
 
     @staticmethod
+    def _same_context_usage_current_authority(
+        left: _ContextUsageAuthority,
+        right: _ContextUsageAuthority,
+    ) -> bool:
+        """Compare the current request closure, excluding frozen proof fields."""
+
+        return (
+            left.run_id == right.run_id
+            and left.lead_model_ref == right.lead_model_ref
+            and getattr(left, "closure_identity", None) == getattr(right, "closure_identity", None)
+            and getattr(left, "asset_facts", None) == getattr(right, "asset_facts", None)
+        )
+
+    @staticmethod
     def _idle_provider_request_profile(
         snapshot: object,
         *,
         runtime_config: AppConfig,
         authority: _ContextUsageAuthority,
     ) -> Mapping[str, object]:
-        """Reuse only a same-model, same-catalog, policy-identical frozen profile."""
+        """Reuse only a policy-identical profile for the exact current assets."""
 
         values = getattr(snapshot, "values", None)
         profile = values.get(PROVIDER_REQUEST_PROFILE_STATE_KEY) if isinstance(values, Mapping) else None
         try:
-            policy_identity = provider_request_runtime_policy_identity(runtime_config)
+            policy_identity = provider_request_runtime_policy_identity(
+                runtime_config,
+            )
+            compatibility_identity = provider_request_runtime_policy_compatibility_identity(
+                runtime_config,
+            )
         except ProviderRequestUsageUnsupported:
             raise ContextUsageUnsupported("Idle Gauge runtime policy identity is unavailable.") from None
+        if not isinstance(profile, Mapping):
+            raise ContextUsageUnsupported(
+                "Idle Gauge cannot prove that the frozen provider profile still matches the next Run.",
+            )
+        if getattr(authority, "profile_proof_attempted", False):
+            policy_matches = (
+                authority.profile_runtime_policy_identity is not None
+                and authority.profile_runtime_policy_compatibility_identity is not None
+                and profile.get("runtime_policy_identity") == authority.profile_runtime_policy_identity
+                and compatibility_identity == authority.profile_runtime_policy_compatibility_identity
+            )
+            model_matches = (
+                authority.lead_model_payload_checksum is not None
+                and authority.profile_lead_model_payload_checksum is not None
+                and authority.lead_model_payload_checksum == authority.profile_lead_model_payload_checksum
+                and authority.resolved_lead_model_name is not None
+                and authority.resolved_lead_model_name == authority.profile_lead_model_name
+                and profile.get("model_name") == authority.resolved_lead_model_name
+            )
+        else:
+            policy_matches = profile.get("runtime_policy_identity") == policy_identity
+            model_matches = profile.get("model_name") == authority.lead_model_ref
         if (
-            not isinstance(profile, Mapping)
-            or authority.closure_identity is None
-            or profile.get("model_name") != authority.lead_model_ref
-            or profile.get("closure_identity") != authority.closure_identity
-            or profile.get("runtime_policy_identity") != policy_identity
+            authority.closure_identity is None
+            or authority.profile_authority_identity is None
+            or authority.profile_closure_identity is None
+            or authority.asset_facts is None
+            or authority.profile_asset_facts is None
+            or profile.get("authority_identity") != authority.profile_authority_identity
+            or not model_matches
+            or profile.get("closure_identity") != authority.profile_closure_identity
+            or authority.asset_facts != authority.profile_asset_facts
+            or not policy_matches
             or profile.get("workload_profile") != "interactive"
             or profile.get("mcp_closure_present") is not False
         ):
@@ -565,7 +668,7 @@ class ProjectChatControlService:
         *,
         authority: _ContextUsageAuthority,
         selected_model_name: str | None,
-    ) -> tuple[AppConfig, str]:
+    ) -> tuple[AppConfig, str, ModelConfig]:
         """Bind Gauge policy and models to the same authority as the next call."""
 
         model_materializer = self._model_materializer
@@ -657,6 +760,7 @@ class ProjectChatControlService:
             return (
                 runtime_config,
                 lead_model.name,
+                lead_model,
             )
         except SystemRuntimePolicyUnavailable:
             raise PrivateWorkUnavailable(context.request_id) from None
@@ -665,12 +769,78 @@ class ProjectChatControlService:
                 raise PrivateWorkRunModelUnavailable(context.request_id) from None
             raise PrivateWorkUnavailable(context.request_id) from None
 
+    async def _prove_idle_provider_profile(
+        self,
+        context: PrivateWorkContext,
+        *,
+        authority: _ContextUsageAuthority,
+        runtime_config: AppConfig,
+        current_lead_model: ModelConfig,
+    ) -> _ContextUsageAuthority:
+        """Prove an idle checkpoint profile against its immutable source Run."""
+
+        run_id = authority.profile_authority_identity
+        run_kwargs = authority.profile_run_kwargs
+        if run_id is None or run_kwargs is None:
+            return replace(authority, profile_proof_attempted=True)
+        policy_materializer = self._runtime_policy_materializer
+        if policy_materializer is None:
+            raise PrivateWorkUnavailable(context.request_id)
+        try:
+            frozen_policy = await policy_materializer.materialize_run_snapshot_envelope(
+                project_id=context.project_id,
+                owner_user_id=str(context.user_id),
+                run_id=run_id,
+            )
+            control_policy = resolve_run_tool_call_control_policy(
+                frozen_policy,
+                run_kwargs,
+            )
+            if control_policy.workload_profile.name != "interactive":
+                return replace(authority, profile_proof_attempted=True)
+            frozen_runtime_config = runtime_config.with_runtime_policy(
+                control_policy.app_config_policy,
+            )
+            frozen_title = frozen_runtime_config.title
+            if frozen_title.enabled and frozen_title.model_name is None and authority.profile_title_model_name is not None:
+                frozen_runtime_config = frozen_runtime_config.model_copy(
+                    update={
+                        "title": frozen_title.model_copy(
+                            update={
+                                "model_name": authority.profile_title_model_name,
+                            },
+                        ),
+                    },
+                )
+            current_provenance = model_execution_provenance(current_lead_model)
+            return replace(
+                authority,
+                profile_proof_attempted=True,
+                profile_runtime_policy_identity=(
+                    provider_request_runtime_policy_identity(
+                        frozen_runtime_config,
+                    )
+                ),
+                profile_runtime_policy_compatibility_identity=(
+                    provider_request_runtime_policy_compatibility_identity(
+                        frozen_runtime_config,
+                    )
+                ),
+                lead_model_payload_checksum=current_provenance.payload_checksum,
+                resolved_lead_model_name=current_lead_model.name,
+            )
+        except SystemRuntimePolicyUnavailable:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except (ProviderRequestUsageUnsupported, TypeError, ValueError):
+            return replace(authority, profile_proof_attempted=True)
+
     async def _resolve_context_usage_authority(
         self,
         context: PrivateWorkContext,
         thread_id: str,
         *,
         selected_model_name: str | None,
+        profile_authority_identity: str | None = None,
     ) -> _ContextUsageAuthority:
         """Resolve active-Run snapshots or the next composer's selected model."""
 
@@ -713,26 +883,116 @@ class ProjectChatControlService:
                         lead_model_ref=model_name,
                     )
 
-                resolved = await self._resolver.resolve_project_asset_snapshot_in_session(
+                selection = AssetSelection(
+                    AssetKind.AGENT,
+                    thread.agent_asset_id,
+                )
+                lead_agent = await self._resolver.resolve_project_asset_snapshot_in_session(
                     session,
                     current,
-                    AssetSelection(AssetKind.AGENT, thread.agent_asset_id),
+                    selection,
                 )
-                if type(resolved) is not ResolvedAgentSnapshot or resolved.scope.value != thread.agent_scope:
+                current_facts = await self._resolver.resolve_run_asset_facts_in_session(
+                    session,
+                    current,
+                    selection,
+                )
+                if (
+                    type(lead_agent) is not ResolvedAgentSnapshot
+                    or lead_agent.scope.value != thread.agent_scope
+                    or not self._valid_context_usage_asset_facts(current_facts)
+                    or current_facts[0].scope != lead_agent.scope
+                    or current_facts[0].asset_id != lead_agent.asset_id
+                    or current_facts[0].version_id != lead_agent.version_id
+                    or current_facts[0].checksum != lead_agent.checksum
+                ):
                     raise PrivateWorkAssetStale(context.request_id)
                 lead_model_ref = selected_run_model_ref(
-                    resolved.payload.model_ref,
+                    lead_agent.payload.model_ref,
                     RequestedRunExecutionProfile(
                         model_name=selected_model_name,
                     ),
                 )
-                return _ContextUsageAuthority(
+                authority = _ContextUsageAuthority(
                     run_id=None,
                     lead_model_ref=lead_model_ref,
                     closure_identity=provider_request_closure_identity(
-                        agent_facts=((str(resolved.version_id), resolved.checksum),),
-                        catalog_generation=resolved.catalog_generation,
+                        agent_facts=((str(lead_agent.version_id), lead_agent.checksum),),
+                        catalog_generation=current_facts[0].catalog_generation,
                     ),
+                    asset_facts=current_facts,
+                )
+                if profile_authority_identity is None:
+                    return authority
+
+                profile_run = (
+                    await session.execute(
+                        select(RunRow.run_id, RunRow.kwargs_json)
+                        .where(
+                            RunRow.project_id == context.project_id,
+                            RunRow.owner_user_id == str(context.user_id),
+                            RunRow.thread_id == thread_id,
+                            RunRow.run_id == profile_authority_identity,
+                            RunRow.status != "deleted",
+                        )
+                        .limit(1)
+                    )
+                ).one_or_none()
+                if profile_run is None:
+                    return authority
+                profile_run_id, profile_run_kwargs = profile_run
+                if not isinstance(profile_run_kwargs, Mapping):
+                    return authority
+                profile_model_rows = (
+                    await session.execute(
+                        select(
+                            RunModelConfigSnapshotRow.purpose,
+                            RunModelConfigSnapshotRow.model_config_id,
+                            RunModelConfigSnapshotRow.payload_checksum,
+                        ).where(
+                            RunModelConfigSnapshotRow.project_id == context.project_id,
+                            RunModelConfigSnapshotRow.owner_user_id == str(context.user_id),
+                            RunModelConfigSnapshotRow.thread_id == thread_id,
+                            RunModelConfigSnapshotRow.run_id == profile_run_id,
+                            RunModelConfigSnapshotRow.purpose.in_(("lead", "title")),
+                        )
+                    )
+                ).all()
+                profile_model_facts = {
+                    purpose: (str(model_config_id), payload_checksum) for purpose, model_config_id, payload_checksum in profile_model_rows if purpose in {"lead", "title"} and isinstance(payload_checksum, str) and len(payload_checksum) == 64
+                }
+                profile_lead_model = profile_model_facts.get("lead")
+                if profile_lead_model is None or len(profile_model_facts) != len(profile_model_rows):
+                    return authority
+                frozen_facts = await self._snapshots.list_asset_facts_in_session(
+                    session,
+                    context,
+                    thread_id,
+                    profile_run_id,
+                )
+                if not self._valid_context_usage_asset_facts(frozen_facts):
+                    return authority
+                frozen_lead = frozen_facts[0]
+                return _ContextUsageAuthority(
+                    run_id=None,
+                    lead_model_ref=lead_model_ref,
+                    closure_identity=authority.closure_identity,
+                    profile_authority_identity=profile_run_id,
+                    profile_closure_identity=provider_request_closure_identity(
+                        agent_facts=(
+                            (
+                                str(frozen_lead.version_id),
+                                frozen_lead.checksum,
+                            ),
+                        ),
+                        catalog_generation=frozen_lead.catalog_generation,
+                    ),
+                    asset_facts=authority.asset_facts,
+                    profile_asset_facts=frozen_facts,
+                    profile_run_kwargs=dict(profile_run_kwargs),
+                    profile_lead_model_name=profile_lead_model[0],
+                    profile_lead_model_payload_checksum=profile_lead_model[1],
+                    profile_title_model_name=(profile_model_facts["title"][0] if "title" in profile_model_facts else None),
                 )
         except PrivateWorkError:
             raise
@@ -751,6 +1011,16 @@ class ProjectChatControlService:
             raise PrivateWorkAssetStale(context.request_id) from None
         except (AssetStorageUnavailable, DBAPIError):
             raise PrivateWorkUnavailable(context.request_id) from None
+
+    @staticmethod
+    def _valid_context_usage_asset_facts(
+        facts: tuple[ResolvedRunAssetFact, ...],
+    ) -> bool:
+        if not facts:
+            return False
+        lead = facts[0]
+        generation = lead.catalog_generation
+        return lead.kind is AssetKind.AGENT and lead.dependency_order == 0 and all(type(fact) is ResolvedRunAssetFact and fact.dependency_order == order and fact.catalog_generation == generation for order, fact in enumerate(facts))
 
     async def _materialize_compaction_config(
         self,

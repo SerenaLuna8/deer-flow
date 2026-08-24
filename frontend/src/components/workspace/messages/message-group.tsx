@@ -32,6 +32,7 @@ import { indexToolCallData } from "@/core/messages/tool-call-index";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
+  extractContentFromMessage,
   extractReasoningContentFromMessage,
   getReasoningDurationSeconds,
 } from "@/core/messages/utils";
@@ -56,6 +57,7 @@ const MEMORY_DISABLED_RESULT =
 
 export function MessageGroup({
   className,
+  includeNarration = true,
   messages,
   isLoading = false,
   renderTaskToolCall,
@@ -64,6 +66,7 @@ export function MessageGroup({
   showTokenDebugSummaries = false,
 }: {
   className?: string;
+  includeNarration?: boolean;
   messages: Message[];
   isLoading?: boolean;
   renderTaskToolCall?: (taskId: string, messageId?: string) => React.ReactNode;
@@ -76,8 +79,13 @@ export function MessageGroup({
     isStaticWebsiteOnly() || isLoading || showAllSteps,
   );
   const steps = useMemo(
-    () => convertToSteps(messages, renderTaskToolCall !== undefined),
-    [messages, renderTaskToolCall],
+    () =>
+      convertToSteps(
+        messages,
+        renderTaskToolCall !== undefined,
+        includeNarration,
+      ),
+    [includeNarration, messages, renderTaskToolCall],
   );
   const debugStepByMessageId = useMemo(
     () =>
@@ -115,7 +123,9 @@ export function MessageGroup({
   const foldableAboveLastToolCallSteps = useMemo(
     () =>
       aboveLastToolCallSteps.filter(
-        (step) => step.type === "reasoning" || step.name !== "task",
+        (step) =>
+          step.type === "reasoning" ||
+          (step.type === "toolCall" && step.name !== "task"),
       ),
     [aboveLastToolCallSteps],
   );
@@ -303,6 +313,53 @@ export function MessageGroup({
     );
   };
 
+  const renderNarration = (
+    step: CoTNarrationStep,
+    { isStreaming = false }: { isStreaming?: boolean } = {},
+  ) => {
+    const stepIndex = steps.indexOf(step);
+    return (
+      <div key={getStepRenderKey(step, "narration")} className="w-full">
+        {renderDebugSummary(step.messageId, stepIndex)}
+        <MarkdownContent
+          content={step.content}
+          isLoading={isStreaming}
+          rehypePlugins={rehypePlugins}
+          className="my-3"
+        />
+      </div>
+    );
+  };
+
+  const renderChronologicalSteps = ({
+    expandReasoning,
+  }: {
+    expandReasoning: boolean;
+  }) => (
+    <div className={cn("flex w-full flex-col gap-3", className)}>
+      {steps.map((step, stepIndex) => {
+        const isLatestStep = stepIndex === steps.length - 1;
+        if (step.type === "reasoning") {
+          return renderReasoningRound(step, {
+            defaultOpen: expandReasoning ? true : undefined,
+            isStreaming: !expandReasoning && isLoading && isLatestStep,
+          });
+        }
+        if (step.type === "narration") {
+          return renderNarration(step, {
+            isStreaming: isLoading && isLatestStep,
+          });
+        }
+        return (
+          <div key={getStepRenderKey(step, "tool-round")} className="w-full">
+            {renderDebugSummary(step.messageId, stepIndex)}
+            {renderProcessToolCall(step)}
+          </div>
+        );
+      })}
+    </div>
+  );
+
   useEffect(() => {
     if (isLoading || showAllSteps) {
       setShowAbove(true);
@@ -314,22 +371,11 @@ export function MessageGroup({
   }
 
   if (showAllSteps) {
-    return (
-      <div className={cn("flex w-full flex-col gap-3", className)}>
-        {steps.map((step) => {
-          if (step.type === "reasoning") {
-            return renderReasoningRound(step, { defaultOpen: true });
-          }
-          const stepIndex = steps.indexOf(step);
-          return (
-            <div key={getStepRenderKey(step, "tool-round")} className="w-full">
-              {renderDebugSummary(step.messageId, stepIndex)}
-              {renderProcessToolCall(step)}
-            </div>
-          );
-        })}
-      </div>
-    );
+    return renderChronologicalSteps({ expandReasoning: true });
+  }
+
+  if (steps.some((step) => step.type === "narration")) {
+    return renderChronologicalSteps({ expandReasoning: false });
   }
 
   if (
@@ -391,7 +437,8 @@ export function MessageGroup({
           {aboveLastToolCallSteps.flatMap((step) => {
             if (
               !showAbove &&
-              (step.type === "reasoning" || step.name !== "task")
+              (step.type === "reasoning" ||
+                (step.type === "toolCall" && step.name !== "task"))
             ) {
               return [];
             }
@@ -400,6 +447,9 @@ export function MessageGroup({
               return renderReasoningRound(step, {
                 defaultOpen: isLoading,
               });
+            }
+            if (step.type === "narration") {
+              return renderNarration(step);
             }
 
             return [
@@ -813,15 +863,20 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   result?: string;
 }
 
-type CoTStep = CoTReasoningStep | CoTToolCallStep;
+interface CoTNarrationStep extends GenericCoTStep<"narration"> {
+  content: string;
+}
+
+type CoTStep = CoTReasoningStep | CoTNarrationStep | CoTToolCallStep;
 
 function convertToSteps(
   messages: Message[],
   includeTaskToolCalls = false,
+  includeNarration = true,
 ): CoTStep[] {
   const steps: CoTStep[] = [];
   const { toolCallResults } = indexToolCallData(messages);
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
       const reasoning = extractReasoningContentFromMessage(message);
       if (reasoning) {
@@ -833,6 +888,21 @@ function convertToSteps(
           reasoningDurationSeconds: getReasoningDurationSeconds(message),
         };
         steps.push(step);
+      }
+      const narration =
+        includeNarration &&
+        !(message.tool_calls ?? []).some(
+          (toolCall) => toolCall.name === "ask_clarification",
+        )
+          ? extractContentFromMessage(message)
+          : "";
+      if (narration) {
+        steps.push({
+          id: `${message.id ?? `message-${messageIndex}`}:narration`,
+          messageId: message.id,
+          type: "narration",
+          content: narration,
+        });
       }
       for (const tool_call of message.tool_calls ?? []) {
         if (

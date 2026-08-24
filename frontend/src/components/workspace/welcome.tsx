@@ -56,15 +56,11 @@ export function Welcome({
           </div>
         )}
       </div>
-      {searchParams.get("mode") === "skill" ? (
+      {searchParams.get("mode") === "skill" && (
         <div className="text-muted-foreground max-w-full text-sm">
           <WelcomeDescription>
             {t.welcome.createYourOwnSkillDescription}
           </WelcomeDescription>
-        </div>
-      ) : (
-        <div className="text-muted-foreground max-w-full text-sm">
-          <WelcomeDescription>{t.welcome.description}</WelcomeDescription>
         </div>
       )}
     </div>

@@ -68,18 +68,15 @@ Each agent response in the conversation may contain:
 - **Tool results**: the output returned by each tool.
 - **Subagent output**: if the agent delegated a task, the subagent's progress appears inline.
 
-Complex tasks can pass through several thinking, tool-call, and tool-result
-cycles. During execution, every reasoning round remains available and the
-current round opens automatically. Once a complex task finishes, all reasoning,
-tool calls, and subagent steps move into one default-collapsed **Execution
-details · N steps** disclosure before the final answer. Every model call keeps
-an independent **Thought (X seconds)** disclosure in its original position
-among the tool calls; reasoning is never flattened into a generic execution
-step or replaced by the last pass. The terminal model call's reasoning appears
-exactly once as the last reasoning step in that process, while the answer and
-finalized file cards remain outside it. A direct answer with no preceding
-execution history keeps its standalone reasoning disclosure. Replay or reload
-reconstructs the same order, and `present_files` transition prose is not repeated.
+Complex tasks can pass through several thinking, process-output, tool-call, and
+tool-result cycles. Every model call keeps its own **Thought (X seconds)**
+disclosure, which collapses only that reasoning body. Process output between
+reasoning rounds remains visible in its original order during execution and
+after completion; it is not moved into a turn-level **Execution details**
+disclosure. Reasoning, tool calls, and subagent steps from rounds with no process
+output can still move into the default-collapsed **Execution details · N steps**
+disclosure. Replay or reload reconstructs the same order, finalized file cards
+remain after the answer, and `present_files` transition prose is not repeated.
 
 ## Understanding token usage
 

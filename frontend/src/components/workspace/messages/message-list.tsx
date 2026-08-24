@@ -418,6 +418,7 @@ export function MessageList({
     ReadonlyMap<string, number>
   >(() => new Map());
   const prevIsLoading = useRef(thread.isLoading);
+  const currentRunJustCompleted = prevIsLoading.current && !thread.isLoading;
   const messages = useMemo(
     () =>
       projectTokenBudgetMessages(
@@ -1124,10 +1125,7 @@ export function MessageList({
     }
 
     return (
-      <div
-        key={"subtask-group-" + group.id}
-        className="relative z-1 flex flex-col gap-2"
-      >
+      <div key={group.id} className="relative z-1 flex flex-col gap-2">
         {results}
         {includeTokenUsage &&
           renderTokenUsage({
@@ -1148,11 +1146,12 @@ export function MessageList({
     if (group.type === "assistant") {
       // The terminal answer keeps its semantic message group, but its reasoning
       // facet belongs at the end of an existing completed execution history.
-      // MessageGroup projects only reasoning/tool steps, so the answer text is
-      // still rendered exactly once by MessageListItem below.
+      // Suppress narration in this projection so the answer text remains owned
+      // and rendered exactly once by MessageListItem below.
       return (
         <div key={"completed-final-reasoning-" + group.id} className="w-full">
           <MessageGroup
+            includeNarration={false}
             messages={group.messages}
             showAllSteps={true}
             tokenDebugSteps={tokenDebugSteps.filter((step) =>
@@ -1181,6 +1180,7 @@ export function MessageList({
       return processMessages.length > 0 ? (
         <div key={"completed-process-group-" + group.id} className="w-full">
           <MessageGroup
+            includeNarration={false}
             messages={processMessages}
             renderTaskToolCall={(taskId, messageId) => (
               <SubtaskCard
@@ -1294,6 +1294,10 @@ export function MessageList({
                       turnDisplay &&
                       turnDisplay.processGroupIndexes.length > 0 && (
                         <AssistantProcessDisclosure
+                          autoCollapseOnMount={
+                            currentRunJustCompleted &&
+                            groupIndex === lastGroupIndex
+                          }
                           stepCount={turnDisplay.processStepCount}
                         >
                           {turnDisplay.processGroupIndexes.map(
@@ -1547,6 +1551,7 @@ export function MessageList({
                     {processMessages.length > 0 && (
                       <MessageGroup
                         className="mb-3"
+                        includeNarration={false}
                         messages={processMessages}
                         isLoading={groupIsLoading}
                         renderTaskToolCall={(taskId, messageId) => (
@@ -1608,7 +1613,7 @@ export function MessageList({
                 });
               }
               return (
-                <div key={"group-" + group.id} className="w-full">
+                <div key={group.id} className="w-full">
                   <MessageGroup
                     messages={group.messages}
                     isLoading={groupIsLoading}

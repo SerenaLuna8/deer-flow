@@ -11,7 +11,14 @@ from app.private_work.context import PrivateWorkContext
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.shared_assets.models import (
+    AssetKind,
+    AssetScope,
+    ResolvedRunAssetFact,
+)
 from deerflow.agents.middlewares.provider_request_usage import (
+    provider_request_closure_identity,
+    provider_request_runtime_policy_compatibility_identity,
     provider_request_runtime_policy_identity,
 )
 from deerflow.runtime.context_compaction import ContextUsageUnsupported
@@ -39,17 +46,28 @@ def _context() -> PrivateWorkContext:
 
 
 class _IdlePolicyConfig:
-    def __init__(self, marker: str) -> None:
+    def __init__(
+        self,
+        marker: str,
+        *,
+        trigger: tuple[str, int | float] = ("tokens", 100_000),
+    ) -> None:
         self.marker = marker
+        self.trigger = trigger
 
     def model_dump(self, *, mode: str):
         assert mode == "json"
-        return {"tool_search": {"marker": self.marker}}
+        return {
+            "summarization": {"trigger": self.trigger},
+            "tool_search": {"marker": self.marker},
+        }
 
 
 def test_idle_context_usage_reuses_only_the_exact_frozen_profile() -> None:
     config = _IdlePolicyConfig("same")
+    exact_assets = (("agent", "project", "agent-1", "agent-version-1", "a" * 64),)
     profile = {
+        "authority_identity": "run-1",
         "model_name": _SELECTED_MODEL,
         "closure_identity": "closure-1",
         "runtime_policy_identity": provider_request_runtime_policy_identity(config),
@@ -66,10 +84,238 @@ def test_idle_context_usage_reuses_only_the_exact_frozen_profile() -> None:
                 run_id=None,
                 lead_model_ref=_SELECTED_MODEL,
                 closure_identity="closure-1",
+                profile_authority_identity="run-1",
+                profile_closure_identity="closure-1",
+                asset_facts=exact_assets,
+                profile_asset_facts=exact_assets,
             ),
         )
         is profile
     )
+
+
+def test_idle_context_usage_ignores_unrelated_catalog_generation_changes() -> None:
+    config = _IdlePolicyConfig("same")
+    frozen_closure = "frozen-generation-closure"
+    current_closure = "current-generation-closure"
+    exact_assets = (
+        ("agent", "project", "agent-1", "agent-version-1", "a" * 64),
+        ("skill", "project", "skill-1", "skill-version-1", "b" * 64),
+    )
+    profile = {
+        "authority_identity": "run-1",
+        "model_name": _SELECTED_MODEL,
+        "closure_identity": frozen_closure,
+        "runtime_policy_identity": provider_request_runtime_policy_identity(config),
+        "workload_profile": "interactive",
+        "mcp_closure_present": False,
+    }
+
+    assert (
+        ProjectChatControlService._idle_provider_request_profile(
+            SimpleNamespace(values={"provider_request_profile": profile}),
+            runtime_config=config,  # type: ignore[arg-type]
+            authority=SimpleNamespace(
+                run_id=None,
+                lead_model_ref=_SELECTED_MODEL,
+                closure_identity=current_closure,
+                profile_authority_identity="run-1",
+                profile_closure_identity=frozen_closure,
+                asset_facts=exact_assets,
+                profile_asset_facts=exact_assets,
+            ),
+        )
+        is profile
+    )
+
+
+def test_idle_context_usage_applies_current_compaction_trigger() -> None:
+    frozen_config = _IdlePolicyConfig("same", trigger=("tokens", 100_000))
+    current_config = _IdlePolicyConfig("same", trigger=("fraction", 0.8))
+    exact_assets = (("agent", "project", "agent-1", "agent-version-1", "a" * 64),)
+    profile = {
+        "authority_identity": "run-1",
+        "model_name": _SELECTED_MODEL,
+        "closure_identity": "closure-1",
+        "runtime_policy_identity": provider_request_runtime_policy_identity(
+            frozen_config,
+        ),
+        "workload_profile": "interactive",
+        "mcp_closure_present": False,
+    }
+
+    assert (
+        ProjectChatControlService._idle_provider_request_profile(
+            SimpleNamespace(values={"provider_request_profile": profile}),
+            runtime_config=current_config,  # type: ignore[arg-type]
+            authority=SimpleNamespace(
+                run_id=None,
+                lead_model_ref=_SELECTED_MODEL,
+                closure_identity="closure-1",
+                profile_authority_identity="run-1",
+                profile_closure_identity="closure-1",
+                asset_facts=exact_assets,
+                profile_asset_facts=exact_assets,
+                profile_proof_attempted=True,
+                profile_runtime_policy_identity=profile["runtime_policy_identity"],
+                profile_runtime_policy_compatibility_identity=provider_request_runtime_policy_compatibility_identity(
+                    frozen_config,
+                ),
+                lead_model_payload_checksum="c" * 64,
+                profile_lead_model_payload_checksum="c" * 64,
+                resolved_lead_model_name=_SELECTED_MODEL,
+                profile_lead_model_name=_SELECTED_MODEL,
+            ),
+        )
+        is profile
+    )
+
+
+@pytest.mark.parametrize(
+    ("current_config", "proof_update"),
+    (
+        (_IdlePolicyConfig("changed"), {}),
+        (
+            _IdlePolicyConfig("same"),
+            {"lead_model_payload_checksum": "d" * 64},
+        ),
+    ),
+)
+def test_idle_context_usage_rejects_non_trigger_policy_or_model_drift(
+    current_config: _IdlePolicyConfig,
+    proof_update: dict[str, object],
+) -> None:
+    frozen_config = _IdlePolicyConfig("same")
+    exact_assets = (("agent", "project", "agent-1", "agent-version-1", "a" * 64),)
+    profile = {
+        "authority_identity": "run-1",
+        "model_name": _SELECTED_MODEL,
+        "closure_identity": "closure-1",
+        "runtime_policy_identity": provider_request_runtime_policy_identity(
+            frozen_config,
+        ),
+        "workload_profile": "interactive",
+        "mcp_closure_present": False,
+    }
+    proof = {
+        "run_id": None,
+        "lead_model_ref": _SELECTED_MODEL,
+        "closure_identity": "closure-1",
+        "profile_authority_identity": "run-1",
+        "profile_closure_identity": "closure-1",
+        "asset_facts": exact_assets,
+        "profile_asset_facts": exact_assets,
+        "profile_proof_attempted": True,
+        "profile_runtime_policy_identity": profile["runtime_policy_identity"],
+        "profile_runtime_policy_compatibility_identity": provider_request_runtime_policy_compatibility_identity(
+            frozen_config,
+        ),
+        "lead_model_payload_checksum": "c" * 64,
+        "profile_lead_model_payload_checksum": "c" * 64,
+        "resolved_lead_model_name": _SELECTED_MODEL,
+        "profile_lead_model_name": _SELECTED_MODEL,
+        **proof_update,
+    }
+
+    with pytest.raises(ContextUsageUnsupported):
+        ProjectChatControlService._idle_provider_request_profile(
+            SimpleNamespace(values={"provider_request_profile": profile}),
+            runtime_config=current_config,  # type: ignore[arg-type]
+            authority=SimpleNamespace(**proof),
+        )
+
+
+@pytest.mark.asyncio
+async def test_idle_profile_proof_uses_frozen_model_metadata_without_old_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ProofConfig(_IdlePolicyConfig):
+        title = SimpleNamespace(enabled=True, model_name=None)
+
+        def with_runtime_policy(self, _policy):
+            return self
+
+    class _PolicyMaterializer:
+        async def materialize_run_snapshot_envelope(self, **_kwargs):
+            return object()
+
+    service = object.__new__(ProjectChatControlService)
+    service._runtime_policy_materializer = _PolicyMaterializer()
+    service._model_materializer = SimpleNamespace(
+        materialize_snapshot=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("proof must not decrypt a frozen model"),
+        ),
+    )
+    monkeypatch.setattr(
+        chat_controls_module,
+        "resolve_run_tool_call_control_policy",
+        lambda *_args: SimpleNamespace(
+            workload_profile=SimpleNamespace(name="interactive"),
+            app_config_policy={},
+        ),
+    )
+    monkeypatch.setattr(
+        chat_controls_module,
+        "model_execution_provenance",
+        lambda _model: SimpleNamespace(payload_checksum="c" * 64),
+    )
+    config = _ProofConfig("same")
+
+    proven = await service._prove_idle_provider_profile(
+        _context(),
+        authority=chat_controls_module._ContextUsageAuthority(
+            run_id=None,
+            lead_model_ref=_SELECTED_MODEL,
+            profile_authority_identity="run-1",
+            profile_run_kwargs={},
+            profile_lead_model_name=_SELECTED_MODEL,
+            profile_lead_model_payload_checksum="c" * 64,
+            profile_title_model_name=None,
+        ),
+        runtime_config=config,  # type: ignore[arg-type]
+        current_lead_model=SimpleNamespace(name=_SELECTED_MODEL),  # type: ignore[arg-type]
+    )
+
+    assert proven.profile_proof_attempted is True
+    assert proven.profile_lead_model_name == _SELECTED_MODEL
+    assert proven.profile_lead_model_payload_checksum == "c" * 64
+    assert proven.profile_runtime_policy_identity == (provider_request_runtime_policy_identity(config))
+
+
+def test_idle_context_usage_fails_closed_when_referenced_asset_changes() -> None:
+    config = _IdlePolicyConfig("same")
+    closure = "same-generation-closure"
+    frozen_assets = (
+        ("agent", "project", "agent-1", "agent-version-1", "a" * 64),
+        ("skill", "project", "skill-1", "skill-version-1", "b" * 64),
+    )
+    current_assets = (
+        frozen_assets[0],
+        ("skill", "project", "skill-1", "skill-version-2", "c" * 64),
+    )
+    profile = {
+        "authority_identity": "run-1",
+        "model_name": _SELECTED_MODEL,
+        "closure_identity": closure,
+        "runtime_policy_identity": provider_request_runtime_policy_identity(config),
+        "workload_profile": "interactive",
+        "mcp_closure_present": False,
+    }
+
+    with pytest.raises(ContextUsageUnsupported):
+        ProjectChatControlService._idle_provider_request_profile(
+            SimpleNamespace(values={"provider_request_profile": profile}),
+            runtime_config=config,  # type: ignore[arg-type]
+            authority=SimpleNamespace(
+                run_id=None,
+                lead_model_ref=_SELECTED_MODEL,
+                closure_identity=closure,
+                profile_authority_identity="run-1",
+                profile_closure_identity=closure,
+                asset_facts=current_assets,
+                profile_asset_facts=frozen_assets,
+            ),
+        )
 
 
 @pytest.mark.parametrize(
@@ -80,13 +326,16 @@ def test_idle_context_usage_reuses_only_the_exact_frozen_profile() -> None:
         {"runtime_policy_identity": "stale"},
         {"workload_profile": "research"},
         {"mcp_closure_present": True},
+        {"authority_identity": "run-2"},
     ),
 )
 def test_idle_context_usage_fails_closed_on_request_shape_drift(
     profile_update: dict[str, object],
 ) -> None:
     config = _IdlePolicyConfig("same")
+    exact_assets = (("agent", "project", "agent-1", "agent-version-1", "a" * 64),)
     profile = {
+        "authority_identity": "run-1",
         "model_name": _SELECTED_MODEL,
         "closure_identity": "closure-1",
         "runtime_policy_identity": provider_request_runtime_policy_identity(config),
@@ -103,6 +352,10 @@ def test_idle_context_usage_fails_closed_on_request_shape_drift(
                 run_id=None,
                 lead_model_ref=_SELECTED_MODEL,
                 closure_identity="closure-1",
+                profile_authority_identity="run-1",
+                profile_closure_identity="closure-1",
+                asset_facts=exact_assets,
+                profile_asset_facts=exact_assets,
             ),
         )
 
@@ -127,7 +380,9 @@ async def test_context_usage_reuses_compact_authority_without_blocking_active_ru
         thread_id: str,
         *,
         selected_model_name: str | None,
+        profile_authority_identity: str | None = None,
     ):
+        assert profile_authority_identity is None
         events.append(("authority", thread_id, selected_model_name))
         return SimpleNamespace(run_id="run-1", lead_model_ref=_FROZEN_LEAD_MODEL)
 
@@ -140,7 +395,13 @@ async def test_context_usage_reuses_compact_authority_without_blocking_active_ru
         selected_model_name,
     ):
         events.append(("materialize", app_config, authority, selected_model_name))
-        return runtime_config, _FROZEN_LEAD_MODEL
+        return (
+            runtime_config,
+            _FROZEN_LEAD_MODEL,
+            SimpleNamespace(
+                name=_FROZEN_LEAD_MODEL,
+            ),
+        )
 
     class _State:
         async def aget(self, config):
@@ -253,7 +514,15 @@ async def test_context_usage_materializes_the_composer_selected_lead_model(
     service._model_materializer = _ModelMaterializer()
     service._runtime_policy_materializer = SimpleNamespace()
 
-    async def authority(_service, _context, thread_id, *, selected_model_name):
+    async def authority(
+        _service,
+        _context,
+        thread_id,
+        *,
+        selected_model_name,
+        profile_authority_identity=None,
+    ):
+        assert profile_authority_identity is None
         materialized.append(("authority", thread_id, selected_model_name))
         return SimpleNamespace(
             run_id=None,
@@ -363,7 +632,15 @@ async def test_context_usage_uses_active_run_frozen_policy_and_models(
     service._model_materializer = _ModelMaterializer()
     service._runtime_policy_materializer = _PolicyMaterializer()
 
-    async def authority(_service, _context, thread_id, *, selected_model_name):
+    async def authority(
+        _service,
+        _context,
+        thread_id,
+        *,
+        selected_model_name,
+        profile_authority_identity=None,
+    ):
+        assert profile_authority_identity is None
         materialized.append(("authority", thread_id, selected_model_name))
         return SimpleNamespace(
             run_id="run-1",
@@ -461,7 +738,9 @@ async def test_context_usage_recomputes_the_whole_read_when_run_authority_change
         thread_id: str,
         *,
         selected_model_name: str | None,
+        profile_authority_identity: str | None = None,
     ):
+        assert profile_authority_identity is None
         resolved = next(authorities)
         events.append(("authority", thread_id, selected_model_name, resolved))
         return resolved
@@ -475,7 +754,11 @@ async def test_context_usage_recomputes_the_whole_read_when_run_authority_change
         selected_model_name,
     ):
         events.append(("materialize", authority, selected_model_name))
-        return authority, authority.lead_model_ref
+        return (
+            authority,
+            authority.lead_model_ref,
+            SimpleNamespace(name=authority.lead_model_ref),
+        )
 
     class _State:
         def __init__(self, measured_authority):
@@ -572,6 +855,29 @@ class _MarkerSession(_AuthoritySession):
         return SimpleNamespace(one=lambda: self.marker_rows)
 
 
+class _IdleClosureSession(_AuthoritySession):
+    def __init__(self, profile_run_id: str):
+        super().__init__(None)
+        self.profile_run_id = profile_run_id
+        self.execute_count = 0
+
+    async def execute(self, _statement):
+        self.execute_count += 1
+        if self.execute_count == 1:
+            return SimpleNamespace(one_or_none=lambda: None)
+        if self.execute_count == 2:
+            return SimpleNamespace(
+                one_or_none=lambda: (self.profile_run_id, {}),
+            )
+        if self.execute_count == 3:
+            return SimpleNamespace(
+                all=lambda: [
+                    ("lead", uuid.UUID(_SELECTED_MODEL), "c" * 64),
+                ],
+            )
+        raise AssertionError("idle authority issued an unexpected query")
+
+
 @pytest.mark.parametrize(
     ("active_run_id", "latest_run_id", "expected"),
     (
@@ -665,17 +971,33 @@ async def test_context_usage_authority_uses_composer_selection_without_active_ru
     service = object.__new__(ProjectChatControlService)
     service._session_factory = lambda: _AuthoritySession(None)
     service._revalidator = SimpleNamespace(require=lambda *_args, **_kwargs: _async_value(object()))
+    agent_asset_id = uuid.uuid4()
+    agent_version_id = uuid.uuid4()
 
     class _Resolved:
-        scope = SimpleNamespace(value="project")
+        scope = AssetScope.PROJECT
         payload = SimpleNamespace(model_ref="default")
-        version_id = uuid.uuid4()
+        asset_id = agent_asset_id
+        version_id = agent_version_id
         checksum = "a" * 64
         catalog_generation = 7
 
     class _Resolver:
         async def resolve_project_asset_snapshot_in_session(self, *_args, **_kwargs):
             return _Resolved()
+
+        async def resolve_run_asset_facts_in_session(self, *_args, **_kwargs):
+            return (
+                ResolvedRunAssetFact(
+                    kind=AssetKind.AGENT,
+                    dependency_order=0,
+                    scope=AssetScope.PROJECT,
+                    asset_id=agent_asset_id,
+                    version_id=agent_version_id,
+                    checksum="a" * 64,
+                    catalog_generation=7,
+                ),
+            )
 
     class _Snapshots:
         async def validate_agent_closure_in_session(self, *_args, **_kwargs):
@@ -684,7 +1006,7 @@ async def test_context_usage_authority_uses_composer_selection_without_active_ru
     class _Threads:
         async def get(self, **_kwargs):
             return SimpleNamespace(
-                agent_asset_id=uuid.uuid4(),
+                agent_asset_id=agent_asset_id,
                 agent_scope="project",
             )
 
@@ -705,3 +1027,114 @@ async def test_context_usage_authority_uses_composer_selection_without_active_ru
 
     assert authority.run_id is None
     assert authority.lead_model_ref == _SELECTED_MODEL
+
+
+@pytest.mark.asyncio
+async def test_idle_context_usage_authority_compares_exact_assets_across_generations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context()
+    service = object.__new__(ProjectChatControlService)
+    profile_run_id = "run-previous"
+    service._session_factory = lambda: _IdleClosureSession(profile_run_id)
+    service._revalidator = SimpleNamespace(require=lambda *_args, **_kwargs: _async_value(object()))
+    agent_asset_id = uuid.uuid4()
+    agent_version_id = uuid.uuid4()
+    skill_asset_id = uuid.uuid4()
+    skill_version_id = uuid.uuid4()
+
+    class _ResolvedAgent:
+        scope = AssetScope.PROJECT
+        payload = SimpleNamespace(model_ref="default")
+        asset_id = agent_asset_id
+        version_id = agent_version_id
+        checksum = "a" * 64
+        catalog_generation = 9
+
+    current_facts = (
+        ResolvedRunAssetFact(
+            kind=AssetKind.AGENT,
+            dependency_order=0,
+            scope=AssetScope.PROJECT,
+            asset_id=agent_asset_id,
+            version_id=agent_version_id,
+            checksum="a" * 64,
+            catalog_generation=9,
+        ),
+        ResolvedRunAssetFact(
+            kind=AssetKind.SKILL,
+            dependency_order=1,
+            scope=AssetScope.PROJECT,
+            asset_id=skill_asset_id,
+            version_id=skill_version_id,
+            checksum="b" * 64,
+            catalog_generation=9,
+        ),
+    )
+
+    class _Resolver:
+        async def resolve_project_asset_snapshot_in_session(self, *_args, **_kwargs):
+            return _ResolvedAgent()
+
+        async def resolve_run_asset_facts_in_session(self, *_args, **_kwargs):
+            return current_facts
+
+    frozen_facts = (
+        ResolvedRunAssetFact(
+            kind=AssetKind.AGENT,
+            dependency_order=0,
+            scope=AssetScope.PROJECT,
+            asset_id=agent_asset_id,
+            version_id=agent_version_id,
+            checksum="a" * 64,
+            catalog_generation=7,
+        ),
+        ResolvedRunAssetFact(
+            kind=AssetKind.SKILL,
+            dependency_order=1,
+            scope=AssetScope.PROJECT,
+            asset_id=skill_asset_id,
+            version_id=skill_version_id,
+            checksum="b" * 64,
+            catalog_generation=7,
+        ),
+    )
+
+    class _Snapshots:
+        async def list_asset_facts_in_session(self, *_args, **_kwargs):
+            return frozen_facts
+
+    class _Threads:
+        async def get(self, **_kwargs):
+            return SimpleNamespace(
+                agent_asset_id=agent_asset_id,
+                agent_scope="project",
+            )
+
+    service._resolver = _Resolver()
+    service._snapshots = _Snapshots()
+    monkeypatch.setattr(chat_controls_module, "ResolvedAgentSnapshot", _ResolvedAgent)
+    monkeypatch.setattr(
+        chat_controls_module,
+        "PrivateThreadRepository",
+        lambda _session: _Threads(),
+    )
+
+    authority = await service._resolve_context_usage_authority(
+        context,
+        "thread-1",
+        selected_model_name=_SELECTED_MODEL,
+        profile_authority_identity=profile_run_id,
+    )
+
+    assert authority.closure_identity == provider_request_closure_identity(
+        agent_facts=((str(agent_version_id), "a" * 64),),
+        catalog_generation=9,
+    )
+    assert authority.profile_closure_identity == provider_request_closure_identity(
+        agent_facts=((str(agent_version_id), "a" * 64),),
+        catalog_generation=7,
+    )
+    assert authority.asset_facts == authority.profile_asset_facts
+    assert authority.profile_lead_model_name == _SELECTED_MODEL
+    assert authority.profile_lead_model_payload_checksum == "c" * 64

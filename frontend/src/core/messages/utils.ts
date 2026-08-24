@@ -215,8 +215,18 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         (hasReasoning(message) || hasToolCalls(message))
       ) {
         const lastGroup = groups[groups.length - 1];
-        // Accumulate consecutive intermediate AI messages into one processing group.
-        if (lastGroup?.type !== "assistant:processing") {
+        // Keep a narrated tool round at its own stable position. While its text
+        // is streaming (before the tool call arrives), the same message is an
+        // assistant group keyed by message.id. Reusing that id here prevents
+        // the visible narration from jumping into an older processing group.
+        const startsNarratedToolRound =
+          extractContentFromMessage(message).trim().length > 0;
+        // Non-narrated intermediate messages can still share one compact
+        // processing group.
+        if (
+          lastGroup?.type !== "assistant:processing" ||
+          startsNarratedToolRound
+        ) {
           const group: AssistantProcessingGroup = {
             id: createGroupId(message, messageIndex, "assistant:processing"),
             type: "assistant:processing",
@@ -295,6 +305,18 @@ function hasDisplayableProcessStep(message: Message): boolean {
   );
 }
 
+function hasDisplayableProcessNarration(message: Message): boolean {
+  return (
+    message.type === "ai" &&
+    extractContentFromMessage(message).trim().length > 0 &&
+    (message.tool_calls ?? []).some(
+      (toolCall) =>
+        toolCall.name !== "present_files" &&
+        toolCall.name !== "ask_clarification",
+    )
+  );
+}
+
 /**
  * Projects safe semantic message groups into a calmer visual turn without
  * mutating their tool-result associations.
@@ -330,6 +352,13 @@ export function getAssistantTurnDisplays(
         candidate?.type !== "assistant:processing" &&
         candidate?.type !== "assistant:subagent" &&
         candidate?.type !== "assistant:present-files"
+      ) {
+        break;
+      }
+      if (
+        (candidate.type === "assistant:processing" ||
+          candidate.type === "assistant:subagent") &&
+        candidate.messages.some(hasDisplayableProcessNarration)
       ) {
         break;
       }

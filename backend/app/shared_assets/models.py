@@ -106,6 +106,24 @@ class ResolvedMcpSnapshot(ResolvedAssetSnapshot):
     secret_digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedRunAssetFact:
+    """Ordered metadata identity for one current or frozen Run asset.
+
+    Catalog generation proves the legacy profile's source but is not part of
+    the exact asset identity: an unrelated catalog update must not make an
+    otherwise byte-identical closure compare different.
+    """
+
+    kind: AssetKind
+    dependency_order: int
+    scope: AssetScope
+    asset_id: uuid.UUID
+    version_id: uuid.UUID
+    checksum: str
+    catalog_generation: int = field(compare=False)
+
+
 @dataclass(frozen=True)
 class ResolvedRunAssetClosure:
     """Exact immutable asset closure admitted for one Run.
