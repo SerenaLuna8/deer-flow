@@ -56,6 +56,7 @@ from deerflow.persistence.private_work.memory_repository_parts import (
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 # Persistence-only Dream orchestration limits.
 _EPISODE_PRUNE_BATCH_LIMIT = 500
@@ -380,6 +381,7 @@ class MemoryDreamStore:
         self,
         scope: MemoryDocumentScope,
         *,
+        account_private_generation: AccountPrivateGeneration,
         trigger: MemoryDreamTrigger,
         frozen: MemoryDreamFrozenRuntime,
         initial_content: str | None,
@@ -390,6 +392,8 @@ class MemoryDreamStore:
     ) -> MemoryDreamAdmissionRecord:
         if (
             type(scope) is not MemoryDocumentScope
+            or type(account_private_generation) is not AccountPrivateGeneration
+            or account_private_generation.owner_user_id != scope.owner_user_id
             or trigger not in {"auto_dream", "manual_dream", "budget_rewrite"}
             or type(frozen) is not MemoryDreamFrozenRuntime
             or not isinstance(now, datetime)
@@ -479,6 +483,7 @@ class MemoryDreamStore:
                 raise MemoryDocumentConflict("Dream budget rewrite requires a published document")
             return await self._enqueue_dream(
                 scope,
+                account_private_generation=account_private_generation,
                 document=document,
                 trigger=trigger,
                 frozen=frozen,
@@ -509,6 +514,7 @@ class MemoryDreamStore:
         history_digest = compute_dream_history_digest(history)
         return await self._enqueue_dream(
             scope,
+            account_private_generation=account_private_generation,
             document=document,
             trigger=trigger,
             frozen=frozen,
@@ -523,6 +529,7 @@ class MemoryDreamStore:
         self,
         scope: MemoryDocumentScope,
         *,
+        account_private_generation: AccountPrivateGeneration,
         document: MemoryDocumentRow,
         trigger: MemoryDreamTrigger,
         frozen: MemoryDreamFrozenRuntime,
@@ -566,6 +573,7 @@ class MemoryDreamStore:
                 run_id=None,
                 occurrence_id=None,
                 max_attempts=max_attempts,
+                owner_private_generation=account_private_generation,
                 retry_safety="safe",
                 priority=0 if trigger == "auto_dream" else 10,
             )

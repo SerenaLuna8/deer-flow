@@ -22,6 +22,7 @@ import posixpath
 import re
 import shlex
 import threading
+import uuid
 from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.community.remote_file_authority import (
@@ -38,6 +39,11 @@ from deerflow.sandbox.sandbox import (
     SandboxAtomicWriter,
     SandboxBinaryReader,
     _validate_extra_env,
+)
+from deerflow.sandbox.sandbox_provider import (
+    RUN_READONLY_MOUNT_MANIFEST_MAX_BYTES,
+    RUN_READONLY_MOUNT_MANIFEST_PATH,
+    run_readonly_mount_manifest_text,
 )
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -94,12 +100,14 @@ class BoxliteBox(Sandbox):
         run: Callable[..., T],
         *,
         default_env: dict[str, str] | None = None,
+        execution_user: str | None = None,
         on_terminal_failure: Callable[[str, str], None] | None = None,
     ) -> None:
         super().__init__(id)
         self._box = box
         self._run = run
         self._default_env = dict(default_env or {})
+        self._execution_user = execution_user
         self._on_terminal_failure = on_terminal_failure
         self._lock = threading.Lock()
         self._closed = False
@@ -133,7 +141,12 @@ class BoxliteBox(Sandbox):
                     raise RuntimeError("sandbox has been closed")
                 box = self._box
             return self._run(
-                box.exec(*argv, env=env, timeout=timeout),
+                box.exec(
+                    *argv,
+                    env=env,
+                    user=self._execution_user,
+                    timeout=timeout,
+                ),
                 timeout=timeout,
             )
         except Exception as e:
@@ -260,10 +273,20 @@ class BoxliteBox(Sandbox):
         """Run fixed secure-I/O code through argv, with JSON/base64 in env."""
 
         encoded = encode_guest_request(request)
+        argv = (
+            (
+                "setpriv",
+                "--no-new-privs",
+                "--",
+                "python3",
+                "-c",
+                PRIVATE_GUEST_SCRIPT,
+            )
+            if self._execution_user is not None
+            else ("python3", "-c", PRIVATE_GUEST_SCRIPT)
+        )
         result = self._exec(
-            "python3",
-            "-c",
-            PRIVATE_GUEST_SCRIPT,
+            *argv,
             env={PRIVATE_GUEST_REQUEST_ENV: encoded},
         )
         stdout = result.stdout or ""
@@ -271,6 +294,41 @@ class BoxliteBox(Sandbox):
         if result.exit_code not in (0, None) or (stderr and not stdout):
             raise OSError("BoxLite private file helper returned no result")
         return decode_guest_response(stdout)
+
+    def probe_run_readonly_mount(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        expected_manifest: str,
+    ) -> None:
+        """Use the actual unprivileged VM identity to prove the mount read-only."""
+
+        canonical_manifest = run_readonly_mount_manifest_text(owner_id)
+        if expected_manifest != canonical_manifest or len(expected_manifest.encode("utf-8")) > RUN_READONLY_MOUNT_MANIFEST_MAX_BYTES:
+            raise SandboxRuntimeError("Invalid run read-only mount manifest")
+        virtual_path = f"/mnt/skills/{RUN_READONLY_MOUNT_MANIFEST_PATH}"
+        response = self._execute_private_guest(
+            {
+                "version": 1,
+                "action": "probe_run_readonly_mount",
+                "root": "/mnt/skills",
+                "path": virtual_path,
+                "display_path": virtual_path,
+                "expected_owner_id": str(owner_id),
+                "expected_manifest": expected_manifest,
+            },
+        )
+        data = response.get("data")
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"euid", "owner_id", "readable", "writable"}
+            or type(data.get("euid")) is not int
+            or data["euid"] <= 0
+            or data.get("owner_id") != str(owner_id)
+            or data.get("readable") is not True
+            or data.get("writable") is not False
+        ):
+            raise SandboxRuntimeError("Invalid run read-only mount guest receipt")
 
     def list_secure_files(
         self,

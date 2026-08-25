@@ -8,6 +8,12 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.run_closure import (
+    add_legacy_test_run_asset,
+    add_sealed_test_run,
+    begin_test_run_closure,
+    seal_test_run_closure,
+)
 from support.system_model_seed import seed_system_model_config
 
 from app.audit.models import resolve_system_audit_context
@@ -32,6 +38,7 @@ from app.system_runtime_settings.models import (
 )
 from app.system_runtime_settings.service import SystemRuntimePolicyService
 from app.system_runtime_settings.validation import canonical_policy_payload_for_schema
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.system_runtime_settings import (
     RunRuntimePolicySnapshotRow,
     SystemRuntimePolicyVersionRow,
@@ -223,27 +230,6 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
                     "agent": agent_id,
                 },
             )
-            for run_id in (run_one, run_two, run_bad):
-                await connection.execute(
-                    text(
-                        """INSERT INTO runs
-                        (run_id,thread_id,owner_user_id,status,multitask_strategy,
-                         metadata_json,kwargs_json,origin_trace_id,message_count,
-                         total_input_tokens,total_output_tokens,total_tokens,llm_call_count,
-                         lead_agent_tokens,subagent_tokens,middleware_tokens,
-                         created_at,updated_at,project_id)
-                        VALUES (:run,:thread,:user,'pending','reject','{}','{}',:trace,
-                                0,0,0,0,0,0,0,0,now(),now(),:project)"""
-                    ),
-                    {
-                        "run": run_id,
-                        "thread": thread_id,
-                        "user": str(admin_id),
-                        "trace": str(uuid.uuid4()),
-                        "project": project_id,
-                    },
-                )
-
         audit = AuditService(factory, AuditHmacKeyring.from_environment())
         service = SystemRuntimePolicyService(factory, audit)
         context = resolve_system_audit_context(
@@ -253,6 +239,28 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
 
         async with factory() as session, session.begin():
             locked_v1 = await service.lock_agent_runtime_for_admission(session)
+            run = RunRow(
+                run_id=run_one,
+                thread_id=thread_id,
+                assistant_id=str(agent_id),
+                owner_user_id=str(admin_id),
+                status="pending",
+                multitask_strategy="reject",
+                metadata_json={},
+                kwargs_json={},
+                origin_trace_id=str(uuid.uuid4()),
+                project_id=project_id,
+            )
+            await begin_test_run_closure(session, run)
+            add_legacy_test_run_asset(
+                session,
+                run,
+                asset_kind="agent",
+                dependency_order=0,
+                asset_id=agent_id,
+                version_id=uuid.uuid4(),
+                payload_checksum="a" * 64,
+            )
             await service.admit_run_snapshot(
                 session,
                 project_id=project_id,
@@ -260,6 +268,22 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
                 thread_id=thread_id,
                 run_id=run_one,
                 locked_policy=locked_v1,
+            )
+            await seal_test_run_closure(session, run)
+            await add_sealed_test_run(
+                session,
+                RunRow(
+                    run_id=run_bad,
+                    thread_id=thread_id,
+                    assistant_id=str(agent_id),
+                    owner_user_id=str(admin_id),
+                    status="pending",
+                    multitask_strategy="reject",
+                    metadata_json={},
+                    kwargs_json={},
+                    origin_trace_id=str(uuid.uuid4()),
+                    project_id=project_id,
+                ),
             )
 
         updated_value = default_policy_value(
@@ -288,6 +312,28 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
 
         async with factory() as session, session.begin():
             locked_v2 = await service.lock_agent_runtime_for_admission(session)
+            run = RunRow(
+                run_id=run_two,
+                thread_id=thread_id,
+                assistant_id=str(agent_id),
+                owner_user_id=str(admin_id),
+                status="pending",
+                multitask_strategy="reject",
+                metadata_json={},
+                kwargs_json={},
+                origin_trace_id=str(uuid.uuid4()),
+                project_id=project_id,
+            )
+            await begin_test_run_closure(session, run)
+            add_legacy_test_run_asset(
+                session,
+                run,
+                asset_kind="agent",
+                dependency_order=0,
+                asset_id=agent_id,
+                version_id=uuid.uuid4(),
+                payload_checksum="b" * 64,
+            )
             await service.admit_run_snapshot(
                 session,
                 project_id=project_id,
@@ -296,6 +342,7 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
                 run_id=run_two,
                 locked_policy=locked_v2,
             )
+            await seal_test_run_closure(session, run)
         assert locked_v1.policy_version_id != locked_v2.policy_version_id
         assert locked_v1.revision == 1
         assert locked_v2.revision == 2

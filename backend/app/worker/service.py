@@ -173,11 +173,15 @@ class JobLeaseAuthority:
         *,
         lease_seconds: int,
         repository_builder: RepositoryBuilder = JobRepository,
+        expected_worker_id: uuid.UUID | None = None,
     ) -> None:
+        if expected_worker_id is not None and type(expected_worker_id) is not uuid.UUID:
+            raise TypeError("expected_worker_id must be a UUID")
         self._factory = repository_factory
         self._repository_builder = repository_builder
         self.claim = claim
         self._lease_seconds = lease_seconds
+        self._expected_worker_id = expected_worker_id
         self._cancel_requested = claim.cancel_requested
         self._invalidated = False
         self._heartbeat_callback: Callable[[], Awaitable[None]] | None = None
@@ -186,6 +190,12 @@ class JobLeaseAuthority:
     @property
     def cancel_requested(self) -> bool:
         return self._cancel_requested
+
+    @property
+    def expected_worker_id(self) -> uuid.UUID | None:
+        """Trusted Worker identity that owns this in-process claim."""
+
+        return self._expected_worker_id
 
     def invalidate(self) -> None:
         self._invalidated = True
@@ -357,8 +367,30 @@ class WorkerService:
                 raise _TransientClaimDatabaseUnavailable(error) from error
             raise
         if self._after_claim_commit is not None:
-            await self._after_claim_commit()
+            try:
+                await self._after_claim_commit()
+            except BaseException as error:
+                if claim is not None:
+                    try:
+                        await self._release_unstarted_claim(claim)
+                    except BaseException as release_error:
+                        error.add_note(
+                            f"unstarted claim release also failed: {type(release_error).__name__}",
+                        )
+                raise
         return claim
+
+    async def _release_unstarted_claim(
+        self,
+        claim: JobClaim,
+    ):
+        async with self._repository() as repository:
+            return await repository.release_unstarted_claim(
+                claim.job_id,
+                lease_token=claim.lease_token,
+                attempt_id=claim.attempt_id,
+                expected_worker_id=self.worker_id,
+            )
 
     async def _mark_running(self, claim: JobClaim) -> bool:
         async with self._repository() as repository:
@@ -421,6 +453,12 @@ class WorkerService:
         raise RuntimeError("job handler did not stop after lease loss")
 
     async def _execute_claim(self, claim: JobClaim) -> None:
+        handler_fence_open = False
+
+        def open_handler_fence() -> None:
+            nonlocal handler_fence_open
+            handler_fence_open = True
+
         if claim.job_type in {"private_run", "automation_run"}:
             origin_trace_id = normalize_trace_id(claim.origin_trace_id)
             if origin_trace_id is None:
@@ -428,10 +466,23 @@ class WorkerService:
             trace_context = request_trace_context(origin_trace_id)
         else:
             trace_context = nullcontext()
-        with trace_context:
-            await self._execute_claim_with_trace(claim)
+        try:
+            with trace_context:
+                await self._execute_claim_with_trace(
+                    claim,
+                    open_handler_fence=open_handler_fence,
+                )
+        except asyncio.CancelledError:
+            if not handler_fence_open:
+                await self._release_unstarted_claim(claim)
+            raise
 
-    async def _execute_claim_with_trace(self, claim: JobClaim) -> None:
+    async def _execute_claim_with_trace(
+        self,
+        claim: JobClaim,
+        *,
+        open_handler_fence: Callable[[], None],
+    ) -> None:
         if not await self._mark_running(claim):
             return
         authority = JobLeaseAuthority(
@@ -439,6 +490,7 @@ class WorkerService:
             claim,
             lease_seconds=self._config.lease_seconds,
             repository_builder=self._repository_builder,
+            expected_worker_id=self.worker_id,
         )
         heartbeat_stop = asyncio.Event()
         task_key = _task_key(claim.job_id)
@@ -446,6 +498,7 @@ class WorkerService:
             self._heartbeat_claim(authority, heartbeat_stop),
             name=f"job-heartbeat-{task_key}",
         )
+        open_handler_fence()
         handler_task = asyncio.create_task(
             self._handlers[claim.job_type](claim, authority),
             name=f"job-handler-{task_key}",
@@ -509,6 +562,7 @@ class WorkerService:
             if claim is None:
                 break
             if not self._accepting or (stop_event is not None and stop_event.is_set()):
+                await self._release_unstarted_claim(claim)
                 break
             task = asyncio.create_task(
                 self._execute_claim(claim),
@@ -564,6 +618,7 @@ class WorkerService:
             self.worker_id,
             frozenset(self._handlers),
             self._config.max_concurrent_jobs,
+            execution_domain_affinity=self._execution_domain_affinity,
         )
         self._accepting = True
         self._draining = False

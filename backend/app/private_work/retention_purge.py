@@ -5,13 +5,19 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
-from sqlalchemy import delete, exists, func, select, text, update
+from sqlalchemy import delete, exists, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.sinks import TrustedOperationAuditSink
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateScopeChanged,
+    LockedAccountPrivateScope,
+)
 from app.private_work.execution_approval_audit import (
     HostExecutionApprovalAuditPort,
 )
@@ -27,13 +33,24 @@ from app.private_work.output_delivery_obligation import (
     OutputDeliveryObligationConflict,
     transition_output_delivery_obligation_for_approval_terminal,
 )
+from app.private_work.retention_authority import (
+    RetentionPurgeAuthority,
+    RetentionPurgeAuthorityConflict,
+)
+from app.private_work.run_skill_tree_materializer import (
+    read_materialization_owner_metadata,
+)
+from app.private_work.run_skill_tree_orphan_reaper import (
+    scan_materialization_owner_ids,
+)
 from app.quotas.integration import ProjectQuotaEnforcer
+from deerflow.config.paths import get_paths
 from deerflow.persistence.execution_approvals import (
     EXECUTION_APPROVAL_ACTIVE_STATUSES,
     ExecutionApprovalRequestRow,
     ExecutionApprovalResultReceiptRow,
 )
-from deerflow.persistence.jobs.model import JobRow
+from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
 from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
     MemoryEpisodeRow,
@@ -49,6 +66,7 @@ from deerflow.persistence.private_work.model import (
     RunSkillSecretSnapshotRow,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import (
     AgentDesignSessionRow,
     SkillDesignSessionRow,
@@ -58,8 +76,10 @@ from deerflow.persistence.shared_assets import (
 )
 from deerflow.persistence.user.model import UserRow
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.utils.asyncio import joined_to_thread
 
 _PURGE_NAMESPACE = uuid.UUID("1960a83e-df43-4f8c-85f4-b7193c08a9d0")
+_PROVIDER_MOUNT_OWNER_STATES = frozenset({"acquiring", "mounted", "release_pending"})
 
 
 class RetentionNotEligible(RuntimeError):
@@ -73,6 +93,14 @@ class RetentionExecutionApprovalActive(RuntimeError):
     def __init__(self, *, retry_after: datetime | None = None) -> None:
         self.retry_after = retry_after
         super().__init__("RETENTION_EXECUTION_APPROVAL_ACTIVE")
+
+
+class RetentionExecutionActive(RuntimeError):
+    """A scoped Job has not converged after its durable purge fence."""
+
+    def __init__(self, *, retry_after: datetime | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__("RETENTION_EXECUTION_ACTIVE")
 
 
 class RetentionExecutionApprovalAuditPort(
@@ -107,6 +135,25 @@ def retention_purge_id(idempotency_key: str) -> uuid.UUID:
     return uuid.uuid5(_PURGE_NAMESPACE, idempotency_key)
 
 
+def _provider_lifecycle_owner_job_ids(
+    materialization_root: Path,
+) -> frozenset[uuid.UUID]:
+    owner_ids, invalid_entries = scan_materialization_owner_ids(
+        materialization_root,
+    )
+    if invalid_entries:
+        raise ValueError("materialization owner inventory is incomplete")
+    job_ids: set[uuid.UUID] = set()
+    for owner_id in owner_ids:
+        metadata = read_materialization_owner_metadata(
+            materialization_root,
+            owner_id,
+        )
+        if metadata.state in _PROVIDER_MOUNT_OWNER_STATES:
+            job_ids.add(metadata.job_id)
+    return frozenset(job_ids)
+
+
 @dataclass(frozen=True, slots=True)
 class RetentionCandidate:
     resource_kind: str
@@ -114,6 +161,7 @@ class RetentionCandidate:
     owner_user_id: str | None
     membership_id: uuid.UUID | None
     activation_generation: int | None
+    account_private_generation: int | None
     project_ids: tuple[uuid.UUID, ...]
     eligibility_at: datetime
     idempotency_key: str
@@ -140,20 +188,24 @@ class RetentionCandidate:
         cls,
         *,
         project_id: uuid.UUID,
+        project_generation: int,
         deletion_effective_at: datetime,
         idempotency_key: str,
         request_id: str,
     ) -> RetentionCandidate:
+        if type(project_generation) is not int or project_generation < 1:
+            raise ValueError("project retention generation must be positive")
         return cls(
-            "project",
-            uuid.UUID(str(project_id)),
-            None,
-            None,
-            None,
-            (),
-            deletion_effective_at,
-            idempotency_key,
-            request_id,
+            resource_kind="project",
+            project_id=uuid.UUID(str(project_id)),
+            owner_user_id=None,
+            membership_id=None,
+            activation_generation=project_generation,
+            account_private_generation=None,
+            project_ids=(),
+            eligibility_at=deletion_effective_at,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
         )
 
     @classmethod
@@ -162,6 +214,7 @@ class RetentionCandidate:
         *,
         owner_user_id: str,
         project_ids: tuple[uuid.UUID, ...],
+        account_private_generation: int,
         retention_until: datetime,
         idempotency_key: str,
         request_id: str,
@@ -169,16 +222,19 @@ class RetentionCandidate:
         projects = tuple(sorted({uuid.UUID(str(value)) for value in project_ids}, key=str))
         if not projects:
             raise ValueError("account purge requires retained project scopes")
+        if type(account_private_generation) is not int or account_private_generation < 1:
+            raise ValueError("account purge requires a positive lifecycle generation")
         return cls(
-            "account",
-            None,
-            str(uuid.UUID(str(owner_user_id))),
-            None,
-            None,
-            projects,
-            retention_until,
-            idempotency_key,
-            request_id,
+            resource_kind="account",
+            project_id=None,
+            owner_user_id=str(uuid.UUID(str(owner_user_id))),
+            membership_id=None,
+            activation_generation=None,
+            account_private_generation=account_private_generation,
+            project_ids=projects,
+            eligibility_at=retention_until,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
         )
 
     @classmethod
@@ -198,16 +254,17 @@ class RetentionCandidate:
         if not isinstance(activation_generation, int) or activation_generation < 1:
             raise ValueError("activation_generation must be positive")
         return cls(
-            "former_owner",
-            uuid.UUID(str(project_id)),
-            str(uuid.UUID(str(owner_user_id))),
-            uuid.UUID(str(membership_id)),
-            activation_generation,
-            (),
-            eligibility_at or retention_until,
-            idempotency_key,
-            request_id,
-            early_delete,
+            resource_kind="former_owner",
+            project_id=uuid.UUID(str(project_id)),
+            owner_user_id=str(uuid.UUID(str(owner_user_id))),
+            membership_id=uuid.UUID(str(membership_id)),
+            activation_generation=activation_generation,
+            account_private_generation=None,
+            project_ids=(),
+            eligibility_at=eligibility_at or retention_until,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+            early_delete=early_delete,
         )
 
 
@@ -222,25 +279,67 @@ class RetentionPurgeResult:
 class RetentionPurgeRepository:
     """Session-bound validation and deletion without transaction ownership."""
 
+    def __init__(self) -> None:
+        root = get_paths().run_skill_materialization_root()
+        if not isinstance(root, Path) or not root.is_absolute() or ".." in root.parts or root.name != "run-skill-materializations":
+            raise ValueError("invalid retention materialization root")
+        self._materialization_root = root
+
     async def verify_still_eligible(
         self,
         session: AsyncSession,
         candidate: RetentionCandidate,
         *,
         now: datetime,
+        locked_account_scope: LockedAccountPrivateScope | None = None,
+        coordinator_job_id: uuid.UUID | None = None,
     ) -> tuple[tuple[uuid.UUID, str | None], ...]:
+        """Lock Phase-B scope and install its exact transaction-local Run set.
+
+        The returned scopes are for application deletion topology.  The
+        immediate PostgreSQL closure trigger separately consumes the exact
+        per-Run authority installed before this method returns; commit or
+        rollback clears it.
+        """
+
         now = _aware(now)
         if now < candidate.eligibility_at:
             raise RetentionNotEligible
         if candidate.resource_kind == "project":
             assert candidate.project_id is not None
+            assert candidate.activation_generation is not None
             project = await session.scalar(select(ProjectRow).where(ProjectRow.id == candidate.project_id).with_for_update())
-            if project is None or project.status != "pending_deletion" or project.deletion_effective_at is None or _aware(project.deletion_effective_at) != candidate.eligibility_at or _aware(project.deletion_effective_at) > now:
+            if (
+                project is None
+                or project.status != "pending_deletion"
+                or project.membership_version != candidate.activation_generation
+                or project.deletion_effective_at is None
+                or _aware(project.deletion_effective_at) != candidate.eligibility_at
+                or _aware(project.deletion_effective_at) > now
+            ):
                 raise RetentionNotEligible
             memberships = (
                 (await session.execute(select(ProjectMembershipRow).where(ProjectMembershipRow.project_id == candidate.project_id).order_by(ProjectMembershipRow.project_id, ProjectMembershipRow.user_id).with_for_update())).scalars().all()
             )
-            return tuple((candidate.project_id, membership.user_id) for membership in memberships)
+            scopes = tuple((candidate.project_id, membership.user_id) for membership in memberships)
+            locked_runs = await self._require_execution_quiescent(
+                session,
+                scopes=((candidate.project_id, None),),
+                coordinator_job_id=coordinator_job_id,
+                now=now,
+            )
+            try:
+                await RetentionPurgeAuthority.issue_verified_scope(
+                    session,
+                    purge_id=retention_purge_id(candidate.idempotency_key),
+                    resource_kind=candidate.resource_kind,
+                    project_id=candidate.project_id,
+                    owner_user_id=None,
+                    locked_runs=locked_runs,
+                )
+            except RetentionPurgeAuthorityConflict:
+                raise RetentionExecutionActive from None
+            return scopes
 
         if candidate.resource_kind == "former_owner":
             assert candidate.project_id is not None
@@ -270,27 +369,159 @@ class RetentionPurgeRepository:
                     # The earlier deadline owns deletion. Equal deadlines are
                     # project-owned so only one exact purge case completes.
                     raise RetentionNotEligible
-            return ((candidate.project_id, candidate.owner_user_id),)
+            scopes = ((candidate.project_id, candidate.owner_user_id),)
+            locked_runs = await self._require_execution_quiescent(
+                session,
+                scopes=scopes,
+                coordinator_job_id=coordinator_job_id,
+                now=now,
+            )
+            try:
+                await RetentionPurgeAuthority.issue_verified_scope(
+                    session,
+                    purge_id=retention_purge_id(candidate.idempotency_key),
+                    resource_kind=candidate.resource_kind,
+                    project_id=candidate.project_id,
+                    owner_user_id=candidate.owner_user_id,
+                    locked_runs=locked_runs,
+                )
+            except RetentionPurgeAuthorityConflict:
+                raise RetentionExecutionActive from None
+            return scopes
 
         assert candidate.owner_user_id is not None
-        owner = await session.scalar(select(UserRow).where(UserRow.id == candidate.owner_user_id).with_for_update())
-        if owner is None:
+        assert candidate.account_private_generation is not None
+        if locked_account_scope is None:
+            try:
+                locked_scope = await AccountPrivateLifecycle().lock_stable_scope_for_purge(
+                    session,
+                    candidate.owner_user_id,
+                )
+            except AccountPrivateScopeChanged:
+                raise RetentionNotEligible from None
+        else:
+            locked_scope = locked_account_scope
+        owner = locked_scope._user_row
+        if (
+            locked_scope.project_ids != candidate.project_ids
+            or locked_scope.state != "pending_deletion"
+            or locked_scope.generation != candidate.account_private_generation
+            or getattr(owner, "private_retention_effective_at", None) != candidate.eligibility_at
+        ):
             raise RetentionNotEligible
-        projects = (await session.execute(select(ProjectRow).where(ProjectRow.id.in_(candidate.project_ids)).order_by(ProjectRow.id).with_for_update())).scalars().all()
-        if tuple(sorted((project.id for project in projects), key=str)) != candidate.project_ids:
-            raise RetentionNotEligible
-        memberships = (
-            (await session.execute(select(ProjectMembershipRow).where(ProjectMembershipRow.user_id == candidate.owner_user_id).order_by(ProjectMembershipRow.project_id, ProjectMembershipRow.user_id).with_for_update())).scalars().all()
+        scopes = tuple((project_id, candidate.owner_user_id) for project_id in locked_scope.project_ids)
+        locked_runs = await self._require_execution_quiescent(
+            session,
+            scopes=scopes,
+            coordinator_job_id=coordinator_job_id,
+            now=now,
         )
-        actual_projects = tuple(sorted((membership.project_id for membership in memberships), key=str))
-        if actual_projects != candidate.project_ids or not memberships:
-            raise RetentionNotEligible
-        if any(membership.status == "active" or membership.retention_until is None or _aware(membership.retention_until) > now for membership in memberships):
-            raise RetentionNotEligible
-        maximum_retention = max(_aware(membership.retention_until) for membership in memberships if membership.retention_until is not None)
-        if maximum_retention != candidate.eligibility_at:
-            raise RetentionNotEligible
-        return tuple((membership.project_id, candidate.owner_user_id) for membership in memberships)
+        try:
+            await RetentionPurgeAuthority.issue_verified_scope(
+                session,
+                purge_id=retention_purge_id(candidate.idempotency_key),
+                resource_kind=candidate.resource_kind,
+                project_id=None,
+                owner_user_id=candidate.owner_user_id,
+                project_ids=candidate.project_ids,
+                locked_runs=locked_runs,
+            )
+        except RetentionPurgeAuthorityConflict:
+            raise RetentionExecutionActive from None
+        return scopes
+
+    async def _require_execution_quiescent(
+        self,
+        session: AsyncSession,
+        *,
+        scopes: tuple[tuple[uuid.UUID, str | None], ...],
+        coordinator_job_id: uuid.UUID | None,
+        now: datetime,
+    ) -> tuple[RunRow, ...]:
+        if not scopes:
+            return ()
+        scope_predicates = tuple(JobRow.project_id == project_id if owner_user_id is None else (JobRow.project_id == project_id) & (JobRow.owner_user_id == owner_user_id) for project_id, owner_user_id in scopes)
+        jobs = tuple(
+            (
+                await session.execute(
+                    select(JobRow)
+                    .where(
+                        or_(*scope_predicates),
+                        *(() if coordinator_job_id is None else (JobRow.id != coordinator_job_id,)),
+                    )
+                    .order_by(JobRow.project_id, JobRow.owner_user_id, JobRow.id)
+                    .with_for_update(of=JobRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        active_jobs = tuple(job for job in jobs if job.status in {"leased", "running"} or (job.status in {"queued", "retry_wait"} and job.available_at <= now))
+        runs = tuple(
+            (
+                await session.execute(
+                    select(RunRow)
+                    .where(or_(*tuple(RunRow.project_id == project_id if owner_user_id is None else (RunRow.project_id == project_id) & (RunRow.owner_user_id == owner_user_id) for project_id, owner_user_id in scopes)))
+                    .order_by(
+                        RunRow.project_id,
+                        RunRow.owner_user_id,
+                        RunRow.thread_id,
+                        RunRow.run_id,
+                    )
+                    .with_for_update(of=RunRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        active_attempts = ()
+        if jobs:
+            active_attempts = tuple(
+                (
+                    await session.execute(
+                        select(JobAttemptRow)
+                        .where(
+                            JobAttemptRow.job_id.in_(
+                                tuple(job.id for job in jobs),
+                            ),
+                            JobAttemptRow.outcome.is_(None),
+                        )
+                        .order_by(
+                            JobAttemptRow.job_id,
+                            JobAttemptRow.attempt_number,
+                        )
+                        .with_for_update(of=JobAttemptRow)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if active_jobs or active_attempts:
+            retry_after = max(
+                (deadline for deadline in (job.lease_expires_at for job in active_jobs) if deadline is not None and deadline > now),
+                default=None,
+            )
+            raise RetentionExecutionActive(retry_after=retry_after)
+
+        # A terminal Job/Attempt is not provider-side absence proof.  Provider
+        # lifecycle roots may disappear only through the in-process finalizer's
+        # matching release proof or the advisory-locked orphan reconciler's
+        # matching owner-absence proof.  Re-read the shared durable root after
+        # the exact Job -> Run -> Attempt locks are held; transaction-A/B mount
+        # transitions need that same suffix, so a newly acquiring owner cannot
+        # cross this final gate.
+        exact_job_ids = frozenset(uuid.UUID(str(job.id)) for job in jobs)
+        if exact_job_ids:
+            try:
+                provider_owner_job_ids = await joined_to_thread(
+                    _provider_lifecycle_owner_job_ids,
+                    self._materialization_root,
+                )
+            except Exception:
+                raise RetentionExecutionActive from None
+            if exact_job_ids.intersection(provider_owner_job_ids):
+                raise RetentionExecutionActive
+        return runs
 
     async def physically_purge(
         self,
@@ -393,6 +624,21 @@ class RetentionPurgeRepository:
                 request_id=candidate.request_id,
                 approval_audit=approval_audit,
             )
+        completed = await session.execute(
+            update(UserRow)
+            .where(
+                UserRow.id == candidate.owner_user_id,
+                UserRow.private_retention_state == "pending_deletion",
+                UserRow.private_retention_generation == candidate.account_private_generation,
+                UserRow.private_retention_effective_at == candidate.eligibility_at,
+            )
+            .values(
+                private_retention_state="purged",
+                private_retention_effective_at=None,
+            )
+        )
+        if completed.rowcount != 1:
+            raise RetentionNotEligible
         return len(candidate.project_ids)
 
 
@@ -1345,11 +1591,13 @@ class RetentionPurger:
             raise TypeError("retention purge requires audit authority")
         if type(quota) is not ProjectQuotaEnforcer:
             raise TypeError("retention purge requires quota authority")
+        if repository is not None and type(repository) is not RetentionPurgeRepository:
+            raise TypeError("retention purge repository is invalid")
         self._sessions = sessions
         self._audit = audit
         self._approval_audit = approval_audit
         self._quota = quota
-        self.repository = repository or RetentionPurgeRepository()
+        self.repository = RetentionPurgeRepository() if repository is None else repository
 
     async def purge(
         self,
@@ -1389,6 +1637,7 @@ class RetentionPurger:
 __all__ = [
     "RetentionCandidate",
     "RetentionExecutionApprovalActive",
+    "RetentionExecutionActive",
     "RetentionNotEligible",
     "RetentionPurgeResult",
     "RetentionPurgeRepository",

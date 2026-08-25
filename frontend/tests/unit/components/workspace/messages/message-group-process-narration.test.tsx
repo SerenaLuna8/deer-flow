@@ -163,4 +163,84 @@ describe("MessageGroup process narration", () => {
     expect(html).not.toContain("COLLAPSED_THOUGHT_BODY");
     expect(html).not.toContain("查看其他");
   });
+
+  test("renders a non-narrated process prefix chronologically without a step disclosure", () => {
+    const messages = [
+      {
+        id: "prefix-round-1",
+        type: "ai",
+        content: "",
+        additional_kwargs: { reasoning_content: "PREFIX_THOUGHT" },
+        tool_calls: [
+          {
+            id: "prefix-call-1",
+            name: "read_file",
+            args: { path: "/tmp/one.md", description: "PREFIX_TOOL_1" },
+          },
+        ],
+      },
+      {
+        id: "prefix-call-1-result",
+        type: "tool",
+        name: "read_file",
+        tool_call_id: "prefix-call-1",
+        content: "one",
+      },
+      {
+        id: "prefix-round-2",
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "prefix-call-2",
+            name: "read_file",
+            args: { path: "/tmp/two.md", description: "PREFIX_TOOL_2" },
+          },
+        ],
+      },
+      {
+        id: "prefix-call-2-result",
+        type: "tool",
+        name: "read_file",
+        tool_call_id: "prefix-call-2",
+        content: "two",
+      },
+      {
+        id: "prefix-round-3",
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "prefix-call-3",
+            name: "read_file",
+            args: { path: "/tmp/three.md", description: "PREFIX_TOOL_3" },
+          },
+        ],
+      },
+      {
+        id: "prefix-call-3-result",
+        type: "tool",
+        name: "read_file",
+        tool_call_id: "prefix-call-3",
+        content: "three",
+      },
+    ] as Message[];
+
+    const html = render(messages, { showAllSteps: false });
+
+    expect(html).not.toContain("查看其他");
+    expect(occurrenceCount(html, 'data-testid="thinking-disclosure"')).toBe(1);
+    for (const marker of ["PREFIX_TOOL_1", "PREFIX_TOOL_2", "PREFIX_TOOL_3"]) {
+      expect(occurrenceCount(html, marker)).toBe(1);
+    }
+    expect(html.indexOf('data-testid="thinking-disclosure"')).toBeLessThan(
+      html.indexOf("PREFIX_TOOL_1"),
+    );
+    expect(html.indexOf("PREFIX_TOOL_1")).toBeLessThan(
+      html.indexOf("PREFIX_TOOL_2"),
+    );
+    expect(html.indexOf("PREFIX_TOOL_2")).toBeLessThan(
+      html.indexOf("PREFIX_TOOL_3"),
+    );
+  });
 });

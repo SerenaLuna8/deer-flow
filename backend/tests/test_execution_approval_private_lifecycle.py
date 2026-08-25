@@ -8,10 +8,14 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from app.audit.sinks import TrustedOperationAuditSink
 from app.private_work.execution_approval_lifecycle import (
     claimed_execution_absolute_deadline,
 )
 from app.private_work.privacy_center import PrivacyCenterService
+from app.private_work.retention_purge import RetentionPurger
+from app.private_work.run_skill_tree_orphan_reaper import RunSkillTreeOrphanReaper
+from app.quotas.integration import ProjectQuotaEnforcer
 from app.worker.retention import RetentionPurgeJobHandler
 
 
@@ -177,6 +181,58 @@ class _DeferralJobs:
         self.row.status = "retry_wait"
         self.row.available_at = now + timedelta(seconds=2)
         return SimpleNamespace(changed=True)
+
+
+class _MountOwnerReconciler:
+    def __init__(self) -> None:
+        self.called = False
+
+    async def reconcile_once(self) -> None:
+        self.called = True
+
+
+@pytest.mark.asyncio
+async def test_retention_worker_reconciles_mount_owners_before_phase_b() -> None:
+    reconciler = _MountOwnerReconciler()
+    handler = object.__new__(RetentionPurgeJobHandler)
+    handler._mount_owner_reconciler = reconciler
+
+    await handler(
+        SimpleNamespace(job_type="retention_purge"),
+        object(),
+    )
+
+    assert reconciler.called
+
+
+def test_retention_worker_constructor_rejects_mount_proof_bypasses() -> None:
+    common = {
+        "audit": object.__new__(TrustedOperationAuditSink),
+        "approval_audit": object(),
+        "quota": object.__new__(ProjectQuotaEnforcer),
+    }
+
+    with pytest.raises(TypeError, match="mount-owner reconciler"):
+        RetentionPurgeJobHandler(
+            None,
+            mount_owner_reconciler=_MountOwnerReconciler(),  # type: ignore[arg-type]
+            **common,  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(TypeError, match="purge repository"):
+        RetentionPurgeJobHandler(
+            None,
+            mount_owner_reconciler=object.__new__(RunSkillTreeOrphanReaper),
+            repository=object(),  # type: ignore[arg-type]
+            **common,  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(TypeError, match="purge repository"):
+        RetentionPurger(
+            None,
+            repository=object(),  # type: ignore[arg-type]
+            **common,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.asyncio

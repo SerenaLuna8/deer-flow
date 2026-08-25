@@ -22,6 +22,7 @@ from deerflow.persistence.private_work.memory_dream_prepare_repository import (
     MemoryDreamPrepareNotFound,
     MemoryDreamPrepareRecord,
 )
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 
 class _Transaction:
@@ -89,6 +90,14 @@ class _Revalidator:
         self.calls.append((capabilities, lock))
         if self.error is not None:
             raise self.error
+
+
+class _AccountPrivateLifecycle:
+    async def require_active_after_membership(self, _session, owner_user_id):
+        return AccountPrivateGeneration(
+            owner_user_id=str(owner_user_id),
+            generation=9,
+        )
 
 
 class _Repository:
@@ -168,6 +177,7 @@ def _service(
         repository_builder=lambda _session, *, jobs: repository,
         job_repository_builder=lambda _session: jobs,
         revalidator=revalidator or _Revalidator(),  # type: ignore[arg-type]
+        account_private_lifecycle=_AccountPrivateLifecycle(),
         audit=audit,
     )
 

@@ -72,6 +72,7 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDreamAdmissionRecord,
 )
 from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 from deerflow.runtime.checkpoint_state import (
     CheckpointStateAccessor,
     build_state_mutation_graph,
@@ -839,9 +840,25 @@ async def test_durable_dream_prepare_worker_drains_real_thread_and_activates_bef
             def __init__(self) -> None:
                 self.calls = 0
 
+            async def require_account_private_generation_after_membership(
+                self,
+                session,
+                scope,
+            ):
+                assert session.in_transaction()
+                assert scope.owner_user_id == str(seed.owner_a.user_id)
+                return AccountPrivateGeneration(
+                    owner_user_id=scope.owner_user_id,
+                    generation=1,
+                )
+
             async def admit(self, session, scope, **kwargs):
                 assert session.in_transaction()
                 assert len(await _history_rows(seed)) == 1
+                assert kwargs["account_private_generation"] == AccountPrivateGeneration(
+                    owner_user_id=scope.owner_user_id,
+                    generation=1,
+                )
                 self.calls += 1
                 return MemoryDreamAdmissionRecord(
                     disposition="queued",

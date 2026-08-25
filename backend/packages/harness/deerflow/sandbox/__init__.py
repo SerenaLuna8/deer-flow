@@ -1,8 +1,37 @@
 from .sandbox import Sandbox
-from .sandbox_provider import SandboxProvider, get_sandbox_provider
+from .sandbox_provider import (
+    NotAcquired,
+    Orphaned,
+    ProviderMountAbsentProof,
+    ProviderRunMountLease,
+    ProviderRunMountOwnerAbsentProof,
+    ProviderRunMountOwnerReconciliation,
+    ProviderRunMountOwnerUnknown,
+    Released,
+    RunMountAcquireCancelled,
+    RunMountReleaseCancelled,
+    RunMountReleaseOutcome,
+    RunReadonlyMountSource,
+    SandboxProvider,
+    get_sandbox_provider,
+    merge_run_mount_release_outcome,
+)
 
 __all__ = [
+    "NotAcquired",
+    "Orphaned",
+    "ProviderMountAbsentProof",
+    "ProviderRunMountLease",
+    "ProviderRunMountOwnerAbsentProof",
+    "ProviderRunMountOwnerReconciliation",
+    "ProviderRunMountOwnerUnknown",
+    "Released",
+    "RunMountAcquireCancelled",
+    "RunMountReleaseCancelled",
+    "RunMountReleaseOutcome",
+    "RunReadonlyMountSource",
     "Sandbox",
     "SandboxProvider",
     "get_sandbox_provider",
+    "merge_run_mount_release_outcome",
 ]

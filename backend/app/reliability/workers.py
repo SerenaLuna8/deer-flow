@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -22,6 +23,7 @@ _JOB_CAPABILITIES = frozenset(
         "memory_seal",
     }
 )
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
 class WorkerRegistry:
@@ -59,17 +61,23 @@ class WorkerRegistry:
         capabilities: frozenset[str],
         max_concurrent_jobs: int,
         *,
+        execution_domain_affinity: str | None,
         now: datetime | None = None,
     ) -> None:
         if not isinstance(worker_id, uuid.UUID):
             raise TypeError("worker_id must be a UUID")
         if not 1 <= max_concurrent_jobs <= 128:
             raise ValueError("worker capacity must be between 1 and 128")
+        if execution_domain_affinity is not None and _SHA256_HEX.fullmatch(execution_domain_affinity) is None:
+            raise ValueError(
+                "execution domain affinity must be a lowercase SHA-256 digest",
+            )
         registered_at = self._now(now)
         values = {
             "version": self._version,
             "capabilities_json": self._capabilities(capabilities),
             "max_concurrent_jobs": max_concurrent_jobs,
+            "execution_domain_affinity": execution_domain_affinity,
             "draining": False,
             "started_at": registered_at,
             "heartbeat_at": registered_at,

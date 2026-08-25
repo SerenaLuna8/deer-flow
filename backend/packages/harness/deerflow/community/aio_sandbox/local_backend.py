@@ -13,7 +13,9 @@ import os
 import shlex
 import subprocess
 import time
+import uuid
 from datetime import datetime
+from typing import Literal
 
 from deerflow.community.remote_file_authority import PRIVATE_ROOT_BOOTSTRAP_SCRIPT
 from deerflow.utils.network import get_free_port, release_port
@@ -26,6 +28,19 @@ logger = logging.getLogger(__name__)
 _APPLE_MANAGED_LABEL = "io.actweave.sandbox.managed"
 _APPLE_SCHEMA_LABEL = "io.actweave.sandbox.schema"
 _APPLE_SCHEMA_VERSION = "1"
+_PRIVATE_OWNER_LABEL = "io.actweave.run-mount-owner"
+
+
+def _validated_private_owner_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        parsed = uuid.UUID(hex=value)
+    except (AttributeError, ValueError):
+        raise RuntimeError("Invalid private container owner") from None
+    if parsed.hex != value:
+        raise RuntimeError("Invalid private container owner")
+    return value
 
 
 def _parse_docker_timestamp(raw: str) -> float:
@@ -397,6 +412,7 @@ class LocalContainerBackend(SandboxBackend):
             extra_mounts,
             user_id=user_id,
             private=False,
+            private_owner_id=None,
         )
 
     def create_private(
@@ -406,9 +422,11 @@ class LocalContainerBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         user_id: str | None = None,
+        private_owner_id: str | None = None,
     ) -> SandboxInfo:
         """Start one fresh private container without global config mounts."""
 
+        private_owner_id = _validated_private_owner_id(private_owner_id)
         if not sandbox_id.startswith("private-") or any(not read_only for _host, _container, read_only in (extra_mounts or ())):
             raise RuntimeError("Invalid private container request")
         return self._create(
@@ -417,6 +435,7 @@ class LocalContainerBackend(SandboxBackend):
             extra_mounts,
             user_id=user_id,
             private=True,
+            private_owner_id=private_owner_id,
         )
 
     def _create(
@@ -427,12 +446,20 @@ class LocalContainerBackend(SandboxBackend):
         *,
         user_id: str | None,
         private: bool,
+        private_owner_id: str | None,
     ) -> SandboxInfo:
         """Shared local create path with private discovery/mount isolation."""
 
         del thread_id, user_id
         container_name = f"{self._container_prefix}-{sandbox_id}"
-        start_options = {"include_config_mounts": False} if private else {}
+        start_options = (
+            {
+                "include_config_mounts": False,
+                "private_owner_id": private_owner_id,
+            }
+            if private
+            else {}
+        )
 
         if self._runtime == "container":
             try:
@@ -540,6 +567,213 @@ class LocalContainerBackend(SandboxBackend):
         self._stop_private_container(stop_target)
         if self._runtime == "docker":
             self._release_sandbox_port(info)
+
+    def readback_private_owner_state(
+        self,
+        info: SandboxInfo,
+        owner_id: str,
+    ) -> Literal["active", "absent"]:
+        """Read back exact owner-label presence without guessing on failures."""
+
+        owner_id = _validated_private_owner_id(owner_id) or ""
+        container_name = info.container_name
+        if not container_name or not info.sandbox_id.startswith("private-"):
+            raise RuntimeError("Private container identity is unavailable")
+        if self._runtime == "container":
+            entry = self._inspect_apple_container(container_name)
+            if entry is None:
+                return "absent"
+            configuration = entry.get("configuration")
+            labels = configuration.get("labels") if isinstance(configuration, dict) else None
+        else:
+            entry = self._inspect_docker_container(container_name)
+            if entry is None:
+                return "absent"
+            configuration = entry.get("Config")
+            labels = configuration.get("Labels") if isinstance(configuration, dict) else None
+        if not isinstance(labels, dict) or labels.get(_APPLE_MANAGED_LABEL) != "true" or labels.get(_APPLE_SCHEMA_LABEL) != _APPLE_SCHEMA_VERSION or labels.get(_PRIVATE_OWNER_LABEL) != owner_id:
+            raise RuntimeError("Private container owner label mismatch")
+        return "active"
+
+    def readback_private_run_mount_state(
+        self,
+        info: SandboxInfo,
+        owner_id: str,
+        *,
+        daemon_source: str,
+        container_path: str,
+    ) -> Literal["active", "absent"]:
+        """Read back the exact owner and Docker-daemon mount coordinates."""
+
+        if type(daemon_source) is not str or not daemon_source or type(container_path) is not str or not container_path.startswith("/"):
+            raise RuntimeError("Private run read-only mount mismatch")
+        state = self.readback_private_owner_state(info, owner_id)
+        if state == "absent" or self._runtime != "docker":
+            return state
+        entry = self._inspect_docker_container(info.container_name)
+        if entry is None:
+            return "absent"
+        mounts = entry.get("Mounts")
+        if not isinstance(mounts, list):
+            raise RuntimeError("Private run read-only mount mismatch")
+        matches = [mount for mount in mounts if isinstance(mount, dict) and mount.get("Destination") == container_path]
+        if len(matches) != 1 or matches[0].get("Type") != "bind" or matches[0].get("Source") != daemon_source or matches[0].get("RW") is not False:
+            raise RuntimeError("Private run read-only mount mismatch")
+        return "active"
+
+    def run_readonly_mounts_ready(self) -> bool:
+        """Probe the selected local runtime without exposing daemon output."""
+
+        command = ["docker", "info", "--format", "{{json .ServerVersion}}"] if self._runtime == "docker" else ["container", "list", "--format", "json"]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return False
+            payload = json.loads(result.stdout or "")
+        except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+            return False
+        if self._runtime == "docker":
+            return type(payload) is str and bool(payload.strip())
+        return isinstance(payload, list)
+
+    def ensure_private_owner_absent(
+        self,
+        owner_id: str,
+        *,
+        expected_sandbox_id: str | None,
+    ) -> None:
+        """Destroy and read back every exact owner-labeled private container."""
+
+        owner_id = _validated_private_owner_id(owner_id) or ""
+        if expected_sandbox_id is not None:
+            if type(expected_sandbox_id) is not str or not expected_sandbox_id.startswith("private-") or len(expected_sandbox_id) > 255:
+                raise RuntimeError("Private container identity is unavailable")
+            expected = SandboxInfo(
+                sandbox_id=expected_sandbox_id,
+                sandbox_url="",
+                container_name=(f"{self._container_prefix}-{expected_sandbox_id}"),
+                container_id=(f"{self._container_prefix}-{expected_sandbox_id}"),
+            )
+            state = self.readback_private_owner_state(expected, owner_id)
+            if state == "active":
+                self.destroy_private(expected)
+            if self.readback_private_owner_state(expected, owner_id) != "absent":
+                raise RuntimeError("Private container absence was not confirmed")
+
+        observed = self._list_private_owner_strict(owner_id)
+        for info in observed:
+            if expected_sandbox_id is not None and info.sandbox_id != expected_sandbox_id:
+                raise RuntimeError("Private container owner is ambiguous")
+            self.destroy_private(info)
+        if self._list_private_owner_strict(owner_id):
+            raise RuntimeError("Private container absence was not confirmed")
+
+    def _list_private_owner_strict(
+        self,
+        owner_id: str,
+    ) -> list[SandboxInfo]:
+        """Enumerate one exact owner label; runtime failures are never absence."""
+
+        owner_id = _validated_private_owner_id(owner_id) or ""
+        if self._runtime == "container":
+            try:
+                result = subprocess.run(
+                    ["container", "list", "--format", "json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError(
+                    "Failed to enumerate private containers",
+                ) from exc
+            if result.returncode != 0:
+                raise RuntimeError("Failed to enumerate private containers")
+            entries = _parse_apple_container_payload(
+                result.stdout,
+                operation="private owner list",
+            )
+            infos: list[SandboxInfo] = []
+            prefix = f"{self._container_prefix}-"
+            for entry in entries:
+                container_name = entry.get("id")
+                configuration = entry.get("configuration")
+                labels = configuration.get("labels") if isinstance(configuration, dict) else None
+                if (
+                    not isinstance(container_name, str)
+                    or not container_name.startswith(prefix)
+                    or not isinstance(labels, dict)
+                    or labels.get(_APPLE_MANAGED_LABEL) != "true"
+                    or labels.get(_APPLE_SCHEMA_LABEL) != _APPLE_SCHEMA_VERSION
+                    or labels.get(_PRIVATE_OWNER_LABEL) != owner_id
+                ):
+                    continue
+                sandbox_id = container_name.removeprefix(prefix)
+                if not sandbox_id.startswith("private-"):
+                    raise RuntimeError("Private container identity is unavailable")
+                infos.append(
+                    SandboxInfo(
+                        sandbox_id=sandbox_id,
+                        sandbox_url=_apple_sandbox_url(entry) or "",
+                        container_name=container_name,
+                        container_id=container_name,
+                    )
+                )
+            return infos
+
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "ps",
+                    "-a",
+                    "--filter",
+                    f"label={_APPLE_MANAGED_LABEL}=true",
+                    "--filter",
+                    f"label={_APPLE_SCHEMA_LABEL}={_APPLE_SCHEMA_VERSION}",
+                    "--filter",
+                    f"label={_PRIVATE_OWNER_LABEL}={owner_id}",
+                    "--format",
+                    "{{.Names}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("Failed to enumerate private containers") from exc
+        if result.returncode != 0:
+            raise RuntimeError("Failed to enumerate private containers")
+        names = tuple(name.strip() for name in result.stdout.splitlines() if name.strip())
+        prefix = f"{self._container_prefix}-"
+        infos = []
+        for container_name in names:
+            if not container_name.startswith(prefix):
+                raise RuntimeError("Private container identity is unavailable")
+            entry = self._inspect_docker_container(container_name)
+            if entry is None:
+                continue
+            configuration = entry.get("Config")
+            labels = configuration.get("Labels") if isinstance(configuration, dict) else None
+            if not isinstance(labels, dict) or labels.get(_APPLE_MANAGED_LABEL) != "true" or labels.get(_APPLE_SCHEMA_LABEL) != _APPLE_SCHEMA_VERSION or labels.get(_PRIVATE_OWNER_LABEL) != owner_id:
+                raise RuntimeError("Private container owner label mismatch")
+            sandbox_id = container_name.removeprefix(prefix)
+            if not sandbox_id.startswith("private-"):
+                raise RuntimeError("Private container identity is unavailable")
+            infos.append(
+                SandboxInfo(
+                    sandbox_id=sandbox_id,
+                    sandbox_url="",
+                    container_name=container_name,
+                    container_id=(entry.get("Id") or container_name),
+                )
+            )
+        return infos
 
     def initialize_private_roots(self, info: SandboxInfo) -> None:
         """Create fixed private roots for the image's unprivileged user.
@@ -858,6 +1092,7 @@ class LocalContainerBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         include_config_mounts: bool = True,
+        private_owner_id: str | None = None,
     ) -> str:
         """Start a new container.
 
@@ -885,7 +1120,7 @@ class LocalContainerBackend(SandboxBackend):
                 raise ValueError("Docker sandbox requires a host port")
             port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"
             cmd.extend(["-p", port_mapping])
-        else:
+        if self._runtime == "container" or private_owner_id is not None:
             cmd.extend(
                 [
                     "--label",
@@ -893,6 +1128,13 @@ class LocalContainerBackend(SandboxBackend):
                     "--label",
                     f"{_APPLE_SCHEMA_LABEL}={_APPLE_SCHEMA_VERSION}",
                 ]
+            )
+        if private_owner_id is not None:
+            cmd.extend(
+                [
+                    "--label",
+                    f"{_PRIVATE_OWNER_LABEL}={private_owner_id}",
+                ],
             )
         cmd.extend(["--name", container_name])
 
@@ -1046,6 +1288,30 @@ class LocalContainerBackend(SandboxBackend):
         if len(matches) != 1:
             raise RuntimeError("Failed to parse Apple Container inspect output")
         return matches[0]
+
+    def _inspect_docker_container(self, container_name: str) -> dict | None:
+        """Return one Docker inspect entry, or None only for confirmed absence."""
+
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", container_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"Failed to inspect container {container_name}") from exc
+        if result.returncode != 0:
+            if _is_no_such_container_error(result.stderr or "", container_name):
+                return None
+            raise RuntimeError(f"Failed to inspect container {container_name}: {(result.stderr or '').strip()}")
+        try:
+            payload = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Failed to parse Docker inspect output") from exc
+        if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+            raise RuntimeError("Failed to parse Docker inspect output")
+        return payload[0]
 
     def _wait_for_apple_container_network(self, container_name: str, *, timeout: float) -> dict | None:
         """Wait briefly for Apple Container to assign its default-network IP."""

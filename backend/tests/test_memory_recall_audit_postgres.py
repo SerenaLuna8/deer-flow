@@ -10,14 +10,12 @@ from datetime import UTC, datetime
 import pytest
 import sqlalchemy as sa
 from support.private_thread_seed import seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 
 from app.audit.service import AuditService, _bind_worker_audit_process
 from app.audit.sinks import OperationalAuditSink
 from app.private_work.memory_authority import PrivateRunMemoryAuthority
-from app.private_work.run_repository import (
-    PrivateRunCreate,
-    PrivateRunRepository,
-)
+from app.private_work.run_repository import PrivateRunRepository
 from app.private_work.thread_repository import (
     PrivateThreadRepository,
     ThreadAgentRef,
@@ -31,6 +29,8 @@ from deerflow.persistence.private_work.memory_document_model import MemoryEpisod
 from deerflow.persistence.private_work.memory_document_repository import (
     REMEMBER_RUN_LIMIT,
 )
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 
 def _audit_sink(factory) -> OperationalAuditSink:
@@ -67,12 +67,19 @@ async def test_recall_search_stays_available_after_durable_run_audit_cap(
                 thread_id=thread_id,
                 agent=ThreadAgentRef(seed.project_agent_id, "project"),
             )
-            await PrivateRunRepository(session).create(
-                scope=scope,
-                thread_id=thread_id,
-                request=PrivateRunCreate(
+            await add_sealed_test_run(
+                session,
+                RunRow(
                     run_id=run_id,
+                    thread_id=thread_id,
+                    assistant_id=str(seed.project_agent_id),
+                    owner_user_id=scope.owner_user_id,
+                    status="pending",
+                    multitask_strategy="reject",
+                    metadata_json={},
+                    kwargs_json={},
                     origin_trace_id=trace_id,
+                    project_id=uuid.UUID(scope.project_id),
                 ),
             )
             session.add(
@@ -112,6 +119,10 @@ async def test_recall_search_stays_available_after_durable_run_audit_cap(
                     run_id=run_id,
                     occurrence_id=None,
                     max_attempts=3,
+                    owner_private_generation=AccountPrivateGeneration(
+                        owner_user_id=scope.owner_user_id,
+                        generation=1,
+                    ),
                     retry_safety="safe",
                     origin_trace_id=trace_id,
                 )

@@ -111,6 +111,12 @@ or downgrade an application database.
 
 - `make setup-db` accepts a new empty target only and initializes application,
   LangGraph, system-asset, and default-project state.
+- `make reset-db` is an explicit destructive operator action, never a runtime
+  startup step. Stop application services first. The command rebuilds only the
+  exact `DATABASE_URL` target's `public` schema, requires the exact database name
+  through an interactive prompt or `CONFIRM_DATABASE`, rejects PostgreSQL's
+  protected databases, then delegates to the same complete Schema V1 bootstrap.
+  It never prints credentials or restarts services.
 - Fresh setup seeds one internal tool-call hard limit at `200`. Every internal
   tool occurrence counts uniformly; the Lead and all delegated Agents share one
   count within a Run, while different Runs remain isolated. This seed belongs to
@@ -330,7 +336,6 @@ or downgrade an application database.
   Activation requires every required declaration to be configured. Secret
   values never enter Skill bytes, public readiness, audit metadata, or API
   responses.
-
 #### Runtime admission and MCP
 
 - Runtime-visible Skill names are unique case-insensitively within a project,
@@ -339,12 +344,20 @@ or downgrade an application database.
   resolution rejects any legacy conflicting closure.
 - Every Run Admission resolves current Agent/Skill asset pointers, including later
   messages in an existing Thread, Automation, Channel, edit, regeneration, and
-  fork paths. It then persists exact versions, bytes, checksums, domain-secret
-  Generation references, MCP configurations, and policy in one self-contained Run Snapshot. Worker execution
-  and retries decode only that snapshot and never reread Current Versions.
+  fork paths. It then persists an immutable referential Run closure: exact
+  Agent/MCP payloads, Skill version-4 manifests and database-protected exact
+  Version pins, checksums, domain-secret Generation references, and policy.
+  Skill bytes remain owned once by the pinned immutable Version. Worker
+  execution and retries may read only that exact Version and never reread
+  Current Versions.
 - A newly admitted Run pins exact versions and checksums. Unrelated catalog
   changes do not invalidate it, while revoked membership, capability, binding,
   secret Generation, or lease fails at the applicable execution boundary.
+- Every Skill materialization control/fingerprint check and readonly-mount
+  publish fence is one transaction ordered as shared `Project → Membership`,
+  then `Job → Run → exact active Attempt`. The execution suffix accepts only
+  that transaction's locked Project context, never relocks governance or User,
+  and binds the claim Attempt to the trusted Worker identity.
 - A project Skill is passive until explicit slash activation or verified reading
   of its admitted `SKILL.md`. Active policy restricts model schemas, execution,
   and `tool_search`; stale or malformed evidence fails closed.
@@ -432,9 +445,11 @@ or downgrade an application database.
 - Context Gauge and automatic compaction share the immutable provider-request
   profile created after Lead tools and request-shaping middleware are assembled.
   The profile stores only bounded facts and digests, while the final provider
-  guard records the same estimator's measurement. Idle Gauge reuse is valid only
-  for the same model, Agent closure, runtime-policy fingerprint, interactive
-  workload, and an MCP-free closure; every unprovable case fails with the typed
+  guard records the same estimator's measurement. Idle Gauge reuse requires the
+  same model payload, exact asset facts, runtime-policy compatibility, and
+  interactive workload. MCP presence alone does not invalidate this
+  last-confirmed idle projection; the next Run still performs fresh MCP discovery
+  and freezes its own profile. Every other unprovable case fails with the typed
   unsupported result rather than using the legacy messages-only estimate.
 - A Run's frozen `token_usage.enabled` value governs every public usage lane:
   Journal, SSE, Sub-Agent events, settlement, and REST checkpoint projection.
@@ -453,6 +468,17 @@ or downgrade an application database.
   forbidden. Audit and committed usage ledgers are append-only.
 - Retention deletes exact project/owner dependencies in documented order; it
   never broadens scope or cascades through retained governance references.
+- A sealed Run closure can be removed only by owning-Run cascade or by the
+  transaction-local `RetentionPurgeAuthority` exact Run set issued after the
+  same transaction locks and revalidates eligibility and execution quiescence.
+  Maintenance GUCs never authorize closure deletion, and Skill refs remain
+  parent-cascade-only.
+- Phase-B retention never treats terminal Job/Attempt rows as provider mount
+  absence proof. The Worker reconciles orphan owners outside the destructive
+  transaction; after `Job -> Run -> Attempt` locks, the repository still
+  blocks an exact scoped owner in `acquiring`, `mounted`, or
+  `release_pending` until a matching provider-absence proof has removed its
+  durable owner root.
 - Private Thread deletion is an exact project/owner force-revocation boundary:
   it terminalizes matching Run/Job/Attempt and approval authority before the
   tombstone commits. Raw checkpoint removal is idempotent recovery work fenced
@@ -525,10 +551,10 @@ current process/runtime settings as one baseline rather than as public upgrade
 milestones. Removed top-level policy keys remain fail-closed tombstones; use
 `make config-upgrade` rather than manually guessing a future migration.
 
-`make setup-db` is the only command allowed to consume the bootstrap DeepSeek Key
-and persist three independently encrypted model-owned copies. Normal Gateway, Worker, Scheduler,
-doctor, and Compose startup must not broadcast provider keys as process-wide
-model configuration.
+`make setup-db` and `make reset-db` are the only commands allowed to consume the
+bootstrap DeepSeek Key and persist three independently encrypted model-owned
+copies. Normal Gateway, Worker, Scheduler, doctor, and Compose startup must not
+broadcast provider keys as process-wide model configuration.
 
 ## Common change paths
 
@@ -592,10 +618,34 @@ source constant changes, update this section and the owning detailed document.
 - Project Skill archives remain limited to 100 MiB total, 64 MiB per regular
   file, and 16384 regular files; archive-create routes have a scoped
   160 MiB wire limit.
-- Run asset snapshots use the self-contained v3 codec. Skill bytes are stored as
-  one canonical zlib-6 frame; each encoded asset and the cumulative encoded
-  assets for one Run are independently limited to 80 MiB. Legacy v2 snapshots
-  remain readable under the archive file-count, per-file, and total-size bounds.
+- New Skill Run asset snapshots use a strict byte-free v4 manifest plus an exact
+  immutable Version reference. Retained v2 inline-Base64 and v3 compressed
+  Skill rows remain readable only through the bounded legacy source adapter,
+  one dependency-order row at a time. Corrupt or source-mismatched legacy rows
+  fail closed; execution never falls back to Current Version and never rewrites
+  them as v4. Worker materialization uses a conservative legacy-exclusive total
+  process gate plus the separately accepted v4 aggregate gate, followed by the
+  v4 bytes-plus-rows batch limits.
+- New-write rollback is centralized behind the restart-frozen
+  `run_skill_snapshots.writer_mode`; `v4_reference` is the default and never
+  reads Skill file content or acquires the legacy Admission gate. Controlled R1
+  rollback may select `legacy_v3` only when every Gateway and Scheduler uses the
+  same baked artifact version and canonical policy digest. Missing or mixed
+  identity fails startup. Release v2 fixes the source/Skill ceiling at 36 MiB,
+  per-Skill codec envelope at 256 MiB, and cumulative encoded Skill JSON per Run
+  at 48 MiB; the resource-rejected v1 artifact and digest are never ready. The
+  legacy writer preflights metadata before a fixed,
+  database-wide, non-blocking transaction advisory lock, reads one exact locked
+  Skill at a time in dependency order, and joins cancellation to codec
+  completion. Busy and Scheduler oversize remain retryable Admissions without a
+  terminal occurrence; interactive oversize is a stable 413. Admin operations
+  exposes only the non-secret mode, artifact, digest, and ready readback.
+- Agent/MCP and current compatibility codec JSON remains bounded; cumulative encoded
+  assets for one Run are independently limited to 80 MiB, and each encoded asset
+  uses the same limit. Historical v2 Skill rows have a reader-only
+  128 MiB ceiling so the full retained ppt-master fixture remains executable;
+  this does not widen the writer. The Skill v4 manifest has its separate
+  256 KiB database gate.
 - Current-message vision injects at most four unique images with a 20 MiB per-image limit.
 - Fresh installs seed the `inspect_image` end-to-end deadline at 60 seconds; administrators may set `5..120`, and each Run freezes the selected value.
 - Agent Builder's one-turn model-generation deadline defaults to and is capped at 600 seconds; its dedicated proxy route retains a 60-second settlement margin.

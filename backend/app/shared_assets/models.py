@@ -100,6 +100,23 @@ class ResolvedSkillSnapshot(ResolvedAssetSnapshot):
 
 
 @dataclass(frozen=True)
+class ResolvedSkillVersionSnapshot(ResolvedAssetSnapshot):
+    """Metadata-only exact Skill Version resolved during Run Admission."""
+
+    file_count: int
+    content_size_bytes: int
+    secret_requirements: tuple[SkillSecretRequirementSnapshot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RunSkillVersionManifest(ResolvedAssetSnapshot):
+    """Strict byte-free facts decoded from one persisted v4 Skill manifest."""
+
+    file_count: int
+    content_size_bytes: int
+
+
+@dataclass(frozen=True)
 class ResolvedMcpSnapshot(ResolvedAssetSnapshot):
     definition: Mapping[str, object]
     secret_generation_ids: tuple[uuid.UUID, ...]
@@ -137,7 +154,7 @@ class ResolvedRunAssetClosure:
 
     lead_agent: ResolvedAgentSnapshot
     delegated_agents: tuple[ResolvedAgentSnapshot, ...]
-    skills: tuple[ResolvedSkillSnapshot, ...]
+    skills: tuple[ResolvedSkillVersionSnapshot, ...]
     mcps: tuple[ResolvedMcpSnapshot, ...]
     main_skill_version_ids: tuple[uuid.UUID, ...]
     main_mcp_version_ids: tuple[uuid.UUID, ...]
@@ -152,7 +169,7 @@ class ResolvedRunAssetClosure:
         if (
             type(self.lead_agent) is not ResolvedAgentSnapshot
             or any(type(item) is not ResolvedAgentSnapshot for item in self.delegated_agents)
-            or any(type(item) is not ResolvedSkillSnapshot for item in self.skills)
+            or any(type(item) is not ResolvedSkillVersionSnapshot for item in self.skills)
             or any(type(item) is not ResolvedMcpSnapshot for item in self.mcps)
             or any(not isinstance(value, uuid.UUID) for value in self.main_skill_version_ids)
             or any(not isinstance(value, uuid.UUID) for value in self.main_mcp_version_ids)

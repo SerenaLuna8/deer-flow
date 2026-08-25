@@ -1,7 +1,10 @@
+import errno
 import hashlib
 import logging
 import threading
+import uuid
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
@@ -14,10 +17,21 @@ from deerflow.sandbox.local.local_sandbox import (
 )
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
+    Orphaned,
     PrivateSandboxLease,
+    ProviderMountAbsentProof,
+    ProviderRunMountLease,
+    ProviderRunMountOwnerAbsentProof,
+    ProviderRunMountOwnerReconciliation,
+    ProviderRunMountOwnerUnknown,
+    Released,
+    RunMountReleaseOutcome,
+    RunReadonlyMountSource,
     RunScopedReadOnlyMount,
     SandboxProvider,
+    merge_run_mount_release_outcome,
     private_sandbox_relative_root,
+    validate_run_readonly_mount_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,6 +56,16 @@ _ACP_WORKSPACE_VIRTUAL_PREFIX = "/mnt/acp-workspace"
 # its accumulated ``_agent_written_paths`` (read_file falls
 # back to no reverse resolution, which is the same behaviour as a fresh run).
 DEFAULT_MAX_CACHED_THREAD_SANDBOXES = 256
+_RUN_SKILLS_CONTAINER_PATH = "/mnt/skills"
+
+
+@dataclass(frozen=True, slots=True)
+class _LocalRunReadonlyMount:
+    lease: ProviderRunMountLease
+    private_lease: PrivateSandboxLease
+    source: RunReadonlyMountSource
+    probe_relative_path: str
+    probe_content: str
 
 
 class LocalSandboxProvider(SandboxProvider):
@@ -78,6 +102,33 @@ class LocalSandboxProvider(SandboxProvider):
     uses_thread_data_mounts = True
     needs_upload_permission_adjustment = False
 
+    def run_readonly_mounts_ready(self) -> bool:
+        """Native Local execution consumes the validated Worker path directly."""
+
+        try:
+            self._require_run_readonly_mount_configuration()
+        except Exception:
+            return False
+        return True
+
+    @staticmethod
+    def _require_run_readonly_mount_configuration() -> str:
+        """Return the fixed mount root or reject a bypass-capable Local mode."""
+
+        from deerflow.config import get_app_config
+
+        config = get_app_config()
+        configured_prefix = config.skills.container_path.rstrip("/") or "/"
+        if config.sandbox.allow_host_bash is not False:
+            raise PublicRunError(
+                PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED,
+            )
+        if configured_prefix != _RUN_SKILLS_CONTAINER_PATH:
+            raise ValueError(
+                "Run-scoped skills require the fixed /mnt/skills root",
+            )
+        return configured_prefix
+
     def __init__(self, max_cached_threads: int = DEFAULT_MAX_CACHED_THREAD_SANDBOXES):
         """Initialize the local sandbox provider with static path mappings.
 
@@ -92,6 +143,12 @@ class LocalSandboxProvider(SandboxProvider):
         self._run_sandboxes: OrderedDict[tuple[str, str, str], LocalSandbox] = OrderedDict()
         self._run_sandbox_ids: dict[str, tuple[str, str, str]] = {}
         self._active_private_runs: dict[tuple[str, str], str] = {}
+        self._run_readonly_mount_owner_ids: set[uuid.UUID] = set()
+        self._run_readonly_mounts: dict[str, _LocalRunReadonlyMount] = {}
+        self._run_readonly_mount_outcomes: dict[
+            str,
+            RunMountReleaseOutcome,
+        ] = {}
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
 
@@ -344,6 +401,218 @@ class LocalSandboxProvider(SandboxProvider):
                     self._active_private_runs.pop(active_key, None)
             raise
 
+    @staticmethod
+    def _validated_run_readonly_mount_source(
+        source: RunReadonlyMountSource,
+    ) -> tuple[str, str]:
+        from deerflow.config.paths import get_paths
+
+        validated = validate_run_readonly_mount_source(
+            source,
+            trusted_root=get_paths().run_skill_materialization_root(),
+        )
+        return validated.probe_relative_path, validated.probe_content
+
+    def prepare_run_readonly_mount(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        source: RunReadonlyMountSource,
+    ) -> ProviderRunMountLease:
+        probe_relative_path, probe_content = self._validated_run_readonly_mount_source(source)
+        with self._lock:
+            if source.owner_id in self._run_readonly_mount_owner_ids:
+                raise SandboxRuntimeError(
+                    "Run read-only mount owner is already registered",
+                )
+            self._run_readonly_mount_owner_ids.add(source.owner_id)
+
+        try:
+            private_lease = self.acquire_private(
+                thread_id,
+                scope=scope,
+                user_id=scope.owner_user_id,
+                run_id=run_id,
+                mounts=(
+                    RunScopedReadOnlyMount(
+                        run_id=run_id,
+                        container_path=_RUN_SKILLS_CONTAINER_PATH,
+                        host_path=str(source.worker_root),
+                    ),
+                ),
+            )
+        except BaseException:
+            with self._lock:
+                self._run_readonly_mount_owner_ids.discard(source.owner_id)
+            raise
+        lease = ProviderRunMountLease(
+            owner_id=source.owner_id,
+            provider_kind="local",
+            sandbox_id=private_lease.sandbox_id,
+            mount_lease_id=uuid.uuid4().hex,
+        )
+        entry = _LocalRunReadonlyMount(
+            lease=lease,
+            private_lease=private_lease,
+            source=source,
+            probe_relative_path=probe_relative_path,
+            probe_content=probe_content,
+        )
+        with self._lock:
+            self._run_readonly_mounts[lease.mount_lease_id] = entry
+        try:
+            return self.readback_run_readonly_mount(lease)
+        except BaseException:
+            self.release_run_readonly_mount(lease)
+            raise
+
+    def readback_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> ProviderRunMountLease:
+        if type(lease) is not ProviderRunMountLease:
+            raise SandboxRuntimeError("Invalid provider run mount lease")
+        with self._lock:
+            entry = self._run_readonly_mounts.get(lease.mount_lease_id)
+        if entry is None or entry.lease != lease:
+            raise SandboxRuntimeError("Run read-only mount lease is not active")
+        sandbox = self.get(lease.sandbox_id)
+        if sandbox is None:
+            raise SandboxRuntimeError("Run read-only mount sandbox is absent")
+        virtual_probe = f"{_RUN_SKILLS_CONTAINER_PATH}/{entry.probe_relative_path}"
+        try:
+            if sandbox.read_file(virtual_probe) != entry.probe_content:
+                raise SandboxRuntimeError("Run read-only mount readback changed")
+            write_probe = f"{_RUN_SKILLS_CONTAINER_PATH}/.actweave-write-probe-{lease.mount_lease_id}"
+            try:
+                sandbox.write_file(write_probe, "probe")
+            except OSError as exc:
+                if exc.errno != errno.EROFS:
+                    raise SandboxRuntimeError(
+                        "Run read-only mount write probe was inconclusive",
+                    ) from exc
+            else:
+                local_probe = entry.source.worker_root / Path(write_probe).name
+                try:
+                    local_probe.unlink(missing_ok=True)
+                finally:
+                    raise SandboxRuntimeError("Run read-only mount is writable")
+        except SandboxRuntimeError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise SandboxRuntimeError(
+                "Run read-only mount readback failed",
+            ) from exc
+        return lease
+
+    def release_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> RunMountReleaseOutcome:
+        if type(lease) is not ProviderRunMountLease:
+            raise SandboxRuntimeError("Invalid provider run mount lease")
+        with self._lock:
+            prior = self._run_readonly_mount_outcomes.get(
+                lease.mount_lease_id,
+            )
+            entry = self._run_readonly_mounts.get(lease.mount_lease_id)
+        if prior is not None:
+            if type(prior) is Released and prior.matches_lease(lease):
+                return prior
+            if type(prior) is Orphaned and prior.matches_lease(lease):
+                pass
+            else:
+                raise SandboxRuntimeError("Run read-only mount lease mismatch")
+        if entry is None or entry.lease != lease:
+            raise SandboxRuntimeError("Run read-only mount lease is not active")
+
+        try:
+            self.release_private(entry.private_lease)
+        except Exception:
+            observed: RunMountReleaseOutcome = Orphaned.from_lease(
+                lease,
+                reason_code="release_readback_unknown",
+                last_lifecycle_state="release_pending",
+            )
+        else:
+            observed = (
+                Released(proof=ProviderMountAbsentProof.from_lease(lease))
+                if self.get(lease.sandbox_id) is None
+                else Orphaned.from_lease(
+                    lease,
+                    reason_code="release_readback_unknown",
+                    last_lifecycle_state="release_pending",
+                )
+            )
+
+        outcome = observed if prior is None else merge_run_mount_release_outcome(prior, observed)
+        with self._lock:
+            self._run_readonly_mount_outcomes[lease.mount_lease_id] = outcome
+            if type(outcome) is Released:
+                self._run_readonly_mounts.pop(lease.mount_lease_id, None)
+                self._run_readonly_mount_owner_ids.discard(lease.owner_id)
+        return outcome
+
+    def ensure_run_readonly_mount_owner_absent(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        persisted_lease: ProviderRunMountLease | None,
+    ) -> ProviderRunMountOwnerReconciliation:
+        """Reconcile the process-local mount map for one durable owner."""
+
+        if type(owner_id) is not uuid.UUID:
+            raise SandboxRuntimeError("Invalid run read-only mount owner")
+        if persisted_lease is not None and (type(persisted_lease) is not ProviderRunMountLease or persisted_lease.owner_id != owner_id or persisted_lease.provider_kind != "local"):
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="local",
+                reason_code="owner_lease_mismatch",
+            )
+        with self._lock:
+            entries = tuple(entry for entry in self._run_readonly_mounts.values() if entry.lease.owner_id == owner_id)
+            owner_registered = owner_id in self._run_readonly_mount_owner_ids
+        if len(entries) > 1:
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="local",
+                reason_code="owner_mount_ambiguous",
+            )
+        if entries:
+            entry = entries[0]
+            if persisted_lease is not None and entry.lease != persisted_lease:
+                return ProviderRunMountOwnerUnknown(
+                    owner_id=owner_id,
+                    provider_kind="local",
+                    reason_code="owner_lease_mismatch",
+                )
+            try:
+                outcome = self.release_run_readonly_mount(entry.lease)
+            except Exception:
+                return ProviderRunMountOwnerUnknown(
+                    owner_id=owner_id,
+                    provider_kind="local",
+                    reason_code="owner_release_unknown",
+                )
+            if type(outcome) is not Released:
+                return ProviderRunMountOwnerUnknown(
+                    owner_id=owner_id,
+                    provider_kind="local",
+                    reason_code="owner_release_unknown",
+                )
+        elif owner_registered:
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="local",
+                reason_code="owner_acquire_in_progress",
+            )
+        return ProviderRunMountOwnerAbsentProof(
+            owner_id=owner_id,
+            provider_kind="local",
+        )
+
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
 
@@ -455,17 +724,7 @@ class LocalSandboxProvider(SandboxProvider):
             raise ValueError("Local private runtime requires exactly one skills mount")
         mount = mounts[0]
         skills_prefix = mount.container_path.rstrip("/")
-        try:
-            from deerflow.config import get_app_config
-
-            app_config = get_app_config()
-            configured_prefix = app_config.skills.container_path.rstrip("/")
-            allow_host_bash = bool(getattr(getattr(app_config, "sandbox", None), "allow_host_bash", False))
-        except Exception:
-            configured_prefix = skills_prefix
-            allow_host_bash = False
-        if allow_host_bash:
-            raise PublicRunError(PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED)
+        configured_prefix = self._require_run_readonly_mount_configuration()
         if skills_prefix != configured_prefix:
             raise ValueError("Run-scoped skills must replace the configured skills root")
         host_root = Path(mount.host_path).resolve()
@@ -576,6 +835,9 @@ class LocalSandboxProvider(SandboxProvider):
             self._run_sandboxes.clear()
             self._run_sandbox_ids.clear()
             self._active_private_runs.clear()
+            self._run_readonly_mount_owner_ids.clear()
+            self._run_readonly_mounts.clear()
+            self._run_readonly_mount_outcomes.clear()
             _singleton = None
         for sandbox in run_sandboxes:
             sandbox.close_private_file_authority()

@@ -51,6 +51,7 @@ from app.shared_assets.models import (
     ResolvedRunAssetClosure,
     ResolvedRunAssetFact,
     ResolvedSkillSnapshot,
+    ResolvedSkillVersionSnapshot,
     SkillAssetRef,
     SkillSecretRequirementSnapshot,
     WorkflowStatus,
@@ -238,7 +239,17 @@ class ProjectAssetResolver:
                 context,
                 selection,
             )
-            skills = tuple([await self._skill_snapshot(session, context, record, 0) for record in plan.skill_records])
+            skills = tuple(
+                [
+                    await self._skill_version_snapshot(
+                        session,
+                        context,
+                        record,
+                        0,
+                    )
+                    for record in plan.skill_records
+                ]
+            )
             mcps = tuple([await self._mcp_snapshot(session, context, record, 0) for record in plan.mcp_records])
             return await self._finalize_run_closure(
                 session,
@@ -504,7 +515,7 @@ class ProjectAssetResolver:
                 0,
                 exact_dependency_records=((skill_record,), ()),
             )
-            skill = await self._skill_snapshot(
+            skill = await self._skill_version_snapshot(
                 session,
                 context,
                 skill_record,
@@ -762,7 +773,7 @@ class ProjectAssetResolver:
         *,
         lead: ResolvedAgentSnapshot,
         delegated_agents: tuple[ResolvedAgentSnapshot, ...],
-        skills: tuple[ResolvedSkillSnapshot, ...],
+        skills: tuple[ResolvedSkillVersionSnapshot, ...],
         mcps: tuple[ResolvedMcpSnapshot, ...],
         main_skill_version_ids: tuple[uuid.UUID, ...],
         main_mcp_version_ids: tuple[uuid.UUID, ...],
@@ -1364,6 +1375,54 @@ class ProjectAssetResolver:
             dependency_version_ids=(),
             files=files,
             secret_requirements=tuple(requirements),
+        )
+
+    async def _skill_version_snapshot(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        record: _ResolvedRecord,
+        generation: int,
+    ) -> ResolvedSkillVersionSnapshot:
+        """Resolve sealed Skill facts without selecting immutable file bytes."""
+
+        del session
+        version = record.version
+        if (
+            not isinstance(version, SkillVersionRow)
+            or (record.scope is AssetScope.SYSTEM and version.revoked_at is not None)
+            or version.files_sealed is not True
+            or type(version.file_count) is not int
+            or not 1 <= version.file_count <= 16_384
+            or type(version.content_size_bytes) is not int
+            or not 0 <= version.content_size_bytes <= 100 * 1024 * 1024
+        ):
+            raise AssetResolutionUnavailable(context.request_id)
+        try:
+            requirements = tuple(
+                SkillSecretRequirementSnapshot(
+                    name=item.name,
+                    target_env=item.target_env,
+                    optional=item.optional,
+                )
+                for item in parse_skill_secret_declarations(
+                    version.secret_requirements,
+                    request_id=context.request_id,
+                )
+            )
+        except SharedAssetError:
+            raise AssetResolutionUnavailable(context.request_id) from None
+        return ResolvedSkillVersionSnapshot(
+            kind=AssetKind.SKILL,
+            scope=record.scope,
+            asset_id=record.asset.id,
+            version_id=version.id,
+            checksum=version.payload_checksum,
+            catalog_generation=generation,
+            dependency_version_ids=(),
+            file_count=version.file_count,
+            content_size_bytes=version.content_size_bytes,
+            secret_requirements=requirements,
         )
 
     async def _mcp_snapshot(

@@ -64,6 +64,7 @@ from deerflow.persistence.private_work import (
     RunMcpSecretSnapshotRow,
     RunMemoryContextSnapshotRow,
     RunSkillSecretSnapshotRow,
+    RunSkillVersionRefRow,
 )
 from deerflow.persistence.projects.invitation_model import ProjectInvitationRow
 from deerflow.persistence.projects.invitation_rate_limit_model import (
@@ -196,6 +197,7 @@ __all__ = [
     "RunMemoryContextSnapshotRow",
     "RunModelConfigSnapshotRow",
     "RunRuntimePolicySnapshotRow",
+    "RunSkillVersionRefRow",
     "RunSkillSecretSnapshotRow",
     "RunRow",
     "ScheduledTaskRow",

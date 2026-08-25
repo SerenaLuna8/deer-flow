@@ -8,7 +8,15 @@ from replay_provider import ReplayChatModel, hash_replay_input
 
 def test_replay_turn_can_derive_deterministic_chunks_without_changing_recorded_bytes(tmp_path) -> None:
     input_messages = [HumanMessage(content="hello")]
-    recorded = AIMessage(content="hi from replay.", id="recorded-message")
+    recorded = AIMessage(
+        content="hi from replay.",
+        id="recorded-message",
+        usage_metadata={
+            "input_tokens": 12,
+            "output_tokens": 4,
+            "total_tokens": 16,
+        },
+    )
     fixture = tmp_path / "fixture.json"
     fixture.write_text(
         json.dumps(
@@ -35,3 +43,5 @@ def test_replay_turn_can_derive_deterministic_chunks_without_changing_recorded_b
     assert [chunk.message.content for chunk in chunks] == list(recorded.content)
     assert "".join(str(chunk.message.content) for chunk in chunks) == recorded.content
     assert {chunk.message.id for chunk in chunks} == {recorded.id}
+    assert all(chunk.message.usage_metadata is None for chunk in chunks[:-1])
+    assert chunks[-1].message.usage_metadata == recorded.usage_metadata

@@ -24,6 +24,7 @@ from deerflow.persistence.shared_assets import (
     McpServerVersionRow,
     McpToolDiscoveryAttemptRow,
 )
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 McpToolDiscoveryTrigger = Literal["auto", "manual"]
 McpToolDiscoveryResultStatus = Literal["succeeded", "failed", "cancelled"]
@@ -120,6 +121,7 @@ class McpToolDiscoveryAttemptRepository:
         secret_digest: str,
         trigger: McpToolDiscoveryTrigger,
         idempotency_key: str,
+        account_private_generation: AccountPrivateGeneration,
     ) -> McpToolDiscoveryAttemptRecord:
         project = _uuid(project_id, field="project_id")
         requester = str(_uuid(requested_by_user_id, field="requested_by_user_id"))
@@ -129,6 +131,8 @@ class McpToolDiscoveryAttemptRepository:
         closure_digest = _digest(secret_digest, field="secret_digest")
         if trigger not in {"auto", "manual"}:
             raise ValueError("unsupported MCP discovery trigger")
+        if type(account_private_generation) is not AccountPrivateGeneration or account_private_generation.owner_user_id != requester:
+            raise ValueError("MCP discovery account-private generation mismatch")
 
         await self._require_visible_version(
             project_id=project,
@@ -146,6 +150,7 @@ class McpToolDiscoveryAttemptRepository:
                 occurrence_id=None,
                 origin_trace_id=None,
                 max_attempts=1,
+                owner_private_generation=account_private_generation,
                 retry_safety="unsafe",
             )
         )

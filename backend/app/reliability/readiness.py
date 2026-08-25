@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +39,11 @@ class ReliabilityReadinessService:
             "audit": audit,
         }
         self._process = process
+        from app.private_work.legacy_run_skill_snapshot_writer import (
+            frozen_run_skill_snapshot_writer,
+        )
+
+        self._run_skill_writer = frozen_run_skill_snapshot_writer()
 
     def _component(self, name: str) -> str:
         provider = self._providers[name]
@@ -53,6 +59,7 @@ class ReliabilityReadinessService:
         request_id: str,
     ) -> ReliabilityReadiness:
         process = self._process
+        writer = self._run_skill_writer
         return ReliabilityReadiness(
             status="closed",
             database=database,
@@ -67,8 +74,15 @@ class ReliabilityReadinessService:
             worker_count=process.worker_count if process is not None else 0,
             worker_capacity=process.worker_capacity if process is not None else 0,
             worker_oldest_heartbeat_age_seconds=(process.worker_oldest_heartbeat_age_seconds if process is not None else None),
+            private_run_worker_fleet=(process.private_run_worker_fleet if process is not None else "unavailable"),
+            private_run_worker_count=(process.private_run_worker_count if process is not None else 0),
+            private_run_worker_capacity=(process.private_run_worker_capacity if process is not None else 0),
             scheduler_ownership=(process.scheduler_ownership if process is not None else "unavailable"),
             schema_state=process.schema_state if process is not None else "unavailable",
+            run_skill_writer_mode=writer.writer_mode,
+            run_skill_writer_artifact_version=writer.artifact_version,
+            run_skill_legacy_policy_digest=writer.legacy_policy_digest,
+            run_skill_writer_ready=writer.ready,
         )
 
     async def read(self) -> ReliabilityReadiness:
@@ -89,10 +103,24 @@ class ReliabilityReadinessService:
 
         components = {name: self._component(name) for name in self._providers}
         process = self._process
+        from app.private_work.run_skill_writer_cohort import (
+            active_run_skill_writer_cohort_ready,
+        )
+
+        writer = replace(
+            self._run_skill_writer,
+            ready=await active_run_skill_writer_cohort_ready(
+                self._session,
+                self._run_skill_writer,
+            ),
+        )
         if process is not None:
             components["worker_fleet"] = process.worker_fleet
             components["scheduler"] = process.scheduler
         healthy = all(status == "ready" or (name == "scheduler" and status == "disabled") for name, status in components.items())
+        if process is not None:
+            healthy = healthy and process.private_run_worker_fleet == "ready"
+        healthy = healthy and writer.ready
         return ReliabilityReadiness(
             status="ready" if healthy else "degraded",
             database="ready",
@@ -102,8 +130,15 @@ class ReliabilityReadinessService:
             worker_count=process.worker_count if process is not None else 0,
             worker_capacity=process.worker_capacity if process is not None else 0,
             worker_oldest_heartbeat_age_seconds=(process.worker_oldest_heartbeat_age_seconds if process is not None else None),
+            private_run_worker_fleet=(process.private_run_worker_fleet if process is not None else "unavailable"),
+            private_run_worker_count=(process.private_run_worker_count if process is not None else 0),
+            private_run_worker_capacity=(process.private_run_worker_capacity if process is not None else 0),
             scheduler_ownership=(process.scheduler_ownership if process is not None else "unavailable"),
             schema_state=process.schema_state if process is not None else "ready",
+            run_skill_writer_mode=writer.writer_mode,
+            run_skill_writer_artifact_version=writer.artifact_version,
+            run_skill_legacy_policy_digest=writer.legacy_policy_digest,
+            run_skill_writer_ready=writer.ready,
             **components,
         )
 

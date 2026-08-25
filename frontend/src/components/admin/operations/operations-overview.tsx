@@ -30,6 +30,8 @@ const READINESS_COMPONENTS = [
   "database",
   "schema",
   "worker_fleet",
+  "private_run_worker_fleet",
+  "run_skill_writer",
   "scheduler",
   "stream",
   "quota",
@@ -70,6 +72,10 @@ export function OperationsOverviewStateView({
     database: readiness.database,
     schema: readiness.schema_state,
     worker_fleet: readiness.worker_fleet,
+    private_run_worker_fleet: readiness.private_run_worker_fleet,
+    run_skill_writer: readiness.run_skill_writer_ready
+      ? "ready"
+      : "unavailable",
     scheduler: readiness.scheduler,
     stream: readiness.stream,
     quota: readiness.quota,
@@ -85,6 +91,14 @@ export function OperationsOverviewStateView({
       value: readiness.worker_capacity,
     },
     {
+      label: labels.readiness.privateRunWorkerCount,
+      value: readiness.private_run_worker_count,
+    },
+    {
+      label: labels.readiness.privateRunWorkerCapacity,
+      value: readiness.private_run_worker_capacity,
+    },
+    {
       label: labels.readiness.oldestHeartbeat,
       value:
         readiness.worker_oldest_heartbeat_age_seconds === null
@@ -97,6 +111,18 @@ export function OperationsOverviewStateView({
     {
       label: labels.readiness.schedulerOwnership,
       value: readinessState(readiness.scheduler_ownership),
+    },
+    {
+      label: labels.readiness.runSkillWriterMode,
+      value: readinessState(readiness.run_skill_writer_mode),
+    },
+    {
+      label: labels.readiness.runSkillWriterArtifact,
+      value: readiness.run_skill_writer_artifact_version,
+    },
+    {
+      label: labels.readiness.legacyPolicyDigest,
+      value: readiness.run_skill_legacy_policy_digest,
     },
   ] as const;
 
@@ -160,7 +186,7 @@ export function OperationsOverviewStateView({
             <dt className="text-muted-foreground text-xs font-medium">
               {fact.label}
             </dt>
-            <dd className="mt-1.5 text-sm font-semibold tracking-tight tabular-nums">
+            <dd className="mt-1.5 text-sm font-semibold tracking-tight break-all tabular-nums">
               {fact.value}
             </dd>
           </div>
@@ -189,18 +215,30 @@ export function OperationsOverviewStateView({
     [labels.counts.queuedJobs, state.data.counts.queued_jobs],
     [labels.counts.runningJobs, state.data.counts.running_jobs],
     [labels.counts.deadJobs, state.data.counts.dead_jobs],
+    [labels.counts.readyJobs, state.data.counts.ready_jobs],
+    [
+      labels.counts.oldestReadyJobAge,
+      state.data.counts.oldest_ready_job_age_seconds ??
+        labels.readiness.notReported,
+    ],
+    [labels.counts.staleLeases, state.data.counts.stale_leases],
+    [
+      labels.counts.waitingForWorkerRuns,
+      state.data.counts.waiting_for_worker_runs,
+    ],
+    [
+      labels.counts.waitingForTerminalizationRuns,
+      state.data.counts.waiting_for_terminalization_runs,
+    ],
   ] as const;
 
   return (
     <div className="space-y-4">
       <AdminMetricGrid aria-label={labels.title} className="xl:grid-cols-5">
-        {counts.map(([label, value], index) => (
+        {counts.map(([label, value]) => (
           <AdminMetric
             key={label}
-            className={cn(
-              "px-4 py-4",
-              index === counts.length - 1 && "sm:col-span-2 xl:col-span-1",
-            )}
+            className="px-4 py-4"
             label={label}
             value={value}
           />

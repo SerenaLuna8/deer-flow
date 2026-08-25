@@ -63,16 +63,19 @@ class _IdlePolicyConfig:
         }
 
 
-def test_idle_context_usage_reuses_only_the_exact_frozen_profile() -> None:
+def test_idle_context_usage_reuses_the_exact_frozen_profile_with_mcp() -> None:
     config = _IdlePolicyConfig("same")
-    exact_assets = (("agent", "project", "agent-1", "agent-version-1", "a" * 64),)
+    exact_assets = (
+        ("agent", "project", "agent-1", "agent-version-1", "a" * 64),
+        ("mcp", "project", "mcp-1", "mcp-version-1", "b" * 64),
+    )
     profile = {
         "authority_identity": "run-1",
         "model_name": _SELECTED_MODEL,
         "closure_identity": "closure-1",
         "runtime_policy_identity": provider_request_runtime_policy_identity(config),
         "workload_profile": "interactive",
-        "mcp_closure_present": False,
+        "mcp_closure_present": True,
     }
     snapshot = SimpleNamespace(values={"provider_request_profile": profile})
 
@@ -287,11 +290,11 @@ def test_idle_context_usage_fails_closed_when_referenced_asset_changes() -> None
     closure = "same-generation-closure"
     frozen_assets = (
         ("agent", "project", "agent-1", "agent-version-1", "a" * 64),
-        ("skill", "project", "skill-1", "skill-version-1", "b" * 64),
+        ("mcp", "project", "mcp-1", "mcp-version-1", "b" * 64),
     )
     current_assets = (
         frozen_assets[0],
-        ("skill", "project", "skill-1", "skill-version-2", "c" * 64),
+        ("mcp", "project", "mcp-1", "mcp-version-2", "c" * 64),
     )
     profile = {
         "authority_identity": "run-1",
@@ -325,7 +328,8 @@ def test_idle_context_usage_fails_closed_when_referenced_asset_changes() -> None
         {"closure_identity": "closure-2"},
         {"runtime_policy_identity": "stale"},
         {"workload_profile": "research"},
-        {"mcp_closure_present": True},
+        {"mcp_closure_present": None},
+        {"mcp_closure_present": "true"},
         {"authority_identity": "run-2"},
     ),
 )

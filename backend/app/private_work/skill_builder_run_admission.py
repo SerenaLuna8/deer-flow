@@ -6,10 +6,17 @@ import json
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecycleClosed,
+    AccountPrivateLifecyclePort,
+)
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
+    LegacyAdmissionBusy,
     PrivateWorkError,
     PrivateWorkRunQuotaExceeded,
+    PrivateWorkTooLarge,
 )
 from app.private_work.execution_profile import (
     RequestedRunExecutionProfile,
@@ -45,6 +52,8 @@ from app.reliability.jobs import (
 )
 from app.shared_assets.errors import (
     AssetConflict,
+    AssetRunAdmissionBusy,
+    AssetRunPayloadTooLarge,
     AssetRunQuotaExceeded,
     AssetStorageUnavailable,
     AssetValidationFailed,
@@ -101,6 +110,7 @@ class SkillBuilderRunAdmissionService(SkillBuilderRunAdmissionPort):
         endpoint_policy: McpEndpointPolicy | None = None,
         quota: PrivateRunAdmissionQuotaPort | None = None,
         audit: PrivateRunAdmissionAuditPort | None = None,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
     ) -> None:
         self._resolver = ProjectAssetResolver(session_factory)
         self._snapshots = RunSnapshotRepository(
@@ -111,6 +121,7 @@ class SkillBuilderRunAdmissionService(SkillBuilderRunAdmissionPort):
         )
         self._quota = quota or _NoopQuota()
         self._audit = audit or _NoopAudit()
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
 
     async def admit_in_session(
         self,
@@ -140,6 +151,14 @@ class SkillBuilderRunAdmissionService(SkillBuilderRunAdmissionPort):
             or operation.run_id is not None
         ):
             raise AssetConflict(context.request_id)
+
+        try:
+            account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+                session,
+                context.user_id,
+            )
+        except AccountPrivateLifecycleClosed:
+            raise AssetConflict(context.request_id) from None
 
         resolved = await self._resolver.resolve_internal_skill_builder_closure_in_session(
             session,
@@ -255,6 +274,7 @@ class SkillBuilderRunAdmissionService(SkillBuilderRunAdmissionPort):
                 ),
                 run_id=run.run_id,
                 origin_trace_id=run.origin_trace_id,
+                account_private_generation=account_private_generation,
             )
             run = await PrivateRunRepository(session).attach_job(
                 scope=private_context.resource_scope,
@@ -266,6 +286,10 @@ class SkillBuilderRunAdmissionService(SkillBuilderRunAdmissionPort):
             await self._audit.run_admitted(session, private_context, run, job)
         except PrivateWorkRunQuotaExceeded:
             raise AssetRunQuotaExceeded(context.request_id) from None
+        except LegacyAdmissionBusy:
+            raise AssetRunAdmissionBusy(context.request_id) from None
+        except PrivateWorkTooLarge:
+            raise AssetRunPayloadTooLarge(context.request_id) from None
         except (
             JobIdempotencyConflict,
             PrivateRunConflict,

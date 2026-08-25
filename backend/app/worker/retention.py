@@ -10,17 +10,27 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.sinks import TrustedOperationAuditSink
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateScopeChanged,
+    LockedAccountPrivateScope,
+)
 from app.private_work.retention_jobs import (
+    account_retention_key,
     former_owner_retention_key,
     project_retention_key,
 )
 from app.private_work.retention_purge import (
     RetentionCandidate,
+    RetentionExecutionActive,
     RetentionExecutionApprovalActive,
     RetentionExecutionApprovalAuditPort,
     RetentionNotEligible,
     RetentionPurgeRepository,
     retention_purge_id,
+)
+from app.private_work.run_skill_tree_orphan_reaper import (
+    RunSkillTreeOrphanReaper,
 )
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.worker.service import (
@@ -47,6 +57,7 @@ class RetentionPurgeJobHandler:
         audit: TrustedOperationAuditSink,
         approval_audit: RetentionExecutionApprovalAuditPort,
         quota: ProjectQuotaEnforcer,
+        mount_owner_reconciler: RunSkillTreeOrphanReaper,
         job_repository_builder: RepositoryBuilder = JobRepository,
         repository: RetentionPurgeRepository | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -59,12 +70,17 @@ class RetentionPurgeJobHandler:
             raise TypeError("retention Worker handler requires quota authority")
         if type(retry_initial_seconds) is not int or type(retry_max_seconds) is not int or retry_initial_seconds < 1 or retry_max_seconds < retry_initial_seconds:
             raise ValueError("retention retry policy is invalid")
+        if type(mount_owner_reconciler) is not RunSkillTreeOrphanReaper:
+            raise TypeError("retention mount-owner reconciler is invalid")
+        if repository is not None and type(repository) is not RetentionPurgeRepository:
+            raise TypeError("retention purge repository is invalid")
         self._sessions = sessions
         self._audit = audit
         self._approval_audit = approval_audit
         self._quota = quota
         self._job_repository_builder = job_repository_builder
-        self._repository = repository or RetentionPurgeRepository()
+        self._repository = RetentionPurgeRepository() if repository is None else repository
+        self._mount_owner_reconciler = mount_owner_reconciler
         # An explicit clock is a test-only forward override. PostgreSQL remains
         # the lower bound for lease and retention authority, so a slow host
         # clock can never extend an expired destructive-work lease.
@@ -78,12 +94,23 @@ class RetentionPurgeJobHandler:
         row: JobRow,
         *,
         now: datetime,
+        locked_account_scope: LockedAccountPrivateScope | None = None,
     ) -> RetentionCandidate:
-        if row.owner_user_id is None:
+        effective_at = row.retention_effective_at
+        generation = row.owner_private_generation
+        if row.retention_resource_kind not in {"project", "former_owner", "account"} or type(generation) is not int or generation < 1 or not isinstance(effective_at, datetime) or effective_at.tzinfo is None:
+            raise RetentionNotEligible
+        effective_at = effective_at.astimezone(UTC)
+
+        if row.retention_resource_kind == "project":
+            if row.owner_user_id is not None or row.retention_membership_id is not None:
+                raise RetentionNotEligible
             project = await session.scalar(select(ProjectRow).where(ProjectRow.id == row.project_id))
             if (
                 project is None
                 or project.deletion_effective_at is None
+                or project.membership_version != generation
+                or project.deletion_effective_at.astimezone(UTC) != effective_at
                 or row.idempotency_key
                 != project_retention_key(
                     project.id,
@@ -93,24 +120,52 @@ class RetentionPurgeJobHandler:
                 raise RetentionNotEligible
             return RetentionCandidate.project(
                 project_id=project.id,
+                project_generation=generation,
                 deletion_effective_at=project.deletion_effective_at,
                 idempotency_key=row.idempotency_key,
                 request_id="retention-worker",
             )
 
+        if row.retention_resource_kind == "account":
+            if (
+                row.owner_user_id is None
+                or row.retention_membership_id is not None
+                or locked_account_scope is None
+                or locked_account_scope.owner_user_id != row.owner_user_id
+                or row.project_id not in locked_account_scope.project_ids
+                or row.idempotency_key
+                != account_retention_key(
+                    owner_user_id=row.owner_user_id,
+                    generation=generation,
+                    effective_at=effective_at,
+                )
+            ):
+                raise RetentionNotEligible
+            return RetentionCandidate.account(
+                owner_user_id=row.owner_user_id,
+                project_ids=locked_account_scope.project_ids,
+                account_private_generation=generation,
+                retention_until=effective_at,
+                idempotency_key=row.idempotency_key,
+                request_id="retention-worker",
+            )
+
+        if row.owner_user_id is None or row.retention_membership_id is None:
+            raise RetentionNotEligible
         membership = await session.scalar(
             select(ProjectMembershipRow).where(
+                ProjectMembershipRow.id == row.retention_membership_id,
                 ProjectMembershipRow.project_id == row.project_id,
                 ProjectMembershipRow.user_id == row.owner_user_id,
             )
         )
-        if membership is None or membership.retention_until is None:
+        if membership is None or membership.retention_until is None or membership.activation_generation != generation:
             raise RetentionNotEligible
         common = {
             "project_id": row.project_id,
             "owner_user_id": row.owner_user_id,
-            "membership_id": membership.id,
-            "activation_generation": membership.activation_generation,
+            "membership_id": row.retention_membership_id,
+            "activation_generation": generation,
             "retention_until": membership.retention_until,
         }
         regular_key = former_owner_retention_key(
@@ -121,12 +176,12 @@ class RetentionPurgeJobHandler:
             **common,
             early_delete=True,
         )
-        if row.idempotency_key == regular_key:
+        if row.idempotency_key == regular_key and membership.retention_until.astimezone(UTC) == effective_at:
             early_delete = False
-            eligibility_at = membership.retention_until
+            eligibility_at = effective_at
         elif row.idempotency_key == early_key:
             early_delete = True
-            eligibility_at = row.available_at
+            eligibility_at = effective_at
         else:
             # Rejoin/leave generation races fail closed: an older Job cannot
             # authorize deletion for the current activation generation.
@@ -143,8 +198,36 @@ class RetentionPurgeJobHandler:
     async def _lock_scope_prefix(
         session: AsyncSession,
         claim: JobClaim,
-    ) -> None:
+    ) -> LockedAccountPrivateScope | None:
         """Lock Project -> Membership shells before the retention Job."""
+
+        preview = (
+            await session.execute(
+                select(
+                    JobRow.project_id,
+                    JobRow.owner_user_id,
+                    JobRow.retention_resource_kind,
+                ).where(
+                    JobRow.id == claim.job_id,
+                    JobRow.job_type == "retention_purge",
+                )
+            )
+        ).one_or_none()
+        if preview is None or preview.project_id != claim.scope.project_id or preview.owner_user_id != claim.scope.owner_user_id:
+            raise LeaseLost(claim.job_id)
+        if preview.retention_resource_kind == "account":
+            if preview.owner_user_id is None:
+                raise LeaseLost(claim.job_id)
+            try:
+                locked_scope = await AccountPrivateLifecycle().lock_stable_scope_for_purge(
+                    session,
+                    preview.owner_user_id,
+                )
+            except AccountPrivateScopeChanged:
+                raise LeaseLost(claim.job_id) from None
+            if preview.project_id not in locked_scope.project_ids:
+                raise LeaseLost(claim.job_id)
+            return locked_scope
 
         project = await session.scalar(select(ProjectRow.id).where(ProjectRow.id == claim.scope.project_id).with_for_update(of=ProjectRow))
         if project is None:
@@ -167,6 +250,7 @@ class RetentionPurgeJobHandler:
         memberships = tuple((await session.scalars(membership_statement)).all())
         if claim.scope.owner_user_id is not None and len(memberships) != 1:
             raise LeaseLost(claim.job_id)
+        return None
 
     async def _cancel_siblings(
         self,
@@ -201,6 +285,7 @@ class RetentionPurgeJobHandler:
         *,
         now: datetime,
         retry_after: datetime | None,
+        public_error_code: str = "RETENTION_EXECUTION_APPROVAL_ACTIVE",
     ) -> None:
         """Defer on bounded external authority without spending failure budget.
 
@@ -218,7 +303,7 @@ class RetentionPurgeJobHandler:
         result = await jobs.retry_or_dead_result(
             claim.job_id,
             lease_token=claim.lease_token,
-            public_error_code="RETENTION_EXECUTION_APPROVAL_ACTIVE",
+            public_error_code=public_error_code,
             retry_initial_seconds=self._retry_initial_seconds,
             retry_max_seconds=self._retry_max_seconds,
             now=now,
@@ -250,9 +335,18 @@ class RetentionPurgeJobHandler:
                 self._lease_lost_commit(claim),
             )
 
+        # Provider enumeration/destroy/readback can be slow and irreversible,
+        # so consume it before the governance transaction.  The repository
+        # still performs the authoritative durable-root absence check after
+        # locking the exact Job -> Run -> Attempt suffix.
+        await self._mount_owner_reconciler.reconcile_once()
+
         async def commit() -> None:
             async with self._sessions() as session, session.begin():
-                await self._lock_scope_prefix(session, claim)
+                locked_account_scope = await self._lock_scope_prefix(
+                    session,
+                    claim,
+                )
                 row = await session.scalar(
                     select(JobRow)
                     .where(
@@ -293,12 +387,29 @@ class RetentionPurgeJobHandler:
                         raise LeaseLost(claim.job_id)
                     return
                 try:
-                    candidate = await self._candidate(session, row, now=now)
+                    candidate = await self._candidate(
+                        session,
+                        row,
+                        now=now,
+                        locked_account_scope=locked_account_scope,
+                    )
                     await self._repository.verify_still_eligible(
                         session,
                         candidate,
                         now=now,
+                        locked_account_scope=locked_account_scope,
+                        coordinator_job_id=row.id,
                     )
+                except RetentionExecutionActive as error:
+                    await self._defer_for_execution_approval(
+                        jobs,
+                        row,
+                        claim,
+                        now=now,
+                        retry_after=error.retry_after,
+                        public_error_code="RETENTION_EXECUTION_ACTIVE",
+                    )
+                    return
                 except RetentionNotEligible:
                     if not await jobs.settle_cancelled(
                         claim.job_id,
@@ -314,13 +425,17 @@ class RetentionPurgeJobHandler:
                         quota=self._quota,
                         approval_audit=self._approval_audit,
                     )
-                except RetentionExecutionApprovalActive as error:
+                except (
+                    RetentionExecutionActive,
+                    RetentionExecutionApprovalActive,
+                ) as error:
                     await self._defer_for_execution_approval(
                         jobs,
                         row,
                         claim,
                         now=now,
                         retry_after=error.retry_after,
+                        public_error_code=("RETENTION_EXECUTION_ACTIVE" if isinstance(error, RetentionExecutionActive) else "RETENTION_EXECUTION_APPROVAL_ACTIVE"),
                     )
                     return
                 await self._audit.purge_completed(

@@ -12,11 +12,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.private_work.authorization import PrivateRunAuthorizationBoundary
 from app.private_work.context import PrivateWorkContext
+from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import (
     PrivateRunExecutionLeaseLost,
     PrivateRunRepository,
     PrivateRunVisionDispatchRateLimited,
 )
+from app.private_work.run_skill_tree_materializer import (
+    MaterializationAttemptIdentity,
+    RuntimeOwnedMaterializedRunSkillTree,
+)
+from app.projects.capabilities import Capability
+from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.reliability.run_execution.ports import (
     NoopPrivateRunAgentQuota,
@@ -24,6 +31,7 @@ from app.reliability.run_execution.ports import (
 )
 from deerflow.persistence.jobs.sql import JobClaim
 from deerflow.runtime.events.models import StreamLeaseProof
+from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.sandbox.sandbox import (
     AuthorizationBoundaryFenceUncertain,
     AuthorizationRevoked,
@@ -40,16 +48,21 @@ class PrivateRunExecutionBoundary:
         *,
         context: PrivateWorkContext,
         claim: JobClaim,
+        expected_worker_id: uuid.UUID | None = None,
         quota: PrivateRunAgentQuotaPort | None = None,
         runtime_kind: Literal["chat", "skill_builder"] = "chat",
     ) -> None:
         if claim.run_id is None:
             raise ValueError("private execution claim requires a Run")
+        if expected_worker_id is not None and type(expected_worker_id) is not uuid.UUID:
+            raise TypeError("expected_worker_id must be a UUID")
         self._factory = session_factory
         self._context = context
         self._claim = claim
+        self._expected_worker_id = expected_worker_id
         self._quota = quota or NoopPrivateRunAgentQuota()
         self._runtime_kind = runtime_kind
+        self._revalidator = PrivateWorkRevalidator()
         executable_roles = (
             (ProjectRole.ADMIN.value, ProjectRole.EDITOR.value)
             if runtime_kind == "skill_builder"
@@ -78,6 +91,141 @@ class PrivateRunExecutionBoundary:
     @property
     def execution_job_id(self) -> uuid.UUID:
         return self._claim.job_id
+
+    @property
+    def expected_worker_id(self) -> uuid.UUID | None:
+        return self._expected_worker_id
+
+    @property
+    def attempt_id(self) -> uuid.UUID:
+        return self._claim.attempt_id
+
+    async def lock_and_assert_materialization_active_in_session(
+        self,
+        session: AsyncSession,
+        locked_context: ProjectContext,
+    ) -> MaterializationAttemptIdentity:
+        """Lock only Job, Run, and exact Attempt after a governance prefix."""
+
+        expected_worker_id = self._expected_worker_id
+        try:
+            if (
+                type(locked_context) is not ProjectContext
+                or locked_context.user_id != self._context.user_id
+                or locked_context.project_id != self._context.project_id
+                or locked_context.membership_id != self._context.membership_id
+                or locked_context.membership_version != self._context.membership_version
+                or expected_worker_id is None
+            ):
+                raise PrivateRunExecutionLeaseLost
+            identity = MaterializationAttemptIdentity(
+                job_id=uuid.UUID(str(self._claim.job_id)),
+                attempt_id=uuid.UUID(str(self._claim.attempt_id)),
+                worker_id=uuid.UUID(str(expected_worker_id)),
+            )
+            cancel_requested = await PrivateRunRepository(
+                session,
+            ).assert_materialization_attempt_active(
+                scope=PrivateResourceScope(
+                    project_id=str(locked_context.project_id),
+                    owner_user_id=str(locked_context.user_id),
+                    membership_version=locked_context.membership_version,
+                ),
+                run_id=self._claim.run_id or "",
+                job_id=identity.job_id,
+                attempt_id=identity.attempt_id,
+                expected_worker_id=identity.worker_id,
+                lease_token=self._claim.lease_token,
+            )
+            if cancel_requested:
+                self.request_local_cancel()
+                raise AuthorizationRevoked
+            return identity
+        except asyncio.CancelledError:
+            raise
+        except AuthorizationRevoked:
+            raise
+        except PrivateRunExecutionLeaseLost:
+            self._lease_lost = True
+            if self._abort_event is not None:
+                self._abort_event.set()
+            raise AuthorizationRevoked from None
+        except Exception:
+            self._lease_lost = True
+            if self._abort_event is not None:
+                self._abort_event.set()
+            raise AuthorizationRevoked from None
+
+    async def before_run_readonly_mount_acquire(
+        self,
+        tree: RuntimeOwnedMaterializedRunSkillTree,
+    ) -> None:
+        """Transaction A: exact authority plus durable acquiring metadata."""
+
+        if type(tree) is not RuntimeOwnedMaterializedRunSkillTree:
+            raise TypeError("Runtime-owned materialized Skill tree is required")
+        await self._materialization_fence(tree.persist_mount_acquiring)
+
+    async def after_run_readonly_mount_acquire(
+        self,
+        tree: RuntimeOwnedMaterializedRunSkillTree,
+        lease,
+    ) -> None:
+        """Transaction B: exact authority plus durable mounted lease identity."""
+
+        if type(tree) is not RuntimeOwnedMaterializedRunSkillTree:
+            raise TypeError("Runtime-owned materialized Skill tree is required")
+
+        async def persist() -> None:
+            await tree.persist_mount_mounted(lease)
+
+        await self._materialization_fence(persist)
+
+    async def _materialization_fence(
+        self,
+        persist=None,
+    ) -> None:
+        """Hold governance and execution locks across one metadata fsync."""
+
+        capabilities = (
+            (
+                Capability.SHARED_ASSETS_READ,
+                Capability.SHARED_ASSETS_EDIT,
+            )
+            if self._runtime_kind == "skill_builder"
+            else (
+                Capability.PRIVATE_WORK_CREATE,
+                Capability.SHARED_ASSETS_EXECUTE,
+            )
+        )
+        try:
+            async with self._factory() as session, session.begin():
+                locked_context = await self._revalidator.require(
+                    session,
+                    self._context,
+                    *capabilities,
+                    lock_mode="share",
+                )
+                await self.lock_and_assert_materialization_active_in_session(
+                    session,
+                    locked_context,
+                )
+                if persist is not None:
+                    await persist()
+        except asyncio.CancelledError:
+            raise
+        except AuthorizationRevoked:
+            raise
+        except PrivateRunExecutionLeaseLost:
+            self._lease_lost = True
+            if self._abort_event is not None:
+                self._abort_event.set()
+            raise AuthorizationRevoked from None
+        except Exception:
+            self._lease_lost = True
+            if self._abort_event is not None:
+                self._abort_event.set()
+            raise AuthorizationRevoked from None
 
     @property
     def lease_lost(self) -> bool:

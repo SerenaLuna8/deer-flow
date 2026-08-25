@@ -11,6 +11,10 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecyclePort,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.shared_assets.errors import (
@@ -34,6 +38,7 @@ from deerflow.persistence.shared_assets import (
     McpServerVersionRow,
     ProjectSystemMcpBindingRow,
 )
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 _T = TypeVar("_T")
 _DISCOVERY_DOMAIN = b"actweave:mcp-tool-discovery:v1\0"
@@ -64,9 +69,12 @@ class McpSecretService:
         self,
         session_factory: Callable[[], AsyncSession],
         governance_sink: SharedAssetGovernanceEventSink | None = None,
+        *,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._governance_sink = governance_sink or SharedAssetGovernanceEventSink()
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
 
     async def get(
         self,
@@ -101,6 +109,10 @@ class McpSecretService:
 
         async def operation(session: AsyncSession) -> McpSecretSetView:
             await self._lock_project(session, actor)
+            account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+                session,
+                actor.user_id,
+            )
             asset, version, slots = await self._target(
                 session,
                 actor,
@@ -152,6 +164,7 @@ class McpSecretService:
                     asset,
                     version,
                     mcp_secret_closure_digest(materials),
+                    account_private_generation,
                 )
             slot = next(item for item in result.slots if item.name == slot_name)
             await self._append_event(
@@ -396,6 +409,7 @@ class McpSecretService:
         asset: McpServerRow,
         version: McpServerVersionRow,
         secret_digest: str,
+        account_private_generation: AccountPrivateGeneration,
     ) -> None:
         digest = hashlib.sha256(_DISCOVERY_DOMAIN)
         digest.update(actor.project_id.bytes)
@@ -413,6 +427,7 @@ class McpSecretService:
             secret_digest=secret_digest,
             trigger="auto",
             idempotency_key=digest.hexdigest(),
+            account_private_generation=account_private_generation,
         )
 
     async def _append_event(

@@ -15,6 +15,10 @@ from app.notifications.models import (
     decode_notification_cursor,
 )
 from app.notifications.repository import NotificationRepository
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecyclePort,
+)
 from app.private_work.context import PrivateWorkContext
 from app.private_work.retention import PrivateWorkRetentionService
 from app.private_work.retention_jobs import RetentionJobAdmission
@@ -100,6 +104,7 @@ class InvitationService:
         quota: InvitationQuotaPort | None = None,
         audit: InvitationAuditPort | None = None,
         notifications: NotificationRepository | None = None,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
     ):
         self.repository = repository
         self._retention = retention
@@ -107,6 +112,7 @@ class InvitationService:
         self._quota = quota or _NoopInvitationQuota()
         self._audit = audit
         self._notifications = notifications or NotificationRepository(repository.session)
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
 
     async def create(
         self,
@@ -301,6 +307,10 @@ class InvitationService:
         )
         membership = await self.repository.lock_membership(
             project.id,
+            user_id,
+        )
+        await self._account_private_lifecycle.reactivate_after_membership(
+            self.repository.session,
             user_id,
         )
         issued_context = PrivateWorkContext.from_project(

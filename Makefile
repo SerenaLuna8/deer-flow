@@ -5,8 +5,8 @@
 .PHONY: \
 	help \
 	setup config config-upgrade check doctor install setup-sandbox support-bundle \
-	setup-db check-db upgrade-system-assets prepare-run-event-partitions prune-run-events reconcile-usage import-project-skills \
-	test \
+	setup-db reset-db check-db upgrade-system-assets prepare-run-event-partitions prune-run-events reconcile-usage import-project-skills \
+	test test-provider-integration \
 	detect-thread-boundaries detect-blocking-io \
 	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean \
 	docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway up down
@@ -57,6 +57,7 @@ help:
 	@echo ""
 	@echo "PostgreSQL 与运维："
 	@echo "  make setup-db                         空库安装 Schema V1 并初始化"
+	@echo "  make reset-db                         永久清空目标库并重新初始化 Schema V1"
 	@echo "  make check-db                         只读检查 revision 与数据库状态"
 	@echo "  make upgrade-system-assets            在维护窗口原地升级 System Agent/Skill Current v1"
 	@echo "  make prepare-run-event-partitions     幂等预创建 run_events 当前月至 N+2 月分区"
@@ -66,6 +67,7 @@ help:
 	@echo ""
 	@echo "测试："
 	@echo "  make test                             使用开发环境 DATABASE_URL 运行后端核心测试"
+	@echo "  make test-provider-integration        运行当前真实 Sandbox Provider 验收"
 	@echo "  make detect-thread-boundaries         检查异步和线程边界"
 	@echo "  make detect-blocking-io               检查后端阻塞 IO"
 	@echo ""
@@ -83,6 +85,9 @@ help:
 test:
 	@$(MAKE) -C backend test
 
+test-provider-integration:
+	@$(MAKE) -C backend test-provider-integration
+
 # Configuration and diagnostics
 setup:
 	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py
@@ -93,6 +98,10 @@ doctor:
 # PostgreSQL and operations
 setup-db:
 	@$(MAKE) -C backend setup-db
+
+reset-db: export CONFIRM_DATABASE := $(CONFIRM_DATABASE)
+reset-db:
+	@$(MAKE) -C backend reset-db
 
 reconcile-usage:
 	@$(MAKE) -C backend reconcile-usage ARGS="$(ARGS)"

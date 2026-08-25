@@ -46,6 +46,9 @@ from app.gateway.routers import (
 )
 from app.gateway.skill_version_body_limit import SkillVersionRequestBodyLimitMiddleware
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
+from app.private_work.legacy_run_skill_snapshot_writer import (
+    freeze_run_skill_snapshot_writer,
+)
 from app.reliability.error_mapping import (
     ReliabilityHTTPException,
     reliability_http_exception_handler,
@@ -147,6 +150,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         SecretKey.from_environment()
         startup_config = get_app_config()
+        writer = freeze_run_skill_snapshot_writer(startup_config.run_skill_snapshots)
+        logger.info(
+            "Run Skill snapshot writer ready: mode=%s artifact=%s policy_digest=%s",
+            writer.writer_mode,
+            writer.artifact_version,
+            writer.legacy_policy_digest,
+        )
         freeze_checkpoint_channel_mode(startup_config.database.checkpoint_channel_mode)
         freeze_checkpoint_snapshot_frequency(startup_config.database.checkpoint_delta.snapshot_frequency)
         validate_proxy_identity_config(startup_config.auth)

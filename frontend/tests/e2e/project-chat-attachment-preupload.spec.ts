@@ -944,9 +944,6 @@ test("uses Research for one admitted Run and resets the next send to Interactive
     workload_profile: "research",
   });
   await expect(research).toHaveAttribute("aria-pressed", "false");
-  await expect(
-    page.getByTestId("effective-run-workload-profile"),
-  ).toHaveAttribute("data-workload-profile", "research");
 
   await composer.fill("Summarize one point.");
   await composer.press("Enter");
@@ -954,13 +951,10 @@ test("uses Research for one admitted Run and resets the next send to Interactive
   expect(requests.runRequestBodies[1]).toMatchObject({
     workload_profile: "interactive",
   });
-  await expect(
-    page.getByTestId("effective-run-workload-profile"),
-  ).toHaveAttribute("data-workload-profile", "interactive");
   expect(requests.unexpectedRequests).toEqual([]);
 });
 
-test("displays the server-confirmed workload profile instead of the local Research request", async ({
+test("does not display a server-confirmed workload profile badge", async ({
   page,
 }) => {
   const requests = await mockProjectChat(page, {
@@ -980,13 +974,160 @@ test("displays the server-confirmed workload profile instead of the local Resear
   expect(requests.runRequestBodies[0]).toMatchObject({
     workload_profile: "research",
   });
-  const effective = page.getByTestId("effective-run-workload-profile");
-  await expect(effective).toHaveAttribute(
-    "data-workload-profile",
-    "interactive",
+  await expect(page.getByTestId("effective-run-workload-profile")).toHaveCount(
+    0,
   );
-  await expect(effective).toContainText("Server-confirmed: Interactive");
-  expect(requests.unexpectedRequests).toEqual([]);
+});
+
+test("soft-wraps plain-text code blocks without changing their content", async ({
+  page,
+}) => {
+  const plainText =
+    "{路由1：佛山南海桂城二《局内路由》HongKongMEGIPOP1《局内路由》深圳信息枢纽大厦《滨海通信机楼ODF传输机房》}";
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    liveValuesMessages: [
+      {
+        id: "human-text-preview",
+        type: "human",
+        content: "Show the TXT route.",
+        additional_kwargs: { run_id: RUN_ID },
+      },
+      {
+        id: "ai-text-preview",
+        type: "ai",
+        content: `\`\`\`text\n${plainText}\n\`\`\``,
+        additional_kwargs: { run_id: RUN_ID },
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("Show the TXT route.");
+  await composer.press("Enter");
+  await expect.poll(requests.runPostCount).toBe(1);
+
+  const codeBlock = page.locator(
+    '[data-code-block][data-language="text"]:visible',
+  );
+  await expect(codeBlock).toContainText(plainText);
+  const presentation = await codeBlock.evaluate((element) => {
+    const pre = element.querySelector("pre");
+    return {
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      overflowX: getComputedStyle(element).overflowX,
+      preFontSize: pre ? getComputedStyle(pre).fontSize : null,
+      preLineHeight: pre ? getComputedStyle(pre).lineHeight : null,
+      preOverflowX: pre ? getComputedStyle(pre).overflowX : null,
+      preWhiteSpace: pre ? getComputedStyle(pre).whiteSpace : null,
+      text: pre?.textContent ?? null,
+    };
+  });
+
+  expect(presentation.overflowX).toBe("hidden");
+  expect(presentation.preFontSize).toBe("14px");
+  expect(presentation.preLineHeight).toBe("22px");
+  expect(presentation.preOverflowX).toBe("hidden");
+  expect(presentation.preWhiteSpace).toBe("pre-wrap");
+  expect(presentation.scrollWidth).toBeLessThanOrEqual(
+    presentation.clientWidth,
+  );
+  expect(presentation.text?.replace(/\n$/, "")).toBe(plainText);
+  expect(presentation.text?.match(/\n/g) ?? []).toHaveLength(1);
+});
+
+test("mounts delivered files only after the final answer without moving them", async ({
+  page,
+}) => {
+  const finalAnswer = "FINAL_DELIVERY_ANSWER";
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    liveValuesMessages: [
+      {
+        id: "human-delivery-order",
+        type: "human",
+        content: "Create and deliver the report.",
+        additional_kwargs: { run_id: RUN_ID },
+      },
+      {
+        id: "ai-present-files",
+        type: "ai",
+        content: "Preparing the report delivery.",
+        additional_kwargs: { run_id: RUN_ID },
+        tool_calls: [
+          {
+            id: "present-report",
+            name: "present_files",
+            args: { filepaths: ["outputs/report.md"] },
+          },
+        ],
+      },
+      {
+        id: "tool-present-files",
+        type: "tool",
+        name: "present_files",
+        tool_call_id: "present-report",
+        content: "ok",
+        additional_kwargs: { run_id: RUN_ID },
+      },
+      {
+        id: "ai-final-delivery",
+        type: "ai",
+        content: finalAnswer,
+        additional_kwargs: { run_id: RUN_ID },
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+  await page.evaluate((answer) => {
+    const samples: string[] = [];
+    const sample = () => {
+      const card = document.querySelector(
+        '[data-testid="assistant-delivered-files"]',
+      );
+      if (!card) return;
+      const finalTurn = Array.from(
+        document.querySelectorAll('[data-assistant-turn=""]'),
+      ).find((element) => element.textContent?.includes(answer));
+      if (!finalTurn) {
+        samples.push("card-before-final-mounted");
+        return;
+      }
+      samples.push(
+        finalTurn.compareDocumentPosition(card) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+          ? "card-after-final"
+          : "card-before-final",
+      );
+    };
+    const observer = new MutationObserver(sample);
+    observer.observe(document.body, { childList: true, subtree: true });
+    Reflect.set(window, "__deliveredFilesOrderProbe", { observer, samples });
+  }, finalAnswer);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("Create and deliver the report.");
+  await composer.press("Enter");
+  await expect.poll(requests.runPostCount).toBe(1);
+  await expect(page.getByText(finalAnswer)).toBeVisible();
+  await expect(page.getByTestId("assistant-delivered-files")).toHaveCount(1);
+
+  const samples = await page.evaluate(() => {
+    const probe = Reflect.get(window, "__deliveredFilesOrderProbe") as {
+      observer: MutationObserver;
+      samples: string[];
+    };
+    probe.observer.disconnect();
+    return probe.samples;
+  });
+  expect(samples.length).toBeGreaterThan(0);
+  expect(new Set(samples)).toEqual(new Set(["card-after-final"]));
 });
 
 test("keeps the one-Run Research choice after a pre-admission failure", async ({

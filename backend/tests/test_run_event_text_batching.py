@@ -444,6 +444,7 @@ async def test_same_burst_persists_one_order_fewer_durable_rows_with_exact_bytes
     """Close the acceptance loop at the actual ``run_events`` row boundary."""
 
     from support.private_thread_seed import seed_private_thread_database
+    from support.run_closure import add_sealed_test_run
 
     from deerflow.persistence.run.model import RunRow
     from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -471,7 +472,8 @@ async def test_same_burst_persists_one_order_fewer_durable_rows_with_exact_bytes
                 )
             )
             await session.flush()
-            session.add(
+            await add_sealed_test_run(
+                session,
                 RunRow(
                     run_id=run_id,
                     thread_id=thread_id,
@@ -484,7 +486,7 @@ async def test_same_burst_persists_one_order_fewer_durable_rows_with_exact_bytes
                     kwargs_json={},
                     origin_trace_id=("a" if label == "raw" else "b") * 32,
                     project_id=seed.owner_a.project_id,
-                )
+                ),
             )
         return thread_id, run_id
 

@@ -275,155 +275,6 @@ export function filterUIVisibleMessages(messages: Message[]): Message[] {
   );
 }
 
-export type AssistantTurnDisplay = {
-  finalGroupIndex: number;
-  hiddenGroupIndexes: number[];
-  processStepCount: number;
-  processGroupIndexes: number[];
-  presentFilesGroupIndexes: number[];
-  presentedFiles: string[];
-};
-
-export type AssistantTurnDisplayOptions = {
-  isCurrentTurnLoading?: boolean;
-};
-
-function hasDisplayableReasoning(message: Message): boolean {
-  const reasoning = extractReasoningContentFromMessage(message);
-  return typeof reasoning === "string" && reasoning.trim().length > 0;
-}
-
-function hasDisplayableProcessStep(message: Message): boolean {
-  return (
-    message.type === "ai" &&
-    (hasDisplayableReasoning(message) ||
-      (message.tool_calls ?? []).some(
-        (toolCall) =>
-          toolCall.name !== "present_files" &&
-          toolCall.name !== "ask_clarification",
-      ))
-  );
-}
-
-function hasDisplayableProcessNarration(message: Message): boolean {
-  return (
-    message.type === "ai" &&
-    extractContentFromMessage(message).trim().length > 0 &&
-    (message.tool_calls ?? []).some(
-      (toolCall) =>
-        toolCall.name !== "present_files" &&
-        toolCall.name !== "ask_clarification",
-    )
-  );
-}
-
-/**
- * Projects safe semantic message groups into a calmer visual turn without
- * mutating their tool-result associations.
- *
- * Only contiguous processing, subagent, and present-files groups immediately
- * preceding a terminal assistant answer are moved. In-flight and
- * present-files-only turns remain in their original position so progress and
- * delivered files never disappear while a Run is still settling. The current
- * final-looking answer is not terminal until its Run has stopped loading.
- */
-export function getAssistantTurnDisplays(
-  groups: MessageGroup[],
-  { isCurrentTurnLoading = false }: AssistantTurnDisplayOptions = {},
-): AssistantTurnDisplay[] {
-  const displays: AssistantTurnDisplay[] = [];
-
-  for (const [finalGroupIndex, group] of groups.entries()) {
-    if (group.type !== "assistant") {
-      continue;
-    }
-    if (isCurrentTurnLoading && finalGroupIndex === groups.length - 1) {
-      continue;
-    }
-
-    const hiddenGroupIndexes: number[] = [];
-    for (
-      let groupIndex = finalGroupIndex - 1;
-      groupIndex >= 0;
-      groupIndex -= 1
-    ) {
-      const candidate = groups[groupIndex];
-      if (
-        candidate?.type !== "assistant:processing" &&
-        candidate?.type !== "assistant:subagent" &&
-        candidate?.type !== "assistant:present-files"
-      ) {
-        break;
-      }
-      if (
-        (candidate.type === "assistant:processing" ||
-          candidate.type === "assistant:subagent") &&
-        candidate.messages.some(hasDisplayableProcessNarration)
-      ) {
-        break;
-      }
-      hiddenGroupIndexes.unshift(groupIndex);
-    }
-
-    if (hiddenGroupIndexes.length === 0) {
-      continue;
-    }
-
-    const presentFilesGroupIndexes = hiddenGroupIndexes.filter(
-      (groupIndex) => groups[groupIndex]?.type === "assistant:present-files",
-    );
-    const processGroupIndexes = hiddenGroupIndexes.filter((groupIndex) => {
-      const candidate = groups[groupIndex];
-      return (
-        candidate?.type === "assistant:processing" ||
-        candidate?.type === "assistant:subagent" ||
-        (candidate?.type === "assistant:present-files" &&
-          candidate.messages.some(hasDisplayableProcessStep))
-      );
-    });
-    if (group.messages.some(hasDisplayableReasoning)) {
-      processGroupIndexes.push(finalGroupIndex);
-    }
-    const presentedFiles = Array.from(
-      new Set(
-        presentFilesGroupIndexes.flatMap((groupIndex) =>
-          (groups[groupIndex]?.messages ?? []).flatMap(
-            extractPresentFilesFromMessage,
-          ),
-        ),
-      ),
-    );
-    const processStepCount = processGroupIndexes
-      .flatMap((groupIndex) => groups[groupIndex]?.messages ?? [])
-      .reduce((count, message) => {
-        if (message.type !== "ai") {
-          return count;
-        }
-        const visibleToolCalls = (message.tool_calls ?? []).filter(
-          (toolCall) =>
-            toolCall.name !== "ask_clarification" &&
-            toolCall.name !== "present_files",
-        );
-        return (
-          count +
-          visibleToolCalls.length +
-          (hasDisplayableReasoning(message) ? 1 : 0)
-        );
-      }, 0);
-
-    displays.push({
-      finalGroupIndex,
-      hiddenGroupIndexes,
-      processStepCount,
-      processGroupIndexes,
-      presentFilesGroupIndexes,
-      presentedFiles,
-    });
-  }
-
-  return displays;
-}
-
 export type EditableTurn = {
   humanMessage: Message;
 };
@@ -876,6 +727,65 @@ export function extractPresentFilesFromMessage(message: Message) {
     }
   }
   return files;
+}
+
+/**
+ * Projects every visible turn's delivered files onto its final assistant
+ * answer. The active turn is withheld until it stops loading so the file card
+ * mounts once at its terminal position instead of moving there at Run end.
+ */
+export function getDeliveredFilesByFinalGroupIndex(
+  groups: MessageGroup[],
+  { isCurrentTurnLoading = false }: { isCurrentTurnLoading?: boolean } = {},
+) {
+  const filesByFinalGroupIndex = new Map<number, string[]>();
+  let turnStartIndex = 0;
+
+  const projectTurn = (turnEndIndex: number, isCurrentTurn: boolean) => {
+    if (isCurrentTurnLoading && isCurrentTurn) {
+      return;
+    }
+
+    const deliveredFiles: string[] = [];
+    let lastPresentFilesGroupIndex = -1;
+    let finalGroupIndex = -1;
+    for (
+      let groupIndex = turnStartIndex;
+      groupIndex < turnEndIndex;
+      groupIndex += 1
+    ) {
+      const group = groups[groupIndex];
+      if (!group) continue;
+      if (group.type === "assistant:present-files") {
+        lastPresentFilesGroupIndex = groupIndex;
+        deliveredFiles.push(
+          ...group.messages.flatMap(extractPresentFilesFromMessage),
+        );
+      } else if (group.type === "assistant") {
+        finalGroupIndex = groupIndex;
+      }
+    }
+
+    if (
+      deliveredFiles.length === 0 ||
+      finalGroupIndex <= lastPresentFilesGroupIndex
+    ) {
+      return;
+    }
+    filesByFinalGroupIndex.set(
+      finalGroupIndex,
+      Array.from(new Set(deliveredFiles)),
+    );
+  };
+
+  for (let groupIndex = 1; groupIndex < groups.length; groupIndex += 1) {
+    if (groups[groupIndex]?.type !== "human") continue;
+    projectTurn(groupIndex, false);
+    turnStartIndex = groupIndex;
+  }
+  projectTurn(groups.length, true);
+
+  return filesByFinalGroupIndex;
 }
 
 export function hasSubagent(message: AIMessage) {

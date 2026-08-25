@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -31,6 +31,11 @@ from app.private_work.execution_profile import (
     resolve_admitted_run_execution_profile,
     selected_run_model_ref,
 )
+from app.private_work.legacy_run_skill_snapshot_writer import (
+    LegacyRunSkillSnapshotWriter,
+    PreparedLegacyRunSkillSnapshots,
+    frozen_run_skill_snapshot_writer,
+)
 from app.private_work.memory_injection import (
     MemoryInjectionCandidate,
     assess_memory_injection,
@@ -41,6 +46,11 @@ from app.private_work.run_repository import (
     PrivateRunCreate,
     PrivateRunRecord,
     PrivateRunRepository,
+)
+from app.private_work.run_skill_writer_cohort import (
+    RunSkillWriterCohortConflict,
+    RunSkillWriterCohortUnavailable,
+    require_active_run_skill_writer_cohort,
 )
 from app.private_work.sandbox_files import (
     RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG,
@@ -75,12 +85,17 @@ from app.shared_assets.models import (
     ResolvedAssetSnapshot,
     ResolvedRunAssetClosure,
     ResolvedRunAssetFact,
+    ResolvedSkillVersionSnapshot,
     SkillAssetRef,
 )
 from app.shared_assets.run_snapshot_codec import (
     MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES,
+    MAX_RUN_SKILL_REFERENCE_MANIFEST_JSON_BYTES,
+    RUN_ASSET_SNAPSHOT_SCHEMA_VERSION,
+    RUN_SKILL_VERSION_REFERENCE_SCHEMA_VERSION,
     RunAssetSnapshotTooLarge,
     encode_run_asset_snapshot,
+    encode_run_skill_version_manifest,
     encoded_run_asset_snapshot_json_size,
 )
 from app.shared_assets.skill_secret_closure import (
@@ -92,6 +107,7 @@ from app.shared_assets.skill_secret_closure import (
     lock_admitted_skill_secret_materials,
     lock_skill_secret_closures,
 )
+from app.shared_assets.skill_secret_policy import parse_skill_secret_declarations
 from app.system_runtime_settings.models import (
     LockedAgentRuntimePolicy,
     auxiliary_model_snapshot_ref,
@@ -125,6 +141,7 @@ from deerflow.persistence.private_work.model import (
     RunAssetVersionRow,
     RunMcpSecretSnapshotRow,
     RunSkillSecretSnapshotRow,
+    RunSkillVersionRefRow,
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets.agent_model import (
@@ -168,6 +185,43 @@ class _RunAssetSnapshotAdmissionEncoder:
             raise PrivateWorkTooLarge(self.request_id)
         return encoded
 
+    def encode_skill_version(
+        self,
+        snapshot: ResolvedSkillVersionSnapshot,
+    ) -> dict[str, object]:
+        try:
+            encoded = encode_run_skill_version_manifest(snapshot)
+        except RunAssetSnapshotTooLarge:
+            raise PrivateWorkTooLarge(self.request_id) from None
+        encoded_size = encoded_run_asset_snapshot_json_size(encoded)
+        if encoded_size > MAX_RUN_SKILL_REFERENCE_MANIFEST_JSON_BYTES:
+            raise PrivateWorkTooLarge(self.request_id)
+        self.encoded_json_bytes += encoded_size
+        if self.encoded_json_bytes > MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES:
+            raise PrivateWorkTooLarge(self.request_id)
+        return encoded
+
+    def include_legacy_skill(
+        self,
+        encoded: Mapping[str, object],
+    ) -> dict[str, object]:
+        if encoded.get("schema_version") != RUN_ASSET_SNAPSHOT_SCHEMA_VERSION or encoded.get("kind") != AssetKind.SKILL.value:
+            raise PrivateWorkTooLarge(self.request_id)
+        copied = dict(encoded)
+        self.encoded_json_bytes += encoded_run_asset_snapshot_json_size(copied)
+        if self.encoded_json_bytes > MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES:
+            raise PrivateWorkTooLarge(self.request_id)
+        return copied
+
+
+def _r1_snapshot_schema_version(
+    snapshot_json: Mapping[str, object],
+) -> int:
+    schema_version = snapshot_json.get("schema_version")
+    if type(schema_version) is not int or schema_version != RUN_ASSET_SNAPSHOT_SCHEMA_VERSION:
+        raise RunSnapshotAssetStale
+    return schema_version
+
 
 def agent_model_snapshot_purpose(version_id: uuid.UUID) -> str:
     """Return the stable Run-model purpose for one delegated Agent version."""
@@ -175,18 +229,6 @@ def agent_model_snapshot_purpose(version_id: uuid.UUID) -> str:
     if not isinstance(version_id, uuid.UUID):
         raise TypeError("Agent version_id must be a UUID")
     return f"agent.{version_id.hex}"
-
-
-@dataclass(frozen=True, slots=True)
-class RunAssetSnapshot:
-    asset_kind: str
-    dependency_order: int
-    asset_scope: str
-    asset_id: uuid.UUID
-    version_id: uuid.UUID
-    payload_checksum: str
-    catalog_generation: int
-    snapshot_json: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +351,7 @@ class RunSnapshotRepository:
         self._model_catalog = model_catalog
         self._runtime_policy = runtime_policy
         self._endpoint_policy = endpoint_policy
+        self._run_skill_writer = frozen_run_skill_snapshot_writer()
         if not callable(personalization_repository_builder):
             raise TypeError("personalization repository builder must be callable")
         self._personalization_repository_builder = personalization_repository_builder
@@ -635,6 +678,11 @@ class RunSnapshotRepository:
                 or asset.status != "active"
                 or asset.current_version_id != version.id
                 or version.revoked_at is not None
+                or version.files_sealed is not True
+                or type(version.file_count) is not int
+                or not 1 <= version.file_count <= 16_384
+                or type(version.content_size_bytes) is not int
+                or not 0 <= version.content_size_bytes <= 100 * 1024 * 1024
                 or (asset.scope == AssetScope.SYSTEM.value and version.version_number != 1)
             ):
                 raise RunSnapshotAssetStale
@@ -888,6 +936,16 @@ class RunSnapshotRepository:
         lead_agent = resolved_closure.lead_agent if resolved_closure is not None else resolved_agent
         if type(lead_agent) is not ResolvedAgentSnapshot or lead_agent.kind is not AssetKind.AGENT or lead_agent.catalog_generation < 0:
             raise PrivateWorkConflict(context.request_id)
+        try:
+            await require_active_run_skill_writer_cohort(
+                session,
+                self._run_skill_writer,
+            )
+        except (
+            RunSkillWriterCohortConflict,
+            RunSkillWriterCohortUnavailable,
+        ):
+            raise PrivateWorkUnavailable(context.request_id) from None
         _reject_secret_bearing_keys(request.metadata, context.request_id)
         _reject_secret_bearing_keys(request.kwargs, context.request_id)
         effective_lead_model_ref = selected_run_model_ref(
@@ -950,6 +1008,18 @@ class RunSnapshotRepository:
                 lead_agent,
             )
         )
+        skill_snapshots = () if resolved_closure is None else resolved_closure.skills
+        mcp_snapshots = () if resolved_closure is None else resolved_closure.mcps
+        if len(skill_snapshots) != len(skills) or len(mcp_snapshots) != len(mcps):
+            raise RunSnapshotAssetStale
+        prepared_legacy_skills: PreparedLegacyRunSkillSnapshots | None = None
+        if self._run_skill_writer.writer_mode == "legacy_v3":
+            prepared_legacy_skills = await LegacyRunSkillSnapshotWriter().prepare(
+                session,
+                request_id=context.request_id,
+                locked_skills=tuple(skills),
+                snapshots=skill_snapshots,
+            )
         locked_runtime_policy: LockedAgentRuntimePolicy | None = None
         if self._runtime_policy is not None:
             try:
@@ -977,10 +1047,19 @@ class RunSnapshotRepository:
             inherited_effective=inherited_workload_profile,
         )
         safe_request = replace(safe_request, kwargs=frozen_workload_kwargs)
-        run = await PrivateRunRepository(session).create(
+        run = await PrivateRunRepository(session).create_for_snapshot_assembly(
             scope=context.resource_scope,
             thread_id=thread_id,
             request=safe_request,
+        )
+        await session.scalar(
+            select(
+                func.set_config(
+                    "deerflow.run_asset_closure_assembly",
+                    run.run_id,
+                    True,
+                )
+            )
         )
         if self._runtime_policy is not None:
             try:
@@ -1138,6 +1217,7 @@ class RunSnapshotRepository:
         asset_snapshot_encoder = _RunAssetSnapshotAdmissionEncoder(
             request_id=context.request_id,
         )
+        lead_agent_snapshot_json = asset_snapshot_encoder.encode(lead_agent)
         asset_rows = [
             RunAssetVersionRow(
                 project_id=context.project_id,
@@ -1151,12 +1231,14 @@ class RunSnapshotRepository:
                 version_id=lead_agent.version_id,
                 payload_checksum=lead_agent.checksum,
                 catalog_generation=lead_agent.catalog_generation,
-                snapshot_json=asset_snapshot_encoder.encode(lead_agent),
+                snapshot_schema_version=_r1_snapshot_schema_version(lead_agent_snapshot_json),
+                snapshot_json=lead_agent_snapshot_json,
             )
         ]
         dependency_order = 1
         if resolved_closure is not None:
             for delegated_agent in resolved_closure.delegated_agents:
+                delegated_snapshot_json = asset_snapshot_encoder.encode(delegated_agent)
                 asset_rows.append(
                     RunAssetVersionRow(
                         project_id=context.project_id,
@@ -1170,19 +1252,31 @@ class RunSnapshotRepository:
                         version_id=delegated_agent.version_id,
                         payload_checksum=delegated_agent.checksum,
                         catalog_generation=lead_agent.catalog_generation,
-                        snapshot_json=asset_snapshot_encoder.encode(delegated_agent),
+                        snapshot_schema_version=_r1_snapshot_schema_version(delegated_snapshot_json),
+                        snapshot_json=delegated_snapshot_json,
                     )
                 )
                 dependency_order += 1
-        skill_snapshots = () if resolved_closure is None else resolved_closure.skills
-        mcp_snapshots = () if resolved_closure is None else resolved_closure.mcps
-        if len(skill_snapshots) != len(skills) or len(mcp_snapshots) != len(mcps):
-            raise RunSnapshotAssetStale
-        for (asset, version), skill_snapshot in zip(
-            skills,
-            skill_snapshots,
-            strict=True,
+        skill_ref_rows: list[RunSkillVersionRefRow] = []
+        for skill_index, ((asset, version), skill_snapshot) in enumerate(
+            zip(
+                skills,
+                skill_snapshots,
+                strict=True,
+            )
         ):
+            if type(skill_snapshot) is not ResolvedSkillVersionSnapshot:
+                raise RunSnapshotAssetStale
+            if prepared_legacy_skills is None:
+                skill_snapshot_json = asset_snapshot_encoder.encode_skill_version(
+                    skill_snapshot,
+                )
+                skill_snapshot_schema_version = RUN_SKILL_VERSION_REFERENCE_SCHEMA_VERSION
+            else:
+                skill_snapshot_json = asset_snapshot_encoder.include_legacy_skill(
+                    prepared_legacy_skills.snapshot_jsons[skill_index],
+                )
+                skill_snapshot_schema_version = RUN_ASSET_SNAPSHOT_SCHEMA_VERSION
             asset_rows.append(
                 RunAssetVersionRow(
                     project_id=context.project_id,
@@ -1196,15 +1290,36 @@ class RunSnapshotRepository:
                     version_id=version.id,
                     payload_checksum=version.payload_checksum,
                     catalog_generation=lead_agent.catalog_generation,
-                    snapshot_json=asset_snapshot_encoder.encode(skill_snapshot),
+                    snapshot_schema_version=skill_snapshot_schema_version,
+                    snapshot_json=skill_snapshot_json,
                 )
             )
+            if prepared_legacy_skills is None:
+                skill_ref_rows.append(
+                    RunSkillVersionRefRow(
+                        project_id=context.project_id,
+                        owner_user_id=str(context.user_id),
+                        thread_id=thread_id,
+                        run_id=run.run_id,
+                        asset_kind=AssetKind.SKILL.value,
+                        dependency_order=dependency_order,
+                        asset_scope=asset.scope,
+                        snapshot_schema_version=(RUN_SKILL_VERSION_REFERENCE_SCHEMA_VERSION),
+                        skill_project_id=(None if asset.scope == AssetScope.SYSTEM.value else asset.project_id),
+                        skill_id=asset.id,
+                        skill_version_id=version.id,
+                        payload_checksum=version.payload_checksum,
+                        file_count=version.file_count,
+                        content_size_bytes=version.content_size_bytes,
+                    )
+                )
             dependency_order += 1
         for (asset, version), mcp_snapshot in zip(
             mcps,
             mcp_snapshots,
             strict=True,
         ):
+            mcp_snapshot_json = asset_snapshot_encoder.encode(mcp_snapshot)
             asset_rows.append(
                 RunAssetVersionRow(
                     project_id=context.project_id,
@@ -1218,11 +1333,13 @@ class RunSnapshotRepository:
                     version_id=version.id,
                     payload_checksum=version.payload_checksum,
                     catalog_generation=lead_agent.catalog_generation,
-                    snapshot_json=asset_snapshot_encoder.encode(mcp_snapshot),
+                    snapshot_schema_version=_r1_snapshot_schema_version(mcp_snapshot_json),
+                    snapshot_json=mcp_snapshot_json,
                 )
             )
             dependency_order += 1
         session.add_all(asset_rows)
+        session.add_all(skill_ref_rows)
         session.add_all(
             RunMcpSecretSnapshotRow(
                 project_id=context.project_id,
@@ -1256,6 +1373,10 @@ class RunSnapshotRepository:
             for material in skill_secret_closures[uuid.UUID(str(version.id))].materials
         )
         await session.flush()
+        run = await PrivateRunRepository(session).seal_asset_closure(
+            scope=context.resource_scope,
+            run_id=run.run_id,
+        )
         await PrivateThreadRepository(session).touch_activity(
             scope=context.resource_scope,
             thread_id=thread_id,
@@ -1282,6 +1403,36 @@ class RunSnapshotRepository:
                 or getattr(snapshot, "catalog_generation", None) != catalog_generation
             ):
                 raise RunSnapshotAssetStale
+            if type(snapshot) is ResolvedSkillVersionSnapshot:
+                try:
+                    requirements = tuple(
+                        (
+                            item.name,
+                            item.target_env,
+                            item.optional,
+                        )
+                        for item in parse_skill_secret_declarations(
+                            version.secret_requirements,
+                            request_id="run-snapshot-validation",
+                        )
+                    )
+                except SharedAssetError:
+                    raise RunSnapshotAssetStale from None
+                if (
+                    version.files_sealed is not True
+                    or snapshot.file_count != version.file_count
+                    or snapshot.content_size_bytes != version.content_size_bytes
+                    or requirements
+                    != tuple(
+                        (
+                            item.name,
+                            item.target_env,
+                            item.optional,
+                        )
+                        for item in snapshot.secret_requirements
+                    )
+                ):
+                    raise RunSnapshotAssetStale
 
     @staticmethod
     def _validate_main_dependency_boundary(
@@ -1508,83 +1659,40 @@ class RunSnapshotRepository:
         )
         return skills, mcps, closures, skill_secret_closures
 
-    async def list_assets(
-        self,
-        context: PrivateWorkContext,
-        run_id: str,
-    ) -> tuple[RunAssetSnapshot, ...]:
-        context = require_issued_private_work_context(context)
-        try:
-            async with self._session_factory() as session:
-                return await self.list_assets_in_session(session, context, run_id)
-        except DBAPIError:
-            raise PrivateWorkUnavailable(context.request_id) from None
-
-    async def list_assets_in_session(
-        self,
-        session: AsyncSession,
-        context: PrivateWorkContext,
-        run_id: str,
-        *,
-        lock: bool = False,
-    ) -> tuple[RunAssetSnapshot, ...]:
-        context = require_issued_private_work_context(context)
-        statement = (
-            select(RunAssetVersionRow)
-            .where(
-                RunAssetVersionRow.project_id == context.project_id,
-                RunAssetVersionRow.owner_user_id == str(context.user_id),
-                RunAssetVersionRow.run_id == run_id,
-            )
-            .order_by(RunAssetVersionRow.dependency_order)
-        )
-        if lock:
-            statement = statement.with_for_update(of=RunAssetVersionRow)
-        rows = (await session.execute(statement)).scalars()
-        return tuple(
-            RunAssetSnapshot(
-                asset_kind=row.asset_kind,
-                dependency_order=row.dependency_order,
-                asset_scope=row.asset_scope,
-                asset_id=row.asset_id,
-                version_id=row.version_id,
-                payload_checksum=row.payload_checksum,
-                catalog_generation=row.catalog_generation,
-                snapshot_json=dict(row.snapshot_json),
-            )
-            for row in rows
-        )
-
     async def list_asset_facts_in_session(
         self,
         session: AsyncSession,
         context: PrivateWorkContext,
         thread_id: str,
         run_id: str,
+        *,
+        lock: bool = False,
     ) -> tuple[ResolvedRunAssetFact, ...]:
         """Read ordered frozen asset metadata without loading snapshot JSON."""
 
         context = require_issued_private_work_context(context)
-        rows = (
-            await session.execute(
-                select(
-                    RunAssetVersionRow.asset_kind,
-                    RunAssetVersionRow.dependency_order,
-                    RunAssetVersionRow.asset_scope,
-                    RunAssetVersionRow.asset_id,
-                    RunAssetVersionRow.version_id,
-                    RunAssetVersionRow.payload_checksum,
-                    RunAssetVersionRow.catalog_generation,
-                )
-                .where(
-                    RunAssetVersionRow.project_id == context.project_id,
-                    RunAssetVersionRow.owner_user_id == str(context.user_id),
-                    RunAssetVersionRow.thread_id == thread_id,
-                    RunAssetVersionRow.run_id == run_id,
-                )
-                .order_by(RunAssetVersionRow.dependency_order)
+        conditions = [
+            RunAssetVersionRow.project_id == context.project_id,
+            RunAssetVersionRow.owner_user_id == str(context.user_id),
+            RunAssetVersionRow.thread_id == thread_id,
+            RunAssetVersionRow.run_id == run_id,
+        ]
+        statement = (
+            select(
+                RunAssetVersionRow.asset_kind,
+                RunAssetVersionRow.dependency_order,
+                RunAssetVersionRow.asset_scope,
+                RunAssetVersionRow.asset_id,
+                RunAssetVersionRow.version_id,
+                RunAssetVersionRow.payload_checksum,
+                RunAssetVersionRow.catalog_generation,
             )
-        ).all()
+            .where(*conditions)
+            .order_by(RunAssetVersionRow.dependency_order)
+        )
+        if lock:
+            statement = statement.with_for_update(of=RunAssetVersionRow)
+        rows = (await session.execute(statement)).all()
         return tuple(
             ResolvedRunAssetFact(
                 kind=AssetKind(asset_kind),
@@ -1658,12 +1766,12 @@ class RunSnapshotRepository:
         self,
         session: AsyncSession,
         context: PrivateWorkContext,
-        mcp_assets: tuple[RunAssetSnapshot, ...],
+        mcp_assets: tuple[ResolvedRunAssetFact, ...],
     ) -> tuple[RunMcpSecretSnapshot, ...]:
         """Lock the current exact closure and return only its secret-free IDs."""
 
         context = require_issued_private_work_context(context)
-        if any(asset.asset_kind != AssetKind.MCP.value for asset in mcp_assets):
+        if any(asset.kind is not AssetKind.MCP for asset in mcp_assets):
             raise RunSnapshotAssetStale
         mcps = await self._mcps(
             session,
@@ -1677,7 +1785,7 @@ class RunSnapshotRepository:
             if row is None:
                 raise RunSnapshotAssetStale
             asset, version = row
-            if asset.id != persisted.asset_id or asset.scope != persisted.asset_scope or version.payload_checksum != persisted.payload_checksum:
+            if asset.id != persisted.asset_id or asset.scope != persisted.scope.value or version.payload_checksum != persisted.checksum:
                 raise RunSnapshotAssetStale
         closures = await self._mcp_secret_closures(
             session,
@@ -1771,12 +1879,12 @@ class RunSnapshotRepository:
         self,
         session: AsyncSession,
         context: PrivateWorkContext,
-        skill_assets: tuple[RunAssetSnapshot, ...],
+        skill_assets: tuple[ResolvedRunAssetFact, ...],
     ) -> tuple[RunSkillSecretSnapshot, ...]:
         """Lock current Skill secret Generations and return secret-free IDs."""
 
         context = require_issued_private_work_context(context)
-        if any(asset.asset_kind != AssetKind.SKILL.value for asset in skill_assets):
+        if any(asset.kind is not AssetKind.SKILL for asset in skill_assets):
             raise RunSnapshotAssetStale
         skills = await self._skills(
             session,
@@ -1789,7 +1897,7 @@ class RunSnapshotRepository:
             if row is None:
                 raise RunSnapshotAssetStale
             asset, version = row
-            if asset.id != persisted.asset_id or asset.scope != persisted.asset_scope or version.payload_checksum != persisted.payload_checksum:
+            if asset.id != persisted.asset_id or asset.scope != persisted.scope.value or version.payload_checksum != persisted.checksum:
                 raise RunSnapshotAssetStale
         try:
             closures = await lock_skill_secret_closures(

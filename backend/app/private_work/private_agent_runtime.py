@@ -55,10 +55,10 @@ from app.private_work.mcp_session_owner import (
 from app.private_work.private_skill_runtime import (
     PrivateRuntimeCleanupError,
 )
-from app.private_work.private_skill_runtime import (
-    remove_private_skill_tree as _remove_private_skill_tree,
-)
 from app.private_work.run_repository import PrivateRunRepository
+from app.private_work.run_skill_tree_materializer import (
+    RuntimeOwnedMaterializedRunSkillTree,
+)
 from app.private_work.snapshot_repository import (
     RunSnapshotAssetStale,
     RunSnapshotRepository,
@@ -94,6 +94,11 @@ from deerflow.mcp_definition_policy import (
     McpEndpointPolicy,
 )
 from deerflow.sandbox.sandbox import AuthorizationRevoked
+from deerflow.sandbox.sandbox_provider import (
+    ProviderRunMountLease,
+    RunMountReleaseOutcome,
+    RunReadonlyMountSource,
+)
 from deerflow.secrets import (
     SecretKey,
     SecretKeyInvalid,
@@ -160,12 +165,12 @@ class PrivateAgentRuntime:
         "_mcp_snapshots",
         "_mcp_tools",
         "_mcp_tools_by_version",
+        "_materialized_skill_tree",
         "_resolver",
         "_run_id",
         "_session_factory",
         "_tool_call_timeout_seconds",
         "safe_manifest",
-        "skill_root",
         "skills",
     )
 
@@ -177,7 +182,6 @@ class PrivateAgentRuntime:
         resolver: ProjectAssetResolver,
         session_factory: async_sessionmaker[AsyncSession],
         safe_manifest: PrivateAgentManifest,
-        skill_root: Path,
         skills: tuple[Skill, ...],
         mcp_snapshots: tuple[ResolvedMcpSnapshot, ...],
         authorization_boundary: object,
@@ -207,8 +211,8 @@ class PrivateAgentRuntime:
         self._tool_call_timeout_seconds = _validated_mcp_runtime_timeout(tool_call_timeout_seconds)
         self._closed = False
         self._closing = False
+        self._materialized_skill_tree: RuntimeOwnedMaterializedRunSkillTree | None = None
         self.safe_manifest = safe_manifest
-        self.skill_root = skill_root
         self.skills = skills
         self._all_skill_manifests = safe_manifest.skills if all_skill_manifests is None else all_skill_manifests
         self._all_skills = skills if all_skills is None else all_skills
@@ -239,6 +243,63 @@ class PrivateAgentRuntime:
     @property
     def run_id(self) -> str:
         return self._run_id
+
+    @property
+    def skill_root(self) -> Path:
+        return self.skill_mount_source.worker_root
+
+    @property
+    def skill_mount_source(self) -> RunReadonlyMountSource:
+        tree = self._materialized_skill_tree
+        if tree is None:
+            raise RuntimeError("Private runtime has no materialized Skill tree")
+        return tree.source
+
+    def borrow_materialized_skill_tree(
+        self,
+    ) -> RuntimeOwnedMaterializedRunSkillTree | None:
+        """Borrow the runtime-owned token for the file-authority mount fence.
+
+        The caller may pass this token to ``PrivateRunFileAuthority`` but must
+        not finalize it. Cleanup ownership remains with this runtime.
+        """
+
+        return self._materialized_skill_tree
+
+    def adopt_materialized_skill_tree(
+        self,
+        tree: RuntimeOwnedMaterializedRunSkillTree,
+    ) -> None:
+        """Strongly adopt the sole runtime cleanup token."""
+
+        if type(tree) is not RuntimeOwnedMaterializedRunSkillTree or self._materialized_skill_tree is not None or self._closed or self._closing:
+            raise RuntimeError("Private runtime Skill tree slot is unavailable")
+        self._materialized_skill_tree = tree
+
+    async def persist_skill_mount_acquiring(self) -> None:
+        tree = self._materialized_skill_tree
+        if tree is None:
+            raise RuntimeError("Private runtime has no materialized Skill tree")
+        await tree.persist_mount_acquiring()
+
+    async def persist_skill_mount_mounted(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> None:
+        tree = self._materialized_skill_tree
+        if tree is None:
+            raise RuntimeError("Private runtime has no materialized Skill tree")
+        await tree.persist_mount_mounted(lease)
+
+    async def finalize_materialized_skill_tree(
+        self,
+        outcome: RunMountReleaseOutcome,
+    ) -> None:
+        tree = self._materialized_skill_tree
+        if tree is None:
+            return
+        await tree.finalize(outcome)
+        self._materialized_skill_tree = None
 
     @property
     def provider_request_closure_identity(self) -> str:
@@ -384,13 +445,14 @@ class PrivateAgentRuntime:
                 )
                 if run is None or run.status not in {"pending", "running"}:
                     raise RunSnapshotAssetStale
-                assets = await repository.list_assets_in_session(
+                assets = await repository.list_asset_facts_in_session(
                     session,
                     self._context,
+                    run.thread_id,
                     self._run_id,
                     lock=True,
                 )
-                skill_assets = tuple(asset for asset in assets if (asset.asset_kind == AssetKind.SKILL.value and asset.version_id in requested_version_ids))
+                skill_assets = tuple(asset for asset in assets if asset.kind is AssetKind.SKILL and asset.version_id in requested_version_ids)
                 if tuple((asset.asset_id, asset.version_id) for asset in skill_assets) != tuple((manifest.asset_id, manifest.version_id) for manifest in requested_manifests):
                     raise RunSnapshotAssetStale
                 persisted = tuple(
@@ -710,17 +772,18 @@ class PrivateAgentRuntime:
             )
             if run is None or run.status not in {"pending", "running"}:
                 return
-            assets = await snapshots.list_assets_in_session(
+            assets = await snapshots.list_asset_facts_in_session(
                 session,
                 context,
+                run.thread_id,
                 self._run_id,
                 lock=True,
             )
-            matching = tuple(asset for asset in assets if asset.asset_kind == AssetKind.MCP.value and asset.version_id == snapshot.version_id)
+            matching = tuple(asset for asset in assets if asset.kind is AssetKind.MCP and asset.version_id == snapshot.version_id)
             if len(matching) != 1:
                 return
             asset = matching[0]
-            if asset.asset_id != snapshot.asset_id or asset.asset_scope != snapshot.scope.value or asset.payload_checksum != snapshot.checksum:
+            if asset.asset_id != snapshot.asset_id or asset.scope is not snapshot.scope or asset.checksum != snapshot.checksum:
                 return
             persisted = tuple(
                 sorted(
@@ -1459,17 +1522,18 @@ class PrivateAgentRuntime:
                 )
                 if run is None or run.status not in {"pending", "running"}:
                     raise RunSnapshotAssetStale
-                assets = await repository.list_assets_in_session(
+                assets = await repository.list_asset_facts_in_session(
                     session,
                     self._context,
+                    run.thread_id,
                     self._run_id,
                     lock=True,
                 )
-                matching_assets = tuple(asset for asset in assets if asset.asset_kind == AssetKind.MCP.value and asset.version_id == snapshot.version_id)
+                matching_assets = tuple(asset for asset in assets if asset.kind is AssetKind.MCP and asset.version_id == snapshot.version_id)
                 if len(matching_assets) != 1:
                     raise RunSnapshotAssetStale
                 asset = matching_assets[0]
-                if asset.asset_id != snapshot.asset_id or asset.asset_scope != snapshot.scope.value or asset.payload_checksum != snapshot.checksum:
+                if asset.asset_id != snapshot.asset_id or asset.scope is not snapshot.scope or asset.checksum != snapshot.checksum:
                     raise RunSnapshotAssetStale
                 persisted = tuple(
                     sorted(
@@ -1518,30 +1582,37 @@ class PrivateAgentRuntime:
         except DBAPIError:
             raise PrivateWorkUnavailable(self._context.request_id) from None
 
-    async def aclose(self) -> None:
+    async def aclose(
+        self,
+        mount_outcome: RunMountReleaseOutcome | None = None,
+    ) -> None:
         if getattr(self, "_closed", False):
+            if mount_outcome is not None:
+                await self.finalize_materialized_skill_tree(mount_outcome)
             return
         if getattr(self, "_closing", False):
             raise PrivateRuntimeCleanupError("Private runtime cleanup is already in progress")
         self._closing = True
-        # Run end: close reused MCP transports and clear their derived-secret
-        # closures before removing the skill tree. Best-effort by design.
+        # MCP transports close independently from provider mount release. The
+        # runtime-owned tree is finalized only from a caller-supplied typed
+        # outcome, never by deleting ``skill_root`` directly.
+        cancellation: asyncio.CancelledError | None = None
         sessions = getattr(self, "_mcp_run_sessions", None)
         if sessions is not None:
             try:
                 await sessions.aclose()
+            except asyncio.CancelledError as error:
+                cancellation = error
             except Exception:
                 logger.warning(
                     "Private MCP run-session cleanup failed for run %s",
                     self._run_id,
                 )
         try:
-            await asyncio.to_thread(
-                _remove_private_skill_tree,
-                self.skill_root,
-            )
-        except Exception:
+            self._closed = True
+            if mount_outcome is not None:
+                await self.finalize_materialized_skill_tree(mount_outcome)
+        finally:
             self._closing = False
-            raise
-        self._closed = True
-        self._closing = False
+        if cancellation is not None:
+            raise cancellation

@@ -34,7 +34,9 @@ import {
 import { usePrivateWorkAccess } from "../private-work/provider";
 import {
   runPrivateWorkAbortable,
+  type ProjectClientScope,
   type ProjectPrivateWorkScope,
+  type RunMetadataStorage,
 } from "../private-work/types";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
@@ -57,6 +59,12 @@ import {
   uploadFiles,
 } from "../uploads";
 
+import {
+  createActiveRunResolver,
+  type ActiveRunCatalogEntry,
+  type ActiveRunResolverGeneration,
+  type ActiveRunScope,
+} from "./active-run-resolver";
 import { useCoalescedStreamMessages } from "./coalesce";
 import {
   attachRunIdToNewMessages,
@@ -75,6 +83,7 @@ import {
   retainOptimisticHumanMessagesAfterFailure,
   retainUnacknowledgedOptimisticHumanMessages,
   resolveActiveRunIdForMessages,
+  scopeCheckpointMessagesByKnownRunBoundaries,
   type ThreadMessageProjectionInput,
 } from "./message-projection";
 import {
@@ -94,6 +103,12 @@ import {
   resolveRunFailureCode,
   resolveRunFailureRunId,
 } from "./run-history";
+import {
+  reconcileTerminalRun as reconcileTerminalRunProjection,
+  retryTerminalReconciliation as retryTerminalReconciliationProjection,
+  type RunTerminalCanonicalAuthority,
+  type RunTerminalReconciliationResult,
+} from "./run-terminal-reconciliation";
 import {
   admitRunAndNotify,
   buildThreadSubmitCheckpointOptions,
@@ -130,6 +145,7 @@ import {
   mapInfiniteThreadsCache,
 } from "./thread-lists";
 import { scopedThreadQueryKey } from "./thread-query-key";
+import { fetchAllThreadRuns } from "./thread-runs";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import {
   emptyRunControlProgress,
@@ -138,7 +154,10 @@ import {
   parseRunControlLiveEvent,
 } from "./tool-call-control-events";
 import type { AgentThread, AgentThreadState } from "./types";
-import { useThreadHistory } from "./use-thread-history";
+import {
+  useThreadHistory,
+  type CanonicalThreadHistory,
+} from "./use-thread-history";
 
 export type ToolEndEvent = {
   name: string;
@@ -149,6 +168,129 @@ type ThreadStreamCallbackMetadata = {
   thread_id?: string;
   run_id?: string;
 };
+
+export type ActiveRunOwnerProjection = Readonly<{
+  accountId: string;
+  projectId: string;
+  threadId: string;
+  runId: string | null;
+  generation: number;
+}>;
+
+type ActiveRunResolverEntry = {
+  key: string;
+  generation: ActiveRunResolverGeneration;
+  admitted: boolean;
+};
+
+type TerminalReconciliationFailure = Readonly<{
+  authority: RunTerminalCanonicalAuthority;
+  error: Error;
+}>;
+
+export async function readActiveRunCatalog(
+  apiClient: Parameters<typeof fetchAllThreadRuns>[0],
+  scope: ActiveRunScope,
+  signal: AbortSignal,
+): Promise<readonly ActiveRunCatalogEntry[]> {
+  const runs = await fetchAllThreadRuns(
+    apiClient,
+    scope.threadId,
+    undefined,
+    signal,
+  );
+  return runs.map((run) => ({
+    run_id: run.run_id,
+    status: run.status,
+  }));
+}
+
+export function createActiveRunReconnectStorageProxy(
+  readCurrentStorage: () => RunMetadataStorage | null,
+): RunMetadataStorage {
+  return {
+    getItem(key) {
+      return readCurrentStorage()?.getItem(key) ?? null;
+    },
+    setItem(key, value) {
+      readCurrentStorage()?.setItem(key, value);
+    },
+    removeItem(key) {
+      readCurrentStorage()?.removeItem(key);
+    },
+  };
+}
+
+export function selectExactActiveRunOwner(
+  projection: ActiveRunOwnerProjection | null,
+  scope: ProjectClientScope,
+  threadId: string | null | undefined,
+): Readonly<{
+  activeRunId: string | null;
+  resolverGeneration: number | null;
+}> {
+  if (
+    projection?.accountId !== scope.accountId ||
+    projection.projectId !== scope.projectId ||
+    projection.threadId !== threadId
+  ) {
+    return { activeRunId: null, resolverGeneration: null };
+  }
+  return {
+    activeRunId: projection.runId,
+    resolverGeneration: projection.generation,
+  };
+}
+
+export function selectExactTerminalReconciliationError(
+  failure: Readonly<{
+    authority: ActiveRunOwnerProjection;
+    error: Error;
+  }> | null,
+  projection: ActiveRunOwnerProjection | null,
+): Error | null {
+  return failure &&
+    projection?.accountId === failure.authority.accountId &&
+    projection.projectId === failure.authority.projectId &&
+    projection.threadId === failure.authority.threadId &&
+    projection.runId === failure.authority.runId &&
+    projection.generation === failure.authority.generation
+    ? failure.error
+    : null;
+}
+
+export function mergeCanonicalTerminalHistory(
+  canonicalMessages: Message[],
+  liveMessages: Message[],
+): Message[] {
+  const scopedLiveMessages =
+    scopeCheckpointMessagesByKnownRunBoundaries(liveMessages);
+  const canonicalIdentities = new Set(
+    canonicalMessages
+      .map(messageIdentity)
+      .filter((identity): identity is string => identity !== undefined),
+  );
+  const missingLiveMessages = scopedLiveMessages.filter((message) => {
+    const identity = messageIdentity(message);
+    return identity === undefined || !canonicalIdentities.has(identity);
+  });
+  return dedupeMessagesByIdentity([
+    ...canonicalMessages,
+    ...missingLiveMessages,
+  ]);
+}
+
+export function captureTerminalLiveMessages(
+  pendingArchivedMessages: Message[],
+  checkpointMessages: Message[],
+): Message[] {
+  return dedupeMessagesByIdentity(
+    scopeCheckpointMessagesByKnownRunBoundaries([
+      ...pendingArchivedMessages,
+      ...checkpointMessages,
+    ]),
+  );
+}
 
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
@@ -232,6 +374,23 @@ const EMPTY_THREAD_VALUES: AgentThreadState = {
   todos: [],
 };
 const EMPTY_MESSAGES: Message[] = [];
+const DISABLED_RUN_METADATA_STORAGE: RunMetadataStorage = {
+  getItem: () => null,
+  setItem: () => undefined,
+  removeItem: () => undefined,
+};
+
+function resolveRunMetadataStorage(
+  reconnectOnMount: ProjectPrivateWorkScope["reconnectOnMount"],
+): RunMetadataStorage {
+  if (typeof reconnectOnMount === "function") {
+    return reconnectOnMount();
+  }
+  if (reconnectOnMount && typeof window !== "undefined") {
+    return window.sessionStorage;
+  }
+  return DISABLED_RUN_METADATA_STORAGE;
+}
 
 export function useProjectedThreadMessages(
   input: ThreadMessageProjectionInput,
@@ -298,6 +457,12 @@ function getStreamErrorMessage(error: unknown): string {
     }
   }
   return "Request failed.";
+}
+
+function terminalReconciliationError(error: unknown): Error {
+  return error instanceof Error
+    ? error
+    : new Error(getStreamErrorMessage(error));
 }
 
 async function readResponseErrorMessage(
@@ -373,6 +538,94 @@ export function useThreadStream({
   currentViewThreadIdRef.current = currentViewThreadId;
   const currentUploadStatusScopeKeyRef = useRef(uploadScopeKey);
   currentUploadStatusScopeKeyRef.current = uploadScopeKey;
+  const activeRunScopeRef = useRef(privateWork.scope);
+  activeRunScopeRef.current = privateWork.scope;
+  const [activeRunResolver] = useState(() => createActiveRunResolver());
+  const activeRunResolverEntryRef = useRef<ActiveRunResolverEntry | null>(null);
+  const [activeRunOwnerProjection, setActiveRunOwnerProjection] =
+    useState<ActiveRunOwnerProjection | null>(null);
+  const activeRunOwnerProjectionRef = useRef<ActiveRunOwnerProjection | null>(
+    null,
+  );
+  const terminalReconciliationFailureRef =
+    useRef<TerminalReconciliationFailure | null>(null);
+  const [terminalReconciliationFailure, setTerminalReconciliationFailure] =
+    useState<TerminalReconciliationFailure | null>(null);
+  const terminalReconciliationAttemptRef = useRef<{
+    key: string;
+    authority: RunTerminalCanonicalAuthority;
+    promise: Promise<RunTerminalReconciliationResult>;
+  } | null>(null);
+  const publishActiveRunOwnerProjection = useCallback(
+    (projection: ActiveRunOwnerProjection | null) => {
+      activeRunOwnerProjectionRef.current = projection;
+      setActiveRunOwnerProjection(projection);
+      const failure = terminalReconciliationFailureRef.current;
+      if (
+        failure &&
+        (projection?.accountId !== failure.authority.accountId ||
+          projection.projectId !== failure.authority.projectId ||
+          projection.threadId !== failure.authority.threadId ||
+          projection.runId !== failure.authority.runId ||
+          projection.generation !== failure.authority.generation)
+      ) {
+        terminalReconciliationFailureRef.current = null;
+        setTerminalReconciliationFailure(null);
+      }
+    },
+    [],
+  );
+  const [activeRunReconnectStorage] = useState(() =>
+    createActiveRunReconnectStorageProxy(
+      () =>
+        activeRunResolverEntryRef.current?.generation.reconnectStorage ?? null,
+    ),
+  );
+  const ensureActiveRunResolverGeneration = useCallback(
+    (selectedThreadId: string): ActiveRunResolverEntry => {
+      const scope: ActiveRunScope = {
+        accountId: privateWork.scope.accountId,
+        projectId: privateWork.scope.projectId,
+        threadId: selectedThreadId,
+      };
+      const key = JSON.stringify([
+        scope.accountId,
+        scope.projectId,
+        scope.threadId,
+      ]);
+      const current = activeRunResolverEntryRef.current;
+      if (current?.key === key) return current;
+
+      const generation = activeRunResolver.begin({
+        scope,
+        reconnectStorage: resolveRunMetadataStorage(
+          privateWork.reconnectOnMount,
+        ),
+        readServerCatalog: (catalogScope, signal) =>
+          readActiveRunCatalog(privateWork.client, catalogScope, signal),
+      });
+      const entry: ActiveRunResolverEntry = {
+        key,
+        generation,
+        admitted: false,
+      };
+      activeRunResolverEntryRef.current = entry;
+      publishActiveRunOwnerProjection({
+        ...scope,
+        runId: null,
+        generation: generation.generation,
+      });
+      return entry;
+    },
+    [
+      activeRunResolver,
+      privateWork.client,
+      privateWork.reconnectOnMount,
+      privateWork.scope.accountId,
+      privateWork.scope.projectId,
+      publishActiveRunOwnerProjection,
+    ],
+  );
   // Optimistic messages shown before the server stream responds.
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const optimisticMessagesRef = useRef<Message[]>(optimisticMessages);
@@ -490,8 +743,9 @@ export function useThreadStream({
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
     error: historyError,
-    retry: retryHistory,
+    retry: retryCanonicalHistory,
     appendMessages,
+    refetchCanonicalThread,
   } = useThreadHistory(onStreamThreadId ?? "", {
     enabled: streamEnabled,
     pendingSupersededRunIds,
@@ -840,11 +1094,21 @@ export function useThreadStream({
     client: privateWork.client,
     assistantId: "lead_agent",
     threadId: streamEnabled ? onStreamThreadId : null,
-    reconnectOnMount: privateWork.reconnectOnMount,
+    reconnectOnMount:
+      privateWork.reconnectOnMount === false
+        ? false
+        : () => activeRunReconnectStorage,
     fetchStateHistory: { limit: 1 },
     throttle: true,
     onCreated(meta) {
       if (!streamOwnerMountedRef.current) return;
+      if (
+        privateWork.isActive?.() === false ||
+        activeRunScopeRef.current.accountId !== privateWork.scope.accountId ||
+        activeRunScopeRef.current.projectId !== privateWork.scope.projectId
+      ) {
+        return;
+      }
       const pendingScope = pendingMessageAdmissionRef.current;
       if (
         pendingScope?.threadId === meta.thread_id &&
@@ -868,6 +1132,21 @@ export function useThreadStream({
       ) {
         replayAttempt.createdRunId = meta.run_id;
       }
+      const resolverEntry = ensureActiveRunResolverGeneration(meta.thread_id);
+      const resolution = resolverEntry.generation.onCreated(meta.run_id);
+      if (resolution?.kind !== "resolved") return;
+      resolverEntry.admitted = true;
+      resolverEntry.generation.reconnectStorage.setItem(
+        `lg:stream:${meta.thread_id}`,
+        meta.run_id,
+      );
+      publishActiveRunOwnerProjection({
+        accountId: privateWork.scope.accountId,
+        projectId: privateWork.scope.projectId,
+        threadId: meta.thread_id,
+        runId: meta.run_id,
+        generation: resolution.generation,
+      });
       setIgnoredReplayHistoryError(null);
       handleStreamStart(meta.thread_id, meta.run_id);
       const pendingAdmission = pendingMessageAdmissionRef.current;
@@ -1186,6 +1465,23 @@ export function useThreadStream({
       ) {
         return;
       }
+      if (callbackOptions?.thread_id && callbackOptions.run_id) {
+        const current = activeRunOwnerProjectionRef.current;
+        const reconciliation = terminalReconciliationAttemptRef.current;
+        if (
+          current?.accountId === privateWork.scope.accountId &&
+          current.projectId === privateWork.scope.projectId &&
+          current.threadId === callbackOptions.thread_id &&
+          current.runId === callbackOptions.run_id &&
+          !(
+            reconciliation?.authority.threadId === callbackOptions.thread_id &&
+            reconciliation.authority.runId === callbackOptions.run_id &&
+            reconciliation.authority.generation === current.generation
+          )
+        ) {
+          publishActiveRunOwnerProjection({ ...current, runId: null });
+        }
+      }
       if (expectedTerminalFailure) {
         // The custom terminal event already ran the failure lifecycle. The SDK
         // sees a clean transport end, but this must not notify consumers that
@@ -1312,12 +1608,76 @@ export function useThreadStream({
         return true;
       } catch {
         attachedContinuationRunIdsRef.current.delete(attachmentKey);
-        retryHistory();
+        retryCanonicalHistory();
         return false;
       }
     },
-    [handleStreamStart, privateWork, queryClient, retryHistory, thread],
+    [
+      handleStreamStart,
+      privateWork,
+      queryClient,
+      retryCanonicalHistory,
+      thread,
+    ],
   );
+  const attachRunRef = useRef(attachRun);
+  attachRunRef.current = attachRun;
+  useEffect(() => {
+    if (!streamEnabled || !threadId) {
+      publishActiveRunOwnerProjection(null);
+      return;
+    }
+
+    const entry = ensureActiveRunResolverGeneration(threadId);
+    let current = true;
+    if (!entry.admitted) {
+      void entry.generation.resolveFromServerCatalog().then((resolution) => {
+        if (
+          !current ||
+          activeRunResolverEntryRef.current !== entry ||
+          resolution === null
+        ) {
+          return;
+        }
+        const runId = resolution.kind === "resolved" ? resolution.runId : null;
+        publishActiveRunOwnerProjection({
+          accountId: privateWork.scope.accountId,
+          projectId: privateWork.scope.projectId,
+          threadId,
+          runId,
+          generation: resolution.generation,
+        });
+        if (resolution.kind === "resolved") {
+          entry.generation.reconnectStorage.setItem(
+            `lg:stream:${threadId}`,
+            resolution.runId,
+          );
+          void attachRunRef.current(resolution.runId);
+        }
+      });
+    }
+
+    return () => {
+      current = false;
+      if (activeRunResolverEntryRef.current === entry) {
+        entry.generation.dispose();
+        activeRunResolverEntryRef.current = null;
+        if (
+          activeRunOwnerProjectionRef.current?.generation ===
+          entry.generation.generation
+        ) {
+          publishActiveRunOwnerProjection(null);
+        }
+      }
+    };
+  }, [
+    ensureActiveRunResolverGeneration,
+    privateWork.scope.accountId,
+    privateWork.scope.projectId,
+    publishActiveRunOwnerProjection,
+    streamEnabled,
+    threadId,
+  ]);
 
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
@@ -1482,6 +1842,195 @@ export function useThreadStream({
       visibleHistory,
     );
   }, [visibleHistory]);
+
+  const reconcileTerminalRun = useCallback(
+    (
+      runId: string,
+      generation: number,
+    ): Promise<RunTerminalReconciliationResult> => {
+      const current = activeRunOwnerProjectionRef.current;
+      const resolverEntry = activeRunResolverEntryRef.current;
+      if (
+        !streamOwnerMountedRef.current ||
+        privateWork.isActive?.() === false ||
+        current?.runId !== runId ||
+        current.generation !== generation ||
+        current.accountId !== privateWork.scope.accountId ||
+        current.projectId !== privateWork.scope.projectId ||
+        current.threadId !== currentViewThreadIdRef.current ||
+        resolverEntry?.generation.generation !== generation
+      ) {
+        return Promise.resolve({ kind: "stale", stage: "initial" });
+      }
+      const target: RunTerminalCanonicalAuthority = {
+        accountId: current.accountId,
+        projectId: current.projectId,
+        threadId: current.threadId,
+        runId,
+        generation,
+      };
+      const key = JSON.stringify([
+        target.accountId,
+        target.projectId,
+        target.threadId,
+        target.runId,
+        target.generation,
+      ]);
+      const existingAttempt = terminalReconciliationAttemptRef.current;
+      if (existingAttempt?.key === key) return existingAttempt.promise;
+      const existingFailure = terminalReconciliationFailureRef.current;
+      if (
+        existingFailure?.authority.accountId === target.accountId &&
+        existingFailure.authority.projectId === target.projectId &&
+        existingFailure.authority.threadId === target.threadId &&
+        existingFailure.authority.runId === target.runId &&
+        existingFailure.authority.generation === target.generation
+      ) {
+        return Promise.resolve({
+          kind: "failed",
+          stage: "canonical-history-refetch",
+          error: existingFailure.error,
+        });
+      }
+
+      const capturedLiveMessages = captureTerminalLiveMessages(
+        pendingArchivedMessagesRef.current,
+        messagesRef.current,
+      );
+      const promise = Promise.resolve()
+        .then(() =>
+          reconcileTerminalRunProjection<CanonicalThreadHistory>(target, {
+            readCurrentAuthority() {
+              if (
+                !streamOwnerMountedRef.current ||
+                privateWork.isActive?.() === false
+              ) {
+                return null;
+              }
+              const projection = activeRunOwnerProjectionRef.current;
+              if (projection?.runId === null || projection === null)
+                return null;
+              return {
+                accountId: projection.accountId,
+                projectId: projection.projectId,
+                threadId: projection.threadId,
+                runId: projection.runId,
+                generation: projection.generation,
+              };
+            },
+            reconnectStorage: resolverEntry.generation.reconnectStorage,
+            setControlledThreadId: setOnStreamThreadId,
+            switchLocalThreadToNull() {
+              thread.switchThread(null);
+            },
+            async refetchCanonicalThread(authority) {
+              const snapshot = await refetchCanonicalThread(authority.threadId);
+              const terminalRun = snapshot.runs.find(
+                (run) => run.run_id === authority.runId,
+              );
+              if (
+                !terminalRun ||
+                !["success", "error", "timeout", "interrupted"].includes(
+                  terminalRun.status,
+                )
+              ) {
+                throw new Error(
+                  "Canonical Thread history did not confirm the terminal Run.",
+                );
+              }
+              return snapshot;
+            },
+            mergeLiveWithCanonicalHistory(authority, snapshot) {
+              const merged = mergeCanonicalTerminalHistory(
+                snapshot.messages,
+                capturedLiveMessages,
+              );
+              pendingArchivedMessagesRef.current = merged;
+              pendingArchiveThreadIdRef.current = authority.threadId;
+              messagesRef.current = merged;
+              queryClient.setQueryData<Run[]>(
+                scopedThreadQueryKey(
+                  privateWork.scope,
+                  "thread",
+                  authority.threadId,
+                ),
+                snapshot.runs,
+              );
+            },
+          }),
+        )
+        .then((result) => {
+          if (result.kind === "reconciled") {
+            const projection = activeRunOwnerProjectionRef.current;
+            if (
+              projection?.runId === runId &&
+              projection.generation === generation
+            ) {
+              publishActiveRunOwnerProjection({ ...projection, runId: null });
+              currentRunIdRef.current = null;
+              currentRunThreadIdRef.current = null;
+              setLiveMessagesThreadId(null);
+            }
+          } else if (result.kind === "failed") {
+            const failure: TerminalReconciliationFailure = {
+              authority: target,
+              error: terminalReconciliationError(result.error),
+            };
+            terminalReconciliationFailureRef.current = failure;
+            setTerminalReconciliationFailure(failure);
+          }
+          return result;
+        })
+        .finally(() => {
+          if (terminalReconciliationAttemptRef.current?.key === key) {
+            terminalReconciliationAttemptRef.current = null;
+          }
+        });
+      terminalReconciliationAttemptRef.current = {
+        key,
+        authority: target,
+        promise,
+      };
+      return promise;
+    },
+    [
+      privateWork,
+      publishActiveRunOwnerProjection,
+      queryClient,
+      refetchCanonicalThread,
+      thread,
+    ],
+  );
+
+  const retryHistory = useCallback(() => {
+    const failure = terminalReconciliationFailureRef.current;
+    if (failure === null) {
+      retryCanonicalHistory();
+      return;
+    }
+    void retryTerminalReconciliationProjection(failure.authority, {
+      readCurrentAuthority() {
+        const projection = activeRunOwnerProjectionRef.current;
+        if (projection?.runId == null) return null;
+        return {
+          accountId: projection.accountId,
+          projectId: projection.projectId,
+          threadId: projection.threadId,
+          runId: projection.runId,
+          generation: projection.generation,
+        };
+      },
+      clearFailure() {
+        if (terminalReconciliationFailureRef.current !== failure) return;
+        terminalReconciliationFailureRef.current = null;
+        setTerminalReconciliationFailure(null);
+      },
+      reconcile(authority) {
+        return reconcileTerminalRun(authority.runId, authority.generation);
+      },
+      retryCanonicalHistory,
+    });
+  }, [reconcileTerminalRun, retryCanonicalHistory]);
 
   useEffect(() => {
     if (optimisticThreadId && optimisticThreadId !== currentViewThreadId) {
@@ -2400,7 +2949,10 @@ export function useThreadStream({
       ),
     [explicitActiveRunId, historyRuns],
   );
-  const activeRunId = useMemo(
+  // This presentation-only attribution may inspect rendered messages for
+  // deduplication. It is never exposed as active Run authority and cannot
+  // drive reconnect, attach, Stop, or execution-state reads.
+  const messageProjectionRunId = useMemo(
     () =>
       resolveActiveRunIdForMessages(
         persistedMessages,
@@ -2420,7 +2972,7 @@ export function useThreadStream({
     pendingArchivedMessages,
     pendingArchiveThreadId,
     renderMessages,
-    activeRunId,
+    activeRunId: messageProjectionRunId,
     runBaselineMessageIds,
     pendingSupersededRunIds,
     visibleOptimisticMessages,
@@ -2475,12 +3027,27 @@ export function useThreadStream({
     }
     return statuses;
   }, [attachmentUploadStatusState, currentViewThreadId, uploadScopeKey]);
+  const exactActiveRunOwner = streamEnabled
+    ? selectExactActiveRunOwner(
+        activeRunOwnerProjection,
+        privateWork.scope,
+        threadId,
+      )
+    : { activeRunId: null, resolverGeneration: null };
+  const visibleTerminalReconciliationError =
+    selectExactTerminalReconciliationError(
+      terminalReconciliationFailure,
+      activeRunOwnerProjection,
+    );
 
   return {
     thread: mergedThread,
     boundThreadId: onStreamThreadId ?? null,
+    activeRunId: exactActiveRunOwner.activeRunId,
+    activeRunResolverGeneration: exactActiveRunOwner.resolverGeneration,
     pendingUsageMessages,
     attachRun,
+    reconcileTerminalRun,
     prepareAttachments,
     discardAttachment,
     attachmentUploadStatuses,
@@ -2491,7 +3058,7 @@ export function useThreadStream({
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
-    historyError,
+    historyError: visibleTerminalReconciliationError ?? historyError,
     retryHistory,
     runExecutionProfiles,
     effectiveRunWorkloadProfile,

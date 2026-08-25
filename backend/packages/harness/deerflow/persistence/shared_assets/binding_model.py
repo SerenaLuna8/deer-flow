@@ -154,11 +154,9 @@ DECLARE
     asset_scope text;
 BEGIN
     IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
-       AND TG_TABLE_NAME IN ('agent_versions', 'skill_versions', 'mcp_server_versions') THEN
+       AND TG_TABLE_NAME IN ('agent_versions', 'mcp_server_versions') THEN
         IF TG_TABLE_NAME = 'agent_versions' THEN
             SELECT scope INTO asset_scope FROM agents WHERE id = NEW.agent_id;
-        ELSIF TG_TABLE_NAME = 'skill_versions' THEN
-            SELECT scope INTO asset_scope FROM skills WHERE id = NEW.skill_id;
         ELSE
             SELECT scope INTO asset_scope FROM mcp_servers
             WHERE id = NEW.mcp_server_id;
@@ -170,17 +168,63 @@ BEGIN
     IF (to_jsonb(NEW) - ARRAY[
         'workflow_status', 'status', 'submitted_at', 'reviewed_at',
         'reviewed_by_user_id', 'review_note', 'retired_at', 'revoked_at',
-        'revoked_by_user_id', 'revocation_reason_code'
+        'revoked_by_user_id', 'revocation_reason_code', 'files_sealed'
     ]::text[]) IS DISTINCT FROM
        (to_jsonb(OLD) - ARRAY[
         'workflow_status', 'status', 'submitted_at', 'reviewed_at',
         'reviewed_by_user_id', 'review_note', 'retired_at', 'revoked_at',
-        'revoked_by_user_id', 'revocation_reason_code'
+        'revoked_by_user_id', 'revocation_reason_code', 'files_sealed'
     ]::text[]) THEN
         RAISE EXCEPTION 'shared asset version payload is immutable'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+"""
+
+_CREATE_SKILL_VERSION_SEAL_FUNCTION = """
+CREATE OR REPLACE FUNCTION enforce_skill_version_files_seal_transition()
+RETURNS trigger AS $$
+BEGIN
+    IF NEW.files_sealed IS NOT DISTINCT FROM OLD.files_sealed
+       OR (OLD.files_sealed IS FALSE AND NEW.files_sealed IS TRUE) THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'invalid Skill version file seal transition'
+        USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$ LANGUAGE plpgsql
+"""
+
+_CREATE_SKILL_VERSION_FACTS_FUNCTION = """
+CREATE OR REPLACE FUNCTION verify_skill_version_file_facts()
+RETURNS trigger AS $$
+DECLARE
+    current_version skill_versions%ROWTYPE;
+    actual_file_count bigint;
+    actual_content_size bigint;
+BEGIN
+    SELECT * INTO current_version
+    FROM skill_versions
+    WHERE id = NEW.id;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF current_version.files_sealed IS NOT TRUE THEN
+        RAISE EXCEPTION 'Skill version files must be sealed before commit'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    SELECT count(*), coalesce(sum(size_bytes), 0)
+    INTO actual_file_count, actual_content_size
+    FROM skill_version_files
+    WHERE skill_version_id = current_version.id;
+    IF actual_file_count IS DISTINCT FROM current_version.file_count
+       OR actual_content_size IS DISTINCT FROM current_version.content_size_bytes THEN
+        RAISE EXCEPTION 'Skill version file facts do not match persisted files'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NULL;
 END;
 $$ LANGUAGE plpgsql
 """
@@ -355,14 +399,16 @@ DECLARE
     parent_scope text;
     parent_project_id uuid;
     parent_asset_id uuid;
+    parent_files_sealed boolean;
     purge_allowed boolean := false;
 BEGIN
     CASE TG_TABLE_NAME
         WHEN 'skill_version_files' THEN
             parent_version_id := CASE WHEN TG_OP = 'DELETE'
                 THEN OLD.skill_version_id ELSE NEW.skill_version_id END;
-            SELECT asset.scope, asset.project_id, asset.id
-            INTO parent_scope, parent_project_id, parent_asset_id
+            SELECT asset.scope, asset.project_id, asset.id, version.files_sealed
+            INTO parent_scope, parent_project_id, parent_asset_id,
+                 parent_files_sealed
             FROM skill_versions version
             JOIN skills asset ON asset.id = version.skill_id
             WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
@@ -512,8 +558,20 @@ BEGIN
         ELSE
             RAISE EXCEPTION 'unsupported version child table';
     END CASE;
+    IF TG_TABLE_NAME = 'skill_version_files' THEN
+        IF TG_OP = 'INSERT'
+           AND parent_files_sealed IS FALSE
+           AND current_setting('deerflow.asset_version_assembly', true)
+               = parent_version_id::text THEN
+            RETURN NEW;
+        END IF;
+        IF TG_OP = 'DELETE' AND purge_allowed THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'Skill version files are immutable outside initial assembly'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
     IF TG_TABLE_NAME IN (
-        'skill_version_files',
         'agent_version_skill_refs',
         'agent_version_mcp_refs',
         'mcp_version_secret_slots'
@@ -568,6 +626,8 @@ $$ LANGUAGE plpgsql
 
 _TRIGGER_DDL = (
     _CREATE_IMMUTABLE_FUNCTION,
+    _CREATE_SKILL_VERSION_SEAL_FUNCTION,
+    _CREATE_SKILL_VERSION_FACTS_FUNCTION,
     _CREATE_GENERATION_FUNCTION,
     _CREATE_BINDING_ELIGIBILITY_FUNCTION,
     _CREATE_SKILL_REVOCATION_FUNCTION,
@@ -576,6 +636,8 @@ _TRIGGER_DDL = (
     _CREATE_VERSION_STATE_FUNCTION,
     "CREATE TRIGGER trg_agent_versions_immutable BEFORE UPDATE ON agent_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_skill_versions_immutable BEFORE UPDATE ON skill_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
+    "CREATE TRIGGER trg_skill_versions_files_seal_transition BEFORE UPDATE OF files_sealed ON skill_versions FOR EACH ROW EXECUTE FUNCTION enforce_skill_version_files_seal_transition()",
+    "CREATE CONSTRAINT TRIGGER trg_skill_versions_facts_complete AFTER INSERT OR UPDATE ON skill_versions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION verify_skill_version_file_facts()",
     "CREATE TRIGGER trg_skill_versions_revocation BEFORE INSERT OR UPDATE OF revoked_at, revoked_by_user_id, revocation_reason_code ON skill_versions FOR EACH ROW EXECUTE FUNCTION enforce_system_skill_version_revocation()",
     "CREATE TRIGGER trg_mcp_server_versions_immutable BEFORE UPDATE ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_skill_version_files_immutable BEFORE UPDATE ON skill_version_files FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",

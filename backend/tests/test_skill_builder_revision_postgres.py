@@ -847,6 +847,9 @@ async def _insert_current_skill(
                 scan_decision="allow",
                 scan_summary={},
                 payload_checksum=checksum,
+                file_count=len(files),
+                content_size_bytes=sum(len(item.content) for item in files),
+                files_sealed=False,
                 created_by_user_id=str(context.user_id),
             )
         )
@@ -876,6 +879,8 @@ async def _insert_current_skill(
         version = await session.get(SkillVersionRow, version_id)
         asset = await session.get(SkillRow, skill_id)
         assert version is not None and asset is not None
+        version.files_sealed = True
+        await session.flush()
         asset.current_version_id = version_id
     return skill_id
 

@@ -1974,12 +1974,28 @@ async def run_agent(
             # joined under repeated cancellation before the admission barrier is
             # cleared, so a replacement cannot observe or reuse live resources.
             cleanup_succeeded = True
-            cleanup_succeeded = await private_files.release() and cleanup_succeeded
+            mount_release_outcome = None
+            try:
+                mount_release_outcome = await private_files.release()
+            except Exception:
+                cleanup_succeeded = False
+                logger.warning(
+                    "Private file authority cleanup failed for run %s",
+                    run_id,
+                    exc_info=True,
+                )
 
             if ctx.private_agent_runtime is not None:
+                close_private_runtime = (
+                    ctx.private_agent_runtime.aclose
+                    if mount_release_outcome is None
+                    else lambda: ctx.private_agent_runtime.aclose(
+                        mount_release_outcome,
+                    )
+                )
                 cleanup_succeeded = (
                     await private_files.join_cleanup(
-                        ctx.private_agent_runtime.aclose,
+                        close_private_runtime,
                         failure_message=f"Private runtime cleanup failed for run {run_id}",
                     )
                     and cleanup_succeeded

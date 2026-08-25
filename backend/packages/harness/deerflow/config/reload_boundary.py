@@ -66,6 +66,7 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
         "channel_connections.* edits need a Gateway restart. Database-backed project instances reconcile independently from PostgreSQL."
     ),
     "worker": ("The independent Worker process captures polling, leasing, concurrency, shutdown, and retry policy at process startup; live workers are not rebuilt on config.yaml edits."),
+    "run_skill_snapshots": ("Gateway and Scheduler freeze the Run Skill snapshot writer mode and its baked release identity at process startup; all writer roles must restart together when run_skill_snapshots.* changes."),
 }
 
 

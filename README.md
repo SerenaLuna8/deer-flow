@@ -25,8 +25,9 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   操作无法由平台召回。会话输入框选择、粘贴或拖入附件后会立即在后台预上传；发送
   消息时复用同一上传结果，不会重复上传。已经持久化的完整回复不会因运行时或沙箱
   回收失败被改写为 Agent 执行失败；此类回收问题作为 Worker 运维错误重试和记录。
-  每次模型调用的思考内容可独立折叠，工具调用之间的过程输出按原顺序保持可见，不会在
-  Run 完成时随整轮执行过程一起隐藏。
+  每次模型调用的思考内容可独立折叠；思考、过程输出和工具调用按模型调用顺序逐项展示，
+  普通执行过程不再使用“查看其他 N 个步骤”或“执行过程 · N 个步骤”的聚合折叠，
+  也不会在 Run 完成时隐藏或重排。
   Run 内的依赖虚拟环境属于临时运行状态，不作为会话文件保存；其他工作区符号链接
   仍安全失败。
   单个 MCP 服务在远端工具发现阶段不可用或返回非法目录时，只会禁用该 MCP 的本次
@@ -72,9 +73,23 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   装配，并遵循 Local/AIO Provider 各自的安全策略；候选文件只能经受管工具、检查和
   显式提交进入不可变版本历史。
 - 每个 Run（包括既有 Thread 的后续消息、编辑/重新生成、Automation 和 Channel）都在
-  准入时重新解析 Agent 与 Skill 的 Current Version，并冻结为完整 Run Snapshot。Worker
-  只执行该快照，执行与重试期间不会重新查询 Current Version。Agent 对 Skill 的依赖只
-  保存 Skill Asset ID，运行时自动解析该 Skill 的 Current Version；MCP 仍绑定精确配置。
+  准入时重新解析 Agent 与 Skill 的 Current Version，并冻结为不可变执行闭包。Agent 与
+  MCP 继续保存精确快照；Skill 文件只在不可变 Skill Version 中保存一次，Run 保存无文件
+  内容的 v4 manifest 和受数据库保护的精确 Version 引用。Worker 按该引用校验、物化并
+  只读挂载 Run 专属 Skill tree，执行、重试和恢复期间都不会重新查询 Current Version。
+  Agent 对 Skill 的依赖仍只保存 Skill Asset ID，只有新 Run 准入时解析其 Current Version；
+  MCP 仍绑定精确配置。
+  `run_skill_snapshots.writer_mode` 是进程启动时冻结的发布选择，默认且正常发布必须使用
+  `v4_reference`。仅在受控 R1 回滚期间，operator 才可让全部 Gateway 与 Scheduler 同时切换
+  为 `legacy_v3`，并配置发布内置的 artifact version
+  `run-skill-snapshot-writer-v2` 和 policy digest
+  `e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8`；已被资源验收否决的
+  v1 坐标、缺失、混用或不匹配都会拒绝启动。v2 固定限制为单 Skill source 36 MiB、单 Skill
+  codec envelope 256 MiB、单 Run 累计 encoded Skill JSON 48 MiB。Legacy 模式在读取 Skill
+  文件前先按固定上界拒绝过大请求，并用 PostgreSQL
+  全库非阻塞单写 gate 限制含内容的准入；busy 返回可重试 503，交互式过大请求返回 413，
+  Scheduler 的 busy/过大 occurrence 都保留为 due/retryable。平台管理运维页会显示当前
+  mode、artifact、policy digest 与 ready 状态，供发布读回核对。
 - 项目主会话可为下一次 Run 一次性选择 Interactive 或 Research Workload Profile；
   Gateway 把服务端确认的 effective profile 冻结进 Run Snapshot，隐藏 continuation 与
   Job retry 继承同一选择。Research 提高 Sub-Agent 工作量上限，但不增加工具、项目或数据
@@ -84,8 +99,10 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   工具 turn 通过有界分层 SNIP 逐 turn 压缩，receipt 仍绑定原始 checkpoint source；
   Dream 模型不可用会显示明确失败，不会伪装成“没有待整理 Memory”。上下文用量与
   自动压缩共用冻结的 provider-request 估算口径，计入系统提示、完整工具 schema 和
-  Durable Context；无法证明当前模型、Agent closure 与策略仍匹配时，界面明确显示暂不
-  支持计量，不回退到偏低的旧估算。
+  Durable Context；会话结束后，在当前模型、Agent closure、资源事实与策略仍匹配时，
+  Gauge 沿用最近一次确认的 Profile 做 idle 投影，不会再仅因包含 MCP 而拒绝计量；下一
+  次 Run 仍会重新发现 MCP 工具并冻结自己的 Profile。其他无法证明的情况继续明确显示
+  暂不支持计量，不回退到偏低的旧估算。
 - Sub-Agent、Guardrail、Tool Search、ToolCallControl 和可扩展工具链。每个
   Sub-Agent Task 直接写入的输出先进入各自的隔离草稿，只有 Lead 明确复制并调用
   `present_files` 后才作为主会话文件交付；文件变更的校验与持久化仍由后端执行，无法
@@ -102,12 +119,12 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 
 项目菜单按服务端下发的 capability 分层，而不是仅按角色名称在浏览器中推断：
 
-| 项目角色 | 项目菜单             | 主要边界                             |
-| -------- | -------------------- | ------------------------------------ |
+| 项目角色 | 项目菜单             | 主要边界                                         |
+| -------- | -------------------- | ------------------------------------------------ |
 | Admin    | 工作、能力、项目管理 | 项目治理、成员、各域秘密配置、审计及资产生命周期 |
-| Editor   | 工作、能力           | 运行工作，并保存、激活或停用项目 Agent/Skill |
-| Runner   | 工作、Agent（只读）  | 运行工作；只读查看 Agent             |
-| Viewer   | 工作、Agent（只读）  | 查看自己的既有工作和 Agent；不能运行 |
+| Editor   | 工作、能力           | 运行工作，并保存、激活或停用项目 Agent/Skill     |
+| Runner   | 工作、Agent（只读）  | 运行工作；只读查看 Agent                         |
+| Viewer   | 工作、Agent（只读）  | 查看自己的既有工作和 Agent；不能运行             |
 
 “工作”包含会话、Automation 和 Memory；渠道连接属于“项目管理”，只对具备
 `project.channels.manage` 的项目管理员显示。Runner 和 Viewer 可只读查看 Agent 目录，以及
@@ -174,6 +191,18 @@ make check-db
 ```
 
 - `make setup-db` 只初始化空目标库，并写入完整 Schema V1 快照。
+- 开发环境需要永久清空目标库时，先停止服务再执行：
+
+  ```bash
+  make stop
+  make reset-db
+  ```
+
+  命令会显示脱敏后的数据库目标，并要求输入 `DATABASE_URL` 中的数据库名确认；
+  非交互环境使用 `make reset-db CONFIRM_DATABASE=deerflow`。它拒绝重置
+  `postgres`、`template0` 和 `template1`，也会在有效 `search_path` 不以
+  `public` 为当前 Schema 时拒绝执行。它不会自动启动服务，且删除的数据不可恢复。
+
 - 空库初始化的 System Runtime Policy v1 将内部工具调用 hard limit 设为 `200`。同一
   Run 的 Lead 与所有 Sub-Agent 共用该计数，`inspect_image`、`task` 与其他内部工具统一
   累计，不同 Run 相互独立；重复执行初始化不会覆盖既有数据库的当前策略版本。
@@ -208,7 +237,9 @@ make stop
 在 macOS 上，两个 `*-daemon` 命令会交由当前登录用户的 `launchd` 持续托管一个前台
 启动器；命令返回后服务仍由该启动器负责，避免终端或自动化执行会话结束时一并回收子进程。
 用 `make stop` 停止服务并卸载该托管任务。服务日志仍在 `logs/`，启动器日志为
-`logs/{dev,prod}-daemon-supervisor.{out,err}.log`。
+`logs/{dev,prod}-daemon-supervisor.{out,err}.log`。本地启动器只会在 Gateway、Worker、
+Scheduler、Frontend、Nginx 五个子进程仍存活，且数据库中出现 fresh、可执行
+`private_run` 的 Worker 后报告启动成功；schema 不匹配或 Worker 超时会明确失败。
 
 浏览器访问 <http://localhost:2026>。常见入口：
 
@@ -288,6 +319,50 @@ make down
 当前仓库提供本地和 Docker Compose 整栈运行，不提供 Kubernetes/Helm 整栈部署
 资源。`docker/provisioner/` 是可选的 Kubernetes Sandbox provider，不是完整应用的
 部署方案。任何生产环境都需要独立验证容量、网络、安全、存储和故障恢复。
+
+Compose Worker 使用 `AioSandboxProvider` 和宿主 Docker socket（DooD）时，v4 Run
+Skill mount 默认关闭。先让测试配置保持
+`sandbox.compose_dood_p03_v1_verified: false`，在目标 Docker 主机执行真实 P-03
+双视图、非特权 guest 读写和跨 Worker 回收探测：
+
+```bash
+cd backend
+ACTWEAVE_REQUIRE_PROVIDER_INTEGRATION=1 \
+ACT_WEAVE_CONFIG_PATH="${ACTWEAVE_COMPOSE_DOOD_TEST_CONFIG:?set a disposable Compose DooD test config}" \
+uv run pytest tests/test_aio_run_skill_mount_lease_dood.py \
+  -m 'provider_integration and p03_compose_dood' -q
+```
+
+只有该命令在当前部署坐标上退出 `0`，才可把部署 `config.yaml` 中的字段改为
+字面量 YAML boolean `true` 并重启 Worker。该字段是版本化的 operator
+attestation，不接受环境变量字符串或请求参数。Docker、双视图 mount、guest
+readback 或 exact reconcile 任一缺失时保持 `false`；Worker 不注册
+`private_run`/`automation_run`，不能用单元测试或本机直连 Docker 冒充 P-03。
+
+BoxLite P-04 与 E2B P-05 使用相同的版本化门禁，默认分别为
+`sandbox.boxlite_p04_v1_verified: false` 和
+`sandbox.e2b_p05_v1_verified: false`。只有在目标 Linux/KVM 主机或受控 E2B
+账号上执行对应真实非特权 guest 读写、exact release/readback 和跨进程 owner
+reconcile 探测并退出 `0` 后，才可把当前部署的字段改为字面量 YAML boolean
+`true` 并重启 Worker：
+
+```bash
+cd backend
+ACTWEAVE_REQUIRE_PROVIDER_INTEGRATION=1 \
+ACT_WEAVE_CONFIG_PATH="${ACTWEAVE_BOXLITE_TEST_CONFIG:?set a disposable BoxLite test config}" \
+uv run pytest tests/test_boxlite_run_skill_mount_lease.py \
+  -m 'provider_integration and p04_boxlite' -q
+
+ACTWEAVE_REQUIRE_PROVIDER_INTEGRATION=1 \
+ACT_WEAVE_CONFIG_PATH="${ACTWEAVE_E2B_TEST_CONFIG:?set a disposable E2B test config}" \
+uv run pytest tests/test_e2b_run_skill_mount_lease.py \
+  -m 'provider_integration and p05_e2b' -q
+```
+
+P-04 还要求本机 BoxLite registry/runtime 启动探测成功；P-05 要求配置凭据并在
+5 秒内完成 E2B control-plane metadata probe。依赖、虚拟化能力、凭据、网络或
+provider readback 任一不可用时 readiness 保持 false。mock contract、请求字段和
+环境字符串都不能启用这两个门。
 
 ## 常用开发命令
 

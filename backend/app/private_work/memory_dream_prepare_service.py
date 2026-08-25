@@ -9,6 +9,10 @@ from datetime import UTC, datetime
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecyclePort,
+)
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -50,6 +54,7 @@ class MemoryDreamPrepareService:
         job_repository_builder=JobRepository,
         dream_store_builder=MemoryDreamStore,
         revalidator: PrivateWorkRevalidator | None = None,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
         audit=None,
     ) -> None:
         if not all(
@@ -67,6 +72,7 @@ class MemoryDreamPrepareService:
         self._job_repository_builder = job_repository_builder
         self._dream_store_builder = dream_store_builder
         self._revalidator = revalidator or PrivateWorkRevalidator()
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
         if audit is not None and not callable(getattr(audit, "memory_dream_settled", None)):
             raise ValueError("Dream preparation audit port is invalid")
         self._audit = audit
@@ -103,8 +109,13 @@ class MemoryDreamPrepareService:
                     Capability.SHARED_ASSETS_EXECUTE,
                     lock=True,
                 )
+                account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+                    session,
+                    scope.owner_user_id,
+                )
                 return await self._repository(session).admit(
                     scope,
+                    account_private_generation=account_private_generation,
                     thread_id=thread_id,
                     operation_id=operation_id,
                     request_id=context.request_id,

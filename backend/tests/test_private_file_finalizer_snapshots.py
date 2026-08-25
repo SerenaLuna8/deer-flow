@@ -119,6 +119,36 @@ def _chunk(file_id: uuid.UUID, index: int, content: bytes) -> SimpleNamespace:
     )
 
 
+def test_ready_authority_comparison_is_independent_of_database_collation() -> None:
+    workbook = SimpleNamespace(
+        id=uuid.UUID(int=1),
+        logical_path="workspace/extract/Workbook1.xlsx",
+        kind="workspace",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size=10,
+        sha256="a" * 64,
+        version=1,
+    )
+    image = SimpleNamespace(
+        id=uuid.UUID(int=2),
+        logical_path="workspace/extract/image1.png",
+        kind="workspace",
+        media_type="image/png",
+        size=20,
+        sha256="b" * 64,
+        version=1,
+    )
+
+    python_order = (workbook, image)
+    database_collation_order = (image, workbook)
+
+    assert file_finalizer_module._canonical_ready_authority(  # type: ignore[attr-defined]
+        python_order,
+    ) == file_finalizer_module._canonical_ready_authority(  # type: ignore[attr-defined]
+        database_collation_order,
+    )
+
+
 @pytest.mark.asyncio
 async def test_authoritative_snapshots_stream_chunks_and_keep_empty_files() -> None:
     first_id = uuid.UUID(int=1)

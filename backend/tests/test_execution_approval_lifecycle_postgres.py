@@ -12,6 +12,12 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.private_thread_seed import seed_private_thread_database
+from support.run_closure import (
+    add_legacy_test_run_asset,
+    add_sealed_test_run,
+    begin_test_run_closure,
+    seal_test_run_closure,
+)
 
 from app.audit.models import AuditAction
 from app.audit.service import (
@@ -97,7 +103,6 @@ from deerflow.persistence.private_work import (
     PrivateArtifactRow,
     PrivateFileChunkRow,
     PrivateFileRow,
-    RunAssetVersionRow,
 )
 from deerflow.persistence.private_work.file_repository import PrivateFileRepository
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
@@ -114,6 +119,7 @@ from deerflow.persistence.system_settings import (
 )
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 from deerflow.runtime.events.models import StreamFrame, StreamLeaseProof
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.host_execution_approval import (
@@ -204,6 +210,8 @@ async def _running_job(
     lease_token: str,
     model_ref: str,
     execution_domain_affinity: str | None = None,
+    agent_version_id: uuid.UUID | None = None,
+    closure_rows: tuple[object, ...] = (),
 ) -> tuple[JobRow, JobAttemptRow]:
     now = datetime.now(UTC)
     origin_trace_id = uuid.uuid4().hex
@@ -226,12 +234,27 @@ async def _running_job(
         execution_heartbeat_at=now,
         execution_started_at=now,
     )
-    session.add(run)
-    await session.flush()
+    if agent_version_id is None:
+        await add_sealed_test_run(session, run)
+    else:
+        await begin_test_run_closure(session, run)
+        add_legacy_test_run_asset(
+            session,
+            run,
+            asset_kind="agent",
+            dependency_order=0,
+            asset_id=agent_id,
+            version_id=agent_version_id,
+            payload_checksum="a" * 64,
+            catalog_generation=1,
+        )
+        session.add_all(closure_rows)
+        await seal_test_run_closure(session, run)
     job = JobRow(
         job_type="private_run",
         project_id=project_id,
         owner_user_id=owner_user_id,
+        owner_private_generation=1,
         run_id=run_id,
         origin_trace_id=origin_trace_id,
         execution_domain_affinity=execution_domain_affinity,
@@ -972,6 +995,147 @@ async def _add_source_output(
     session.add(row)
     await session.flush()
     return row
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_finalizer_ready_authority_ignores_database_collation_order(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(
+        migrated_postgres_database_url,
+        stage=False,
+    )
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            for logical_path, media_type, content in (
+                (
+                    "workspace/extract/Workbook1.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    b"workbook",
+                ),
+                (
+                    "workspace/extract/image1.png",
+                    "image/png",
+                    b"image",
+                ),
+            ):
+                digest = hashlib.sha256(content).hexdigest()
+                row = PrivateFileRow(
+                    project_id=scenario.seed.owner_a.project_id,
+                    owner_user_id=str(scenario.seed.owner_a.user_id),
+                    thread_id=scenario.thread_id,
+                    kind="workspace",
+                    logical_path=logical_path,
+                    media_type=media_type,
+                    size=len(content),
+                    sha256=digest,
+                    status="ready",
+                    version=1,
+                    created_by_run_id=scenario.source_run_id,
+                )
+                session.add(row)
+                await session.flush()
+                session.add(
+                    PrivateFileChunkRow(
+                        file_id=row.id,
+                        chunk_index=0,
+                        content=content,
+                        size=len(content),
+                        sha256=digest,
+                    )
+                )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert run is not None
+            run.finalization_status = "finalizing"
+
+        async with scenario.seed.factory() as session:
+            ready_files = tuple(
+                (
+                    await session.scalars(
+                        sa.select(PrivateFileRow)
+                        .where(
+                            PrivateFileRow.project_id == scenario.seed.owner_a.project_id,
+                            PrivateFileRow.owner_user_id == str(scenario.seed.owner_a.user_id),
+                            PrivateFileRow.thread_id == scenario.thread_id,
+                            PrivateFileRow.status == "ready",
+                        )
+                        .order_by(
+                            PrivateFileRow.logical_path,
+                            PrivateFileRow.id,
+                        )
+                    )
+                ).all()
+            )
+
+        # The target PostgreSQL database uses en_US collation, while Python
+        # orders these mixed-case paths by Unicode code point. Finalization
+        # must compare facts, not the database's presentation order.
+        assert tuple(row.logical_path for row in ready_files) == (
+            "workspace/extract/image1.png",
+            "workspace/extract/Workbook1.xlsx",
+        )
+        assert tuple(sorted(row.logical_path for row in ready_files)) == (
+            "workspace/extract/Workbook1.xlsx",
+            "workspace/extract/image1.png",
+        )
+
+        manifest = AuthorityManifest(
+            entries=tuple(
+                AuthorityManifestEntry(
+                    file_id=row.id,
+                    logical_path=row.logical_path,
+                    kind=row.kind,
+                    media_type=row.media_type,
+                    size=row.size,
+                    sha256=row.sha256,
+                    version=row.version,
+                )
+                for row in ready_files
+            ),
+            run_id=scenario.source_run_id,
+        )
+        after_files = tuple(
+            _AfterFile(
+                logical_path=row.logical_path,
+                virtual_path=f"/mnt/user-data/{row.logical_path}",
+                kind=row.kind,
+                size=row.size,
+                media_type=row.media_type,
+            )
+            for row in ready_files
+        )
+        boundary = PrivateRunExecutionBoundary(
+            scenario.seed.factory,
+            context=scenario.seed.owner_a,
+            claim=scenario.claim,
+        )
+
+        result = await PrivateFileFinalizer(scenario.seed.factory)._commit(
+            PrivateFileRunScope(
+                scenario.seed.owner_a,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                authorization_boundary=boundary,
+            ),
+            manifest,
+            after_files,
+            (),
+            (),
+        )
+
+        assert result.files == ()
+        assert result.workspace_changes is None
+        async with scenario.seed.factory() as session:
+            committed_run = await session.get(RunRow, scenario.source_run_id)
+            assert committed_run is not None
+            assert committed_run.finalization_status == "complete"
+    finally:
+        await scenario.seed.engine.dispose()
 
 
 @pytest.mark.postgres
@@ -3334,15 +3498,41 @@ class _QueuedAffinityContinuationAdmission:
             )
             assert approval is not None and approval.status == "approved"
             runs = PrivateRunRepository(session)
-            run = await runs.create(
+            run = await runs.create_for_snapshot_assembly(
                 scope=context.resource_scope,
                 thread_id=thread_id,
                 request=request,
+            )
+            await session.scalar(
+                sa.select(
+                    sa.func.set_config(
+                        "deerflow.run_asset_closure_assembly",
+                        run.run_id,
+                        True,
+                    )
+                )
+            )
+            add_legacy_test_run_asset(
+                session,
+                run,
+                asset_kind="agent",
+                dependency_order=0,
+                asset_id=uuid.uuid5(uuid.NAMESPACE_URL, f"agent:{run.run_id}"),
+                version_id=uuid.uuid5(uuid.NAMESPACE_URL, f"version:{run.run_id}"),
+                payload_checksum=hashlib.sha256(run.run_id.encode()).hexdigest(),
+            )
+            run = await runs.seal_asset_closure(
+                scope=context.resource_scope,
+                run_id=run.run_id,
             )
             job = await PrivateRunJobRepository(session).enqueue(
                 scope=JobScope(context.project_id, str(context.user_id)),
                 run_id=run.run_id,
                 origin_trace_id=run.origin_trace_id,
+                account_private_generation=AccountPrivateGeneration(
+                    owner_user_id=str(context.user_id),
+                    generation=1,
+                ),
                 execution_domain_affinity=affinity,
             )
             run = await runs.attach_job(
@@ -4217,50 +4407,33 @@ class _AtomicContinuationAdmission:
                     lease_token=self.lease_token,
                     model_ref=str(self._model_config_id),
                     execution_domain_affinity=(server_context.host_execution_domain_affinity),
-                )
-                session.add(
-                    RunAssetVersionRow(
-                        project_id=self._project_id,
-                        owner_user_id=self._owner_user_id,
-                        thread_id=thread_id,
-                        run_id=request.run_id,
-                        asset_kind="agent",
-                        dependency_order=0,
-                        asset_scope="project",
-                        asset_id=self._agent_id,
-                        version_id=self._agent_version_id,
-                        payload_checksum="a" * 64,
-                        catalog_generation=1,
-                        snapshot_json={},
-                    ),
-                )
-                session.add(
-                    RunModelConfigSnapshotRow(
-                        project_id=self._project_id,
-                        owner_user_id=self._owner_user_id,
-                        thread_id=thread_id,
-                        run_id=request.run_id,
-                        purpose="chat",
-                        model_config_id=self._model_config_id,
-                        provider_payload={
-                            "model_ref": str(self._model_config_id),
-                            "max_input_tokens": 64_000,
-                        },
-                        payload_checksum=self._model_payload_checksum,
-                        secret_generation_id=None,
-                        secret_envelope_digest=None,
-                    ),
-                )
-                session.add(
-                    RunRuntimePolicySnapshotRow(
-                        project_id=self._project_id,
-                        owner_user_id=self._owner_user_id,
-                        thread_id=thread_id,
-                        run_id=request.run_id,
-                        section="agent_runtime",
-                        policy_version_id=self._runtime_policy_version_id,
-                        schema_version=self._runtime_policy_schema_version,
-                        payload_checksum=self._runtime_policy_checksum,
+                    agent_version_id=self._agent_version_id,
+                    closure_rows=(
+                        RunModelConfigSnapshotRow(
+                            project_id=self._project_id,
+                            owner_user_id=self._owner_user_id,
+                            thread_id=thread_id,
+                            run_id=request.run_id,
+                            purpose="chat",
+                            model_config_id=self._model_config_id,
+                            provider_payload={
+                                "model_ref": str(self._model_config_id),
+                                "max_input_tokens": 64_000,
+                            },
+                            payload_checksum=self._model_payload_checksum,
+                            secret_generation_id=None,
+                            secret_envelope_digest=None,
+                        ),
+                        RunRuntimePolicySnapshotRow(
+                            project_id=self._project_id,
+                            owner_user_id=self._owner_user_id,
+                            thread_id=thread_id,
+                            run_id=request.run_id,
+                            section="agent_runtime",
+                            policy_version_id=self._runtime_policy_version_id,
+                            schema_version=self._runtime_policy_schema_version,
+                            payload_checksum=self._runtime_policy_checksum,
+                        ),
                     ),
                 )
                 approval.continuation_run_id = request.run_id
@@ -4445,50 +4618,33 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 run_id=source_run_id,
                 lease_token=source_token,
                 model_ref=str(model_config_id),
-            )
-            session.add(
-                RunAssetVersionRow(
-                    project_id=project_id,
-                    owner_user_id=str(owner_id),
-                    thread_id=thread_id,
-                    run_id=source_run_id,
-                    asset_kind="agent",
-                    dependency_order=0,
-                    asset_scope="project",
-                    asset_id=agent_id,
-                    version_id=agent_version_id,
-                    payload_checksum="a" * 64,
-                    catalog_generation=1,
-                    snapshot_json={},
-                ),
-            )
-            session.add(
-                RunModelConfigSnapshotRow(
-                    project_id=project_id,
-                    owner_user_id=str(owner_id),
-                    thread_id=thread_id,
-                    run_id=source_run_id,
-                    purpose="chat",
-                    model_config_id=model_config_id,
-                    provider_payload={
-                        "model_ref": str(model_config_id),
-                        "max_input_tokens": 64_000,
-                    },
-                    payload_checksum=model_payload_checksum,
-                    secret_generation_id=None,
-                    secret_envelope_digest=None,
-                ),
-            )
-            session.add(
-                RunRuntimePolicySnapshotRow(
-                    project_id=project_id,
-                    owner_user_id=str(owner_id),
-                    thread_id=thread_id,
-                    run_id=source_run_id,
-                    section="agent_runtime",
-                    policy_version_id=runtime_policy_version.id,
-                    schema_version=runtime_policy_version.schema_version,
-                    payload_checksum=runtime_policy_version.payload_checksum,
+                agent_version_id=agent_version_id,
+                closure_rows=(
+                    RunModelConfigSnapshotRow(
+                        project_id=project_id,
+                        owner_user_id=str(owner_id),
+                        thread_id=thread_id,
+                        run_id=source_run_id,
+                        purpose="chat",
+                        model_config_id=model_config_id,
+                        provider_payload={
+                            "model_ref": str(model_config_id),
+                            "max_input_tokens": 64_000,
+                        },
+                        payload_checksum=model_payload_checksum,
+                        secret_generation_id=None,
+                        secret_envelope_digest=None,
+                    ),
+                    RunRuntimePolicySnapshotRow(
+                        project_id=project_id,
+                        owner_user_id=str(owner_id),
+                        thread_id=thread_id,
+                        run_id=source_run_id,
+                        section="agent_runtime",
+                        policy_version_id=runtime_policy_version.id,
+                        schema_version=runtime_policy_version.schema_version,
+                        payload_checksum=runtime_policy_version.payload_checksum,
+                    ),
                 ),
             )
 

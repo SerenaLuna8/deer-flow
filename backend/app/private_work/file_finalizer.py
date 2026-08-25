@@ -76,6 +76,28 @@ _DEFAULT_PRIVATE_FINALIZATION_MAX_SCANNED_FILES = 2_000
 _DEFAULT_PRIVATE_FINALIZATION_MAX_SCAN_ENTRIES = 10_000
 
 
+def _canonical_ready_authority(rows: Any) -> tuple[tuple[object, ...], ...]:
+    """Compare ready-file facts without depending on PostgreSQL collation."""
+
+    facts: list[tuple[object, ...]] = []
+    for row in rows:
+        file_id = getattr(row, "file_id", None)
+        if file_id is None:
+            file_id = row.id
+        facts.append(
+            (
+                file_id,
+                row.logical_path,
+                row.kind,
+                row.media_type,
+                row.size,
+                row.sha256,
+                row.version,
+            )
+        )
+    return tuple(sorted(facts, key=lambda item: (item[1], str(item[0]))))
+
+
 @dataclass(frozen=True, slots=True)
 class _AfterFile:
     logical_path: str
@@ -276,7 +298,7 @@ class PrivateFileFinalizer:
                 session,
                 run_scope.context,
                 Capability.PRIVATE_WORK_CREATE,
-                lock=True,
+                lock_mode="update",
             )
             await self._authorize_mutation(run_scope, session)
             result = await session.execute(
@@ -439,7 +461,7 @@ class PrivateFileFinalizer:
                 session,
                 run_scope.context,
                 Capability.PRIVATE_WORK_CREATE,
-                lock=True,
+                lock_mode="update",
             )
             await self._authorize_mutation(run_scope, session)
             await PrivateFileRepository(session).stage(
@@ -478,6 +500,7 @@ class PrivateFileFinalizer:
                         session,
                         run_scope.context,
                         Capability.PRIVATE_WORK_CREATE,
+                        lock_mode="update",
                     )
                     await self._authorize_mutation(
                         run_scope,
@@ -778,7 +801,7 @@ class PrivateFileFinalizer:
                 session,
                 run_scope.context,
                 Capability.PRIVATE_WORK_CREATE,
-                lock=True,
+                lock_mode="update",
             )
             thread = (
                 await session.execute(
@@ -909,7 +932,7 @@ class PrivateFileFinalizer:
                 session,
                 run_scope.context,
                 Capability.PRIVATE_WORK_CREATE,
-                lock=True,
+                lock_mode="update",
             )
             thread = (
                 await session.execute(
@@ -962,33 +985,10 @@ class PrivateFileFinalizer:
                 .scalars()
                 .all()
             )
-            expected_authority = sorted(
-                [
-                    (
-                        entry.file_id,
-                        entry.logical_path,
-                        entry.kind,
-                        entry.media_type,
-                        entry.size,
-                        entry.sha256,
-                        entry.version,
-                    )
-                    for entry in before_manifest.entries
-                ],
-                key=lambda item: (item[1], item[0]),
+            expected_authority = _canonical_ready_authority(
+                before_manifest.entries,
             )
-            current_authority = [
-                (
-                    row.id,
-                    row.logical_path,
-                    row.kind,
-                    row.media_type,
-                    row.size,
-                    row.sha256,
-                    row.version,
-                )
-                for row in current_rows
-            ]
+            current_authority = _canonical_ready_authority(current_rows)
             if len({entry.logical_path for entry in before_manifest.entries}) != len(before_manifest.entries) or current_authority != expected_authority:
                 raise PrivateWorkUnavailable(run_scope.context.request_id)
 

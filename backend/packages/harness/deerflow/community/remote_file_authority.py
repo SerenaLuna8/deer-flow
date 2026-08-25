@@ -273,6 +273,96 @@ try:
             os.close(mount_fd)
         emit({"initialized": True})
 
+    if action == "probe_run_readonly_mount":
+        expected_keys = {
+            "version", "action", "root", "path", "display_path",
+            "expected_owner_id", "expected_manifest",
+        }
+        if set(request) != expected_keys:
+            fail("protocol", "invalid run mount probe request")
+        if (
+            request.get("root") != "/mnt/skills"
+            or request.get("path") != "/mnt/skills/.actweave-run-mount.json"
+            or request.get("display_path") != "/mnt/skills/.actweave-run-mount.json"
+        ):
+            fail("protocol", "invalid run mount probe path")
+        if PRIVATE_RUNTIME_EUID == 0:
+            fail("permission", "run mount verifier must be unprivileged")
+        raw_owner = request.get("expected_owner_id")
+        expected_manifest = request.get("expected_manifest")
+        try:
+            owner = uuid.UUID(raw_owner)
+        except (AttributeError, ValueError):
+            fail("protocol", "invalid run mount owner")
+        canonical_manifest = json.dumps(
+            {"owner_id": str(owner), "schema_version": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n"
+        if str(owner) != raw_owner or expected_manifest != canonical_manifest:
+            fail("protocol", "invalid run mount manifest declaration")
+        root_fd = open_absolute_dir(PRIVATE_MOUNT_ROOT + "/skills")
+        try:
+            root_st = os.fstat(root_fd)
+            if stat.S_IMODE(root_st.st_mode) != 0o555:
+                fail("permission", "run mount root mode is invalid")
+            name = ".actweave-run-mount.json"
+            before = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
+            try:
+                opened = os.fstat(fd)
+                regular_identity(opened)
+                if (
+                    not same(before, opened)
+                    or stat.S_IMODE(opened.st_mode) != 0o444
+                    or opened.st_size > 512
+                ):
+                    fail("unsafe", "run mount manifest metadata is invalid")
+                content = os.read(fd, 513)
+                after = os.fstat(fd)
+                current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                if (
+                    not same(opened, after)
+                    or not same(after, current)
+                    or after.st_size != len(content)
+                    or content != expected_manifest.encode("utf-8")
+                ):
+                    fail("changed", "run mount manifest readback mismatch")
+            finally:
+                os.close(fd)
+            write_name = ".actweave-write-probe-" + owner.hex
+            try:
+                write_fd = os.open(
+                    write_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=root_fd,
+                )
+            except OSError as exc:
+                if exc.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
+                    fail("io", "run mount write probe was inconclusive")
+            else:
+                os.close(write_fd)
+                try:
+                    os.unlink(write_name, dir_fd=root_fd)
+                except OSError:
+                    pass
+                fail("unsafe", "run mount is writable")
+            try:
+                os.stat(write_name, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                fail("unsafe", "run mount write probe was retained")
+        finally:
+            os.close(root_fd)
+        emit({
+            "euid": PRIVATE_RUNTIME_EUID,
+            "owner_id": str(owner),
+            "readable": True,
+            "writable": False,
+        })
+
     root, parts = relative(request.get("root"), request.get("path"))
 
     if action == "scan":

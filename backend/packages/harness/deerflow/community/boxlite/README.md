@@ -28,6 +28,7 @@ sandbox:
   replicas: 3
   idle_timeout: 600
   health_check_skip_seconds: 0.0
+  boxlite_p04_v1_verified: false
   environment:
     PYTHONUNBUFFERED: "1"
 ```
@@ -35,6 +36,11 @@ sandbox:
 `replicas` is a soft cap across active and warm VMs owned by the provider.
 Warm VMs are evicted before active ones. `idle_timeout: 0` disables idle
 reaping; `health_check_skip_seconds: 0` keeps validation on every warm reuse.
+`boxlite_p04_v1_verified` is a strict, versioned release attestation. Keep it
+`false` until the real P-04 provider-integration test succeeds on this exact
+Linux/KVM target; a quoted string such as `"true"` is rejected. General legacy
+BoxLite use may run on a supported macOS host, but that does not satisfy or
+enable the release-specific P-04 v4 Run Skill gate.
 
 ## Lifecycle and isolation
 
@@ -47,6 +53,12 @@ daemon thread and marshals SDK calls to it.
 - Private Run acquisition derives a fresh identity from project, owner, thread,
   Run, and a nonce; it mounts admitted read-only resources and requires strict
   destruction instead of warm reuse.
+- Typed v4 Run Skill acquisition accepts only a validated materializer-owned
+  source, exposes it at `/mnt/skills`, and labels the Run VM with the exact
+  opaque owner coordinate. Readback executes as the non-root `deerflow_agent`
+  identity; release returns proof only after the BoxLite registry confirms the
+  exact VM is absent. Owner reconciliation uses `list_info` plus exact remove
+  and a second absence readback across Worker processes.
 - Provider startup reconciles orphaned BoxLite instances it owns.
 - `/mnt/user-data/{workspace,uploads,outputs}` and `/mnt/skills` are created in
   each VM before use.

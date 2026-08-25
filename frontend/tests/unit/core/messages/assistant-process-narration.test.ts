@@ -1,10 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
-import {
-  getAssistantTurnDisplays,
-  getMessageGroups,
-} from "@/core/messages/utils";
+import { getMessageGroups } from "@/core/messages/utils";
 
 function reasoningToolRound({
   content = "",
@@ -88,71 +85,5 @@ describe("assistant process narration", () => {
       "round-2",
       "call-2-result",
     ]);
-  });
-
-  test("keeps narrated process output outside the completed turn disclosure", () => {
-    const narratedToolRound = reasoningToolRound({
-      content: "OUTPUT_1",
-      messageId: "round-1",
-      reasoning: "THOUGHT_1",
-      toolCallId: "call-1",
-    });
-    const finalAnswer = {
-      id: "final-answer",
-      type: "ai",
-      content: "FINAL_OUTPUT",
-      additional_kwargs: { reasoning_content: "FINAL_THOUGHT" },
-    } as Message;
-    const groups = getMessageGroups([
-      narratedToolRound,
-      toolResult("call-1"),
-      finalAnswer,
-    ]);
-
-    expect(groups.map((group) => group.type)).toEqual([
-      "assistant:processing",
-      "assistant",
-    ]);
-    expect(getAssistantTurnDisplays(groups)).toEqual([]);
-  });
-
-  test("does not treat Anthropic thinking blocks as visible process output", () => {
-    const anthropicThinkingRound = (messageId: string, toolCallId: string) =>
-      ({
-        id: messageId,
-        type: "ai",
-        content: [
-          {
-            type: "thinking",
-            thinking: `THOUGHT_${messageId}`,
-            signature: `signature-${messageId}`,
-          },
-        ],
-        tool_calls: [
-          {
-            id: toolCallId,
-            name: "read_file",
-            args: { path: `/tmp/${messageId}.md` },
-          },
-        ],
-      }) as unknown as Message;
-    const finalAnswer = {
-      id: "final-answer",
-      type: "ai",
-      content: "FINAL_OUTPUT",
-    } as Message;
-    const groups = getMessageGroups([
-      anthropicThinkingRound("round-1", "call-1"),
-      toolResult("call-1"),
-      anthropicThinkingRound("round-2", "call-2"),
-      toolResult("call-2"),
-      finalAnswer,
-    ]);
-
-    expect(groups.map((group) => group.type)).toEqual([
-      "assistant:processing",
-      "assistant",
-    ]);
-    expect(getAssistantTurnDisplays(groups)).toHaveLength(1);
   });
 });

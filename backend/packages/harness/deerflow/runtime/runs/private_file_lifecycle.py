@@ -15,6 +15,12 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from deerflow.file_authority import RunFileAuthority
+from deerflow.sandbox.sandbox_provider import (
+    NotAcquired,
+    Orphaned,
+    Released,
+    RunMountReleaseOutcome,
+)
 from deerflow.workspace_changes.types import WorkspaceChangeResult
 
 logger = logging.getLogger(__name__)
@@ -79,6 +85,11 @@ class PrivateFileLifecycle:
     _failed: bool = field(default=False, init=False)
     _cleanup_cancellation_pending: bool = field(default=False, init=False)
     _finalization_result: object | None = field(default=None, init=False)
+    _release_completed: bool = field(default=False, init=False)
+    _release_outcome: RunMountReleaseOutcome | None = field(
+        default=None,
+        init=False,
+    )
 
     @property
     def enabled(self) -> bool:
@@ -252,20 +263,60 @@ class PrivateFileLifecycle:
         finally:
             self._cleanup_cancellation_pending |= cancellation_pending
 
-    async def release(self) -> bool:
+    async def release(self) -> RunMountReleaseOutcome | None:
+        """Join release and preserve the provider's typed mount evidence."""
+
+        if self._release_completed:
+            return self._release_outcome
         authority = self.authority
         if authority is None:
-            return True
+            self._release_completed = True
+            return None
         release = getattr(authority, "release", None)
         if not callable(release):
-            release = getattr(authority, "close", None)
-        if not callable(release):
-            logger.warning(
-                "Private file authority cleanup failed for run %s: release unavailable",
-                self.run_id,
+            raise RuntimeError("Private file authority release is unavailable")
+
+        cancellation_pending = False
+        try:
+            for attempt in range(1, self.cleanup_max_attempts + 1):
+                deferred = await await_despite_cancellation(release())
+                cancellation_pending |= deferred.cancellation_pending
+                if deferred.task.cancelled():
+                    logger.warning(
+                        "Private file authority cleanup failed for run %s (attempt %d/%d)",
+                        self.run_id,
+                        attempt,
+                        self.cleanup_max_attempts,
+                    )
+                    continue
+                try:
+                    outcome = deferred.result()
+                except Exception:
+                    logger.warning(
+                        "Private file authority cleanup failed for run %s (attempt %d/%d)",
+                        self.run_id,
+                        attempt,
+                        self.cleanup_max_attempts,
+                        exc_info=True,
+                    )
+                    continue
+                if outcome is not None and type(outcome) not in {
+                    NotAcquired,
+                    Released,
+                    Orphaned,
+                }:
+                    logger.warning(
+                        "Private file authority returned invalid release evidence for run %s (attempt %d/%d)",
+                        self.run_id,
+                        attempt,
+                        self.cleanup_max_attempts,
+                    )
+                    continue
+                self._release_outcome = outcome
+                self._release_completed = True
+                return outcome
+            raise RuntimeError(
+                f"Private file authority cleanup failed for run {self.run_id}",
             )
-            return False
-        return await self.join_cleanup(
-            release,
-            failure_message=(f"Private file authority cleanup failed for run {self.run_id}"),
-        )
+        finally:
+            self._cleanup_cancellation_pending |= cancellation_pending

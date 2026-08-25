@@ -98,9 +98,9 @@ async def _seed_event_scope(connection: AsyncConnection) -> dict[str, object]:
                  metadata_json,kwargs_json,origin_trace_id,message_count,
                  total_input_tokens,total_output_tokens,total_tokens,llm_call_count,
                  lead_agent_tokens,subagent_tokens,middleware_tokens,
-                 created_at,updated_at,project_id)
-                VALUES (:run,:thread,:owner,'pending','reject','{}','{}',:trace,
-                        0,0,0,0,0,0,0,0,now(),now(),:project)"""
+                 created_at,updated_at,project_id,asset_closure_sealed)
+                VALUES (:run,:thread,:owner,'success','reject','{}','{}',:trace,
+                        0,0,0,0,0,0,0,0,now(),now(),:project,true)"""
             ),
             {
                 "run": run_id,

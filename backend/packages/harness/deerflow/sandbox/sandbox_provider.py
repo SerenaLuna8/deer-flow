@@ -1,9 +1,15 @@
 import asyncio
 import hashlib
+import json
+import os
+import re
+import stat
 import threading
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Literal
 
 from deerflow.config import get_app_config
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
@@ -17,6 +23,494 @@ _PRIVATE_SANDBOX_SECURE_ROOTS = (
     "/mnt/user-data/uploads",
     "/mnt/user-data/outputs",
 )
+
+_PROVIDER_KIND = re.compile(r"[a-z0-9](?:[a-z0-9_.-]{0,63})\Z")
+_REASON_CODE = re.compile(r"[a-z0-9](?:[a-z0-9_]{0,63})\Z")
+RUN_READONLY_MOUNT_MANIFEST_PATH = ".actweave-run-mount.json"
+RUN_READONLY_MOUNT_MANIFEST_MAX_BYTES = 512
+_RUN_READONLY_MOUNT_MAX_ENTRIES = 100_000
+
+
+def _validated_opaque_identifier(value: str, *, field: str) -> str:
+    if type(value) is not str or not value or value != value.strip() or len(value) > 255 or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"Invalid {field}")
+    return value
+
+
+def run_readonly_mount_manifest_text(owner_id: uuid.UUID) -> str:
+    """Return the canonical, bounded owner manifest written into one tree."""
+
+    if type(owner_id) is not uuid.UUID:
+        raise ValueError("Invalid run read-only mount owner")
+    return (
+        json.dumps(
+            {
+                "owner_id": str(owner_id),
+                "schema_version": 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedRunReadonlyMountSource:
+    source: "RunReadonlyMountSource"
+    probe_relative_path: str
+    probe_content: str
+
+
+def validate_run_readonly_mount_source(
+    source: "RunReadonlyMountSource",
+    *,
+    trusted_root: Path,
+) -> ValidatedRunReadonlyMountSource:
+    """Validate the provider-independent owner/tree and bounded probe contract."""
+
+    if type(source) is not RunReadonlyMountSource or not isinstance(trusted_root, Path) or not trusted_root.is_absolute() or ".." in trusted_root.parts:
+        raise SandboxRuntimeError("Invalid run read-only mount source")
+    owner_root = trusted_root / source.owner_id.hex
+    expected_tree = owner_root / "tree"
+    try:
+        trusted_status = trusted_root.lstat()
+        trusted_resolved = trusted_root.resolve(strict=True)
+        owner_status = owner_root.lstat()
+        tree_status = source.worker_root.lstat()
+        tree_resolved = source.worker_root.resolve(strict=True)
+    except OSError as exc:
+        raise SandboxRuntimeError("Untrusted run read-only mount source") from exc
+    if (
+        source.worker_root != expected_tree
+        or stat.S_ISLNK(trusted_status.st_mode)
+        or not stat.S_ISDIR(trusted_status.st_mode)
+        or stat.S_ISLNK(owner_status.st_mode)
+        or not stat.S_ISDIR(owner_status.st_mode)
+        or stat.S_IMODE(owner_status.st_mode) != 0o700
+        or stat.S_ISLNK(tree_status.st_mode)
+        or not stat.S_ISDIR(tree_status.st_mode)
+        or stat.S_IMODE(tree_status.st_mode) != 0o555
+        or tree_resolved != trusted_resolved / source.owner_id.hex / "tree"
+    ):
+        raise SandboxRuntimeError("Untrusted run read-only mount source")
+
+    skill_manifest_found = False
+    entry_count = 0
+    try:
+        for path in source.worker_root.rglob("*"):
+            entry_count += 1
+            if entry_count > _RUN_READONLY_MOUNT_MAX_ENTRIES:
+                raise SandboxRuntimeError("Run read-only mount has too many entries")
+            status = path.lstat()
+            mode = status.st_mode
+            if stat.S_ISLNK(mode):
+                raise SandboxRuntimeError("Untrusted run read-only mount source")
+            if stat.S_ISDIR(mode):
+                if stat.S_IMODE(mode) != 0o555:
+                    raise SandboxRuntimeError("Run read-only mount directory mode is invalid")
+                continue
+            if not stat.S_ISREG(mode) or status.st_nlink != 1:
+                raise SandboxRuntimeError("Untrusted run read-only mount source")
+            if stat.S_IMODE(mode) != 0o444:
+                raise SandboxRuntimeError("Run read-only mount file mode is invalid")
+            if path.name == "SKILL.md":
+                skill_manifest_found = True
+    except OSError as exc:
+        raise SandboxRuntimeError("Untrusted run read-only mount source") from exc
+    if not skill_manifest_found:
+        raise SandboxRuntimeError("Run read-only mount has no Skill manifest")
+
+    manifest_path = source.worker_root / RUN_READONLY_MOUNT_MANIFEST_PATH
+    descriptor = -1
+    try:
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise OSError("No-follow file reads are unavailable")
+        descriptor = os.open(
+            manifest_path,
+            os.O_RDONLY | os.O_NOFOLLOW,
+        )
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o444 or before.st_size > RUN_READONLY_MOUNT_MANIFEST_MAX_BYTES:
+            raise OSError("Invalid run read-only mount manifest")
+        content = os.read(
+            descriptor,
+            RUN_READONLY_MOUNT_MANIFEST_MAX_BYTES + 1,
+        )
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size) or len(content) != before.st_size:
+            raise OSError("Run read-only mount manifest changed")
+    except OSError as exc:
+        raise SandboxRuntimeError("Run read-only mount manifest is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    expected = run_readonly_mount_manifest_text(source.owner_id).encode("utf-8")
+    if content != expected:
+        raise SandboxRuntimeError("Run read-only mount manifest owner mismatch")
+    return ValidatedRunReadonlyMountSource(
+        source=source,
+        probe_relative_path=RUN_READONLY_MOUNT_MANIFEST_PATH,
+        probe_content=expected.decode("utf-8"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RunReadonlyMountSource:
+    """Materializer-owned immutable tree offered to one Sandbox provider."""
+
+    owner_id: uuid.UUID
+    worker_root: Path
+
+    def __post_init__(self) -> None:
+        if type(self.owner_id) is not uuid.UUID or not isinstance(
+            self.worker_root,
+            Path,
+        ):
+            raise ValueError("Invalid run read-only mount source")
+        if not self.worker_root.is_absolute() or ".." in self.worker_root.parts or "\x00" in str(self.worker_root):
+            raise ValueError("Invalid run read-only mount source")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRunMountLease:
+    """Exact provider coordinates for one acquired run read-only mount."""
+
+    owner_id: uuid.UUID
+    provider_kind: str
+    sandbox_id: str
+    mount_lease_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.owner_id) is not uuid.UUID
+            or _PROVIDER_KIND.fullmatch(
+                self.provider_kind,
+            )
+            is None
+        ):
+            raise ValueError("Invalid provider run mount lease")
+        _validated_opaque_identifier(self.sandbox_id, field="sandbox identifier")
+        _validated_opaque_identifier(
+            self.mount_lease_id,
+            field="mount lease identifier",
+        )
+
+    def matches_source(self, source: RunReadonlyMountSource) -> bool:
+        return type(source) is RunReadonlyMountSource and self.owner_id == source.owner_id
+
+    def _coordinates(self) -> tuple[uuid.UUID, str, str, str]:
+        return (
+            self.owner_id,
+            self.provider_kind,
+            self.sandbox_id,
+            self.mount_lease_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderMountAbsentProof:
+    """Provider-confirmed absence for the exact lease coordinates."""
+
+    owner_id: uuid.UUID
+    provider_kind: str
+    sandbox_id: str
+    mount_lease_id: str
+
+    def __post_init__(self) -> None:
+        ProviderRunMountLease(
+            owner_id=self.owner_id,
+            provider_kind=self.provider_kind,
+            sandbox_id=self.sandbox_id,
+            mount_lease_id=self.mount_lease_id,
+        )
+
+    @classmethod
+    def from_lease(
+        cls,
+        lease: ProviderRunMountLease,
+    ) -> "ProviderMountAbsentProof":
+        if type(lease) is not ProviderRunMountLease:
+            raise ValueError("Invalid provider run mount lease")
+        return cls(
+            owner_id=lease.owner_id,
+            provider_kind=lease.provider_kind,
+            sandbox_id=lease.sandbox_id,
+            mount_lease_id=lease.mount_lease_id,
+        )
+
+    def matches_lease(self, lease: ProviderRunMountLease) -> bool:
+        return type(lease) is ProviderRunMountLease and self._coordinates() == lease._coordinates()
+
+    def _coordinates(self) -> tuple[uuid.UUID, str, str, str]:
+        return (
+            self.owner_id,
+            self.provider_kind,
+            self.sandbox_id,
+            self.mount_lease_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRunMountOwnerAbsentProof:
+    """Provider-confirmed absence of every mount carrying one exact owner label."""
+
+    owner_id: uuid.UUID
+    provider_kind: str
+
+    def __post_init__(self) -> None:
+        if type(self.owner_id) is not uuid.UUID or _PROVIDER_KIND.fullmatch(self.provider_kind) is None:
+            raise ValueError("Invalid provider owner absence proof")
+
+    def matches_owner(self, owner_id: uuid.UUID) -> bool:
+        return type(owner_id) is uuid.UUID and self.owner_id == owner_id
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRunMountOwnerUnknown:
+    """Fail-closed provider reconciliation result without absence proof."""
+
+    owner_id: uuid.UUID
+    reason_code: str
+    provider_kind: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.owner_id) is not uuid.UUID or _REASON_CODE.fullmatch(self.reason_code) is None or (self.provider_kind is not None and _PROVIDER_KIND.fullmatch(self.provider_kind) is None):
+            raise ValueError("Invalid provider owner reconciliation result")
+
+
+type ProviderRunMountOwnerReconciliation = ProviderRunMountOwnerAbsentProof | ProviderRunMountOwnerUnknown
+
+
+@dataclass(frozen=True, slots=True)
+class NotAcquired:
+    """Proof that provider acquisition never began for this owner."""
+
+    owner_id: uuid.UUID
+    last_lifecycle_state: Literal["materialized"] = "materialized"
+
+    def __post_init__(self) -> None:
+        if type(self.owner_id) is not uuid.UUID or self.last_lifecycle_state != "materialized":
+            raise ValueError("Invalid not-acquired mount outcome")
+
+    def matches_source(self, source: RunReadonlyMountSource) -> bool:
+        return type(source) is RunReadonlyMountSource and self.owner_id == source.owner_id
+
+
+@dataclass(frozen=True, slots=True)
+class Released:
+    """Terminal release backed by exact provider absence proof."""
+
+    proof: ProviderMountAbsentProof
+
+    def __post_init__(self) -> None:
+        if type(self.proof) is not ProviderMountAbsentProof:
+            raise ValueError("Invalid released mount outcome")
+
+    @property
+    def owner_id(self) -> uuid.UUID:
+        return self.proof.owner_id
+
+    def matches_source(self, source: RunReadonlyMountSource) -> bool:
+        return type(source) is RunReadonlyMountSource and self.owner_id == source.owner_id
+
+    def matches_lease(self, lease: ProviderRunMountLease) -> bool:
+        return self.proof.matches_lease(lease)
+
+
+@dataclass(frozen=True, slots=True)
+class Orphaned:
+    """Stable unknown outcome retained until exact provider readback succeeds."""
+
+    owner_id: uuid.UUID
+    reason_code: str
+    last_lifecycle_state: Literal["acquiring", "mounted", "release_pending"]
+    provider_kind: str | None = None
+    sandbox_id: str | None = None
+    mount_lease_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.owner_id) is not uuid.UUID or _REASON_CODE.fullmatch(self.reason_code) is None or self.last_lifecycle_state not in {"acquiring", "mounted", "release_pending"}:
+            raise ValueError("Invalid orphaned mount outcome")
+        coordinates = (
+            self.provider_kind,
+            self.sandbox_id,
+            self.mount_lease_id,
+        )
+        if any(value is None for value in coordinates):
+            if any(value is not None for value in coordinates):
+                raise ValueError("Incomplete orphaned mount lease")
+            return
+        ProviderRunMountLease(
+            owner_id=self.owner_id,
+            provider_kind=self.provider_kind,
+            sandbox_id=self.sandbox_id,
+            mount_lease_id=self.mount_lease_id,
+        )
+
+    @classmethod
+    def from_lease(
+        cls,
+        lease: ProviderRunMountLease,
+        *,
+        reason_code: str,
+        last_lifecycle_state: Literal[
+            "acquiring",
+            "mounted",
+            "release_pending",
+        ],
+    ) -> "Orphaned":
+        if type(lease) is not ProviderRunMountLease:
+            raise ValueError("Invalid provider run mount lease")
+        return cls(
+            owner_id=lease.owner_id,
+            provider_kind=lease.provider_kind,
+            sandbox_id=lease.sandbox_id,
+            mount_lease_id=lease.mount_lease_id,
+            reason_code=reason_code,
+            last_lifecycle_state=last_lifecycle_state,
+        )
+
+    def matches_source(self, source: RunReadonlyMountSource) -> bool:
+        return type(source) is RunReadonlyMountSource and self.owner_id == source.owner_id
+
+    def matches_lease(self, lease: ProviderRunMountLease) -> bool:
+        return (
+            type(lease) is ProviderRunMountLease
+            and self.provider_kind is not None
+            and (
+                self.owner_id,
+                self.provider_kind,
+                self.sandbox_id,
+                self.mount_lease_id,
+            )
+            == lease._coordinates()
+        )
+
+
+type RunMountReleaseOutcome = NotAcquired | Released | Orphaned
+
+
+def merge_run_mount_release_outcome(
+    previous: RunMountReleaseOutcome,
+    observed: RunMountReleaseOutcome,
+) -> RunMountReleaseOutcome:
+    """Keep release evidence monotonic under retries and late readback."""
+
+    if type(previous) not in {NotAcquired, Released, Orphaned} or type(
+        observed,
+    ) not in {NotAcquired, Released, Orphaned}:
+        raise TypeError("Invalid run mount release outcome")
+    if previous.owner_id != observed.owner_id:
+        raise ValueError("Run mount outcomes have different owners")
+    if type(previous) is NotAcquired:
+        if type(observed) is NotAcquired:
+            return previous
+        raise ValueError("Run mount not-acquired proof conflicts with provider evidence")
+
+    previous_lease = (
+        previous.proof._coordinates()
+        if type(previous) is Released
+        else (
+            (
+                previous.owner_id,
+                previous.provider_kind,
+                previous.sandbox_id,
+                previous.mount_lease_id,
+            )
+            if type(previous) is Orphaned and previous.provider_kind is not None
+            else None
+        )
+    )
+    observed_lease = (
+        observed.proof._coordinates()
+        if type(observed) is Released
+        else (
+            (
+                observed.owner_id,
+                observed.provider_kind,
+                observed.sandbox_id,
+                observed.mount_lease_id,
+            )
+            if type(observed) is Orphaned and observed.provider_kind is not None
+            else None
+        )
+    )
+    if previous_lease is not None and observed_lease is not None and previous_lease != observed_lease:
+        raise ValueError("Run mount outcomes refer to a different mount lease")
+
+    if type(previous) is Released:
+        return previous
+    if type(observed) is Released:
+        return observed
+    if type(observed) is NotAcquired:
+        raise ValueError("Provider acquisition cannot become not-acquired")
+    return previous
+
+
+class RunMountAcquireCancelled(asyncio.CancelledError):
+    """Cancellation carrying the acquired lease and its cleanup evidence."""
+
+    __slots__ = ("_lease", "_release_outcome")
+
+    def __init__(
+        self,
+        lease: ProviderRunMountLease,
+        release_outcome: Released | Orphaned,
+    ) -> None:
+        if (
+            type(lease) is not ProviderRunMountLease
+            or type(
+                release_outcome,
+            )
+            not in {Released, Orphaned}
+            or not release_outcome.matches_lease(lease)
+        ):
+            raise ValueError("Invalid cancelled run mount cleanup evidence")
+        super().__init__("Run read-only mount acquisition was cancelled")
+        self._lease = lease
+        self._release_outcome = release_outcome
+
+    @property
+    def lease(self) -> ProviderRunMountLease:
+        return self._lease
+
+    @property
+    def release_outcome(self) -> Released | Orphaned:
+        return self._release_outcome
+
+
+class RunMountReleaseCancelled(asyncio.CancelledError):
+    """Cancellation carrying the completed provider release evidence."""
+
+    __slots__ = ("_lease", "_release_outcome")
+
+    def __init__(
+        self,
+        lease: ProviderRunMountLease,
+        release_outcome: RunMountReleaseOutcome,
+    ) -> None:
+        if type(lease) is not ProviderRunMountLease or type(
+            release_outcome,
+        ) not in {NotAcquired, Released, Orphaned}:
+            raise ValueError("Invalid cancelled run mount release evidence")
+        if type(release_outcome) is NotAcquired:
+            matches = release_outcome.owner_id == lease.owner_id
+        else:
+            matches = release_outcome.matches_lease(lease)
+        if not matches:
+            raise ValueError("Cancelled run mount release evidence mismatch")
+        super().__init__("Run read-only mount release was cancelled")
+        self._lease = lease
+        self._release_outcome = release_outcome
+
+    @property
+    def lease(self) -> ProviderRunMountLease:
+        return self._lease
+
+    @property
+    def release_outcome(self) -> RunMountReleaseOutcome:
+        return self._release_outcome
 
 
 async def _await_joined_thread(task: asyncio.Task) -> tuple[object, bool]:
@@ -44,7 +538,9 @@ class RunScopedReadOnlyMount:
 
     def __post_init__(self) -> None:
         normalized_container = PurePosixPath(self.container_path).as_posix()
-        if not self.run_id or not self.container_path.startswith("/") or ".." in PurePosixPath(self.container_path).parts or normalized_container != self.container_path.rstrip("/") or not Path(self.host_path).is_absolute():
+        windows_host = PureWindowsPath(self.host_path)
+        host_is_absolute = Path(self.host_path).is_absolute() or windows_host.is_absolute()
+        if not self.run_id or not self.container_path.startswith("/") or ".." in PurePosixPath(self.container_path).parts or normalized_container != self.container_path.rstrip("/") or not host_is_absolute or ".." in windows_host.parts:
             raise ValueError("Invalid run-scoped read-only mount")
 
 
@@ -72,6 +568,11 @@ class SandboxProvider(ABC):
     uses_thread_data_mounts: bool = False
     needs_upload_permission_adjustment: bool = True
     _supports_isolated_private_file_authority: bool = False
+
+    def run_readonly_mounts_ready(self) -> bool:
+        """Return whether this process can execute exact v4 Skill mounts."""
+
+        return False
 
     @staticmethod
     def _private_storage_key(scope: PrivateResourceScope) -> str:
@@ -338,6 +839,172 @@ class SandboxProvider(ABC):
             user_id=user_id,
             mounts=mounts,
         )
+
+    def prepare_run_readonly_mount(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        source: RunReadonlyMountSource,
+    ) -> ProviderRunMountLease:
+        """Acquire and read back one exact provider-owned read-only mount."""
+
+        del thread_id, scope, run_id, source
+        raise SandboxRuntimeError(
+            "Run read-only mounts are unsupported by this sandbox provider",
+        )
+
+    async def prepare_run_readonly_mount_async(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        source: RunReadonlyMountSource,
+    ) -> ProviderRunMountLease:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.prepare_run_readonly_mount,
+                thread_id,
+                scope=scope,
+                run_id=run_id,
+                source=source,
+            ),
+        )
+        result, cancellation_pending = await _await_joined_thread(task)
+        lease = result
+        if type(lease) is not ProviderRunMountLease:
+            raise SandboxRuntimeError("Invalid provider run mount lease")
+        if cancellation_pending:
+            cleanup_task = asyncio.create_task(
+                asyncio.to_thread(self.release_run_readonly_mount, lease),
+            )
+            try:
+                cleanup_result, _cleanup_cancelled = await _await_joined_thread(
+                    cleanup_task,
+                )
+            except asyncio.CancelledError:
+                cleanup_result = Orphaned.from_lease(
+                    lease,
+                    reason_code="cancel_cleanup_unconfirmed",
+                    last_lifecycle_state="release_pending",
+                )
+            except Exception:
+                cleanup_result = Orphaned.from_lease(
+                    lease,
+                    reason_code="cancel_cleanup_unconfirmed",
+                    last_lifecycle_state="release_pending",
+                )
+            if type(cleanup_result) not in {Released, Orphaned} or not cleanup_result.matches_lease(lease):
+                cleanup_result = Orphaned.from_lease(
+                    lease,
+                    reason_code="cancel_cleanup_unconfirmed",
+                    last_lifecycle_state="release_pending",
+                )
+            raise RunMountAcquireCancelled(lease, cleanup_result)
+        return lease
+
+    def readback_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> ProviderRunMountLease:
+        """Confirm the exact lease is active, readable, and read-only."""
+
+        del lease
+        raise SandboxRuntimeError(
+            "Run read-only mount readback is unsupported by this sandbox provider",
+        )
+
+    async def readback_run_readonly_mount_async(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> ProviderRunMountLease:
+        task = asyncio.create_task(
+            asyncio.to_thread(self.readback_run_readonly_mount, lease),
+        )
+        result, cancellation_pending = await _await_joined_thread(task)
+        if cancellation_pending:
+            raise asyncio.CancelledError
+        if type(result) is not ProviderRunMountLease:
+            raise SandboxRuntimeError("Invalid provider run mount readback")
+        return result
+
+    def release_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> RunMountReleaseOutcome:
+        """Release the exact lease and return proof-bearing typed evidence."""
+
+        del lease
+        raise SandboxRuntimeError(
+            "Run read-only mount release is unsupported by this sandbox provider",
+        )
+
+    async def release_run_readonly_mount_async(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> RunMountReleaseOutcome:
+        task = asyncio.create_task(
+            asyncio.to_thread(self.release_run_readonly_mount, lease),
+        )
+        result, cancellation_pending = await _await_joined_thread(task)
+        if type(result) not in {NotAcquired, Released, Orphaned}:
+            raise SandboxRuntimeError("Invalid provider run mount release outcome")
+        if cancellation_pending:
+            raise RunMountReleaseCancelled(lease, result)
+        return result
+
+    def ensure_run_readonly_mount_owner_absent(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        persisted_lease: ProviderRunMountLease | None,
+    ) -> ProviderRunMountOwnerReconciliation:
+        """Destroy/read back every exact owner-labeled mount, or fail closed.
+
+        This recovery interface is intentionally separate from ordinary lease
+        release: a restarted Worker may only have the durable owner label and
+        no recoverable in-process lease. Providers without exact enumeration,
+        destroy, and absence readback keep v4 orphan cleanup unavailable.
+        """
+
+        if type(owner_id) is not uuid.UUID or (persisted_lease is not None and (type(persisted_lease) is not ProviderRunMountLease or persisted_lease.owner_id != owner_id)):
+            raise SandboxRuntimeError("Invalid run read-only mount owner")
+        return ProviderRunMountOwnerUnknown(
+            owner_id=owner_id,
+            provider_kind=(persisted_lease.provider_kind if persisted_lease is not None else None),
+            reason_code="owner_reconciliation_unsupported",
+        )
+
+    async def ensure_run_readonly_mount_owner_absent_async(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        persisted_lease: ProviderRunMountLease | None,
+    ) -> ProviderRunMountOwnerReconciliation:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.ensure_run_readonly_mount_owner_absent,
+                owner_id,
+                persisted_lease=persisted_lease,
+            ),
+        )
+        result, cancellation_pending = await _await_joined_thread(task)
+        if cancellation_pending:
+            raise asyncio.CancelledError
+        if (
+            type(result)
+            not in {
+                ProviderRunMountOwnerAbsentProof,
+                ProviderRunMountOwnerUnknown,
+            }
+            or result.owner_id != owner_id
+        ):
+            raise SandboxRuntimeError(
+                "Invalid provider owner reconciliation result",
+            )
+        return result
 
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:

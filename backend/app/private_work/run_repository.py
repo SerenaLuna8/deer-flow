@@ -227,12 +227,61 @@ class PrivateRunRepository:
             job_id=row.job_id,
         )
 
+    async def create_for_snapshot_assembly(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        request: PrivateRunCreate,
+    ) -> PrivateRunRecord:
+        """Create the unsealed parent owned by RunSnapshotRepository."""
+
+        if request.status != "pending":
+            raise PrivateRunConflict
+        return await self._create_row(
+            scope=scope,
+            thread_id=thread_id,
+            request=request,
+            asset_closure_sealed=False,
+        )
+
+    async def create_terminal_empty_shell(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        request: PrivateRunCreate,
+    ) -> PrivateRunRecord:
+        """Create an explicitly terminal, sealed privacy-retention shell."""
+
+        if request.status not in {"success", "error", "timeout", "interrupted"}:
+            raise PrivateRunConflict
+        return await self._create_row(
+            scope=scope,
+            thread_id=thread_id,
+            request=request,
+            asset_closure_sealed=True,
+        )
+
     async def create(
         self,
         *,
         scope: PrivateResourceScope,
         thread_id: str,
         request: PrivateRunCreate,
+    ) -> PrivateRunRecord:
+        """Reject executable Run creation outside the snapshot factory."""
+
+        del scope, thread_id, request
+        raise PrivateRunConflict
+
+    async def _create_row(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        request: PrivateRunCreate,
+        asset_closure_sealed: bool,
     ) -> PrivateRunRecord:
         project_id, owner_user_id = self.coordinates(scope)
         thread_exists = (
@@ -262,6 +311,7 @@ class PrivateRunRepository:
             origin_trace_id=request.origin_trace_id,
             model_name=request.model_name,
             follow_up_to_run_id=request.follow_up_to_run_id,
+            asset_closure_sealed=asset_closure_sealed,
             created_at=now,
             updated_at=now,
         )
@@ -270,6 +320,31 @@ class PrivateRunRepository:
             await self.session.flush()
         except IntegrityError:
             raise PrivateRunConflict from None
+        return self.record(row)
+
+    async def seal_asset_closure(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+    ) -> PrivateRunRecord:
+        """Seal one exact snapshot-assembly Run before Job admission."""
+
+        row = (
+            await self.session.execute(
+                select(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    *self.predicates(scope),
+                )
+                .with_for_update(of=RunRow)
+            )
+        ).scalar_one_or_none()
+        if row is None or row.status != "pending" or row.job_id is not None or row.asset_closure_sealed is not False:
+            raise PrivateRunConflict
+        row.asset_closure_sealed = True
+        row.updated_at = datetime.now(UTC)
+        await self.session.flush()
         return self.record(row)
 
     async def has_conflicting_active_run(
@@ -333,7 +408,7 @@ class PrivateRunRepository:
                 .with_for_update(of=RunRow)
             )
         ).scalar_one_or_none()
-        if row is None or (row.job_id is not None and row.job_id != job_id):
+        if row is None or row.asset_closure_sealed is not True or (row.job_id is not None and row.job_id != job_id):
             raise PrivateRunConflict
         row.job_id = job_id
         row.updated_at = datetime.now(UTC)
@@ -451,9 +526,12 @@ class PrivateRunRepository:
             run_id=run_id,
             job_id=job_id,
         )
-        started_at = now if now is not None else await self.session.scalar(sa.select(sa.func.clock_timestamp()))
-        if not isinstance(started_at, datetime) or started_at.tzinfo is None:
-            raise PrivateRunExecutionLeaseLost
+        attempt = await self._locked_active_attempt(
+            job=job,
+            job_id=job_id,
+            token_hash=token_hash,
+        )
+        started_at = await self._authority_time_after_locks(now)
         if origin_trace_id is not None and (normalize_trace_id(origin_trace_id) is None or origin_trace_id != run.origin_trace_id):
             raise PrivateRunExecutionLeaseLost
         if not self._active_job_lease(job, token_hash=token_hash, now=started_at):
@@ -477,6 +555,7 @@ class PrivateRunRepository:
         run.execution_lease_expires_at = job.lease_expires_at
         run.execution_heartbeat_at = job.heartbeat_at or started_at
         run.execution_started_at = run.execution_started_at or started_at
+        attempt.execution_started_at = attempt.execution_started_at or started_at
         run.updated_at = started_at
         await self.session.flush()
         return PrivateRunExecutionState(
@@ -641,6 +720,65 @@ class PrivateRunRepository:
         checked_at = await self._authority_time_after_locks(now)
         if (
             not self._active_job_lease(
+                job,
+                token_hash=token_hash,
+                now=checked_at,
+            )
+            or run.status != "running"
+            or run.execution_lease_token_hash != token_hash
+            or run.execution_lease_expires_at is None
+            or run.execution_lease_expires_at <= checked_at
+        ):
+            raise PrivateRunExecutionLeaseLost
+        return any(
+            value is not None
+            for value in (
+                job.cancel_requested_at,
+                run.cancel_requested_at,
+                run.authorization_cancel_requested_at,
+            )
+        )
+
+    async def assert_materialization_attempt_active(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+        attempt_id: uuid.UUID,
+        expected_worker_id: uuid.UUID,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """Fence materialization to the exact current Attempt and Worker."""
+
+        if type(attempt_id) is not uuid.UUID or type(expected_worker_id) is not uuid.UUID:
+            raise PrivateRunExecutionLeaseLost
+        token_hash = self._lease_token_hash(lease_token)
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        attempt = (
+            await self.session.execute(
+                select(JobAttemptRow)
+                .where(
+                    JobAttemptRow.id == attempt_id,
+                    JobAttemptRow.job_id == job_id,
+                    JobAttemptRow.attempt_number == job.attempt_count,
+                    JobAttemptRow.worker_id == expected_worker_id,
+                    JobAttemptRow.lease_token_hash == token_hash,
+                    JobAttemptRow.outcome.is_(None),
+                )
+                .with_for_update(of=JobAttemptRow)
+            )
+        ).scalar_one_or_none()
+        checked_at = await self._authority_time_after_locks(now)
+        if (
+            attempt is None
+            or job.lease_owner_id != expected_worker_id
+            or not self._active_job_lease(
                 job,
                 token_hash=token_hash,
                 now=checked_at,

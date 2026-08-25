@@ -88,7 +88,6 @@ def _runtime(
         resolver=object(),  # type: ignore[arg-type]
         session_factory=object(),  # type: ignore[arg-type]
         safe_manifest=manifest,
-        skill_root=tmp_path,
         skills=(),
         mcp_snapshots=snapshots,
         authorization_boundary=object(),

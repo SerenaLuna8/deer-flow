@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import and_, select
 from sqlalchemy.exc import DBAPIError
@@ -57,12 +58,23 @@ async def resolve_project_context_in_transaction(
     project_identifier: uuid.UUID | str,
     request_id: str,
     *,
-    lock: bool = False,
+    lock: bool | None = None,
+    lock_mode: Literal["none", "share", "update"] = "none",
 ) -> ProjectContext:
     """Resolve project authority without changing the caller-owned transaction."""
 
+    if type(lock_mode) is not str or lock_mode not in {"none", "share", "update"}:
+        raise TypeError("lock_mode must be none, share, or update")
+    if lock is not None and type(lock) is not bool:
+        raise TypeError("lock must be a boolean or None")
+    if lock is not None and lock_mode != "none":
+        raise TypeError("lock and lock_mode cannot both be specified")
+    if lock is True:
+        lock_mode = "update"
+
     identifier_filter = ProjectRow.id == project_identifier if isinstance(project_identifier, uuid.UUID) else ProjectRow.slug == project_identifier
-    if lock:
+    if lock_mode != "none":
+        shared = lock_mode == "share"
         project_statement = (
             select(ProjectRow.id)
             .where(
@@ -70,7 +82,7 @@ async def resolve_project_context_in_transaction(
                 ProjectRow.status == "active",
                 ProjectRow.is_suspended.is_(False),
             )
-            .with_for_update(of=ProjectRow)
+            .with_for_update(read=shared, of=ProjectRow)
         )
         try:
             project_id = (await session.execute(project_statement)).scalar_one_or_none()
@@ -83,7 +95,7 @@ async def resolve_project_context_in_transaction(
                     ProjectMembershipRow.user_id == str(user_id),
                     ProjectMembershipRow.status == "active",
                 )
-                .with_for_update(of=ProjectMembershipRow)
+                .with_for_update(read=shared, of=ProjectMembershipRow)
             )
             membership = (await session.execute(membership_statement)).scalar_one_or_none()
         except DBAPIError:

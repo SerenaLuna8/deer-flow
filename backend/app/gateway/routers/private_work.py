@@ -56,6 +56,7 @@ from app.private_work.context import PrivateWorkContext
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import (
     PrivateWorkConflict,
+    PrivateWorkDatabaseUnavailable,
     PrivateWorkError,
     PrivateWorkInvalid,
     PrivateWorkNotFound,
@@ -88,6 +89,13 @@ from app.private_work.readiness_service import (
     PrivateWorkReadinessService,
     ReadinessStatus,
 )
+from app.private_work.revalidation import PrivateWorkRevalidator
+from app.private_work.run_execution_state import (
+    RunExecutionState,
+    RunExecutionStatePolicy,
+    RunExecutionStateUnavailable,
+    read_run_execution_state,
+)
 from app.private_work.run_repository import PrivateRunRecord
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRecord, ThreadAgentRef
@@ -97,6 +105,7 @@ from app.private_work.workload_profile import (
     RunWorkloadProfileUnsupported,
     parse_persisted_run_workload_profile,
 )
+from app.projects.capabilities import Capability
 from app.reliability.error_mapping import reliability_http_exception
 from app.reliability.errors import (
     ReliabilityDatabaseUnavailable,
@@ -225,6 +234,34 @@ class PrivateRunExecutionProfileResponse(StrictPrivateWorkResponse):
     thinking_enabled: bool
     reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = None
     supports_vision: bool
+
+
+class PrivateRunExecutionStateResponse(StrictPrivateWorkResponse):
+    phase: Literal[
+        "queued",
+        "waiting_for_worker",
+        "starting",
+        "executing",
+        "retry_wait",
+        "waiting_for_lease_expiry",
+        "waiting_for_terminalization",
+        "waiting_for_recovery",
+        "recovering",
+        "cancelling",
+        "terminal",
+    ]
+    observed_at: datetime
+    phase_started_at: datetime | None
+    execution_started_at: datetime | None
+    retry_at: datetime | None
+    run_status: Literal[
+        "pending",
+        "running",
+        "success",
+        "error",
+        "timeout",
+        "interrupted",
+    ]
 
 
 class PrivateRunResponse(StrictPrivateWorkResponse):
@@ -2259,6 +2296,50 @@ async def get_private_run(
     except PrivateWorkError as error:
         _raise_http(error)
     return _run_response(record)
+
+
+@router.get(
+    "/threads/{thread_id}/runs/{run_id}/execution-state",
+    response_model=PrivateRunExecutionStateResponse,
+)
+async def get_private_run_execution_state(
+    thread_id: uuid.UUID,
+    run_id: uuid.UUID,
+    context: PrivateWorkContext = Depends(private_work_context),
+    session: AsyncSession = Depends(project_session),
+    config: AppConfig = Depends(get_config),
+) -> PrivateRunExecutionStateResponse:
+    try:
+        await PrivateWorkRevalidator().require(
+            session,
+            context,
+            Capability.PRIVATE_WORK_READ_OWN,
+        )
+        projection = await read_run_execution_state(
+            session,
+            context,
+            str(thread_id),
+            str(run_id),
+            RunExecutionStatePolicy(
+                worker_fresh_for_seconds=config.worker.heartbeat_seconds * 3,
+            ),
+        )
+        if type(projection) is RunExecutionStateUnavailable:
+            raise PrivateWorkUnavailable(context.request_id)
+        if type(projection) is not RunExecutionState:
+            raise PrivateWorkUnavailable(context.request_id)
+    except PrivateWorkDatabaseUnavailable:
+        _raise_http(PrivateWorkUnavailable(context.request_id))
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateRunExecutionStateResponse(
+        phase=projection.phase,
+        observed_at=projection.observed_at,
+        phase_started_at=projection.phase_started_at,
+        execution_started_at=projection.execution_started_at,
+        retry_at=projection.retry_at,
+        run_status=projection.run_status,
+    )
 
 
 @router.get(

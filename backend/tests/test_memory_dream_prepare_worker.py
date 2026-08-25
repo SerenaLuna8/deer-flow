@@ -27,6 +27,7 @@ from deerflow.persistence.private_work.memory_dream_prepare_repository import (
     MemoryDreamPrepareConflict,
     MemoryDreamPrepareNotFound,
 )
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 from deerflow.runtime.context_compaction import ThreadCompactionResult
 
 
@@ -146,6 +147,16 @@ class _Personalization:
 
 
 class _Admission:
+    async def require_account_private_generation_after_membership(
+        self,
+        _session,
+        scope,
+    ):
+        return AccountPrivateGeneration(
+            owner_user_id=scope.owner_user_id,
+            generation=1,
+        )
+
     async def admit(self, *_args, **_kwargs):
         return SimpleNamespace(
             disposition="nothing_pending",
@@ -342,6 +353,16 @@ async def test_prepare_final_settlement_retries_when_dream_model_becomes_unavail
         )
 
     class Admission:
+        async def require_account_private_generation_after_membership(
+            self,
+            _session,
+            scope,
+        ):
+            return AccountPrivateGeneration(
+                owner_user_id=scope.owner_user_id,
+                generation=1,
+            )
+
         async def admit(self, *_args, **_kwargs):
             raise MemoryDreamModelUnavailable
 

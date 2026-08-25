@@ -65,9 +65,44 @@ def postgres_admin_url() -> str:
 
 
 @pytest_asyncio.fixture()
-async def postgres_database_url(postgres_admin_url: str):
+async def postgres_database_url(
+    postgres_admin_url: str,
+    request: pytest.FixtureRequest,
+):
     async with temporary_postgres_database(postgres_admin_url) as url:
-        yield RedactedURL(url)
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from app.private_work.legacy_run_skill_snapshot_writer import (
+            freeze_run_skill_snapshot_writer,
+            reset_run_skill_snapshot_writer_for_testing,
+        )
+        from app.private_work.run_skill_writer_cohort import (
+            RunSkillWriterCohortLease,
+        )
+        from deerflow.config.run_skill_snapshot_config import (
+            RunSkillSnapshotConfig,
+        )
+
+        reset_run_skill_snapshot_writer_for_testing()
+        cohort_control = request.node.get_closest_marker("run_skill_writer_cohort_control") is not None
+        engine = create_async_engine(url) if not cohort_control else None
+        lease = None
+        if engine is not None:
+            writer = freeze_run_skill_snapshot_writer(RunSkillSnapshotConfig())
+            lease = await RunSkillWriterCohortLease.acquire(
+                engine,
+                writer,
+                process_role="gateway",
+                process_authority=True,
+            )
+        try:
+            yield RedactedURL(url)
+        finally:
+            if lease is not None:
+                await lease.close()
+            reset_run_skill_snapshot_writer_for_testing()
+            if engine is not None:
+                await engine.dispose()
 
 
 @pytest_asyncio.fixture()
@@ -88,3 +123,22 @@ async def migrated_postgres_database_url(postgres_database_url: str):
         yield postgres_database_url
     finally:
         await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def mock_non_postgres_run_skill_writer_cohort_assertion(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Give fake-session unit tests one test-only Admission assertion seam."""
+
+    if (
+        request.node.get_closest_marker("postgres") is not None
+        or "postgres_database_url" in request.fixturenames
+        or "migrated_postgres_database_url" in request.fixturenames
+        or request.node.get_closest_marker("run_skill_writer_cohort_control") is not None
+    ):
+        return
+    from support.run_skill_writer_cohort import install_mock_cohort_assertion
+
+    install_mock_cohort_assertion(monkeypatch)

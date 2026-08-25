@@ -37,7 +37,11 @@ from app.private_work.connection_inbound import (
     ProjectInboundDispatcher,
     ProviderIdentity,
 )
-from app.private_work.errors import PrivateWorkNotFound
+from app.private_work.errors import (
+    LegacyAdmissionBusy,
+    PrivateWorkNotFound,
+    PrivateWorkTooLarge,
+)
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
@@ -77,6 +81,9 @@ GROUP_BINDING_UNAVAILABLE_MESSAGE = "群聊连接验证暂时不可用，请稍�
 GROUP_BINDING_AGENT_UNAVAILABLE_MESSAGE = "当前群聊配置的 Agent 不可用，请联系项目管理员重新选择。"
 INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
 INBOUND_DEDUPE_MAX_ENTRIES = 4096
+LEGACY_ADMISSION_MAX_RETRIES = 2
+LEGACY_ADMISSION_RETRY_DELAY_SECONDS = 1.0
+LEGACY_ADMISSION_RETRYABLE_MESSAGE = "Run admission is temporarily busy. Please send this message again."
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
 # client_id) are not guaranteed identical across a provider's own redelivery, so
 # keying dedupe on them would miss exactly the retries we want to absorb.
@@ -810,6 +817,10 @@ class ChannelManager:
         # OrderedDict lets us evict expired/overflow entries from the front in
         # O(k) instead of scanning all entries on every inbound message.
         self._recent_inbound_events: OrderedDict[tuple[str, str, str, str, str], float] = OrderedDict()
+        self._legacy_admission_retries: dict[
+            tuple[str, str, str, str, str],
+            int,
+        ] = {}
 
     @staticmethod
     def _channel_supports_streaming(
@@ -1118,6 +1129,36 @@ class ChannelManager:
         if key is not None:
             self._recent_inbound_events.pop(key, None)
 
+    def _clear_legacy_admission_retry(self, msg: InboundMessage) -> None:
+        key = self._inbound_dedupe_key(msg)
+        if key is not None:
+            self._legacy_admission_retries.pop(key, None)
+
+    async def _retry_legacy_admission(self, msg: InboundMessage) -> None:
+        """Retry one provider delivery without reopening its dedupe window."""
+
+        key = self._inbound_dedupe_key(msg)
+        if key is None:
+            self._release_inbound_dedupe_key(msg)
+            await self._send_error(msg, LEGACY_ADMISSION_RETRYABLE_MESSAGE)
+            return
+        retries = self._legacy_admission_retries.get(key, 0)
+        if retries >= LEGACY_ADMISSION_MAX_RETRIES:
+            self._legacy_admission_retries.pop(key, None)
+            self._release_inbound_dedupe_key(msg)
+            await self._send_error(msg, LEGACY_ADMISSION_RETRYABLE_MESSAGE)
+            return
+        self._legacy_admission_retries[key] = retries + 1
+        await asyncio.sleep(LEGACY_ADMISSION_RETRY_DELAY_SECONDS)
+        if not self._running or not await self.bus.is_instance_side_effect_allowed(
+            msg.channel_instance_id,
+            provider=msg.channel_name,
+        ):
+            self._legacy_admission_retries.pop(key, None)
+            self._release_inbound_dedupe_key(msg)
+            return
+        await self._handle_message(msg)
+
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
         """Surface unhandled exceptions from background tasks."""
@@ -1150,6 +1191,7 @@ class ChannelManager:
                     ):
                         return
                     await self._handle_project_inbound_chat(msg)
+                self._clear_legacy_admission_retry(msg)
                 return
 
             # Non-command chat can be rejected before it consumes a semaphore
@@ -1173,7 +1215,13 @@ class ChannelManager:
                     await self._handle_command(msg)
                 else:
                     await self._handle_chat(msg, bound_identity_checked=True)
+        except LegacyAdmissionBusy:
+            await self._retry_legacy_admission(msg)
+        except PrivateWorkTooLarge as exc:
+            self._clear_legacy_admission_retry(msg)
+            await self._send_error(msg, exc.public_message)
         except InvalidChannelSessionConfigError as exc:
+            self._clear_legacy_admission_retry(msg)
             logger.warning(
                 "Invalid channel session config for %s: %s",
                 msg.channel_name,
@@ -1181,6 +1229,7 @@ class ChannelManager:
             )
             await self._send_error(msg, str(exc))
         except SlashSkillCommandResolutionError as exc:
+            self._clear_legacy_admission_retry(msg)
             logger.warning(
                 "Slash skill command resolution failed for %s: %s",
                 msg.channel_name,
@@ -1196,6 +1245,7 @@ class ChannelManager:
             # redelivery of the same message can recover instead of being dropped
             # for the dedupe TTL.
             self._release_inbound_dedupe_key(msg)
+            self._clear_legacy_admission_retry(msg)
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------

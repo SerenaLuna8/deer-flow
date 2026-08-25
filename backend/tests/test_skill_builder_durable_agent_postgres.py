@@ -20,6 +20,7 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkRunQuotaExceeded,
 )
+from app.private_work.retention_authority import RetentionPurgeAuthority
 from app.private_work.retention_purge import purge_private_scope
 from app.private_work.run_repository import PrivateRunRepository
 from app.private_work.run_service import PrivateRunService
@@ -1351,6 +1352,44 @@ async def test_private_retention_accepts_a_linked_builder_run_without_fk_leak(
         assert isinstance(admitted, SkillBuilderRunAdmission)
 
         async with seed.factory() as session, session.begin():
+            now = datetime.now(UTC)
+            job = await session.scalar(
+                sa.select(JobRow)
+                .where(
+                    JobRow.project_id == context.project_id,
+                    JobRow.owner_user_id == str(context.user_id),
+                    JobRow.run_id == admitted.run_id,
+                )
+                .with_for_update(of=JobRow)
+            )
+            run = await session.scalar(
+                sa.select(RunRow)
+                .where(
+                    RunRow.project_id == context.project_id,
+                    RunRow.owner_user_id == str(context.user_id),
+                    RunRow.thread_id == admitted.thread_id,
+                    RunRow.run_id == admitted.run_id,
+                )
+                .with_for_update(of=RunRow)
+            )
+            assert job is not None and run is not None
+            job.status = "cancelled"
+            job.completed_at = now
+            job.cancel_requested_at = now
+            job.cancel_reason = "retention_scope_purged"
+            run.status = "interrupted"
+            run.cancel_requested_at = now
+            run.cancel_reason = "retention_scope_purged"
+            await session.flush()
+            await RetentionPurgeAuthority.issue_single_run(
+                session,
+                purge_id=uuid.uuid4(),
+                project_id=context.project_id,
+                owner_user_id=str(context.user_id),
+                thread_id=admitted.thread_id,
+                run_id=admitted.run_id,
+                now=now,
+            )
             await purge_private_scope(
                 session,
                 project_id=context.project_id,
@@ -1362,7 +1401,7 @@ async def test_private_retention_accepts_a_linked_builder_run_without_fk_leak(
             assert await session.scalar(sa.select(sa.func.count()).select_from(SkillDesignOperationRow).where(SkillDesignOperationRow.session_id == design.id)) == 0
             retained_run = (await session.execute(sa.select(RunRow).where(RunRow.run_id == admitted.run_id))).scalar_one()
             retained_job = (await session.execute(sa.select(JobRow).where(JobRow.run_id == admitted.run_id))).scalar_one()
-            assert retained_job.status == "queued"
+            assert retained_job.status == "cancelled"
             assert retained_run.kwargs_json == {}
             assert retained_run.metadata_json == {}
     finally:

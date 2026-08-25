@@ -487,6 +487,8 @@ class ProjectChannelGroupBindingService:
             raise
         except GroupBindingRepositoryAgentUnavailable:
             raise GroupBindingAgentUnavailable(request_id) from None
+        except GroupBindingRepositoryConflict:
+            raise GroupBindingConflict(request_id) from None
         except IntegrityError:
             raise GroupBindingConflict(request_id) from None
         except (DBAPIError, SATimeoutError):

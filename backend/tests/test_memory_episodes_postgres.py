@@ -41,6 +41,7 @@ from deerflow.persistence.private_work.memory_document_repository import (
     memory_document_digest,
 )
 from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 
 def _owner_ref(_owner_user_id: str) -> JobOwnerRef:
@@ -184,6 +185,10 @@ async def test_postgres_settlement_transfers_history_into_episodes(
             assert isinstance(sections_policy_version_id, uuid.UUID)
             admission = await MemoryDocumentRepository(session, jobs=_jobs(session)).admit_dream(
                 scope,
+                account_private_generation=AccountPrivateGeneration(
+                    owner_user_id=scope.owner_user_id,
+                    generation=1,
+                ),
                 trigger="manual_dream",
                 frozen=frozen,
                 initial_content=EMPTY_MEMORY_DOCUMENT,
@@ -519,6 +524,10 @@ async def test_postgres_reset_and_retention_purge_delete_episodes(
                     run_id=None,
                     occurrence_id=None,
                     max_attempts=5,
+                    owner_private_generation=AccountPrivateGeneration(
+                        owner_user_id=scope_b.owner_user_id,
+                        generation=1,
+                    ),
                     retry_safety="safe",
                 )
             )
@@ -534,6 +543,10 @@ async def test_postgres_reset_and_retention_purge_delete_episodes(
                     run_id=None,
                     occurrence_id=None,
                     max_attempts=5,
+                    owner_private_generation=AccountPrivateGeneration(
+                        owner_user_id=scope_b.owner_user_id,
+                        generation=1,
+                    ),
                     retry_safety="safe",
                 )
             )

@@ -12,6 +12,7 @@ import pytest
 import sqlalchemy as sa
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from support.private_thread_seed import seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 
 from app.private_work import checkpointer as checkpointer_module
 from app.private_work import retention_purge as retention_purge_module
@@ -39,6 +40,7 @@ from app.private_work.output_delivery_obligation import (
     transition_output_delivery_obligation_for_approval_terminal,
 )
 from app.private_work.privacy_center import PrivacyCenterService
+from app.private_work.retention_authority import RetentionPurgeAuthority
 from app.private_work.retention_jobs import project_retention_key
 from app.private_work.retention_purge import (
     RetentionExecutionApprovalActive,
@@ -49,6 +51,9 @@ from app.private_work.run_repository import (
     PrivateRunRepository,
 )
 from app.private_work.run_service import PrivateRunService
+from app.private_work.run_skill_tree_orphan_reaper import (
+    RunSkillTreeOrphanReaper,
+)
 from app.private_work.thread_repository import (
     PrivateThreadRepository,
     ThreadAgentRef,
@@ -333,12 +338,12 @@ async def _add_run_job(
         execution_heartbeat_at=None if terminal else now,
         execution_started_at=now,
     )
-    session.add(run)
-    await session.flush()
+    await add_sealed_test_run(session, run)
     job = JobRow(
         job_type="private_run",
         project_id=owner.project_id,
         owner_user_id=str(owner.user_id),
+        owner_private_generation=1,
         run_id=run_id,
         origin_trace_id=origin_trace_id,
         idempotency_key=hashlib.sha256(f"job:{run_id}".encode()).hexdigest(),
@@ -1369,6 +1374,7 @@ async def test_thread_delete_projected_terminal_job_wins_over_active_reverse_job
                 job_type="private_run",
                 project_id=seed.owner_a.project_id,
                 owner_user_id=str(seed.owner_a.user_id),
+                owner_private_generation=1,
                 run_id=primary.run.run_id,
                 origin_trace_id=primary.run.origin_trace_id,
                 idempotency_key=hashlib.sha256(
@@ -2285,6 +2291,7 @@ async def test_side_effect_boundary_samples_time_after_job_lock(
 @pytest.mark.asyncio
 async def test_retention_commit_revalidates_lease_after_scope_lock_wait(
     migrated_postgres_database_url: str,
+    tmp_path,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
     tracking_repository = _TrackingRetentionRepository()
@@ -2301,6 +2308,10 @@ async def test_retention_commit_revalidates_lease_after_scope_lock_wait(
                 job_type="retention_purge",
                 project_id=seed.owner_a.project_id,
                 owner_user_id=None,
+                owner_private_generation=project.membership_version,
+                retention_resource_kind="project",
+                retention_effective_at=deletion_effective_at,
+                retention_membership_id=None,
                 idempotency_key=project_retention_key(
                     seed.owner_a.project_id,
                     deletion_effective_at,
@@ -2346,6 +2357,14 @@ async def test_retention_commit_revalidates_lease_after_scope_lock_wait(
         handler._quota = _Quota()
         handler._job_repository_builder = JobRepository
         handler._repository = tracking_repository
+        handler._mount_owner_reconciler = RunSkillTreeOrphanReaper(
+            engine=seed.engine,
+            materialization_root=tmp_path / "run-skill-materializations",
+            provider=SimpleNamespace(
+                ensure_run_readonly_mount_owner_absent_async=lambda *_args, **_kwargs: None,
+            ),
+            grace_seconds=0,
+        )
         handler._clock = lambda: datetime.now(UTC) - timedelta(days=1)
         handler._retry_initial_seconds = 2
         handler._retry_max_seconds = 300
@@ -2697,6 +2716,31 @@ async def test_owner_retention_purge_removes_approval_payload_but_keeps_audit(
             )
 
         async with seed.factory() as session, session.begin():
+            target_runs = tuple(
+                (
+                    await session.execute(
+                        sa.select(RunRow)
+                        .where(
+                            RunRow.project_id == seed.owner_a.project_id,
+                            RunRow.owner_user_id == str(seed.owner_a.user_id),
+                        )
+                        .order_by(RunRow.run_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            purge_id = uuid.uuid4()
+            for run in target_runs:
+                await RetentionPurgeAuthority.issue_single_run(
+                    session,
+                    purge_id=purge_id,
+                    project_id=run.project_id,
+                    owner_user_id=run.owner_user_id,
+                    thread_id=run.thread_id,
+                    run_id=run.run_id,
+                    now=datetime.now(UTC),
+                )
             await purge_private_scope(
                 session,
                 project_id=seed.owner_a.project_id,

@@ -514,7 +514,7 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
     from app.shared_assets.mcp_tool_inventory_repository import (
         McpToolInventoryRepository,
     )
-    from app.shared_assets.models import AgentPayload
+    from app.shared_assets.models import AgentPayload, AssetKind
     from app.shared_assets.resolver import ProjectAssetResolver
     from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
     from deerflow.persistence.shared_assets import McpSecretSlotRow
@@ -833,10 +833,10 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
                     thread_id,
                     PrivateRunCreate(run_id=f"mcp-run-{reuse}-{uuid.uuid4()}"),
                 )
-                mcp_assets = tuple(asset for asset in admitted.snapshot.assets if asset.asset_kind == "mcp")
+                mcp_assets = tuple(asset for asset in admitted.snapshot.assets if asset.kind is AssetKind.MCP)
                 assert len(mcp_assets) == 1
                 assert mcp_assets[0].version_id == mcp_version_id
-                assert mcp_assets[0].payload_checksum == mcp_checksum
+                assert mcp_assets[0].checksum == mcp_checksum
                 assert all(asset.version_id != current_mcp_version_id for asset in admitted.snapshot.assets)
                 assert len(admitted.snapshot.mcp_secrets) == 1
                 persisted_secret = admitted.snapshot.mcp_secrets[0]

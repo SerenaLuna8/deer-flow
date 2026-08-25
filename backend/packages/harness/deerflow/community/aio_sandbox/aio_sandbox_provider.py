@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 try:
@@ -43,7 +44,22 @@ from deerflow.private_scope import PrivateResourceScope
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, SandboxProvider
+from deerflow.sandbox.sandbox_provider import (
+    Orphaned,
+    PrivateSandboxLease,
+    ProviderMountAbsentProof,
+    ProviderRunMountLease,
+    ProviderRunMountOwnerAbsentProof,
+    ProviderRunMountOwnerReconciliation,
+    ProviderRunMountOwnerUnknown,
+    Released,
+    RunMountReleaseOutcome,
+    RunReadonlyMountSource,
+    RunScopedReadOnlyMount,
+    SandboxProvider,
+    merge_run_mount_release_outcome,
+    validate_run_readonly_mount_source,
+)
 
 from .aio_sandbox import AioSandbox
 from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -61,6 +77,16 @@ IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 THREAD_LOCK_EXECUTOR_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 _THREAD_LOCK_EXECUTOR = ThreadPoolExecutor(max_workers=THREAD_LOCK_EXECUTOR_WORKERS, thread_name_prefix="sandbox-lock-wait")
 atexit.register(_THREAD_LOCK_EXECUTOR.shutdown, wait=False, cancel_futures=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _AioRunReadonlyMount:
+    lease: ProviderRunMountLease
+    private_lease: PrivateSandboxLease
+    source: RunReadonlyMountSource
+    daemon_source: str
+    info: SandboxInfo
+    probe_content: str
 
 
 def _lock_file_exclusive(lock_file) -> None:
@@ -149,6 +175,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._thread_locks: dict[tuple[str, str], threading.Lock] = {}  # (user_id, thread_id) -> in-process lock
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
         self._private_runtime_ids: set[str] = set()
+        self._run_readonly_mount_owner_ids: set[uuid.UUID] = set()
+        self._run_readonly_mounts: dict[str, _AioRunReadonlyMount] = {}
+        self._run_readonly_mount_outcomes: dict[
+            str,
+            RunMountReleaseOutcome,
+        ] = {}
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
         # Containers here can be reclaimed quickly (no cold-start) or destroyed
@@ -181,6 +213,22 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Remote backends may require explicit file sync.
         """
         return isinstance(self._backend, LocalContainerBackend)
+
+    def run_readonly_mounts_ready(self) -> bool:
+        """Return only structurally mapped, live local-runtime capability."""
+
+        if not isinstance(self._backend, LocalContainerBackend):
+            return False
+        try:
+            paths = get_paths()
+            config = get_app_config()
+            paths_ready = paths.run_skill_host_mapping_ready()
+            runtime_ready = self._backend.run_readonly_mounts_ready()
+            configured_root = config.skills.container_path.rstrip("/") or "/"
+            p03_accepted = self._backend.runtime != "docker" or not paths.run_skill_uses_distinct_host_view() or config.sandbox.compose_dood_p03_v1_verified is True
+        except Exception:
+            return False
+        return configured_root == "/mnt/skills" and paths_ready and runtime_ready and p03_accepted
 
     # ── Factory methods ──────────────────────────────────────────────────
 
@@ -694,11 +742,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if not isinstance(self._backend, LocalContainerBackend):
             raise SandboxRuntimeError("AIO backend lacks required private sandbox security capabilities")
         extra_mounts = self._validated_private_local_mounts(mounts)
+        private_owner_id = self._dedicated_run_mount_owner_id(mounts)
         info = self._backend.create_private(
             f"private-{hashlib.sha256(identity.encode()).hexdigest()[:16]}",
             sandbox_id,
             extra_mounts=extra_mounts or None,
             user_id=scope.owner_user_id,
+            private_owner_id=private_owner_id,
         )
         registered = False
         try:
@@ -794,19 +844,50 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         def paths_overlap(left, right) -> bool:
             return left == right or left in right.parents or right in left.parents
 
-        def resolve_host(path: str) -> Path:
-            source = Path(path)
-            try:
-                before = source.lstat()
-                resolved = source.resolve(strict=True)
-                mode = resolved.stat().st_mode
-            except OSError as exc:
-                raise SandboxRuntimeError("Invalid private AIO mount source") from exc
+        def resolve_host(
+            path: str,
+            container: PurePosixPath,
+        ) -> tuple[str, Path]:
+            if container == PurePosixPath("/mnt/skills"):
+                try:
+                    resolved = get_paths().worker_run_skill_materialization_path(
+                        path,
+                    )
+                    before = resolved.lstat()
+                    mode = resolved.stat().st_mode
+                except (OSError, ValueError) as exc:
+                    if os.getenv("ACT_WEAVE_HOST_BASE_DIR"):
+                        raise SandboxRuntimeError(
+                            "Invalid private AIO mount source",
+                        ) from exc
+                    source = Path(path)
+                    try:
+                        before = source.lstat()
+                        resolved = source.resolve(strict=True)
+                        mode = resolved.stat().st_mode
+                    except OSError as native_exc:
+                        raise SandboxRuntimeError(
+                            "Invalid private AIO mount source",
+                        ) from native_exc
+                    daemon_source = str(resolved)
+                else:
+                    daemon_source = path
+            else:
+                source = Path(path)
+                try:
+                    before = source.lstat()
+                    resolved = source.resolve(strict=True)
+                    mode = resolved.stat().st_mode
+                except OSError as exc:
+                    raise SandboxRuntimeError(
+                        "Invalid private AIO mount source",
+                    ) from exc
+                daemon_source = str(resolved)
             if stat.S_ISLNK(before.st_mode) or stat.S_ISSOCK(mode):
                 raise SandboxRuntimeError("Private AIO mount source is unsafe")
             if any(paths_overlap(resolved, socket_path) for socket_path in host_socket_roots):
                 raise SandboxRuntimeError("Private AIO mount exposes a container runtime socket")
-            return resolved
+            return daemon_source, resolved
 
         def resolve_container(path: str) -> PurePosixPath:
             candidate = PurePosixPath(path)
@@ -816,19 +897,281 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 raise SandboxRuntimeError("Private AIO mount exposes a container runtime socket")
             return candidate
 
-        run_mounts: list[tuple[Path, PurePosixPath]] = []
+        run_mounts: list[tuple[str, Path, PurePosixPath]] = []
         for mount in mounts:
-            host = resolve_host(mount.host_path)
             container = resolve_container(mount.container_path)
+            daemon_source, worker_source = resolve_host(
+                mount.host_path,
+                container,
+            )
             if any(paths_overlap(container, protected) for protected in protected_container_roots):
                 raise SandboxRuntimeError("Private AIO run mount overlaps private storage")
             if any(paths_overlap(container, protected) for protected in protected_runtime_roots):
                 raise SandboxRuntimeError("Private AIO run mount overlaps private runtime")
-            if any(paths_overlap(host, other_host) or paths_overlap(container, other_container) for other_host, other_container in run_mounts):
+            if any(paths_overlap(worker_source, other_worker_source) or paths_overlap(container, other_container) for _other_daemon, other_worker_source, other_container in run_mounts):
                 raise SandboxRuntimeError("Private AIO mounts overlap")
-            run_mounts.append((host, container))
+            run_mounts.append((daemon_source, worker_source, container))
 
-        return [(str(host), container.as_posix(), True) for host, container in run_mounts]
+        return [(daemon_source, container.as_posix(), True) for daemon_source, _worker_source, container in run_mounts]
+
+    @staticmethod
+    def _dedicated_run_mount_owner_id(
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str | None:
+        if len(mounts) != 1:
+            return None
+        mount = mounts[0]
+        if mount.container_path != "/mnt/skills":
+            return None
+        try:
+            paths = get_paths()
+            trusted_root = paths.run_skill_materialization_root().resolve(
+                strict=True,
+            )
+            relative = paths.worker_run_skill_materialization_path(mount.host_path).relative_to(trusted_root)
+            if len(relative.parts) != 2 or relative.parts[1] != "tree":
+                return None
+            return uuid.UUID(hex=relative.parts[0]).hex
+        except (OSError, ValueError):
+            return None
+
+    def _ensure_run_readonly_mount_state_locked(self) -> None:
+        if not hasattr(self, "_run_readonly_mount_owner_ids"):
+            self._run_readonly_mount_owner_ids = set()
+        if not hasattr(self, "_run_readonly_mounts"):
+            self._run_readonly_mounts = {}
+        if not hasattr(self, "_run_readonly_mount_outcomes"):
+            self._run_readonly_mount_outcomes = {}
+
+    def prepare_run_readonly_mount(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        source: RunReadonlyMountSource,
+    ) -> ProviderRunMountLease:
+        paths = get_paths()
+        if not paths.run_skill_host_mapping_ready():
+            raise SandboxRuntimeError(
+                "AIO run read-only mount host mapping is unavailable",
+            )
+        validated = validate_run_readonly_mount_source(
+            source,
+            trusted_root=paths.run_skill_materialization_root(),
+        )
+        try:
+            daemon_source = paths.host_run_skill_materialization_path(
+                source.worker_root,
+            )
+        except ValueError as exc:
+            raise SandboxRuntimeError(
+                "AIO run read-only mount host mapping is unavailable",
+            ) from exc
+        with self._lock:
+            self._ensure_run_readonly_mount_state_locked()
+            if source.owner_id in self._run_readonly_mount_owner_ids:
+                raise SandboxRuntimeError(
+                    "Run read-only mount owner is already registered",
+                )
+            self._run_readonly_mount_owner_ids.add(source.owner_id)
+
+        try:
+            private_lease = self.acquire_private(
+                thread_id,
+                scope=scope,
+                user_id=scope.owner_user_id,
+                run_id=run_id,
+                mounts=(
+                    RunScopedReadOnlyMount(
+                        run_id=run_id,
+                        container_path="/mnt/skills",
+                        host_path=daemon_source,
+                    ),
+                ),
+            )
+        except BaseException:
+            with self._lock:
+                self._run_readonly_mount_owner_ids.discard(source.owner_id)
+            raise
+        with self._lock:
+            info = self._sandbox_infos.get(private_lease.sandbox_id)
+        if info is None:
+            self.release_private(private_lease)
+            with self._lock:
+                self._run_readonly_mount_owner_ids.discard(source.owner_id)
+            raise SandboxRuntimeError("Private AIO sandbox metadata is unavailable")
+        lease = ProviderRunMountLease(
+            owner_id=source.owner_id,
+            provider_kind="aio-local-container",
+            sandbox_id=private_lease.sandbox_id,
+            mount_lease_id=uuid.uuid4().hex,
+        )
+        entry = _AioRunReadonlyMount(
+            lease=lease,
+            private_lease=private_lease,
+            source=source,
+            daemon_source=daemon_source,
+            info=info,
+            probe_content=validated.probe_content,
+        )
+        with self._lock:
+            self._run_readonly_mounts[lease.mount_lease_id] = entry
+        try:
+            return self.readback_run_readonly_mount(lease)
+        except BaseException:
+            self.release_run_readonly_mount(lease)
+            raise
+
+    def readback_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> ProviderRunMountLease:
+        if type(lease) is not ProviderRunMountLease:
+            raise SandboxRuntimeError("Invalid provider run mount lease")
+        with self._lock:
+            self._ensure_run_readonly_mount_state_locked()
+            entry = self._run_readonly_mounts.get(lease.mount_lease_id)
+        if entry is None or entry.lease != lease:
+            raise SandboxRuntimeError("Run read-only mount lease is not active")
+        if not isinstance(self._backend, LocalContainerBackend):
+            raise SandboxRuntimeError("AIO run read-only mount backend is unsupported")
+        try:
+            state = self._backend.readback_private_run_mount_state(
+                entry.info,
+                lease.owner_id.hex,
+                daemon_source=entry.daemon_source,
+                container_path="/mnt/skills",
+            )
+        except Exception as exc:
+            raise SandboxRuntimeError(
+                "AIO run read-only mount owner readback failed",
+            ) from exc
+        if state != "active":
+            raise SandboxRuntimeError("AIO run read-only mount is absent")
+        sandbox = self.get(lease.sandbox_id)
+        probe = getattr(sandbox, "probe_run_readonly_mount", None)
+        if not callable(probe):
+            raise SandboxRuntimeError("AIO run read-only mount probe is unavailable")
+        try:
+            probe(
+                owner_id=lease.owner_id,
+                expected_manifest=entry.probe_content,
+            )
+        except Exception as exc:
+            raise SandboxRuntimeError("AIO run read-only mount probe failed") from exc
+        return lease
+
+    def release_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> RunMountReleaseOutcome:
+        if type(lease) is not ProviderRunMountLease:
+            raise SandboxRuntimeError("Invalid provider run mount lease")
+        with self._lock:
+            self._ensure_run_readonly_mount_state_locked()
+            prior = self._run_readonly_mount_outcomes.get(lease.mount_lease_id)
+            entry = self._run_readonly_mounts.get(lease.mount_lease_id)
+        if prior is not None:
+            if type(prior) is Released and prior.matches_lease(lease):
+                return prior
+            if type(prior) is not Orphaned or not prior.matches_lease(lease):
+                raise SandboxRuntimeError("Run read-only mount lease mismatch")
+        if entry is None or entry.lease != lease:
+            raise SandboxRuntimeError("Run read-only mount lease is not active")
+        if not isinstance(self._backend, LocalContainerBackend):
+            raise SandboxRuntimeError("AIO run read-only mount backend is unsupported")
+
+        try:
+            state = self._backend.readback_private_owner_state(
+                entry.info,
+                lease.owner_id.hex,
+            )
+        except Exception:
+            observed: RunMountReleaseOutcome = Orphaned.from_lease(
+                lease,
+                reason_code="release_readback_unknown",
+                last_lifecycle_state="release_pending",
+            )
+        else:
+            if state in {"active", "absent"}:
+                try:
+                    self.release_private(entry.private_lease)
+                except Exception:
+                    observed = Orphaned.from_lease(
+                        lease,
+                        reason_code="release_readback_unknown",
+                        last_lifecycle_state="release_pending",
+                    )
+                else:
+                    try:
+                        state = self._backend.readback_private_owner_state(
+                            entry.info,
+                            lease.owner_id.hex,
+                        )
+                    except Exception:
+                        state = "unknown"
+            observed = (
+                Released(proof=ProviderMountAbsentProof.from_lease(lease))
+                if state == "absent"
+                else Orphaned.from_lease(
+                    lease,
+                    reason_code="release_readback_unknown",
+                    last_lifecycle_state="release_pending",
+                )
+            )
+
+        outcome = observed if prior is None else merge_run_mount_release_outcome(prior, observed)
+        with self._lock:
+            self._run_readonly_mount_outcomes[lease.mount_lease_id] = outcome
+            if type(outcome) is Released:
+                self._run_readonly_mounts.pop(lease.mount_lease_id, None)
+                self._run_readonly_mount_owner_ids.discard(lease.owner_id)
+        return outcome
+
+    def ensure_run_readonly_mount_owner_absent(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        persisted_lease: ProviderRunMountLease | None,
+    ) -> ProviderRunMountOwnerReconciliation:
+        """Reconcile exact owner-labeled containers across Worker restarts."""
+
+        if type(owner_id) is not uuid.UUID:
+            raise SandboxRuntimeError("Invalid run read-only mount owner")
+        if persisted_lease is not None and (type(persisted_lease) is not ProviderRunMountLease or persisted_lease.owner_id != owner_id or persisted_lease.provider_kind != "aio-local-container"):
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="aio-local-container",
+                reason_code="owner_lease_mismatch",
+            )
+        if not isinstance(self._backend, LocalContainerBackend):
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="aio-local-container",
+                reason_code="owner_reconciliation_unsupported",
+            )
+        try:
+            self._backend.ensure_private_owner_absent(
+                owner_id.hex,
+                expected_sandbox_id=(persisted_lease.sandbox_id if persisted_lease is not None else None),
+            )
+        except Exception:
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="aio-local-container",
+                reason_code="owner_readback_unknown",
+            )
+        with self._lock:
+            self._ensure_run_readonly_mount_state_locked()
+            stale_leases = tuple(lease_id for lease_id, entry in self._run_readonly_mounts.items() if entry.lease.owner_id == owner_id)
+            for lease_id in stale_leases:
+                self._run_readonly_mounts.pop(lease_id, None)
+            self._run_readonly_mount_owner_ids.discard(owner_id)
+        return ProviderRunMountOwnerAbsentProof(
+            owner_id=owner_id,
+            provider_kind="aio-local-container",
+        )
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.

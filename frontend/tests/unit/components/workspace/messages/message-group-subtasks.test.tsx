@@ -31,7 +31,7 @@ function occurrenceCount(value: string, needle: string) {
 }
 
 describe("MessageGroup Sub-Agent visibility", () => {
-  test("keeps every task visible while folding only the preceding reasoning step", () => {
+  test("keeps every task visible after the chronological reasoning entry", () => {
     const html = render([
       {
         type: "ai",
@@ -48,9 +48,9 @@ describe("MessageGroup Sub-Agent visibility", () => {
       },
     ]);
 
-    expect(html).toContain("查看其他 1 个步骤");
-    expect(html).not.toContain("查看其他 3 个步骤");
+    expect(html).not.toContain("查看其他");
     expect(html).not.toContain("REASONING_THAT_STARTS_THE_DELEGATION");
+    expect(occurrenceCount(html, 'data-testid="thinking-disclosure"')).toBe(1);
 
     const taskMarkers = [
       "SUBTASK_CARD_task-1",
@@ -60,6 +60,9 @@ describe("MessageGroup Sub-Agent visibility", () => {
     for (const marker of taskMarkers) {
       expect(occurrenceCount(html, marker)).toBe(1);
     }
+    expect(html.indexOf('data-testid="thinking-disclosure"')).toBeLessThan(
+      html.indexOf(taskMarkers[0]!),
+    );
     expect(html.indexOf(taskMarkers[0]!)).toBeLessThan(
       html.indexOf(taskMarkers[1]!),
     );
@@ -107,7 +110,7 @@ describe("MessageGroup Sub-Agent visibility", () => {
     );
   });
 
-  test("keeps task cards ordered and unique when present_files closes the tool round", () => {
+  test("keeps every task and tool ordered when present_files closes the chronological round", () => {
     const html = render([
       {
         type: "ai",
@@ -133,14 +136,24 @@ describe("MessageGroup Sub-Agent visibility", () => {
       },
     ]);
 
-    expect(html).toContain("查看其他 2 个步骤");
+    expect(html).not.toContain("查看其他");
     expect(html).not.toContain("REASONING_BEFORE_TASK_AND_FILES");
-    expect(html).not.toContain("agent history");
+    expect(occurrenceCount(html, 'data-testid="thinking-disclosure"')).toBe(1);
+    expect(occurrenceCount(html, "agent history")).toBe(1);
+    expect(occurrenceCount(html, "展示文件")).toBe(1);
 
     const firstTask = "SUBTASK_CARD_task-a";
     const secondTask = "SUBTASK_CARD_task-b";
     expect(occurrenceCount(html, firstTask)).toBe(1);
     expect(occurrenceCount(html, secondTask)).toBe(1);
+    expect(html.indexOf('data-testid="thinking-disclosure"')).toBeLessThan(
+      html.indexOf(firstTask),
+    );
+    expect(html.indexOf(firstTask)).toBeLessThan(html.indexOf("agent history"));
+    expect(html.indexOf("agent history")).toBeLessThan(
+      html.indexOf(secondTask),
+    );
     expect(html.indexOf(firstTask)).toBeLessThan(html.indexOf(secondTask));
+    expect(html.indexOf(secondTask)).toBeLessThan(html.indexOf("展示文件"));
   });
 });

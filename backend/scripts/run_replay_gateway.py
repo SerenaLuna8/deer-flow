@@ -1,83 +1,189 @@
-"""Start a hermetic replay gateway for the core full-stack E2E.
+"""Start a hermetic replay Gateway for the real-backend browser gate.
 
-Builds an ephemeral process config, seeds the disposable PostgreSQL model and
-runtime-policy catalogs for ``ReplayChatModel``, then runs uvicorn — no model
-API key, deterministic. Used as a
-Playwright ``webServer`` (see ``frontend/playwright.real-backend.config.ts``) and
-runnable standalone for debugging::
+Derives one random disposable PostgreSQL database from the loopback development
+``DATABASE_URL``, installs Schema V1, seeds the deterministic Replay model, and
+owns the Gateway plus optional delayed Worker lifecycle. No model API key is
+used. This is the ``playwright.real-backend.config.ts`` web server::
 
-    DATABASE_URL=postgresql+asyncpg://.../deerflow_test_replay_local \
-      uv run python scripts/run_replay_gateway.py --port 8011
+    DATABASE_URL=postgresql+asyncpg://.../deerflow \
+      uv run python scripts/run_replay_gateway.py --port 8117
 
 ``tests/`` is put on the path so the test-only replay provider resolves;
-``GATEWAY_CORS_ORIGINS`` is set so the frontend on :3000 can talk to it.
-Every catalog or schema write is rejected unless the target database name has
-the disposable ``deerflow_test_`` prefix.
+``GATEWAY_CORS_ORIGINS`` is set for the task-local frontend. The derived
+database is always named ``deerflow_test_replay_*`` and is dropped in ``finally``.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import signal
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal
 
 _BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_BACKEND))
 sys.path.insert(0, str(_BACKEND / "tests"))  # replay_provider + build_config_yaml live here
 
 
+def _replay_worker_mode() -> Literal["immediate", "delayed"]:
+    mode = os.environ.get("E2E_REPLAY_WORKER_MODE", "immediate")
+    if mode not in {"immediate", "delayed"}:
+        raise RuntimeError("E2E_REPLAY_WORKER_MODE must be immediate or delayed")
+    return mode
+
+
+def _write_readback(payload: dict[str, object]) -> None:
+    raw_path = os.environ.get("E2E_REPLAY_READBACK_PATH", "").strip()
+    if not raw_path:
+        return
+    path = Path(raw_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+@contextmanager
+def _uvicorn_shutdown_signal_guard():
+    """Let uvicorn re-raise shutdown signals without skipping outer finally."""
+
+    def consume_shutdown_signal(_signum, _frame) -> None:
+        return None
+
+    original = {signum: signal.signal(signum, consume_shutdown_signal) for signum in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for signum, handler in original.items():
+            signal.signal(signum, handler)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8011)
+    parser.add_argument("--port", type=int, default=8117)
     parser.add_argument("--fixture", default=str(_BACKEND / "tests" / "fixtures" / "replay" / "write_read_file.ultra.json"))
-    parser.add_argument("--cors", default="http://localhost:3000")
+    parser.add_argument("--cors", default="http://localhost:3317")
     args = parser.parse_args()
 
     from _replay_fixture import (
+        ReplayWorkerController,
         bootstrap_replay_test_database,
         build_config_yaml,
         install_replay_model_adapter,
         prepare_hermetic_skills,
         prepare_replay_runtime_catalog,
         replay_gateway_user,
-        replay_worker,
+        replay_test_database_from_development,
     )
 
-    home = Path(tempfile.mkdtemp(prefix="replay-gw-"))
-    cfg = home / "config.yaml"
-    cfg.write_text(build_config_yaml(home=home), encoding="utf-8")
+    development_database_url = os.environ.get("DATABASE_URL")
+    worker_mode = _replay_worker_mode()
+    readback: dict[str, object] = {
+        "schema_version": 1,
+        "worker_mode": worker_mode,
+        "database_created": False,
+        "database_dropped": False,
+        "gateway_outcome": "not_started",
+    }
+    database = None
+    controller = None
+    try:
+        with replay_test_database_from_development(
+            development_database_url,
+        ) as database:
+            readback["database_name"] = database.database_name
+            readback["database_created"] = True
+            os.environ["DATABASE_URL"] = database.database_url
 
-    # Override (not setdefault): the replay gateway must be hermetic, so an outer
-    # ACT_WEAVE_HOME can't leak in and shift prompt-affecting paths/skills.
-    os.environ["ACT_WEAVE_HOME"] = str(home)
-    os.environ["ACT_WEAVE_CONFIG_PATH"] = str(cfg)
-    prepare_hermetic_skills(home)
-    os.environ["ACT_WEAVE_REPLAY_FIXTURE"] = args.fixture
-    os.environ.setdefault("AUTH_JWT_SECRET", "ci-replay-secret")
-    os.environ["GATEWAY_CORS_ORIGINS"] = args.cors
-    # Child / dynamic imports (resolve_class) search PYTHONPATH too.
-    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (str(_BACKEND), str(_BACKEND / "tests"), os.environ.get("PYTHONPATH", "")) if p)
-    install_replay_model_adapter()
-    if os.environ.get("ACT_WEAVE_REPLAY_BOOTSTRAP_SCHEMA") == "1":
-        asyncio.run(bootstrap_replay_test_database())
-    asyncio.run(prepare_replay_runtime_catalog())
+            with tempfile.TemporaryDirectory(prefix="replay-gw-") as raw_home:
+                home = Path(raw_home)
+                cfg = home / "config.yaml"
+                cfg.write_text(build_config_yaml(home=home), encoding="utf-8")
 
-    import uvicorn
-    from replay_agent_router import router as replay_agent_router
+                # The replay process owns all prompt-affecting paths and never
+                # inherits a developer's Skill tree.
+                os.environ["ACT_WEAVE_HOME"] = str(home)
+                os.environ["ACT_WEAVE_CONFIG_PATH"] = str(cfg)
+                prepare_hermetic_skills(home)
+                os.environ["ACT_WEAVE_REPLAY_FIXTURE"] = args.fixture
+                os.environ.setdefault("AUTH_JWT_SECRET", "ci-replay-secret")
+                os.environ["GATEWAY_CORS_ORIGINS"] = args.cors
+                os.environ["PYTHONPATH"] = os.pathsep.join(
+                    path
+                    for path in (
+                        str(_BACKEND),
+                        str(_BACKEND / "tests"),
+                        os.environ.get("PYTHONPATH", ""),
+                    )
+                    if path
+                )
+                install_replay_model_adapter()
+                asyncio.run(bootstrap_replay_test_database(database.database_url))
+                asyncio.run(prepare_replay_runtime_catalog(database.database_url))
 
-    from app.gateway.app import app as gateway_app
-    from app.gateway.deps import get_current_user_from_request
+                import uvicorn
+                from replay_agent_router import (
+                    build_replay_worker_router,
+                )
+                from replay_agent_router import (
+                    router as replay_agent_router,
+                )
 
-    gateway_app.dependency_overrides[get_current_user_from_request] = replay_gateway_user
-    gateway_app.include_router(replay_agent_router)
+                from app.gateway.app import app as gateway_app
+                from app.gateway.deps import get_current_user_from_request
 
-    print(f"[replay-gw] config={cfg} fixture={args.fixture} cors={args.cors} port={args.port}", flush=True)
-    with replay_worker():
-        uvicorn.run(gateway_app, host="127.0.0.1", port=args.port, log_level="warning")
-    return 0
+                controller = ReplayWorkerController(
+                    database_url=database.database_url,
+                    mode=worker_mode,
+                )
+                gateway_app.dependency_overrides[get_current_user_from_request] = replay_gateway_user
+                gateway_app.include_router(replay_agent_router)
+                if worker_mode == "delayed":
+                    gateway_app.include_router(build_replay_worker_router(controller))
+                else:
+                    controller.start()
+
+                print(
+                    f"[replay-gw] database=disposable worker_mode={worker_mode} port={args.port}",
+                    flush=True,
+                )
+                readback["gateway_outcome"] = "running"
+                try:
+                    with _uvicorn_shutdown_signal_guard():
+                        uvicorn.run(
+                            gateway_app,
+                            host="127.0.0.1",
+                            port=args.port,
+                            log_level="warning",
+                        )
+                    readback["gateway_outcome"] = "stopped"
+                finally:
+                    controller.close()
+                    readback["worker"] = controller.lifecycle_readback()
+        readback["database_dropped"] = bool(database is not None and database.dropped)
+        return 0
+    except BaseException as error:
+        readback["gateway_outcome"] = "failed"
+        readback["failure_type"] = type(error).__name__
+        if controller is not None:
+            try:
+                controller.close()
+                readback["worker"] = controller.lifecycle_readback()
+            except Exception:
+                readback["worker_cleanup"] = "failed"
+        readback["database_dropped"] = bool(database is not None and database.dropped)
+        raise
+    finally:
+        _write_readback(readback)
 
 
 if __name__ == "__main__":

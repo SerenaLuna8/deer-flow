@@ -19,6 +19,7 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
     SkillRuntimeNameConflict,
 )
+from app.shared_assets.skill_version_facts import skill_version_archive_facts
 from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
@@ -91,6 +92,46 @@ class SkillVersionStorageRecord:
 def _request_id(context: object) -> str:
     request_id = getattr(context, "request_id", None)
     return request_id if isinstance(request_id, str) else "unknown"
+
+
+async def assemble_and_seal_skill_version(
+    session: AsyncSession,
+    version: SkillVersionRow,
+    files: Sequence[SkillVersionFileRow],
+    *,
+    request_id: str,
+) -> tuple[SkillVersionFileRow, ...]:
+    file_snapshot = tuple(files)
+    if version.files_sealed is not False:
+        raise AssetValidationFailed(request_id)
+    await session.scalar(
+        select(
+            func.set_config(
+                "deerflow.asset_version_assembly",
+                str(version.id),
+                True,
+            )
+        )
+    )
+    session.add_all(file_snapshot)
+    await session.flush()
+    persisted = (
+        await session.execute(
+            select(
+                SkillVersionFileRow.path,
+                SkillVersionFileRow.sha256,
+                SkillVersionFileRow.size_bytes,
+            )
+            .where(SkillVersionFileRow.skill_version_id == version.id)
+            .order_by(SkillVersionFileRow.path.collate("C"))
+        )
+    ).all()
+    facts = skill_version_archive_facts(tuple((str(path), str(sha256), int(size_bytes)) for path, sha256, size_bytes in persisted))
+    if facts.file_count != version.file_count or facts.content_size_bytes != version.content_size_bytes or facts.payload_checksum != version.payload_checksum:
+        raise AssetValidationFailed(request_id)
+    version.files_sealed = True
+    await session.flush()
+    return file_snapshot
 
 
 class SkillRepository:
@@ -565,7 +606,11 @@ class SkillRepository:
         asset = await self.get_project_asset(context, asset_id, for_update=True)
         if version.skill_id != asset.id or any(file.skill_version_id != version.id for file in files):
             raise AssetNotFound(context.request_id)
-        return await self._create_version(version, files)
+        return await self._create_version(
+            version,
+            files,
+            request_id=context.request_id,
+        )
 
     async def create_system_version(
         self,
@@ -578,7 +623,11 @@ class SkillRepository:
         asset = await self.get_system_asset(context, asset_id, for_update=True)
         if version.skill_id != asset.id or any(file.skill_version_id != version.id for file in files):
             raise AssetNotFound(context.request_id)
-        return await self._create_version(version, files)
+        return await self._create_version(
+            version,
+            files,
+            request_id=context.request_id,
+        )
 
     async def create_override_version(
         self,
@@ -591,27 +640,27 @@ class SkillRepository:
         asset = await self.get_override_asset(context, asset_id, for_update=True)
         if version.skill_id != asset.id or any(file.skill_version_id != version.id for file in files):
             raise AssetNotFound(context.request_id)
-        return await self._create_version(version, files)
+        return await self._create_version(
+            version,
+            files,
+            request_id=context.request_id,
+        )
 
     async def _create_version(
         self,
         version: SkillVersionRow,
         files: Sequence[SkillVersionFileRow],
+        *,
+        request_id: str,
     ) -> SkillVersionRecord:
-        file_snapshot = tuple(files)
         self.session.add(version)
         await self.session.flush()
-        await self.session.scalar(
-            select(
-                func.set_config(
-                    "deerflow.asset_version_assembly",
-                    str(version.id),
-                    True,
-                )
-            )
+        file_snapshot = await assemble_and_seal_skill_version(
+            self.session,
+            version,
+            files,
+            request_id=request_id,
         )
-        self.session.add_all(file_snapshot)
-        await self.session.flush()
         return SkillVersionRecord(version, file_snapshot)
 
     async def get_project_version(

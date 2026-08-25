@@ -865,7 +865,7 @@ def _make_lead_agent(
 
     skill_search_enabled = resolved_app_config.skills.deferred_discovery
     container_base_path = resolved_app_config.skills.container_path if private_runtime is not None else resolved_app_config.skills.container_path
-    runtime_skills_root = Path(getattr(private_runtime, "skill_root")) if private_runtime is not None else None
+    runtime_skills_root = Path(getattr(private_runtime, "skill_root")) if private_runtime is not None and runtime_skills else None
 
     # Build discovery from the Agent-available Skill catalog. Availability is
     # not activation: only the exact-runtime middleware may apply allowed-tools.

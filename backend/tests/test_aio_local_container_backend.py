@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import threading
+import uuid
 from types import SimpleNamespace
 
 import pytest
 
-from deerflow.community.aio_sandbox.aio_sandbox_provider import DEFAULT_IMAGE
+from deerflow.community.aio_sandbox.aio_sandbox_provider import (
+    DEFAULT_IMAGE,
+    AioSandboxProvider,
+)
 from deerflow.community.aio_sandbox.backend import wait_for_sandbox_ready
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
@@ -15,6 +20,10 @@ from deerflow.community.aio_sandbox.local_backend import (
 )
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
 from deerflow.community.remote_file_authority import PRIVATE_ROOT_BOOTSTRAP_SCRIPT
+from deerflow.sandbox.sandbox_provider import (
+    ProviderRunMountOwnerAbsentProof,
+    ProviderRunMountOwnerUnknown,
+)
 
 
 def _backend(*, runtime: str = "container") -> LocalContainerBackend:
@@ -130,7 +139,7 @@ def test_private_create_excludes_every_config_mount(
             read_only=True,
         ),
     ]
-    starts: list[tuple[str, int | None, object, bool]] = []
+    starts: list[tuple[str, int | None, object, bool, str | None]] = []
 
     def start(
         name: str,
@@ -138,8 +147,17 @@ def test_private_create_excludes_every_config_mount(
         extra_mounts: object = None,
         *,
         include_config_mounts: bool = True,
+        private_owner_id: str | None = None,
     ) -> str:
-        starts.append((name, port, extra_mounts, include_config_mounts))
+        starts.append(
+            (
+                name,
+                port,
+                extra_mounts,
+                include_config_mounts,
+                private_owner_id,
+            )
+        )
         return name
 
     monkeypatch.setattr(backend, "_start_container", start)
@@ -168,8 +186,295 @@ def test_private_create_excludes_every_config_mount(
             None if runtime == "container" else 31415,
             [("/run/skill", "/mnt/skills/private", True)],
             False,
+            None,
         )
     ]
+
+
+@pytest.mark.parametrize("runtime", ["container", "docker"])
+def test_private_create_labels_and_reads_back_the_exact_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+) -> None:
+    backend = _backend(runtime=runtime)
+    owner_id = uuid.UUID("60000000-0000-0000-0000-000000000001")
+    container_name = "deer-flow-sandbox-private-test1234"
+    commands: list[list[str]] = []
+    labels = {
+        "io.actweave.sandbox.managed": "true",
+        "io.actweave.sandbox.schema": "1",
+        "io.actweave.run-mount-owner": owner_id.hex,
+    }
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(cmd)
+        if cmd[:2] == [runtime, "run"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="runtime-container-id\n",
+                stderr="",
+            )
+        if cmd == ["container", "inspect", container_name]:
+            payload = _apple_container_payload(container_id=container_name)
+            payload[0]["configuration"]["labels"] = labels
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+        if cmd == ["docker", "inspect", container_name]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"Config": {"Labels": labels}}]),
+                stderr="",
+            )
+        pytest.fail(f"Unexpected runtime command: {cmd!r}")
+
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend.subprocess.run",
+        fake_run,
+    )
+    if runtime == "docker":
+        monkeypatch.setattr(
+            "deerflow.community.aio_sandbox.local_backend.get_free_port",
+            lambda **_kwargs: 31415,
+        )
+
+    info = backend.create_private(
+        None,
+        "private-test1234",
+        extra_mounts=[("/run/skill", "/mnt/skills", True)],
+        private_owner_id=owner_id.hex,
+    )
+
+    start = commands[0]
+    owner_label = f"io.actweave.run-mount-owner={owner_id.hex}"
+    assert owner_label in start
+    expected_mount = "/run/skill:/mnt/skills:ro" if runtime == "container" else "type=bind,src=/run/skill,dst=/mnt/skills,readonly"
+    assert expected_mount in start
+    assert backend.readback_private_owner_state(info, owner_id.hex) == "active"
+
+    inspect_name = "_inspect_apple_container" if runtime == "container" else "_inspect_docker_container"
+    monkeypatch.setattr(backend, inspect_name, lambda _name: None)
+    assert backend.readback_private_owner_state(info, owner_id.hex) == "absent"
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        {
+            "io.actweave.sandbox.managed": "true",
+            "io.actweave.sandbox.schema": "1",
+            "io.actweave.run-mount-owner": "60000000000000000000000000000002",
+        },
+        {
+            "io.actweave.sandbox.schema": "1",
+            "io.actweave.run-mount-owner": "60000000000000000000000000000001",
+        },
+        {
+            "io.actweave.sandbox.managed": "true",
+            "io.actweave.sandbox.schema": "2",
+            "io.actweave.run-mount-owner": "60000000000000000000000000000001",
+        },
+    ],
+)
+def test_private_owner_readback_rejects_mismatched_ownership_labels(
+    monkeypatch: pytest.MonkeyPatch,
+    labels: dict[str, str],
+) -> None:
+    backend = _backend()
+    info = SandboxInfo(
+        sandbox_id="private-test1234",
+        sandbox_url="http://192.168.64.5:8080",
+        container_name="deer-flow-sandbox-private-test1234",
+        container_id="runtime-container-id",
+    )
+    payload = _apple_container_payload(container_id=info.container_name)
+    payload[0]["configuration"]["labels"] = labels
+    monkeypatch.setattr(backend, "_inspect_apple_container", lambda _name: payload[0])
+
+    with pytest.raises(RuntimeError, match="owner label mismatch"):
+        backend.readback_private_owner_state(
+            info,
+            "60000000000000000000000000000001",
+        )
+
+
+def test_docker_private_mount_readback_requires_exact_daemon_source_and_readonly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _backend(runtime="docker")
+    owner_id = "60000000000000000000000000000001"
+    info = SandboxInfo(
+        sandbox_id="private-test1234",
+        sandbox_url="http://host.docker.internal:31415",
+        container_name="deer-flow-sandbox-private-test1234",
+        container_id="runtime-container-id",
+    )
+    labels = {
+        "io.actweave.sandbox.managed": "true",
+        "io.actweave.sandbox.schema": "1",
+        "io.actweave.run-mount-owner": owner_id,
+    }
+    entry = {
+        "Config": {"Labels": labels},
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "/host/state/run-skill-materializations/owner/tree",
+                "Destination": "/mnt/skills",
+                "RW": False,
+            }
+        ],
+    }
+    monkeypatch.setattr(backend, "_inspect_docker_container", lambda _name: entry)
+
+    assert (
+        backend.readback_private_run_mount_state(
+            info,
+            owner_id,
+            daemon_source=("/host/state/run-skill-materializations/owner/tree"),
+            container_path="/mnt/skills",
+        )
+        == "active"
+    )
+
+    entry["Mounts"][0]["RW"] = True
+    with pytest.raises(RuntimeError, match="read-only mount mismatch"):
+        backend.readback_private_run_mount_state(
+            info,
+            owner_id,
+            daemon_source=("/host/state/run-skill-materializations/owner/tree"),
+            container_path="/mnt/skills",
+        )
+
+
+@pytest.mark.parametrize(
+    ("runtime", "returncode", "stdout", "expected"),
+    [
+        ("docker", 0, '"27.0.0"\n', True),
+        ("docker", 1, "", False),
+        ("container", 0, "[]\n", True),
+        ("container", 0, "not-json", False),
+    ],
+)
+def test_local_container_run_mount_readiness_is_runtime_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+    returncode: int,
+    stdout: str,
+    expected: bool,
+) -> None:
+    backend = _backend(runtime=runtime)
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=returncode,
+            stdout=stdout,
+            stderr="private daemon detail",
+        ),
+    )
+
+    assert backend.run_readonly_mounts_ready() is expected
+
+
+def test_private_owner_reaper_strictly_enumerates_destroys_and_reads_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _backend(runtime="docker")
+    owner_id = uuid.UUID("60000000-0000-0000-0000-000000000001")
+    container_name = "deer-flow-sandbox-private-reaper1234"
+    labels = {
+        "io.actweave.sandbox.managed": "true",
+        "io.actweave.sandbox.schema": "1",
+        "io.actweave.run-mount-owner": owner_id.hex,
+    }
+    active = True
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal active
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "ps", "-a"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=f"{container_name}\n" if active else "",
+                stderr="",
+            )
+        if cmd == ["docker", "inspect", container_name]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Id": "container-id",
+                            "Name": f"/{container_name}",
+                            "Config": {"Labels": labels},
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        if cmd == ["docker", "stop", "container-id"]:
+            active = False
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        pytest.fail(f"Unexpected runtime command: {cmd!r}")
+
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend.subprocess.run",
+        fake_run,
+    )
+
+    backend.ensure_private_owner_absent(
+        owner_id.hex,
+        expected_sandbox_id=None,
+    )
+    backend.ensure_private_owner_absent(
+        owner_id.hex,
+        expected_sandbox_id=None,
+    )
+
+    assert ["docker", "stop", "container-id"] in calls
+    list_command = calls[0]
+    assert f"label=io.actweave.run-mount-owner={owner_id.hex}" in list_command
+
+
+def test_aio_provider_returns_owner_absence_only_from_local_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_id = uuid.UUID("60000000-0000-0000-0000-000000000001")
+    backend = _backend(runtime="docker")
+    reconciled: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        backend,
+        "ensure_private_owner_absent",
+        lambda value, *, expected_sandbox_id: reconciled.append(
+            (value, expected_sandbox_id),
+        ),
+    )
+    provider = object.__new__(AioSandboxProvider)
+    provider._backend = backend
+    provider._lock = threading.Lock()
+    provider._run_readonly_mount_owner_ids = set()
+    provider._run_readonly_mounts = {}
+    provider._run_readonly_mount_outcomes = {}
+
+    proof = provider.ensure_run_readonly_mount_owner_absent(
+        owner_id,
+        persisted_lease=None,
+    )
+
+    assert type(proof) is ProviderRunMountOwnerAbsentProof
+    assert proof.owner_id == owner_id
+    assert reconciled == [(owner_id.hex, None)]
+
+    provider._backend = object()
+    unknown = provider.ensure_run_readonly_mount_owner_absent(
+        owner_id,
+        persisted_lease=None,
+    )
+    assert type(unknown) is ProviderRunMountOwnerUnknown
+    assert unknown.reason_code == "owner_reconciliation_unsupported"
 
 
 @pytest.mark.parametrize(

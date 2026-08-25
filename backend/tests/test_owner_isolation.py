@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from support.private_thread_seed import seed_private_thread_database
 
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.thread_meta import ThreadMetaRepository
@@ -18,7 +19,6 @@ from deerflow.runtime.events.store.db import DbRunEventStore
 async def _seed_private_data(database_url):
     seed = await seed_private_thread_database(database_url)
     thread_repo = ThreadMetaRepository(seed.factory)
-    run_repo = RunRepository(seed.factory)
     for thread_id, scope in (
         ("t-alpha", seed.owner_a_scope),
         ("t-beta", seed.owner_b_scope),
@@ -30,12 +30,17 @@ async def _seed_private_data(database_url):
             agent_asset_id=seed.project_agent_id,
             agent_scope="project",
         )
-    for run_id, thread_id, scope in (
-        ("run-a1", "t-alpha", seed.owner_a_scope),
-        ("run-a2", "t-alpha", seed.owner_a_scope),
-        ("run-b1", "t-beta", seed.owner_b_scope),
-    ):
-        await run_repo.put(run_id, thread_id=thread_id, scope=scope)
+    async with seed.factory() as session, session.begin():
+        for run_id, thread_id, scope in (
+            ("run-a1", "t-alpha", seed.owner_a_scope),
+            ("run-a2", "t-alpha", seed.owner_a_scope),
+            ("run-b1", "t-beta", seed.owner_b_scope),
+        ):
+            await PrivateRunRepository(session).create_terminal_empty_shell(
+                scope=scope,
+                thread_id=thread_id,
+                request=PrivateRunCreate(run_id=run_id, status="success"),
+            )
     return seed
 
 

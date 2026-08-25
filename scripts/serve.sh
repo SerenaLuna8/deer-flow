@@ -699,6 +699,31 @@ run_process() {
     echo "✓ $name started"
 }
 
+# Read back the exact five roles started by this launcher. Ports alone cannot
+# prove that the Worker/Scheduler children survived startup, and a stale Worker
+# row alone cannot prove that the frontend or proxy child is still owned here.
+readback_required_children() {
+    local required_names=("Gateway" "Worker" "Scheduler" "Frontend" "Nginx")
+    local index pid
+
+    if [ "${#STARTED_PIDS[@]}" -ne "${#required_names[@]}" ] || \
+        [ "${#STARTED_PROCESS_NAMES[@]}" -ne "${#required_names[@]}" ]; then
+        echo "✗ Required process readback is incomplete." >&2
+        return 1
+    fi
+    for ((index = 0; index < ${#required_names[@]}; index++)); do
+        if [ "${STARTED_PROCESS_NAMES[$index]}" != "${required_names[$index]}" ]; then
+            echo "✗ Required process role readback does not match startup order." >&2
+            return 1
+        fi
+        pid="${STARTED_PIDS[$index]}"
+        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            echo "✗ ${required_names[$index]} exited before readiness completed." >&2
+            return 1
+        fi
+    done
+}
+
 # ── Start services ───────────────────────────────────────────────────────────
 
 mkdir -p "$LOG_ROOT"
@@ -731,6 +756,22 @@ run_service "Nginx" \
     2026 10
 
 # ── Ready ────────────────────────────────────────────────────────────────────
+
+readback_required_children || startup_failure 1
+execution_readiness_status=0
+(
+    cd backend
+    env PYTHONPATH=. uv run python scripts/check_local_execution_readiness.py --timeout-seconds 30
+) || execution_readiness_status=$?
+if [ "$execution_readiness_status" -ne 0 ]; then
+    case "$execution_readiness_status" in
+        2) echo "✗ Local execution readiness failed: database or Schema V1 is unavailable." >&2 ;;
+        3) echo "✗ Local execution readiness failed: no fresh private_run Worker registered before timeout." >&2 ;;
+        *) echo "✗ Local execution readiness failed unexpectedly." >&2 ;;
+    esac
+    startup_failure 1
+fi
+readback_required_children || startup_failure 1
 
 echo ""
 echo "=========================================="

@@ -11,6 +11,7 @@ from support.private_thread_seed import (
     PrivateThreadSeed,
     seed_private_thread_database,
 )
+from support.run_closure import add_sealed_test_run
 
 from app.private_work.file_service import PrivateFileService
 from app.private_work.sandbox_files import (
@@ -205,7 +206,8 @@ async def test_conditional_discard_retains_run_snapshot_upload_and_quota(
             name="frozen.txt",
         )
         async with seed.factory() as session, session.begin():
-            session.add(
+            await add_sealed_test_run(
+                session,
                 RunRow(
                     run_id=str(uuid.uuid4()),
                     thread_id=thread_id,
@@ -225,7 +227,7 @@ async def test_conditional_discard_retains_run_snapshot_upload_and_quota(
                         RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG: persisted_current_upload_snapshot((_snapshot_entry(upload),)),
                     },
                     project_id=seed.owner_a.project_id,
-                )
+                ),
             )
 
         before = await _stored_state(seed, file_id=upload.id)

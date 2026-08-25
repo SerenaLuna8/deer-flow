@@ -10,6 +10,7 @@ from app.private_work.errors import (
     ExecutionApprovalInvalid,
     ExecutionApprovalNotFound,
     ExecutionApprovalPolicyDisabled,
+    LegacyAdmissionBusy,
     PrivateWorkAgentArchived,
     PrivateWorkAssetStale,
     PrivateWorkCompactionDisabled,
@@ -58,6 +59,7 @@ _PRIVATE_WORK_ERROR_TYPES = (
     PrivateWorkMcpQuotaExceeded,
     PrivateWorkInvalid,
     PrivateWorkUnavailable,
+    LegacyAdmissionBusy,
 )
 
 

@@ -23,6 +23,9 @@ from app.automations.system_policy import (
     SystemAutomationsPolicyReader,
 )
 from app.final_schema import FinalSchemaProbe
+from app.private_work.legacy_run_skill_snapshot_writer import (
+    freeze_run_skill_snapshot_writer,
+)
 from app.private_work.memory_dream_service import (
     MemoryDreamModelUnavailable,
     MemoryDreamSchedulerService,
@@ -31,6 +34,7 @@ from app.private_work.memory_seal_service import (
     MemorySealAdmissionService,
     MemorySealSchedulerService,
 )
+from app.private_work.run_skill_writer_cohort import RunSkillWriterCohortLease
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.quotas.system_policy import SystemQuotaPolicyReader
@@ -151,6 +155,13 @@ async def run_scheduler(
 ) -> None:
     try:
         config = await asyncio.to_thread(get_app_config)
+        writer = freeze_run_skill_snapshot_writer(config.run_skill_snapshots)
+        logger.info(
+            "Run Skill snapshot writer ready: mode=%s artifact=%s policy_digest=%s",
+            writer.writer_mode,
+            writer.artifact_version,
+            writer.legacy_policy_digest,
+        )
         raw_mcp_security = getattr(config, "mcp_security", None)
         if isinstance(raw_mcp_security, McpSecurityConfig):
             mcp_security = raw_mcp_security
@@ -166,6 +177,7 @@ async def run_scheduler(
     except Exception:
         raise SchedulerConfigurationUnavailable() from None
     await init_engine(config.database)
+    writer_cohort: RunSkillWriterCohortLease | None = None
     try:
         session_factory = get_session_factory()
         async with session_factory() as session:
@@ -173,6 +185,12 @@ async def run_scheduler(
         engine = get_engine()
         if engine is None:
             raise RuntimeError("scheduler persistence engine is unavailable")
+        writer_cohort = await RunSkillWriterCohortLease.acquire(
+            engine,
+            writer,
+            process_role="scheduler",
+            process_authority=True,
+        )
         ownership = AutomationSchedulerOwnership(engine)
         audit_keyring = AuditHmacKeyring.from_environment()
         from app.audit.service import AuditService, _bind_scheduler_audit_process
@@ -216,23 +234,47 @@ async def run_scheduler(
             ownership=ownership,
             policy_reader=automations_policy,
         )
-        await SchedulerApp(
-            enabled=True,
-            ownership=ownership,
-            service=service,
-            session_factory=session_factory,
-            poll_interval_seconds=5,
-            dream_service=MemoryDreamSchedulerService(
-                session_factory,
-                audit=audit_sink,
-            ),
-            seal_service=MemorySealSchedulerService(
-                session_factory,
-                admission=MemorySealAdmissionService(audit=audit_sink),
-            ),
-            policy_reader=automations_policy,
-        ).run(stop_event or asyncio.Event())
+        runtime_stop_event = stop_event or asyncio.Event()
+        stop_on_cohort_loss = asyncio.create_task(
+            writer_cohort.wait_lost(),
+        )
+        scheduler_run = asyncio.create_task(
+            SchedulerApp(
+                enabled=True,
+                ownership=ownership,
+                service=service,
+                session_factory=session_factory,
+                poll_interval_seconds=5,
+                dream_service=MemoryDreamSchedulerService(
+                    session_factory,
+                    audit=audit_sink,
+                ),
+                seal_service=MemorySealSchedulerService(
+                    session_factory,
+                    admission=MemorySealAdmissionService(audit=audit_sink),
+                ),
+                policy_reader=automations_policy,
+            ).run(runtime_stop_event)
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {scheduler_run, stop_on_cohort_loss},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_on_cohort_loss in done and not scheduler_run.done():
+                runtime_stop_event.set()
+            await scheduler_run
+            if stop_on_cohort_loss in done:
+                raise SchedulerConfigurationUnavailable()
+        finally:
+            stop_on_cohort_loss.cancel()
+            try:
+                await stop_on_cohort_loss
+            except asyncio.CancelledError:
+                pass
     finally:
+        if writer_cohort is not None:
+            await writer_cohort.close()
         await close_engine()
 
 

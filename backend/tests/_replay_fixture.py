@@ -3,18 +3,103 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal, Protocol
 
 from starlette.requests import Request
 
 _REPLAY_ADMIN_ID = uuid.UUID("5fb66f7d-5655-54df-a7da-66066c114f17")
+_REPLAY_WORKER_FRESH_FOR_SECONDS = 3
+_REPLAY_DATABASE_NAME = re.compile(r"deerflow_test_replay_[0-9]+_[0-9a-f]{32}\Z")
+_REPLAY_FAULT_BARRIER_ROOT_ENV = "ACT_WEAVE_REPLAY_FAULT_BARRIER_ROOT"
+ReplayFault = Literal["model", "claim", "begin_execution"]
+_REPLAY_FAULTS: tuple[ReplayFault, ...] = (
+    "model",
+    "claim",
+    "begin_execution",
+)
+
+
+class _StopEvent(Protocol):
+    def is_set(self) -> bool: ...
+
+
+class ReplayFaultBarriers:
+    """Task-local file barriers shared by the replay Gateway and Worker."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root.expanduser().resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _marker(self, fault: ReplayFault) -> Path:
+        if fault not in _REPLAY_FAULTS:
+            raise ValueError("unsupported replay fault")
+        return self.root / f"{fault}.hold"
+
+    def hold(self, fault: ReplayFault) -> None:
+        self._marker(fault).touch(exist_ok=True)
+
+    def release(self, fault: ReplayFault) -> None:
+        self._marker(fault).unlink(missing_ok=True)
+
+    def release_all(self) -> None:
+        for fault in _REPLAY_FAULTS:
+            self.release(fault)
+
+    def is_held(self, fault: ReplayFault) -> bool:
+        return self._marker(fault).is_file()
+
+    def wait(
+        self,
+        fault: ReplayFault,
+        *,
+        poll_seconds: float = 0.02,
+    ) -> None:
+        while self.is_held(fault):
+            time.sleep(poll_seconds)
+
+    async def wait_async(
+        self,
+        fault: ReplayFault,
+        *,
+        poll_seconds: float = 0.02,
+        stop_event: _StopEvent | None = None,
+    ) -> bool:
+        import asyncio
+
+        while self.is_held(fault):
+            if stop_event is not None and stop_event.is_set():
+                return False
+            await asyncio.sleep(poll_seconds)
+        return True
+
+    def snapshot(self) -> dict[str, bool]:
+        return {
+            "held_model": self.is_held("model"),
+            "held_claim": self.is_held("claim"),
+            "held_begin_execution": self.is_held("begin_execution"),
+        }
+
+
+def replay_fault_barriers_from_environment() -> ReplayFaultBarriers | None:
+    raw_root = os.environ.get(_REPLAY_FAULT_BARRIER_ROOT_ENV, "").strip()
+    if not raw_root:
+        return None
+    root = Path(raw_root).expanduser().resolve()
+    if not root.is_dir():
+        raise RuntimeError("replay fault barrier root is unavailable")
+    return ReplayFaultBarriers(root)
 
 
 def replay_gateway_admin_user() -> SimpleNamespace:
@@ -96,6 +181,15 @@ tools:
     use: deerflow.sandbox.tools:write_file_tool
 database:
   url: $DATABASE_URL
+worker:
+  enabled: true
+  poll_interval_seconds: 0.1
+  lease_seconds: 15
+  heartbeat_seconds: 1
+  max_concurrent_jobs: 8
+  shutdown_grace_seconds: 5
+  retry_initial_seconds: 1
+  retry_max_seconds: 5
 """
 
 
@@ -125,16 +219,84 @@ def _validated_replay_database_url(
     return resolved_url
 
 
+@dataclass(slots=True)
+class ReplayTestDatabase:
+    database_url: str
+    database_name: str
+    dropped: bool = False
+
+
+def _development_database_coordinates(
+    database_url: str | None,
+) -> tuple[str, str, str]:
+    from sqlalchemy.engine import make_url
+
+    if not database_url:
+        raise RuntimeError("development DATABASE_URL is required for replay database setup")
+    try:
+        parsed = make_url(database_url)
+    except Exception:
+        raise RuntimeError("replay database setup requires a valid development PostgreSQL URL") from None
+    if parsed.get_backend_name() != "postgresql" or parsed.host not in {"127.0.0.1", "localhost", "::1"} or not parsed.database or parsed.database in {"postgres", "template0", "template1"} or parsed.database.startswith("deerflow_test_"):
+        raise RuntimeError("replay database setup requires a loopback development PostgreSQL database")
+
+    database_name = f"deerflow_test_replay_{os.getpid()}_{uuid.uuid4().hex}"
+    if _REPLAY_DATABASE_NAME.fullmatch(database_name) is None:
+        raise RuntimeError("invalid replay test database name")
+    maintenance_url = parsed.set(
+        drivername="postgresql",
+        database="postgres",
+    ).render_as_string(hide_password=False)
+    replay_url = parsed.set(
+        drivername="postgresql+asyncpg",
+        database=database_name,
+    ).render_as_string(hide_password=False)
+    return maintenance_url, replay_url, database_name
+
+
+@contextmanager
+def replay_test_database_from_development(
+    database_url: str | None,
+) -> Iterator[ReplayTestDatabase]:
+    """Create and always drop one random loopback replay database."""
+
+    import psycopg
+    from psycopg import sql
+
+    maintenance_url, replay_url, database_name = _development_database_coordinates(database_url)
+    with psycopg.connect(maintenance_url, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0 ENCODING 'UTF8'").format(sql.Identifier(database_name)))
+    try:
+        database = ReplayTestDatabase(
+            database_url=replay_url,
+            database_name=database_name,
+        )
+        yield database
+    finally:
+        with psycopg.connect(maintenance_url, autocommit=True) as connection:
+            connection.execute(
+                """
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname=%s AND pid <> pg_backend_pid()
+                """,
+                (database_name,),
+            )
+            connection.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database_name)))
+        if "database" in locals():
+            database.dropped = True
+
+
 def install_replay_model_adapter() -> None:
-    """Point the credential-free ``vision_bridge_fake`` test model at ReplayChatModel.
+    """Point test-only ``openai`` execution at credential-free ReplayChatModel.
 
     The override lives only in replay Gateway/Worker processes. The database
-    still contains a supported, credential-free provider adapter, so the test
-    harness does not add a test implementation to the production allowlist.
+    retains a provider engineering profile supported by the production request
+    guard, while the process-local descriptor prevents any network/API-key use.
     """
     from app.system_settings import validation
 
-    validation.PROVIDER_ADAPTERS["vision_bridge_fake"] = validation.ProviderAdapterSpec(
+    validation.PROVIDER_ADAPTERS["openai"] = validation.ProviderAdapterSpec(
         "replay_provider:ReplayChatModel",
         False,
     )
@@ -204,12 +366,12 @@ async def prepare_replay_runtime_catalog(
         )
         model_catalog = SystemModelCatalogService(session_factory)
         catalog = await model_catalog.list_models(audit_context)
-        matches = tuple(item for item in catalog.items if item.display_name == "Scenario Model" and item.provider_adapter == "vision_bridge_fake" and item.provider_model == "replay")
+        matches = tuple(item for item in catalog.items if item.display_name == "Scenario Model" and item.provider_adapter == "openai" and item.provider_model == "replay")
         if len(matches) > 1:
             raise RuntimeError("replay scenario model catalog is ambiguous")
         if matches:
             model = matches[0]
-            if model.status != "active" or model.provider_adapter != "vision_bridge_fake" or model.provider_model != "replay" or model.settings or not model.supports_thinking or model.api_key_configured:
+            if model.status != "active" or model.provider_adapter != "openai" or model.provider_model != "replay" or model.settings or not model.supports_thinking or model.api_key_configured:
                 raise RuntimeError("existing scenario-model is not replay-compatible")
         else:
             model = await model_catalog.create_model(
@@ -217,7 +379,7 @@ async def prepare_replay_runtime_catalog(
                 CreateSystemModel(
                     display_name="Scenario Model",
                     status="active",
-                    provider_adapter="vision_bridge_fake",
+                    provider_adapter="openai",
                     provider_model="replay",
                     max_input_tokens=64_000,
                     settings={},
@@ -301,11 +463,47 @@ def prepare_hermetic_skills(home: Path) -> None:
     (home / "skills" / "custom").mkdir(parents=True, exist_ok=True)
 
 
-@contextmanager
-def replay_worker() -> Iterator[None]:
-    """Run the real independent Worker and wait for durable readiness."""
+def _sync_postgres_url(database_url: str) -> str:
+    from sqlalchemy.engine import make_url
+
+    parsed = make_url(database_url)
+    return parsed.set(drivername="postgresql").render_as_string(
+        hide_password=False,
+    )
+
+
+def _replay_worker_registry_is_fresh(
+    *,
+    database_url: str,
+    fresh_for_seconds: int,
+) -> bool:
+    import psycopg
+
+    with psycopg.connect(_sync_postgres_url(database_url)) as connection:
+        row = connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM worker_nodes
+                WHERE draining IS FALSE
+                  AND heartbeat_at >= now() - make_interval(secs => %s)
+                  AND capabilities_json::jsonb @> '["private_run"]'::jsonb
+            )
+            """,
+            (fresh_for_seconds,),
+        ).fetchone()
+    return bool(row and row[0] is True)
+
+
+def _start_replay_worker_process(
+    *,
+    database_url: str,
+    barrier_root: Path,
+) -> subprocess.Popen[str]:
     backend_root = Path(__file__).resolve().parents[1]
     environment = os.environ.copy()
+    environment["DATABASE_URL"] = database_url
+    environment[_REPLAY_FAULT_BARRIER_ROOT_ENV] = str(barrier_root)
     python_paths = (
         str(backend_root),
         str(backend_root / "tests"),
@@ -313,53 +511,183 @@ def replay_worker() -> Iterator[None]:
         environment.get("PYTHONPATH", ""),
     )
     environment["PYTHONPATH"] = os.pathsep.join(path for path in python_paths if path)
-    command = [
-        sys.executable,
-        str(backend_root / "tests" / "replay_worker_process.py"),
-    ]
-    process = subprocess.Popen(
-        command,
+    return subprocess.Popen(
+        [
+            sys.executable,
+            str(backend_root / "tests" / "replay_worker_process.py"),
+        ],
         cwd=backend_root,
         env=environment,
         stdout=None,
         stderr=subprocess.STDOUT,
         text=True,
     )
-    try:
-        database_url = environment["DATABASE_URL"].replace(
-            "postgresql+asyncpg://",
-            "postgresql://",
-            1,
-        )
-        import psycopg
 
-        deadline = time.monotonic() + 20
+
+class ReplayWorkerController:
+    """Own one real replay Worker inside an exact disposable database."""
+
+    def __init__(
+        self,
+        *,
+        database_url: str,
+        mode: Literal["immediate", "delayed"],
+        worker_fresh_for_seconds: int = _REPLAY_WORKER_FRESH_FOR_SECONDS,
+        readiness_timeout_seconds: float = 20,
+        barrier_parent: Path | None = None,
+    ) -> None:
+        if mode not in {"immediate", "delayed"}:
+            raise ValueError("unsupported replay Worker mode")
+        self._database_url = _validated_replay_database_url(
+            database_url,
+            required_prefix="deerflow_test_replay_",
+        )
+        if worker_fresh_for_seconds < 1 or readiness_timeout_seconds <= 0:
+            raise ValueError("invalid replay Worker readiness policy")
+        self._mode = mode
+        self._worker_fresh_for_seconds = worker_fresh_for_seconds
+        self._readiness_timeout_seconds = readiness_timeout_seconds
+        self._process: subprocess.Popen[str] | None = None
+        self._lock = threading.Lock()
+        self._starts = 0
+        self._stops = 0
+        self._crashes = 0
+        self._barrier_tempdir = tempfile.TemporaryDirectory(
+            prefix="actweave-replay-faults-",
+            dir=barrier_parent,
+        )
+        self._barriers = ReplayFaultBarriers(
+            Path(self._barrier_tempdir.name),
+        )
+
+    def _fresh(self) -> bool:
+        return _replay_worker_registry_is_fresh(
+            database_url=self._database_url,
+            fresh_for_seconds=self._worker_fresh_for_seconds,
+        )
+
+    def _snapshot(self) -> dict[str, object]:
+        process = self._process
+        snapshot: dict[str, object] = {
+            "mode": self._mode,
+            "running": process is not None and process.poll() is None,
+            "fresh": self._fresh(),
+        }
+        snapshot.update(self._barriers.snapshot())
+        return snapshot
+
+    def status(self) -> dict[str, object]:
+        with self._lock:
+            return self._snapshot()
+
+    def _wait_for_freshness(self, expected: bool) -> None:
+        deadline = time.monotonic() + self._readiness_timeout_seconds
         while True:
-            if process.poll() is not None:
-                raise RuntimeError(f"replay Worker exited before readiness: status={process.returncode}")
-            with psycopg.connect(database_url) as connection:
-                ready = connection.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM worker_nodes
-                        WHERE draining IS FALSE
-                          AND heartbeat_at >= now() - interval '10 seconds'
-                          AND capabilities_json::jsonb @> '["private_run"]'::jsonb
-                    )
-                    """
-                ).fetchone()[0]
-            if ready:
-                break
+            process = self._process
+            if expected and (process is None or process.poll() is not None):
+                status = None if process is None else process.returncode
+                raise RuntimeError(f"replay Worker exited before readiness: status={status}")
+            if self._fresh() is expected:
+                return
             if time.monotonic() >= deadline:
-                raise TimeoutError("replay Worker did not publish readiness")
+                state = "fresh" if expected else "stale"
+                raise TimeoutError(f"replay Worker registry did not become {state}")
             time.sleep(0.05)
+
+    def start(self) -> dict[str, object]:
+        with self._lock:
+            process = self._process
+            if process is not None and process.poll() is None:
+                self._wait_for_freshness(True)
+                return self._snapshot()
+            if self._fresh():
+                raise RuntimeError("replay Worker registry is fresh without controller ownership")
+            self._process = _start_replay_worker_process(
+                database_url=self._database_url,
+                barrier_root=self._barriers.root,
+            )
+            self._starts += 1
+            try:
+                self._wait_for_freshness(True)
+            except BaseException:
+                self._stop_process()
+                raise
+            return self._snapshot()
+
+    def _stop_process(self) -> None:
+        process = self._process
+        if process is None or process.poll() is not None:
+            self._process = None
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        finally:
+            self._process = None
+            self._stops += 1
+
+    def stop(self) -> dict[str, object]:
+        with self._lock:
+            self._barriers.release_all()
+            self._stop_process()
+            self._wait_for_freshness(False)
+            return self._snapshot()
+
+    def crash(self) -> dict[str, object]:
+        """SIGKILL the owned Worker without removing its registry row."""
+
+        with self._lock:
+            process = self._process
+            if process is None or process.poll() is not None:
+                raise RuntimeError("replay Worker is not running")
+            process.kill()
+            process.wait(timeout=5)
+            self._process = None
+            self._crashes += 1
+            return self._snapshot()
+
+    def hold(self, fault: ReplayFault) -> dict[str, object]:
+        with self._lock:
+            self._barriers.hold(fault)
+            return self._snapshot()
+
+    def release(self, fault: ReplayFault) -> dict[str, object]:
+        with self._lock:
+            self._barriers.release(fault)
+            return self._snapshot()
+
+    def close(self) -> None:
+        try:
+            self.stop()
+        finally:
+            self._barriers.release_all()
+            self._barrier_tempdir.cleanup()
+
+    def lifecycle_readback(self) -> dict[str, object]:
+        with self._lock:
+            snapshot = self._snapshot()
+            snapshot.update(
+                {
+                    "starts": self._starts,
+                    "stops": self._stops,
+                    "crashes": self._crashes,
+                }
+            )
+            return snapshot
+
+
+@contextmanager
+def replay_worker() -> Iterator[None]:
+    """Run the real independent Worker and wait for durable readiness."""
+    controller = ReplayWorkerController(
+        database_url=os.environ.get("DATABASE_URL", ""),
+        mode="immediate",
+    )
+    try:
+        controller.start()
         yield
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+        controller.close()

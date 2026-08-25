@@ -17,6 +17,8 @@ from deerflow.persistence.jobs.sql import (
     JobRepository,
     JobRequeueForbidden,
     JobScope,
+    JobUnstartedClaimRelease,
+    RetentionPurgeJobAuthority,
 )
 
 __all__ = [
@@ -35,5 +37,7 @@ __all__ = [
     "JobRequeueForbidden",
     "JobRow",
     "JobScope",
+    "JobUnstartedClaimRelease",
+    "RetentionPurgeJobAuthority",
     "WorkerNodeRow",
 ]

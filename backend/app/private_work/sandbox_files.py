@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -22,6 +23,9 @@ from app.private_work.errors import (
 )
 from app.private_work.file_paths import normalize_private_logical_path
 from app.private_work.revalidation import PrivateWorkRevalidator
+from app.private_work.run_skill_tree_materializer import (
+    RuntimeOwnedMaterializedRunSkillTree,
+)
 from app.projects.capabilities import Capability
 from app.upload_contracts import PRIVATE_UPLOAD_DEFAULTS
 from deerflow.file_authority import AuthorityManifest, AuthorityManifestEntry
@@ -33,10 +37,18 @@ from deerflow.persistence.private_work.file_repository import (
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.sandbox.sandbox import PRIVATE_FILE_IO_CHUNK_SIZE
 from deerflow.sandbox.sandbox_provider import (
+    NotAcquired,
+    Orphaned,
     PrivateSandboxLease,
+    ProviderRunMountLease,
+    Released,
+    RunMountAcquireCancelled,
+    RunMountReleaseCancelled,
+    RunMountReleaseOutcome,
     RunScopedReadOnlyMount,
     SandboxProvider,
     get_sandbox_provider,
+    merge_run_mount_release_outcome,
 )
 
 _VIRTUAL_ROOTS = {
@@ -54,6 +66,7 @@ _DELEGATED_OUTPUT_RUNTIME_ROOT = "/mnt/user-data/workspace/.deerflow/subagents"
 _DELEGATED_OUTPUT_MAX_CAPTURE_FILES = 2_000
 _DELEGATED_OUTPUT_MAX_SCRATCH_ENTRIES = 100_000
 RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG = "__run_current_upload_snapshot"
+logger = logging.getLogger(__name__)
 _CURRENT_UPLOAD_SNAPSHOT_KEYS = frozenset(
     {
         "file_id",
@@ -514,6 +527,8 @@ class PrivateRunFileAuthority:
         finalizer: Any,
         *,
         mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+        run_skill_tree: RuntimeOwnedMaterializedRunSkillTree | None = None,
+        skill_container_path: str | None = None,
         provider: SandboxProvider | None = None,
         current_upload_snapshot: tuple[CurrentUploadSnapshotEntry, ...] = (),
         output_delivery_port: object | None = None,
@@ -523,15 +538,29 @@ class PrivateRunFileAuthority:
         snapshot_ids = tuple(entry.file_id for entry in current_upload_snapshot)
         if len(snapshot_ids) != len(set(snapshot_ids)):
             raise ValueError("Invalid current private upload snapshot")
+        if run_skill_tree is not None:
+            if type(run_skill_tree) is not RuntimeOwnedMaterializedRunSkillTree or mounts or type(skill_container_path) is not str:
+                raise ValueError("Invalid materialized Skill mount authority")
+            container_path = PurePosixPath(skill_container_path)
+            if not container_path.is_absolute() or ".." in container_path.parts or container_path.as_posix() != skill_container_path.rstrip("/"):
+                raise ValueError("Invalid materialized Skill container path")
+        elif skill_container_path is not None:
+            raise ValueError("Skill container path requires a materialized tree")
         self._run_scope = run_scope
         self._projection = projection
         self._finalizer = finalizer
         self._mounts = mounts
+        self._run_skill_tree = run_skill_tree
+        self._skill_container_path = skill_container_path
         self._provider = provider
         self._current_upload_snapshot = current_upload_snapshot
         self._current_upload_snapshot_ids = frozenset(snapshot_ids)
         self._output_delivery_port = output_delivery_port
         self._lease: PrivateSandboxLease | None = None
+        self._provider_mount_lease: ProviderRunMountLease | None = None
+        self._mount_release_outcome: RunMountReleaseOutcome | None = None
+        self._mount_acquire_started = False
+        self._mount_published = False
         self._sandbox: Any | None = None
         self._manifest: AuthorityManifest | None = None
         self._presented_paths: list[str] = []
@@ -543,6 +572,8 @@ class PrivateRunFileAuthority:
 
     @property
     def sandbox_id(self) -> str | None:
+        if self._provider_mount_lease is not None:
+            return self._provider_mount_lease.sandbox_id
         return None if self._lease is None else self._lease.sandbox_id
 
     @property
@@ -569,9 +600,17 @@ class PrivateRunFileAuthority:
         if not parsed.is_absolute() or ".." in parsed.parts or parsed.as_posix() != path:
             return False
 
-        lease = self._lease
         manifest = self._manifest
-        if type(lease) is not PrivateSandboxLease or lease.run_id != run_id or self._run_scope.run_id != run_id or self._sandbox is None or type(manifest) is not AuthorityManifest or manifest.run_id != run_id:
+        if self._run_scope.run_id != run_id or self._sandbox is None or type(manifest) is not AuthorityManifest or manifest.run_id != run_id:
+            return False
+
+        provider_mount = self._provider_mount_lease
+        if type(provider_mount) is ProviderRunMountLease and self._run_skill_tree is not None and provider_mount.matches_source(self._run_skill_tree.source) and self._mount_published:
+            prefix = (self._skill_container_path or "").rstrip("/") or "/"
+            return path == prefix or path.startswith(f"{prefix}/")
+
+        lease = self._lease
+        if type(lease) is not PrivateSandboxLease or lease.run_id != run_id:
             return False
 
         for mount in self._mounts:
@@ -605,27 +644,123 @@ class PrivateRunFileAuthority:
         if self._manifest is not None:
             return self._manifest
         boundary = self._run_scope.authorization_boundary
-        check = getattr(boundary, "before_sandbox_restore", None)
-        if not callable(check):
-            check = getattr(boundary, "before_sandbox_write", None)
-        if callable(check):
-            # Sandbox acquisition can create a container/Pod, so authority is
-            # checked before asking the provider to allocate anything.
-            await check()
         provider = self._provider or get_sandbox_provider()
         self._provider = provider
-        lease = await provider.acquire_private_async(
-            self._run_scope.thread_id,
-            scope=self._run_scope.resource_scope,
-            user_id=self._run_scope.resource_scope.owner_user_id,
-            run_id=self._run_scope.run_id,
-            mounts=self._mounts,
-        )
-        sandbox = provider.get(lease.sandbox_id)
-        if sandbox is None:
-            await provider.release_private_async(lease)
-            raise PrivateWorkUnavailable(self._run_scope.context.request_id)
-        self._lease = lease
+        run_skill_tree = self._run_skill_tree
+        if run_skill_tree is None:
+            check = getattr(boundary, "before_sandbox_restore", None)
+            if not callable(check):
+                check = getattr(boundary, "before_sandbox_write", None)
+            if callable(check):
+                # The generic Sandbox path has no typed materialized-tree
+                # transaction A, so it retains its pre-allocation fence.
+                await check()
+            lease = await provider.acquire_private_async(
+                self._run_scope.thread_id,
+                scope=self._run_scope.resource_scope,
+                user_id=self._run_scope.resource_scope.owner_user_id,
+                run_id=self._run_scope.run_id,
+                mounts=self._mounts,
+            )
+            sandbox = provider.get(lease.sandbox_id)
+            if sandbox is None:
+                await provider.release_private_async(lease)
+                raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+            self._lease = lease
+        else:
+            before_acquire = getattr(
+                boundary,
+                "before_run_readonly_mount_acquire",
+                None,
+            )
+            after_acquire = getattr(
+                boundary,
+                "after_run_readonly_mount_acquire",
+                None,
+            )
+            if not callable(before_acquire) or not callable(after_acquire):
+                raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+            try:
+                await before_acquire(run_skill_tree)
+            except BaseException:
+                try:
+                    self._mount_acquire_started = await run_skill_tree.provider_acquire_may_have_started()
+                except BaseException:
+                    # Transaction A can fail after the acquiring metadata was
+                    # durably renamed but before COMMIT acknowledgement.  A
+                    # failed readback therefore cannot prove NotAcquired.
+                    self._mount_acquire_started = True
+                if self._mount_acquire_started:
+                    self._remember_mount_release_outcome(
+                        Orphaned(
+                            owner_id=run_skill_tree.source.owner_id,
+                            reason_code="acquire_fence_outcome_unknown",
+                            last_lifecycle_state="acquiring",
+                        )
+                    )
+                raise
+            self._mount_acquire_started = True
+            try:
+                provider_mount = await provider.prepare_run_readonly_mount_async(
+                    self._run_scope.thread_id,
+                    scope=self._run_scope.resource_scope,
+                    run_id=self._run_scope.run_id,
+                    source=run_skill_tree.source,
+                )
+            except RunMountAcquireCancelled as error:
+                self._provider_mount_lease = error.lease
+                self._remember_mount_release_outcome(error.release_outcome)
+                raise
+            except asyncio.CancelledError:
+                self._remember_mount_release_outcome(
+                    Orphaned(
+                        owner_id=run_skill_tree.source.owner_id,
+                        reason_code="acquire_cancelled_unknown",
+                        last_lifecycle_state="acquiring",
+                    )
+                )
+                raise
+            except Exception:
+                self._remember_mount_release_outcome(
+                    Orphaned(
+                        owner_id=run_skill_tree.source.owner_id,
+                        reason_code="acquire_failed_unknown",
+                        last_lifecycle_state="acquiring",
+                    )
+                )
+                raise PrivateWorkUnavailable(
+                    self._run_scope.context.request_id,
+                ) from None
+            self._provider_mount_lease = provider_mount
+            try:
+                readback = await provider.readback_run_readonly_mount_async(
+                    provider_mount,
+                )
+                if readback != provider_mount:
+                    raise PrivateWorkUnavailable(
+                        self._run_scope.context.request_id,
+                    )
+            except BaseException:
+                await self._release_provider_mount_after_failed_publish(
+                    last_lifecycle_state="acquiring",
+                )
+                raise
+            try:
+                await after_acquire(run_skill_tree, provider_mount)
+                self._mount_published = True
+            except BaseException:
+                await self._release_provider_mount_after_failed_publish(
+                    last_lifecycle_state="mounted",
+                )
+                raise
+            sandbox = provider.get(provider_mount.sandbox_id)
+            if sandbox is None:
+                await self._release_provider_mount_after_failed_publish(
+                    last_lifecycle_state="mounted",
+                )
+                raise PrivateWorkUnavailable(
+                    self._run_scope.context.request_id,
+                )
         self._sandbox = sandbox
         # A provider may retain its thread projection after an ungraceful
         # process exit. Remove only the exact runtime scratch root before any
@@ -1164,6 +1299,83 @@ class PrivateRunFileAuthority:
             # attempted when scratch cleanup itself fails closed.
             await self._finalizer.mark_failed(self._run_scope)
 
+    async def _release_provider_mount_after_failed_publish(
+        self,
+        *,
+        last_lifecycle_state: str,
+    ) -> RunMountReleaseOutcome:
+        lease = self._provider_mount_lease
+        provider = self._provider
+        if type(lease) is not ProviderRunMountLease or provider is None:
+            tree = self._run_skill_tree
+            if tree is None:
+                raise PrivateWorkUnavailable(
+                    self._run_scope.context.request_id,
+                )
+            outcome: RunMountReleaseOutcome = Orphaned(
+                owner_id=tree.source.owner_id,
+                reason_code="acquire_release_unknown",
+                last_lifecycle_state="acquiring",
+            )
+            return self._remember_mount_release_outcome(outcome)
+        try:
+            outcome = await provider.release_run_readonly_mount_async(lease)
+        except RunMountReleaseCancelled as error:
+            outcome = error.release_outcome
+        except BaseException:
+            outcome = Orphaned.from_lease(
+                lease,
+                reason_code="release_readback_unknown",
+                last_lifecycle_state=last_lifecycle_state,
+            )
+        if type(outcome) not in {Released, Orphaned} or not outcome.matches_lease(
+            lease,
+        ):
+            outcome = Orphaned.from_lease(
+                lease,
+                reason_code="release_readback_unknown",
+                last_lifecycle_state=last_lifecycle_state,
+            )
+        elif type(outcome) is Orphaned:
+            last_lifecycle_state = await self._durable_mount_lifecycle_state(
+                fallback=last_lifecycle_state,
+            )
+            outcome = Orphaned.from_lease(
+                lease,
+                reason_code=outcome.reason_code,
+                last_lifecycle_state=last_lifecycle_state,
+            )
+        outcome = self._remember_mount_release_outcome(outcome)
+        self._sandbox = None
+        self._manifest = None
+        return outcome
+
+    def _remember_mount_release_outcome(
+        self,
+        observed: RunMountReleaseOutcome,
+    ) -> RunMountReleaseOutcome:
+        previous = self._mount_release_outcome
+        outcome = observed if previous is None else merge_run_mount_release_outcome(previous, observed)
+        self._mount_release_outcome = outcome
+        return outcome
+
+    async def _durable_mount_lifecycle_state(
+        self,
+        *,
+        fallback: str,
+    ) -> str:
+        tree = self._run_skill_tree
+        if tree is None:
+            return fallback
+        try:
+            return await tree.read_mount_lifecycle_state()
+        except Exception:
+            logger.warning(
+                "Materialized Skill mount lifecycle readback failed",
+                exc_info=True,
+            )
+            return fallback
+
     def _clear_released_state(self) -> None:
         self._lease = None
         self._sandbox = None
@@ -1173,11 +1385,13 @@ class PrivateRunFileAuthority:
         self._cleanup_failed = False
         self._active_delegated_output_roots.clear()
 
-    async def release(self) -> None:
+    async def release(self) -> RunMountReleaseOutcome | None:
         async with self._release_lock:
+            if self._run_skill_tree is not None:
+                return await self._release_materialized_mount()
             lease = self._lease
             if lease is None:
-                return
+                return None
             await self._cleanup_delegated_output_scratch()
             provider = self._provider
             if provider is None:
@@ -1197,6 +1411,84 @@ class PrivateRunFileAuthority:
                     self._clear_released_state()
                 raise
             self._clear_released_state()
+            return None
+
+    async def _release_materialized_mount(self) -> RunMountReleaseOutcome:
+        tree = self._run_skill_tree
+        assert tree is not None
+        previous = self._mount_release_outcome
+        if type(previous) in {NotAcquired, Released}:
+            return previous
+        if not self._mount_acquire_started:
+            outcome: RunMountReleaseOutcome = NotAcquired(
+                owner_id=tree.source.owner_id,
+            )
+            return self._remember_mount_release_outcome(outcome)
+        lease = self._provider_mount_lease
+        provider = self._provider
+        if type(lease) is not ProviderRunMountLease or provider is None:
+            if type(previous) is Orphaned:
+                return previous
+            outcome = Orphaned(
+                owner_id=tree.source.owner_id,
+                reason_code="acquire_outcome_unknown",
+                last_lifecycle_state="acquiring",
+            )
+            return self._remember_mount_release_outcome(outcome)
+
+        try:
+            await self._cleanup_delegated_output_scratch()
+        except Exception:
+            logger.warning(
+                "Private sandbox scratch cleanup failed before mount release",
+                exc_info=True,
+            )
+        try:
+            outcome = await provider.release_run_readonly_mount_async(lease)
+        except RunMountReleaseCancelled as error:
+            outcome = error.release_outcome
+            if type(outcome) is Orphaned and outcome.matches_lease(lease):
+                last_lifecycle_state = await self._durable_mount_lifecycle_state(
+                    fallback=("mounted" if self._mount_published else "acquiring"),
+                )
+                outcome = Orphaned.from_lease(
+                    lease,
+                    reason_code=outcome.reason_code,
+                    last_lifecycle_state=last_lifecycle_state,
+                )
+            self._remember_mount_release_outcome(outcome)
+            self._sandbox = None
+            self._manifest = None
+            raise
+        except BaseException:
+            outcome = Orphaned.from_lease(
+                lease,
+                reason_code="release_readback_unknown",
+                last_lifecycle_state=("mounted" if self._mount_published else "acquiring"),
+            )
+        if type(outcome) not in {Released, Orphaned} or not outcome.matches_lease(
+            lease,
+        ):
+            outcome = Orphaned.from_lease(
+                lease,
+                reason_code="release_readback_unknown",
+                last_lifecycle_state=("mounted" if self._mount_published else "acquiring"),
+            )
+        elif type(outcome) is Orphaned:
+            last_lifecycle_state = await self._durable_mount_lifecycle_state(
+                fallback=("mounted" if self._mount_published else "acquiring"),
+            )
+            outcome = Orphaned.from_lease(
+                lease,
+                reason_code=outcome.reason_code,
+                last_lifecycle_state=last_lifecycle_state,
+            )
+        outcome = self._remember_mount_release_outcome(outcome)
+        self._sandbox = None
+        self._manifest = None
+        if type(outcome) is Released:
+            self._mount_published = False
+        return outcome
 
     def thread_data_paths(self) -> dict[str, str]:
         if self._manifest is None:

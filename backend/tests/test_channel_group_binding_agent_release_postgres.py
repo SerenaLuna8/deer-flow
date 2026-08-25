@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.audit.models import resolve_system_audit_context
@@ -1292,16 +1292,21 @@ async def test_binding_delete_and_inbound_preserve_terminal_identity_state(
                 )
 
         async def inbound() -> dict[str, object] | None:
-            async with factory() as session, session.begin():
-                await session.execute(text("SET LOCAL lock_timeout = '4s'"))
-                return await repository.resolve_or_create_guest(
-                    session,
-                    provider="lark",
-                    channel_instance_id=seed.channel_instance_id,
-                    external_group_refs=(seed.external_group_ref,),
-                    external_account_refs=(seed.external_account_ref,),
-                    now=now + timedelta(seconds=1),
-                )
+            try:
+                async with factory() as session, session.begin():
+                    await session.execute(text("SET LOCAL lock_timeout = '4s'"))
+                    return await repository.resolve_or_create_guest(
+                        session,
+                        provider="lark",
+                        channel_instance_id=seed.channel_instance_id,
+                        external_group_refs=(seed.external_group_ref,),
+                        external_account_refs=(seed.external_account_ref,),
+                        now=now + timedelta(seconds=1),
+                    )
+            except GroupBindingRepositoryConflict:
+                # A coordinate snapshot taken immediately before delete must
+                # roll back rather than reuse a now-tombstoned suffix.
+                return None
 
         _, authority = await asyncio.wait_for(
             asyncio.gather(delete_binding(), inbound()),
@@ -1339,3 +1344,242 @@ async def test_binding_delete_and_inbound_preserve_terminal_identity_state(
             assert authority["id"] == seed.connection_id
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize("retention_state", ["pending_deletion", "purged"])
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_existing_guest_reuse_reactivates_account_and_stales_old_generation(
+    migrated_postgres_database_url: str,
+    retention_state: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    repository = PostgresProjectChannelGroupBindingRepository()
+    try:
+        seed = await _seed_lifecycle(factory)
+        old_generation = 7
+        async with factory() as session, session.begin():
+            guest = await session.get(UserRow, str(seed.guest_user_id))
+            assert guest is not None
+            guest.private_retention_state = retention_state
+            guest.private_retention_generation = old_generation
+            guest.private_retention_effective_at = datetime.now(UTC) if retention_state == "pending_deletion" else None
+
+        async with factory() as session, session.begin():
+            authority = await repository.resolve_or_create_guest(
+                session,
+                provider="lark",
+                channel_instance_id=seed.channel_instance_id,
+                external_group_refs=(seed.external_group_ref,),
+                external_account_refs=(seed.external_account_ref,),
+                now=datetime.now(UTC),
+            )
+
+        assert authority is not None
+        assert authority["id"] == seed.connection_id
+        assert authority["owner_user_id"] == str(seed.guest_user_id)
+        async with factory() as session:
+            guest = await session.get(UserRow, str(seed.guest_user_id))
+        assert guest is not None
+        assert guest.private_retention_state == "active"
+        assert guest.private_retention_generation == old_generation + 1
+        assert guest.private_retention_effective_at is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_new_guest_initializes_account_and_membership_lifecycle_defaults(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    repository = PostgresProjectChannelGroupBindingRepository()
+    try:
+        seed = await _seed_lifecycle(factory)
+        new_account_ref = uuid.uuid4().hex * 2
+        async with factory() as session, session.begin():
+            authority = await repository.resolve_or_create_guest(
+                session,
+                provider="lark",
+                channel_instance_id=seed.channel_instance_id,
+                external_group_refs=(seed.external_group_ref,),
+                external_account_refs=(new_account_ref,),
+                now=datetime.now(UTC),
+            )
+
+        assert authority is not None
+        async with factory() as session:
+            principal = await session.scalar(
+                select(ChannelExternalPrincipalRow).where(
+                    ChannelExternalPrincipalRow.group_binding_id == seed.binding_id,
+                    ChannelExternalPrincipalRow.external_account_ref == new_account_ref,
+                )
+            )
+            assert principal is not None
+            guest = await session.get(UserRow, principal.principal_user_id)
+            membership = await session.get(
+                ProjectMembershipRow,
+                principal.membership_id,
+            )
+        assert guest is not None
+        assert guest.private_retention_state == "active"
+        assert guest.private_retention_generation == 1
+        assert guest.private_retention_effective_at is None
+        assert membership is not None
+        assert membership.status == "active"
+        assert membership.version == 1
+        assert membership.activation_generation == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_existing_guest_lock_trace_keeps_account_prefix_before_channel_suffix(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    repository = PostgresProjectChannelGroupBindingRepository()
+    lock_trace: list[str] = []
+
+    def capture_lock(_connection, _cursor, statement, *_args) -> None:
+        normalized = " ".join(statement.split())
+        markers = (
+            ("FOR SHARE OF projects", "project"),
+            ("FOR SHARE OF project_memberships", "membership"),
+            ("FOR NO KEY UPDATE OF users", "user"),
+            ("FOR SHARE OF project_channel_instances", "instance"),
+            ("FOR UPDATE OF project_channel_group_bindings", "binding"),
+            ("FOR SHARE OF agents", "agent"),
+            ("FOR UPDATE OF channel_external_principals", "principal"),
+            ("FOR UPDATE OF channel_connections", "connection"),
+        )
+        for marker, relation in markers:
+            if marker in normalized:
+                lock_trace.append(relation)
+                return
+
+    event.listen(
+        engine.sync_engine,
+        "before_cursor_execute",
+        capture_lock,
+    )
+    try:
+        seed = await _seed_lifecycle(factory)
+        lock_trace.clear()
+        async with factory() as session, session.begin():
+            authority = await repository.resolve_or_create_guest(
+                session,
+                provider="lark",
+                channel_instance_id=seed.channel_instance_id,
+                external_group_refs=(seed.external_group_ref,),
+                external_account_refs=(seed.external_account_ref,),
+                now=datetime.now(UTC),
+            )
+        assert authority is not None
+        assert lock_trace == [
+            "project",
+            "membership",
+            "user",
+            "instance",
+            "binding",
+            "agent",
+            "principal",
+            "connection",
+        ]
+    finally:
+        event.remove(
+            engine.sync_engine,
+            "before_cursor_execute",
+            capture_lock,
+        )
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_existing_guest_coordinate_race_rolls_back_account_reactivation(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed_engine = create_async_engine(migrated_postgres_database_url)
+    inbound_engine = create_async_engine(migrated_postgres_database_url)
+    seed_factory = async_sessionmaker(seed_engine, expire_on_commit=False)
+    inbound_factory = async_sessionmaker(inbound_engine, expire_on_commit=False)
+    repository = PostgresProjectChannelGroupBindingRepository()
+    pre_read_completed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def observe_pre_read(_connection, _cursor, statement, *_args) -> None:
+        normalized = " ".join(statement.split())
+        if "FROM project_channel_group_bindings" in normalized and "LEFT OUTER JOIN channel_external_principals" in normalized and " FOR " not in normalized:
+            loop.call_soon_threadsafe(pre_read_completed.set)
+
+    event.listen(
+        inbound_engine.sync_engine,
+        "after_cursor_execute",
+        observe_pre_read,
+    )
+    try:
+        seed = await _seed_lifecycle(seed_factory)
+        pending_at = datetime.now(UTC)
+        async with seed_factory() as session, session.begin():
+            guest = await session.get(UserRow, str(seed.guest_user_id))
+            assert guest is not None
+            guest.private_retention_state = "pending_deletion"
+            guest.private_retention_generation = 7
+            guest.private_retention_effective_at = pending_at
+
+        replacement_account_ref = uuid.uuid4().hex * 2
+
+        async def inbound() -> str:
+            try:
+                async with inbound_factory() as session, session.begin():
+                    await session.execute(text("SET LOCAL lock_timeout = '4s'"))
+                    await repository.resolve_or_create_guest(
+                        session,
+                        provider="lark",
+                        channel_instance_id=seed.channel_instance_id,
+                        external_group_refs=(seed.external_group_ref,),
+                        external_account_refs=(
+                            seed.external_account_ref,
+                            replacement_account_ref,
+                        ),
+                        now=datetime.now(UTC),
+                    )
+            except GroupBindingRepositoryConflict:
+                return "conflict"
+            return "unexpected-authority"
+
+        async with seed_factory() as blocker:
+            transaction = await blocker.begin()
+            await blocker.execute(select(ProjectRow.id).where(ProjectRow.id == seed.context.project_id).with_for_update(of=ProjectRow))
+            inbound_task = asyncio.create_task(inbound())
+            await asyncio.wait_for(pre_read_completed.wait(), timeout=4)
+            await blocker.execute(update(ChannelExternalPrincipalRow).where(ChannelExternalPrincipalRow.id == seed.principal_id).values(external_account_ref=replacement_account_ref))
+            await transaction.commit()
+
+        assert await asyncio.wait_for(inbound_task, timeout=6) == "conflict"
+        async with seed_factory() as session:
+            principal = await session.get(
+                ChannelExternalPrincipalRow,
+                seed.principal_id,
+            )
+            guest = await session.get(UserRow, str(seed.guest_user_id))
+        assert principal is not None
+        assert principal.external_account_ref == replacement_account_ref
+        assert guest is not None
+        assert guest.private_retention_state == "pending_deletion"
+        assert guest.private_retention_generation == 7
+        assert guest.private_retention_effective_at == pending_at
+    finally:
+        event.remove(
+            inbound_engine.sync_engine,
+            "after_cursor_execute",
+            observe_pre_read,
+        )
+        await inbound_engine.dispose()
+        await seed_engine.dispose()

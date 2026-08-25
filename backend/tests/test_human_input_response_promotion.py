@@ -551,7 +551,7 @@ async def test_run_admission_persists_gateway_authorized_visibility(
                 thread_id=thread_id,
                 agent=ThreadAgentRef(seed.project_agent_id, "project"),
             )
-            await PrivateRunRepository(session).create(
+            await PrivateRunRepository(session).create_terminal_empty_shell(
                 scope=seed.owner_a_scope,
                 thread_id=thread_id,
                 request=PrivateRunCreate(

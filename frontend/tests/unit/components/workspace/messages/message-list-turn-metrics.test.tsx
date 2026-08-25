@@ -12,7 +12,7 @@ import { ProjectPrivateWorkProvider } from "@/core/private-work/provider";
 import type { AgentThreadState } from "@/core/threads";
 
 function renderMessageList(
-  message: Message,
+  message: Message | Message[],
   tokenUsageInlineMode: TokenUsageInlineMode = "per_turn",
 ) {
   const thread = {
@@ -20,7 +20,7 @@ function renderMessageList(
     getMessagesMetadata: () => undefined,
     isLoading: false,
     isThreadLoading: false,
-    messages: [message],
+    messages: Array.isArray(message) ? message : [message],
   } as unknown as BaseStream<AgentThreadState>;
 
   return renderToStaticMarkup(
@@ -85,6 +85,31 @@ describe("MessageList turn metrics", () => {
     expect(html.indexOf("本次任务耗时 19 秒")).toBeLessThan(
       html.indexOf("Tokens"),
     );
+  });
+
+  test("renders one task duration for a visible turn containing multiple Runs", () => {
+    const html = renderMessageList([
+      {
+        ...assistantMessage({ duration: 88 }),
+        id: "answer-progress",
+        additional_kwargs: {
+          run_id: "run-1",
+          turn_duration: 88,
+        },
+      } as Message,
+      {
+        ...assistantMessage({ duration: 119 }),
+        id: "answer-final",
+        additional_kwargs: {
+          run_id: "run-2",
+          turn_duration: 119,
+        },
+      } as Message,
+    ]);
+
+    expect(html.match(/data-testid="run-duration"/g)).toHaveLength(1);
+    expect(html).not.toContain("本次任务耗时 1 分 28 秒");
+    expect(html).toContain("本次任务耗时 1 分 59 秒");
   });
 
   test("keeps a compact duration row when token usage is unavailable", () => {

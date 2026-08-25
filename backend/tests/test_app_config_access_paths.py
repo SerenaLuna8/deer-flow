@@ -7,11 +7,60 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from deerflow.config import app_config as app_config_module
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.sandbox_config import SandboxConfig
+
+
+def test_compose_dood_p03_acceptance_is_explicit_and_strict() -> None:
+    provider = "deerflow.community.aio_sandbox:AioSandboxProvider"
+
+    assert SandboxConfig(use=provider).compose_dood_p03_v1_verified is False
+    assert (
+        SandboxConfig(
+            use=provider,
+            compose_dood_p03_v1_verified=True,
+        ).compose_dood_p03_v1_verified
+        is True
+    )
+    with pytest.raises(ValidationError):
+        SandboxConfig.model_validate(
+            {
+                "use": provider,
+                "compose_dood_p03_v1_verified": "true",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "provider"),
+    [
+        (
+            "boxlite_p04_v1_verified",
+            "deerflow.community.boxlite:BoxliteProvider",
+        ),
+        (
+            "e2b_p05_v1_verified",
+            "deerflow.community.e2b_sandbox:E2BSandboxProvider",
+        ),
+    ],
+)
+def test_remote_run_mount_acceptance_is_explicit_and_strict(
+    field: str,
+    provider: str,
+) -> None:
+    assert getattr(SandboxConfig(use=provider), field) is False
+    assert getattr(SandboxConfig.model_validate({"use": provider, field: True}), field) is True
+    with pytest.raises(ValidationError):
+        SandboxConfig.model_validate(
+            {
+                "use": provider,
+                field: "true",
+            }
+        )
 
 
 @pytest.fixture(autouse=True)

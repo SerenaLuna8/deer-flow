@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 import sys
 from collections.abc import Mapping
@@ -14,6 +15,9 @@ from app.automations.reconciliation import AutomationReconciler
 from app.final_schema import FinalSchemaProbe
 from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.checkpointer import ProjectScopedCheckpointer
+from app.private_work.run_skill_tree_orphan_reaper import (
+    RunSkillTreeOrphanReaper,
+)
 from app.private_work.thread_service import PrivateThreadService
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
@@ -40,11 +44,13 @@ from deerflow.config.database_config import (
     DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY,
 )
 from deerflow.config.mcp_security_config import McpSecurityConfig
+from deerflow.config.paths import get_paths
 from deerflow.config.quota_config import QuotaConfig
+from deerflow.config.worker_config import require_supported_worker_release_topology
 from deerflow.logging_config import configure_logging
 from deerflow.mcp.http_security import make_secure_mcp_http_client_factory
 from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
-from deerflow.persistence import close_engine, get_session_factory, init_engine
+from deerflow.persistence import close_engine, get_engine, get_session_factory, init_engine
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.runtime import make_store
 from deerflow.runtime.checkpoint_mode import (
@@ -55,6 +61,7 @@ from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.stream import PostgresStreamBridge
 from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.security import resolve_host_bash_execution_mode
 from deerflow.secrets import SecretKey
 from deerflow.subagents.lifecycle import (
@@ -63,6 +70,7 @@ from deerflow.subagents.lifecycle import (
 )
 
 WORKER_VERSION = "m6"
+logger = logging.getLogger(__name__)
 
 
 class WorkerConfigurationUnavailable(RuntimeError):
@@ -70,6 +78,20 @@ class WorkerConfigurationUnavailable(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("Worker configuration is unavailable")
+
+
+def _handlers_for_run_mount_readiness(
+    handlers: dict[str, JobHandler],
+    *,
+    ready: bool,
+) -> dict[str, JobHandler]:
+    """Remove Agent-graph claims when exact Skill mounts are unprovable."""
+
+    if type(ready) is not bool:
+        raise TypeError("run mount provider readiness must be boolean")
+    if ready:
+        return dict(handlers)
+    return {job_type: handler for job_type, handler in handlers.items() if job_type not in {"private_run", "automation_run"}}
 
 
 async def _run_service_until_subagents_close(
@@ -104,6 +126,7 @@ async def run_worker(
     try:
         SecretKey.from_environment()
         config = await asyncio.to_thread(get_app_config)
+        require_supported_worker_release_topology(config.worker)
         raw_mcp_security = getattr(config, "mcp_security", None)
         if isinstance(raw_mcp_security, McpSecurityConfig):
             mcp_security = raw_mcp_security
@@ -149,6 +172,38 @@ async def run_worker(
         session_factory = get_session_factory()
         async with session_factory() as session:
             await FinalSchemaProbe().require_ready(session)
+        engine = get_engine()
+        if engine is None:
+            raise WorkerConfigurationUnavailable()
+        sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
+        try:
+            run_mount_provider_ready = await asyncio.to_thread(
+                sandbox_provider.run_readonly_mounts_ready,
+            )
+        except Exception:
+            run_mount_provider_ready = False
+        if type(run_mount_provider_ready) is not bool:
+            run_mount_provider_ready = False
+        logger.info(
+            "Run Skill mount provider readiness ready=%s",
+            run_mount_provider_ready,
+        )
+        run_skill_orphan_reaper = RunSkillTreeOrphanReaper(
+            engine=engine,
+            materialization_root=get_paths().run_skill_materialization_root(),
+            provider=sandbox_provider,
+            grace_seconds=(config.worker.materialization_orphan_grace_seconds),
+        )
+        orphan_report = await run_skill_orphan_reaper.reap_startup()
+        logger.info(
+            "Run Skill orphan startup reconciliation complete scanned=%d deleted=%d preserved_active=%d preserved_grace=%d preserved_lock=%d preserved_unknown=%d",
+            orphan_report.scanned,
+            orphan_report.deleted,
+            orphan_report.preserved_active,
+            orphan_report.preserved_grace,
+            orphan_report.preserved_lock,
+            orphan_report.preserved_unknown,
+        )
         automation_reconciler = AutomationReconciler(session_factory)
         await automation_reconciler.reconcile_restart(
             datetime.now(UTC),
@@ -272,6 +327,7 @@ async def run_worker(
                     approval_audit=audit_sink,
                     quota=quota_enforcer,
                     job_repository_builder=repository_builder,
+                    mount_owner_reconciler=run_skill_orphan_reaper,
                     retry_initial_seconds=(config.worker.retry_initial_seconds),
                     retry_max_seconds=config.worker.retry_max_seconds,
                 ),
@@ -309,6 +365,10 @@ async def run_worker(
                     audit=audit_sink,
                 ),
             }
+        active_handlers = _handlers_for_run_mount_readiness(
+            active_handlers,
+            ready=run_mount_provider_ready,
+        )
         registry = WorkerRegistry(session_factory, version=WORKER_VERSION)
         service = WorkerService(
             session_factory,

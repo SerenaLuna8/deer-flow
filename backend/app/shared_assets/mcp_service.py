@@ -16,6 +16,10 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecyclePort,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
@@ -52,6 +56,7 @@ from deerflow.persistence.shared_assets import (
     McpServerRow,
     McpServerVersionRow,
 )
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _SLOT_PATTERN = re.compile(r"[a-z][a-z0-9._-]{0,62}\Z")
@@ -363,10 +368,12 @@ class McpService:
         governance_sink: SharedAssetGovernanceEventSink | None = None,
         *,
         endpoint_policy: McpEndpointPolicy | None = None,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._governance_sink = governance_sink or SharedAssetGovernanceEventSink()
         self._endpoint_policy = endpoint_policy
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
 
     async def create_asset(self, actor: _Actor, command: CreateMcpServer) -> McpAssetView:
         command = self._validate_create(actor, command)
@@ -416,6 +423,11 @@ class McpService:
         async def operation(
             repository: McpRepository,
         ) -> ProjectMcpConfiguredCreateResult:
+            await repository.lock_project(actor)
+            account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+                repository.session,
+                actor.user_id,
+            )
             asset = McpServerRow(
                 scope=AssetScope.PROJECT.value,
                 project_id=actor.project_id,
@@ -423,7 +435,7 @@ class McpService:
                 display_name=command.display_name,
                 created_by_user_id=str(actor.user_id),
             )
-            await repository.create_project_asset(actor, asset)
+            await repository.create_project_asset_after_lock(actor, asset)
             version_id = uuid.uuid4()
             version = McpServerVersionRow(
                 id=version_id,
@@ -479,6 +491,7 @@ class McpService:
                     payload_checksum=record.row.payload_checksum,
                     secret_digest=hashlib.sha256(b"actweave:mcp-secret-closure:v1\0").hexdigest(),
                     trigger="auto",
+                    account_private_generation=account_private_generation,
                 )
             return ProjectMcpConfiguredCreateResult(
                 asset=self._asset_view(asset),
@@ -535,10 +548,14 @@ class McpService:
         async def operation(
             repository: McpRepository,
         ) -> ProjectMcpConfiguredCreateResult:
-            asset = await repository.get_project_asset(
+            await repository.lock_project(actor)
+            account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+                repository.session,
+                actor.user_id,
+            )
+            asset = await repository._get_project_asset_after_lock(
                 actor,
                 asset_id,
-                for_update=True,
             )
             self._require_expected_version(
                 actor,
@@ -607,7 +624,13 @@ class McpService:
                 asset,
                 record,
             )
-            await self._enqueue_if_ready(actor, repository, asset, record)
+            await self._enqueue_if_ready(
+                actor,
+                repository,
+                asset,
+                record,
+                account_private_generation=account_private_generation,
+            )
             return ProjectMcpConfiguredCreateResult(
                 asset=self._asset_view(asset),
                 version=self._version_view(record),
@@ -1055,7 +1078,18 @@ class McpService:
         self._require_capability(actor, Capability.SHARED_ASSETS_EXECUTE)
 
         async def operation(repository: McpRepository) -> McpToolDiscoveryAttemptView:
-            asset = await self._get_asset(repository, actor, asset_id, for_update=True)
+            await repository.lock_project(actor)
+            account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+                repository.session,
+                actor.user_id,
+            )
+            asset = await self._get_asset(
+                repository,
+                actor,
+                asset_id,
+                for_update=True,
+                lock_project=False,
+            )
             record = await self._get_version(
                 repository,
                 actor,
@@ -1096,6 +1130,7 @@ class McpService:
                     payload_checksum=record.row.payload_checksum,
                     secret_digest=closure.digest,
                     trigger="manual",
+                    account_private_generation=account_private_generation,
                 )
             )
 
@@ -1202,6 +1237,7 @@ class McpService:
         payload_checksum: str,
         secret_digest: str,
         trigger: Literal["auto", "manual"],
+        account_private_generation: AccountPrivateGeneration,
     ) -> McpToolDiscoveryAttemptRecord:
         idempotency_key = _mcp_tool_discovery_idempotency_key(
             project_id=actor.project_id,
@@ -1222,6 +1258,7 @@ class McpService:
                 secret_digest=secret_digest,
                 trigger=trigger,
                 idempotency_key=idempotency_key,
+                account_private_generation=account_private_generation,
             )
         except (TypeError, ValueError, RuntimeError):
             raise AssetStorageUnavailable(actor.request_id) from None
@@ -1287,6 +1324,8 @@ class McpService:
         repository: McpRepository,
         asset: McpServerRow,
         record: McpVersionRecord,
+        *,
+        account_private_generation: AccountPrivateGeneration,
     ) -> None:
         materials = await McpSecretStore(repository.session).load_materials(
             project_id=actor.project_id,
@@ -1308,6 +1347,7 @@ class McpService:
             payload_checksum=record.row.payload_checksum,
             secret_digest=mcp_secret_closure_digest(materials),
             trigger="auto",
+            account_private_generation=account_private_generation,
         )
 
     @staticmethod

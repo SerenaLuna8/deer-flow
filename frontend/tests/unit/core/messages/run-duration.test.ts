@@ -89,4 +89,27 @@ describe("getRunDurationDisplaysByGroupIndex", () => {
       [{ runId: "run-2", durationSeconds: 7 }],
     ]);
   });
+
+  test("shows only the latest duration when one visible turn contains multiple Runs", () => {
+    const groups: MessageGroup[] = [
+      {
+        id: "answer",
+        type: "assistant",
+        messages: [
+          message("answer-progress", "ai", {
+            run_id: "run-1",
+            turn_duration: 88,
+          }),
+          message("answer-final", "ai", {
+            run_id: "run-2",
+            turn_duration: 119,
+          }),
+        ],
+      },
+    ];
+
+    expect(getRunDurationDisplaysByGroupIndex(groups)).toEqual([
+      [{ runId: "run-2", durationSeconds: 119 }],
+    ]);
+  });
 });

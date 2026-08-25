@@ -609,7 +609,7 @@ class ProjectChatControlService:
         runtime_config: AppConfig,
         authority: _ContextUsageAuthority,
     ) -> Mapping[str, object]:
-        """Reuse only a policy-identical profile for the exact current assets."""
+        """Reuse the last confirmed profile for an authority-matched idle projection."""
 
         values = getattr(snapshot, "values", None)
         profile = values.get(PROVIDER_REQUEST_PROFILE_STATE_KEY) if isinstance(values, Mapping) else None
@@ -624,7 +624,7 @@ class ProjectChatControlService:
             raise ContextUsageUnsupported("Idle Gauge runtime policy identity is unavailable.") from None
         if not isinstance(profile, Mapping):
             raise ContextUsageUnsupported(
-                "Idle Gauge cannot prove that the frozen provider profile still matches the next Run.",
+                "Idle Gauge has no valid last-confirmed provider profile for the current projection.",
             )
         if getattr(authority, "profile_proof_attempted", False):
             policy_matches = (
@@ -656,9 +656,9 @@ class ProjectChatControlService:
             or authority.asset_facts != authority.profile_asset_facts
             or not policy_matches
             or profile.get("workload_profile") != "interactive"
-            or profile.get("mcp_closure_present") is not False
+            or type(profile.get("mcp_closure_present")) is not bool
         ):
-            raise ContextUsageUnsupported("Idle Gauge cannot prove that the frozen provider profile still matches the next Run.")
+            raise ContextUsageUnsupported("Idle Gauge cannot prove that the frozen provider profile is valid for the current projection.")
         return profile
 
     async def _materialize_context_usage_config(

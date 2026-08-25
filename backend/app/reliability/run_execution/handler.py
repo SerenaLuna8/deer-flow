@@ -576,9 +576,10 @@ class PrivateRunJobHandler:
                         ),
                         context.resource_scope,
                     )
-            assets = await self._snapshots.list_assets_in_session(
+            assets = await self._snapshots.list_asset_facts_in_session(
                 session,
                 context,
+                state.run.thread_id,
                 state.run.run_id,
                 lock=True,
             )

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import sqlalchemy as sa
 from support.private_thread_seed import seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 from support.system_model_seed import seed_system_model_config
 
 from app.personalization.repository import AccountPersonalizationRepository
@@ -175,7 +176,7 @@ async def _add_pending_history(
     )
 
 
-def _add_run(
+async def _add_run(
     session,
     *,
     project_id: uuid.UUID,
@@ -185,7 +186,8 @@ def _add_run(
     run_id: str,
     trace_seed: str,
 ) -> None:
-    session.add(
+    await add_sealed_test_run(
+        session,
         RunRow(
             run_id=run_id,
             thread_id=thread_id,
@@ -198,7 +200,7 @@ def _add_run(
             kwargs_json={},
             origin_trace_id=hashlib.sha256(trace_seed.encode()).hexdigest()[:32],
             project_id=project_id,
-        )
+        ),
     )
 
 
@@ -488,7 +490,7 @@ async def test_postgres_memory_document_sections_freeze_across_policy_drift_and_
                 (scope_a.owner_user_id, thread_a, bad_a),
                 (scope_b.owner_user_id, thread_b, run_b),
             ):
-                _add_run(
+                await _add_run(
                     session,
                     project_id=scope_a.project_id,
                     owner_user_id=owner_user_id,

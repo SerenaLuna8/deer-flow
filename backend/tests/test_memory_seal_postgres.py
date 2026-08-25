@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from sqlalchemy.engine import make_url
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 from support.system_model_seed import (
     seed_system_model_config,
     system_model_payload_checksum,
@@ -239,7 +240,8 @@ async def _seed_due_thread(
             )
         )
         await session.flush()
-        session.add(
+        await add_sealed_test_run(
+            session,
             RunRow(
                 run_id=f"settled-{uuid.uuid4().hex}",
                 thread_id=thread_id,
@@ -255,7 +257,7 @@ async def _seed_due_thread(
                 finalization_status="complete",
                 created_at=idle_at,
                 updated_at=idle_at,
-            )
+            ),
         )
 
     state = bind_scoped_checkpoint_state(
@@ -440,7 +442,8 @@ async def test_memory_seal_terminal_failure_waits_for_new_thread_activity(
                 seconds=1,
             )
             async with seed.factory() as session, session.begin():
-                session.add(
+                await add_sealed_test_run(
+                    session,
                     RunRow(
                         run_id=f"activity-{uuid.uuid4().hex}",
                         thread_id=thread_id,
@@ -456,7 +459,7 @@ async def test_memory_seal_terminal_failure_waits_for_new_thread_activity(
                         finalization_status="complete",
                         created_at=activity_at,
                         updated_at=activity_at,
-                    )
+                    ),
                 )
                 await session.flush()
                 await PrivateThreadRepository(session).touch_activity(
@@ -701,7 +704,8 @@ async def test_memory_seal_real_postgres_live_run_preempts_with_noop(
             )
 
             async with seed.factory() as session, session.begin():
-                session.add(
+                await add_sealed_test_run(
+                    session,
                     RunRow(
                         run_id=f"live-{uuid.uuid4().hex}",
                         thread_id=thread_id,
@@ -715,7 +719,7 @@ async def test_memory_seal_real_postgres_live_run_preempts_with_noop(
                         origin_trace_id=uuid.uuid4().hex,
                         project_id=seed.owner_a.project_id,
                         finalization_status="pending",
-                    )
+                    ),
                 )
 
             handler = MemorySealJobHandler(

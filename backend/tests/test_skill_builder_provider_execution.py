@@ -15,6 +15,9 @@ import deerflow.agents.lead_agent.agent as lead_agent_module
 from app.private_work.context import PrivateWorkContext
 from app.private_work.run_admission import PersistedRunSnapshot
 from app.private_work.run_repository import PrivateRunRecord
+from app.private_work.run_skill_tree_materializer import (
+    RuntimeOwnedMaterializedRunSkillTree,
+)
 from app.private_work.sandbox_files import (
     PrivateFileRunScope,
     PrivateRunFileAuthority,
@@ -44,6 +47,7 @@ from deerflow.runtime.runs.execution_contracts import (
 from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox_provider import (
     PrivateSandboxLease,
+    RunReadonlyMountSource,
     RunScopedReadOnlyMount,
 )
 from deerflow.subagents.binding import (
@@ -87,8 +91,22 @@ class _Runtime:
         self.agent_catalog = None
         self._events = events
         self._closed = False
+        self._skill_tree = RuntimeOwnedMaterializedRunSkillTree(
+            owner_root=skill_root.parent / "skill-tree-owner",
+            source=RunReadonlyMountSource(
+                owner_id=uuid.uuid4(),
+                worker_root=skill_root,
+            ),
+            manifests=(),
+            skills=(),
+        )
 
-    async def aclose(self) -> None:
+    def borrow_materialized_skill_tree(
+        self,
+    ) -> RuntimeOwnedMaterializedRunSkillTree:
+        return self._skill_tree
+
+    async def aclose(self, _mount_outcome=None) -> None:
         if self._closed:
             return
         self._closed = True
@@ -416,13 +434,12 @@ async def test_skill_builder_executor_installs_private_file_authority_with_exact
     assert isinstance(observed["agent_factory"], SkillBuilderAgentFactory)
     assert observed["host_execution_approval_port"] is None
     assert observed["config"]["context"]["non_interactive"] is True
-    mounts = file_authority._mounts  # pyright: ignore[reportPrivateUsage]
-    assert mounts == (
-        RunScopedReadOnlyMount(
-            run_id=execution.run.run_id,
-            container_path="/mnt/skills",
-            host_path=str(tmp_path / "exact-skills"),
-        ),
+    assert file_authority._mounts == ()  # pyright: ignore[reportPrivateUsage]
+    assert (  # pyright: ignore[reportPrivateUsage]
+        file_authority._run_skill_tree is _runtime.borrow_materialized_skill_tree()
+    )
+    assert (  # pyright: ignore[reportPrivateUsage]
+        file_authority._skill_container_path == "/mnt/skills"
     )
 
 

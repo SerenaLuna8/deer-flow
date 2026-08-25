@@ -501,6 +501,7 @@ async def test_append_stream_frame_notifies_only_on_commit_when_enabled(
 ) -> None:
     import asyncpg
     from support.private_thread_seed import seed_private_thread_database
+    from support.run_closure import add_sealed_test_run
 
     from deerflow.persistence.run.model import RunRow
     from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -527,7 +528,8 @@ async def test_append_stream_frame_notifies_only_on_commit_when_enabled(
                 )
             )
             await session.flush()
-            session.add(
+            await add_sealed_test_run(
+                session,
                 RunRow(
                     run_id=run_id,
                     thread_id=thread_id,
@@ -540,7 +542,7 @@ async def test_append_stream_frame_notifies_only_on_commit_when_enabled(
                     kwargs_json={},
                     origin_trace_id="c" * 32,
                     project_id=uuid.UUID(scope.project_id),
-                )
+                ),
             )
 
         store = DbRunEventStore(

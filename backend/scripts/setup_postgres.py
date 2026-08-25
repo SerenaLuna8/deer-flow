@@ -310,21 +310,41 @@ async def _database_exists(admin_url: str, database_name: str) -> bool:
             await connection.close()
 
 
-def _create_setup_engine(config: DatabaseConfig) -> AsyncEngine:
+def _create_setup_engine(
+    config: DatabaseConfig,
+    *,
+    force_public_schema: bool = False,
+) -> AsyncEngine:
     """Create an engine owned only by one setup invocation."""
+    server_settings = {
+        "statement_timeout": str(config.statement_timeout_seconds * 1000),
+    }
+    if force_public_schema:
+        server_settings["search_path"] = "public"
     return create_async_engine(
         config.sqlalchemy_url,
         pool_size=config.pool_size,
         max_overflow=config.max_overflow,
         pool_timeout=config.pool_timeout_seconds,
         pool_pre_ping=True,
-        connect_args={"server_settings": {"statement_timeout": str(config.statement_timeout_seconds * 1000)}},
+        connect_args={"server_settings": server_settings},
     )
 
 
-async def _bootstrap_langgraph_schemas(database_url: str) -> None:
+def _force_public_schema_url(database_url: str) -> str:
+    """Return a psycopg URL whose session search path is exactly public."""
+    return make_url(database_url).update_query_dict({"options": "-csearch_path=public"}).render_as_string(hide_password=False)
+
+
+async def _bootstrap_langgraph_schemas(
+    database_url: str,
+    *,
+    force_public_schema: bool = False,
+) -> None:
     """Idempotently initialize and document the exact LangGraph table set."""
     connection_url = _asyncpg_url(database_url)
+    if force_public_schema:
+        connection_url = _force_public_schema_url(connection_url)
     try:
         async with AsyncPostgresSaver.from_conn_string(connection_url) as saver:
             await saver.setup()
@@ -457,29 +477,58 @@ async def _bootstrap_existing(
     *,
     default_model_bootstrap: (DefaultSystemModelBootstrapMaterial | None) = None,
 ) -> str:
-    engine = _create_setup_engine(DatabaseConfig(url=database_url))
+    try:
+        async with _complete_bootstrap_lock(database_url):
+            return await _bootstrap_empty_schema_under_lock(
+                database_url,
+                default_model_bootstrap=default_model_bootstrap,
+            )
+    except PostgresSetupError:
+        raise
+    except Exception:
+        raise PostgresSetupError("PostgreSQL schema 初始化协调失败；请检查 DATABASE_URL 和并发初始化任务") from None
+
+
+async def _bootstrap_empty_schema_under_lock(
+    database_url: str,
+    *,
+    default_model_bootstrap: (DefaultSystemModelBootstrapMaterial | None) = None,
+    force_public_schema: bool = False,
+) -> str:
+    """Initialize an empty target while the caller owns the bootstrap lock."""
+
+    config = DatabaseConfig(url=database_url)
+    if force_public_schema:
+        engine = _create_setup_engine(config, force_public_schema=True)
+    else:
+        engine = _create_setup_engine(config)
     primary_error: BaseException | None = None
     bootstrap_stage = "schema"
     try:
-        async with _complete_bootstrap_lock(database_url):
-            async with engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
-            await stage_schema_for_setup(engine)
-            bootstrap_stage = "system_assets"
-            await _bootstrap_builtin_catalog(engine)
-            bootstrap_stage = "system_models"
-            await _bootstrap_default_model_schema(
-                engine,
-                default_model_bootstrap,
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        await stage_schema_for_setup(engine)
+        bootstrap_stage = "system_assets"
+        await _bootstrap_builtin_catalog(engine)
+        bootstrap_stage = "system_models"
+        await _bootstrap_default_model_schema(
+            engine,
+            default_model_bootstrap,
+        )
+        bootstrap_stage = "runtime_policies"
+        await _bootstrap_runtime_policy_schema(engine)
+        bootstrap_stage = "langgraph"
+        if force_public_schema:
+            await _bootstrap_langgraph_schemas(
+                database_url,
+                force_public_schema=True,
             )
-            bootstrap_stage = "runtime_policies"
-            await _bootstrap_runtime_policy_schema(engine)
-            bootstrap_stage = "langgraph"
+        else:
             await _bootstrap_langgraph_schemas(database_url)
-            bootstrap_stage = "default_project"
-            await _bootstrap_default_project_schema(engine)
-            bootstrap_stage = "finalize"
-            await finalize_staged_schema(engine)
+        bootstrap_stage = "default_project"
+        await _bootstrap_default_project_schema(engine)
+        bootstrap_stage = "finalize"
+        await finalize_staged_schema(engine)
         return CURRENT_SCHEMA_REVISION
     except ProjectBootstrapFailed as exc:
         primary_error = exc

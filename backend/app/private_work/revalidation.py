@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.context import PrivateWorkContext, require_issued_private_work_context
@@ -19,7 +21,8 @@ class PrivateWorkRevalidator:
         session: AsyncSession,
         context: PrivateWorkContext,
         *capabilities: Capability,
-        lock: bool = False,
+        lock: bool | None = None,
+        lock_mode: Literal["none", "share", "update"] = "none",
     ) -> ProjectContext:
         context = require_issued_private_work_context(context)
         try:
@@ -29,6 +32,7 @@ class PrivateWorkRevalidator:
                 context.project_id,
                 context.request_id,
                 lock=lock,
+                lock_mode=lock_mode,
             )
         except ProjectNotFound:
             raise PrivateWorkNotFound(context.request_id) from None

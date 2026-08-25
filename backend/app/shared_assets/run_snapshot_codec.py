@@ -28,6 +28,8 @@ from app.shared_assets.models import (
     ResolvedAssetSnapshot,
     ResolvedMcpSnapshot,
     ResolvedSkillSnapshot,
+    ResolvedSkillVersionSnapshot,
+    RunSkillVersionManifest,
     SkillArchiveFile,
     SkillAssetRef,
     SkillSecretRequirementSnapshot,
@@ -40,16 +42,21 @@ from app.shared_assets.skill_archive import (
 
 RUN_ASSET_SNAPSHOT_SCHEMA_VERSION = 3
 _LEGACY_RUN_ASSET_SNAPSHOT_SCHEMA_VERSION = 2
+RUN_SKILL_VERSION_REFERENCE_SCHEMA_VERSION = 4
 # Bound the one JSONB parameter before persistence.  The 80 MiB budget admits
 # the measured compressed ppt-master payload class; deployment memory safety
 # still requires the real PostgreSQL acceptance gate.
 MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES = 80 * 1024 * 1024
+MAX_RUN_SKILL_REFERENCE_MANIFEST_JSON_BYTES = 256 * 1024
 
 _SKILL_ARCHIVE_CODEC = "canonical-frame-zlib-6"
 _SKILL_ARCHIVE_COMPRESSION_LEVEL = 6
 _SKILL_FRAME_MAGIC = b"DFSKV3\x00\x01"
 _SKILL_FRAME_HEADER = struct.Struct(">8sIQ")
 _SKILL_FILE_HEADER = struct.Struct(">IIQ")
+LEGACY_SKILL_ARCHIVE_CODEC = _SKILL_ARCHIVE_CODEC
+LEGACY_SKILL_FRAME_FIXED_BYTES = _SKILL_FRAME_HEADER.size
+LEGACY_SKILL_FILE_FIXED_BYTES = _SKILL_FILE_HEADER.size
 _MAX_SKILL_PATH_CHARS = 1024
 _MAX_SKILL_MEDIA_TYPE_CHARS = 255
 _MAX_SKILL_PATH_BYTES = _MAX_SKILL_PATH_CHARS * 4
@@ -63,6 +70,120 @@ class RunAssetSnapshotInvalid(ValueError):
 
 class RunAssetSnapshotTooLarge(RunAssetSnapshotInvalid):
     """The final encoded Run snapshot exceeds its persistence budget."""
+
+
+def encode_run_skill_version_manifest(
+    snapshot: ResolvedSkillVersionSnapshot,
+) -> dict[str, object]:
+    """Encode the byte-free persisted manifest for one exact Skill Version."""
+
+    if (
+        type(snapshot) is not ResolvedSkillVersionSnapshot
+        or snapshot.kind is not AssetKind.SKILL
+        or type(snapshot.file_count) is not int
+        or not 1 <= snapshot.file_count <= MAX_SKILL_ARCHIVE_FILES
+        or type(snapshot.content_size_bytes) is not int
+        or not 0 <= snapshot.content_size_bytes <= MAX_SKILL_ARCHIVE_BYTES
+        or _CHECKSUM.fullmatch(snapshot.checksum) is None
+        or type(snapshot.catalog_generation) is not int
+        or snapshot.catalog_generation < 0
+        or any(type(value) is not uuid.UUID for value in snapshot.dependency_version_ids)
+    ):
+        raise RunAssetSnapshotInvalid("Run Skill Version snapshot metadata is invalid")
+    manifest: dict[str, object] = {
+        "schema_version": RUN_SKILL_VERSION_REFERENCE_SCHEMA_VERSION,
+        "kind": AssetKind.SKILL.value,
+        "scope": snapshot.scope.value,
+        "asset_id": str(snapshot.asset_id),
+        "version_id": str(snapshot.version_id),
+        "checksum": snapshot.checksum,
+        "catalog_generation": snapshot.catalog_generation,
+        "dependency_version_ids": [str(value) for value in snapshot.dependency_version_ids],
+        "skill": {
+            "source": "skill_version_ref",
+            "file_count": snapshot.file_count,
+            "content_size_bytes": snapshot.content_size_bytes,
+        },
+    }
+    if encoded_run_asset_snapshot_json_size(manifest) > MAX_RUN_SKILL_REFERENCE_MANIFEST_JSON_BYTES:
+        raise RunAssetSnapshotTooLarge(
+            "Run Skill Version manifest exceeds the encoded JSON size limit",
+        )
+    return manifest
+
+
+def decode_run_skill_version_manifest(
+    value: Mapping[str, object],
+) -> RunSkillVersionManifest:
+    """Strictly decode one byte-free v4 Skill manifest.
+
+    Version secret declarations deliberately are not carried by this value;
+    the runtime plan joins and validates them from the exact immutable Version.
+    """
+
+    try:
+        if encoded_run_asset_snapshot_json_size(value) > MAX_RUN_SKILL_REFERENCE_MANIFEST_JSON_BYTES:
+            raise RunAssetSnapshotTooLarge(
+                "Run Skill Version manifest exceeds the encoded JSON size limit",
+            )
+        if set(value) != {
+            "schema_version",
+            "kind",
+            "scope",
+            "asset_id",
+            "version_id",
+            "checksum",
+            "catalog_generation",
+            "dependency_version_ids",
+            "skill",
+        }:
+            raise RunAssetSnapshotInvalid(
+                "Run Skill Version manifest shape is invalid",
+            )
+        if value["schema_version"] != RUN_SKILL_VERSION_REFERENCE_SCHEMA_VERSION or value["kind"] != AssetKind.SKILL.value:
+            raise RunAssetSnapshotInvalid(
+                "Run Skill Version manifest schema is unsupported",
+            )
+        raw = _mapping(value["skill"])
+        if set(raw) != {"source", "file_count", "content_size_bytes"}:
+            raise RunAssetSnapshotInvalid(
+                "Run Skill Version manifest shape is invalid",
+            )
+        if raw["source"] != "skill_version_ref":
+            raise RunAssetSnapshotInvalid(
+                "Run Skill Version manifest source is invalid",
+            )
+        checksum = str(value["checksum"])
+        generation = value["catalog_generation"]
+        if _CHECKSUM.fullmatch(checksum) is None or type(generation) is not int or generation < 0:
+            raise RunAssetSnapshotInvalid(
+                "Run Skill Version manifest metadata is invalid",
+            )
+        return RunSkillVersionManifest(
+            kind=AssetKind.SKILL,
+            scope=AssetScope(str(value["scope"])),
+            asset_id=uuid.UUID(str(value["asset_id"])),
+            version_id=uuid.UUID(str(value["version_id"])),
+            checksum=checksum,
+            catalog_generation=generation,
+            dependency_version_ids=_uuids(value["dependency_version_ids"]),
+            file_count=_bounded_int(
+                raw["file_count"],
+                minimum=1,
+                maximum=MAX_SKILL_ARCHIVE_FILES,
+            ),
+            content_size_bytes=_bounded_int(
+                raw["content_size_bytes"],
+                minimum=0,
+                maximum=MAX_SKILL_ARCHIVE_BYTES,
+            ),
+        )
+    except (RunAssetSnapshotInvalid, RunAssetSnapshotTooLarge):
+        raise
+    except (KeyError, TypeError, ValueError):
+        raise RunAssetSnapshotInvalid(
+            "Run Skill Version manifest is invalid",
+        ) from None
 
 
 def encode_run_asset_snapshot(snapshot: ResolvedAssetSnapshot) -> dict[str, object]:

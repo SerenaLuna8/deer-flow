@@ -36,6 +36,12 @@ class JobRow(Base):
     job_type: Mapped[str] = mapped_column(String(32), nullable=False)
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     owner_user_id: Mapped[str | None] = mapped_column(String(36))
+    owner_private_generation: Mapped[int | None] = mapped_column(BigInteger)
+    retention_resource_kind: Mapped[str | None] = mapped_column(String(16))
+    retention_effective_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    retention_membership_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     namespace: Mapped[str | None] = mapped_column(String(255))
     run_id: Mapped[str | None] = mapped_column(String(64))
     automation_occurrence_id: Mapped[str | None] = mapped_column(String(64))
@@ -140,6 +146,19 @@ class JobRow(Base):
         ),
         CheckConstraint("attempt_count >= 0 AND max_attempts >= 1", name="ck_jobs_attempts"),
         CheckConstraint(
+            "owner_private_generation IS NOT NULL AND owner_private_generation >= 1 AND (job_type = 'retention_purge' OR owner_user_id IS NOT NULL)",
+            name="ck_jobs_owner_private_generation",
+        ),
+        CheckConstraint(
+            "(job_type = 'retention_purge' AND retention_resource_kind IS NOT NULL AND "
+            "retention_resource_kind IN ('project', 'former_owner', 'account') AND retention_effective_at IS NOT NULL AND "
+            "((retention_resource_kind = 'project' AND owner_user_id IS NULL AND retention_membership_id IS NULL) OR "
+            "(retention_resource_kind = 'former_owner' AND owner_user_id IS NOT NULL AND retention_membership_id IS NOT NULL) OR "
+            "(retention_resource_kind = 'account' AND owner_user_id IS NOT NULL AND retention_membership_id IS NULL))) OR "
+            "(job_type <> 'retention_purge' AND retention_resource_kind IS NULL AND retention_effective_at IS NULL AND retention_membership_id IS NULL)",
+            name="ck_jobs_retention_authority",
+        ),
+        CheckConstraint(
             "(job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) "
             "OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) "
             "OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) "
@@ -195,6 +214,9 @@ class JobAttemptRow(Base):
     worker_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("worker_nodes.id", ondelete="RESTRICT"), nullable=False)
     lease_token_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+    execution_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     outcome: Mapped[str | None] = mapped_column(String(16))
@@ -248,11 +270,22 @@ class WorkerNodeRow(Base):
     version: Mapped[str] = mapped_column(String(64), nullable=False)
     capabilities_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list, server_default=text("'[]'"))
     max_concurrent_jobs: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_domain_affinity: Mapped[str | None] = mapped_column(CHAR(64))
     draining: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
 
     __table_args__ = (
         CheckConstraint("max_concurrent_jobs >= 1", name="ck_worker_nodes_capacity"),
+        CheckConstraint(
+            "execution_domain_affinity IS NULL OR execution_domain_affinity ~ '^[0-9a-f]{64}$'",
+            name="ck_worker_nodes_execution_domain_affinity",
+        ),
         Index("ix_worker_nodes_fresh", "draining", "heartbeat_at"),
+        Index(
+            "ix_worker_nodes_fresh_affinity",
+            "execution_domain_affinity",
+            "heartbeat_at",
+            postgresql_where=text("draining = false"),
+        ),
     )

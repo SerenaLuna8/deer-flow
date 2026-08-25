@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.jobs.model import DeadJobRow, JobAttemptRow, JobRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 from deerflow.public_error_codes import LLM_PUBLIC_ERROR_CODES
 from deerflow.trace_context import normalize_trace_id
 
@@ -79,6 +81,48 @@ class JobScope:
 
 
 @dataclass(frozen=True, slots=True)
+class RetentionPurgeJobAuthority:
+    """Restart-safe authority for one exact destructive retention case."""
+
+    resource_kind: Literal["project", "former_owner", "account"]
+    project_id: uuid.UUID
+    owner_user_id: str | None
+    generation: int
+    effective_at: datetime
+    membership_id: uuid.UUID | None = None
+
+    def __post_init__(self) -> None:
+        scope = JobScope(self.project_id, self.owner_user_id)
+        if (
+            self.resource_kind not in {"project", "former_owner", "account"}
+            or type(self.generation) is not int
+            or self.generation < 1
+            or not isinstance(self.effective_at, datetime)
+            or self.effective_at.tzinfo is None
+            or self.effective_at.utcoffset() is None
+        ):
+            raise ValueError("invalid retention purge authority")
+        membership_id = self.membership_id
+        if membership_id is not None:
+            try:
+                membership_id = uuid.UUID(str(membership_id))
+            except (TypeError, ValueError):
+                raise ValueError("invalid retention membership authority") from None
+        if self.resource_kind == "project":
+            if scope.owner_user_id is not None or membership_id is not None:
+                raise ValueError("project retention authority has invalid owner coordinates")
+        elif self.resource_kind == "former_owner":
+            if scope.owner_user_id is None or membership_id is None:
+                raise ValueError("former_owner retention authority requires membership")
+        elif scope.owner_user_id is None or membership_id is not None:
+            raise ValueError("account retention authority has invalid owner coordinates")
+        object.__setattr__(self, "project_id", scope.project_id)
+        object.__setattr__(self, "owner_user_id", scope.owner_user_id)
+        object.__setattr__(self, "membership_id", membership_id)
+        object.__setattr__(self, "effective_at", self.effective_at.astimezone(UTC))
+
+
+@dataclass(frozen=True, slots=True)
 class EnqueueJob:
     job_type: JobType
     scope: JobScope
@@ -86,6 +130,7 @@ class EnqueueJob:
     run_id: str | None
     occurrence_id: str | None
     max_attempts: int
+    owner_private_generation: AccountPrivateGeneration | RetentionPurgeJobAuthority
     namespace: str | None = None
     origin_trace_id: str | None = None
     retry_safety: RetrySafety = "safe"
@@ -113,6 +158,22 @@ class EnqueueJob:
             raise ValueError("max_attempts must be between 1 and 20")
         if self.retry_safety not in {"safe", "unknown", "unsafe"}:
             raise ValueError("unsupported retry safety")
+        if self.job_type == "retention_purge":
+            if type(self.owner_private_generation) is not RetentionPurgeJobAuthority:
+                raise TypeError(
+                    "retention_purge requires RetentionPurgeJobAuthority",
+                )
+            if self.owner_private_generation.project_id != self.scope.project_id or self.owner_private_generation.owner_user_id != self.scope.owner_user_id:
+                raise ValueError("retention purge authority scope mismatch")
+        else:
+            if type(self.owner_private_generation) is not AccountPrivateGeneration:
+                raise TypeError(
+                    "owner Jobs require AccountPrivateGeneration",
+                )
+            if self.owner_private_generation.owner_user_id != self.scope.owner_user_id:
+                raise ValueError(
+                    "account-private generation owner does not match Job scope owner",
+                )
         if self.execution_domain_affinity is not None:
             if _SHA256_HEX.fullmatch(self.execution_domain_affinity) is None:
                 raise ValueError(
@@ -182,6 +243,11 @@ class JobClaim:
 @dataclass(frozen=True, slots=True)
 class JobHeartbeat:
     cancel_requested: bool
+
+
+@dataclass(frozen=True, slots=True)
+class JobUnstartedClaimRelease:
+    disposition: Literal["requeued", "cancelled"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,9 +434,14 @@ class JobRepository:
 
     @staticmethod
     def _same_authority(row: JobRow, request: EnqueueJob) -> bool:
+        retention = request.owner_private_generation if type(request.owner_private_generation) is RetentionPurgeJobAuthority else None
         return (
             row.project_id == request.scope.project_id
             and row.owner_user_id == request.scope.owner_user_id
+            and row.owner_private_generation == request.owner_private_generation.generation
+            and row.retention_resource_kind == (None if retention is None else retention.resource_kind)
+            and row.retention_effective_at == (None if retention is None else retention.effective_at)
+            and row.retention_membership_id == (None if retention is None else retention.membership_id)
             and row.run_id == request.run_id
             and row.automation_occurrence_id == request.occurrence_id
             and row.namespace == request.namespace
@@ -387,6 +458,7 @@ class JobRepository:
             raise TypeError("EnqueueJob is required")
         now = datetime.now(UTC)
         job_id = uuid.uuid4()
+        retention = request.owner_private_generation if type(request.owner_private_generation) is RetentionPurgeJobAuthority else None
         inserted_id = await self.session.scalar(
             pg_insert(JobRow)
             .values(
@@ -394,6 +466,10 @@ class JobRepository:
                 job_type=request.job_type,
                 project_id=request.scope.project_id,
                 owner_user_id=request.scope.owner_user_id,
+                owner_private_generation=request.owner_private_generation.generation,
+                retention_resource_kind=(None if retention is None else retention.resource_kind),
+                retention_effective_at=(None if retention is None else retention.effective_at),
+                retention_membership_id=(None if retention is None else retention.membership_id),
                 namespace=request.namespace,
                 run_id=request.run_id,
                 automation_occurrence_id=request.occurrence_id,
@@ -466,6 +542,106 @@ class JobRepository:
             coordinates.project_id,
             coordinates.owner_user_id,
         )
+
+    async def _lock_claim_authority(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str | None,
+        job_type: JobType,
+        owner_private_generation: int | None,
+        retention_resource_kind: str | None,
+        retention_effective_at: datetime | None,
+        retention_membership_id: uuid.UUID | None,
+    ) -> bool:
+        """Lock Project -> Membership -> User before a claim mutation."""
+
+        project = (
+            await self.session.execute(
+                sa.select(
+                    ProjectRow.status,
+                    ProjectRow.is_suspended,
+                    ProjectRow.membership_version,
+                    ProjectRow.deletion_effective_at,
+                )
+                .where(ProjectRow.id == project_id)
+                .with_for_update(read=True, of=ProjectRow)
+            )
+        ).one_or_none()
+        if project is None:
+            return False
+        retention = job_type == "retention_purge"
+        if not retention and (project.status != "active" or project.is_suspended is not False):
+            return False
+        if owner_user_id is None:
+            return (
+                retention
+                and retention_resource_kind == "project"
+                and type(owner_private_generation) is int
+                and owner_private_generation >= 1
+                and isinstance(retention_effective_at, datetime)
+                and retention_effective_at.tzinfo is not None
+                and retention_membership_id is None
+                and project.status == "pending_deletion"
+                and project.membership_version == owner_private_generation
+                and project.deletion_effective_at == retention_effective_at
+            )
+        membership = (
+            await self.session.execute(
+                sa.select(
+                    ProjectMembershipRow.id,
+                    ProjectMembershipRow.status,
+                    ProjectMembershipRow.activation_generation,
+                    ProjectMembershipRow.retention_until,
+                )
+                .where(
+                    ProjectMembershipRow.project_id == project_id,
+                    ProjectMembershipRow.user_id == owner_user_id,
+                )
+                .with_for_update(read=True, of=ProjectMembershipRow)
+            )
+        ).one_or_none()
+        if membership is None:
+            return False
+        if not retention and membership.status != "active":
+            return False
+        if type(owner_private_generation) is not int or owner_private_generation < 1:
+            return False
+        lifecycle = (
+            await self.session.execute(
+                sa.select(
+                    UserRow.private_retention_state,
+                    UserRow.private_retention_generation,
+                    UserRow.private_retention_effective_at,
+                )
+                .where(UserRow.id == owner_user_id)
+                .with_for_update(read=True, of=UserRow)
+            )
+        ).one_or_none()
+        if lifecycle is None:
+            return False
+        if retention:
+            if retention_resource_kind == "former_owner":
+                return (
+                    retention_membership_id == membership.id
+                    and membership.status in {"left", "removed"}
+                    and membership.activation_generation == owner_private_generation
+                    and membership.retention_until is not None
+                    and isinstance(retention_effective_at, datetime)
+                    and retention_effective_at.tzinfo is not None
+                )
+            return (
+                retention_resource_kind == "account"
+                and retention_membership_id is None
+                and isinstance(retention_effective_at, datetime)
+                and retention_effective_at.tzinfo is not None
+                and lifecycle.private_retention_state == "pending_deletion"
+                and lifecycle.private_retention_generation == owner_private_generation
+                and lifecycle.private_retention_effective_at == retention_effective_at
+            )
+        if retention_resource_kind is not None or retention_effective_at is not None or retention_membership_id is not None:
+            return False
+        return lifecycle.private_retention_state == "active" and lifecycle.private_retention_generation == owner_private_generation
 
     async def _lock_memory_prepare_before_job(
         self,
@@ -725,6 +901,10 @@ class JobRepository:
                     JobRow.project_id,
                     JobRow.owner_user_id,
                     JobRow.job_type,
+                    JobRow.owner_private_generation,
+                    JobRow.retention_resource_kind,
+                    JobRow.retention_effective_at,
+                    JobRow.retention_membership_id,
                 )
                 .where(
                     JobRow.job_type.in_(job_types),
@@ -747,12 +927,18 @@ class JobRepository:
 
             savepoint = await self.session.begin_nested()
             try:
-                if not await self._lock_authority(
-                    candidate.project_id,
-                    candidate.owner_user_id,
+                if not await self._lock_claim_authority(
+                    project_id=candidate.project_id,
+                    owner_user_id=candidate.owner_user_id,
+                    job_type=candidate.job_type,
+                    owner_private_generation=(candidate.owner_private_generation),
+                    retention_resource_kind=candidate.retention_resource_kind,
+                    retention_effective_at=candidate.retention_effective_at,
+                    retention_membership_id=candidate.retention_membership_id,
                 ):
                     await savepoint.rollback()
-                    return None
+                    skipped_ids.add(candidate.id)
+                    continue
                 if candidate.job_type == "memory_dream_prepare":
                     await self._lock_memory_prepare_before_job(
                         job_id=candidate.id,
@@ -764,6 +950,13 @@ class JobRepository:
                         sa.select(JobRow)
                         .where(
                             JobRow.id == candidate.id,
+                            JobRow.project_id == candidate.project_id,
+                            JobRow.owner_user_id == candidate.owner_user_id,
+                            JobRow.job_type == candidate.job_type,
+                            JobRow.owner_private_generation == candidate.owner_private_generation,
+                            JobRow.retention_resource_kind == candidate.retention_resource_kind,
+                            JobRow.retention_effective_at == candidate.retention_effective_at,
+                            JobRow.retention_membership_id == candidate.retention_membership_id,
                             JobRow.job_type.in_(job_types),
                             execution_domain_claimable,
                         )
@@ -920,6 +1113,113 @@ class JobRepository:
             .values(status="running", updated_at=changed_at)
         )
         return result.rowcount == 1
+
+    async def release_unstarted_claim(
+        self,
+        job_id: uuid.UUID,
+        *,
+        lease_token: str,
+        attempt_id: uuid.UUID,
+        expected_worker_id: uuid.UUID,
+        now: datetime | None = None,
+    ) -> JobUnstartedClaimRelease | Literal[False]:
+        """Release one exact committed claim before its handler fence opens."""
+
+        if not isinstance(job_id, uuid.UUID):
+            raise TypeError("job_id must be a UUID")
+        if not isinstance(attempt_id, uuid.UUID):
+            raise TypeError("attempt_id must be a UUID")
+        if not isinstance(expected_worker_id, uuid.UUID):
+            raise TypeError("expected_worker_id must be a UUID")
+        if type(lease_token) is not str or not lease_token:
+            raise ValueError("lease_token must be non-empty")
+        coordinates = (
+            await self.session.execute(
+                sa.select(
+                    JobRow.project_id,
+                    JobRow.owner_user_id,
+                ).where(JobRow.id == job_id)
+            )
+        ).one_or_none()
+        if coordinates is None or not await self._lock_authority(
+            coordinates.project_id,
+            coordinates.owner_user_id,
+        ):
+            return False
+        token_hash = _lease_token_hash(lease_token)
+        row = (
+            await self.session.execute(
+                sa.select(JobRow)
+                .where(
+                    JobRow.id == job_id,
+                    JobRow.project_id == coordinates.project_id,
+                    JobRow.owner_user_id == coordinates.owner_user_id,
+                    JobRow.status.in_(("leased", "running")),
+                    JobRow.lease_owner_id == expected_worker_id,
+                    JobRow.lease_token_hash == token_hash,
+                )
+                .with_for_update(of=JobRow)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        if row.run_id is not None:
+            # Importing the Run model at module load would execute the
+            # ``deerflow.persistence.run`` compatibility facade, which also
+            # imports the agent-runtime-backed repository.  Keep the generic
+            # Job persistence facade safe for lightweight Memory imports.
+            from deerflow.persistence.run.model import RunRow
+
+            run_id = await self.session.scalar(
+                sa.select(RunRow.run_id)
+                .where(
+                    RunRow.project_id == row.project_id,
+                    RunRow.owner_user_id == row.owner_user_id,
+                    RunRow.run_id == row.run_id,
+                    RunRow.job_id == row.id,
+                )
+                .with_for_update(of=RunRow)
+            )
+            if run_id is None:
+                return False
+        attempt = (
+            await self.session.execute(
+                sa.select(JobAttemptRow)
+                .where(
+                    JobAttemptRow.id == attempt_id,
+                    JobAttemptRow.job_id == row.id,
+                    JobAttemptRow.attempt_number == row.attempt_count,
+                    JobAttemptRow.worker_id == expected_worker_id,
+                    JobAttemptRow.lease_token_hash == token_hash,
+                    JobAttemptRow.outcome.is_(None),
+                )
+                .with_for_update(of=JobAttemptRow)
+            )
+        ).scalar_one_or_none()
+        if attempt is None or attempt.execution_started_at is not None:
+            return False
+        released_at = self._now(now) if now is not None else await self.session.scalar(sa.select(sa.func.clock_timestamp()))
+        if not isinstance(released_at, datetime) or released_at.tzinfo is None:
+            raise RuntimeError("database release clock is unavailable")
+        if row.cancel_requested_at is not None:
+            await self._settle_unowned_cancel(row, now=released_at)
+            await self.session.flush()
+            return JobUnstartedClaimRelease(disposition="cancelled")
+        if row.attempt_count >= row.max_attempts:
+            return False
+        attempt.heartbeat_at = released_at
+        attempt.finished_at = released_at
+        attempt.outcome = "retry"
+        row.status = "queued"
+        row.available_at = released_at
+        row.lease_owner_id = None
+        row.lease_token_hash = None
+        row.lease_expires_at = None
+        row.heartbeat_at = None
+        row.public_error_code = None
+        row.updated_at = released_at
+        await self.session.flush()
+        return JobUnstartedClaimRelease(disposition="requeued")
 
     async def heartbeat(
         self,
@@ -1359,12 +1659,21 @@ class JobRepository:
                 and existing_successor.namespace == predecessor.namespace
                 and existing_successor.origin_trace_id == predecessor.origin_trace_id
                 and existing_successor.execution_domain_affinity == predecessor.execution_domain_affinity
+                and existing_successor.owner_private_generation == predecessor.owner_private_generation
+                and existing_successor.retention_resource_kind == predecessor.retention_resource_kind
+                and existing_successor.retention_effective_at == predecessor.retention_effective_at
+                and existing_successor.retention_membership_id == predecessor.retention_membership_id
                 and existing_successor.status == "queued"
                 and existing_successor.attempt_count == 0
                 and existing_successor.retry_safety == "safe"
             ):
                 return existing_successor.id
             raise JobRequeueForbidden("safe requeue successor authority is invalid")
+
+        if type(predecessor.owner_private_generation) is not int or predecessor.owner_private_generation < 1 or (predecessor.job_type != "retention_purge" and predecessor.owner_user_id is None):
+            raise JobRequeueForbidden(
+                "dead job account-private generation is invalid",
+            )
 
         request = EnqueueJob(
             job_type=predecessor.job_type,
@@ -1373,6 +1682,21 @@ class JobRepository:
             run_id=predecessor.run_id,
             occurrence_id=predecessor.automation_occurrence_id,
             max_attempts=max_attempts,
+            owner_private_generation=(
+                RetentionPurgeJobAuthority(
+                    resource_kind=predecessor.retention_resource_kind,
+                    project_id=predecessor.project_id,
+                    owner_user_id=predecessor.owner_user_id,
+                    generation=predecessor.owner_private_generation,
+                    effective_at=predecessor.retention_effective_at,
+                    membership_id=predecessor.retention_membership_id,
+                )
+                if predecessor.job_type == "retention_purge"
+                else AccountPrivateGeneration(
+                    owner_user_id=predecessor.owner_user_id,
+                    generation=predecessor.owner_private_generation,
+                )
+            ),
             namespace=predecessor.namespace,
             retry_safety="safe",
             priority=predecessor.priority,
@@ -1394,6 +1718,10 @@ class JobRepository:
                         JobRow.run_id == predecessor.run_id,
                         JobRow.automation_occurrence_id == predecessor.automation_occurrence_id,
                         JobRow.predecessor_dead_job_id == predecessor.id,
+                        JobRow.owner_private_generation == predecessor.owner_private_generation,
+                        JobRow.retention_resource_kind == predecessor.retention_resource_kind,
+                        JobRow.retention_effective_at == predecessor.retention_effective_at,
+                        JobRow.retention_membership_id == predecessor.retention_membership_id,
                         JobRow.execution_domain_affinity == predecessor.execution_domain_affinity,
                         JobRow.status == "queued",
                         JobRow.attempt_count == 0,
@@ -1465,7 +1793,9 @@ __all__ = [
     "JobScope",
     "JobTerminalResult",
     "JobType",
+    "JobUnstartedClaimRelease",
     "RetrySafety",
+    "RetentionPurgeJobAuthority",
     "consume_issued_dead_job_requeued_event",
     "retry_backoff_seconds",
 ]

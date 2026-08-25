@@ -15,6 +15,9 @@ from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.errors import PrivateWorkAgentArchived, PrivateWorkAssetStale
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate
+from app.private_work.run_skill_tree_materializer import (
+    MaterializationAttemptIdentity,
+)
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.projects.context import ProjectContext
 from app.projects.default_skill_bindings import (
@@ -44,11 +47,33 @@ from deerflow.persistence.shared_assets import (
     SkillRow,
     SkillVersionRow,
 )
+from deerflow.sandbox.sandbox_provider import NotAcquired
 
 
 class _AcceptingAgentCatalogValidator:
     async def validate(self, *_args: object, **_kwargs: object) -> None:
         return None
+
+
+class _MaterializationBoundary:
+    def __init__(self, execution_job_id: uuid.UUID) -> None:
+        self.execution_job_id = uuid.UUID(str(execution_job_id))
+        self.attempt_id = uuid.uuid4()
+        self.expected_worker_id = uuid.uuid4()
+
+    async def before_checkpoint_read(self) -> None:
+        return None
+
+    async def lock_and_assert_materialization_active_in_session(
+        self,
+        _session: object,
+        _locked_context: ProjectContext,
+    ) -> MaterializationAttemptIdentity:
+        return MaterializationAttemptIdentity(
+            job_id=self.execution_job_id,
+            attempt_id=self.attempt_id,
+            worker_id=self.expected_worker_id,
+        )
 
 
 def _project_context(seed: PrivateThreadSeed) -> ProjectContext:
@@ -247,7 +272,7 @@ async def test_admission_snapshot_first_survives_concurrent_agent_archive(
         assert version is not None
         assert persisted is not None
         assert persisted.version_id == version.id
-        assert persisted.payload_checksum == admitted.snapshot.assets[0].payload_checksum
+        assert persisted.payload_checksum == admitted.snapshot.assets[0].checksum
         assert persisted.payload_checksum != version.payload_checksum
 
         runtime = await PrivateAssetRuntime(seed.factory).materialize(
@@ -469,6 +494,9 @@ async def test_admitted_run_uses_system_skill_snapshot_after_governance_revocati
         runtime = await PrivateAssetRuntime(seed.factory).materialize(
             seed.owner_a,
             admitted,
+            authorization_boundary=_MaterializationBoundary(
+                admitted.job.job_id,
+            ),
         )
         try:
             assert [item.asset_id for item in runtime.safe_manifest.skills] == [
@@ -478,7 +506,9 @@ async def test_admitted_run_uses_system_skill_snapshot_after_governance_revocati
                 skill_version.id,
             ]
         finally:
-            await runtime.aclose()
+            await runtime.aclose(
+                NotAcquired(owner_id=runtime.skill_mount_source.owner_id),
+            )
 
         await _create_thread(seed, rejected_thread_id)
         with pytest.raises(PrivateWorkAssetStale):

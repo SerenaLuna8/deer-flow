@@ -11,6 +11,10 @@ from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecyclePort,
+)
 from app.projects.asset_summary import project_asset_summary_columns
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
@@ -115,11 +119,13 @@ class ProjectRepository:
         quota: ProjectCreateQuotaPort | None = None,
         quota_config: QuotaConfig | None = None,
         quota_policy: QuotaConfigProvider | None = None,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
     ):
         self.session = session
         self._quota = quota or _NoopProjectCreateQuota()
         self._quota_config = quota_config or QuotaConfig()
         self._quota_policy = quota_policy
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
 
     async def _current_quota_config(self) -> QuotaConfig:
         if self._quota_policy is None:
@@ -149,6 +155,10 @@ class ProjectRepository:
                 membership.project_id = project.id
                 self.session.add(membership)
                 await self.session.flush()
+                await self._account_private_lifecycle.reactivate_after_membership(
+                    self.session,
+                    user_id,
+                )
                 await seed_new_project_system_skill_bindings(
                     self.session,
                     project_id=project.id,

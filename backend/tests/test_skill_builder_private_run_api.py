@@ -62,7 +62,7 @@ async def _seed_run_feed(
             ),
             thread_kind=thread_kind,
         )
-        await PrivateRunRepository(session).create(
+        await PrivateRunRepository(session).create_terminal_empty_shell(
             scope=seed.owner_a_scope,
             thread_id=thread_id,
             request=PrivateRunCreate(

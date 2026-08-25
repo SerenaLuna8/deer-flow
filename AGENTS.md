@@ -81,9 +81,10 @@ see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
   the current command index.
 - Run backend targets from `backend/` and frontend targets from `frontend/`, for
   example `make lint` and `pnpm check`.
-- Treat `make setup-db` and `make upgrade-system-assets` as explicit operator
-  actions, not runtime startup steps. Use `make check-db` for read-only database
-  readiness evidence.
+- Treat `make setup-db`, `make reset-db`, and `make upgrade-system-assets` as
+  explicit operator actions, not runtime startup steps. `make reset-db` is
+  destructive and requires exact target confirmation. Use `make check-db` for
+  read-only database readiness evidence.
 
 ## Repository-wide rules
 

@@ -113,6 +113,12 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Drop duplicate or non-advancing frames. A newly mounted projection joins an
   active Run from cursor `0` because an old hidden consumer's cursor does not
   prove that the new UI rendered those frames.
+- Resolve the one active Run only from authoritative Run/history state; a local
+  duration or an intermediate `ask_clarification` message is not a terminal
+  signal. While active, render the strict six-field execution-state projection.
+  When REST/history proves terminal, stop and forget that exact Run reconnect
+  even if its SSE source never closes; late SSE must not overwrite the canonical
+  terminal history or cause a second Run/cancel request.
 - Scope disposal aborts the stream and prevents late state writes. Compare-and-
   remove reconnect metadata so an old consumer cannot erase a newer Run.
 - A successful Thread DELETE immediately tears down only that exact
@@ -136,15 +142,18 @@ generator. A necessary local patch needs focused coverage and an explanation.
   use their dedicated task/progress surfaces and must not be attached to an
   arbitrary assistant message.
 - A Lead Agent's ordinary text on a tool-calling message is process output, not
-  a terminal answer. Preserve it in canonical model-call order outside the
-  turn-level process disclosure, keep each reasoning round independently
-  collapsible, and let specialized surfaces such as `present_files` retain sole
-  ownership of their transition text.
+  a terminal answer. Render every reasoning, process-output, and tool step in
+  canonical model-call order without a generic step aggregation or turn-level
+  execution disclosure; keep each reasoning body independently collapsible, and
+  keep specialized tool steps such as `present_files` in their original
+  position. Withhold its delivered-file card while the Run is active, then mount
+  the deduplicated card once after the final assistant answer so it never moves
+  during terminal settlement.
 - The Main Project Chat composer may select `Research` for the next Run only.
   Promote that choice through the reserved admission context, clear it only
-  after authoritative Run admission succeeds, and render the server-confirmed
-  effective profile. Research is workload policy, not a capability or model
-  instruction, and is unavailable on unrelated chat surfaces.
+  after authoritative Run admission succeeds. Research is workload policy, not
+  a capability or model instruction, and is unavailable on unrelated chat
+  surfaces.
 - Repeated-call, Run tool-call-limit, and Sub-Agent-total progress are three strict
   event contracts. Merge live custom frames with durable Run Event replay by
   deterministic `observation_id`; refresh, reconnect, or duplicated middleware
@@ -276,9 +285,9 @@ generator. A necessary local patch needs focused coverage and an explanation.
   ordinary conversation history does not mount the change card or issue its
   query; backend tracking and finalization remain authoritative.
 - Every `task` tool call remains visible as its own Sub-Agent card in canonical
-  message order; the generic reasoning/tool fold must never absorb Task cards.
-  Card metadata is a single bounded row whose flexible text truncates before
-  fixed status and disclosure controls.
+  message order alongside reasoning and other tools. Card metadata is a single
+  bounded row whose flexible text truncates before fixed status and disclosure
+  controls.
 
 ### Admin and Automation
 

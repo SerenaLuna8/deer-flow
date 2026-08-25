@@ -215,6 +215,27 @@ def test_trusted_extension_adds_and_excludes_tools_and_uses_canonical_middleware
     assert captured.get("prompt_calls") is None
 
 
+def test_private_runtime_without_skills_does_not_require_a_materialized_skill_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    _install_factory_spies(monkeypatch, captured=captured)
+    private_runtime = _private_runtime(tmp_path)
+    del private_runtime.skill_root
+
+    graph = lead_agent_module._make_lead_agent(
+        {"configurable": {"thinking_enabled": False}},
+        app_config=_app_config(),
+        private_runtime=private_runtime,
+    )
+
+    assert graph == "canonical-graph"
+    middleware_kwargs = captured["middleware_kwargs"]
+    assert middleware_kwargs["runtime_skills"] == ()  # type: ignore[index]
+    assert middleware_kwargs["runtime_skills_root"] is None  # type: ignore[index]
+
+
 @pytest.mark.parametrize(
     "middleware",
     (_AfterModelOnlyMiddleware(), _BoundedRequestShaperMiddleware()),

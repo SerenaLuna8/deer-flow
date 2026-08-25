@@ -9,6 +9,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from support.skill_version_fixture import (
+    assemble_and_seal_skill_version,
+    sealed_skill_version_fixture,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,14 @@ async def _seed_revocation_graph(engine: AsyncEngine) -> _RevocationSeed:
     project_skill_id = uuid.uuid4()
     system_version_id = uuid.uuid4()
     project_version_id = uuid.uuid4()
+    system_version_fixture = sealed_skill_version_fixture(
+        system_version_id,
+        name="system-v1",
+    )
+    project_version_fixture = sealed_skill_version_fixture(
+        project_version_id,
+        name="project-v1",
+    )
 
     async with engine.begin() as connection:
         await connection.execute(
@@ -90,11 +102,13 @@ async def _seed_revocation_graph(engine: AsyncEngine) -> _RevocationSeed:
                 """INSERT INTO skill_versions
                 (id,skill_id,version_number,description,
                  frontmatter,compatibility,secret_requirements,scan_decision,
-                scan_summary,payload_checksum,created_by_user_id)
+                 scan_summary,payload_checksum,file_count,content_size_bytes,
+                 files_sealed,created_by_user_id)
                 VALUES (:id,:skill_id,:version_number,
                         :description,jsonb_build_object('name',CAST(:name AS text)),
                         '>=1.0','[]'::jsonb,'allow',
-                        jsonb_build_object('decision','allow'),:checksum,:owner)"""
+                        jsonb_build_object('decision','allow'),:checksum,
+                        :file_count,:content_size,false,:owner)"""
             ),
             [
                 {
@@ -103,7 +117,9 @@ async def _seed_revocation_graph(engine: AsyncEngine) -> _RevocationSeed:
                     "version_number": 1,
                     "description": "System Skill Current v1",
                     "name": "system-v1",
-                    "checksum": "1" * 64,
+                    "checksum": system_version_fixture.payload_checksum,
+                    "file_count": system_version_fixture.file_count,
+                    "content_size": system_version_fixture.content_size_bytes,
                     "owner": admin_user_id,
                 },
                 {
@@ -112,10 +128,20 @@ async def _seed_revocation_graph(engine: AsyncEngine) -> _RevocationSeed:
                     "version_number": 1,
                     "description": "Project Skill Current v1",
                     "name": "project-v1",
-                    "checksum": "6" * 64,
+                    "checksum": project_version_fixture.payload_checksum,
+                    "file_count": project_version_fixture.file_count,
+                    "content_size": project_version_fixture.content_size_bytes,
                     "owner": admin_user_id,
                 },
             ],
+        )
+        await assemble_and_seal_skill_version(
+            connection,
+            system_version_fixture,
+        )
+        await assemble_and_seal_skill_version(
+            connection,
+            project_version_fixture,
         )
         await connection.execute(
             text(
@@ -306,18 +332,26 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
             {"actor": seed.admin_user_id, "version_id": seed.project_version_id},
             "only a System Skill Current v1 can be revoked",
         )
+        invalid_fixture = sealed_skill_version_fixture(
+            uuid.uuid4(),
+            name="invalid-revoked-v2",
+        )
         await _expect_database_error(
             engine,
             """INSERT INTO skill_versions
             (id,skill_id,version_number,scan_decision,
-             payload_checksum,created_by_user_id,revoked_at,
+             payload_checksum,file_count,content_size_bytes,files_sealed,
+             created_by_user_id,revoked_at,
              revoked_by_user_id,revocation_reason_code)
-            VALUES (:id,:skill_id,2,'allow',:checksum,:actor,
+            VALUES (:id,:skill_id,2,'allow',:checksum,:file_count,
+                    :content_size,false,:actor,
                     clock_timestamp(),:actor,'integrity')""",
             {
-                "id": uuid.uuid4(),
+                "id": invalid_fixture.version_id,
                 "skill_id": seed.system_skill_id,
-                "checksum": "7" * 64,
+                "checksum": invalid_fixture.payload_checksum,
+                "file_count": invalid_fixture.file_count,
+                "content_size": invalid_fixture.content_size_bytes,
                 "actor": seed.admin_user_id,
             },
             "skill version must be created unrevoked",

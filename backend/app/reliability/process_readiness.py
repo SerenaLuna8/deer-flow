@@ -12,6 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.automations.ownership import AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY
 from app.final_schema import FinalSchemaProbe
+from deerflow.config.worker_config import (
+    RELEASE_WORKER_MAX_CONCURRENT_JOBS,
+    RELEASE_WORKER_PROCESS_COUNT,
+)
 
 SchemaState = Literal["ready", "unavailable"]
 
@@ -32,6 +36,9 @@ class ProcessReadinessSnapshot:
     worker_count: int
     worker_capacity: int
     worker_oldest_heartbeat_age_seconds: int | None
+    private_run_worker_fleet: str
+    private_run_worker_count: int
+    private_run_worker_capacity: int
     scheduler: str
     scheduler_ownership: str
     schema_state: SchemaState
@@ -94,6 +101,9 @@ async def read_process_readiness(
             worker_count=0,
             worker_capacity=0,
             worker_oldest_heartbeat_age_seconds=None,
+            private_run_worker_fleet="unavailable",
+            private_run_worker_count=0,
+            private_run_worker_capacity=0,
             scheduler=scheduler,
             scheduler_ownership=scheduler_state,
             schema_state="unavailable",
@@ -109,6 +119,9 @@ async def read_process_readiness(
             worker_count=0,
             worker_capacity=0,
             worker_oldest_heartbeat_age_seconds=None,
+            private_run_worker_fleet="unavailable",
+            private_run_worker_count=0,
+            private_run_worker_capacity=0,
             scheduler=scheduler,
             scheduler_ownership=scheduler_state,
             schema_state="unavailable",
@@ -119,6 +132,12 @@ async def read_process_readiness(
             text(
                 """SELECT count(*)::bigint AS worker_count,
                           COALESCE(sum(max_concurrent_jobs),0)::bigint AS capacity,
+                          count(*) FILTER (
+                              WHERE capabilities_json::jsonb ? 'private_run'
+                          )::bigint AS private_run_worker_count,
+                          COALESCE(sum(max_concurrent_jobs) FILTER (
+                              WHERE capabilities_json::jsonb ? 'private_run'
+                          ),0)::bigint AS private_run_capacity,
                           min(heartbeat_at) AS oldest
                    FROM worker_nodes
                    WHERE draining=false AND heartbeat_at>=:cutoff"""
@@ -128,6 +147,8 @@ async def read_process_readiness(
     ).one()
     worker_count = int(worker.worker_count)
     worker_capacity = int(worker.capacity)
+    private_run_worker_count = int(worker.private_run_worker_count)
+    private_run_worker_capacity = int(worker.private_run_capacity)
     oldest_age = None
     if worker.oldest is not None:
         oldest = worker.oldest
@@ -135,6 +156,7 @@ async def read_process_readiness(
             oldest = oldest.replace(tzinfo=UTC)
         oldest_age = max(0, int((selected_now - oldest.astimezone(UTC)).total_seconds()))
     worker_fleet = "ready" if worker_count > 0 and worker_capacity > 0 else "unavailable"
+    private_run_worker_fleet = "ready" if private_run_worker_count == RELEASE_WORKER_PROCESS_COUNT and private_run_worker_capacity == RELEASE_WORKER_MAX_CONCURRENT_JOBS else "unavailable"
 
     if not scheduler_enabled:
         scheduler = "disabled"
@@ -147,7 +169,7 @@ async def read_process_readiness(
         scheduler = "ready" if owned else "unavailable"
         scheduler_state = "owned" if owned else "unowned"
 
-    ready = worker_fleet == "ready" and (scheduler == "ready" or scheduler == "disabled")
+    ready = worker_fleet == "ready" and private_run_worker_fleet == "ready" and (scheduler == "ready" or scheduler == "disabled")
     return ProcessReadinessSnapshot(
         ready=ready,
         role=role,
@@ -155,6 +177,9 @@ async def read_process_readiness(
         worker_count=worker_count,
         worker_capacity=worker_capacity,
         worker_oldest_heartbeat_age_seconds=oldest_age,
+        private_run_worker_fleet=private_run_worker_fleet,
+        private_run_worker_count=private_run_worker_count,
+        private_run_worker_capacity=private_run_worker_capacity,
         scheduler=scheduler,
         scheduler_ownership=scheduler_state,
         schema_state="ready",

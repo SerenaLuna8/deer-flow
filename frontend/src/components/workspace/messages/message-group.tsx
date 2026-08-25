@@ -2,7 +2,6 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   BookOpenTextIcon,
   BrainIcon,
-  ChevronUp,
   CoinsIcon,
   FolderOpenIcon,
   GlobeIcon,
@@ -15,17 +14,14 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import {
-  ChainOfThought,
-  ChainOfThoughtContent,
   ChainOfThoughtSearchResult,
   ChainOfThoughtSearchResults,
   ChainOfThoughtStep,
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock } from "@/components/ai-elements/code-block";
-import { Button } from "@/components/ui/button";
 import { buildWriteFileArtifactURL } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { indexToolCallData } from "@/core/messages/tool-call-index";
@@ -37,12 +33,10 @@ import {
   getReasoningDurationSeconds,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
-import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { cn } from "@/lib/utils";
 
 import { useArtifacts } from "../artifacts";
-import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
@@ -60,6 +54,7 @@ export function MessageGroup({
   includeNarration = true,
   messages,
   isLoading = false,
+  renderToolCall,
   renderTaskToolCall,
   showAllSteps = false,
   tokenDebugSteps = [],
@@ -69,15 +64,19 @@ export function MessageGroup({
   includeNarration?: boolean;
   messages: Message[];
   isLoading?: boolean;
+  renderToolCall?: (toolCall: {
+    id?: string;
+    messageId?: string;
+    name: string;
+    args: Record<string, unknown>;
+    result?: string | Record<string, unknown>;
+  }) => React.ReactNode | undefined;
   renderTaskToolCall?: (taskId: string, messageId?: string) => React.ReactNode;
   showAllSteps?: boolean;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
 }) {
   const { t } = useI18n();
-  const [showAbove, setShowAbove] = useState(
-    isStaticWebsiteOnly() || isLoading || showAllSteps,
-  );
   const steps = useMemo(
     () =>
       convertToSteps(
@@ -109,38 +108,6 @@ export function MessageGroup({
 
     return counts;
   }, [steps]);
-  const lastToolCallStep = useMemo(() => {
-    const filteredSteps = steps.filter((step) => step.type === "toolCall");
-    return filteredSteps[filteredSteps.length - 1];
-  }, [steps]);
-  const aboveLastToolCallSteps = useMemo(() => {
-    if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
-      return steps.slice(0, index);
-    }
-    return [];
-  }, [lastToolCallStep, steps]);
-  const foldableAboveLastToolCallSteps = useMemo(
-    () =>
-      aboveLastToolCallSteps.filter(
-        (step) =>
-          step.type === "reasoning" ||
-          (step.type === "toolCall" && step.name !== "task"),
-      ),
-    [aboveLastToolCallSteps],
-  );
-  const afterLastToolCallReasoningSteps = useMemo(() => {
-    if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
-      return steps
-        .slice(index + 1)
-        .filter((step): step is CoTReasoningStep => step.type === "reasoning");
-    }
-    return steps.filter(
-      (step): step is CoTReasoningStep => step.type === "reasoning",
-    );
-  }, [lastToolCallStep, steps]);
-  const lastReasoningStep = afterLastToolCallReasoningSteps.at(-1);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
     const firstIndices = new Map<string, number>();
@@ -242,7 +209,7 @@ export function MessageGroup({
     return `${prefix}-${sourceId}`;
   };
 
-  const renderToolCall = (step: CoTToolCallStep) => {
+  const renderDefaultToolCall = (step: CoTToolCallStep) => {
     const debugStep =
       showTokenDebugSummaries && step.messageId
         ? debugStepByMessageId.get(step.messageId)
@@ -267,7 +234,11 @@ export function MessageGroup({
         </div>
       );
     }
-    return renderToolCall(step);
+    const specializedToolCall = renderToolCall?.(step);
+    if (specializedToolCall !== undefined) {
+      return specializedToolCall;
+    }
+    return renderDefaultToolCall(step);
   };
 
   const renderReasoningRound = (
@@ -360,123 +331,11 @@ export function MessageGroup({
     </div>
   );
 
-  useEffect(() => {
-    if (isLoading || showAllSteps) {
-      setShowAbove(true);
-    }
-  }, [isLoading, showAllSteps]);
-
   if (steps.length === 0) {
     return null;
   }
 
-  if (showAllSteps) {
-    return renderChronologicalSteps({ expandReasoning: true });
-  }
-
-  if (steps.some((step) => step.type === "narration")) {
-    return renderChronologicalSteps({ expandReasoning: false });
-  }
-
-  if (
-    lastReasoningStep &&
-    !lastToolCallStep &&
-    steps.every((step) => step.type === "reasoning")
-  ) {
-    return (
-      <div className={cn("flex w-full flex-col gap-2", className)}>
-        {steps.map((step, index) => {
-          if (step.type !== "reasoning") {
-            return null;
-          }
-          const isLatest = index === steps.length - 1;
-          return renderReasoningRound(step, {
-            defaultOpen: isLoading && !isLatest ? true : undefined,
-            isStreaming: isLoading && isLatest,
-          });
-        })}
-      </div>
-    );
-  }
-
-  return (
-    <ChainOfThought
-      className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
-      open={true}
-    >
-      {foldableAboveLastToolCallSteps.length > 0 && !showAllSteps && (
-        <Button
-          key="above"
-          className="w-full items-start justify-start text-left"
-          variant="ghost"
-          onClick={() => setShowAbove(!showAbove)}
-        >
-          <ChainOfThoughtStep
-            label={
-              <span className="opacity-60">
-                {showAbove
-                  ? t.toolCalls.lessSteps
-                  : t.toolCalls.moreSteps(
-                      foldableAboveLastToolCallSteps.length,
-                    )}
-              </span>
-            }
-            icon={
-              <ChevronUp
-                className={cn(
-                  "size-4 opacity-60 transition-transform duration-200",
-                  showAbove ? "rotate-180" : "",
-                )}
-              />
-            }
-          ></ChainOfThoughtStep>
-        </Button>
-      )}
-      {lastToolCallStep && (
-        <ChainOfThoughtContent className="px-4 pb-2">
-          {aboveLastToolCallSteps.flatMap((step) => {
-            if (
-              !showAbove &&
-              (step.type === "reasoning" ||
-                (step.type === "toolCall" && step.name !== "task"))
-            ) {
-              return [];
-            }
-            const stepIndex = steps.indexOf(step);
-            if (step.type === "reasoning") {
-              return renderReasoningRound(step, {
-                defaultOpen: isLoading,
-              });
-            }
-            if (step.type === "narration") {
-              return renderNarration(step);
-            }
-
-            return [
-              renderDebugSummary(step.messageId, stepIndex),
-              renderProcessToolCall(step),
-            ];
-          })}
-          {renderDebugSummary(
-            lastToolCallStep.messageId,
-            steps.indexOf(lastToolCallStep),
-          )}
-          {lastToolCallStep && (
-            <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              {renderProcessToolCall(lastToolCallStep)}
-            </FlipDisplay>
-          )}
-        </ChainOfThoughtContent>
-      )}
-      {afterLastToolCallReasoningSteps.map((step) =>
-        renderReasoningRound(step, {
-          defaultOpen:
-            isLoading && step !== lastReasoningStep ? true : undefined,
-          isStreaming: isLoading && step === lastReasoningStep,
-        }),
-      )}
-    </ChainOfThought>
-  );
+  return renderChronologicalSteps({ expandReasoning: showAllSteps });
 }
 
 function formatDebugToken(

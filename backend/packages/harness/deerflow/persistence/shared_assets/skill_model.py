@@ -6,11 +6,13 @@ from datetime import UTC, datetime
 from sqlalchemy import (
     CHAR,
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     LargeBinary,
     String,
     Text,
@@ -93,6 +95,14 @@ class SkillVersionRow(Base):
     scan_summary: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     supersedes_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("skill_versions.id", ondelete="RESTRICT"), nullable=True)
     payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    file_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    files_sealed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
     created_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -104,6 +114,18 @@ class SkillVersionRow(Base):
         CheckConstraint("scan_decision IN ('allow', 'warn', 'block')", name="ck_skill_versions_scan_decision"),
         CheckConstraint("payload_checksum ~ '^[0-9a-f]{64}$'", name="ck_skill_versions_checksum"),
         CheckConstraint(
+            "file_count BETWEEN 1 AND 16384",
+            name="ck_skill_versions_file_count",
+        ),
+        CheckConstraint(
+            "content_size_bytes BETWEEN 0 AND 104857600",
+            name="ck_skill_versions_content_size",
+        ),
+        CheckConstraint(
+            "files_sealed IN (true, false)",
+            name="ck_skill_versions_files_sealed",
+        ),
+        CheckConstraint(
             "(revoked_at IS NULL) = (revoked_by_user_id IS NULL) AND (revoked_at IS NULL) = (revocation_reason_code IS NULL)",
             name="ck_skill_versions_revocation",
         ),
@@ -113,6 +135,14 @@ class SkillVersionRow(Base):
         ),
         UniqueConstraint("skill_id", "version_number", name="uq_skill_versions_asset_number"),
         UniqueConstraint("skill_id", "id", name="uq_skill_versions_asset_id"),
+        UniqueConstraint(
+            "skill_id",
+            "id",
+            "payload_checksum",
+            "file_count",
+            "content_size_bytes",
+            name="uq_skill_versions_runtime_exact",
+        ),
     )
 
 
@@ -129,7 +159,12 @@ class SkillVersionFileRow(Base):
     __table_args__ = (
         ForeignKeyConstraint(["skill_version_id"], ["skill_versions.id"], ondelete="RESTRICT"),
         CheckConstraint("path <> '' AND path !~ '(^/|(^|/)\\.\\.(/|$))'", name="ck_skill_version_files_safe_path"),
-        CheckConstraint("size_bytes >= 0 AND size_bytes <= 104857600", name="ck_skill_version_files_size"),
+        CheckConstraint("size_bytes >= 0 AND size_bytes <= 67108864", name="ck_skill_version_files_size"),
         CheckConstraint("size_bytes = octet_length(content)", name="ck_skill_version_files_content_size"),
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="ck_skill_version_files_sha256"),
+        Index(
+            "ix_skill_version_files_version_path_c",
+            "skill_version_id",
+            text('path COLLATE "C"'),
+        ),
     )

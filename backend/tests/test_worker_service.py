@@ -22,7 +22,12 @@ from app.worker.service import (
     WorkerService,
 )
 from deerflow.config.worker_config import WorkerConfig
-from deerflow.persistence.jobs.sql import JobClaim, JobHeartbeat, JobScope
+from deerflow.persistence.jobs.sql import (
+    JobClaim,
+    JobHeartbeat,
+    JobScope,
+    JobUnstartedClaimRelease,
+)
 from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
 from deerflow.trace_context import get_current_trace_id
 
@@ -79,6 +84,7 @@ class _FakeBackend:
         self.claim_errors: deque[BaseException] = deque()
         self.transaction_exit_errors: deque[BaseException] = deque()
         self.transaction_active = False
+        self.released: list[tuple[uuid.UUID, str, uuid.UUID, uuid.UUID]] = []
         self.claim_gate: asyncio.Event | None = None
         self.claim_started: asyncio.Event | None = None
 
@@ -101,6 +107,20 @@ class _FakeRepository:
     async def mark_running(self, job_id, **_kwargs):
         self.backend.marked_running.append(job_id)
         return True
+
+    async def release_unstarted_claim(
+        self,
+        job_id,
+        *,
+        lease_token,
+        attempt_id,
+        expected_worker_id,
+        **_kwargs,
+    ):
+        self.backend.released.append(
+            (job_id, lease_token, attempt_id, expected_worker_id),
+        )
+        return JobUnstartedClaimRelease(disposition="requeued")
 
     async def heartbeat(self, _job_id, **_kwargs):
         self.backend.heartbeats += 1
@@ -130,10 +150,12 @@ class _FakeRegistry:
         self.heartbeat_gate: asyncio.Event | None = None
         self.heartbeat_cancel_suppressed: asyncio.Event | None = None
         self.register_error: BaseException | None = None
+        self.register_kwargs: list[dict[str, object]] = []
         self.mark_draining_error: Exception | None = None
 
     async def register(self, *_args, **_kwargs) -> None:
         self.calls.append("register")
+        self.register_kwargs.append(dict(_kwargs))
         if self.register_error is not None:
             raise self.register_error
 
@@ -456,6 +478,27 @@ async def test_worker_passes_stable_execution_domain_affinity_to_claim_sql() -> 
 
     assert await service._claim_next() is None
     assert backend.claim_kwargs[0]["execution_domain_affinity"] == execution_domain.affinity
+
+
+@pytest.mark.asyncio
+async def test_worker_registers_its_stable_execution_domain_affinity() -> None:
+    backend = _FakeBackend(job_count=0)
+    registry = _FakeRegistry()
+    execution_domain = _execution_domain()
+    service = WorkerService(
+        _Factory(backend),
+        registry,
+        {},
+        _config(),
+        repository_builder=_FakeRepository,
+        execution_domain=execution_domain,
+    )
+
+    await service._register()
+
+    assert registry.register_kwargs == [
+        {"execution_domain_affinity": execution_domain.affinity},
+    ]
 
 
 def test_worker_rejects_malformed_execution_domain_affinity() -> None:
@@ -1064,6 +1107,7 @@ async def test_uncooperative_handler_after_lease_loss_fail_stops_worker_capacity
 @pytest.mark.asyncio
 async def test_stop_during_claim_does_not_start_claimed_handler() -> None:
     backend = _FakeBackend(job_count=1)
+    claim = backend.claims[0]
     backend.claim_gate = asyncio.Event()
     backend.claim_started = asyncio.Event()
     handler_started = asyncio.Event()
@@ -1088,6 +1132,72 @@ async def test_stop_during_claim_does_not_start_claimed_handler() -> None:
 
     assert not handler_started.is_set()
     assert backend.marked_running == []
+    assert backend.released == [
+        (
+            claim.job_id,
+            claim.lease_token,
+            claim.attempt_id,
+            service.worker_id,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_claim_hook_failure_releases_before_returning_primary_error() -> None:
+    backend = _FakeBackend(job_count=1)
+    claim = backend.claims[0]
+
+    async def fail_after_claim_commit() -> None:
+        raise RuntimeError("post-claim dispatch failed")
+
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"retention_purge": object()},
+        _config(),
+        repository_builder=_FakeRepository,
+        after_claim_commit=fail_after_claim_commit,
+    )
+
+    with pytest.raises(RuntimeError, match="post-claim dispatch failed"):
+        await service._claim_next()
+
+    assert backend.released == [
+        (
+            claim.job_id,
+            claim.lease_token,
+            claim.attempt_id,
+            service.worker_id,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_release_commit_unknown_is_attempted_once_without_retry() -> None:
+    backend = _FakeBackend(job_count=1)
+    claim = backend.claims[0]
+    backend.transaction_exit_errors.append(
+        CannotConnectNowError("release commit acknowledgement unknown"),
+    )
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"retention_purge": object()},
+        _config(),
+        repository_builder=_FakeRepository,
+    )
+
+    with pytest.raises(CannotConnectNowError):
+        await service._release_unstarted_claim(claim)
+
+    assert backend.released == [
+        (
+            claim.job_id,
+            claim.lease_token,
+            claim.attempt_id,
+            service.worker_id,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -1142,6 +1252,7 @@ async def test_fleet_heartbeat_recovers_from_postgres_recovery() -> None:
 @pytest.mark.asyncio
 async def test_fleet_loss_during_claim_never_starts_claimed_handler() -> None:
     backend = _FakeBackend(job_count=1)
+    claim = backend.claims[0]
     backend.claim_gate = asyncio.Event()
     backend.claim_started = asyncio.Event()
     registry = _FakeRegistry()
@@ -1169,6 +1280,14 @@ async def test_fleet_loss_during_claim_never_starts_claimed_handler() -> None:
         await asyncio.wait_for(running, timeout=1)
     assert not handler_started.is_set()
     assert backend.marked_running == []
+    assert backend.released == [
+        (
+            claim.job_id,
+            claim.lease_token,
+            claim.attempt_id,
+            service.worker_id,
+        )
+    ]
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,9 @@ CREATE TABLE users (
     token_version INTEGER NOT NULL,
     memory_enabled BOOLEAN DEFAULT true NOT NULL,
     preferences_version BIGINT DEFAULT 1 NOT NULL,
+    private_retention_state VARCHAR(24) DEFAULT 'active' NOT NULL,
+    private_retention_generation BIGINT DEFAULT 1 NOT NULL,
+    private_retention_effective_at TIMESTAMP WITH TIME ZONE,
     PRIMARY KEY (id),
     CONSTRAINT ck_users_system_role CHECK (system_role IN ('system_admin', 'user')),
     CONSTRAINT ck_users_principal_type CHECK (principal_type IN ('human', 'channel_guest')),
@@ -38,6 +41,9 @@ CREATE TABLE users (
     CONSTRAINT ck_users_username_format CHECK (username IS NULL OR username ~ '^[a-z][a-z0-9_]{2,31}$'),
     CONSTRAINT ck_users_channel_guest_identity CHECK ((principal_type = 'human' AND email IS NOT NULL) OR (principal_type = 'channel_guest' AND email IS NULL AND username IS NULL AND password_hash IS NULL AND oauth_provider IS NULL AND oauth_id IS NULL AND system_role = 'user' AND needs_setup IS FALSE AND token_version = 0)),
     CONSTRAINT ck_users_preferences_version CHECK (preferences_version >= 1),
+    CONSTRAINT ck_users_private_retention_state CHECK (private_retention_state IN ('active', 'pending_deletion', 'purged')),
+    CONSTRAINT ck_users_private_retention_generation CHECK (private_retention_generation >= 1),
+    CONSTRAINT ck_users_private_retention_effective_at CHECK ((private_retention_state = 'pending_deletion' AND private_retention_effective_at IS NOT NULL) OR (private_retention_state IN ('active', 'purged') AND private_retention_effective_at IS NULL)),
     CONSTRAINT uq_users_id_principal_type UNIQUE (id, principal_type)
 );
 
@@ -84,11 +90,13 @@ CREATE TABLE runs (
     authorization_cancel_requested_at TIMESTAMP WITH TIME ZONE,
     authorization_cancel_reason VARCHAR(64),
     finalization_status VARCHAR(20) DEFAULT 'pending' NOT NULL,
+    asset_closure_sealed BOOLEAN DEFAULT false NOT NULL,
     PRIMARY KEY (run_id),
     CONSTRAINT uq_runs_private_scope UNIQUE (project_id, owner_user_id, thread_id, run_id),
     CONSTRAINT uq_runs_job_scope UNIQUE (project_id, owner_user_id, run_id),
     CONSTRAINT uq_runs_job_trace_scope UNIQUE (project_id, owner_user_id, run_id, origin_trace_id),
-    CONSTRAINT ck_runs_finalization_status CHECK (finalization_status IN ('pending', 'finalizing', 'complete', 'failed'))
+    CONSTRAINT ck_runs_finalization_status CHECK (finalization_status IN ('pending', 'finalizing', 'complete', 'failed')),
+    CONSTRAINT ck_runs_asset_closure_sealed CHECK (asset_closure_sealed IN (true, false))
 );
 
 CREATE INDEX ix_runs_project_id ON runs (project_id);
@@ -104,6 +112,10 @@ CREATE TABLE jobs (
     job_type VARCHAR(32) NOT NULL,
     project_id UUID NOT NULL,
     owner_user_id VARCHAR(36),
+    owner_private_generation BIGINT,
+    retention_resource_kind VARCHAR(16),
+    retention_effective_at TIMESTAMP WITH TIME ZONE,
+    retention_membership_id UUID,
     namespace VARCHAR(255),
     run_id VARCHAR(64),
     automation_occurrence_id VARCHAR(64),
@@ -140,6 +152,8 @@ CREATE TABLE jobs (
     CONSTRAINT ck_jobs_retry_safety CHECK (retry_safety IN ('safe', 'unknown', 'unsafe')),
     CONSTRAINT ck_jobs_execution_domain_affinity CHECK (execution_domain_affinity IS NULL OR (job_type = 'private_run' AND execution_domain_affinity ~ '^[0-9a-f]{64}$')),
     CONSTRAINT ck_jobs_attempts CHECK (attempt_count >= 0 AND max_attempts >= 1),
+    CONSTRAINT ck_jobs_owner_private_generation CHECK (owner_private_generation IS NOT NULL AND owner_private_generation >= 1 AND (job_type = 'retention_purge' OR owner_user_id IS NOT NULL)),
+    CONSTRAINT ck_jobs_retention_authority CHECK ((job_type = 'retention_purge' AND retention_resource_kind IS NOT NULL AND retention_resource_kind IN ('project', 'former_owner', 'account') AND retention_effective_at IS NOT NULL AND ((retention_resource_kind = 'project' AND owner_user_id IS NULL AND retention_membership_id IS NULL) OR (retention_resource_kind = 'former_owner' AND owner_user_id IS NOT NULL AND retention_membership_id IS NOT NULL) OR (retention_resource_kind = 'account' AND owner_user_id IS NOT NULL AND retention_membership_id IS NULL))) OR (job_type <> 'retention_purge' AND retention_resource_kind IS NULL AND retention_effective_at IS NULL AND retention_membership_id IS NULL)),
     CONSTRAINT ck_jobs_authority_shape CHECK ((job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'memory_dream' AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'memory_dream_prepare' AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'memory_seal' AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)),
     CONSTRAINT ck_jobs_memory_namespace CHECK ((job_type IN ('memory_dream', 'memory_dream_prepare', 'memory_seal')) = (namespace IS NOT NULL))
 );
@@ -176,14 +190,18 @@ CREATE TABLE worker_nodes (
     version VARCHAR(64) NOT NULL,
     capabilities_json JSON DEFAULT '[]' NOT NULL,
     max_concurrent_jobs INTEGER NOT NULL,
+    execution_domain_affinity CHAR(64),
     draining BOOLEAN DEFAULT false NOT NULL,
     started_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     heartbeat_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     PRIMARY KEY (id),
-    CONSTRAINT ck_worker_nodes_capacity CHECK (max_concurrent_jobs >= 1)
+    CONSTRAINT ck_worker_nodes_capacity CHECK (max_concurrent_jobs >= 1),
+    CONSTRAINT ck_worker_nodes_execution_domain_affinity CHECK (execution_domain_affinity IS NULL OR execution_domain_affinity ~ '^[0-9a-f]{64}$')
 );
 
 CREATE INDEX ix_worker_nodes_fresh ON worker_nodes (draining, heartbeat_at);
+
+CREATE INDEX ix_worker_nodes_fresh_affinity ON worker_nodes (execution_domain_affinity, heartbeat_at) WHERE draining = false;
 
 CREATE TABLE run_event_partition_state (
     singleton BOOLEAN DEFAULT true NOT NULL,
@@ -319,6 +337,7 @@ CREATE TABLE job_attempts (
     worker_id UUID NOT NULL,
     lease_token_hash CHAR(64) NOT NULL,
     started_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    execution_started_at TIMESTAMP WITH TIME ZONE,
     heartbeat_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     finished_at TIMESTAMP WITH TIME ZONE,
     outcome VARCHAR(16),
@@ -1281,6 +1300,7 @@ CREATE TABLE run_asset_versions (
     version_id UUID NOT NULL,
     payload_checksum CHAR(64) NOT NULL,
     catalog_generation BIGINT NOT NULL,
+    snapshot_schema_version SMALLINT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     snapshot_json JSONB NOT NULL,
     CONSTRAINT pk_run_asset_versions PRIMARY KEY (project_id, owner_user_id, run_id, asset_kind, dependency_order),
@@ -1292,8 +1312,15 @@ CREATE TABLE run_asset_versions (
     CONSTRAINT ck_run_asset_versions_scope CHECK (asset_scope IN ('system', 'project')),
     CONSTRAINT ck_run_asset_versions_order CHECK (dependency_order >= 0),
     CONSTRAINT ck_run_asset_versions_generation CHECK (catalog_generation >= 0),
-    CONSTRAINT ck_run_asset_versions_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$')
+    CONSTRAINT ck_run_asset_versions_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_run_asset_versions_snapshot_schema CHECK (snapshot_schema_version BETWEEN 2 AND 4),
+    CONSTRAINT uq_run_asset_versions_dependency_order UNIQUE (project_id, owner_user_id, run_id, dependency_order),
+    CONSTRAINT uq_run_asset_versions_runtime_exact UNIQUE (project_id, owner_user_id, thread_id, run_id, asset_kind, dependency_order, asset_scope, asset_id, version_id, payload_checksum, snapshot_schema_version)
 );
+
+CREATE INDEX ix_run_asset_versions_legacy_project_skill ON run_asset_versions (project_id, asset_id, version_id) WHERE asset_kind = 'skill' AND asset_scope = 'project' AND snapshot_schema_version IN (2, 3);
+
+CREATE INDEX ix_run_asset_versions_legacy_skill_version ON run_asset_versions (asset_id, version_id) WHERE asset_kind = 'skill' AND snapshot_schema_version IN (2, 3);
 
 CREATE TABLE run_skill_secret_snapshots (
     project_id UUID NOT NULL,
@@ -1475,6 +1502,9 @@ CREATE TABLE skill_versions (
     scan_summary JSONB DEFAULT '{}'::jsonb NOT NULL,
     supersedes_version_id UUID,
     payload_checksum CHAR(64) NOT NULL,
+    file_count INTEGER NOT NULL,
+    content_size_bytes BIGINT NOT NULL,
+    files_sealed BOOLEAN DEFAULT false NOT NULL,
     created_by_user_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     revoked_at TIMESTAMP WITH TIME ZONE,
@@ -1484,15 +1514,57 @@ CREATE TABLE skill_versions (
     CONSTRAINT ck_skill_versions_number CHECK (version_number >= 1),
     CONSTRAINT ck_skill_versions_scan_decision CHECK (scan_decision IN ('allow', 'warn', 'block')),
     CONSTRAINT ck_skill_versions_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_skill_versions_file_count CHECK (file_count BETWEEN 1 AND 16384),
+    CONSTRAINT ck_skill_versions_content_size CHECK (content_size_bytes BETWEEN 0 AND 104857600),
+    CONSTRAINT ck_skill_versions_files_sealed CHECK (files_sealed IN (true, false)),
     CONSTRAINT ck_skill_versions_revocation CHECK ((revoked_at IS NULL) = (revoked_by_user_id IS NULL) AND (revoked_at IS NULL) = (revocation_reason_code IS NULL)),
     CONSTRAINT ck_skill_versions_revocation_reason CHECK (revocation_reason_code IS NULL OR revocation_reason_code IN ('security', 'policy', 'integrity')),
     CONSTRAINT uq_skill_versions_asset_number UNIQUE (skill_id, version_number),
     CONSTRAINT uq_skill_versions_asset_id UNIQUE (skill_id, id),
+    CONSTRAINT uq_skill_versions_runtime_exact UNIQUE (skill_id, id, payload_checksum, file_count, content_size_bytes),
     FOREIGN KEY(skill_id) REFERENCES skills (id) ON DELETE RESTRICT,
     FOREIGN KEY(supersedes_version_id) REFERENCES skill_versions (id) ON DELETE RESTRICT,
     FOREIGN KEY(created_by_user_id) REFERENCES users (id),
     FOREIGN KEY(revoked_by_user_id) REFERENCES users (id)
 );
+
+CREATE TABLE run_skill_version_refs (
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    run_id VARCHAR(64) NOT NULL,
+    asset_kind VARCHAR(16) NOT NULL,
+    dependency_order INTEGER NOT NULL,
+    asset_scope VARCHAR(16) NOT NULL,
+    snapshot_schema_version SMALLINT NOT NULL,
+    skill_project_id UUID,
+    skill_id UUID NOT NULL,
+    skill_version_id UUID NOT NULL,
+    payload_checksum CHAR(64) NOT NULL,
+    file_count INTEGER NOT NULL,
+    content_size_bytes BIGINT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_run_skill_version_refs PRIMARY KEY (project_id, owner_user_id, run_id, asset_kind, dependency_order),
+    CONSTRAINT uq_run_skill_version_refs_exact_version UNIQUE (project_id, owner_user_id, run_id, skill_id, skill_version_id),
+    CONSTRAINT ck_run_skill_version_refs_kind CHECK (asset_kind = 'skill'),
+    CONSTRAINT ck_run_skill_version_refs_schema CHECK (snapshot_schema_version = 4),
+    CONSTRAINT ck_run_skill_version_refs_scope CHECK (asset_scope IN ('system', 'project')),
+    CONSTRAINT ck_run_skill_version_refs_scope_project CHECK ((asset_scope = 'system' AND skill_project_id IS NULL) OR (asset_scope = 'project' AND skill_project_id IS NOT NULL AND skill_project_id = project_id)),
+    CONSTRAINT ck_run_skill_version_refs_order CHECK (dependency_order >= 0),
+    CONSTRAINT ck_run_skill_version_refs_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_run_skill_version_refs_file_count CHECK (file_count BETWEEN 1 AND 16384),
+    CONSTRAINT ck_run_skill_version_refs_content_size CHECK (content_size_bytes BETWEEN 0 AND 104857600),
+    CONSTRAINT fk_run_skill_version_refs_exact_run_asset FOREIGN KEY(project_id, owner_user_id, thread_id, run_id, asset_kind, dependency_order, asset_scope, skill_id, skill_version_id, payload_checksum, snapshot_schema_version) REFERENCES run_asset_versions (project_id, owner_user_id, thread_id, run_id, asset_kind, dependency_order, asset_scope, asset_id, version_id, payload_checksum, snapshot_schema_version) ON DELETE CASCADE,
+    CONSTRAINT fk_run_skill_version_refs_skill_scope FOREIGN KEY(skill_id, asset_scope) REFERENCES skills (id, scope) ON DELETE RESTRICT,
+    CONSTRAINT fk_run_skill_version_refs_project_skill FOREIGN KEY(skill_project_id, skill_id) REFERENCES skills (project_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_run_skill_version_refs_exact_version FOREIGN KEY(skill_id, skill_version_id, payload_checksum, file_count, content_size_bytes) REFERENCES skill_versions (skill_id, id, payload_checksum, file_count, content_size_bytes) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_run_skill_version_refs_version ON run_skill_version_refs (skill_version_id);
+
+CREATE INDEX ix_run_skill_version_refs_skill_scope ON run_skill_version_refs (skill_id, asset_scope);
+
+CREATE INDEX ix_run_skill_version_refs_project_skill ON run_skill_version_refs (skill_project_id, skill_id);
 
 CREATE TABLE run_runtime_policy_snapshots (
     project_id UUID NOT NULL,
@@ -2097,10 +2169,12 @@ CREATE TABLE skill_version_files (
     PRIMARY KEY (skill_version_id, path),
     FOREIGN KEY(skill_version_id) REFERENCES skill_versions (id) ON DELETE RESTRICT,
     CONSTRAINT ck_skill_version_files_safe_path CHECK (path <> '' AND path !~ '(^/|(^|/)\.\.(/|$))'),
-    CONSTRAINT ck_skill_version_files_size CHECK (size_bytes >= 0 AND size_bytes <= 104857600),
+    CONSTRAINT ck_skill_version_files_size CHECK (size_bytes >= 0 AND size_bytes <= 67108864),
     CONSTRAINT ck_skill_version_files_content_size CHECK (size_bytes = octet_length(content)),
     CONSTRAINT ck_skill_version_files_sha256 CHECK (sha256 ~ '^[0-9a-f]{64}$')
 );
+
+CREATE INDEX ix_skill_version_files_version_path_c ON skill_version_files (skill_version_id, path COLLATE "C");
 
 CREATE TABLE project_skill_secret_states (
     project_id UUID NOT NULL,
@@ -2667,11 +2741,9 @@ DECLARE
     asset_scope text;
 BEGIN
     IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
-       AND TG_TABLE_NAME IN ('agent_versions', 'skill_versions', 'mcp_server_versions') THEN
+       AND TG_TABLE_NAME IN ('agent_versions', 'mcp_server_versions') THEN
         IF TG_TABLE_NAME = 'agent_versions' THEN
             SELECT scope INTO asset_scope FROM agents WHERE id = NEW.agent_id;
-        ELSIF TG_TABLE_NAME = 'skill_versions' THEN
-            SELECT scope INTO asset_scope FROM skills WHERE id = NEW.skill_id;
         ELSE
             SELECT scope INTO asset_scope FROM mcp_servers
             WHERE id = NEW.mcp_server_id;
@@ -2683,17 +2755,59 @@ BEGIN
     IF (to_jsonb(NEW) - ARRAY[
         'workflow_status', 'status', 'submitted_at', 'reviewed_at',
         'reviewed_by_user_id', 'review_note', 'retired_at', 'revoked_at',
-        'revoked_by_user_id', 'revocation_reason_code'
+        'revoked_by_user_id', 'revocation_reason_code', 'files_sealed'
     ]::text[]) IS DISTINCT FROM
        (to_jsonb(OLD) - ARRAY[
         'workflow_status', 'status', 'submitted_at', 'reviewed_at',
         'reviewed_by_user_id', 'review_note', 'retired_at', 'revoked_at',
-        'revoked_by_user_id', 'revocation_reason_code'
+        'revoked_by_user_id', 'revocation_reason_code', 'files_sealed'
     ]::text[]) THEN
         RAISE EXCEPTION 'shared asset version payload is immutable'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION enforce_skill_version_files_seal_transition()
+RETURNS trigger AS $$
+BEGIN
+    IF NEW.files_sealed IS NOT DISTINCT FROM OLD.files_sealed
+       OR (OLD.files_sealed IS FALSE AND NEW.files_sealed IS TRUE) THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'invalid Skill version file seal transition'
+        USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION verify_skill_version_file_facts()
+RETURNS trigger AS $$
+DECLARE
+    current_version skill_versions%ROWTYPE;
+    actual_file_count bigint;
+    actual_content_size bigint;
+BEGIN
+    SELECT * INTO current_version
+    FROM skill_versions
+    WHERE id = NEW.id;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF current_version.files_sealed IS NOT TRUE THEN
+        RAISE EXCEPTION 'Skill version files must be sealed before commit'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    SELECT count(*), coalesce(sum(size_bytes), 0)
+    INTO actual_file_count, actual_content_size
+    FROM skill_version_files
+    WHERE skill_version_id = current_version.id;
+    IF actual_file_count IS DISTINCT FROM current_version.file_count
+       OR actual_content_size IS DISTINCT FROM current_version.content_size_bytes THEN
+        RAISE EXCEPTION 'Skill version file facts do not match persisted files'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -2858,14 +2972,16 @@ DECLARE
     parent_scope text;
     parent_project_id uuid;
     parent_asset_id uuid;
+    parent_files_sealed boolean;
     purge_allowed boolean := false;
 BEGIN
     CASE TG_TABLE_NAME
         WHEN 'skill_version_files' THEN
             parent_version_id := CASE WHEN TG_OP = 'DELETE'
                 THEN OLD.skill_version_id ELSE NEW.skill_version_id END;
-            SELECT asset.scope, asset.project_id, asset.id
-            INTO parent_scope, parent_project_id, parent_asset_id
+            SELECT asset.scope, asset.project_id, asset.id, version.files_sealed
+            INTO parent_scope, parent_project_id, parent_asset_id,
+                 parent_files_sealed
             FROM skill_versions version
             JOIN skills asset ON asset.id = version.skill_id
             WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
@@ -3015,8 +3131,20 @@ BEGIN
         ELSE
             RAISE EXCEPTION 'unsupported version child table';
     END CASE;
+    IF TG_TABLE_NAME = 'skill_version_files' THEN
+        IF TG_OP = 'INSERT'
+           AND parent_files_sealed IS FALSE
+           AND current_setting('deerflow.asset_version_assembly', true)
+               = parent_version_id::text THEN
+            RETURN NEW;
+        END IF;
+        IF TG_OP = 'DELETE' AND purge_allowed THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'Skill version files are immutable outside initial assembly'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
     IF TG_TABLE_NAME IN (
-        'skill_version_files',
         'agent_version_skill_refs',
         'agent_version_mcp_refs',
         'mcp_version_secret_slots'
@@ -3070,6 +3198,10 @@ CREATE TRIGGER trg_agent_versions_immutable BEFORE UPDATE ON agent_versions FOR 
 
 CREATE TRIGGER trg_skill_versions_immutable BEFORE UPDATE ON skill_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update();
 
+CREATE TRIGGER trg_skill_versions_files_seal_transition BEFORE UPDATE OF files_sealed ON skill_versions FOR EACH ROW EXECUTE FUNCTION enforce_skill_version_files_seal_transition();
+
+CREATE CONSTRAINT TRIGGER trg_skill_versions_facts_complete AFTER INSERT OR UPDATE ON skill_versions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION verify_skill_version_file_facts();
+
 CREATE TRIGGER trg_skill_versions_revocation BEFORE INSERT OR UPDATE OF revoked_at, revoked_by_user_id, revocation_reason_code ON skill_versions FOR EACH ROW EXECUTE FUNCTION enforce_system_skill_version_revocation();
 
 CREATE TRIGGER trg_mcp_server_versions_immutable BEFORE UPDATE ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update();
@@ -3115,6 +3247,353 @@ CREATE TRIGGER trg_agent_bindings_generation AFTER INSERT OR UPDATE OR DELETE ON
 CREATE TRIGGER trg_skill_bindings_generation AFTER INSERT OR UPDATE OR DELETE ON project_system_skill_bindings FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
 
 CREATE TRIGGER trg_mcp_bindings_generation AFTER INSERT OR UPDATE OR DELETE ON project_system_mcp_bindings FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
+
+CREATE OR REPLACE FUNCTION enforce_run_asset_closure_seal_transition()
+RETURNS trigger AS $$
+BEGIN
+    IF NEW.asset_closure_sealed IS NOT DISTINCT FROM OLD.asset_closure_sealed
+       OR (OLD.asset_closure_sealed IS FALSE
+           AND NEW.asset_closure_sealed IS TRUE) THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'invalid Run asset closure seal transition'
+        USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION gate_run_closure_child_mutation()
+RETURNS trigger AS $$
+DECLARE
+    exact_project_id uuid;
+    exact_owner_user_id text;
+    exact_thread_id text;
+    exact_run_id text;
+    closure_sealed boolean;
+    run_found boolean := false;
+    claimable_job_exists boolean := false;
+    retention_authorized boolean := false;
+    ref_parent_exists boolean := false;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        exact_project_id := OLD.project_id;
+        exact_owner_user_id := OLD.owner_user_id;
+        exact_thread_id := OLD.thread_id;
+        exact_run_id := OLD.run_id;
+    ELSE
+        exact_project_id := NEW.project_id;
+        exact_owner_user_id := NEW.owner_user_id;
+        exact_thread_id := NEW.thread_id;
+        exact_run_id := NEW.run_id;
+    END IF;
+
+    SELECT asset_closure_sealed
+    INTO closure_sealed
+    FROM runs
+    WHERE project_id = exact_project_id
+      AND owner_user_id = exact_owner_user_id
+      AND thread_id = exact_thread_id
+      AND run_id = exact_run_id
+    FOR UPDATE;
+    run_found := FOUND;
+
+    IF TG_OP = 'DELETE' AND NOT run_found THEN
+        RETURN OLD;
+    END IF;
+    IF NOT run_found THEN
+        RAISE EXCEPTION 'Run closure child requires an exact Run'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'Run closure child rows are immutable'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        -- RetentionPurgeAuthority installs exact Run coordinates in a
+        -- transaction-local temp table only after locked eligibility and
+        -- quiescence verification.  This is deliberately not a blanket GUC.
+        IF to_regclass('pg_temp.retention_purge_run_authority') IS NOT NULL THEN
+            EXECUTE
+                'SELECT EXISTS (
+                     SELECT 1
+                     FROM pg_temp.retention_purge_run_authority authority
+                     WHERE authority.project_id = $1
+                       AND authority.thread_id = $2
+                       AND authority.run_id = $3
+                       AND authority.purge_id IS NOT NULL
+                       AND (
+                           (authority.resource_kind = ''project''
+                            AND authority.owner_user_id IS NULL)
+                           OR
+                           (authority.resource_kind IN
+                                (''former_owner'', ''account'', ''run'')
+                            AND authority.owner_user_id = $4)
+                       )
+                 )'
+            INTO retention_authorized
+            USING exact_project_id, exact_thread_id, exact_run_id,
+                  exact_owner_user_id;
+        END IF;
+        IF retention_authorized AND TG_TABLE_NAME = 'run_skill_version_refs' THEN
+            SELECT EXISTS (
+                SELECT 1
+                FROM run_asset_versions parent
+                WHERE parent.project_id = OLD.project_id
+                  AND parent.owner_user_id = OLD.owner_user_id
+                  AND parent.thread_id = OLD.thread_id
+                  AND parent.run_id = OLD.run_id
+                  AND parent.asset_kind = OLD.asset_kind
+                  AND parent.dependency_order = OLD.dependency_order
+            ) INTO ref_parent_exists;
+            IF ref_parent_exists THEN
+                RAISE EXCEPTION 'Run Skill ref cannot be deleted independently'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+        END IF;
+        IF retention_authorized THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'Run closure child deletion requires scoped retention authority'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF closure_sealed IS NOT FALSE
+       OR current_setting('deerflow.run_asset_closure_assembly', true)
+          IS DISTINCT FROM exact_run_id THEN
+        RAISE EXCEPTION 'Run closure is not open for exact assembly'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM jobs
+        WHERE project_id = exact_project_id
+          AND owner_user_id = exact_owner_user_id
+          AND run_id = exact_run_id
+          AND (
+              (status IN ('queued', 'retry_wait')
+               AND available_at <= clock_timestamp())
+              OR
+              (status IN ('leased', 'running')
+               AND lease_expires_at <= clock_timestamp())
+          )
+    ) INTO claimable_job_exists;
+    IF claimable_job_exists THEN
+        RAISE EXCEPTION 'claimable Job forbids Run closure assembly'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION verify_run_asset_closure()
+RETURNS trigger AS $$
+DECLARE
+    current_run runs%ROWTYPE;
+    asset run_asset_versions%ROWTYPE;
+    asset_count bigint;
+    minimum_dependency_order integer;
+    max_dependency_order integer;
+    ref_count bigint;
+    ref_file_count integer;
+    ref_content_size bigint;
+    invalid_secret_identity boolean;
+BEGIN
+    SELECT * INTO current_run
+    FROM runs
+    WHERE run_id = NEW.run_id;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF current_run.asset_closure_sealed IS NOT TRUE THEN
+        RAISE EXCEPTION 'Run asset closure must be sealed before commit'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    SELECT count(*), min(dependency_order), max(dependency_order)
+    INTO asset_count, minimum_dependency_order, max_dependency_order
+    FROM run_asset_versions
+    WHERE project_id = current_run.project_id
+      AND owner_user_id = current_run.owner_user_id
+      AND thread_id = current_run.thread_id
+      AND run_id = current_run.run_id;
+
+    IF asset_count = 0 THEN
+        SELECT EXISTS (
+            SELECT 1 FROM run_skill_secret_snapshots secret
+            WHERE secret.project_id = current_run.project_id
+              AND secret.owner_user_id = current_run.owner_user_id
+              AND secret.thread_id = current_run.thread_id
+              AND secret.run_id = current_run.run_id
+            UNION ALL
+            SELECT 1 FROM run_mcp_secret_snapshots secret
+            WHERE secret.project_id = current_run.project_id
+              AND secret.owner_user_id = current_run.owner_user_id
+              AND secret.thread_id = current_run.thread_id
+              AND secret.run_id = current_run.run_id
+        ) INTO invalid_secret_identity;
+        IF invalid_secret_identity
+           OR current_run.status NOT IN
+                ('success', 'error', 'timeout', 'interrupted', 'deleted') THEN
+            RAISE EXCEPTION 'only a terminal privacy-purged Run may have an empty closure'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NULL;
+    END IF;
+
+    IF minimum_dependency_order != 0
+       OR max_dependency_order != asset_count - 1 THEN
+        RAISE EXCEPTION 'Run asset dependency order must be globally continuous'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM run_asset_versions first_asset
+        WHERE first_asset.project_id = current_run.project_id
+          AND first_asset.owner_user_id = current_run.owner_user_id
+          AND first_asset.thread_id = current_run.thread_id
+          AND first_asset.run_id = current_run.run_id
+          AND first_asset.dependency_order = 0
+          AND first_asset.asset_kind = 'agent'
+    ) THEN
+        RAISE EXCEPTION 'Run asset closure must begin with an Agent'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM run_skill_secret_snapshots secret
+        WHERE secret.project_id = current_run.project_id
+          AND secret.owner_user_id = current_run.owner_user_id
+          AND secret.thread_id = current_run.thread_id
+          AND secret.run_id = current_run.run_id
+          AND NOT EXISTS (
+              SELECT 1
+              FROM run_asset_versions parent
+              WHERE parent.project_id = secret.project_id
+                AND parent.owner_user_id = secret.owner_user_id
+                AND parent.thread_id = secret.thread_id
+                AND parent.run_id = secret.run_id
+                AND parent.asset_kind = 'skill'
+                AND parent.asset_id = secret.skill_id
+                AND parent.version_id = secret.skill_version_id
+          )
+    ) INTO invalid_secret_identity;
+    IF invalid_secret_identity THEN
+        RAISE EXCEPTION 'Run Skill secret snapshot lacks its exact Skill parent'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM run_mcp_secret_snapshots secret
+        WHERE secret.project_id = current_run.project_id
+          AND secret.owner_user_id = current_run.owner_user_id
+          AND secret.thread_id = current_run.thread_id
+          AND secret.run_id = current_run.run_id
+          AND NOT EXISTS (
+              SELECT 1
+              FROM run_asset_versions parent
+              WHERE parent.project_id = secret.project_id
+                AND parent.owner_user_id = secret.owner_user_id
+                AND parent.thread_id = secret.thread_id
+                AND parent.run_id = secret.run_id
+                AND parent.asset_kind = 'mcp'
+                AND parent.asset_id = secret.mcp_server_id
+                AND parent.version_id = secret.mcp_server_version_id
+          )
+    ) INTO invalid_secret_identity;
+    IF invalid_secret_identity THEN
+        RAISE EXCEPTION 'Run MCP secret snapshot lacks its exact MCP parent'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    FOR asset IN
+        SELECT *
+        FROM run_asset_versions
+        WHERE project_id = current_run.project_id
+          AND owner_user_id = current_run.owner_user_id
+          AND thread_id = current_run.thread_id
+          AND run_id = current_run.run_id
+        ORDER BY dependency_order
+    LOOP
+        IF jsonb_typeof(asset.snapshot_json) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(asset.snapshot_json->'schema_version') IS DISTINCT FROM 'number'
+           OR jsonb_typeof(asset.snapshot_json->'kind') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(asset.snapshot_json->'scope') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(asset.snapshot_json->'asset_id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(asset.snapshot_json->'version_id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(asset.snapshot_json->'checksum') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(asset.snapshot_json->'catalog_generation') IS DISTINCT FROM 'number'
+           OR jsonb_typeof(asset.snapshot_json->'dependency_version_ids') IS DISTINCT FROM 'array'
+           OR asset.snapshot_json->>'schema_version' IS DISTINCT FROM asset.snapshot_schema_version::text
+           OR asset.snapshot_json->>'kind' IS DISTINCT FROM asset.asset_kind
+           OR asset.snapshot_json->>'scope' IS DISTINCT FROM asset.asset_scope
+           OR asset.snapshot_json->>'asset_id' IS DISTINCT FROM asset.asset_id::text
+           OR asset.snapshot_json->>'version_id' IS DISTINCT FROM asset.version_id::text
+           OR asset.snapshot_json->>'checksum' IS DISTINCT FROM asset.payload_checksum
+           OR asset.snapshot_json->>'catalog_generation' IS DISTINCT FROM asset.catalog_generation::text THEN
+            RAISE EXCEPTION 'Run asset typed identity disagrees with snapshot JSON'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+
+        IF asset.snapshot_schema_version = 4 AND asset.asset_kind != 'skill' THEN
+            RAISE EXCEPTION 'Run asset schema v4 is reserved for Skill references'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+
+        SELECT count(*), max(file_count), max(content_size_bytes)
+        INTO ref_count, ref_file_count, ref_content_size
+        FROM run_skill_version_refs ref
+        WHERE ref.project_id = asset.project_id
+          AND ref.owner_user_id = asset.owner_user_id
+          AND ref.thread_id = asset.thread_id
+          AND ref.run_id = asset.run_id
+          AND ref.asset_kind = asset.asset_kind
+          AND ref.dependency_order = asset.dependency_order;
+
+        IF asset.asset_kind = 'skill' AND asset.snapshot_schema_version = 4 THEN
+            IF ref_count != 1
+               OR octet_length(asset.snapshot_json::text) > 262144
+               OR asset.snapshot_json - 'schema_version' - 'kind' - 'scope'
+                    - 'asset_id' - 'version_id' - 'checksum'
+                    - 'catalog_generation' - 'dependency_version_ids'
+                    - 'skill' != '{}'::jsonb
+               OR jsonb_typeof(asset.snapshot_json->'skill') IS DISTINCT FROM 'object'
+               OR (asset.snapshot_json->'skill') - 'source' - 'file_count'
+                    - 'content_size_bytes' != '{}'::jsonb
+               OR jsonb_typeof(asset.snapshot_json->'skill'->'source') IS DISTINCT FROM 'string'
+               OR jsonb_typeof(asset.snapshot_json->'skill'->'file_count') IS DISTINCT FROM 'number'
+               OR jsonb_typeof(asset.snapshot_json->'skill'->'content_size_bytes') IS DISTINCT FROM 'number'
+               OR asset.snapshot_json->'skill'->>'source' IS DISTINCT FROM 'skill_version_ref'
+               OR asset.snapshot_json->'skill'->>'file_count' IS DISTINCT FROM ref_file_count::text
+               OR asset.snapshot_json->'skill'->>'content_size_bytes' IS DISTINCT FROM ref_content_size::text
+               OR EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(asset.snapshot_json->'dependency_version_ids') value
+                    WHERE jsonb_typeof(value) IS DISTINCT FROM 'string'
+                       OR value #>> '{}' !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+               ) THEN
+                RAISE EXCEPTION 'Run Skill v4 manifest and exact ref are incomplete'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+        ELSIF ref_count != 0 THEN
+            RAISE EXCEPTION 'only a Skill v4 parent may own an exact Skill ref'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+    END LOOP;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_runs_asset_closure_seal_transition BEFORE UPDATE OF asset_closure_sealed ON runs FOR EACH ROW EXECUTE FUNCTION enforce_run_asset_closure_seal_transition();
+
+CREATE TRIGGER trg_run_asset_versions_closure_mutation BEFORE INSERT OR UPDATE OR DELETE ON run_asset_versions FOR EACH ROW EXECUTE FUNCTION gate_run_closure_child_mutation();
+
+CREATE TRIGGER trg_run_skill_version_refs_closure_mutation BEFORE INSERT OR UPDATE OR DELETE ON run_skill_version_refs FOR EACH ROW EXECUTE FUNCTION gate_run_closure_child_mutation();
+
+CREATE TRIGGER trg_run_skill_secret_snapshots_closure_mutation BEFORE INSERT OR UPDATE OR DELETE ON run_skill_secret_snapshots FOR EACH ROW EXECUTE FUNCTION gate_run_closure_child_mutation();
+
+CREATE TRIGGER trg_run_mcp_secret_snapshots_closure_mutation BEFORE INSERT OR UPDATE OR DELETE ON run_mcp_secret_snapshots FOR EACH ROW EXECUTE FUNCTION gate_run_closure_child_mutation();
+
+CREATE CONSTRAINT TRIGGER trg_runs_asset_closure_complete AFTER INSERT OR UPDATE ON runs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION verify_run_asset_closure();
 
 
 
@@ -3599,7 +4078,7 @@ INSERT INTO alembic_version (version_num) VALUES ('schema_v1');
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 96 static tables and 1165 columns.
+-- Coverage: 97 static tables and 1194 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE project_invitation_rate_limits IS '记录项目邀请码失败尝试的限流窗口。';
@@ -3623,6 +4102,9 @@ COMMENT ON COLUMN users.needs_setup IS '用户：是否需要初始化。';
 COMMENT ON COLUMN users.token_version IS '用户：令牌版本号。';
 COMMENT ON COLUMN users.memory_enabled IS '用户：是否启用用户记忆功能。';
 COMMENT ON COLUMN users.preferences_version IS '用户：偏好版本号。';
+COMMENT ON COLUMN users.private_retention_state IS '用户：私有保留状态。';
+COMMENT ON COLUMN users.private_retention_generation IS '用户：私有保留代次。';
+COMMENT ON COLUMN users.private_retention_effective_at IS '用户：私有保留生效时间。';
 
 COMMENT ON TABLE runs IS '保存一次智能体运行的身份、状态、用量与执行租约。';
 COMMENT ON COLUMN runs.run_id IS '智能体运行：运行标识。';
@@ -3661,12 +4143,17 @@ COMMENT ON COLUMN runs.cancel_reason IS '智能体运行：取消原因。';
 COMMENT ON COLUMN runs.authorization_cancel_requested_at IS '智能体运行：授权取消请求时间。';
 COMMENT ON COLUMN runs.authorization_cancel_reason IS '智能体运行：授权取消原因。';
 COMMENT ON COLUMN runs.finalization_status IS '智能体运行：收尾状态。';
+COMMENT ON COLUMN runs.asset_closure_sealed IS '智能体运行：资产闭包封存。';
 
 COMMENT ON TABLE jobs IS '保存 Worker 可领取、续租、重试和结算的持久化任务。';
 COMMENT ON COLUMN jobs.id IS '后台任务：主键标识。';
 COMMENT ON COLUMN jobs.job_type IS '后台任务：任务类型。';
 COMMENT ON COLUMN jobs.project_id IS '后台任务：所属项目标识。';
 COMMENT ON COLUMN jobs.owner_user_id IS '后台任务：私有数据所有者的用户标识。';
+COMMENT ON COLUMN jobs.owner_private_generation IS '后台任务：所有者私有代次。';
+COMMENT ON COLUMN jobs.retention_resource_kind IS '后台任务：保留资源类型。';
+COMMENT ON COLUMN jobs.retention_effective_at IS '后台任务：保留生效时间。';
+COMMENT ON COLUMN jobs.retention_membership_id IS '后台任务：保留成员关系标识。';
 COMMENT ON COLUMN jobs.namespace IS '后台任务：私有数据命名空间。';
 COMMENT ON COLUMN jobs.run_id IS '后台任务：运行标识。';
 COMMENT ON COLUMN jobs.automation_occurrence_id IS '后台任务：自动化触发实例标识。';
@@ -3708,6 +4195,7 @@ COMMENT ON COLUMN worker_nodes.id IS '工作节点：主键标识。';
 COMMENT ON COLUMN worker_nodes.version IS '工作节点：记录版本号。';
 COMMENT ON COLUMN worker_nodes.capabilities_json IS '工作节点：工作节点能力列表。';
 COMMENT ON COLUMN worker_nodes.max_concurrent_jobs IS '工作节点：可并发执行的任务上限。';
+COMMENT ON COLUMN worker_nodes.execution_domain_affinity IS '工作节点：执行域私有快照的不可逆亲和摘要。';
 COMMENT ON COLUMN worker_nodes.draining IS '工作节点：是否处于排空状态。';
 COMMENT ON COLUMN worker_nodes.started_at IS '工作节点：开始时间。';
 COMMENT ON COLUMN worker_nodes.heartbeat_at IS '工作节点：心跳时间。';
@@ -3791,6 +4279,7 @@ COMMENT ON COLUMN job_attempts.attempt_number IS '任务尝试：尝试编号。
 COMMENT ON COLUMN job_attempts.worker_id IS '任务尝试：工作节点标识。';
 COMMENT ON COLUMN job_attempts.lease_token_hash IS '任务尝试：执行租约令牌的不可逆哈希。';
 COMMENT ON COLUMN job_attempts.started_at IS '任务尝试：开始时间。';
+COMMENT ON COLUMN job_attempts.execution_started_at IS '任务尝试：执行开始时间。';
 COMMENT ON COLUMN job_attempts.heartbeat_at IS '任务尝试：心跳时间。';
 COMMENT ON COLUMN job_attempts.finished_at IS '任务尝试：完成时间。';
 COMMENT ON COLUMN job_attempts.outcome IS '任务尝试：执行结果。';
@@ -4298,6 +4787,7 @@ COMMENT ON COLUMN run_asset_versions.asset_id IS '运行资产快照：资产标
 COMMENT ON COLUMN run_asset_versions.version_id IS '运行资产快照：版本标识。';
 COMMENT ON COLUMN run_asset_versions.payload_checksum IS '运行资产快照：载荷内容校验和。';
 COMMENT ON COLUMN run_asset_versions.catalog_generation IS '运行资产快照：目录代次。';
+COMMENT ON COLUMN run_asset_versions.snapshot_schema_version IS '运行资产快照：快照架构版本号。';
 COMMENT ON COLUMN run_asset_versions.created_at IS '运行资产快照：记录创建时间。';
 COMMENT ON COLUMN run_asset_versions.snapshot_json IS '运行资产快照：准入时冻结的完整且不含明文凭据的资产内容。';
 
@@ -4391,11 +4881,31 @@ COMMENT ON COLUMN skill_versions.scan_decision IS '技能版本：安全扫描�
 COMMENT ON COLUMN skill_versions.scan_summary IS '技能版本：安全扫描摘要。';
 COMMENT ON COLUMN skill_versions.supersedes_version_id IS '技能版本：替代目标版本标识。';
 COMMENT ON COLUMN skill_versions.payload_checksum IS '技能版本：载荷内容校验和。';
+COMMENT ON COLUMN skill_versions.file_count IS '技能版本：文件数量。';
+COMMENT ON COLUMN skill_versions.content_size_bytes IS '技能版本：内容大小字节数。';
+COMMENT ON COLUMN skill_versions.files_sealed IS '技能版本：文件封存。';
 COMMENT ON COLUMN skill_versions.created_by_user_id IS '技能版本：创建操作的用户标识。';
 COMMENT ON COLUMN skill_versions.created_at IS '技能版本：记录创建时间。';
 COMMENT ON COLUMN skill_versions.revoked_at IS '技能版本：不可逆治理撤销时间。';
 COMMENT ON COLUMN skill_versions.revoked_by_user_id IS '技能版本：执行撤销的用户标识。';
 COMMENT ON COLUMN skill_versions.revocation_reason_code IS '技能版本：撤销原因代码。';
+
+COMMENT ON TABLE run_skill_version_refs IS '冻结一次运行准入时采用的精确技能版本、校验和与规模事实。';
+COMMENT ON COLUMN run_skill_version_refs.project_id IS '运行技能版本引用：所属项目标识。';
+COMMENT ON COLUMN run_skill_version_refs.owner_user_id IS '运行技能版本引用：私有数据所有者的用户标识。';
+COMMENT ON COLUMN run_skill_version_refs.thread_id IS '运行技能版本引用：线程标识。';
+COMMENT ON COLUMN run_skill_version_refs.run_id IS '运行技能版本引用：运行标识。';
+COMMENT ON COLUMN run_skill_version_refs.asset_kind IS '运行技能版本引用：资产类型。';
+COMMENT ON COLUMN run_skill_version_refs.dependency_order IS '运行技能版本引用：依赖顺序。';
+COMMENT ON COLUMN run_skill_version_refs.asset_scope IS '运行技能版本引用：资产范围。';
+COMMENT ON COLUMN run_skill_version_refs.snapshot_schema_version IS '运行技能版本引用：快照架构版本号。';
+COMMENT ON COLUMN run_skill_version_refs.skill_project_id IS '运行技能版本引用：技能项目标识。';
+COMMENT ON COLUMN run_skill_version_refs.skill_id IS '运行技能版本引用：技能标识。';
+COMMENT ON COLUMN run_skill_version_refs.skill_version_id IS '运行技能版本引用：技能版本标识。';
+COMMENT ON COLUMN run_skill_version_refs.payload_checksum IS '运行技能版本引用：载荷内容校验和。';
+COMMENT ON COLUMN run_skill_version_refs.file_count IS '运行技能版本引用：文件数量。';
+COMMENT ON COLUMN run_skill_version_refs.content_size_bytes IS '运行技能版本引用：内容大小字节数。';
+COMMENT ON COLUMN run_skill_version_refs.created_at IS '运行技能版本引用：记录创建时间。';
 
 COMMENT ON TABLE run_runtime_policy_snapshots IS '冻结一次运行采用的系统运行策略版本。';
 COMMENT ON COLUMN run_runtime_policy_snapshots.project_id IS '运行策略快照：所属项目标识。';

@@ -101,6 +101,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "run_model_config_snapshots",
     "run_runtime_policy_snapshots",
     "run_skill_secret_snapshots",
+    "run_skill_version_refs",
     "runs",
     "scheduled_task_runs",
     "scheduled_tasks",

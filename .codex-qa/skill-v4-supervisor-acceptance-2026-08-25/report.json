@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-25T10:46:16+08:00",
+  "contains_secrets": false,
+  "probe": "required_scheduler_child_exit_and_launchd_full_stack_recovery",
+  "old_supervisor_pid": 26344,
+  "terminated_scheduler_pid": 26536,
+  "new_supervisor_pid": 26887,
+  "old_required_children_gone": true,
+  "new_required_roles": {
+    "gateway_pid": 26922,
+    "worker_pid": 26983,
+    "scheduler_pid": 27005,
+    "frontend_pid": 27031,
+    "nginx_pid": 27074
+  },
+  "post_recovery": {
+    "gateway_health": "healthy",
+    "local_execution_readiness": "ready",
+    "private_run_worker_processes": 1,
+    "private_run_worker_capacity": 8,
+    "writer_cohort_members": 2,
+    "writer_mode": "v4_reference"
+  },
+  "assertions": {
+    "required_child_exit_detected": true,
+    "old_supervisor_exited": true,
+    "all_old_required_children_exited": true,
+    "launchd_started_new_supervisor": true,
+    "all_five_required_roles_restarted": true,
+    "gateway_recovered": true,
+    "worker_1x8_recovered": true,
+    "writer_cohort_recovered": true
+  },
+  "passed": true
+}

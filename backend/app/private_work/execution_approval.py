@@ -515,7 +515,15 @@ async def _asset_closure(
 ]:
     assets = (
         await session.execute(
-            sa.select(RunAssetVersionRow)
+            sa.select(
+                RunAssetVersionRow.asset_kind,
+                RunAssetVersionRow.dependency_order,
+                RunAssetVersionRow.asset_scope,
+                RunAssetVersionRow.asset_id,
+                RunAssetVersionRow.version_id,
+                RunAssetVersionRow.payload_checksum,
+                RunAssetVersionRow.catalog_generation,
+            )
             .where(
                 RunAssetVersionRow.project_id == project_id,
                 RunAssetVersionRow.owner_user_id == owner_user_id,
@@ -526,7 +534,7 @@ async def _asset_closure(
                 RunAssetVersionRow.dependency_order,
             ),
         )
-    ).scalars()
+    ).all()
     asset_values = tuple(
         (
             row.asset_kind,

@@ -60,13 +60,16 @@ REQUIRED_FUNCTIONS = frozenset(
         "bump_asset_catalog_generation",
         "cleanup_run_event_invariant",
         "drop_run_event_partitions_before",
+        "enforce_run_asset_closure_seal_transition",
         "enforce_run_event_identity_immutable",
         "enforce_scheduled_task_agent_project",
         "enforce_shared_asset_version_state_transition",
+        "enforce_skill_version_files_seal_transition",
         "enforce_stream_terminal_invariant",
         "ensure_run_events_month_partition",
         "ensure_system_binding_eligible_version",
         "enforce_system_skill_version_revocation",
+        "gate_run_closure_child_mutation",
         "prevent_bound_mcp_published_version_downgrade",
         "prevent_memory_document_sections_mutation",
         "prevent_asset_version_child_mutation",
@@ -77,6 +80,8 @@ REQUIRED_FUNCTIONS = frozenset(
         "reject_direct_run_runtime_policy_snapshot_mutation",
         "set_schema_v1_updated_at",
         "set_threads_meta_updated_at",
+        "verify_run_asset_closure",
+        "verify_skill_version_file_facts",
     }
 )
 _PARAMETERIZED_REQUIRED_FUNCTIONS = frozenset(
@@ -104,40 +109,40 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=95,
-        digest="3206643a11835c0e3344f01ff4cd1ccf52de91075d1dd23073863a8670ebea75",
+        count=96,
+        digest="ed6359a204cd7caa2c2ff2cc79cb66234cc54a47f7079807d3f27a5e0d1ed217",
     ),
     "columns": CatalogInvariant(
-        count=1164,
-        digest="39fc8347769d543a00c51e23dee76a17f598fd9a024483737c0f07e92f99a161",
+        count=1193,
+        digest="665e3dc823dae573880a261e2a7c2f473cc858a4c7d5a684b26a4f52bcefb828",
     ),
     "table_comments": CatalogInvariant(
-        count=96,
-        digest="2cb1e77059219e3dc8603abc1b92955ae7658776e9dfd6d5634f054a8918185d",
+        count=97,
+        digest="cbce05b685fab0cccd6518779f45ddd15e177790069e9e07357b3e2900052889",
     ),
     "column_comments": CatalogInvariant(
-        count=1165,
-        digest="e6643fc8868b22bc7fa6ba46b8deaa9149635ff95a83b4958dcafa4b2e4939a6",
+        count=1194,
+        digest="d4396b6d543e29c96ae11a4f6ceb73202fd4d0a21f21c2a0e342f2fd70ee48eb",
     ),
     "sequences": CatalogInvariant(
         count=4,
         digest="73cb0d46bc3afc9585d0959b1d57d093621113408f2629dad9a6b027550af894",
     ),
     "constraints": CatalogInvariant(
-        count=863,
-        digest="58449ffbbd7d175f82f964cb7709b2ff6fb804d00084e9b015a5fe1ddc6193c5",
+        count=893,
+        digest="4725a8c82ea91d26ed4d83582cc2ddecd3faa5fc63240d85a060fb2cb7fb87f0",
     ),
     "indexes": CatalogInvariant(
-        count=310,
-        digest="d447223088748a00aa45cb2ed35aa8c101b440e01ca31f11e25ebab911aa0698",
+        count=322,
+        digest="1e7faae9d8a04b7bb79b1e4f877934f302b190968b0c58f1e20e10efba8baafd",
     ),
     "functions": CatalogInvariant(
-        count=20,
-        digest="dc672a38b73f7aac37cea2265a55d1f49d12ed7be6b299836a14dd79521c26c3",
+        count=25,
+        digest="882603a6f23c2db8b3ef8a59a4815d2a7156ce8dd6372e36cbe10c5fe708cd02",
     ),
     "triggers": CatalogInvariant(
-        count=81,
-        digest="bcc95a8f600f9c572d13df08b876f9ebc70d3e4c5872223cb0b7840db822c58e",
+        count=89,
+        digest="958d1173e45752aa7686b23ecec5baf6b088145c0b6d5edca11bbd4d84b38a2e",
     ),
 }
 

@@ -71,11 +71,16 @@ import json
 import os
 import re
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.callbacks import BaseCallbackHandler, CallbackManagerForLLMRun
+from _replay_fixture import replay_fault_barriers_from_environment
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    BaseCallbackHandler,
+    CallbackManagerForLLMRun,
+)
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, messages_from_dict
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
@@ -348,7 +353,11 @@ class ReplayChatModel(BaseChatModel):
             tags=getattr(run_manager, "tags", None),
         )
 
-    def _match(self, messages: list[BaseMessage], run_manager: CallbackManagerForLLMRun | None = None) -> _ReplayTurn:
+    def _match_after_barrier(
+        self,
+        messages: list[BaseMessage],
+        run_manager: CallbackManagerForLLMRun | AsyncCallbackManagerForLLMRun | None = None,
+    ) -> _ReplayTurn:
         caller = self._caller_from_run_manager(run_manager)
         key = hash_replay_input(messages, caller=caller)
         bucket = self._table.get(key)
@@ -376,6 +385,26 @@ class ReplayChatModel(BaseChatModel):
             )
         return bucket.popleft()
 
+    def _match(
+        self,
+        messages: list[BaseMessage],
+        run_manager: CallbackManagerForLLMRun | None = None,
+    ) -> _ReplayTurn:
+        barriers = replay_fault_barriers_from_environment()
+        if barriers is not None:
+            barriers.wait("model")
+        return self._match_after_barrier(messages, run_manager)
+
+    async def _amatch(
+        self,
+        messages: list[BaseMessage],
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+    ) -> _ReplayTurn:
+        barriers = replay_fault_barriers_from_environment()
+        if barriers is not None:
+            await barriers.wait_async("model")
+        return self._match_after_barrier(messages, run_manager)
+
     def _generate(
         self,
         messages: list[BaseMessage],
@@ -385,6 +414,34 @@ class ReplayChatModel(BaseChatModel):
     ) -> ChatResult:
         return ChatResult(generations=[ChatGeneration(message=self._match(messages, run_manager).message)])
 
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, kwargs
+        turn = await self._amatch(messages, run_manager)
+        return ChatResult(generations=[ChatGeneration(message=turn.message)])
+
+    @staticmethod
+    def _chunks(turn: _ReplayTurn) -> Iterator[ChatGenerationChunk]:
+        message = turn.message
+        text = message.content if isinstance(message.content, str) else ""
+        text_chunks = tuple(text[index : index + turn.text_chunk_chars] for index in range(0, len(text), turn.text_chunk_chars)) if turn.text_chunk_chars is not None else (message.content,)
+        for index, text_chunk in enumerate(text_chunks):
+            is_last_chunk = index == len(text_chunks) - 1
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=text_chunk,
+                    tool_calls=message.tool_calls if turn.text_chunk_chars is None else [],
+                    additional_kwargs=message.additional_kwargs if index == 0 else {},
+                    id=message.id,
+                    usage_metadata=(message.usage_metadata if is_last_chunk else None),
+                )
+            )
+
     def _stream(
         self,
         messages: list[BaseMessage],
@@ -393,20 +450,25 @@ class ReplayChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         turn = self._match(messages, run_manager)
-        message = turn.message
-        text = message.content if isinstance(message.content, str) else ""
-        text_chunks = tuple(text[index : index + turn.text_chunk_chars] for index in range(0, len(text), turn.text_chunk_chars)) if turn.text_chunk_chars is not None else (message.content,)
-        for index, text_chunk in enumerate(text_chunks):
-            chunk = ChatGenerationChunk(
-                message=AIMessageChunk(
-                    content=text_chunk,
-                    tool_calls=message.tool_calls if turn.text_chunk_chars is None else [],
-                    additional_kwargs=message.additional_kwargs if index == 0 else {},
-                    id=message.id,
-                )
-            )
+        for chunk in self._chunks(turn):
+            text_chunk = chunk.message.content
             if run_manager is not None and isinstance(text_chunk, str) and text_chunk:
                 run_manager.on_llm_new_token(text_chunk, chunk=chunk)
+            yield chunk
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        del stop, kwargs
+        turn = await self._amatch(messages, run_manager)
+        for chunk in self._chunks(turn):
+            text_chunk = chunk.message.content
+            if run_manager is not None and isinstance(text_chunk, str) and text_chunk:
+                await run_manager.on_llm_new_token(text_chunk, chunk=chunk)
             yield chunk
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> Runnable:  # type: ignore[override]

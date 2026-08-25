@@ -15,6 +15,7 @@ from app.personalization.repository import (
     AccountPersonalizationNotFound,
     AccountPersonalizationRepository,
 )
+from app.private_work.account_private_lifecycle import AccountPrivateLifecycleClosed
 from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
@@ -379,7 +380,16 @@ class MemoryDreamPrepareJobHandler:
                     )
                     project_context.require(Capability.PRIVATE_WORK_CREATE)
                     project_context.require(Capability.SHARED_ASSETS_EXECUTE)
-                except (ProjectForbidden, ProjectNotFound, ValueError):
+                    account_private_generation = await self._admission.require_account_private_generation_after_membership(
+                        session,
+                        work.scope,
+                    )
+                except (
+                    AccountPrivateLifecycleClosed,
+                    ProjectForbidden,
+                    ProjectNotFound,
+                    ValueError,
+                ):
                     await self._repository(session).settle_cancelled(
                         work.scope,
                         job_id=claim.job_id,
@@ -421,6 +431,7 @@ class MemoryDreamPrepareJobHandler:
                         work.scope,
                         trigger="manual_dream",
                         now=now,
+                        account_private_generation=account_private_generation,
                     )
                 except MemoryDreamModelUnavailable:
                     await repository.retry_or_dead(

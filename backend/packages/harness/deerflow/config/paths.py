@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import shutil
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from deerflow.config.runtime_paths import runtime_home
 
@@ -88,6 +88,19 @@ def join_host_path(base: str, *parts: str) -> str:
     return _join_host_path(base, *parts)
 
 
+def _validated_host_path(
+    value: str,
+) -> PurePosixPath | PureWindowsPath:
+    """Parse one absolute daemon-view path without touching that filesystem."""
+
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+        raise ValueError("Invalid host materialization path")
+    path = PureWindowsPath(value) if re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\\\") or "\\" in value else PurePosixPath(value)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("Invalid host materialization path")
+    return path
+
+
 class Paths:
     """
     Centralized path configuration for ActWeave application data.
@@ -146,6 +159,98 @@ class Paths:
             return Path(env_home).resolve()
 
         return _default_local_base_dir()
+
+    def run_skill_materialization_root(self) -> Path:
+        """Dedicated Worker root for exact, per-attempt Skill trees."""
+
+        return self.base_dir / "run-skill-materializations"
+
+    def host_run_skill_materialization_root(self) -> str:
+        """Docker-daemon view of the dedicated Skill materialization root."""
+
+        root = _join_host_path(
+            self._host_base_dir_str(),
+            "run-skill-materializations",
+        )
+        _validated_host_path(root)
+        return root
+
+    def host_run_skill_materialization_path(
+        self,
+        worker_path: Path,
+    ) -> str:
+        """Translate one exact Worker-contained path into the daemon view."""
+
+        if not isinstance(worker_path, Path) or not worker_path.is_absolute() or ".." in worker_path.parts:
+            raise ValueError("Invalid Worker materialization path")
+        try:
+            trusted_root = self.run_skill_materialization_root().resolve(
+                strict=True,
+            )
+            resolved = worker_path.resolve(strict=True)
+            relative = resolved.relative_to(trusted_root)
+        except (OSError, ValueError):
+            raise ValueError("Worker materialization path is outside the trusted root") from None
+        if not relative.parts or worker_path != resolved:
+            raise ValueError("Worker materialization path is outside the trusted root")
+        return _join_host_path(
+            self.host_run_skill_materialization_root(),
+            *relative.parts,
+        )
+
+    def worker_run_skill_materialization_path(
+        self,
+        host_path: str,
+    ) -> Path:
+        """Map a daemon-view path back to its exact Worker-visible source."""
+
+        candidate = _validated_host_path(host_path)
+        trusted_host_root = _validated_host_path(
+            self.host_run_skill_materialization_root(),
+        )
+        if type(candidate) is not type(trusted_host_root):
+            raise ValueError("Host materialization path is outside the trusted root")
+        try:
+            relative = candidate.relative_to(trusted_host_root)
+        except ValueError:
+            raise ValueError("Host materialization path is outside the trusted root") from None
+        if not relative.parts:
+            raise ValueError("Host materialization path is outside the trusted root")
+        worker_path = self.run_skill_materialization_root().joinpath(
+            *relative.parts,
+        )
+        try:
+            trusted_worker_root = self.run_skill_materialization_root().resolve(
+                strict=True,
+            )
+            resolved = worker_path.resolve(strict=True)
+            resolved.relative_to(trusted_worker_root)
+        except (OSError, ValueError):
+            raise ValueError("Host materialization path has no trusted Worker source") from None
+        return resolved
+
+    def run_skill_host_mapping_ready(self) -> bool:
+        """Return whether the configured Worker/daemon path mapping is usable."""
+
+        sandbox_host = os.getenv("ACT_WEAVE_SANDBOX_HOST", "localhost").strip().lower()
+        if sandbox_host == "host.docker.internal" and not os.getenv("ACT_WEAVE_HOST_BASE_DIR"):
+            return False
+        try:
+            _validated_host_path(self.host_run_skill_materialization_root())
+        except ValueError:
+            return False
+        return True
+
+    def run_skill_uses_distinct_host_view(self) -> bool:
+        """Return whether the daemon resolves a different absolute root."""
+
+        worker_root = _validated_host_path(
+            str(self.run_skill_materialization_root()),
+        )
+        host_root = _validated_host_path(
+            self.host_run_skill_materialization_root(),
+        )
+        return type(worker_root) is not type(host_root) or worker_root != host_root
 
     @property
     def user_md_file(self) -> Path:

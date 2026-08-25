@@ -10,6 +10,15 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import func, select, update
 from support.private_thread_seed import TEST_MODEL_REF, seed_private_thread_database
+from support.run_closure import (
+    add_legacy_test_run_asset,
+    begin_test_run_closure,
+    seal_test_run_closure,
+)
+from support.skill_version_fixture import (
+    assemble_and_seal_skill_version,
+    sealed_skill_version_fixture,
+)
 
 from app.audit.service import AuditService, _bind_worker_audit_process
 from app.audit.sinks import TrustedOperationAuditSink
@@ -75,6 +84,7 @@ from deerflow.secrets import SecretEnvelope, SecretKey
 class _ProjectSecretFixture:
     skill_id: uuid.UUID
     skill_version_id: uuid.UUID
+    skill_payload_checksum: str
     mcp_server_id: uuid.UUID
     mcp_server_version_id: uuid.UUID
     mcp_slot_id: uuid.UUID
@@ -112,8 +122,10 @@ async def _add_skill_secret_pair(
         revision=1,
         created_by_user_id=str(context.user_id),
     )
+    version_id = uuid.uuid4()
+    version_fixture = sealed_skill_version_fixture(version_id, name=slug)
     version = SkillVersionRow(
-        id=uuid.uuid4(),
+        id=version_id,
         skill_id=skill.id,
         version_number=1,
         description="Secret retention",
@@ -128,11 +140,15 @@ async def _add_skill_secret_pair(
         ],
         scan_decision="allow",
         scan_summary={"rule_ids": []},
-        payload_checksum="a" * 64,
+        payload_checksum=version_fixture.payload_checksum,
+        file_count=version_fixture.file_count,
+        content_size_bytes=version_fixture.content_size_bytes,
+        files_sealed=False,
         created_by_user_id=str(context.user_id),
     )
     session.add_all((skill, version))
     await session.flush()
+    await assemble_and_seal_skill_version(session, version_fixture)
     skill.current_version_id = version.id
     store = SkillSecretStore(session)
     for value in ("skill-secret-one", "skill-secret-two"):
@@ -296,6 +312,7 @@ async def _add_all_domain_secrets(session, context: ProjectContext) -> _ProjectS
     return _ProjectSecretFixture(
         skill_id=skill.id,
         skill_version_id=skill_version.id,
+        skill_payload_checksum=skill_version.payload_checksum,
         mcp_server_id=mcp.id,
         mcp_server_version_id=mcp_version.id,
         mcp_slot_id=_slot.id,
@@ -383,56 +400,52 @@ async def _add_run_asset_snapshots(
         )
     )
     await session.flush()
-    session.add(
-        RunRow(
-            run_id=run_id,
-            thread_id=thread_id,
-            assistant_id=str(seed.project_agent_id),
-            owner_user_id=str(context.user_id),
-            status="success",
-            model_name="retention-test-model",
-            multitask_strategy="reject",
-            metadata_json={},
-            kwargs_json={},
-            origin_trace_id=uuid.uuid4().hex,
-            project_id=context.project_id,
-            finalization_status="complete",
-        )
+    run = RunRow(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id=str(seed.project_agent_id),
+        owner_user_id=str(context.user_id),
+        status="success",
+        model_name="retention-test-model",
+        multitask_strategy="reject",
+        metadata_json={},
+        kwargs_json={},
+        origin_trace_id=uuid.uuid4().hex,
+        project_id=context.project_id,
+        finalization_status="complete",
     )
-    await session.flush()
-    session.add_all(
-        (
-            RunAssetVersionRow(
-                project_id=context.project_id,
-                owner_user_id=str(context.user_id),
-                thread_id=thread_id,
-                run_id=run_id,
-                asset_kind="skill",
-                dependency_order=0,
-                asset_scope="project",
-                asset_id=fixture.skill_id,
-                version_id=fixture.skill_version_id,
-                payload_checksum="a" * 64,
-                catalog_generation=1,
-                snapshot_json={},
-            ),
-            RunAssetVersionRow(
-                project_id=context.project_id,
-                owner_user_id=str(context.user_id),
-                thread_id=thread_id,
-                run_id=run_id,
-                asset_kind="mcp",
-                dependency_order=0,
-                asset_scope="project",
-                asset_id=fixture.mcp_server_id,
-                version_id=fixture.mcp_server_version_id,
-                payload_checksum="b" * 64,
-                catalog_generation=1,
-                snapshot_json={},
-            ),
-        )
+    await begin_test_run_closure(session, run)
+    add_legacy_test_run_asset(
+        session,
+        run,
+        asset_kind="agent",
+        dependency_order=0,
+        asset_id=seed.project_agent_id,
+        version_id=uuid.uuid4(),
+        payload_checksum="c" * 64,
+        catalog_generation=1,
     )
-    await session.flush()
+    add_legacy_test_run_asset(
+        session,
+        run,
+        asset_kind="skill",
+        dependency_order=1,
+        asset_id=fixture.skill_id,
+        version_id=fixture.skill_version_id,
+        payload_checksum=fixture.skill_payload_checksum,
+        catalog_generation=1,
+    )
+    add_legacy_test_run_asset(
+        session,
+        run,
+        asset_kind="mcp",
+        dependency_order=2,
+        asset_id=fixture.mcp_server_id,
+        version_id=fixture.mcp_server_version_id,
+        payload_checksum="b" * 64,
+        catalog_generation=1,
+    )
+    await seal_test_run_closure(session, run)
     return run_id
 
 
@@ -586,6 +599,12 @@ async def test_project_pending_deletion_restore_and_final_purge_secret_ownership
         deletion_effective_at = now - timedelta(seconds=1)
         async with seed.factory() as session, session.begin():
             await session.execute(update(ProjectRow).where(ProjectRow.id == context.project_id).values(deletion_effective_at=deletion_effective_at))
+            project_generation = await session.scalar(
+                select(ProjectRow.membership_version).where(
+                    ProjectRow.id == context.project_id,
+                )
+            )
+            assert isinstance(project_generation, int)
         keyring = AuditHmacKeyring("retention-test", {"retention-test": b"a" * 32})
         audit_service = AuditService(seed.factory, keyring)
         purger = RetentionPurger(
@@ -606,6 +625,7 @@ async def test_project_pending_deletion_restore_and_final_purge_secret_ownership
         result = await purger.purge(
             RetentionCandidate.project(
                 project_id=context.project_id,
+                project_generation=project_generation,
                 deletion_effective_at=deletion_effective_at,
                 idempotency_key=f"project-secret-retention:{context.project_id}",
                 request_id="project-secret-final-purge",

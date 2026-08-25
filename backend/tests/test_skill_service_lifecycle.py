@@ -288,6 +288,8 @@ class _Repository:
             )
         if row.created_at is None:
             row.created_at = datetime.now(UTC)
+        assert row.files_sealed is False
+        row.files_sealed = True
         record = SkillVersionRecord(row=row, files=tuple(files))
         self.store.versions[row.id] = record
         return record
@@ -430,6 +432,30 @@ async def _create_candidate(
         expected_asset_version=1,
     )
     return asset, harness.store.versions[version.id]
+
+
+@pytest.mark.asyncio
+async def test_version_creation_persists_sealed_archive_facts(
+    harness: _Harness,
+) -> None:
+    actor = _admin_context()
+    manifest = b"---\nname: facts-skill\ndescription: Facts skill\n---\n\nUse facts.\n"
+    reference = b"three bytes are not enough"
+    files = (
+        SkillArchiveFile("SKILL.md", manifest, "text/markdown"),
+        SkillArchiveFile("references/fact.txt", reference, "text/plain"),
+    )
+
+    _asset, record = await _create_candidate(
+        harness,
+        actor,
+        "facts-skill",
+        files=files,
+    )
+
+    assert record.row.file_count == 2
+    assert record.row.content_size_bytes == len(manifest) + len(reference)
+    assert record.row.files_sealed is True
 
 
 @pytest.mark.asyncio

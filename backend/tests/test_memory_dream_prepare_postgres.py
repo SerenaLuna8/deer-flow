@@ -43,6 +43,7 @@ from deerflow.persistence.private_work.memory_dream_prepare_repository import (
 )
 from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 
 def _owner_ref(_owner_user_id: str) -> JobOwnerRef:
@@ -109,6 +110,10 @@ async def _admit(
         jobs=_jobs(session),
     ).admit(
         _scope(seed),
+        account_private_generation=AccountPrivateGeneration(
+            owner_user_id=seed.owner_a.resource_scope.owner_user_id,
+            generation=1,
+        ),
         thread_id=thread_id,
         operation_id=operation_id,
         request_id="memory-dream-prepare-postgres",
@@ -307,6 +312,10 @@ async def _settled_prepare_with_queued_child(
             jobs=_jobs(session),
         ).admit_dream(
             _scope(seed),
+            account_private_generation=AccountPrivateGeneration(
+                owner_user_id=seed.owner_a.resource_scope.owner_user_id,
+                generation=1,
+            ),
             trigger="manual_dream",
             frozen=frozen,
             initial_content=EMPTY_MEMORY_DOCUMENT,
@@ -659,6 +668,10 @@ async def test_prepare_queued_child_settles_parent_successfully(
                 jobs=_jobs(session),
             ).admit_dream(
                 _scope(seed),
+                account_private_generation=AccountPrivateGeneration(
+                    owner_user_id=seed.owner_a.resource_scope.owner_user_id,
+                    generation=1,
+                ),
                 trigger="manual_dream",
                 frozen=frozen,
                 initial_content=EMPTY_MEMORY_DOCUMENT,
@@ -973,6 +986,10 @@ async def test_prepare_final_and_admission_share_thread_then_row_lock_order(
                     jobs=_jobs(session),
                 ).admit(
                     _scope(seed),
+                    account_private_generation=AccountPrivateGeneration(
+                        owner_user_id=seed.owner_a.resource_scope.owner_user_id,
+                        generation=1,
+                    ),
                     thread_id=thread_id,
                     operation_id=uuid.uuid4(),
                     request_id="memory-dream-prepare-interleave",

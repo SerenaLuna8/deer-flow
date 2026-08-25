@@ -8,6 +8,10 @@ from dataclasses import dataclass
 import pytest
 from sqlalchemy import exists, select
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
+from support.skill_version_fixture import (
+    assemble_and_seal_skill_version,
+    sealed_skill_version_fixture,
+)
 
 from app.projects.context import ProjectContext
 from app.shared_assets.binding_service import BindingService
@@ -70,7 +74,18 @@ async def _seed_skill_pairs(
             session.add_all((project_skill, system_skill))
             await session.flush()
 
+            project_version_id = uuid.uuid4()
+            system_version_id = uuid.uuid4()
+            project_fixture = sealed_skill_version_fixture(
+                project_version_id,
+                name=f"project-{slug}",
+            )
+            system_fixture = sealed_skill_version_fixture(
+                system_version_id,
+                name=f"system-{slug}",
+            )
             project_version = SkillVersionRow(
+                id=project_version_id,
                 skill_id=project_skill.id,
                 version_number=1,
                 description="Project runtime-name conflict fixture",
@@ -79,10 +94,14 @@ async def _seed_skill_pairs(
                 secret_requirements=[],
                 scan_decision="allow",
                 scan_summary={"rule_ids": []},
-                payload_checksum="a" * 64,
+                payload_checksum=project_fixture.payload_checksum,
+                file_count=project_fixture.file_count,
+                content_size_bytes=project_fixture.content_size_bytes,
+                files_sealed=False,
                 created_by_user_id=str(seed.owner_a.user_id),
             )
             system_version = SkillVersionRow(
+                id=system_version_id,
                 skill_id=system_skill.id,
                 version_number=1,
                 description="System runtime-name conflict fixture",
@@ -91,11 +110,16 @@ async def _seed_skill_pairs(
                 secret_requirements=[],
                 scan_decision="allow",
                 scan_summary={"rule_ids": []},
-                payload_checksum="b" * 64,
+                payload_checksum=system_fixture.payload_checksum,
+                file_count=system_fixture.file_count,
+                content_size_bytes=system_fixture.content_size_bytes,
+                files_sealed=False,
                 created_by_user_id=str(seed.owner_a.user_id),
             )
             session.add_all((project_version, system_version))
             await session.flush()
+            await assemble_and_seal_skill_version(session, project_fixture)
+            await assemble_and_seal_skill_version(session, system_fixture)
             project_skill.current_version_id = project_version.id
             system_skill.current_version_id = system_version.id
             pairs[slug] = _SkillPair(

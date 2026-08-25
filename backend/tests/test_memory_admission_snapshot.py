@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 import sqlalchemy as sa
 from support.private_thread_seed import TEST_MODEL_REF, seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 
 import app.private_work.snapshot_repository as snapshot_module
 from app.personalization.repository import AccountPersonalizationRepository
@@ -49,9 +50,11 @@ from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
     RunMemoryContextSnapshotRow,
 )
+from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 LEAD_MODEL_REF = "00000000-0000-4000-8000-000000000305"
 VISION_MODEL_REF = "00000000-0000-4000-8000-000000000306"
@@ -597,8 +600,16 @@ async def test_run_admission_locks_models_before_optional_user_memory_snapshot(
 
             return Result()
 
+        async def scalar(self, _statement):
+            events.append("closure:assembly")
+            return run.run_id
+
         def add_all(self, values) -> None:
-            tuple(values)
+            rows = tuple(values)
+            asset_rows = tuple(value for value in rows if isinstance(value, RunAssetVersionRow))
+            if asset_rows:
+                assert all(row.snapshot_schema_version == 3 for row in asset_rows)
+                events.append("closure:parents-v3")
 
         async def flush(self) -> None:
             return None
@@ -607,7 +618,12 @@ async def test_run_admission_locks_models_before_optional_user_memory_snapshot(
         def __init__(self, _session) -> None:
             pass
 
-        async def create(self, **_kwargs):
+        async def create_for_snapshot_assembly(self, **_kwargs):
+            events.append("closure:run-false")
+            return run
+
+        async def seal_asset_closure(self, **_kwargs):
+            events.append("closure:sealed")
             return run
 
         async def update_admitted_execution_profile(self, **_kwargs):
@@ -735,6 +751,8 @@ async def test_run_admission_locks_models_before_optional_user_memory_snapshot(
     expected_events = [
         "asset",
         "policy",
+        "closure:run-false",
+        "closure:assembly",
         "policy_snapshot",
         "model:lead",
         "model:title",
@@ -742,7 +760,13 @@ async def test_run_admission_locks_models_before_optional_user_memory_snapshot(
     ]
     if runtime_kind == "chat":
         expected_events.append("memory")
-    expected_events.append("activity")
+    expected_events.extend(
+        [
+            "closure:parents-v3",
+            "closure:sealed",
+            "activity",
+        ]
+    )
     assert events == expected_events
 
 
@@ -775,6 +799,9 @@ async def test_run_admission_freezes_catalog_default_title_model(
         def in_transaction(self) -> bool:
             return True
 
+        async def scalar(self, _statement):
+            return run.run_id
+
         def add_all(self, values) -> None:
             tuple(values)
 
@@ -785,7 +812,10 @@ async def test_run_admission_freezes_catalog_default_title_model(
         def __init__(self, _session) -> None:
             pass
 
-        async def create(self, **_kwargs):
+        async def create_for_snapshot_assembly(self, **_kwargs):
+            return run
+
+        async def seal_asset_closure(self, **_kwargs):
             return run
 
         async def update_admitted_execution_profile(self, **_kwargs):
@@ -913,7 +943,8 @@ async def test_postgres_snapshot_stays_frozen_and_reset_removes_it(
                 )
             )
             await session.flush()
-            session.add(
+            await add_sealed_test_run(
+                session,
                 RunRow(
                     run_id=run_id,
                     thread_id=thread_id,
@@ -926,7 +957,7 @@ async def test_postgres_snapshot_stays_frozen_and_reset_removes_it(
                     kwargs_json={},
                     origin_trace_id="b" * 32,
                     project_id=uuid.UUID(scope.project_id),
-                )
+                ),
             )
             session.add(
                 MemoryDocumentRow(
@@ -973,6 +1004,10 @@ async def test_postgres_snapshot_stays_frozen_and_reset_removes_it(
                     run_id=run_id,
                     occurrence_id=None,
                     max_attempts=3,
+                    owner_private_generation=AccountPrivateGeneration(
+                        owner_user_id=scope.owner_user_id,
+                        generation=1,
+                    ),
                     retry_safety="safe",
                     origin_trace_id="b" * 32,
                 )

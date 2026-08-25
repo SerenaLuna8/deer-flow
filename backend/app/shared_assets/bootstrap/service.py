@@ -41,6 +41,7 @@ from app.shared_assets.models import (
     SkillArchiveFile,
     SkillAssetRef,
 )
+from app.shared_assets.skill_repository import assemble_and_seal_skill_version
 from app.shared_assets.skill_service import (
     _analyze_skill_files,
     normalize_skill_files,
@@ -405,12 +406,22 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
             scan_summary={},
             supersedes_version_id=None,
             payload_checksum=preview.checksum,
+            file_count=len(preview.file_views),
+            content_size_bytes=sum(item.size_bytes for item in preview.file_views),
+            files_sealed=False,
             created_by_user_id=str(BUILTIN_ASSET_USER_ID),
         )
         session.add_all([asset, version])
         await session.flush()
-        session.add_all(_skill_file_rows(version_id, expected_files))
-        await session.flush()
+        try:
+            await assemble_and_seal_skill_version(
+                session,
+                version,
+                _skill_file_rows(version_id, expected_files),
+                request_id=entry.source_key,
+            )
+        except AssetValidationFailed as error:
+            raise BootstrapConflict("packaged System Skill file facts failed persistence verification") from error
         asset.current_version_id = version_id
         await session.flush()
         return True
@@ -433,6 +444,9 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         secret_requirements=requirements,
         supersedes_version_id=None,
         payload_checksum=preview.checksum,
+        file_count=len(preview.file_views),
+        content_size_bytes=sum(item.size_bytes for item in preview.file_views),
+        files_sealed=True,
         created_by_user_id=str(BUILTIN_ASSET_USER_ID),
     ) and _skill_files_match(version_id, persisted_files, expected_files)
     if version.payload_checksum == preview.checksum:

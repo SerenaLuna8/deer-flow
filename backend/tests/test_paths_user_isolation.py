@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from deerflow.config.paths import Paths
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 
 
 @pytest.fixture
@@ -190,6 +191,77 @@ class TestHostPathsWithUserId:
     def test_host_acp_workspace_dir_with_user_id(self, paths: Paths):
         result = paths.host_acp_workspace_dir("t1", user_id="u1")
         assert "acp-workspace" in result
+
+
+class TestRunSkillMaterializationHostView:
+    def test_translates_only_worker_contained_paths_to_explicit_host_view(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        worker_base = tmp_path / "worker-state"
+        host_base = tmp_path / "host-state"
+        paths = Paths(worker_base)
+        owner_id = "50000000000000000000000000000001"
+        tree = paths.run_skill_materialization_root() / owner_id / "tree"
+        tree.mkdir(parents=True)
+        outsider = tmp_path / "outside" / "tree"
+        outsider.mkdir(parents=True)
+        monkeypatch.setenv("ACT_WEAVE_HOST_BASE_DIR", str(host_base))
+
+        host_root = paths.host_run_skill_materialization_root()
+        host_tree = paths.host_run_skill_materialization_path(tree)
+
+        assert host_root == str(host_base / "run-skill-materializations")
+        assert host_tree == str(
+            host_base / "run-skill-materializations" / owner_id / "tree",
+        )
+        assert paths.worker_run_skill_materialization_path(host_tree) == tree.resolve()
+        with pytest.raises(ValueError, match="materialization"):
+            paths.host_run_skill_materialization_path(outsider)
+        with pytest.raises(ValueError, match="materialization"):
+            paths.worker_run_skill_materialization_path(
+                str(host_base / "outside" / owner_id / "tree"),
+            )
+
+    def test_rejects_relative_or_implicit_dood_host_mapping(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        paths: Paths,
+    ) -> None:
+        monkeypatch.setenv("ACT_WEAVE_SANDBOX_HOST", "host.docker.internal")
+        monkeypatch.delenv("ACT_WEAVE_HOST_BASE_DIR", raising=False)
+        assert paths.run_skill_host_mapping_ready() is False
+
+        monkeypatch.setenv("ACT_WEAVE_HOST_BASE_DIR", "relative/state")
+        assert paths.run_skill_host_mapping_ready() is False
+
+        monkeypatch.setenv("ACT_WEAVE_HOST_BASE_DIR", str(paths.base_dir))
+        assert paths.run_skill_host_mapping_ready() is True
+
+    def test_preserves_windows_daemon_view_for_typed_mount(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        paths: Paths,
+    ) -> None:
+        owner_id = "50000000000000000000000000000002"
+        tree = paths.run_skill_materialization_root() / owner_id / "tree"
+        tree.mkdir(parents=True)
+        monkeypatch.setenv(
+            "ACT_WEAVE_HOST_BASE_DIR",
+            r"C:\actweave\state",
+        )
+
+        host_tree = paths.host_run_skill_materialization_path(tree)
+        mount = RunScopedReadOnlyMount(
+            run_id="run-windows-dood",
+            container_path="/mnt/skills",
+            host_path=host_tree,
+        )
+
+        assert host_tree == ("C:\\actweave\\state\\run-skill-materializations\\" + owner_id + "\\tree")
+        assert mount.host_path == host_tree
+        assert paths.worker_run_skill_materialization_path(host_tree) == tree.resolve()
 
 
 class TestEnsureAndDeleteWithUserId:

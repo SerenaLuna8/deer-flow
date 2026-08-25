@@ -173,7 +173,7 @@ The acceptance boundary that fixes what a Run may execute and pairs the Run with
 _Avoid_: Harness Execution
 
 **Run Snapshot**:
-The immutable set of exact Agent and Skill definitions, a copied System Model Configuration, exact MCP configuration, their Configuration Secret Generation references, and runtime policy authorized for a Run. It does not preserve destroyed secret material, and Channel delivery secrets are resolved separately from the current Channel configuration.
+The immutable execution closure authorized for one Run: exact Agent and MCP payloads, a copied System Model Configuration, exact Skill Versions, Configuration Secret Generation references, and runtime policy. A Skill's file bytes are retained once by its immutable Version and pinned by the Run's manifest plus database reference; retry, resume, and replay never resolve Current Version again. The closure does not preserve destroyed secret material, and Channel delivery secrets are resolved separately from the current Channel configuration.
 _Avoid_: Current configuration
 
 **Run Workload Profile**:

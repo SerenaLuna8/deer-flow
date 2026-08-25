@@ -8,5 +8,6 @@ This keeps the harness package free of any dependency on app code.
 """
 
 from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
-__all__ = ["UserRow"]
+__all__ = ["AccountPrivateGeneration", "UserRow"]

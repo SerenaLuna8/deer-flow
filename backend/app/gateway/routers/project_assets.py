@@ -56,6 +56,8 @@ from app.shared_assets import (
     AssetInUse,
     AssetKind,
     AssetNotFound,
+    AssetRunAdmissionBusy,
+    AssetRunPayloadTooLarge,
     AssetRunQuotaExceeded,
     AssetScope,
     AssetSelection,
@@ -845,6 +847,8 @@ ASSET_ERRORS = (
     AssetStorageUnavailable,
     AssetStorageQuotaExceeded,
     AssetRunQuotaExceeded,
+    AssetRunAdmissionBusy,
+    AssetRunPayloadTooLarge,
     SkillDesignTargetUnsupported,
     SkillDesignTargetSessionExists,
     SkillDesignTargetDeleted,
@@ -870,6 +874,8 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
         AssetValidationFailed: 422,
         AssetStorageQuotaExceeded: 429,
         AssetRunQuotaExceeded: 429,
+        AssetRunAdmissionBusy: 503,
+        AssetRunPayloadTooLarge: 413,
         AssetStorageUnavailable: 503,
         SkillDesignTargetUnsupported: 422,
         SkillDesignTargetSessionExists: 409,
@@ -895,7 +901,7 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
             "message": exc.public_message,
             "request_id": request_id or exc.request_id,
         },
-        headers={"Retry-After": "1"} if type(exc) in {AssetStorageQuotaExceeded, AssetRunQuotaExceeded} else None,
+        headers={"Retry-After": "1"} if type(exc) in {AssetStorageQuotaExceeded, AssetRunQuotaExceeded, AssetRunAdmissionBusy} else None,
     ) from None
 
 

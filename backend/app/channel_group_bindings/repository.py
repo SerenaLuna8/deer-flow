@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import String, cast, delete, func, select, update
+from sqlalchemy import String, and_, cast, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecycleClosed,
+    AccountPrivateLifecyclePort,
+)
 from app.projects.context import ProjectContext
 from deerflow.persistence.channel_connections.group_challenge_model import (
     ProjectChannelGroupBindingChallengeRow,
@@ -27,6 +33,35 @@ from deerflow.persistence.shared_assets import (
 )
 
 _MAX_BIGINT = 9_223_372_036_854_775_807
+
+
+@dataclass(frozen=True, slots=True)
+class _GuestResolutionCoordinates:
+    project_id: uuid.UUID
+    channel_instance_revision: int
+    binding_id: uuid.UUID
+    binding_revision: int
+    external_group_ref: str
+    agent_asset_id: uuid.UUID
+    agent_scope: str
+    principal_id: uuid.UUID | None
+    principal_user_id: str | None
+    membership_id: uuid.UUID | None
+    external_account_ref: str | None
+    principal_status: str | None
+    membership_status: str | None
+    membership_role: str | None
+    membership_version: int | None
+    membership_activation_generation: int | None
+    connection_id: str | None
+    connection_project_id: uuid.UUID | None
+    connection_owner_user_id: str | None
+    connection_instance_id: uuid.UUID | None
+    connection_status: str | None
+
+    @property
+    def has_existing_principal(self) -> bool:
+        return self.principal_id is not None
 
 
 class GroupBindingRepositoryNotFound(Exception):
@@ -53,6 +88,13 @@ def _group_models():
 
 
 class PostgresProjectChannelGroupBindingRepository:
+    def __init__(
+        self,
+        *,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
+    ) -> None:
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
+
     @staticmethod
     def _group_connection_ids(principal_model, binding):
         return select(
@@ -658,35 +700,26 @@ class PostgresProjectChannelGroupBindingRepository:
         now: datetime,
     ) -> dict[str, object] | None:
         ProjectChannelGroupBindingRow, ChannelExternalPrincipalRow = _group_models()
-        binding_conditions = (
-            ProjectChannelGroupBindingRow.channel_instance_id == channel_instance_id,
-            ProjectChannelGroupBindingRow.provider == provider,
-            ProjectChannelGroupBindingRow.external_group_ref.in_(
-                external_group_refs,
-            ),
-            ProjectChannelGroupBindingRow.status == "active",
-            ProjectChannelGroupBindingRow.deleted_at.is_(None),
-            ProjectChannelInstanceRow.desired_status == "enabled",
-            ProjectChannelInstanceRow.observed_status == "running",
-            ProjectChannelInstanceRow.deleted_at.is_(None),
+        coordinates = await self._discover_guest_coordinates(
+            session,
+            ProjectChannelGroupBindingRow,
+            ChannelExternalPrincipalRow,
+            provider=provider,
+            channel_instance_id=channel_instance_id,
+            external_group_refs=external_group_refs,
+            external_account_refs=external_account_refs,
         )
-        project_id = (
-            await session.execute(
-                select(ProjectChannelGroupBindingRow.project_id)
-                .join(
-                    ProjectChannelInstanceRow,
-                    (ProjectChannelInstanceRow.project_id == ProjectChannelGroupBindingRow.project_id) & (ProjectChannelInstanceRow.id == ProjectChannelGroupBindingRow.channel_instance_id),
-                )
-                .where(*binding_conditions)
-            )
-        ).scalar_one_or_none()
-        if project_id is None:
+        if coordinates is None:
+            return None
+        if coordinates.connection_status == "revoked":
+            # Explicit disconnect is terminal. An unlocked negative answer is
+            # safe; a concurrent reconnect can be observed by a later inbound.
             return None
         locked_project_id = (
             await session.execute(
                 select(ProjectRow.id)
                 .where(
-                    ProjectRow.id == project_id,
+                    ProjectRow.id == coordinates.project_id,
                     ProjectRow.status == "active",
                     ProjectRow.is_suspended.is_(False),
                 )
@@ -694,7 +727,24 @@ class PostgresProjectChannelGroupBindingRepository:
             )
         ).scalar_one_or_none()
         if locked_project_id is None:
-            return None
+            raise GroupBindingRepositoryConflict
+
+        membership = None
+        if coordinates.has_existing_principal:
+            membership = await self._lock_existing_guest_membership(
+                session,
+                coordinates,
+            )
+            if membership is None:
+                raise GroupBindingRepositoryConflict
+            try:
+                await self._account_private_lifecycle.reactivate_after_membership(
+                    session,
+                    coordinates.principal_user_id,
+                )
+            except AccountPrivateLifecycleClosed:
+                raise GroupBindingRepositoryConflict from None
+
         locked_instance_id = (
             await session.execute(
                 select(ProjectChannelInstanceRow.id)
@@ -702,6 +752,7 @@ class PostgresProjectChannelGroupBindingRepository:
                     ProjectChannelInstanceRow.project_id == locked_project_id,
                     ProjectChannelInstanceRow.id == channel_instance_id,
                     ProjectChannelInstanceRow.provider == provider,
+                    ProjectChannelInstanceRow.revision == coordinates.channel_instance_revision,
                     ProjectChannelInstanceRow.desired_status == "enabled",
                     ProjectChannelInstanceRow.observed_status == "running",
                     ProjectChannelInstanceRow.deleted_at.is_(None),
@@ -710,25 +761,28 @@ class PostgresProjectChannelGroupBindingRepository:
             )
         ).scalar_one_or_none()
         if locked_instance_id is None:
-            return None
+            raise GroupBindingRepositoryConflict
         binding = (
             await session.execute(
                 select(ProjectChannelGroupBindingRow)
                 .where(
+                    ProjectChannelGroupBindingRow.id == coordinates.binding_id,
                     ProjectChannelGroupBindingRow.project_id == locked_project_id,
                     ProjectChannelGroupBindingRow.channel_instance_id == locked_instance_id,
                     ProjectChannelGroupBindingRow.provider == provider,
-                    ProjectChannelGroupBindingRow.external_group_ref.in_(
-                        external_group_refs,
-                    ),
+                    ProjectChannelGroupBindingRow.external_group_ref == coordinates.external_group_ref,
+                    ProjectChannelGroupBindingRow.revision == coordinates.binding_revision,
+                    ProjectChannelGroupBindingRow.agent_asset_id == coordinates.agent_asset_id,
+                    ProjectChannelGroupBindingRow.agent_scope == coordinates.agent_scope,
                     ProjectChannelGroupBindingRow.status == "active",
                     ProjectChannelGroupBindingRow.deleted_at.is_(None),
                 )
                 .with_for_update(of=ProjectChannelGroupBindingRow)
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if binding is None:
-            return None
+            raise GroupBindingRepositoryConflict
         if not await self._agent_is_available(
             session,
             project_id=binding.project_id,
@@ -740,46 +794,48 @@ class PostgresProjectChannelGroupBindingRepository:
             session,
             tuple((provider, account_ref, group_ref) for account_ref in external_account_refs for group_ref in external_group_refs),
         )
-        principal = await self._get_active_principal(
-            session,
-            ChannelExternalPrincipalRow,
-            binding.id,
-            external_account_refs,
-            for_update=True,
-        )
-        if principal is None:
-            principal = await self._create_guest_principal(
+
+        if coordinates.has_existing_principal:
+            principal = await self._lock_existing_guest_principal(
+                session,
+                ChannelExternalPrincipalRow,
+                coordinates,
+            )
+            if principal is None:
+                raise GroupBindingRepositoryConflict
+        else:
+            unexpected_principal = await self._get_active_principal(
+                session,
+                ChannelExternalPrincipalRow,
+                binding.id,
+                external_account_refs,
+                for_update=True,
+            )
+            if unexpected_principal is not None:
+                # The unlocked discovery saw no principal. Reusing one that
+                # appeared after the Project lock would skip its mandatory
+                # Membership -> User lifecycle prefix, so retry from discovery.
+                raise GroupBindingRepositoryConflict
+            principal, membership = await self._create_guest_principal(
                 session,
                 ChannelExternalPrincipalRow,
                 binding,
                 external_account_refs[0],
                 now,
             )
-        membership = (
-            await session.execute(
-                select(ProjectMembershipRow).where(
-                    ProjectMembershipRow.id == principal.membership_id,
-                    ProjectMembershipRow.project_id == binding.project_id,
-                    ProjectMembershipRow.user_id == principal.principal_user_id,
-                    ProjectMembershipRow.role == "channel_guest",
-                    ProjectMembershipRow.status == "active",
-                )
-            )
-        ).scalar_one_or_none()
+
         if membership is None:
-            return None
+            raise GroupBindingRepositoryConflict
         connection = await self._ensure_guest_connection(
             session,
             binding=binding,
             principal=principal,
             external_account_ref=principal.external_account_ref,
             external_group_ref=binding.external_group_ref,
+            expected_connection_id=coordinates.connection_id,
+            expected_status=coordinates.connection_status,
             now=now,
         )
-        if connection is None:
-            # Explicit disconnect is terminal. Retain the principal and its
-            # stable identity anchor, but do not restore authority implicitly.
-            return None
         principal.status = "active"
         principal.last_seen_at = now
         principal.updated_at = now
@@ -794,6 +850,275 @@ class PostgresProjectChannelGroupBindingRepository:
         )
 
     @staticmethod
+    async def _discover_guest_coordinates(
+        session: AsyncSession,
+        binding_model,
+        principal_model,
+        *,
+        provider: str,
+        channel_instance_id: uuid.UUID,
+        external_group_refs: tuple[str, ...],
+        external_account_refs: tuple[str, ...],
+    ) -> _GuestResolutionCoordinates | None:
+        rows = (
+            await session.execute(
+                select(
+                    binding_model.project_id.label("project_id"),
+                    ProjectChannelInstanceRow.revision.label(
+                        "channel_instance_revision",
+                    ),
+                    binding_model.id.label("binding_id"),
+                    binding_model.revision.label("binding_revision"),
+                    binding_model.external_group_ref.label("external_group_ref"),
+                    binding_model.agent_asset_id.label("agent_asset_id"),
+                    binding_model.agent_scope.label("agent_scope"),
+                    principal_model.id.label("principal_id"),
+                    principal_model.principal_user_id.label("principal_user_id"),
+                    principal_model.membership_id.label("membership_id"),
+                    principal_model.external_account_ref.label(
+                        "external_account_ref",
+                    ),
+                    principal_model.status.label("principal_status"),
+                    ProjectMembershipRow.status.label("membership_status"),
+                    ProjectMembershipRow.role.label("membership_role"),
+                    ProjectMembershipRow.version.label("membership_version"),
+                    ProjectMembershipRow.activation_generation.label(
+                        "membership_activation_generation",
+                    ),
+                    ChannelConnectionRow.id.label("connection_id"),
+                    ChannelConnectionRow.project_id.label(
+                        "connection_project_id",
+                    ),
+                    ChannelConnectionRow.owner_user_id.label(
+                        "connection_owner_user_id",
+                    ),
+                    ChannelConnectionRow.channel_instance_id.label(
+                        "connection_instance_id",
+                    ),
+                    ChannelConnectionRow.status.label("connection_status"),
+                )
+                .join(
+                    ProjectChannelInstanceRow,
+                    and_(
+                        ProjectChannelInstanceRow.project_id == binding_model.project_id,
+                        ProjectChannelInstanceRow.id == binding_model.channel_instance_id,
+                    ),
+                )
+                .outerjoin(
+                    principal_model,
+                    and_(
+                        principal_model.project_id == binding_model.project_id,
+                        principal_model.group_binding_id == binding_model.id,
+                        principal_model.external_account_ref.in_(
+                            external_account_refs,
+                        ),
+                    ),
+                )
+                .outerjoin(
+                    ProjectMembershipRow,
+                    and_(
+                        ProjectMembershipRow.id == principal_model.membership_id,
+                        ProjectMembershipRow.project_id == principal_model.project_id,
+                        ProjectMembershipRow.user_id == principal_model.principal_user_id,
+                    ),
+                )
+                .outerjoin(
+                    ChannelConnectionRow,
+                    and_(
+                        ChannelConnectionRow.id == func.replace(cast(principal_model.id, String), "-", ""),
+                        ChannelConnectionRow.project_id == principal_model.project_id,
+                        ChannelConnectionRow.owner_user_id == principal_model.principal_user_id,
+                        ChannelConnectionRow.channel_instance_id == binding_model.channel_instance_id,
+                    ),
+                )
+                .where(
+                    binding_model.channel_instance_id == channel_instance_id,
+                    binding_model.provider == provider,
+                    binding_model.external_group_ref.in_(external_group_refs),
+                    binding_model.status == "active",
+                    binding_model.deleted_at.is_(None),
+                    ProjectChannelInstanceRow.provider == provider,
+                    ProjectChannelInstanceRow.desired_status == "enabled",
+                    ProjectChannelInstanceRow.observed_status == "running",
+                    ProjectChannelInstanceRow.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise GroupBindingRepositoryConflict
+        row = rows[0]
+        binding_values = (
+            row.project_id,
+            row.channel_instance_revision,
+            row.binding_id,
+            row.binding_revision,
+            row.external_group_ref,
+            row.agent_asset_id,
+            row.agent_scope,
+        )
+        if not (
+            isinstance(binding_values[0], uuid.UUID)
+            and type(binding_values[1]) is int
+            and binding_values[1] >= 1
+            and isinstance(binding_values[2], uuid.UUID)
+            and type(binding_values[3]) is int
+            and binding_values[3] >= 1
+            and type(binding_values[4]) is str
+            and binding_values[4] in external_group_refs
+            and isinstance(binding_values[5], uuid.UUID)
+            and binding_values[6] in {"project", "system"}
+        ):
+            raise GroupBindingRepositoryConflict
+
+        principal_values = (
+            row.principal_id,
+            row.principal_user_id,
+            row.membership_id,
+            row.external_account_ref,
+            row.principal_status,
+            row.membership_status,
+            row.membership_role,
+            row.membership_version,
+            row.membership_activation_generation,
+        )
+        connection_values = (
+            row.connection_id,
+            row.connection_project_id,
+            row.connection_owner_user_id,
+            row.connection_instance_id,
+            row.connection_status,
+        )
+        if all(value is None for value in principal_values):
+            if any(value is not None for value in connection_values):
+                raise GroupBindingRepositoryConflict
+            return _GuestResolutionCoordinates(
+                project_id=row.project_id,
+                channel_instance_revision=row.channel_instance_revision,
+                binding_id=row.binding_id,
+                binding_revision=row.binding_revision,
+                external_group_ref=row.external_group_ref,
+                agent_asset_id=row.agent_asset_id,
+                agent_scope=row.agent_scope,
+                principal_id=None,
+                principal_user_id=None,
+                membership_id=None,
+                external_account_ref=None,
+                principal_status=None,
+                membership_status=None,
+                membership_role=None,
+                membership_version=None,
+                membership_activation_generation=None,
+                connection_id=None,
+                connection_project_id=None,
+                connection_owner_user_id=None,
+                connection_instance_id=None,
+                connection_status=None,
+            )
+        if not (
+            isinstance(row.principal_id, uuid.UUID)
+            and type(row.principal_user_id) is str
+            and isinstance(row.membership_id, uuid.UUID)
+            and type(row.external_account_ref) is str
+            and row.external_account_ref in external_account_refs
+            and row.principal_status in {"active", "frozen"}
+            and row.membership_status == "active"
+            and row.membership_role == "channel_guest"
+            and type(row.membership_version) is int
+            and row.membership_version >= 1
+            and type(row.membership_activation_generation) is int
+            and row.membership_activation_generation >= 1
+        ):
+            raise GroupBindingRepositoryConflict
+        if not (
+            all(value is None for value in connection_values)
+            or (
+                type(row.connection_id) is str
+                and row.connection_id == row.principal_id.hex
+                and row.connection_project_id == row.project_id
+                and row.connection_owner_user_id == row.principal_user_id
+                and row.connection_instance_id == channel_instance_id
+                and row.connection_status in {"connected", "frozen", "revoked"}
+            )
+        ):
+            raise GroupBindingRepositoryConflict
+        return _GuestResolutionCoordinates(
+            project_id=row.project_id,
+            channel_instance_revision=row.channel_instance_revision,
+            binding_id=row.binding_id,
+            binding_revision=row.binding_revision,
+            external_group_ref=row.external_group_ref,
+            agent_asset_id=row.agent_asset_id,
+            agent_scope=row.agent_scope,
+            principal_id=row.principal_id,
+            principal_user_id=row.principal_user_id,
+            membership_id=row.membership_id,
+            external_account_ref=row.external_account_ref,
+            principal_status=row.principal_status,
+            membership_status=row.membership_status,
+            membership_role=row.membership_role,
+            membership_version=row.membership_version,
+            membership_activation_generation=row.membership_activation_generation,
+            connection_id=row.connection_id,
+            connection_project_id=row.connection_project_id,
+            connection_owner_user_id=row.connection_owner_user_id,
+            connection_instance_id=row.connection_instance_id,
+            connection_status=row.connection_status,
+        )
+
+    @staticmethod
+    async def _lock_existing_guest_membership(
+        session: AsyncSession,
+        coordinates: _GuestResolutionCoordinates,
+    ):
+        if not coordinates.has_existing_principal:
+            return None
+        return (
+            await session.execute(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.id == coordinates.membership_id,
+                    ProjectMembershipRow.project_id == coordinates.project_id,
+                    ProjectMembershipRow.user_id == coordinates.principal_user_id,
+                    ProjectMembershipRow.role == coordinates.membership_role,
+                    ProjectMembershipRow.status == coordinates.membership_status,
+                    ProjectMembershipRow.version == coordinates.membership_version,
+                    ProjectMembershipRow.activation_generation == coordinates.membership_activation_generation,
+                )
+                .with_for_update(read=True, of=ProjectMembershipRow)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+
+    @staticmethod
+    async def _lock_existing_guest_principal(
+        session: AsyncSession,
+        model,
+        coordinates: _GuestResolutionCoordinates,
+    ):
+        if not coordinates.has_existing_principal:
+            return None
+        return (
+            await session.execute(
+                select(model)
+                .where(
+                    model.id == coordinates.principal_id,
+                    model.project_id == coordinates.project_id,
+                    model.group_binding_id == coordinates.binding_id,
+                    model.external_account_ref == coordinates.external_account_ref,
+                    model.principal_user_id == coordinates.principal_user_id,
+                    model.membership_id == coordinates.membership_id,
+                    model.principal_type == "channel_guest",
+                    model.membership_role == coordinates.membership_role,
+                    model.status == coordinates.principal_status,
+                )
+                .with_for_update(of=model)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+
+    @staticmethod
     async def _ensure_guest_connection(
         session: AsyncSession,
         *,
@@ -801,8 +1126,10 @@ class PostgresProjectChannelGroupBindingRepository:
         principal,
         external_account_ref: str,
         external_group_ref: str,
+        expected_connection_id: str | None,
+        expected_status: str | None,
         now: datetime,
-    ) -> ChannelConnectionRow | None:
+    ) -> ChannelConnectionRow:
         connection_id = principal.id.hex
         row = (
             await session.execute(
@@ -821,7 +1148,9 @@ class PostgresProjectChannelGroupBindingRepository:
             "agent_asset_id": str(binding.agent_asset_id),
             "agent_scope": binding.agent_scope,
         }
-        if row is None:
+        if expected_connection_id is None:
+            if row is not None:
+                raise GroupBindingRepositoryConflict
             row = ChannelConnectionRow(
                 id=connection_id,
                 project_id=binding.project_id,
@@ -840,8 +1169,8 @@ class PostgresProjectChannelGroupBindingRepository:
             )
             session.add(row)
         else:
-            if row.status == "revoked":
-                return None
+            if expected_connection_id != connection_id or expected_status not in {"connected", "frozen"} or row is None or row.status != expected_status:
+                raise GroupBindingRepositoryConflict
             row.status = "connected"
             row.external_account_id = external_account_ref
             row.workspace_id = external_group_ref
@@ -929,37 +1258,34 @@ class PostgresProjectChannelGroupBindingRepository:
                         oauth_id=None,
                         needs_setup=False,
                         token_version=0,
+                        private_retention_state="active",
+                        private_retention_generation=1,
+                        private_retention_effective_at=None,
                     )
                 )
                 await session.flush()
-                session.add(
-                    ProjectMembershipRow(
-                        id=membership_id,
-                        project_id=binding.project_id,
-                        user_id=str(principal_user_id),
-                        role="channel_guest",
-                        status="active",
-                        version=1,
-                        activation_generation=1,
-                        is_pinned=False,
-                        last_entered_at=None,
-                    )
+                membership = ProjectMembershipRow(
+                    id=membership_id,
+                    project_id=binding.project_id,
+                    user_id=str(principal_user_id),
+                    role="channel_guest",
+                    status="active",
+                    version=1,
+                    activation_generation=1,
+                    is_pinned=False,
+                    last_entered_at=None,
                 )
+                session.add(membership)
                 await session.flush()
                 session.add(principal)
                 await session.flush()
-            return principal
+            return principal, membership
         except IntegrityError:
-            existing = await self._get_active_principal(
-                session,
-                model,
-                binding.id,
-                (external_account_ref,),
-                for_update=True,
-            )
-            if existing is None:
-                raise
-            return existing
+            # Identity creation is the L-01 exemption only while the identity
+            # is genuinely new. A concurrent winner must be retried through
+            # the L-03 Project -> Membership -> User prefix instead of being
+            # adopted from this already-entered channel-resource suffix.
+            raise GroupBindingRepositoryConflict from None
 
 
 __all__ = [

@@ -133,6 +133,18 @@ class AssetRunQuotaExceeded(SharedAssetError):
     public_message = "Project concurrent Run quota exceeded"
 
 
+class AssetRunAdmissionBusy(SharedAssetError):
+    code = "ASSET_RUN_ADMISSION_BUSY"
+    status_code = 503
+    public_message = "Skill Builder Run admission is temporarily unavailable"
+
+
+class AssetRunPayloadTooLarge(SharedAssetError):
+    code = "ASSET_RUN_PAYLOAD_TOO_LARGE"
+    status_code = 413
+    public_message = "Skill Builder Run payload is too large"
+
+
 class AssetResolutionUnavailable(SharedAssetError):
     code = "asset_resolution_unavailable"
     status_code = 503

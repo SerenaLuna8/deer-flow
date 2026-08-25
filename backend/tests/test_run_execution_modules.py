@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import app.reliability.execution as compatibility
@@ -66,3 +67,18 @@ def test_checkpoint_progress_cursor_includes_pending_writes() -> None:
     assert cursor is not None
     assert cursor.startswith("pw:")
     assert cursor == checkpoint_progress_cursor(saver, with_pending)
+
+
+def test_materialization_fence_uses_shared_governance_locks() -> None:
+    source = inspect.getsource(PrivateRunExecutionBoundary._materialization_fence)
+    suffix = inspect.getsource(
+        PrivateRunExecutionBoundary.lock_and_assert_materialization_active_in_session,
+    )
+
+    assert 'lock_mode="share"' in source
+    assert "lock=True" not in source
+    assert source.index("self._revalidator.require") < source.index("self.lock_and_assert_materialization_active_in_session")
+    assert source.index("self.lock_and_assert_materialization_active_in_session") < source.index("await persist()")
+    assert "_revalidator" not in suffix
+    assert "_factory" not in suffix
+    assert "User" not in suffix

@@ -55,16 +55,14 @@ import {
 } from "@/core/messages/usage-model";
 import {
   extractContentFromMessage,
-  extractPresentFilesFromMessage,
   extractTextFromMessage,
   getAssistantTurnCopyData,
-  getAssistantTurnDisplays,
   getAssistantTurnUsageMessages,
+  getDeliveredFilesByFinalGroupIndex,
   getLatestEditableTurn,
   getMessageGroups,
   getStreamingMessageLookup,
   hasContent,
-  hasPresentFiles,
   hasReasoning,
   isAssistantMessageGroupStreaming,
   isHiddenFromUIMessage,
@@ -83,6 +81,7 @@ import {
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
+import type { RunExecutionState } from "@/core/threads/run-execution-state";
 import { cn } from "@/lib/utils";
 
 import { useArtifacts } from "../artifacts";
@@ -92,7 +91,6 @@ import { useMaybeSidecar } from "../sidecar/context";
 import { Tooltip } from "../tooltip";
 
 import { AssistantActionRow } from "./assistant-action-row";
-import { AssistantProcessDisclosure } from "./assistant-process-disclosure";
 import {
   HumanInputCard,
   type HumanInputSubmitResult,
@@ -104,7 +102,7 @@ import {
   MessageTokenUsageDebugList,
   MessageTokenUsageList,
 } from "./message-token-usage";
-import { RunActivity } from "./run-duration";
+import { RunActivity, RunExecutionActivity } from "./run-duration";
 import { RunFeedbackButtons } from "./run-feedback-buttons";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
@@ -167,9 +165,7 @@ function getPresentFilesProcessMessages(messages: Message[]): Message[] {
     messages.flatMap((message) =>
       message.type === "ai"
         ? (message.tool_calls ?? []).flatMap((toolCall) =>
-            toolCall.name !== "present_files" &&
-            toolCall.name !== "ask_clarification" &&
-            toolCall.id
+            toolCall.name !== "ask_clarification" && toolCall.id
               ? [toolCall.id]
               : [],
           )
@@ -180,11 +176,11 @@ function getPresentFilesProcessMessages(messages: Message[]): Message[] {
   return messages.flatMap((message): Message[] => {
     if (message.type === "ai") {
       const visibleToolCalls = (message.tool_calls ?? []).filter(
-        (toolCall) =>
-          toolCall.name !== "present_files" &&
-          toolCall.name !== "ask_clarification",
+        (toolCall) => toolCall.name !== "ask_clarification",
       );
-      return hasReasoning(message) || visibleToolCalls.length > 0
+      return hasReasoning(message) ||
+        hasContent(message) ||
+        visibleToolCalls.length > 0
         ? [{ ...message, tool_calls: visibleToolCalls }]
         : [];
     }
@@ -350,6 +346,7 @@ export function MessageList({
   enableSidecarActions = true,
   sidecarSurface = false,
   suspendLoadingIndicators = false,
+  runExecutionState,
   executionApproval = null,
   observedExecutionApprovalId = null,
   trailingContent,
@@ -391,6 +388,7 @@ export function MessageList({
   enableSidecarActions?: boolean;
   sidecarSurface?: boolean;
   suspendLoadingIndicators?: boolean;
+  runExecutionState?: RunExecutionState | "unavailable" | null;
   executionApproval?: ExecutionApprovalProjection | null;
   observedExecutionApprovalId?: string | null;
   trailingContent?: ReactNode;
@@ -418,7 +416,6 @@ export function MessageList({
     ReadonlyMap<string, number>
   >(() => new Map());
   const prevIsLoading = useRef(thread.isLoading);
-  const currentRunJustCompleted = prevIsLoading.current && !thread.isLoading;
   const messages = useMemo(
     () =>
       projectTokenBudgetMessages(
@@ -472,19 +469,13 @@ export function MessageList({
     writeArtifactSelections,
   ]);
   const groupedMessages = useMemo(() => getMessageGroups(messages), [messages]);
-  const assistantTurnDisplay = useMemo(() => {
-    const displays = getAssistantTurnDisplays(groupedMessages, {
-      isCurrentTurnLoading: visualRunIsLoading,
-    });
-    return {
-      byFinalGroupIndex: new Map(
-        displays.map((display) => [display.finalGroupIndex, display] as const),
-      ),
-      hiddenGroupIndexes: new Set(
-        displays.flatMap((display) => display.hiddenGroupIndexes),
-      ),
-    };
-  }, [groupedMessages, visualRunIsLoading]);
+  const deliveredFilesByFinalGroupIndex = useMemo(
+    () =>
+      getDeliveredFilesByFinalGroupIndex(groupedMessages, {
+        isCurrentTurnLoading: thread.isLoading,
+      }),
+    [groupedMessages, thread.isLoading],
+  );
   useEffect(() => {
     if (thread.isLoading && !prevIsLoading.current) {
       const now = Date.now();
@@ -1081,20 +1072,10 @@ export function MessageList({
       return null;
     }
 
-    const tasks = hydrateSubtasks(group.messages);
+    hydrateSubtasks(group.messages);
 
     const results: ReactNode[] = [];
     const subagentDebugMessageIds: string[] = [];
-    if (tasks.size > 0 && !showAllSteps) {
-      results.push(
-        <div
-          key="subtask-count"
-          className="text-muted-foreground pt-2 text-sm font-normal"
-        >
-          {t.subtasks.executing(tasks.size)}
-        </div>,
-      );
-    }
     const message = group.messages.find((message) => message.type === "ai");
     if (message) {
       if (!hasReasoning(message) && message.id) {
@@ -1134,86 +1115,6 @@ export function MessageList({
             durationSeconds,
             debugMessageIds: subagentDebugMessageIds,
           })}
-      </div>
-    );
-  };
-
-  const renderCompletedProcessGroup = (groupIndex: number): ReactNode => {
-    const group = groupedMessages[groupIndex];
-    if (!group) {
-      return null;
-    }
-    if (group.type === "assistant") {
-      // The terminal answer keeps its semantic message group, but its reasoning
-      // facet belongs at the end of an existing completed execution history.
-      // Suppress narration in this projection so the answer text remains owned
-      // and rendered exactly once by MessageListItem below.
-      return (
-        <div key={"completed-final-reasoning-" + group.id} className="w-full">
-          <MessageGroup
-            includeNarration={false}
-            messages={group.messages}
-            showAllSteps={true}
-            tokenDebugSteps={tokenDebugSteps.filter((step) =>
-              group.messages.some((message) => message.id === step.messageId),
-            )}
-            showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
-          />
-        </div>
-      );
-    }
-    if (group.type === "assistant:subagent") {
-      return renderSubagentGroup(group, {
-        groupIsLoading: false,
-        includeTokenUsage: false,
-        showAllSteps: true,
-      });
-    }
-    if (group.type === "assistant:present-files") {
-      hydrateSubtasks(group.messages);
-      const processMessages = getPresentFilesProcessMessages(group.messages);
-      const sourceMessageById = new Map(
-        processMessages.flatMap((message) =>
-          message.type === "ai" && message.id ? [[message.id, message]] : [],
-        ),
-      );
-      return processMessages.length > 0 ? (
-        <div key={"completed-process-group-" + group.id} className="w-full">
-          <MessageGroup
-            includeNarration={false}
-            messages={processMessages}
-            renderTaskToolCall={(taskId, messageId) => (
-              <SubtaskCard
-                key={"task-group-" + taskId}
-                taskId={taskId}
-                threadId={threadId}
-                runId={
-                  (
-                    sourceMessageById.get(messageId ?? "") as {
-                      run_id?: string;
-                    }
-                  )?.run_id
-                }
-              />
-            )}
-            showAllSteps={true}
-          />
-        </div>
-      ) : null;
-    }
-    if (group.type !== "assistant:processing") {
-      return null;
-    }
-    return (
-      <div key={"completed-process-group-" + group.id} className="w-full">
-        <MessageGroup
-          messages={group.messages}
-          showAllSteps={true}
-          tokenDebugSteps={tokenDebugSteps.filter((step) =>
-            group.messages.some((message) => message.id === step.messageId),
-          )}
-          showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
-        />
       </div>
     );
   };
@@ -1263,19 +1164,15 @@ export function MessageList({
             retry={retryHistory}
           />
           {groupedMessages.map((group, groupIndex) => {
-            if (assistantTurnDisplay.hiddenGroupIndexes.has(groupIndex)) {
-              return null;
-            }
-
             const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
             const groupIsLoading =
               visualRunIsLoading && groupIndex === lastGroupIndex;
-            const turnDisplay =
-              assistantTurnDisplay.byFinalGroupIndex.get(groupIndex);
             const durationDisplays = resolveRunDurationDisplays(
               group,
               groupIndex,
             );
+            const deliveredFiles =
+              deliveredFilesByFinalGroupIndex.get(groupIndex) ?? [];
 
             const content = (() => {
               if (group.type === "human" || group.type === "assistant") {
@@ -1290,21 +1187,6 @@ export function MessageList({
                       group.type === "assistant" && "group/assistant-turn",
                     )}
                   >
-                    {group.type === "assistant" &&
-                      turnDisplay &&
-                      turnDisplay.processGroupIndexes.length > 0 && (
-                        <AssistantProcessDisclosure
-                          autoCollapseOnMount={
-                            currentRunJustCompleted &&
-                            groupIndex === lastGroupIndex
-                          }
-                          stepCount={turnDisplay.processStepCount}
-                        >
-                          {turnDisplay.processGroupIndexes.map(
-                            renderCompletedProcessGroup,
-                          )}
-                        </AssistantProcessDisclosure>
-                      )}
                     {group.messages.map((msg) => {
                       const item = (
                         <MessageListItem
@@ -1314,11 +1196,6 @@ export function MessageList({
                             groupIndex === groupedMessages.length - 1
                           }
                           threadId={threadId}
-                          showReasoning={
-                            !turnDisplay?.processGroupIndexes.includes(
-                              groupIndex,
-                            )
-                          }
                           showCopyButton={group.type !== "assistant"}
                           canEdit={
                             group.type === "human" &&
@@ -1427,14 +1304,14 @@ export function MessageList({
                       <TokenBudgetNotice messages={group.messages} />
                     )}
                     {group.type === "assistant" &&
-                      turnDisplay &&
                       artifactsEnabled &&
-                      turnDisplay.presentedFiles.length > 0 && (
+                      deliveredFiles.length > 0 && (
                         <ArtifactFileList
                           className="mt-2"
-                          files={turnDisplay.presentedFiles}
+                          files={deliveredFiles}
                           surface="message"
                           threadId={threadId}
+                          canDelete={canDeleteFiles}
                         />
                       )}
                     {renderTokenUsage({
@@ -1527,14 +1404,6 @@ export function MessageList({
                 }
                 return null;
               } else if (group.type === "assistant:present-files") {
-                const files: string[] = [];
-                for (const message of group.messages) {
-                  if (hasPresentFiles(message)) {
-                    const presentFiles =
-                      extractPresentFilesFromMessage(message);
-                    files.push(...presentFiles);
-                  }
-                }
                 const processMessages = getPresentFilesProcessMessages(
                   group.messages,
                 );
@@ -1551,7 +1420,6 @@ export function MessageList({
                     {processMessages.length > 0 && (
                       <MessageGroup
                         className="mb-3"
-                        includeNarration={false}
                         messages={processMessages}
                         isLoading={groupIsLoading}
                         renderTaskToolCall={(taskId, messageId) => (
@@ -1576,22 +1444,6 @@ export function MessageList({
                         showTokenDebugSummaries={
                           tokenUsageInlineMode === "step_debug"
                         }
-                      />
-                    )}
-                    {group.messages[0] && hasContent(group.messages[0]) && (
-                      <MarkdownContent
-                        content={extractContentFromMessage(group.messages[0])}
-                        isLoading={visualRunIsLoading}
-                        rehypePlugins={rehypePlugins}
-                        className="mb-4"
-                      />
-                    )}
-                    {artifactsEnabled && (
-                      <ArtifactFileList
-                        files={files}
-                        surface="message"
-                        threadId={threadId}
-                        canDelete={canDeleteFiles}
                       />
                     )}
                     {renderTokenUsage({
@@ -1639,9 +1491,13 @@ export function MessageList({
             })();
             return content;
           })}
-          {visualRunIsLoading && (
+          {visualRunIsLoading && runExecutionState !== null && (
             <div className="w-full">
-              <RunActivity startTime={turnStartTime} />
+              {runExecutionState === undefined ? (
+                <RunActivity startTime={turnStartTime} />
+              ) : (
+                <RunExecutionActivity state={runExecutionState} />
+              )}
             </div>
           )}
           {trailingContent ? (

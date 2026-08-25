@@ -6,6 +6,8 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from deerflow.sandbox.sandbox_provider import RunMountReleaseOutcome
+
 
 @dataclass(frozen=True, slots=True)
 class AuthorityManifestEntry:
@@ -96,7 +98,7 @@ class RunFileAuthority(Protocol):
 
     async def mark_failed(self) -> None: ...
 
-    async def release(self) -> None: ...
+    async def release(self) -> RunMountReleaseOutcome | None: ...
 
 
 def require_private_file_authority(

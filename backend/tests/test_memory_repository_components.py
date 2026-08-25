@@ -165,6 +165,7 @@ async def test_memory_facade_delegates_dream_lifecycle_to_one_store() -> None:
     assert (
         await repository.admit_dream(  # type: ignore[arg-type]
             scope,
+            account_private_generation=object(),
             trigger="manual_dream",
             frozen=object(),
             initial_content=None,

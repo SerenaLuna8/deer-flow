@@ -83,6 +83,25 @@ class UserRow(Base):
         server_default=text("1"),
     )
 
+    # Durable account-private admission barrier.  This lifecycle is distinct
+    # from login identity and does not authorize deletion of the User row.
+    private_retention_state: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="active",
+        server_default=text("'active'"),
+    )
+    private_retention_generation: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
+    private_retention_effective_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     __table_args__ = (
         CheckConstraint("system_role IN ('system_admin', 'user')", name="ck_users_system_role"),
         CheckConstraint(
@@ -107,6 +126,18 @@ class UserRow(Base):
         CheckConstraint(
             "preferences_version >= 1",
             name="ck_users_preferences_version",
+        ),
+        CheckConstraint(
+            "private_retention_state IN ('active', 'pending_deletion', 'purged')",
+            name="ck_users_private_retention_state",
+        ),
+        CheckConstraint(
+            "private_retention_generation >= 1",
+            name="ck_users_private_retention_generation",
+        ),
+        CheckConstraint(
+            "(private_retention_state = 'pending_deletion' AND private_retention_effective_at IS NOT NULL) OR (private_retention_state IN ('active', 'purged') AND private_retention_effective_at IS NULL)",
+            name="ck_users_private_retention_effective_at",
         ),
         UniqueConstraint(
             "id",

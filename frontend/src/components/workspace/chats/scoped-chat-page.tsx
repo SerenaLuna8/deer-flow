@@ -1,6 +1,6 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -30,7 +30,6 @@ import {
   RunFailureAlert,
   shouldShowRunFailureAlert,
 } from "@/components/workspace/run-failure-alert";
-import { RunWorkloadProfileBadge } from "@/components/workspace/run-workload-profile-badge";
 import {
   SidecarProvider,
   SidecarTrigger,
@@ -86,6 +85,17 @@ import {
   useThreadStream,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
+import {
+  fetchRunExecutionState,
+  isTerminalRunExecutionState,
+  runExecutionStateObserverQueryKey,
+  runExecutionStatePollInterval,
+  runExecutionStateQueryEnabled,
+  runExecutionStateRetryDelay,
+  selectObservedRunExecutionState,
+  shouldRetryRunExecutionState,
+  type RunExecutionState,
+} from "@/core/threads/run-execution-state";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -142,6 +152,24 @@ function OptionalSidecarProvider({
   );
 }
 
+function currentDocumentVisibility(): DocumentVisibilityState {
+  return typeof document === "undefined" ? "hidden" : document.visibilityState;
+}
+
+function useDocumentVisibility(): DocumentVisibilityState {
+  const [visibility, setVisibility] = useState(currentDocumentVisibility);
+  useEffect(() => {
+    const updateVisibility = () => {
+      setVisibility(currentDocumentVisibility());
+    };
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", updateVisibility);
+    };
+  }, []);
+  return visibility;
+}
+
 export function ScopedChatPage({
   scope,
   missingThreadFallback = null,
@@ -160,6 +188,7 @@ export function ScopedChatPage({
   const queryClient = useQueryClient();
   const { thread_id: threadId } = useParams<{ thread_id: string }>();
   const privateWork = scope.privateWork;
+  const documentVisibility = useDocumentVisibility();
   const isMock = false;
   // Project chat creation is server-first, so every dynamic chat route owns an
   // already-persisted thread. Welcome mode is now purely a visual projection of
@@ -229,6 +258,9 @@ export function ScopedChatPage({
 
   const {
     thread,
+    activeRunId,
+    activeRunResolverGeneration,
+    reconcileTerminalRun,
     pendingUsageMessages,
     attachRun,
     prepareAttachments,
@@ -247,7 +279,6 @@ export function ScopedChatPage({
     runFailureCode,
     runFailureRunId,
     runControlObservations,
-    effectiveRunWorkloadProfile,
   } = useThreadStream({
     threadId,
     displayThreadId: threadId,
@@ -289,6 +320,89 @@ export function ScopedChatPage({
       }
     },
   });
+
+  const executionStateQueryKey = useMemo(
+    () =>
+      activeRunId && activeRunResolverGeneration !== null
+        ? runExecutionStateObserverQueryKey(
+            privateWork.scope,
+            threadId,
+            activeRunId,
+            activeRunResolverGeneration,
+          )
+        : ([
+            ...privateWork.queryKeyPrefix,
+            "thread",
+            threadId,
+            "run-execution-state",
+            "inactive",
+          ] as const),
+    [
+      activeRunId,
+      activeRunResolverGeneration,
+      privateWork.queryKeyPrefix,
+      privateWork.scope,
+      threadId,
+    ],
+  );
+  const executionStateQueryEnabled =
+    threadReady &&
+    runExecutionStateQueryEnabled(
+      activeRunId,
+      activeRunResolverGeneration,
+      documentVisibility,
+    );
+  const executionStateQuery = useQuery<RunExecutionState>({
+    queryKey: executionStateQueryKey,
+    queryFn: ({ signal }) => {
+      if (!activeRunId || activeRunResolverGeneration === null) {
+        throw new Error("An exact active Run is required");
+      }
+      return fetchRunExecutionState(privateWork, threadId, activeRunId, signal);
+    },
+    enabled: executionStateQueryEnabled,
+    retry: shouldRetryRunExecutionState,
+    retryDelay: runExecutionStateRetryDelay,
+    refetchInterval: (query) =>
+      runExecutionStatePollInterval(
+        currentDocumentVisibility(),
+        query.state.status === "error" ? undefined : query.state.data,
+      ),
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  });
+  useEffect(() => {
+    const queryKey = executionStateQueryKey;
+    if (!executionStateQueryEnabled) {
+      void queryClient.cancelQueries({ queryKey, exact: true });
+    }
+    return () => {
+      void queryClient.cancelQueries({ queryKey, exact: true });
+    };
+  }, [executionStateQueryEnabled, executionStateQueryKey, queryClient]);
+  const runExecutionState: RunExecutionState | "unavailable" | null =
+    activeRunId && activeRunResolverGeneration !== null
+      ? selectObservedRunExecutionState(
+          executionStateQuery.data,
+          executionStateQuery.isError,
+        )
+      : null;
+  useEffect(() => {
+    if (
+      !activeRunId ||
+      activeRunResolverGeneration === null ||
+      !executionStateQuery.data ||
+      !isTerminalRunExecutionState(executionStateQuery.data)
+    ) {
+      return;
+    }
+    void reconcileTerminalRun(activeRunId, activeRunResolverGeneration);
+  }, [
+    activeRunId,
+    activeRunResolverGeneration,
+    executionStateQuery.data,
+    reconcileTerminalRun,
+  ]);
 
   const persistedExecutionApproval = useMemo(
     () => findLatestExecutionApprovalArtifact(thread.messages),
@@ -743,11 +857,6 @@ export function ScopedChatPage({
             >
               <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
                 {renderHeaderAccessory?.(threadMetadata.data)}
-                {effectiveRunWorkloadProfile ? (
-                  <RunWorkloadProfileBadge
-                    profile={effectiveRunWorkloadProfile}
-                  />
-                ) : null}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <TokenUsageIndicator
@@ -774,6 +883,7 @@ export function ScopedChatPage({
                   testId="main-message-list"
                   threadId={threadId}
                   thread={thread}
+                  runExecutionState={runExecutionState}
                   initialScroll="instant"
                   paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                   hasMoreHistory={hasMoreHistory}

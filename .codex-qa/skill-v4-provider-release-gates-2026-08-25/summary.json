@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-25T09:37:53+08:00",
+  "contains_secrets": false,
+  "collection_contract": {
+    "p01_native_local": {
+      "selected_nodeid": "tests/test_run_skill_mount_lease.py::test_native_local_mount_readback_is_read_only_and_release_proves_absence",
+      "selected_count": 1,
+      "exit_code": 0
+    },
+    "p02_native_aio": {
+      "selected_nodeid": "tests/test_aio_private_sandbox_lifecycle.py::test_real_apple_container_typed_run_mount_probe_and_release",
+      "selected_count": 1,
+      "exit_code": 0
+    }
+  },
+  "probes": {
+    "p01_native_local": {
+      "status": "passed",
+      "provider_identity": "deerflow.sandbox.local.local_sandbox_provider.LocalSandboxProvider",
+      "execution_identity": "native host process",
+      "config_source": "config.example.yaml",
+      "config_projection": {
+        "sandbox_use": "deerflow.sandbox.local:LocalSandboxProvider",
+        "allow_host_bash": false,
+        "skills_container_path": "/mnt/skills"
+      },
+      "config_projection_sha256": "a99267874f46ffd5561a498dd473addc9b1ec345098d1a8b790ec24605ab6fb1",
+      "readback": "exact active lease read back",
+      "write_probe": "rejected by read-only filesystem",
+      "release": "exact Released proof returned",
+      "cleanup": "provider lookup confirmed sandbox absent after release",
+      "pytest_result": "1 passed, 10 deselected in 0.75s"
+    },
+    "p02_native_aio": {
+      "status": "passed",
+      "provider_identity": "deerflow.community.aio_sandbox.aio_sandbox_provider.AioSandboxProvider",
+      "execution_identity": "Apple Container 1.2.2 non-root guest",
+      "config_source": "config.yaml",
+      "config_projection": {
+        "sandbox_use": "deerflow.community.aio_sandbox:AioSandboxProvider",
+        "allow_host_bash": false,
+        "skills_container_path": "/mnt/skills",
+        "runtime": "container",
+        "image": "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0"
+      },
+      "config_projection_sha256": "63ca16c5cd0f4f23fa5e90a22cdd91af20f4003ed08aaa897c0f4fd118354a2a",
+      "readback": "owner label, active lease, manifest owner, and guest readability confirmed",
+      "write_probe": "non-root guest reported mount not writable",
+      "release": "exact Released proof returned",
+      "cleanup": "post-test container list confirmed no actweave-p02 container",
+      "pytest_result": "1 passed, 70 deselected in 10.76s"
+    }
+  }
+}

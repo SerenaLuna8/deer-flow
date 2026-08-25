@@ -498,6 +498,21 @@ function repairInjectedUserOrder(messages: Message[]): Message[] {
   return repaired;
 }
 
+/**
+ * Reapply server-owned Run boundaries to checkpoint messages before comparing
+ * them with the Run-scoped journal projection.
+ *
+ * LangGraph checkpoints keep the admitted HumanMessage Run ID while following
+ * AI and Tool messages can remain unscoped. The canonical Run journal carries
+ * that Run ID on every projected message, so consumers must normalize the
+ * checkpoint side first or the same ToolMessage has two different identities.
+ */
+export function scopeCheckpointMessagesByKnownRunBoundaries(
+  messages: Message[],
+): Message[] {
+  return attachRunIdWithinKnownTurns(repairInjectedUserOrder(messages));
+}
+
 function alignSanitizedHistoryUserIds(
   historyMessages: Message[],
   threadMessages: Message[],
@@ -561,9 +576,8 @@ export function mergeMessages(
   // identities (`run:<id>+tool:<id>` in history versus `tool:<id>` live),
   // survives dedupe twice, and a partially hydrated latest clarification can
   // appear before an older checkpoint HumanMessage.
-  const scopedThreadMessages = attachRunIdWithinKnownTurns(
-    repairInjectedUserOrder(threadMessages),
-  );
+  const scopedThreadMessages =
+    scopeCheckpointMessagesByKnownRunBoundaries(threadMessages);
   const projectedHistoryMessages = alignSanitizedHistoryUserIds(
     historyMessages,
     scopedThreadMessages,

@@ -31,6 +31,7 @@ from deerflow.runtime.host_execution_approval import (
 from deerflow.runtime.recovered_llm_failures import (
     RunRecoveredLLMFailureRecorder,
 )
+from deerflow.sandbox.sandbox_provider import RunMountReleaseOutcome
 from deerflow.subagents.binding import (
     ConfiguredLeadParentExecutionProfile,
     EmbeddedParentExecutionProfile,
@@ -283,8 +284,8 @@ class _OwnerLoopFileAuthorityProxy:
             self._target.mark_failed,
         )
 
-    async def release(self) -> None:
-        await invoke_parent_operation_on_owner_loop(
+    async def release(self) -> RunMountReleaseOutcome | None:
+        return await invoke_parent_operation_on_owner_loop(
             self._binding,
             self._target.release,
         )

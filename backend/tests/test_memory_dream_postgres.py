@@ -55,6 +55,7 @@ from deerflow.persistence.system_runtime_settings import (
     SystemRuntimePolicyRow,
     SystemRuntimePolicyVersionRow,
 )
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 
 def _owner_ref(_owner_user_id: str) -> JobOwnerRef:
@@ -63,6 +64,15 @@ def _owner_ref(_owner_user_id: str) -> JobOwnerRef:
 
 def _jobs(session) -> JobRepository:
     return JobRepository(session, owner_ref_hasher=_owner_ref)
+
+
+def _account_generation(
+    scope: MemoryDocumentScope,
+) -> AccountPrivateGeneration:
+    return AccountPrivateGeneration(
+        owner_user_id=scope.owner_user_id,
+        generation=1,
+    )
 
 
 async def _memory_document_policy_version_id(session) -> uuid.UUID:
@@ -189,6 +199,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                     jobs=_jobs(session),
                 ).admit_dream(
                     scope,
+                    account_private_generation=_account_generation(scope),
                     trigger=trigger,
                     frozen=frozen,
                     initial_content=EMPTY_MEMORY_DOCUMENT,
@@ -646,6 +657,7 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
                 jobs=_jobs(session),
             ).admit_dream(
                 worker_scope,
+                account_private_generation=_account_generation(worker_scope),
                 trigger="manual_dream",
                 frozen=frozen,
                 initial_content=EMPTY_MEMORY_DOCUMENT,
@@ -849,6 +861,7 @@ async def test_release_settlement_locks_document_before_active_job(
                 jobs=_jobs(session),
             ).admit_dream(
                 scope,
+                account_private_generation=_account_generation(scope),
                 trigger="manual_dream",
                 frozen=frozen,
                 initial_content=EMPTY_MEMORY_DOCUMENT,
@@ -909,6 +922,7 @@ async def test_release_settlement_locks_document_before_active_job(
                 jobs=_jobs(blocker),
             ).admit_dream(
                 scope,
+                account_private_generation=_account_generation(scope),
                 trigger="manual_dream",
                 frozen=frozen,
                 initial_content=EMPTY_MEMORY_DOCUMENT,
@@ -1070,6 +1084,7 @@ async def test_postgres_dream_settlement_keeps_frozen_payload_when_model_config_
                 jobs=_jobs(session),
             ).admit_dream(
                 scope,
+                account_private_generation=_account_generation(scope),
                 trigger="manual_dream",
                 frozen=frozen,
                 initial_content=EMPTY_MEMORY_DOCUMENT,

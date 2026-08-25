@@ -9,16 +9,22 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import sqlalchemy as sa
 from support.private_thread_seed import seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 
 import app.private_work.run_repository as run_repository_module
+from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import (
     PrivateRunExecutionLeaseLost,
     PrivateRunRepository,
+)
+from app.private_work.run_skill_tree_materializer import (
+    MaterializationAttemptIdentity,
 )
 from app.private_work.thread_repository import (
     PrivateThreadRepository,
     ThreadAgentRef,
 )
+from app.projects.capabilities import Capability
 from app.reliability.run_execution.boundary import PrivateRunExecutionBoundary
 from app.worker.service import JobLeaseAuthority, LeaseLost
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow, WorkerNodeRow
@@ -80,12 +86,12 @@ async def _seed_active_run(seed, *, lease_seconds: float) -> _ActiveRun:
             execution_heartbeat_at=now,
             execution_started_at=now,
         )
-        session.add(run)
-        await session.flush()
+        await add_sealed_test_run(session, run)
         job = JobRow(
             job_type="private_run",
             project_id=seed.owner_a.project_id,
             owner_user_id=str(seed.owner_a.user_id),
+            owner_private_generation=1,
             run_id=run_id,
             origin_trace_id=origin_trace_id,
             idempotency_key=hashlib.sha256(f"job:{run_id}".encode()).hexdigest(),
@@ -135,6 +141,136 @@ async def _add_worker(seed) -> uuid.UUID:
             ),
         )
     return worker_id
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_materialization_execution_suffix_uses_locked_context_and_exact_attempt_worker(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    statements: list[str] = []
+    try:
+        active = await _seed_active_run(seed, lease_seconds=30)
+        async with seed.factory() as session:
+            raw_ids = (
+                await session.execute(
+                    sa.text(
+                        """SELECT job.id AS job_id, attempt.id AS attempt_id
+                           FROM jobs AS job
+                           JOIN job_attempts AS attempt
+                             ON attempt.job_id=job.id
+                           WHERE job.id=:job_id"""
+                    ),
+                    {"job_id": active.job_id},
+                )
+            ).one()
+
+        def claim(*, attempt_id: object = raw_ids.attempt_id) -> JobClaim:
+            return JobClaim(
+                job_id=raw_ids.job_id,
+                attempt_id=attempt_id,  # type: ignore[arg-type]
+                lease_token=active.lease_token,
+                job_type="private_run",
+                scope=JobScope(
+                    seed.owner_a.project_id,
+                    str(seed.owner_a.user_id),
+                ),
+                run_id=active.run_id,
+                occurrence_id=None,
+                retry_safety="unknown",
+                cancel_requested=False,
+            )
+
+        sa.event.listen(
+            seed.engine.sync_engine,
+            "before_cursor_execute",
+            lambda _connection, _cursor, statement, _parameters, _context, _executemany: statements.append(statement),
+        )
+        boundary = PrivateRunExecutionBoundary(
+            seed.factory,
+            context=seed.owner_a,
+            claim=claim(),
+            expected_worker_id=active.worker_id,
+        )
+        async with seed.factory() as session, session.begin():
+            locked_context = await PrivateWorkRevalidator().require(
+                session,
+                seed.owner_a,
+                Capability.PRIVATE_WORK_CREATE,
+                Capability.SHARED_ASSETS_EXECUTE,
+                lock_mode="share",
+            )
+            identity = await boundary.lock_and_assert_materialization_active_in_session(
+                session,
+                locked_context,
+            )
+
+        assert type(identity) is MaterializationAttemptIdentity
+        assert type(identity.job_id) is uuid.UUID
+        assert type(identity.attempt_id) is uuid.UUID
+        assert type(identity.worker_id) is uuid.UUID
+        assert identity == MaterializationAttemptIdentity(
+            job_id=active.job_id,
+            attempt_id=active.attempt_id,
+            worker_id=active.worker_id,
+        )
+        normalized_statements = [" ".join(statement.lower().split()) for statement in statements]
+        reads = [statement for statement in normalized_statements if " from " in statement]
+        lock_order = [
+            next(index for index, statement in enumerate(reads) if table in statement)
+            for table in (
+                "from projects",
+                "from project_memberships",
+                "from jobs",
+                "from runs",
+                "from job_attempts",
+            )
+        ]
+        assert lock_order == sorted(lock_order)
+        assert all("from users" not in statement for statement in reads)
+
+        wrong_attempt = PrivateRunExecutionBoundary(
+            seed.factory,
+            context=seed.owner_a,
+            claim=claim(attempt_id=uuid.uuid4()),
+            expected_worker_id=active.worker_id,
+        )
+        async with seed.factory() as session, session.begin():
+            locked_context = await PrivateWorkRevalidator().require(
+                session,
+                seed.owner_a,
+                Capability.PRIVATE_WORK_CREATE,
+                Capability.SHARED_ASSETS_EXECUTE,
+                lock_mode="share",
+            )
+            with pytest.raises(AuthorizationRevoked):
+                await wrong_attempt.lock_and_assert_materialization_active_in_session(
+                    session,
+                    locked_context,
+                )
+
+        wrong_worker = PrivateRunExecutionBoundary(
+            seed.factory,
+            context=seed.owner_a,
+            claim=claim(),
+            expected_worker_id=uuid.uuid4(),
+        )
+        async with seed.factory() as session, session.begin():
+            locked_context = await PrivateWorkRevalidator().require(
+                session,
+                seed.owner_a,
+                Capability.PRIVATE_WORK_CREATE,
+                Capability.SHARED_ASSETS_EXECUTE,
+                lock_mode="share",
+            )
+            with pytest.raises(AuthorizationRevoked):
+                await wrong_worker.lock_and_assert_materialization_active_in_session(
+                    session,
+                    locked_context,
+                )
+    finally:
+        await seed.engine.dispose()
 
 
 @pytest.mark.postgres

@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy import ForeignKeyConstraint, Index, PrimaryKeyConstraint, UniqueConstraint
 from sqlalchemy.exc import IntegrityError
 from support.private_thread_seed import seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 
 import deerflow.persistence.models  # noqa: F401 -- populate metadata
 from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
@@ -456,8 +457,7 @@ async def test_output_delivery_retention_restricts_files_and_cascades_with_appro
                 origin_trace_id=f"trace-{uuid.uuid4()}",
                 project_id=project_id,
             )
-            session.add(run)
-            await session.flush()
+            await add_sealed_test_run(session, run)
             session.add_all(
                 [
                     JobRow(
@@ -465,6 +465,7 @@ async def test_output_delivery_retention_restricts_files_and_cascades_with_appro
                         job_type="private_run",
                         project_id=project_id,
                         owner_user_id=owner_user_id,
+                        owner_private_generation=1,
                         run_id=run_id,
                         origin_trace_id=run.origin_trace_id,
                         idempotency_key="b" * 64,

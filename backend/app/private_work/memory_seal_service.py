@@ -22,6 +22,11 @@ from app.personalization.repository import (
     AccountPersonalizationNotFound,
     AccountPersonalizationRepository,
 )
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecycleClosed,
+    AccountPrivateLifecyclePort,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
@@ -85,6 +90,7 @@ class MemorySealAdmissionService:
         job_repository_builder=JobRepository,
         personalization_repository_builder=AccountPersonalizationRepository,
         audit=None,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
     ) -> None:
         if not callable(job_repository_builder) or not callable(personalization_repository_builder):
             raise ValueError("Seal admission configuration is invalid")
@@ -93,6 +99,7 @@ class MemorySealAdmissionService:
         self._job_repository_builder = job_repository_builder
         self._personalization_repository_builder = personalization_repository_builder
         self._audit = audit
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
 
     @staticmethod
     async def _platform_idle_minutes(session: AsyncSession) -> int | None:
@@ -226,7 +233,7 @@ class MemorySealAdmissionService:
         thread_id: str,
         now: datetime,
     ) -> uuid.UUID | None:
-        """Lock Project -> Membership -> Thread, re-verify, and enqueue one Job."""
+        """Lock Project -> Membership -> User -> Thread, then enqueue one Job."""
 
         context = await resolve_project_context_in_transaction(
             session,
@@ -236,6 +243,13 @@ class MemorySealAdmissionService:
             lock=True,
         )
         context.require(Capability.PRIVATE_WORK_CREATE)
+        try:
+            account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+                session,
+                owner_user_id,
+            )
+        except AccountPrivateLifecycleClosed:
+            return None
         thread = (
             await session.execute(
                 sa.select(ThreadMetaRow)
@@ -296,6 +310,7 @@ class MemorySealAdmissionService:
                 run_id=None,
                 occurrence_id=None,
                 max_attempts=_SEAL_JOB_MAX_ATTEMPTS,
+                owner_private_generation=account_private_generation,
                 retry_safety="safe",
             )
         )

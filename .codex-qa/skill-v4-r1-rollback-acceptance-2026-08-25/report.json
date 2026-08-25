@@ -1,0 +1,570 @@
+{
+  "assertions": {
+    "accepted_fixture_is_near_encoded_ceiling": true,
+    "accepted_fixture_is_whole_file_subset_not_full": true,
+    "all_attempts_try_one_permit": true,
+    "at_most_one_content_select": true,
+    "busy_attempts_never_select_content": true,
+    "cancel_releases_permit": true,
+    "coexistence_healthy_after": true,
+    "coexistence_no_oom_increment": true,
+    "coexistence_postmaster_unchanged": true,
+    "coexistence_wal_recorded": true,
+    "coexistence_writer_and_materializer_complete": true,
+    "commit_releases_permit": true,
+    "distinct_os_processes": true,
+    "eight_attempts": true,
+    "full_preflight_cohort_ready": true,
+    "full_preflight_content_queries_zero": true,
+    "full_preflight_is_413": true,
+    "full_preflight_permit_attempts_zero": true,
+    "homogeneous_database_cohort_coordinate": true,
+    "homogeneous_legacy_artifact_and_policy": true,
+    "one_writer_seven_busy": true,
+    "permit_is_fail_fast": true,
+    "physical_connection_close_releases_permit": true,
+    "postgres_healthy_after": true,
+    "postgres_limit_is_one_gib": true,
+    "postgres_no_oom_increment": true,
+    "postgres_peak_within_cgroup_limit": true,
+    "postgres_postmaster_unchanged": true,
+    "rollback_releases_permit": true,
+    "rollback_source_shapes_preserved": true,
+    "rollback_v4_reads_v3_and_v4": true,
+    "three_writer_process_roles": true,
+    "topology_wal_recorded": true,
+    "v4_cutover_modes_use_database_cohort": true
+  },
+  "coexistence": {
+    "materializer": {
+      "baseline_rss_bytes": 159465472,
+      "final_rss_bytes": 451772416,
+      "legacy_snapshot_query_count": 1,
+      "peak_rss_bytes": 451772416,
+      "roots_remaining": [],
+      "runs": [
+        {
+          "expected_tree_file_count": 38,
+          "index": 0,
+          "latency_seconds": 0.307224625001254,
+          "run_mount_manifest_present": true,
+          "snapshot_schema_version": 3,
+          "tree_file_count": 38
+        }
+      ],
+      "v4_content_query_count": 0,
+      "writer_readback": {
+        "artifact_version": "run-skill-snapshot-writer-v2",
+        "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+        "ready": true,
+        "writer_mode": "legacy_v3"
+      }
+    },
+    "postgres": {
+      "healthy_after": true,
+      "oom_events_after": {
+        "high": 0,
+        "low": 0,
+        "max": 21116,
+        "oom": 4,
+        "oom_group_kill": 0,
+        "oom_kill": 3
+      },
+      "oom_events_before": {
+        "high": 0,
+        "low": 0,
+        "max": 21116,
+        "oom": 4,
+        "oom_group_kill": 0,
+        "oom_kill": 3
+      },
+      "postmaster_unchanged": true
+    },
+    "process_peak_rss_bytes": {
+      "gateway-coexist": 478019584,
+      "legacy-materializer": 451772416
+    },
+    "wal": {
+      "bytes": 46144856
+    },
+    "wall_seconds": 2.1037847499974305,
+    "writer": {
+      "attempts": [
+        {
+          "actual_encoded_bytes": 43106678,
+          "attempt_label": "gateway-coexist-0",
+          "content_query_count": 1,
+          "encoded_upper_bound_bytes": 50331634,
+          "gate_query_seconds": 0.0005405409974628128,
+          "latency_seconds": 1.8575745830021333,
+          "outcome": "success",
+          "permit_attempt_count": 1,
+          "role": "gateway-coexist"
+        }
+      ],
+      "baseline_rss_bytes": 159432704,
+      "cohort_readback": {
+        "artifact_version": "run-skill-snapshot-writer-v2",
+        "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+        "process_role": "gateway",
+        "ready": true,
+        "writer_mode": "legacy_v3"
+      },
+      "final_rss_bytes": 478003200,
+      "peak_rss_bytes": 478035968,
+      "process_label": "gateway-coexist",
+      "writer_readback": {
+        "artifact_version": "run-skill-snapshot-writer-v2",
+        "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+        "ready": true,
+        "writer_mode": "legacy_v3"
+      }
+    }
+  },
+  "command": "PYTHONPATH=. uv run python scripts/profile_r1_legacy_admission_resources.py --archive <ppt-master.zip> --evidence <report.json> --postgres-container postgres",
+  "failure": null,
+  "fixture": {
+    "accepted_near_ceiling": {
+      "codec_working_set_bytes": 213881917,
+      "content_size_bytes": 37733975,
+      "encoded_ceiling_utilization": 0.9999997218449911,
+      "encoded_upper_bound_bytes": 50331634,
+      "file_count": 37,
+      "full_archive": false,
+      "source_bytes": 37733975,
+      "whole_file_subset": true
+    },
+    "archive_filename": "ppt-master.zip",
+    "archive_sha256": "76488c7379289b96e873faa40be5764712735aa0b8a0341f27ec9aafb93a9289",
+    "archive_size_bytes": 57531855,
+    "database_size_bytes_after_seed": 128710323,
+    "full": {
+      "content_size_bytes": 79243539,
+      "file_count": 12922,
+      "full_archive": true
+    }
+  },
+  "full_preflight": {
+    "baseline_rss_bytes": 343490560,
+    "cohort_readback": {
+      "artifact_version": "run-skill-snapshot-writer-v2",
+      "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+      "process_role": "gateway",
+      "ready": true,
+      "writer_mode": "legacy_v3"
+    },
+    "content_query_count": 0,
+    "full_archive": true,
+    "http_status": 413,
+    "latency_seconds": 0.03795070799969835,
+    "outcome": "too_large",
+    "peak_rss_bytes": 344932352,
+    "permit_attempt_count": 0,
+    "source_kind": "full_ppt_master"
+  },
+  "generated_at": "2026-08-24T23:48:51.768321+00:00",
+  "passed": true,
+  "permit_release": {
+    "cancel_releases_permit": true,
+    "commit_releases_permit": true,
+    "physical_connection_close_releases_permit": true,
+    "rollback_releases_permit": true
+  },
+  "postgres": {
+    "baseline": {
+      "aggregate_process_rss_bytes": 240701440,
+      "cgroup_limit_bytes": 1073741824,
+      "cgroup_memory_bytes": 308129792,
+      "postmaster_rss_bytes": 17620992
+    },
+    "cgroup_headroom_at_peak_bytes": 265011200,
+    "container_name": "postgres",
+    "final": {
+      "aggregate_process_rss_bytes": 242749440,
+      "cgroup_limit_bytes": 1073741824,
+      "cgroup_memory_bytes": 330276864,
+      "postmaster_rss_bytes": 17620992
+    },
+    "identity_after": {
+      "database_size_bytes": 218396339,
+      "in_recovery": false,
+      "postmaster_started_at": "2026-08-24 19:17:41.049043+08"
+    },
+    "identity_before": {
+      "database_size_bytes": 7657139,
+      "in_recovery": false,
+      "postmaster_started_at": "2026-08-24 19:17:41.049043+08"
+    },
+    "oom_events_after": {
+      "high": 0,
+      "low": 0,
+      "max": 21116,
+      "oom": 4,
+      "oom_group_kill": 0,
+      "oom_kill": 3
+    },
+    "oom_events_before": {
+      "high": 0,
+      "low": 0,
+      "max": 21116,
+      "oom": 4,
+      "oom_group_kill": 0,
+      "oom_kill": 3
+    },
+    "peak": {
+      "aggregate_process_rss_bytes": 798683136,
+      "cgroup_limit_bytes": 1073741824,
+      "cgroup_memory_bytes": 808730624,
+      "postmaster_rss_bytes": 17620992
+    },
+    "sample_count": 40
+  },
+  "prior_failure_evidence": "pre-wal-diff-dbapi-report.json",
+  "profile": "r1_legacy_admission_rollback_release_topology",
+  "rollback_rehearsal": {
+    "mode_sequence": [
+      {
+        "artifact_version": "run-skill-snapshot-writer-v2",
+        "cohort_readback": {
+          "artifact_version": "run-skill-snapshot-writer-v2",
+          "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+          "process_role": "gateway",
+          "ready": true,
+          "writer_mode": "v4_reference"
+        },
+        "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+        "ready": true,
+        "writer_mode": "v4_reference"
+      },
+      {
+        "artifact_version": "run-skill-snapshot-writer-v2",
+        "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+        "ready": true,
+        "writer_mode": "legacy_v3"
+      },
+      {
+        "artifact_version": "run-skill-snapshot-writer-v2",
+        "cohort_readback": {
+          "artifact_version": "run-skill-snapshot-writer-v2",
+          "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+          "process_role": "gateway",
+          "ready": true,
+          "writer_mode": "v4_reference"
+        },
+        "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+        "ready": true,
+        "writer_mode": "v4_reference"
+      }
+    ],
+    "persisted_source_shapes": [
+      {
+        "has_exact_ref": false,
+        "snapshot_schema_version": 3
+      },
+      {
+        "has_exact_ref": true,
+        "snapshot_schema_version": 4
+      }
+    ],
+    "reader": {
+      "baseline_rss_bytes": 158793728,
+      "final_rss_bytes": 421003264,
+      "legacy_snapshot_query_count": 1,
+      "peak_rss_bytes": 421019648,
+      "roots_remaining": [],
+      "runs": [
+        {
+          "expected_tree_file_count": 38,
+          "index": 0,
+          "latency_seconds": 0.3364638749990263,
+          "run_mount_manifest_present": true,
+          "snapshot_schema_version": 3,
+          "tree_file_count": 38
+        },
+        {
+          "expected_tree_file_count": 38,
+          "index": 1,
+          "latency_seconds": 0.10879620799823897,
+          "run_mount_manifest_present": true,
+          "snapshot_schema_version": 4,
+          "tree_file_count": 38
+        }
+      ],
+      "v4_content_query_count": 5,
+      "writer_readback": {
+        "artifact_version": "run-skill-snapshot-writer-v2",
+        "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+        "ready": true,
+        "writer_mode": "v4_reference"
+      }
+    }
+  },
+  "scope_limits": [
+    "The profile uses the production LegacyRunSkillSnapshotWriter, database-wide advisory transaction gate, v3 codec, and v2/v3/v4 production materializers against a random isolated Schema V1 database.",
+    "Gateway and Scheduler are real independent OS processes with release role labels; the profile does not claim HTTP routing, scheduler polling, model, or Agent Graph execution.",
+    "The full supplied ppt-master Version is used only for conservative preflight rejection. The accepted writer fixture is a deterministic whole-file subset from the same archive and is explicitly not reported as full ppt-master.",
+    "Existing nonzero PostgreSQL OOM counters are baseline history; release success requires no increment during this profile and an unchanged postmaster outside recovery."
+  ],
+  "writer_topology": {
+    "attempt_count": 8,
+    "attempts": [
+      {
+        "actual_encoded_bytes": null,
+        "attempt_label": "gateway-a-0",
+        "content_query_count": 0,
+        "encoded_upper_bound_bytes": null,
+        "gate_query_seconds": 0.0007697920009377412,
+        "latency_seconds": 0.05957941700035008,
+        "outcome": "retryable_busy",
+        "permit_attempt_count": 1,
+        "role": "gateway-a"
+      },
+      {
+        "actual_encoded_bytes": null,
+        "attempt_label": "gateway-a-1",
+        "content_query_count": 0,
+        "encoded_upper_bound_bytes": null,
+        "gate_query_seconds": 0.0008042919944273308,
+        "latency_seconds": 0.057593084005929995,
+        "outcome": "retryable_busy",
+        "permit_attempt_count": 1,
+        "role": "gateway-a"
+      },
+      {
+        "actual_encoded_bytes": null,
+        "attempt_label": "gateway-a-2",
+        "content_query_count": 0,
+        "encoded_upper_bound_bytes": null,
+        "gate_query_seconds": 0.0007142500035115518,
+        "latency_seconds": 0.05805208400124684,
+        "outcome": "retryable_busy",
+        "permit_attempt_count": 1,
+        "role": "gateway-a"
+      },
+      {
+        "actual_encoded_bytes": null,
+        "attempt_label": "gateway-b-0",
+        "content_query_count": 0,
+        "encoded_upper_bound_bytes": null,
+        "gate_query_seconds": 0.0012037919950671494,
+        "latency_seconds": 0.06053820899978746,
+        "outcome": "retryable_busy",
+        "permit_attempt_count": 1,
+        "role": "gateway-b"
+      },
+      {
+        "actual_encoded_bytes": null,
+        "attempt_label": "gateway-b-1",
+        "content_query_count": 0,
+        "encoded_upper_bound_bytes": null,
+        "gate_query_seconds": 0.0010445829975651577,
+        "latency_seconds": 0.058623292003176175,
+        "outcome": "retryable_busy",
+        "permit_attempt_count": 1,
+        "role": "gateway-b"
+      },
+      {
+        "actual_encoded_bytes": null,
+        "attempt_label": "gateway-b-2",
+        "content_query_count": 0,
+        "encoded_upper_bound_bytes": null,
+        "gate_query_seconds": 0.0009825410015764646,
+        "latency_seconds": 0.05713554200337967,
+        "outcome": "retryable_busy",
+        "permit_attempt_count": 1,
+        "role": "gateway-b"
+      },
+      {
+        "actual_encoded_bytes": null,
+        "attempt_label": "scheduler-0",
+        "content_query_count": 0,
+        "encoded_upper_bound_bytes": null,
+        "gate_query_seconds": 0.0012507089995779097,
+        "latency_seconds": 0.05129133299487876,
+        "outcome": "retryable_busy",
+        "permit_attempt_count": 1,
+        "role": "scheduler"
+      },
+      {
+        "actual_encoded_bytes": 43106678,
+        "attempt_label": "scheduler-1",
+        "content_query_count": 1,
+        "encoded_upper_bound_bytes": 50331634,
+        "gate_query_seconds": 0.000590208001085557,
+        "latency_seconds": 2.012304915995628,
+        "outcome": "success",
+        "permit_attempt_count": 1,
+        "role": "scheduler"
+      }
+    ],
+    "distinct_os_processes": true,
+    "process_count": 3,
+    "process_peak_rss_bytes": {
+      "gateway-a": 165445632,
+      "gateway-b": 165707776,
+      "scheduler": 475070464
+    },
+    "processes": [
+      {
+        "attempts": [
+          {
+            "actual_encoded_bytes": null,
+            "attempt_label": "gateway-a-0",
+            "content_query_count": 0,
+            "encoded_upper_bound_bytes": null,
+            "gate_query_seconds": 0.0007697920009377412,
+            "latency_seconds": 0.05957941700035008,
+            "outcome": "retryable_busy",
+            "permit_attempt_count": 1,
+            "role": "gateway-a"
+          },
+          {
+            "actual_encoded_bytes": null,
+            "attempt_label": "gateway-a-1",
+            "content_query_count": 0,
+            "encoded_upper_bound_bytes": null,
+            "gate_query_seconds": 0.0008042919944273308,
+            "latency_seconds": 0.057593084005929995,
+            "outcome": "retryable_busy",
+            "permit_attempt_count": 1,
+            "role": "gateway-a"
+          },
+          {
+            "actual_encoded_bytes": null,
+            "attempt_label": "gateway-a-2",
+            "content_query_count": 0,
+            "encoded_upper_bound_bytes": null,
+            "gate_query_seconds": 0.0007142500035115518,
+            "latency_seconds": 0.05805208400124684,
+            "outcome": "retryable_busy",
+            "permit_attempt_count": 1,
+            "role": "gateway-a"
+          }
+        ],
+        "baseline_rss_bytes": 160153600,
+        "cohort_readback": {
+          "artifact_version": "run-skill-snapshot-writer-v2",
+          "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+          "process_role": "gateway",
+          "ready": true,
+          "writer_mode": "legacy_v3"
+        },
+        "final_rss_bytes": 165429248,
+        "peak_rss_bytes": 165478400,
+        "process_label": "gateway-a",
+        "writer_readback": {
+          "artifact_version": "run-skill-snapshot-writer-v2",
+          "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+          "ready": true,
+          "writer_mode": "legacy_v3"
+        }
+      },
+      {
+        "attempts": [
+          {
+            "actual_encoded_bytes": null,
+            "attempt_label": "gateway-b-0",
+            "content_query_count": 0,
+            "encoded_upper_bound_bytes": null,
+            "gate_query_seconds": 0.0012037919950671494,
+            "latency_seconds": 0.06053820899978746,
+            "outcome": "retryable_busy",
+            "permit_attempt_count": 1,
+            "role": "gateway-b"
+          },
+          {
+            "actual_encoded_bytes": null,
+            "attempt_label": "gateway-b-1",
+            "content_query_count": 0,
+            "encoded_upper_bound_bytes": null,
+            "gate_query_seconds": 0.0010445829975651577,
+            "latency_seconds": 0.058623292003176175,
+            "outcome": "retryable_busy",
+            "permit_attempt_count": 1,
+            "role": "gateway-b"
+          },
+          {
+            "actual_encoded_bytes": null,
+            "attempt_label": "gateway-b-2",
+            "content_query_count": 0,
+            "encoded_upper_bound_bytes": null,
+            "gate_query_seconds": 0.0009825410015764646,
+            "latency_seconds": 0.05713554200337967,
+            "outcome": "retryable_busy",
+            "permit_attempt_count": 1,
+            "role": "gateway-b"
+          }
+        ],
+        "baseline_rss_bytes": 160399360,
+        "cohort_readback": {
+          "artifact_version": "run-skill-snapshot-writer-v2",
+          "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+          "process_role": "gateway",
+          "ready": true,
+          "writer_mode": "legacy_v3"
+        },
+        "final_rss_bytes": 165675008,
+        "peak_rss_bytes": 165724160,
+        "process_label": "gateway-b",
+        "writer_readback": {
+          "artifact_version": "run-skill-snapshot-writer-v2",
+          "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+          "ready": true,
+          "writer_mode": "legacy_v3"
+        }
+      },
+      {
+        "attempts": [
+          {
+            "actual_encoded_bytes": null,
+            "attempt_label": "scheduler-0",
+            "content_query_count": 0,
+            "encoded_upper_bound_bytes": null,
+            "gate_query_seconds": 0.0012507089995779097,
+            "latency_seconds": 0.05129133299487876,
+            "outcome": "retryable_busy",
+            "permit_attempt_count": 1,
+            "role": "scheduler"
+          },
+          {
+            "actual_encoded_bytes": 43106678,
+            "attempt_label": "scheduler-1",
+            "content_query_count": 1,
+            "encoded_upper_bound_bytes": 50331634,
+            "gate_query_seconds": 0.000590208001085557,
+            "latency_seconds": 2.012304915995628,
+            "outcome": "success",
+            "permit_attempt_count": 1,
+            "role": "scheduler"
+          }
+        ],
+        "baseline_rss_bytes": 160514048,
+        "cohort_readback": {
+          "artifact_version": "run-skill-snapshot-writer-v2",
+          "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+          "process_role": "scheduler",
+          "ready": true,
+          "writer_mode": "legacy_v3"
+        },
+        "final_rss_bytes": 475054080,
+        "peak_rss_bytes": 475086848,
+        "process_label": "scheduler",
+        "writer_readback": {
+          "artifact_version": "run-skill-snapshot-writer-v2",
+          "legacy_policy_digest": "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
+          "ready": true,
+          "writer_mode": "legacy_v3"
+        }
+      }
+    ],
+    "roles": [
+      "gateway-a",
+      "gateway-b",
+      "scheduler"
+    ],
+    "wal": {
+      "bytes": 46426904
+    },
+    "wall_seconds": 2.284277500002645
+  }
+}

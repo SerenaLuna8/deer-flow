@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import sqlalchemy as sa
 from support.private_thread_seed import seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 from support.system_model_seed import seed_system_model_config
 
 from app.private_work.memory_dream_service import MemoryDreamAdmissionService
@@ -326,7 +327,8 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
                 (before_run_id, "a" * 32),
                 (after_run_id, "b" * 32),
             ):
-                session.add(
+                await add_sealed_test_run(
+                    session,
                     RunRow(
                         run_id=run_id,
                         thread_id=thread_id,
@@ -339,7 +341,7 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
                         kwargs_json={},
                         origin_trace_id=trace,
                         project_id=scope.project_id,
-                    )
+                    ),
                 )
             sections_policy_version_id = await session.scalar(
                 sa.select(SystemRuntimePolicyRow.current_version_id).where(

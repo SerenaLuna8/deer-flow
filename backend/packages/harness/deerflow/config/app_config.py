@@ -29,6 +29,7 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
+from deerflow.config.run_skill_snapshot_config import RunSkillSnapshotConfig
 from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skills_config import SkillsConfig
@@ -310,6 +311,13 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "worker",
             field_doc="Independent Worker process polling, leasing, concurrency, and retry configuration.",
+        ),
+    )
+    run_skill_snapshots: RunSkillSnapshotConfig = Field(
+        default_factory=RunSkillSnapshotConfig,
+        description=format_field_description(
+            "run_skill_snapshots",
+            field_doc="Restart-required Run Skill snapshot writer selection.",
         ),
     )
     quotas: QuotaConfig = Field(

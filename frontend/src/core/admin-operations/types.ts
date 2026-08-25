@@ -57,7 +57,14 @@ const operationsReadinessSchema = z
       .int()
       .nonnegative()
       .nullable(),
+    private_run_worker_fleet: z.string().min(1),
+    private_run_worker_count: z.number().int().nonnegative(),
+    private_run_worker_capacity: z.number().int().nonnegative(),
     scheduler_ownership: z.string().min(1),
+    run_skill_writer_mode: z.enum(["v4_reference", "legacy_v3"]),
+    run_skill_writer_artifact_version: z.string().min(1).max(128),
+    run_skill_legacy_policy_digest: z.string().regex(/^[0-9a-f]{64}$/u),
+    run_skill_writer_ready: z.boolean(),
   })
   .strict();
 
@@ -68,6 +75,11 @@ const operationsCountsSchema = z
     queued_jobs: z.number().int().nonnegative(),
     running_jobs: z.number().int().nonnegative(),
     dead_jobs: z.number().int().nonnegative(),
+    ready_jobs: z.number().int().nonnegative(),
+    oldest_ready_job_age_seconds: z.number().int().nonnegative().nullable(),
+    stale_leases: z.number().int().nonnegative(),
+    waiting_for_worker_runs: z.number().int().nonnegative(),
+    waiting_for_terminalization_runs: z.number().int().nonnegative(),
   })
   .strict();
 

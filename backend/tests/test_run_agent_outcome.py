@@ -29,6 +29,7 @@ from deerflow.runtime.runs.execution_contracts import (
 )
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.sandbox.sandbox_provider import NotAcquired
 from deerflow.token_budget_usage import (
     TokenBudgetUsageRecorder,
     TokenBudgetUsageSnapshot,
@@ -608,6 +609,7 @@ async def test_run_agent_disabled_token_tracking_excludes_subagent_receipt_from_
 @pytest.mark.asyncio
 async def test_run_agent_returns_outcome_after_owned_resources_and_terminal_close() -> None:
     events: list[str] = []
+    release_outcome = NotAcquired(owner_id=uuid.uuid4())
 
     class Authority:
         async def restore(self) -> object:
@@ -624,11 +626,13 @@ async def test_run_agent_returns_outcome_after_owned_resources_and_terminal_clos
         async def mark_failed(self) -> None:
             events.append("authority:failed")
 
-        async def release(self) -> None:
+        async def release(self) -> NotAcquired:
             events.append("authority:release")
+            return release_outcome
 
     class Runtime:
-        async def aclose(self) -> None:
+        async def aclose(self, observed_outcome) -> None:
+            assert observed_outcome is release_outcome
             events.append("runtime:close")
 
     class Agent:

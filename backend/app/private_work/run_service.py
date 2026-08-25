@@ -39,6 +39,10 @@ from app.private_work.output_delivery_obligation import (
     settle_continuation_output_delivery,
     transition_output_delivery_obligation_for_approval_terminal,
 )
+from app.private_work.retention_authority import (
+    RetentionPurgeAuthority,
+    RetentionPurgeAuthorityConflict,
+)
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import (
     PrivateRunConflict,
@@ -66,6 +70,7 @@ from deerflow.persistence.shared_assets import SkillDesignOperationRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 TERMINAL_PRIVATE_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
+_RUN_RETENTION_NAMESPACE = uuid.UUID("b4ab3129-e23d-4ee6-b7db-71f87754e65f")
 
 
 class PrivateRunQuotaPort(Protocol):
@@ -522,6 +527,29 @@ class PrivateRunService:
                         raise PrivateWorkNotFound(context.request_id)
                     if locked_target.status not in TERMINAL_PRIVATE_RUN_STATUSES:
                         raise PrivateRunConflict
+                    try:
+                        await RetentionPurgeAuthority.issue_single_run(
+                            session,
+                            purge_id=uuid.uuid5(
+                                _RUN_RETENTION_NAMESPACE,
+                                ":".join(
+                                    (
+                                        str(context.project_id),
+                                        str(context.user_id),
+                                        thread_id,
+                                        run_id,
+                                        context.request_id,
+                                    )
+                                ),
+                            ),
+                            project_id=context.project_id,
+                            owner_user_id=str(context.user_id),
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            now=approval_now,
+                        )
+                    except RetentionPurgeAuthorityConflict:
+                        raise PrivateRunConflict from None
 
                     approval_ids = tuple(row.id for row in approval_rows)
                     if approval_ids:

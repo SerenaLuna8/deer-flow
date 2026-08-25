@@ -709,6 +709,9 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         model_ref = lead_model.name
         skill_root = None
 
+        def borrow_materialized_skill_tree(self):
+            return None
+
         async def aclose(self) -> None:
             return None
 

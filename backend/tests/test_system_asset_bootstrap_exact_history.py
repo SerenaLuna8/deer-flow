@@ -4,7 +4,7 @@ import hashlib
 import json
 import uuid
 from types import MappingProxyType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -181,6 +181,9 @@ async def test_system_skill_bootstrap_ignores_legacy_scan_columns(
         scan_summary={"rule_ids": ["legacy-rule"]},
         supersedes_version_id=None,
         payload_checksum=preview.checksum,
+        file_count=len(preview.file_views),
+        content_size_bytes=sum(item.size_bytes for item in preview.file_views),
+        files_sealed=True,
         created_by_user_id=str(bootstrap_service.BUILTIN_ASSET_USER_ID),
     )
     persisted_files = bootstrap_service._skill_file_rows(version_id, files)
@@ -199,6 +202,71 @@ async def test_system_skill_bootstrap_ignores_legacy_scan_columns(
     )
 
     assert await bootstrap_service._seed_skill(session, catalog, entry) is False
+
+    version.files_sealed = False
+    session.execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [version])),
+            SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: persisted_files)),
+        ]
+    )
+    with pytest.raises(
+        bootstrap_service.BootstrapConflict,
+        match="checksum has drifted content",
+    ):
+        await bootstrap_service._seed_skill(session, catalog, entry)
+
+
+@pytest.mark.asyncio
+async def test_system_skill_bootstrap_assembles_and_seals_preview_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = _entry("builtin:skill:sealed-facts", 1)
+    archive = dump_skill_archive(
+        (
+            SkillArchiveFile(
+                path="SKILL.md",
+                media_type="text/markdown",
+                content=(b"---\nname: sealed-facts\ndescription: Sealed facts.\n---\n"),
+            ),
+            SkillArchiveFile(
+                path="references/a.md",
+                media_type="text/markdown",
+                content=b"reference\n",
+            ),
+        )
+    )
+    entry = entry.model_copy(update={"sha256": hashlib.sha256(archive).hexdigest()})
+    catalog = catalog_module.BootstrapCatalog.model_validate({"schema_version": 3, "entries": [entry.model_dump(mode="json")]})
+    catalog._payloads = MappingProxyType({(entry.source_key, 1): archive})
+    session = SimpleNamespace(add_all=MagicMock(), flush=AsyncMock())
+    monkeypatch.setattr(
+        bootstrap_service,
+        "_existing_asset",
+        AsyncMock(return_value=None),
+    )
+
+    async def seal(_session, version, files, *, request_id: str):
+        assert request_id == entry.source_key
+        assert version.files_sealed is False
+        assert version.file_count == len(files)
+        assert version.content_size_bytes == sum(row.size_bytes for row in files)
+        version.files_sealed = True
+        return tuple(files)
+
+    assembler = AsyncMock(side_effect=seal)
+    monkeypatch.setattr(
+        bootstrap_service,
+        "assemble_and_seal_skill_version",
+        assembler,
+    )
+
+    assert await bootstrap_service._seed_skill(session, catalog, entry) is True
+    parent_rows = session.add_all.call_args_list[0].args[0]
+    asset, version = parent_rows
+    assert version.files_sealed is True
+    assert asset.current_version_id == version.id
+    assembler.assert_awaited_once()
 
 
 @pytest.mark.asyncio

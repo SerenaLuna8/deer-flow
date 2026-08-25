@@ -92,6 +92,7 @@ from app.reliability.run_execution.tool_call_control_policy import (
 from app.reliability.run_execution.vision_dispatch import (
     PrivateRunVisionDispatchAuthority,
 )
+from app.shared_assets.models import AssetKind
 from app.shared_assets.skill_builder_activity_stream import (
     SkillBuilderActivityEmitter,
     SkillBuilderActivityStreamBridge,
@@ -155,7 +156,6 @@ from deerflow.runtime.user_context import (
     set_runtime_storage_user_id,
 )
 from deerflow.sandbox.sandbox import AuthorizationRevoked
-from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.token_budget_usage import (
     TokenBudgetUsageRecorder,
     TokenBudgetUsageSnapshot,
@@ -565,6 +565,7 @@ class RunAgentPrivateExecutor:
             self._factory,
             context=execution.context,
             claim=claim,
+            expected_worker_id=authority.expected_worker_id,
             quota=self._quota,
             runtime_kind=execution.runtime_kind,
         )
@@ -622,7 +623,7 @@ class RunAgentPrivateExecutor:
                     }
                     delegated_agent_versions: set[uuid.UUID] = set()
                     for asset in execution.snapshot.assets:
-                        if asset.asset_kind != "agent" or asset.dependency_order == 0:
+                        if asset.kind is not AssetKind.AGENT or asset.dependency_order == 0:
                             continue
                         if asset.version_id in delegated_agent_versions:
                             raise PermanentExecutionError("RUN_ASSET_STALE")
@@ -761,18 +762,12 @@ class RunAgentPrivateExecutor:
                 "container_path",
                 None,
             )
-            skill_root = getattr(private_runtime, "skill_root", None)
-            mounts = (
-                (
-                    RunScopedReadOnlyMount(
-                        run_id=execution.run.run_id,
-                        container_path=skill_container_path,
-                        host_path=str(skill_root),
-                    ),
-                )
-                if isinstance(skill_container_path, str) and skill_root is not None
-                else ()
-            )
+            run_skill_tree = private_runtime.borrow_materialized_skill_tree()
+            if run_skill_tree is not None and not isinstance(
+                skill_container_path,
+                str,
+            ):
+                raise PermanentExecutionError("RUN_ASSET_STALE")
             continuation_approval_id = execution.run.kwargs.get(
                 "host_execution_approval_id",
             )
@@ -811,7 +806,8 @@ class RunAgentPrivateExecutor:
                         audit=self._file_finalization_audit,
                         output_delivery_port=host_execution_approval_port,
                     ),
-                    mounts=mounts,
+                    run_skill_tree=run_skill_tree,
+                    skill_container_path=(skill_container_path if run_skill_tree is not None else None),
                     current_upload_snapshot=current_upload_snapshot,
                     output_delivery_port=host_execution_approval_port,
                 )
@@ -1083,9 +1079,10 @@ class RunAgentPrivateExecutor:
         finally:
             if runtime_config_pushed:
                 pop_current_app_config()
+            mount_outcome = None
             if not resource_ownership.transferred and file_authority is not None:
                 try:
-                    await file_authority.release()
+                    mount_outcome = await file_authority.release()
                 except Exception:
                     logger.warning(
                         "Failed to release private file authority for Run %s",
@@ -1094,7 +1091,10 @@ class RunAgentPrivateExecutor:
                     )
             if not resource_ownership.transferred and private_runtime is not None:
                 try:
-                    await private_runtime.aclose()
+                    if mount_outcome is None:
+                        await private_runtime.aclose()
+                    else:
+                        await private_runtime.aclose(mount_outcome)
                 except Exception:
                     logger.warning(
                         "Failed to clean private runtime for Run %s",

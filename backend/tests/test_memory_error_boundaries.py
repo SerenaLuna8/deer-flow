@@ -167,6 +167,7 @@ async def test_durable_executor_maps_memory_authority_unavailable_to_existing_re
     runtime = SimpleNamespace(
         model_ref=model.name,
         skill_root=None,
+        borrow_materialized_skill_tree=lambda: None,
         aclose=AsyncMock(),
     )
 

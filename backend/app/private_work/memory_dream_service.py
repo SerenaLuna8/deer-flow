@@ -13,6 +13,10 @@ from app.personalization.repository import (
     AccountPersonalizationNotFound,
     AccountPersonalizationRepository,
 )
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecyclePort,
+)
 from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
@@ -41,6 +45,7 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDreamFrozenRuntime,
     MemoryDreamTrigger,
 )
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 _SCHEDULER_REQUEST_ID = "memory-dream-scheduler"
 _BUDGET_REWRITE_DISCOVERY_PAGE_SIZE = 100
@@ -64,6 +69,7 @@ class MemoryDreamAdmissionService:
         repository_builder=MemoryDocumentRepository,
         personalization_repository_builder=AccountPersonalizationRepository,
         job_repository_builder=JobRepository,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
     ) -> None:
         if not all(
             callable(value)
@@ -77,6 +83,7 @@ class MemoryDreamAdmissionService:
         self._repository_builder = repository_builder
         self._personalization_repository_builder = personalization_repository_builder
         self._job_repository_builder = job_repository_builder
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
 
     def _repository(self, session: AsyncSession) -> MemoryDocumentRepository:
         return self._repository_builder(
@@ -157,7 +164,15 @@ class MemoryDreamAdmissionService:
         *,
         trigger: MemoryDreamTrigger,
         now: datetime,
+        account_private_generation: AccountPrivateGeneration | None = None,
     ) -> MemoryDreamAdmissionRecord:
+        if account_private_generation is None:
+            account_private_generation = await self.require_account_private_generation_after_membership(
+                session,
+                scope,
+            )
+        elif type(account_private_generation) is not AccountPrivateGeneration or account_private_generation.owner_user_id != scope.owner_user_id:
+            raise ValueError("Dream account-private generation mismatch")
         repository = self._repository(session)
         state = await repository.read_state(scope)
         policy_state = None
@@ -190,6 +205,21 @@ class MemoryDreamAdmissionService:
             trigger=trigger,
             now=now,
             runtime=runtime,
+            account_private_generation=account_private_generation,
+        )
+
+    async def require_account_private_generation_after_membership(
+        self,
+        session: AsyncSession,
+        scope: MemoryDocumentScope,
+    ) -> AccountPrivateGeneration:
+        """Acquire the L-05 User guard before any Dream domain lock."""
+
+        if type(scope) is not MemoryDocumentScope:
+            raise TypeError("MemoryDocumentScope is required")
+        return await self._account_private_lifecycle.require_active_after_membership(
+            session,
+            scope.owner_user_id,
         )
 
     async def _admit_with_runtime(
@@ -205,6 +235,7 @@ class MemoryDreamAdmissionService:
             object,
             LockedMemoryDocumentPolicy | None,
         ],
+        account_private_generation: AccountPrivateGeneration,
         budget_only: bool = False,
     ) -> MemoryDreamAdmissionRecord:
         _policy, policy_revision, model, creation_policy = runtime
@@ -240,6 +271,7 @@ class MemoryDreamAdmissionService:
             return self._nothing_pending()
         return await repository.admit_dream(
             scope,
+            account_private_generation=account_private_generation,
             trigger=effective_trigger,
             frozen=frozen,
             initial_content=(render_empty_memory_document(creation_policy.value.sections) if creation_policy is not None else None),
@@ -309,6 +341,10 @@ class MemoryDreamAdmissionService:
             lock=True,
         )
         context.require(Capability.PRIVATE_WORK_CREATE)
+        account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+            session,
+            scope.owner_user_id,
+        )
         repository = self._repository(session)
         state = await repository.read_state(scope)
         policy_state = await self._platform_policy(
@@ -345,6 +381,7 @@ class MemoryDreamAdmissionService:
             trigger="auto_dream",
             now=now,
             runtime=runtime,
+            account_private_generation=account_private_generation,
             budget_only=not require_due,
         )
 

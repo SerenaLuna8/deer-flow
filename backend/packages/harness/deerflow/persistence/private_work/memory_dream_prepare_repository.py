@@ -28,6 +28,7 @@ from deerflow.persistence.private_work.memory_document_model import (
     MemoryDreamPrepareRunRow,
 )
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 _ACTIVE_JOB_STATUSES = ("queued", "leased", "running", "retry_wait")
 
@@ -244,6 +245,7 @@ class MemoryDreamPrepareRepository:
         self,
         scope: MemoryDocumentScope,
         *,
+        account_private_generation: AccountPrivateGeneration,
         thread_id: str,
         operation_id: uuid.UUID,
         request_id: str,
@@ -251,7 +253,10 @@ class MemoryDreamPrepareRepository:
         max_attempts: int = 3,
     ) -> MemoryDreamPrepareAdmission:
         if (
-            type(thread_id) is not str
+            type(scope) is not MemoryDocumentScope
+            or type(account_private_generation) is not AccountPrivateGeneration
+            or account_private_generation.owner_user_id != scope.owner_user_id
+            or type(thread_id) is not str
             or not thread_id
             or len(thread_id) > 64
             or not isinstance(operation_id, uuid.UUID)
@@ -312,6 +317,7 @@ class MemoryDreamPrepareRepository:
                 run_id=None,
                 occurrence_id=None,
                 max_attempts=max_attempts,
+                owner_private_generation=account_private_generation,
                 retry_safety="safe",
                 priority=10,
             )

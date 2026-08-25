@@ -89,6 +89,25 @@ export const enUS: Translations = {
     separator: " ",
   },
 
+  runExecutionState: {
+    unavailable: "Execution status temporarily unavailable",
+    totalDuration: (duration) => `Total execution time ${duration}`,
+    phaseDuration: (duration) => `Current phase ${duration}`,
+    phases: {
+      queued: "Waiting for an execution slot",
+      waiting_for_worker: "Waiting for an execution Worker",
+      starting: "Worker claimed; starting",
+      executing: "Executing",
+      retry_wait: "Waiting to retry",
+      waiting_for_lease_expiry: "Worker disconnected; waiting for lease expiry",
+      waiting_for_terminalization:
+        "Execution outcome unknown; waiting for safe settlement",
+      waiting_for_recovery: "Waiting to recover execution",
+      recovering: "Recovering execution",
+      cancelling: "Stopping",
+    },
+  },
+
   // Home
   home: {
     docs: "Docs",
@@ -715,8 +734,13 @@ export const enUS: Translations = {
         title: "Readiness",
         workerCount: "Worker processes",
         workerCapacity: "Worker capacity",
+        privateRunWorkerCount: "Private-run Worker processes",
+        privateRunWorkerCapacity: "Private-run Worker capacity",
         oldestHeartbeat: "Oldest Worker heartbeat",
         schedulerOwnership: "Scheduler ownership",
+        runSkillWriterMode: "Run Skill writer mode",
+        runSkillWriterArtifact: "Run Skill writer artifact",
+        legacyPolicyDigest: "Legacy policy digest",
         secondsAgo: "{seconds}s ago",
         notReported: "Not reported",
         states: {
@@ -729,12 +753,16 @@ export const enUS: Translations = {
           owned: "Owned",
           unowned: "Unowned",
           ownership_lost: "Ownership lost",
+          v4_reference: "Version reference v4",
+          legacy_v3: "Legacy v3 rollback",
           unknown: "Unknown",
         },
         components: {
           database: "Database",
           schema: "Schema",
           worker_fleet: "Worker fleet",
+          private_run_worker_fleet: "Private-run Worker fleet",
+          run_skill_writer: "Run Skill writer",
           scheduler: "Scheduler",
           stream: "Stream",
           quota: "Quota",
@@ -752,6 +780,11 @@ export const enUS: Translations = {
         queuedJobs: "Queued jobs",
         runningJobs: "Running jobs",
         deadJobs: "Dead jobs",
+        readyJobs: "Ready jobs",
+        oldestReadyJobAge: "Oldest ready job age (seconds)",
+        staleLeases: "Stale leases",
+        waitingForWorkerRuns: "Runs waiting for a Worker",
+        waitingForTerminalizationRuns: "Runs waiting for terminalization",
       },
       usage: {
         title: "Aggregate usage",
@@ -2529,8 +2562,6 @@ export const enUS: Translations = {
       "The Agent's configured model could not be resolved. Check its system binding, Current Version, and active model catalog entry, then retry.",
     runExecutionProfile: (modelDisplayName, modeName, supportsVision) =>
       `Effective run: ${modelDisplayName} · ${modeName} · ${supportsVision ? "vision-capable" : "text only"}`,
-    runWorkloadProfile: (profile) =>
-      `Server-confirmed: ${profile === "research" ? "Research" : "Interactive"}`,
   },
 
   // Chats
@@ -2611,10 +2642,6 @@ export const enUS: Translations = {
 
   // Tool calls
   toolCalls: {
-    moreSteps: (count: number) => `${count} more step${count === 1 ? "" : "s"}`,
-    lessSteps: "Less steps",
-    executionDetails: "Execution details",
-    stepCount: (count: number) => `${count} ${count === 1 ? "step" : "steps"}`,
     executeCommand: "Execute command",
     presentFiles: "Present files",
     needYourHelp: "Need your help",
@@ -2724,8 +2751,6 @@ export const enUS: Translations = {
 
   subtasks: {
     subtask: "Subtask",
-    executing: (count: number) =>
-      `Executing ${count === 1 ? "" : count + " "}subtask${count === 1 ? "" : "s in parallel"}`,
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",

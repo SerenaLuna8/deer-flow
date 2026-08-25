@@ -44,6 +44,7 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryEpisodeCursorInvalid,
 )
 from deerflow.persistence.system_settings import SystemModelConfigRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 NOW = datetime(2026, 8, 5, 1, 2, 3, tzinfo=UTC)
 SECTIONS_POLICY_VERSION_ID = uuid.UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
@@ -66,6 +67,14 @@ class _Personalization:
     async def read_memory(self, _owner, *, for_update: bool = False):
         assert for_update is True
         return AccountMemoryPreference(memory_enabled=True, version=8)
+
+
+class _AccountPrivateLifecycle:
+    async def require_active_after_membership(self, _session, owner_user_id):
+        return AccountPrivateGeneration(
+            owner_user_id=str(owner_user_id),
+            generation=7,
+        )
 
 
 class _ProjectContext:
@@ -206,6 +215,7 @@ def _service(repository: _Repository) -> MemoryDreamAdmissionService:
         repository_builder=lambda _session, **_kwargs: repository,
         personalization_repository_builder=lambda _session: _Personalization(),
         job_repository_builder=lambda _session: object(),
+        account_private_lifecycle=_AccountPrivateLifecycle(),
     )
 
 
@@ -811,6 +821,7 @@ async def test_scheduler_discovers_without_row_locks_then_uses_one_transaction_p
         repository_builder=lambda session, **_kwargs: Repository(session),
         personalization_repository_builder=Personalization,
         job_repository_builder=lambda _session: object(),
+        account_private_lifecycle=_AccountPrivateLifecycle(),
     )
     scheduler = MemoryDreamSchedulerService(
         factory,
@@ -917,6 +928,7 @@ async def test_scheduler_rechecks_due_with_the_locked_current_interval(
             repository_builder=lambda session, **_kwargs: Repository(session),
             personalization_repository_builder=Personalization,
             job_repository_builder=lambda _session: object(),
+            account_private_lifecycle=_AccountPrivateLifecycle(),
         ),
     )
 

@@ -70,13 +70,12 @@ Each agent response in the conversation may contain:
 
 Complex tasks can pass through several thinking, process-output, tool-call, and
 tool-result cycles. Every model call keeps its own **Thought (X seconds)**
-disclosure, which collapses only that reasoning body. Process output between
-reasoning rounds remains visible in its original order during execution and
-after completion; it is not moved into a turn-level **Execution details**
-disclosure. Reasoning, tool calls, and subagent steps from rounds with no process
-output can still move into the default-collapsed **Execution details · N steps**
-disclosure. Replay or reload reconstructs the same order, finalized file cards
-remain after the answer, and `present_files` transition prose is not repeated.
+disclosure, which collapses only that reasoning body. Thinking, process output,
+tool calls, subagent cards, and finalized file cards remain in canonical
+model-call order during execution and after completion. They are never moved
+into a turn-level **Execution details · N steps** disclosure. Replay or reload
+reconstructs the same order, and `present_files` transition prose is not
+repeated.
 
 ## Understanding token usage
 

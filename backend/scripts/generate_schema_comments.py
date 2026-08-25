@@ -28,8 +28,8 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
-_EXPECTED_TABLE_COUNT = 96
-_EXPECTED_COLUMN_COUNT = 1165
+_EXPECTED_TABLE_COUNT = 97
+_EXPECTED_COLUMN_COUNT = 1194
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -109,6 +109,10 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "feedback": ("运行反馈", "保存用户针对智能体运行提交的评分与意见。"),
     "mcp_server_versions": ("MCP 服务版本", "保存不可变的 MCP 服务连接与公开配置。"),
     "run_asset_versions": ("运行资产快照", "冻结一次运行准入时解析出的智能体、技能或 MCP 完整版本内容。"),
+    "run_skill_version_refs": (
+        "运行技能版本引用",
+        "冻结一次运行准入时采用的精确技能版本、校验和与规模事实。",
+    ),
     "run_event_partition_state": ("运行事件分区状态", "记录运行事件分区维护的高水位。"),
     "run_event_invariants": ("运行事件不变量", "保存运行事件全局单调序列的单例状态。"),
     "run_events": ("运行事件", "保存按日期分区的持久化运行事件流。"),
@@ -495,6 +499,7 @@ _WORD_LABELS: dict[str, str] = {
     "content": "内容",
     "context": "上下文",
     "conversation": "会话",
+    "closure": "闭包",
     "count": "数量",
     "create": "创建",
     "created": "创建",
@@ -544,6 +549,7 @@ _WORD_LABELS: dict[str, str] = {
     "feedback": "反馈",
     "fencing": "栅栏",
     "file": "文件",
+    "files": "文件",
     "finalization": "收尾",
     "finished": "完成",
     "first": "首次",
@@ -638,6 +644,7 @@ _WORD_LABELS: dict[str, str] = {
     "preferences": "偏好",
     "principal": "主体",
     "priority": "优先级",
+    "private": "私有",
     "process": "进程",
     "progress": "进度",
     "project": "项目",
@@ -659,6 +666,7 @@ _WORD_LABELS: dict[str, str] = {
     "requested": "请求",
     "required": "必需",
     "requirements": "要求",
+    "resource": "资源",
     "reserved": "预留",
     "resolved": "解析",
     "result": "结果",
@@ -700,6 +708,7 @@ _WORD_LABELS: dict[str, str] = {
     "slot": "槽位",
     "slug": "标识名",
     "snip": "摘录",
+    "snapshot": "快照",
     "sort": "排序",
     "soul": "人格设定",
     "source": "来源",

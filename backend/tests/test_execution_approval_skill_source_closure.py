@@ -15,6 +15,9 @@ class _Rows:
     def scalars(self) -> tuple[object, ...]:
         return self._rows
 
+    def all(self) -> tuple[object, ...]:
+        return self._rows
+
 
 class _ClosureSession:
     def __init__(self, generation_id: uuid.UUID) -> None:

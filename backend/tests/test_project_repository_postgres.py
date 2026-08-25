@@ -8,6 +8,10 @@ import pytest
 from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.skill_version_fixture import (
+    assemble_and_seal_skill_version,
+    sealed_skill_version_fixture,
+)
 
 from app.projects.context import resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
@@ -33,6 +37,7 @@ async def _insert_system_skill(
 ) -> tuple[uuid.UUID, uuid.UUID]:
     skill_id = uuid.uuid4()
     version_id = uuid.uuid4()
+    fixture = sealed_skill_version_fixture(version_id, name=slug)
     await connection.execute(
         text(
             """INSERT INTO skills
@@ -49,16 +54,22 @@ async def _insert_system_skill(
     await connection.execute(
         text(
             """INSERT INTO skill_versions
-            (id,skill_id,version_number,scan_decision,payload_checksum,created_by_user_id)
-            VALUES (:version,:skill,1,'allow',:checksum,:actor)"""
+            (id,skill_id,version_number,scan_decision,payload_checksum,
+             file_count,content_size_bytes,files_sealed,created_by_user_id)
+            VALUES
+            (:version,:skill,1,'allow',:checksum,:file_count,:content_size,false,
+             :actor)"""
         ),
         {
             "version": version_id,
             "skill": skill_id,
-            "checksum": uuid.uuid4().hex * 2,
+            "checksum": fixture.payload_checksum,
+            "file_count": fixture.file_count,
+            "content_size": fixture.content_size_bytes,
             "actor": str(actor_id),
         },
     )
+    await assemble_and_seal_skill_version(connection, fixture)
     if make_current:
         await connection.execute(
             text("UPDATE skills SET current_version_id=:version WHERE id=:skill"),
@@ -97,6 +108,10 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
             draft_summary = await repository.get(context)
             assert (draft_summary.agent_count, draft_summary.skill_count, draft_summary.mcp_count) == (0, 0, 0)
             agent_version_id, skill_version_id, mcp_version_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+            skill_fixture = sealed_skill_version_fixture(
+                skill_version_id,
+                name="alpha-skill",
+            )
             async with session.begin():
                 await session.execute(
                     text("""INSERT INTO agent_versions
@@ -106,10 +121,21 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
                 )
                 await session.execute(
                     text("""INSERT INTO skill_versions
-                    (id,skill_id,version_number,scan_decision,payload_checksum,created_by_user_id)
-                    VALUES (:version,:asset,1,'allow',:checksum,:user)"""),
-                    {"version": skill_version_id, "asset": skill.id, "checksum": "b" * 64, "user": str(owner)},
+                    (id,skill_id,version_number,scan_decision,payload_checksum,
+                     file_count,content_size_bytes,files_sealed,created_by_user_id)
+                    VALUES
+                    (:version,:asset,1,'allow',:checksum,:file_count,
+                     :content_size,false,:user)"""),
+                    {
+                        "version": skill_version_id,
+                        "asset": skill.id,
+                        "checksum": skill_fixture.payload_checksum,
+                        "file_count": skill_fixture.file_count,
+                        "content_size": skill_fixture.content_size_bytes,
+                        "user": str(owner),
+                    },
                 )
+                await assemble_and_seal_skill_version(session, skill_fixture)
                 await session.execute(
                     text("""INSERT INTO mcp_server_versions
                     (id,mcp_server_id,version_number,workflow_status,transport,payload_checksum,created_by_user_id)

@@ -96,6 +96,7 @@ from deerflow.persistence.private_work.memory_repository_parts import (
     version_record,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 _escape_like_pattern = escape_like_pattern
 _validated_episode_tags = validated_episode_tags
@@ -255,6 +256,7 @@ class MemoryDocumentRepository:
         self,
         scope: MemoryDocumentScope,
         *,
+        account_private_generation: AccountPrivateGeneration,
         trigger: MemoryDreamTrigger,
         frozen: MemoryDreamFrozenRuntime,
         initial_content: str | None,
@@ -265,6 +267,7 @@ class MemoryDocumentRepository:
     ) -> MemoryDreamAdmissionRecord:
         return await self.dreams.admit_dream(
             scope,
+            account_private_generation=account_private_generation,
             trigger=trigger,
             frozen=frozen,
             initial_content=initial_content,

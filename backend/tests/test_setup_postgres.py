@@ -93,6 +93,19 @@ def test_setup_engine_factory_returns_a_fresh_engine_per_call(monkeypatch) -> No
     assert factory.call_count == 2
 
 
+def test_setup_engine_factory_can_pin_public_schema(monkeypatch) -> None:
+    engine = object()
+    factory = MagicMock(return_value=engine)
+    monkeypatch.setattr(setup_postgres, "create_async_engine", factory, raising=False)
+    config = setup_postgres.DatabaseConfig(url="postgresql://owner:secret@localhost/deerflow_test_1_abc")
+
+    assert setup_postgres._create_setup_engine(config, force_public_schema=True) is engine
+
+    server_settings = factory.call_args.kwargs["connect_args"]["server_settings"]
+    assert server_settings["search_path"] == "public"
+    assert server_settings["statement_timeout"] == str(config.statement_timeout_seconds * 1000)
+
+
 @pytest.mark.asyncio
 async def test_langgraph_bootstrap_uses_explicit_url_in_saver_then_store_order(monkeypatch) -> None:
     calls = []
@@ -148,6 +161,43 @@ async def test_langgraph_bootstrap_uses_explicit_url_in_saver_then_store_order(m
         ]
         * 2
     )
+
+
+@pytest.mark.asyncio
+async def test_langgraph_bootstrap_can_pin_every_connection_to_public(monkeypatch) -> None:
+    urls: list[str] = []
+    database_url = "postgresql://owner:private-password@localhost/deerflow_test_1_abc"
+
+    class Context:
+        async def __aenter__(self):
+            return self
+
+        async def setup(self):
+            return None
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Provider:
+        def from_conn_string(self, url):
+            urls.append(url)
+            return Context()
+
+    monkeypatch.setattr(setup_postgres, "AsyncPostgresSaver", Provider())
+    monkeypatch.setattr(setup_postgres, "AsyncPostgresStore", Provider())
+
+    async def comment(url):
+        urls.append(url)
+
+    monkeypatch.setattr(setup_postgres, "_comment_langgraph_schemas", comment)
+
+    await setup_postgres._bootstrap_langgraph_schemas(
+        database_url,
+        force_public_schema=True,
+    )
+
+    assert len(urls) == 3
+    assert all(setup_postgres.make_url(url).query["options"] == "-csearch_path=public" for url in urls)
 
 
 @pytest.mark.asyncio
@@ -278,8 +328,8 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
         "langgraph",
         "projects",
         "finalize",
-        "lock:exit",
         "dispose",
+        "lock:exit",
     ]
     connection_context.__aexit__.assert_awaited_once()
 

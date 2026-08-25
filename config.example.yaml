@@ -87,12 +87,37 @@ tool_output:
   storage_subdir: .tool-results
 uploads:
   pdf_converter: auto
+run_skill_snapshots:
+  # Restart-required release selection for new Run Skill snapshots. The v4
+  # writer stores only an immutable Version reference and is the safe default.
+  writer_mode: v4_reference
+  # A controlled R1 rollback must switch every Gateway and Scheduler process to
+  # legacy_v3 together and set both exact baked release coordinates below.
+  # Missing or mismatched coordinates fail startup; do not copy values from a
+  # request or project. Leave both fields absent while v4_reference is active.
+  # Release v2 limits source/Skill to 36 MiB, the per-Skill codec envelope to
+  # 256 MiB, and cumulative encoded Skill JSON per Run to 48 MiB. The rejected
+  # v1 coordinates are not accepted by startup.
+  # expected_artifact_version: run-skill-snapshot-writer-v2
+  # expected_legacy_policy_digest: e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Local Provider launches commands in the Worker's OS namespace. Keep direct
   # host Bash disabled unless the deployment is fully trusted. This flag and
   # host_execution_approval.mode=approval_required are mutually exclusive.
   allow_host_bash: false
+  # Release gate for Compose Worker + AioSandboxProvider/DooD exact Run Skill
+  # mounts. Keep false by default. Set the literal YAML boolean true only after
+  # the real P-03 dual-view guest and cross-Worker probe passes for this exact
+  # deployment; environment-variable strings are intentionally rejected.
+  compose_dood_p03_v1_verified: false
+  # Release gates for the BoxLite P-04 and E2B P-05 typed Run Skill mount
+  # adapters. Keep both false until the matching real provider_integration
+  # command exits 0 for this exact host/account/template. Only literal YAML
+  # booleans are accepted; request data and environment strings cannot enable
+  # either capability.
+  boxlite_p04_v1_verified: false
+  e2b_p05_v1_verified: false
   host_execution_approval:
     # Local Provider only: approval_required stages every Lead/subagent Bash
     # call for one exact, single-use host launch. It does not turn Local into a
@@ -150,10 +175,22 @@ worker:
   poll_interval_seconds: 0.5
   lease_seconds: 90
   heartbeat_seconds: 20
-  max_concurrent_jobs: 4
+  # This release permits exactly one Worker process at capacity 8.
+  # Readiness fails closed if the fresh private_run registry topology differs.
+  max_concurrent_jobs: 8
   shutdown_grace_seconds: 30
   retry_initial_seconds: 2
   retry_max_seconds: 300
+  # Per-process release bounds. The total gate admits one RSS-calibrated v2/v3
+  # compatibility envelope; the nested v4 gate preserves the separately accepted
+  # 256 MiB aggregate. Neither value is a fleet-wide memory limit.
+  materialization_max_inflight_bytes: 1610612736
+  materialization_v4_max_inflight_bytes: 268435456
+  materialization_batch_max_bytes: 8388608
+  materialization_batch_max_files: 50
+  # Preserve inactive owner roots for at least this long before startup
+  # reconciliation; active/unknown Job, Attempt, or provider state still wins.
+  materialization_orphan_grace_seconds: 300
   stream:
     # Merge root assistant text deltas for at most this many milliseconds
     # (or 4 KiB) per durable frame. 0 disables coalescing (per-token frames).

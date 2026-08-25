@@ -70,6 +70,24 @@ export interface Translations {
     separator: string;
   };
 
+  runExecutionState: {
+    unavailable: string;
+    totalDuration: (duration: string) => string;
+    phaseDuration: (duration: string) => string;
+    phases: {
+      queued: string;
+      waiting_for_worker: string;
+      starting: string;
+      executing: string;
+      retry_wait: string;
+      waiting_for_lease_expiry: string;
+      waiting_for_terminalization: string;
+      waiting_for_recovery: string;
+      recovering: string;
+      cancelling: string;
+    };
+  };
+
   home: {
     docs: string;
   };
@@ -593,8 +611,13 @@ export interface Translations {
         title: string;
         workerCount: string;
         workerCapacity: string;
+        privateRunWorkerCount: string;
+        privateRunWorkerCapacity: string;
         oldestHeartbeat: string;
         schedulerOwnership: string;
+        runSkillWriterMode: string;
+        runSkillWriterArtifact: string;
+        legacyPolicyDigest: string;
         secondsAgo: string;
         notReported: string;
         states: {
@@ -607,12 +630,16 @@ export interface Translations {
           owned: string;
           unowned: string;
           ownership_lost: string;
+          v4_reference: string;
+          legacy_v3: string;
           unknown: string;
         };
         components: {
           database: string;
           schema: string;
           worker_fleet: string;
+          private_run_worker_fleet: string;
+          run_skill_writer: string;
           scheduler: string;
           stream: string;
           quota: string;
@@ -630,6 +657,11 @@ export interface Translations {
         queuedJobs: string;
         runningJobs: string;
         deadJobs: string;
+        readyJobs: string;
+        oldestReadyJobAge: string;
+        staleLeases: string;
+        waitingForWorkerRuns: string;
+        waitingForTerminalizationRuns: string;
       };
       usage: {
         title: string;
@@ -2153,7 +2185,6 @@ export interface Translations {
       modeName: string,
       supportsVision: boolean,
     ) => string;
-    runWorkloadProfile: (profile: "interactive" | "research") => string;
   };
 
   // Chats
@@ -2223,10 +2254,6 @@ export interface Translations {
 
   // Tool calls
   toolCalls: {
-    moreSteps: (count: number) => string;
-    lessSteps: string;
-    executionDetails: string;
-    stepCount: (count: number) => string;
     executeCommand: string;
     presentFiles: string;
     needYourHelp: string;
@@ -2328,7 +2355,6 @@ export interface Translations {
   // Subtasks
   subtasks: {
     subtask: string;
-    executing: (count: number) => string;
     in_progress: string;
     completed: string;
     failed: string;

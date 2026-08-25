@@ -46,14 +46,22 @@ from app.automations.system_policy import (
     AutomationsPolicyUnavailable,
     current_automations_policy,
 )
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateGeneration,
+    AccountPrivateLifecycle,
+    AccountPrivateLifecycleClosed,
+    AccountPrivateLifecyclePort,
+)
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
+    LegacyAdmissionBusy,
     PrivateWorkAssetStale,
     PrivateWorkConflict,
     PrivateWorkError,
     PrivateWorkForbidden,
     PrivateWorkNotFound,
     PrivateWorkRunQuotaExceeded,
+    PrivateWorkTooLarge,
     PrivateWorkUnavailable,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
@@ -332,6 +340,7 @@ class AutomationDispatcher:
         endpoint_policy: McpEndpointPolicy | None = None,
         quota: AutomationQuotaPort | None = None,
         audit: AutomationAuditPort | None = None,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
     ) -> None:
         if retry_delay <= timedelta(0):
             raise ValueError("retry_delay must be positive")
@@ -348,6 +357,7 @@ class AutomationDispatcher:
         self._policy_reader = policy_reader
         self._quota = quota or _NoopAutomationQuota()
         self._audit = audit or _NoopAutomationAudit()
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
         self._revalidator = PrivateWorkRevalidator()
         self._resolver = ProjectAssetResolver(session_factory)
         self._snapshots = RunSnapshotRepository(
@@ -427,6 +437,7 @@ class AutomationDispatcher:
         session: AsyncSession,
         definition: AutomationDefinitionRef,
         occurrence: ScheduledTaskRunRecord,
+        account_private_generation: AccountPrivateGeneration,
     ) -> AdmittedAutomationOccurrence | SkippedAutomationOccurrence:
         if occurrence.status == "skipped" and occurrence.run_id is None and occurrence.thread_id is None and occurrence.job_id is None:
             return SkippedAutomationOccurrence(
@@ -440,6 +451,7 @@ class AutomationDispatcher:
             run_id=occurrence.run_id,
             occurrence_id=occurrence.id,
             job_id=occurrence.job_id,
+            account_private_generation=account_private_generation,
             lock=True,
         )
         run = await PrivateRunRepository(session).get(
@@ -532,6 +544,10 @@ class AutomationDispatcher:
                 project.require(Capability.AUTOMATION_MANAGE_OWN)
                 project.require(Capability.PRIVATE_WORK_CREATE)
                 project.require(Capability.SHARED_ASSETS_EXECUTE)
+                account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+                    session,
+                    project.user_id,
+                )
                 context = PrivateWorkContext.from_project(project)
                 tasks = ScheduledTaskRepository(session)
                 task = await tasks.lock_for_automation_outcome(
@@ -552,6 +568,7 @@ class AutomationDispatcher:
                         session,
                         definition,
                         existing,
+                        account_private_generation,
                     )
                 if task.frozen_at is not None or task.deleted_at is not None:
                     raise AutomationNotFound(context.request_id)
@@ -701,6 +718,7 @@ class AutomationDispatcher:
                     run_id=run.run_id,
                     occurrence_id=occurrence.id,
                     origin_trace_id=run.origin_trace_id,
+                    account_private_generation=account_private_generation,
                 )
                 run = await PrivateRunRepository(session).attach_job(
                     scope=context.resource_scope,
@@ -1207,11 +1225,20 @@ class AutomationDispatcher:
     def _map_error(error: Exception) -> AutomationError:
         if isinstance(error, AutomationError):
             return error
+        if isinstance(error, LegacyAdmissionBusy):
+            return AutomationUnavailable(_DISPATCH_REQUEST_ID)
+        if isinstance(error, PrivateWorkTooLarge):
+            return AutomationUnavailable(_DISPATCH_REQUEST_ID)
         if isinstance(error, (ProjectNotFound, PrivateWorkNotFound)):
             return AutomationNotFound(_DISPATCH_REQUEST_ID)
         if isinstance(
             error,
-            (ProjectForbidden, PrivateWorkForbidden, AssetForbidden),
+            (
+                ProjectForbidden,
+                PrivateWorkForbidden,
+                AssetForbidden,
+                AccountPrivateLifecycleClosed,
+            ),
         ):
             return AutomationForbidden(_DISPATCH_REQUEST_ID)
         if isinstance(

@@ -6,6 +6,10 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 from support.private_thread_seed import seed_private_thread_database
+from support.skill_version_fixture import (
+    assemble_and_seal_skill_version,
+    sealed_skill_version_fixture,
+)
 
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
@@ -47,6 +51,16 @@ async def test_historical_skill_secret_can_be_cleared_but_not_replaced(
     historical_version_id = uuid.uuid4()
     current_version_id = uuid.uuid4()
     requirements = [{"name": "api_key", "target_env": "API_KEY", "optional": False}]
+    version_fixtures = (
+        sealed_skill_version_fixture(
+            historical_version_id,
+            name="historical-secret-v1",
+        ),
+        sealed_skill_version_fixture(
+            current_version_id,
+            name="historical-secret-v2",
+        ),
+    )
     try:
         async with seed.factory() as session, session.begin():
             skill = SkillRow(
@@ -72,7 +86,10 @@ async def test_historical_skill_secret_can_be_cleared_but_not_replaced(
                         secret_requirements=requirements,
                         scan_decision="allow",
                         scan_summary={"rule_ids": []},
-                        payload_checksum="a" * 64,
+                        payload_checksum=version_fixtures[0].payload_checksum,
+                        file_count=version_fixtures[0].file_count,
+                        content_size_bytes=version_fixtures[0].content_size_bytes,
+                        files_sealed=False,
                         created_by_user_id=str(actor.user_id),
                     ),
                     SkillVersionRow(
@@ -86,12 +103,17 @@ async def test_historical_skill_secret_can_be_cleared_but_not_replaced(
                         secret_requirements=requirements,
                         scan_decision="allow",
                         scan_summary={"rule_ids": []},
-                        payload_checksum="b" * 64,
+                        payload_checksum=version_fixtures[1].payload_checksum,
+                        file_count=version_fixtures[1].file_count,
+                        content_size_bytes=version_fixtures[1].content_size_bytes,
+                        files_sealed=False,
                         created_by_user_id=str(actor.user_id),
                     ),
                 )
             )
             await session.flush()
+            for fixture in version_fixtures:
+                await assemble_and_seal_skill_version(session, fixture)
             skill.current_version_id = current_version_id
             await SkillSecretStore(session).replace_values(
                 project_id=actor.project_id,
@@ -188,6 +210,13 @@ async def test_candidate_copy_reencrypts_only_compatible_skill_secrets(
     )
     skill_id = uuid.uuid4()
     version_ids = tuple(uuid.uuid4() for _ in range(4))
+    version_fixtures = tuple(
+        sealed_skill_version_fixture(
+            version_id,
+            name=f"candidate-copy-v{index}",
+        )
+        for index, version_id in enumerate(version_ids, start=1)
+    )
     requirement = [
         {
             "name": "provider_key",
@@ -230,13 +259,21 @@ async def test_candidate_copy_reencrypts_only_compatible_skill_secrets(
                     ),
                     scan_decision="allow",
                     scan_summary={"rule_ids": []},
-                    payload_checksum=f"{index}" * 64,
+                    payload_checksum=fixture.payload_checksum,
+                    file_count=fixture.file_count,
+                    content_size_bytes=fixture.content_size_bytes,
+                    files_sealed=False,
                     created_by_user_id=str(actor.user_id),
                 )
-                for index, version_id in enumerate(version_ids, start=1)
+                for index, (version_id, fixture) in enumerate(
+                    zip(version_ids, version_fixtures, strict=True),
+                    start=1,
+                )
             )
             session.add_all(versions)
             await session.flush()
+            for fixture in version_fixtures:
+                await assemble_and_seal_skill_version(session, fixture)
             skill.current_version_id = versions[0].id
             source_state = (
                 await SkillSecretStore(session).replace_values(

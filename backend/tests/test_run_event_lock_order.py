@@ -11,9 +11,10 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import text
+from support.run_closure import add_sealed_test_run
 
 from deerflow.persistence.models.run_event import ThreadEventSequenceRow
-from deerflow.persistence.run import RunRepository
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.runtime.events.models import (
     StreamFrame,
@@ -348,25 +349,32 @@ async def _seed_active_job_run(seed, *, label: str):
         agent_asset_id=seed.project_agent_id,
         agent_scope="project",
     )
-    await RunRepository(seed.factory).put(
-        run_id,
-        thread_id=thread_id,
-        scope=scope,
-    )
     async with seed.factory() as session, session.begin():
-        trace_id = await session.scalar(
-            text("SELECT origin_trace_id FROM runs WHERE run_id=:run_id FOR UPDATE"),
-            {"run_id": run_id},
+        trace_id = uuid.uuid4().hex
+        await add_sealed_test_run(
+            session,
+            RunRow(
+                run_id=run_id,
+                thread_id=thread_id,
+                assistant_id=str(seed.project_agent_id),
+                owner_user_id=scope.owner_user_id,
+                status="pending",
+                multitask_strategy="reject",
+                metadata_json={},
+                kwargs_json={},
+                origin_trace_id=trace_id,
+                project_id=uuid.UUID(scope.project_id),
+            ),
         )
-        assert isinstance(trace_id, str)
         await session.execute(
             text(
                 """INSERT INTO jobs
-                (id,job_type,project_id,owner_user_id,run_id,origin_trace_id,
+                (id,job_type,project_id,owner_user_id,owner_private_generation,
+                 run_id,origin_trace_id,
                  idempotency_key,status,max_attempts,lease_token_hash,
                  lease_expires_at,retry_safety)
                 VALUES
-                (:job_id,'private_run',:project_id,:owner_user_id,:run_id,
+                (:job_id,'private_run',:project_id,:owner_user_id,1,:run_id,
                  :trace_id,:idempotency_key,'running',1,:token_hash,
                  now() + interval '60 seconds','safe')"""
             ),

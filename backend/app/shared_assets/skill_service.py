@@ -56,6 +56,7 @@ from app.shared_assets.skill_secret_service import (
     copy_compatible_skill_secrets_in_transaction,
     validate_skill_secret_readiness_in_transaction,
 )
+from app.shared_assets.skill_version_facts import skill_version_archive_facts
 from app.shared_assets.version_relation import (
     VersionLineageNode,
     classify_version_relations,
@@ -473,20 +474,7 @@ def _snapshot_checksum(file_views: Sequence[SkillFileView]) -> str:
     # Keep the revision-0001 persisted checksum contract. Runtime Skill
     # materialization is byte-based; media_type is validated separately, and a
     # Persisted Skill file rows are immutable at the database boundary.
-    canonical = json.dumps(
-        [
-            {
-                "path": item.path,
-                "sha256": item.sha256,
-                "size_bytes": item.size_bytes,
-            }
-            for item in file_views
-        ],
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-    return hashlib.sha256(canonical).hexdigest()
+    return skill_version_archive_facts(tuple((item.path, item.sha256, item.size_bytes) for item in file_views)).payload_checksum
 
 
 def _snapshot_checksum_for_files(files: Sequence[SkillArchiveFile]) -> str:
@@ -1804,6 +1792,9 @@ class SkillService:
             scan_summary={},
             supersedes_version_id=supersedes_version_id,
             payload_checksum=preview.checksum,
+            file_count=len(preview.file_views),
+            content_size_bytes=sum(item.size_bytes for item in preview.file_views),
+            files_sealed=False,
             created_by_user_id=str(actor.user_id),
         )
         file_rows = tuple(

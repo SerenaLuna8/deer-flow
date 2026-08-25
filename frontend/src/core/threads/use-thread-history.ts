@@ -1,4 +1,4 @@
-import type { Message } from "@langchain/langgraph-sdk";
+import type { Message, Run } from "@langchain/langgraph-sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { EventSequence } from "../private-work/event-sequence";
@@ -22,8 +22,58 @@ import {
   shouldReloadEmptyRunAfterTerminalFailure,
   shouldAutoContinueOnEmptyRun,
 } from "./run-history";
-import { useThreadRuns } from "./thread-runs";
+import { fetchAllThreadRuns, useThreadRuns } from "./thread-runs";
 import type { RunMessage } from "./types";
+
+const CANONICAL_THREAD_HISTORY_MAX_MESSAGE_PAGES = 1000;
+
+export type CanonicalThreadHistory = Readonly<{
+  threadId: string;
+  runs: Run[];
+  messages: Message[];
+}>;
+
+export async function fetchCanonicalThreadHistory(
+  apiClient: Parameters<typeof fetchAllThreadRuns>[0],
+  apiBaseURL: string,
+  threadId: string,
+  signal: AbortSignal,
+): Promise<CanonicalThreadHistory> {
+  const runs = await fetchAllThreadRuns(apiClient, threadId, undefined, signal);
+  let rows: RunMessage[] = [];
+  let messagePageCount = 0;
+  for (const run of runs) {
+    let beforeSeq: EventSequence | undefined;
+    while (true) {
+      signal.throwIfAborted();
+      messagePageCount += 1;
+      if (messagePageCount > CANONICAL_THREAD_HISTORY_MAX_MESSAGE_PAGES) {
+        throw new Error("Canonical Thread history exceeded the page limit.");
+      }
+      const page = await fetchRunMessagesPage(
+        apiBaseURL,
+        threadId,
+        run.run_id,
+        beforeSeq,
+        signal,
+      );
+      rows = mergeRunMessageRows(rows, page.data, runs);
+      const nextBeforeSeq = getNextRunMessagesBeforeSeq(page);
+      if (nextBeforeSeq === null) break;
+      if (nextBeforeSeq === undefined) {
+        throw new Error(
+          `Run ${run.run_id} returned a non-advancing message page.`,
+        );
+      }
+      beforeSeq = nextBeforeSeq;
+    }
+  }
+  return {
+    threadId,
+    runs,
+    messages: buildVisibleHistoryMessages(rows, getSupersededRunIds(runs), []),
+  };
+}
 
 type ThreadHistoryOptions = {
   enabled?: boolean;
@@ -299,6 +349,18 @@ export function useThreadHistory(
     }
     void loadMessages();
   }, [loadMessages, refetchRuns, runsFailed]);
+  const refetchCanonicalThread = useCallback(
+    (targetThreadId: string) =>
+      runPrivateWorkAbortable(privateWork, (signal) =>
+        fetchCanonicalThreadHistory(
+          privateWork.client,
+          privateWork.apiBaseURL,
+          targetThreadId,
+          signal ?? new AbortController().signal,
+        ),
+      ),
+    [privateWork],
+  );
   return {
     runs: runs.data,
     messages,
@@ -308,5 +370,6 @@ export function useThreadHistory(
     loadMore: loadMessages,
     error: historyError,
     retry: retryHistory,
+    refetchCanonicalThread,
   };
 }

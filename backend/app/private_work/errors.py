@@ -151,6 +151,12 @@ class PrivateWorkQuotaUnavailable(PrivateWorkRetryableUnavailable):
     reason_code = "quota_unavailable"
 
 
+class LegacyAdmissionBusy(PrivateWorkRetryableUnavailable):
+    """The database-wide legacy byte-bearing writer permit is occupied."""
+
+    reason_code = "legacy_admission_busy"
+
+
 class ExecutionApprovalNotFound(PrivateWorkError):
     code = "EXECUTION_APPROVAL_NOT_FOUND"
     public_message = "Execution approval was not found."

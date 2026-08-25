@@ -2,6 +2,8 @@ GATEWAY_WORKERS ?= 1
 SETUP_ENV_FILE := $(wildcard ../.env)
 RUNTIME_ENV_RUNNER = uv run python scripts/run_runtime.py --
 
+.PHONY: reset-db
+
 install:
 	uv sync
 
@@ -18,7 +20,10 @@ scheduler:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m app.scheduler.app
 
 test:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python tests/support/core_gate_plugin.py tests/ -q
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python tests/support/core_gate_plugin.py tests/ -q -m "not provider_integration"
+
+test-provider-integration:
+	ACTWEAVE_REQUIRE_PROVIDER_INTEGRATION=1 ACT_WEAVE_RUN_REAL_APPLE_CONTAINER_TEST=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/ -q -m provider_integration
 
 lint:
 	uvx ruff check .
@@ -29,6 +34,9 @@ format:
 
 setup-db:
 	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/setup_postgres.py
+
+reset-db:
+	uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python -m scripts.reset_postgres
 
 check-db:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/check_postgres.py

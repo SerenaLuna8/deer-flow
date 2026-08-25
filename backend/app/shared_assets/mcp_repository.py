@@ -116,6 +116,16 @@ class McpRepository:
 
     async def create_project_asset(self, context: ProjectContext, row: McpServerRow) -> McpServerRow:
         await self.lock_project(context)
+        return await self.create_project_asset_after_lock(context, row)
+
+    async def create_project_asset_after_lock(
+        self,
+        context: ProjectContext,
+        row: McpServerRow,
+    ) -> McpServerRow:
+        """Create after the caller's Project/Membership governance prefix."""
+
+        self._require_project_actor(context)
         if row.scope != "project" or row.project_id != context.project_id:
             raise AssetNotFound(context.request_id)
         self.session.add(row)

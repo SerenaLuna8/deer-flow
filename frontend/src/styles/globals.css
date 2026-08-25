@@ -70,50 +70,6 @@
 
 @custom-variant dark (&:is(.dark *));
 
-@keyframes assistant-process-expand {
-  from {
-    height: 0;
-    opacity: 0;
-    transform: translateY(-0.25rem);
-  }
-  to {
-    height: var(--radix-collapsible-content-height);
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes assistant-process-collapse {
-  from {
-    height: var(--radix-collapsible-content-height);
-    opacity: 1;
-    transform: translateY(0);
-  }
-  to {
-    height: 0;
-    opacity: 0;
-    transform: translateY(-0.25rem);
-  }
-}
-
-.animate-assistant-process-collapse[data-state="open"] {
-  animation: assistant-process-expand 320ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.animate-assistant-process-collapse[data-state="open"][data-initial-open="true"] {
-  animation: none;
-}
-
-.animate-assistant-process-collapse[data-state="closed"] {
-  animation: assistant-process-collapse 320ms cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .animate-assistant-process-collapse[data-state] {
-    animation: none;
-  }
-}
-
 @theme {
   --font-sans:
     ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
@@ -476,6 +432,35 @@
     background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
     border-radius: 999px;
   }
+}
+
+/* Plain-text fences are prose-like previews. Wrap them visually while keeping
+   the original code string unchanged for copy and download actions. */
+:is(
+    [data-code-block-container][data-language="text"],
+    [data-code-block-container][data-language="txt"]
+  )
+  [data-code-block],
+:is(
+    [data-code-block-container][data-language="text"],
+    [data-code-block-container][data-language="txt"]
+  )
+  [data-code-block]
+  pre {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+:is(
+    [data-code-block-container][data-language="text"],
+    [data-code-block-container][data-language="txt"]
+  )
+  [data-code-block]
+  pre {
+  font-size: 14px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 :root {

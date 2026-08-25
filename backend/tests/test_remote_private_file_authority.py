@@ -7,6 +7,7 @@ import pwd
 import stat
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -245,6 +246,47 @@ def test_private_guest_prunes_excluded_workspace_runtime_tree_before_entry_limit
                     "file_type": "regular",
                 }
             ]
+        },
+    }
+
+
+def test_private_guest_run_mount_probe_is_bounded_and_read_only(
+    tmp_path: Path,
+) -> None:
+    owner_id = uuid.UUID("70000000-0000-0000-0000-000000000001")
+    manifest = f'{{"owner_id":"{owner_id}","schema_version":1}}\n'
+    mount_root = tmp_path / "mnt"
+    skills_root = mount_root / "skills"
+    skills_root.mkdir(parents=True, mode=0o700)
+    manifest_path = skills_root / ".actweave-run-mount.json"
+    manifest_path.write_text(manifest, encoding="utf-8")
+    manifest_path.chmod(0o444)
+    skills_root.chmod(0o555)
+
+    try:
+        response = _run_guest_init(
+            mount_root,
+            request={
+                "version": 1,
+                "action": "probe_run_readonly_mount",
+                "root": "/mnt/skills",
+                "path": "/mnt/skills/.actweave-run-mount.json",
+                "display_path": "/mnt/skills/.actweave-run-mount.json",
+                "expected_owner_id": str(owner_id),
+                "expected_manifest": manifest,
+            },
+        )
+    finally:
+        skills_root.chmod(0o700)
+        manifest_path.chmod(0o600)
+
+    assert response == {
+        "ok": True,
+        "data": {
+            "euid": os.geteuid(),
+            "owner_id": str(owner_id),
+            "readable": True,
+            "writable": False,
         },
     }
 

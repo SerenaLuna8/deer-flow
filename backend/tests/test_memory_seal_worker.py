@@ -39,6 +39,7 @@ from app.worker.memory_seal import MemorySealJobHandler
 from app.worker.service import JobSettlement, LeaseLost
 from deerflow.config.app_config import AppConfig
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository, JobScope
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 from deerflow.runtime.context_compaction import ThreadCompactionResult
 
 NOW = datetime(2026, 8, 6, 10, 20, 30, tzinfo=UTC)
@@ -130,6 +131,21 @@ class _Personalization:
             memory_enabled = self.enabled
 
         return _Preference()
+
+
+class _AccountLifecycle:
+    def __init__(self, *, events: list[str] | None = None) -> None:
+        self.events = events
+        self.calls: list[tuple[object, str]] = []
+
+    async def require_active_after_membership(self, session, owner_user_id):
+        self.calls.append((session, owner_user_id))
+        if self.events is not None:
+            self.events.append("account")
+        return AccountPrivateGeneration(
+            owner_user_id=owner_user_id,
+            generation=1,
+        )
 
 
 class _AdmissionAudit:
@@ -516,6 +532,7 @@ async def test_admission_enqueues_one_job_with_thread_coordinate_and_audit(
         job_repository_builder=lambda _session: jobs,
         personalization_repository_builder=lambda _session: personalization,
         audit=audit,
+        account_private_lifecycle=_AccountLifecycle(),
     )
 
     job_id = await service.admit_thread(
@@ -544,6 +561,10 @@ async def test_admission_enqueues_one_job_with_thread_coordinate_and_audit(
     assert job.run_id is None
     assert job.occurrence_id is None
     assert job.max_attempts == 5
+    assert job.owner_private_generation == AccountPrivateGeneration(
+        owner_user_id=OWNER_USER_ID,
+        generation=1,
+    )
     assert job.retry_safety == "safe"
     assert job.idempotency_key == compute_seal_idempotency_key(
         project_id=str(PROJECT_ID),
@@ -582,6 +603,7 @@ async def test_admission_skips_an_existing_job_for_the_same_activity(
         job_repository_builder=lambda _session: jobs,
         personalization_repository_builder=lambda _session: _Personalization(),
         audit=audit,
+        account_private_lifecycle=_AccountLifecycle(),
     )
 
     admitted = await service.admit_thread(
@@ -646,6 +668,7 @@ async def test_admission_locks_thread_before_reading_live_policy_and_preference(
     service = MemorySealAdmissionService(
         job_repository_builder=lambda _session: _OrderedJobs(),
         personalization_repository_builder=lambda _session: _OrderedPersonalization(),
+        account_private_lifecycle=_AccountLifecycle(events=events),
     )
 
     assert (
@@ -660,6 +683,7 @@ async def test_admission_locks_thread_before_reading_live_policy_and_preference(
     )
     assert events == [
         "project_membership",
+        "account",
         "thread",
         "policy",
         "preference",
@@ -691,6 +715,7 @@ async def test_admission_skips_when_the_locked_recheck_is_no_longer_due(
         job_repository_builder=lambda _session: jobs,
         personalization_repository_builder=lambda _session: _Personalization(),
         audit=audit,
+        account_private_lifecycle=_AccountLifecycle(),
     )
 
     assert (
@@ -725,6 +750,7 @@ async def test_admission_skips_owners_who_disabled_memory(
     service = MemorySealAdmissionService(
         job_repository_builder=lambda _session: jobs,
         personalization_repository_builder=lambda _session: _Personalization(enabled=False),
+        account_private_lifecycle=_AccountLifecycle(),
     )
 
     assert (

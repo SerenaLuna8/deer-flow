@@ -88,6 +88,24 @@ export const zhCN: Translations = {
     separator: " ",
   },
 
+  runExecutionState: {
+    unavailable: "执行状态暂不可用",
+    totalDuration: (duration) => `总执行时长 ${duration}`,
+    phaseDuration: (duration) => `当前阶段 ${duration}`,
+    phases: {
+      queued: "等待执行槽位",
+      waiting_for_worker: "等待执行 Worker",
+      starting: "Worker 已领取，正在启动",
+      executing: "执行中",
+      retry_wait: "等待重试",
+      waiting_for_lease_expiry: "Worker 已失联，等待租约到期",
+      waiting_for_terminalization: "执行结果未知，等待安全收敛",
+      waiting_for_recovery: "等待恢复执行",
+      recovering: "正在恢复执行",
+      cancelling: "正在停止",
+    },
+  },
+
   // Home
   home: {
     docs: "文档",
@@ -681,8 +699,13 @@ export const zhCN: Translations = {
         title: "就绪状态",
         workerCount: "执行器进程数",
         workerCapacity: "执行器容量",
+        privateRunWorkerCount: "私有运行执行器进程数",
+        privateRunWorkerCapacity: "私有运行执行器容量",
         oldestHeartbeat: "最早执行器心跳",
         schedulerOwnership: "调度器所有权",
+        runSkillWriterMode: "运行 Skill 写入模式",
+        runSkillWriterArtifact: "运行 Skill 写入制品",
+        legacyPolicyDigest: "Legacy 策略摘要",
         secondsAgo: "{seconds} 秒前",
         notReported: "未上报",
         states: {
@@ -695,12 +718,16 @@ export const zhCN: Translations = {
           owned: "已持有",
           unowned: "未持有",
           ownership_lost: "所有权已丢失",
+          v4_reference: "v4 版本引用",
+          legacy_v3: "Legacy v3 回滚",
           unknown: "未知",
         },
         components: {
           database: "数据库",
           schema: "架构",
           worker_fleet: "执行器集群",
+          private_run_worker_fleet: "私有运行执行器集群",
+          run_skill_writer: "运行 Skill 写入器",
           scheduler: "调度器",
           stream: "事件流",
           quota: "配额",
@@ -718,6 +745,11 @@ export const zhCN: Translations = {
         queuedJobs: "排队作业",
         runningJobs: "运行中作业",
         deadJobs: "终止作业",
+        readyJobs: "可领取作业",
+        oldestReadyJobAge: "最早可领取作业等待时长（秒）",
+        staleLeases: "过期租约",
+        waitingForWorkerRuns: "等待执行器的运行",
+        waitingForTerminalizationRuns: "等待终态收敛的运行",
       },
       usage: {
         title: "聚合用量",
@@ -2387,8 +2419,6 @@ export const zhCN: Translations = {
       "无法解析 Agent 配置的模型。请检查其系统绑定、Current Version 和模型目录中的启用状态后重试。",
     runExecutionProfile: (modelDisplayName, modeName, supportsVision) =>
       `实际执行：${modelDisplayName} · ${modeName} · ${supportsVision ? "支持视觉" : "仅文本"}`,
-    runWorkloadProfile: (profile) =>
-      `服务端确认：${profile === "research" ? "深度研究" : "普通对话"}`,
   },
 
   // Chats
@@ -2469,10 +2499,6 @@ export const zhCN: Translations = {
 
   // Tool calls
   toolCalls: {
-    moreSteps: (count: number) => `查看其他 ${count} 个步骤`,
-    lessSteps: "隐藏步骤",
-    executionDetails: "执行过程",
-    stepCount: (count: number) => `${count} 个步骤`,
     executeCommand: "执行命令",
     presentFiles: "展示文件",
     needYourHelp: "需要你的协助",
@@ -2576,8 +2602,6 @@ export const zhCN: Translations = {
 
   subtasks: {
     subtask: "子任务",
-    executing: (count: number) =>
-      `${count > 1 ? "并行" : ""}执行 ${count} 个子任务`,
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",

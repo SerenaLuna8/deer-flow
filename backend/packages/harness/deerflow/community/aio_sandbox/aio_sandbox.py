@@ -25,6 +25,11 @@ from deerflow.sandbox.sandbox import (
     SandboxBinaryReader,
     _validate_extra_env,
 )
+from deerflow.sandbox.sandbox_provider import (
+    RUN_READONLY_MOUNT_MANIFEST_MAX_BYTES,
+    RUN_READONLY_MOUNT_MANIFEST_PATH,
+    run_readonly_mount_manifest_text,
+)
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 from .backend import _sandbox_url_bypasses_env_proxy
@@ -436,6 +441,41 @@ class AioSandbox(Sandbox):
         if boundary is None:
             raise SandboxRuntimeError("Private file authority is unavailable")
         boundary.initialize_private_roots()
+
+    def probe_run_readonly_mount(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        expected_manifest: str,
+    ) -> None:
+        """Use the real unprivileged guest to prove one exact mount is read-only."""
+
+        canonical_manifest = run_readonly_mount_manifest_text(owner_id)
+        if expected_manifest != canonical_manifest or len(expected_manifest.encode("utf-8")) > RUN_READONLY_MOUNT_MANIFEST_MAX_BYTES:
+            raise SandboxRuntimeError("Invalid run read-only mount manifest")
+        virtual_path = f"/mnt/skills/{RUN_READONLY_MOUNT_MANIFEST_PATH}"
+        response = self._execute_private_guest(
+            {
+                "version": 1,
+                "action": "probe_run_readonly_mount",
+                "root": "/mnt/skills",
+                "path": virtual_path,
+                "display_path": virtual_path,
+                "expected_owner_id": str(owner_id),
+                "expected_manifest": expected_manifest,
+            },
+        )
+        data = response.get("data")
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"euid", "owner_id", "readable", "writable"}
+            or type(data.get("euid")) is not int
+            or data["euid"] <= 0
+            or data.get("owner_id") != str(owner_id)
+            or data.get("readable") is not True
+            or data.get("writable") is not False
+        ):
+            raise SandboxRuntimeError("Invalid run read-only mount guest receipt")
 
     def open_regular_reader(self, path: str) -> SandboxBinaryReader:
         boundary = getattr(self, "_private_files", None)

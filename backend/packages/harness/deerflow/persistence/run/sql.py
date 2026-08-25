@@ -133,7 +133,6 @@ class RunRepository(RunStore):
             raise ValueError("private run scope is required")
         project_id, owner_user_id = self._coordinates(scope)
         now = datetime.now(UTC)
-        created = datetime.fromisoformat(created_at) if created_at else now
         values = {
             "thread_id": thread_id,
             "assistant_id": assistant_id,
@@ -158,10 +157,15 @@ class RunRepository(RunStore):
                 )
             ).scalar_one_or_none()
             if row is None:
-                session.add(RunRow(run_id=run_id, created_at=created, **values))
-            else:
-                for key, value in values.items():
-                    setattr(row, key, value)
+                raise ValueError(
+                    "new executable Runs require snapshot admission",
+                )
+            if row.asset_closure_sealed is not True or row.job_id is None:
+                raise ValueError(
+                    "executable Run requires sealed snapshot admission",
+                )
+            for key, value in values.items():
+                setattr(row, key, value)
             await session.commit()
 
     async def get(

@@ -92,8 +92,15 @@ class OperationsReadinessResponse(BaseModel):
     worker_count: int
     worker_capacity: int
     worker_oldest_heartbeat_age_seconds: int | None
+    private_run_worker_fleet: str
+    private_run_worker_count: int
+    private_run_worker_capacity: int
     scheduler_ownership: str
     schema_state: Literal["ready", "unavailable"]
+    run_skill_writer_mode: Literal["v4_reference", "legacy_v3"]
+    run_skill_writer_artifact_version: str
+    run_skill_legacy_policy_digest: str
+    run_skill_writer_ready: bool
 
 
 class OperationsCountsResponse(BaseModel):
@@ -103,6 +110,11 @@ class OperationsCountsResponse(BaseModel):
     queued_jobs: int
     running_jobs: int
     dead_jobs: int
+    ready_jobs: int
+    oldest_ready_job_age_seconds: int | None
+    stale_leases: int
+    waiting_for_worker_runs: int
+    waiting_for_terminalization_runs: int
 
 
 class AggregateUsageResponse(BaseModel):
@@ -210,15 +222,12 @@ async def current_reliability_readiness(
     request: Request,
     session: AsyncSession,
     identity: tuple[uuid.UUID, str],
+    *,
+    worker_fresh_for_seconds: int | None = None,
 ) -> ReliabilityReadiness:
     service = getattr(request.app.state, "reliability_readiness_service", None)
     if service is None:
-        try:
-            config = await asyncio.to_thread(get_app_config)
-            worker_fresh_for_seconds = config.worker.heartbeat_seconds * 3
-        except FileNotFoundError:
-            # Small embedded/test apps may intentionally omit a config file.
-            worker_fresh_for_seconds = 60
+        selected_worker_freshness = worker_fresh_for_seconds if worker_fresh_for_seconds is not None else await current_worker_fresh_for_seconds()
         try:
             from app.system_runtime_settings import (
                 AutomationsPolicyValue,
@@ -243,7 +252,7 @@ async def current_reliability_readiness(
             session,
             role="gateway",
             scheduler_enabled=scheduler_enabled,
-            worker_fresh_for_seconds=worker_fresh_for_seconds,
+            worker_fresh_for_seconds=selected_worker_freshness,
         )
         service = ReliabilityReadinessService(
             FinalSchemaProbe(),
@@ -270,6 +279,15 @@ async def current_reliability_readiness(
     if not isawaitable(result):
         raise TypeError("reliability readiness service must be async")
     return await result
+
+
+async def current_worker_fresh_for_seconds() -> int:
+    try:
+        config = await asyncio.to_thread(get_app_config)
+        return config.worker.heartbeat_seconds * 3
+    except FileNotFoundError:
+        # Small embedded/test apps may intentionally omit a config file.
+        return 60
 
 
 def _gateway_components_status(
@@ -324,8 +342,15 @@ def overview_response(
                 worker_count=readiness.worker_count,
                 worker_capacity=readiness.worker_capacity,
                 worker_oldest_heartbeat_age_seconds=readiness.worker_oldest_heartbeat_age_seconds,
+                private_run_worker_fleet=readiness.private_run_worker_fleet,
+                private_run_worker_count=readiness.private_run_worker_count,
+                private_run_worker_capacity=readiness.private_run_worker_capacity,
                 scheduler_ownership=readiness.scheduler_ownership,
                 schema_state=readiness.schema_state,
+                run_skill_writer_mode=readiness.run_skill_writer_mode,
+                run_skill_writer_artifact_version=(readiness.run_skill_writer_artifact_version),
+                run_skill_legacy_policy_digest=(readiness.run_skill_legacy_policy_digest),
+                run_skill_writer_ready=readiness.run_skill_writer_ready,
             ),
             data_status="unavailable",
             counts=None,
@@ -348,8 +373,15 @@ def overview_response(
             worker_count=readiness.worker_count,
             worker_capacity=readiness.worker_capacity,
             worker_oldest_heartbeat_age_seconds=readiness.worker_oldest_heartbeat_age_seconds,
+            private_run_worker_fleet=readiness.private_run_worker_fleet,
+            private_run_worker_count=readiness.private_run_worker_count,
+            private_run_worker_capacity=readiness.private_run_worker_capacity,
             scheduler_ownership=readiness.scheduler_ownership,
             schema_state=readiness.schema_state,
+            run_skill_writer_mode=readiness.run_skill_writer_mode,
+            run_skill_writer_artifact_version=(readiness.run_skill_writer_artifact_version),
+            run_skill_legacy_policy_digest=(readiness.run_skill_legacy_policy_digest),
+            run_skill_writer_ready=readiness.run_skill_writer_ready,
         ),
         data_status="available",
         counts=OperationsCountsResponse(
@@ -358,6 +390,11 @@ def overview_response(
             queued_jobs=value.counts.queued_jobs,
             running_jobs=value.counts.running_jobs,
             dead_jobs=value.counts.dead_jobs,
+            ready_jobs=value.counts.ready_jobs,
+            oldest_ready_job_age_seconds=(value.counts.oldest_ready_job_age_seconds),
+            stale_leases=value.counts.stale_leases,
+            waiting_for_worker_runs=value.counts.waiting_for_worker_runs,
+            waiting_for_terminalization_runs=(value.counts.waiting_for_terminalization_runs),
         ),
         usage=[
             AggregateUsageResponse(
@@ -398,12 +435,20 @@ async def get_operations_overview(
 ) -> OperationsOverviewResponse:
     async with session.begin():
         await resolve_current_system_audit_context(session, identity[0], identity[1])
-        readiness = await current_reliability_readiness(request, session, identity)
+        worker_fresh_for_seconds = await current_worker_fresh_for_seconds()
+        readiness = await current_reliability_readiness(
+            request,
+            session,
+            identity,
+            worker_fresh_for_seconds=worker_fresh_for_seconds,
+        )
         channel_providers = await current_channel_provider_health()
         if readiness.status == "closed":
             return overview_response(None, readiness, channel_providers)
         return overview_response(
-            await SystemOperationsRepository(session).overview(),
+            await SystemOperationsRepository(session).overview(
+                worker_fresh_for_seconds=worker_fresh_for_seconds,
+            ),
             readiness,
             channel_providers,
         )
@@ -413,6 +458,7 @@ __all__ = [
     "AdminOperationsRoute",
     "authenticated_system_identity",
     "current_reliability_readiness",
+    "current_worker_fresh_for_seconds",
     "current_system_context",
     "map_admin_operations_errors",
     "router",

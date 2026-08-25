@@ -37,6 +37,7 @@ from deerflow.persistence.private_work.model import (
     RunAssetVersionRow,
     RunMcpSecretSnapshotRow,
     RunSkillSecretSnapshotRow,
+    RunSkillVersionRefRow,
 )
 
 __all__ = [
@@ -69,5 +70,6 @@ __all__ = [
     "RunAssetVersionRow",
     "RunMemoryContextSnapshotRow",
     "RunMcpSecretSnapshotRow",
+    "RunSkillVersionRefRow",
     "RunSkillSecretSnapshotRow",
 ]

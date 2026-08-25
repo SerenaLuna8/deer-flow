@@ -35,10 +35,12 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from e2b.sandbox.sandbox_api import SandboxQuery
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config import get_app_config
@@ -46,7 +48,22 @@ from deerflow.private_scope import PrivateResourceScope
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, SandboxProvider
+from deerflow.sandbox.sandbox_provider import (
+    Orphaned,
+    PrivateSandboxLease,
+    ProviderMountAbsentProof,
+    ProviderRunMountLease,
+    ProviderRunMountOwnerAbsentProof,
+    ProviderRunMountOwnerReconciliation,
+    ProviderRunMountOwnerUnknown,
+    Released,
+    RunMountReleaseOutcome,
+    RunReadonlyMountSource,
+    RunScopedReadOnlyMount,
+    SandboxProvider,
+    merge_run_mount_release_outcome,
+    validate_run_readonly_mount_source,
+)
 
 from .e2b_sandbox import DEFAULT_E2B_HOME_DIR, E2BSandbox, _is_sandbox_gone_error
 
@@ -60,6 +77,7 @@ DEFAULT_REPLICAS = 3
 # Hard upper bound for ``set_timeout`` (e2b currently caps at 24h on the
 # free plan; passing an excessive value is rejected by the control-plane).
 MAX_E2B_TIMEOUT = 24 * 60 * 60
+_READINESS_REQUEST_TIMEOUT_SECONDS = 5
 
 # Metadata keys we attach to every sandbox so we can discover ours via
 # ``Sandbox.list(query={...})`` from any gateway process.
@@ -68,6 +86,7 @@ META_KEY_THREAD = "deer_flow_thread"
 META_KEY_PROVIDER = "deer_flow_provider"
 META_KEY_PROJECT = "deer_flow_project"
 META_KEY_RUN = "deer_flow_run"
+META_KEY_RUN_MOUNT_OWNER = "deer_flow_run_mount_owner"
 META_VAL_PROVIDER = "e2b_sandbox_provider"
 PRIVATE_EXECUTION_USER = "deerflow_agent"
 PRIVATE_HOME_DIR = f"/home/{PRIVATE_EXECUTION_USER}/user-data"
@@ -114,6 +133,15 @@ print(json.dumps({
 """
 
 
+@dataclass(frozen=True, slots=True)
+class _E2BRunReadonlyMount:
+    lease: ProviderRunMountLease
+    private_lease: PrivateSandboxLease
+    source: RunReadonlyMountSource
+    probe_content: str
+    expected_metadata: tuple[tuple[str, str], ...]
+
+
 class E2BSandboxProvider(SandboxProvider):
     """Sandbox provider backed by the e2b code-interpreter cloud SDK."""
 
@@ -125,6 +153,36 @@ class E2BSandboxProvider(SandboxProvider):
     _supports_isolated_private_file_authority = True
 
     # ── Construction & config ────────────────────────────────────────────
+
+    def run_readonly_mounts_ready(self) -> bool:
+        """Bound P-05 readiness to attestation, credential, and control plane."""
+
+        try:
+            config = get_app_config()
+            configured_root = config.skills.container_path.rstrip("/") or "/"
+            if configured_root != "/mnt/skills" or config.sandbox.e2b_p05_v1_verified is not True or not self._config.get("api_key") or not self._config.get("template"):
+                return False
+            sandbox_cls = self._get_sandbox_cls()
+            listing = sandbox_cls.list(
+                query=SandboxQuery(
+                    metadata={
+                        META_KEY_PROVIDER: META_VAL_PROVIDER,
+                        META_KEY_RUN_MOUNT_OWNER: "p05-readiness-probe",
+                    },
+                ),
+                request_timeout=_READINESS_REQUEST_TIMEOUT_SECONDS,
+                **self._common_kwargs(),
+            )
+            if hasattr(listing, "next_items") and hasattr(listing, "has_next"):
+                if getattr(listing, "has_next", False):
+                    listing.next_items()
+            else:
+                raise SandboxRuntimeError(
+                    "e2b readiness listing is not bounded",
+                )
+        except Exception:
+            return False
+        return True
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -138,6 +196,16 @@ class E2BSandboxProvider(SandboxProvider):
         # ``OrderedDict`` maintains insertion / move_to_end order for LRU.
         self._warm_pool: OrderedDict[str, tuple[str, float]] = OrderedDict()
         self._shutdown_called = False
+        self._run_readonly_mount_owner_ids: set[uuid.UUID] = set()
+        self._pending_run_readonly_mount_owners: dict[
+            tuple[str, str, str, str],
+            uuid.UUID,
+        ] = {}
+        self._run_readonly_mounts: dict[str, _E2BRunReadonlyMount] = {}
+        self._run_readonly_mount_outcomes: dict[
+            str,
+            RunMountReleaseOutcome,
+        ] = {}
 
         self._config = self._load_config()
 
@@ -265,15 +333,31 @@ class E2BSandboxProvider(SandboxProvider):
         """Allocate one e2b VM tagged with the complete private identity."""
 
         sandbox_cls = self._get_sandbox_cls()
+        metadata = {
+            META_KEY_PROVIDER: META_VAL_PROVIDER,
+            META_KEY_PROJECT: scope.project_id,
+            META_KEY_USER: scope.owner_user_id,
+            META_KEY_THREAD: thread_id,
+            META_KEY_RUN: run_id,
+        }
+        request_key = self._run_mount_request_key(
+            scope=scope,
+            thread_id=thread_id,
+            run_id=run_id,
+        )
+        with self._lock:
+            pending_owner_id = self._pending_run_readonly_mount_owners.get(
+                request_key,
+            )
+        derived_owner_id = self._dedicated_run_mount_owner_id(mounts)
+        if pending_owner_id is not None and derived_owner_id != pending_owner_id:
+            raise SandboxRuntimeError("Run read-only mount owner label mismatch")
+        mount_owner_id = pending_owner_id or derived_owner_id
+        if mount_owner_id is not None:
+            metadata[META_KEY_RUN_MOUNT_OWNER] = mount_owner_id.hex
         create_kwargs: dict[str, Any] = {
             "template": self._config["template"],
-            "metadata": {
-                META_KEY_PROVIDER: META_VAL_PROVIDER,
-                META_KEY_PROJECT: scope.project_id,
-                META_KEY_USER: scope.owner_user_id,
-                META_KEY_THREAD: thread_id,
-                META_KEY_RUN: run_id,
-            },
+            "metadata": metadata,
             **self._common_kwargs(),
         }
         if self._config["idle_timeout"] > 0:
@@ -347,7 +431,7 @@ class E2BSandboxProvider(SandboxProvider):
                 Path(mount.host_path),
                 container_root,
             )
-            protect = f"set -eu; chown -R root:root -- {shlex.quote(container_root)}; find {shlex.quote(container_root)} -type d -exec chmod 0555 {{}} +; find {shlex.quote(container_root)} -type f -exec chmod 0555 {{}} +"
+            protect = f"set -eu; chown -R root:root -- {shlex.quote(container_root)}; find {shlex.quote(container_root)} -type d -exec chmod 0555 {{}} +; find {shlex.quote(container_root)} -type f -exec chmod 0444 {{}} +"
             protected = client.commands.run(protect, user="root")
             if getattr(protected, "exit_code", 0) not in (0, None) or getattr(protected, "stderr", ""):
                 raise SandboxRuntimeError("Failed to protect private e2b mount")
@@ -455,6 +539,363 @@ class E2BSandboxProvider(SandboxProvider):
             if callable(make_dir):
                 make_dir(parent, user="root")
             client.files.write(target, content, user="root")
+
+    @staticmethod
+    def _run_mount_request_key(
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+    ) -> tuple[str, str, str, str]:
+        return (
+            scope.project_id,
+            scope.owner_user_id,
+            thread_id,
+            run_id,
+        )
+
+    @staticmethod
+    def _dedicated_run_mount_owner_id(
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> uuid.UUID | None:
+        if len(mounts) != 1 or mounts[0].container_path != "/mnt/skills":
+            return None
+        from deerflow.config.paths import get_paths
+
+        try:
+            trusted_root = (
+                get_paths()
+                .run_skill_materialization_root()
+                .resolve(
+                    strict=True,
+                )
+            )
+            source = Path(mounts[0].host_path).resolve(strict=True)
+            relative = source.relative_to(trusted_root)
+            if len(relative.parts) != 2 or relative.parts[1] != "tree":
+                return None
+            return uuid.UUID(hex=relative.parts[0])
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _iter_sandbox_infos(result: object):
+        if hasattr(result, "next_items") and hasattr(result, "has_next"):
+            for _ in range(50):
+                if not getattr(result, "has_next", False):
+                    return
+                page = result.next_items()
+                if not page:
+                    return
+                yield from page
+            raise SandboxRuntimeError("e2b sandbox listing exceeded page limit")
+        try:
+            yield from result  # type: ignore[misc]
+        except TypeError as exc:
+            raise SandboxRuntimeError("e2b sandbox listing is unavailable") from exc
+
+    def _list_run_mount_infos(
+        self,
+        owner_id: uuid.UUID,
+    ) -> tuple[object, ...]:
+        sandbox_cls = self._get_sandbox_cls()
+        expected = {
+            META_KEY_PROVIDER: META_VAL_PROVIDER,
+            META_KEY_RUN_MOUNT_OWNER: owner_id.hex,
+        }
+        result = sandbox_cls.list(
+            query=SandboxQuery(metadata=expected),
+            **self._common_kwargs(),
+        )
+        infos = []
+        for info in self._iter_sandbox_infos(result):
+            metadata = getattr(info, "metadata", None)
+            if not isinstance(metadata, dict) or any(metadata.get(key) != value for key, value in expected.items()):
+                continue
+            infos.append(info)
+        return tuple(infos)
+
+    def _run_mount_state(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        expected_sandbox_id: str,
+        expected_metadata: tuple[tuple[str, str], ...],
+    ) -> str:
+        infos = self._list_run_mount_infos(owner_id)
+        if not infos:
+            return "absent"
+        if len(infos) != 1:
+            return "unknown"
+        info = infos[0]
+        sandbox_id = getattr(info, "sandbox_id", None)
+        metadata = getattr(info, "metadata", None)
+        if sandbox_id != expected_sandbox_id or not isinstance(metadata, dict) or any(metadata.get(key) != value for key, value in expected_metadata):
+            return "unknown"
+        return "active"
+
+    def _discard_in_process_run_mount(
+        self,
+        entry: _E2BRunReadonlyMount,
+    ) -> None:
+        sandbox_to_close: E2BSandbox | None = None
+        with self._lock:
+            sandbox_to_close = self._sandboxes.pop(entry.lease.sandbox_id, None)
+            self._warm_pool.pop(entry.lease.sandbox_id, None)
+            for key in [key for key, registered in self._thread_sandboxes.items() if registered == entry.lease.sandbox_id]:
+                self._thread_sandboxes.pop(key, None)
+        private_lock, private_leases = self._private_lease_state()
+        with private_lock:
+            private_leases.pop(entry.lease.sandbox_id, None)
+            releasing = getattr(self, "_private_releasing", None)
+            if releasing is not None:
+                releasing.discard(entry.lease.sandbox_id)
+        if sandbox_to_close is not None:
+            sandbox_to_close.close()
+
+    def prepare_run_readonly_mount(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        source: RunReadonlyMountSource,
+    ) -> ProviderRunMountLease:
+        from deerflow.config.paths import get_paths
+
+        validated = validate_run_readonly_mount_source(
+            source,
+            trusted_root=get_paths().run_skill_materialization_root(),
+        )
+        request_key = self._run_mount_request_key(
+            scope=scope,
+            thread_id=thread_id,
+            run_id=run_id,
+        )
+        with self._lock:
+            if source.owner_id in self._run_readonly_mount_owner_ids:
+                raise SandboxRuntimeError(
+                    "Run read-only mount owner is already registered",
+                )
+            if request_key in self._pending_run_readonly_mount_owners:
+                raise SandboxRuntimeError(
+                    "Run read-only mount request is already registered",
+                )
+            self._run_readonly_mount_owner_ids.add(source.owner_id)
+            self._pending_run_readonly_mount_owners[request_key] = source.owner_id
+        try:
+            private_lease = self.acquire_private(
+                thread_id,
+                scope=scope,
+                user_id=scope.owner_user_id,
+                run_id=run_id,
+                mounts=(
+                    RunScopedReadOnlyMount(
+                        run_id=run_id,
+                        container_path="/mnt/skills",
+                        host_path=str(source.worker_root),
+                    ),
+                ),
+            )
+        except BaseException:
+            with self._lock:
+                self._run_readonly_mount_owner_ids.discard(source.owner_id)
+            raise
+        finally:
+            with self._lock:
+                if self._pending_run_readonly_mount_owners.get(request_key) == source.owner_id:
+                    self._pending_run_readonly_mount_owners.pop(request_key, None)
+        lease = ProviderRunMountLease(
+            owner_id=source.owner_id,
+            provider_kind="e2b",
+            sandbox_id=private_lease.sandbox_id,
+            mount_lease_id=uuid.uuid4().hex,
+        )
+        expected_metadata = tuple(
+            sorted(
+                {
+                    META_KEY_PROVIDER: META_VAL_PROVIDER,
+                    META_KEY_PROJECT: scope.project_id,
+                    META_KEY_USER: scope.owner_user_id,
+                    META_KEY_THREAD: thread_id,
+                    META_KEY_RUN: run_id,
+                    META_KEY_RUN_MOUNT_OWNER: source.owner_id.hex,
+                }.items()
+            )
+        )
+        entry = _E2BRunReadonlyMount(
+            lease=lease,
+            private_lease=private_lease,
+            source=source,
+            probe_content=validated.probe_content,
+            expected_metadata=expected_metadata,
+        )
+        with self._lock:
+            self._run_readonly_mounts[lease.mount_lease_id] = entry
+        try:
+            return self.readback_run_readonly_mount(lease)
+        except BaseException:
+            self.release_run_readonly_mount(lease)
+            raise
+
+    def readback_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> ProviderRunMountLease:
+        if type(lease) is not ProviderRunMountLease or lease.provider_kind != "e2b":
+            raise SandboxRuntimeError("Invalid provider run mount lease")
+        with self._lock:
+            entry = self._run_readonly_mounts.get(lease.mount_lease_id)
+        if entry is None or entry.lease != lease:
+            raise SandboxRuntimeError("Run read-only mount lease is not active")
+        try:
+            state = self._run_mount_state(
+                lease.owner_id,
+                expected_sandbox_id=lease.sandbox_id,
+                expected_metadata=entry.expected_metadata,
+            )
+        except Exception as exc:
+            raise SandboxRuntimeError(
+                "e2b run read-only mount owner readback failed",
+            ) from exc
+        if state != "active":
+            raise SandboxRuntimeError("e2b run read-only mount is absent")
+        sandbox = self.get(lease.sandbox_id)
+        probe = getattr(sandbox, "probe_run_readonly_mount", None)
+        if not callable(probe):
+            raise SandboxRuntimeError("e2b run read-only mount probe is unavailable")
+        try:
+            probe(
+                owner_id=lease.owner_id,
+                expected_manifest=entry.probe_content,
+            )
+        except Exception as exc:
+            raise SandboxRuntimeError("e2b run read-only mount probe failed") from exc
+        return lease
+
+    def release_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> RunMountReleaseOutcome:
+        if type(lease) is not ProviderRunMountLease or lease.provider_kind != "e2b":
+            raise SandboxRuntimeError("Invalid provider run mount lease")
+        with self._lock:
+            prior = self._run_readonly_mount_outcomes.get(lease.mount_lease_id)
+            entry = self._run_readonly_mounts.get(lease.mount_lease_id)
+        if prior is not None:
+            if type(prior) is Released and prior.matches_lease(lease):
+                return prior
+            if type(prior) is not Orphaned or not prior.matches_lease(lease):
+                raise SandboxRuntimeError("Run read-only mount lease mismatch")
+        if entry is None or entry.lease != lease:
+            raise SandboxRuntimeError("Run read-only mount lease is not active")
+        try:
+            state = self._run_mount_state(
+                lease.owner_id,
+                expected_sandbox_id=lease.sandbox_id,
+                expected_metadata=entry.expected_metadata,
+            )
+        except Exception:
+            state = "unknown"
+        if state == "active" or (state == "absent" and self.get(lease.sandbox_id) is not None):
+            try:
+                self.release_private(entry.private_lease)
+            except Exception:
+                state = "unknown"
+            else:
+                try:
+                    state = self._run_mount_state(
+                        lease.owner_id,
+                        expected_sandbox_id=lease.sandbox_id,
+                        expected_metadata=entry.expected_metadata,
+                    )
+                except Exception:
+                    state = "unknown"
+        observed: RunMountReleaseOutcome = (
+            Released(proof=ProviderMountAbsentProof.from_lease(lease))
+            if state == "absent"
+            else Orphaned.from_lease(
+                lease,
+                reason_code="release_readback_unknown",
+                last_lifecycle_state="release_pending",
+            )
+        )
+        outcome = observed if prior is None else merge_run_mount_release_outcome(prior, observed)
+        with self._lock:
+            self._run_readonly_mount_outcomes[lease.mount_lease_id] = outcome
+            if type(outcome) is Released:
+                self._run_readonly_mounts.pop(lease.mount_lease_id, None)
+                self._run_readonly_mount_owner_ids.discard(lease.owner_id)
+        if type(outcome) is Released:
+            self._discard_in_process_run_mount(entry)
+        return outcome
+
+    def ensure_run_readonly_mount_owner_absent(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        persisted_lease: ProviderRunMountLease | None,
+    ) -> ProviderRunMountOwnerReconciliation:
+        """Kill and re-enumerate exact owner-tagged E2B sandboxes."""
+
+        if type(owner_id) is not uuid.UUID:
+            raise SandboxRuntimeError("Invalid run read-only mount owner")
+        if persisted_lease is not None and (type(persisted_lease) is not ProviderRunMountLease or persisted_lease.owner_id != owner_id or persisted_lease.provider_kind != "e2b"):
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="e2b",
+                reason_code="owner_lease_mismatch",
+            )
+        try:
+            infos = self._list_run_mount_infos(owner_id)
+            if persisted_lease is not None and any(getattr(info, "sandbox_id", None) != persisted_lease.sandbox_id for info in infos):
+                return ProviderRunMountOwnerUnknown(
+                    owner_id=owner_id,
+                    provider_kind="e2b",
+                    reason_code="owner_lease_mismatch",
+                )
+            sandbox_cls = self._get_sandbox_cls()
+            for info in infos:
+                sandbox_id = getattr(info, "sandbox_id", None)
+                if not isinstance(sandbox_id, str) or not sandbox_id:
+                    raise SandboxRuntimeError("Invalid e2b sandbox listing")
+                client = self._reconnect_client(sandbox_cls, sandbox_id)
+                try:
+                    kill = getattr(client, "kill", None)
+                    if not callable(kill):
+                        raise SandboxRuntimeError(
+                            "Private e2b sandbox destroy is unavailable",
+                        )
+                    kill()
+                except Exception as exc:
+                    if not _is_sandbox_gone_error(exc):
+                        raise
+                finally:
+                    self._safe_close_client(client)
+            remaining = self._list_run_mount_infos(owner_id)
+        except Exception:
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="e2b",
+                reason_code="owner_readback_unknown",
+            )
+        if remaining:
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="e2b",
+                reason_code="owner_readback_unknown",
+            )
+        with self._lock:
+            stale_entries = tuple((lease_id, entry) for lease_id, entry in self._run_readonly_mounts.items() if entry.lease.owner_id == owner_id)
+            for lease_id, entry in stale_entries:
+                self._run_readonly_mounts.pop(lease_id, None)
+            self._run_readonly_mount_owner_ids.discard(owner_id)
+        for _lease_id, entry in stale_entries:
+            self._discard_in_process_run_mount(entry)
+        return ProviderRunMountOwnerAbsentProof(
+            owner_id=owner_id,
+            provider_kind="e2b",
+        )
 
     def _destroy_private_sandbox(self, sandbox_id: str) -> None:
         with self._lock:

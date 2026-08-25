@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from support.skill_version_fixture import (
+    assemble_and_seal_skill_version,
+    sealed_skill_version_fixture,
+)
 
 from app.projects.context import ProjectContext, resolve_project_context
 from app.shared_assets.agent_payload_checksum import agent_payload_checksum
@@ -51,6 +55,13 @@ async def _seed_trigger_graph(engine: AsyncEngine) -> _TriggerSeed:
     agent_version_id = uuid.uuid4()
     skill_ids = (uuid.uuid4(), uuid.uuid4())
     skill_version_ids = (uuid.uuid4(), uuid.uuid4())
+    skill_version_fixtures = tuple(
+        sealed_skill_version_fixture(
+            version_id,
+            name=f"trigger-skill-{index}",
+        )
+        for index, version_id in enumerate(skill_version_ids, start=1)
+    )
     mcp_ids = (uuid.uuid4(), uuid.uuid4())
     mcp_version_ids = (uuid.uuid4(), uuid.uuid4())
 
@@ -135,23 +146,31 @@ async def _seed_trigger_graph(engine: AsyncEngine) -> _TriggerSeed:
             text(
                 """INSERT INTO skill_versions
                 (id,skill_id,version_number,scan_decision,
-                 payload_checksum,created_by_user_id)
+                 payload_checksum,file_count,content_size_bytes,files_sealed,
+                 created_by_user_id)
                 VALUES
-                (:id,:asset,1,'allow',:checksum,:owner)"""
+                (:id,:asset,1,'allow',:checksum,:file_count,:content_size,false,
+                 :owner)"""
             ),
             [
                 {
                     "id": version_id,
                     "asset": asset_id,
-                    "checksum": str(index) * 64,
+                    "checksum": fixture.payload_checksum,
+                    "file_count": fixture.file_count,
+                    "content_size": fixture.content_size_bytes,
                     "owner": str(user_id),
                 }
-                for index, (asset_id, version_id) in enumerate(
-                    zip(skill_ids, skill_version_ids, strict=True),
-                    start=1,
+                for asset_id, version_id, fixture in zip(
+                    skill_ids,
+                    skill_version_ids,
+                    skill_version_fixtures,
+                    strict=True,
                 )
             ],
         )
+        for fixture in skill_version_fixtures:
+            await assemble_and_seal_skill_version(connection, fixture)
         await connection.execute(
             text(
                 """UPDATE skills

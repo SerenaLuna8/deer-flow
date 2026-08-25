@@ -10,6 +10,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import SecretStr
 from support.private_thread_seed import seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 
 from app.automations.dispatcher import (
     AutomationDispatcher,
@@ -119,12 +120,12 @@ async def _seed_active_run(seed) -> _ActiveRun:
             execution_heartbeat_at=now,
             execution_started_at=now,
         )
-        session.add(run)
-        await session.flush()
+        await add_sealed_test_run(session, run)
         job = JobRow(
             job_type="private_run",
             project_id=seed.owner_a.project_id,
             owner_user_id=str(seed.owner_a.user_id),
+            owner_private_generation=1,
             run_id=run_id,
             origin_trace_id=origin_trace_id,
             idempotency_key=hashlib.sha256(f"job:{run_id}".encode()).hexdigest(),

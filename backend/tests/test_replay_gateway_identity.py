@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-from _replay_fixture import replay_gateway_user
+from _replay_fixture import install_replay_model_adapter, replay_gateway_user
 
 from app.gateway.auth_disabled import (
     AUTH_SOURCE_AUTH_DISABLED,
@@ -36,3 +36,16 @@ async def test_replay_gateway_maps_only_auth_disabled_identity_to_admin() -> Non
 
     assert str(user.id) == "5fb66f7d-5655-54df-a7da-66066c114f17"
     assert user.system_role == "system_admin"
+
+
+def test_replay_model_uses_a_supported_provider_engineering_profile() -> None:
+    from app.system_settings import validation
+
+    original = validation.PROVIDER_ADAPTERS["openai"]
+    try:
+        install_replay_model_adapter()
+        replay = validation.PROVIDER_ADAPTERS["openai"]
+        assert replay.class_path == "replay_provider:ReplayChatModel"
+        assert replay.api_key_required is False
+    finally:
+        validation.PROVIDER_ADAPTERS["openai"] = original

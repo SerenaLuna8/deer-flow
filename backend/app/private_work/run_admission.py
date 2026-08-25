@@ -16,6 +16,11 @@ from app.channels.instance_identity import (
     normalize_channel_instance_id,
     persisted_channel_instance_id,
 )
+from app.private_work.account_private_lifecycle import (
+    AccountPrivateLifecycle,
+    AccountPrivateLifecycleClosed,
+    AccountPrivateLifecyclePort,
+)
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -67,7 +72,6 @@ from app.private_work.sandbox_files import (
     required_current_upload_snapshot_from_run_kwargs,
 )
 from app.private_work.snapshot_repository import (
-    RunAssetSnapshot,
     RunMcpSecretSnapshot,
     RunModelSnapshotAdmissionPort,
     RunRuntimePolicyAdmissionPort,
@@ -94,7 +98,12 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
-from app.shared_assets.models import AssetKind, AssetSelection, ResolvedRunAssetClosure
+from app.shared_assets.models import (
+    AssetKind,
+    AssetSelection,
+    ResolvedRunAssetClosure,
+    ResolvedRunAssetFact,
+)
 from app.shared_assets.resolver import ProjectAssetResolver
 from app.system_settings.model_refs import ModelRefResolver
 from deerflow.agents.memory.snip import MEMORY_ARCHIVE_RECEIPT_KEY
@@ -113,7 +122,7 @@ from deerflow.trace_context import generate_trace_id, normalize_trace_id
 
 @dataclass(frozen=True, slots=True)
 class PersistedRunSnapshot:
-    assets: tuple[RunAssetSnapshot, ...]
+    assets: tuple[ResolvedRunAssetFact, ...]
     mcp_secrets: tuple[RunMcpSecretSnapshot, ...]
     catalog_generation: int
 
@@ -461,6 +470,7 @@ class PrivateRunAdmissionService:
         quota: PrivateRunAdmissionQuotaPort | None = None,
         audit: PrivateRunAdmissionAuditPort | None = None,
         human_input_response_promoter: PrivateRunHumanInputResponsePromoter | None = None,
+        account_private_lifecycle: AccountPrivateLifecyclePort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._resolver = resolver or ProjectAssetResolver(session_factory)
@@ -487,16 +497,20 @@ class PrivateRunAdmissionService:
             else NoopHostExecutionApprovalAudit()
         )
         self._human_input_response_promoter = human_input_response_promoter
+        self._account_private_lifecycle = account_private_lifecycle or AccountPrivateLifecycle()
 
     async def _persisted_snapshot(
         self,
         session: AsyncSession,
         context: PrivateWorkContext,
         run_id: str,
+        *,
+        thread_id: str,
     ) -> PersistedRunSnapshot:
-        assets = await self._snapshots.list_assets_in_session(
+        assets = await self._snapshots.list_asset_facts_in_session(
             session,
             context,
+            thread_id,
             run_id,
             lock=True,
         )
@@ -506,7 +520,7 @@ class PrivateRunAdmissionService:
             run_id,
             lock=True,
         )
-        if not assets or assets[0].asset_kind != AssetKind.AGENT.value:
+        if not assets or assets[0].kind is not AssetKind.AGENT:
             raise RunSnapshotAssetStale
         generations = {asset.catalog_generation for asset in assets}
         if len(generations) != 1:
@@ -742,6 +756,10 @@ class PrivateRunAdmissionService:
                     Capability.SHARED_ASSETS_EXECUTE,
                     lock=True,
                 )
+                account_private_generation = await self._account_private_lifecycle.require_active_after_membership(
+                    session,
+                    context.user_id,
+                )
                 inbound_agent = await self._require_inbound_authority(
                     session,
                     context,
@@ -840,6 +858,7 @@ class PrivateRunAdmissionService:
                             scope=job_scope,
                             run_id=replay_run.run_id,
                             job_id=replay_run.job_id,
+                            account_private_generation=account_private_generation,
                             lock=True,
                         )
                         if replay_job is None or replay_run.origin_trace_id != replay_job.origin_trace_id:
@@ -850,6 +869,7 @@ class PrivateRunAdmissionService:
                                 session,
                                 context,
                                 replay_run.run_id,
+                                thread_id=replay_run.thread_id,
                             ),
                             opaque_runtime_scope=context.resource_scope,
                             job=replay_job,
@@ -873,6 +893,7 @@ class PrivateRunAdmissionService:
                         scope=job_scope,
                         run_id=existing.run_id,
                         job_id=existing.job_id,
+                        account_private_generation=account_private_generation,
                         lock=True,
                     )
                     locked_existing = await runs.get(
@@ -940,6 +961,7 @@ class PrivateRunAdmissionService:
                             session,
                             context,
                             locked_existing.run_id,
+                            thread_id=locked_existing.thread_id,
                         ),
                         opaque_runtime_scope=context.resource_scope,
                         job=existing_job,
@@ -997,6 +1019,7 @@ class PrivateRunAdmissionService:
                     scope=job_scope,
                     run_id=run.run_id,
                     origin_trace_id=run.origin_trace_id,
+                    account_private_generation=account_private_generation,
                     execution_domain_affinity=(server_context.host_execution_domain_affinity if continuation_approval_id is not None else None),
                 )
                 run = await runs.attach_job(
@@ -1046,6 +1069,7 @@ class PrivateRunAdmissionService:
                     session,
                     context,
                     run.run_id,
+                    thread_id=run.thread_id,
                 )
                 if snapshot.catalog_generation != resolved.lead_agent.catalog_generation:
                     raise RunSnapshotAssetStale
@@ -1057,6 +1081,8 @@ class PrivateRunAdmissionService:
                 )
         except AgentArchived:
             raise PrivateWorkAgentArchived(context.request_id) from None
+        except AccountPrivateLifecycleClosed:
+            raise PrivateWorkForbidden(context.request_id) from None
         except (RunSnapshotAssetStale, AssetResolutionUnavailable):
             raise PrivateWorkAssetStale(context.request_id) from None
         except RunModelSelectionLocked:

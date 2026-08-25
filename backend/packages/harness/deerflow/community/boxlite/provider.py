@@ -17,10 +17,13 @@ import asyncio
 import atexit
 import hashlib
 import logging
+import os
+import sys
 import threading
 import time
 import uuid
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -30,7 +33,22 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, SandboxProvider
+from deerflow.sandbox.sandbox_provider import (
+    Orphaned,
+    PrivateSandboxLease,
+    ProviderMountAbsentProof,
+    ProviderRunMountLease,
+    ProviderRunMountOwnerAbsentProof,
+    ProviderRunMountOwnerReconciliation,
+    ProviderRunMountOwnerUnknown,
+    Released,
+    RunMountReleaseOutcome,
+    RunReadonlyMountSource,
+    RunScopedReadOnlyMount,
+    SandboxProvider,
+    merge_run_mount_release_outcome,
+    validate_run_readonly_mount_source,
+)
 
 from ..warm_pool_lifecycle import WarmPoolLifecycleMixin
 from .box import BoxliteBox
@@ -44,6 +62,9 @@ T = TypeVar("T")
 
 DEFAULT_IMAGE = "python:3.12-slim"
 _BOX_NAME_PREFIX = "deer-flow-boxlite-"
+_RUN_BOX_NAME_PREFIX = f"{_BOX_NAME_PREFIX}run-"
+_RUN_SKILLS_CONTAINER_PATH = "/mnt/skills"
+_PRIVATE_EXECUTION_USER = "deerflow_agent"
 # ActWeave's virtual prefixes, materialised on the box rootfs at start so the
 # Sandbox file APIs (which address /mnt/user-data/...) resolve natively.
 _VIRTUAL_DIRS = (
@@ -52,6 +73,20 @@ _VIRTUAL_DIRS = (
     f"{VIRTUAL_PATH_PREFIX}/outputs",
     DEFAULT_SKILLS_CONTAINER_PATH,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _BoxliteRunReadonlyMount:
+    lease: ProviderRunMountLease
+    private_lease: PrivateSandboxLease
+    source: RunReadonlyMountSource
+    probe_content: str
+
+
+def _boxlite_p04_target_capable() -> bool:
+    """P-04 is released only on the attested Linux/KVM target class."""
+
+    return sys.platform.startswith("linux") and os.path.exists("/dev/kvm") and os.access("/dev/kvm", os.R_OK | os.W_OK)
 
 
 def _import_simplebox() -> type[SimpleBox]:
@@ -185,11 +220,34 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
         self._shutdown_called = False
+        self._run_readonly_mount_owner_ids: set[uuid.UUID] = set()
+        self._pending_run_readonly_mount_owners: dict[
+            tuple[str, str, str, str],
+            uuid.UUID,
+        ] = {}
+        self._run_readonly_mounts: dict[str, _BoxliteRunReadonlyMount] = {}
+        self._run_readonly_mount_outcomes: dict[
+            str,
+            RunMountReleaseOutcome,
+        ] = {}
         self._config = self._load_config()
         self._loop = _EventLoopThread()
         atexit.register(self.shutdown)
-        self._reconcile_orphans()
+        self._p04_registry_ready = self._reconcile_orphans()
         self._start_idle_checker()
+
+    def run_readonly_mounts_ready(self) -> bool:
+        """Enable P-04 only after attestation and a live local registry probe."""
+
+        try:
+            config = get_app_config()
+            configured_root = config.skills.container_path.rstrip("/") or "/"
+            attested = config.sandbox.boxlite_p04_v1_verified is True
+            registry_ready = self._p04_registry_ready is True
+            target_ready = _boxlite_p04_target_capable()
+        except Exception:
+            return False
+        return configured_root == _RUN_SKILLS_CONTAINER_PATH and attested and registry_ready and target_ready
 
     def _load_config(self) -> dict[str, Any]:
         sandbox_config = get_app_config().sandbox
@@ -222,7 +280,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
     @staticmethod
     def _sandbox_id_from_box_name(name: str | None) -> str | None:
-        if not name or not name.startswith(_BOX_NAME_PREFIX):
+        if not name or not name.startswith(_BOX_NAME_PREFIX) or name.startswith(_RUN_BOX_NAME_PREFIX):
             return None
         sandbox_id = name[len(_BOX_NAME_PREFIX) :]
         return sandbox_id or None
@@ -284,7 +342,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         logger.warning("Invalidating BoxLite box %s after terminal failure: %s", sandbox_id, reason)
         box_to_close.close()
 
-    def _reconcile_orphans(self) -> None:
+    def _reconcile_orphans(self) -> bool:
         """Adopt ActWeave-owned BoxLite boxes left by a previous provider/process.
 
         BoxLite boxes are discovered by the legacy ``deer-flow`` name prefix. Adopted
@@ -294,13 +352,14 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             adopted = self._adopt_existing_boxes()
         except ImportError:
             logger.debug("BoxLite is not installed; skipping startup reconciliation")
-            return
+            return False
         except Exception as e:
             logger.warning("Failed to reconcile existing BoxLite boxes: %s", e)
-            return
+            return False
 
         if adopted:
             logger.info("Startup reconciliation adopted %s BoxLite box(es)", adopted)
+        return True
 
     def _adopt_existing_boxes(self) -> int:
         runtime_cls = _import_sync_boxlite_runtime()
@@ -387,13 +446,32 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
         identity = f"{scope.project_id}:{scope.owner_user_id}:{thread_id}:{run_id}:{uuid.uuid4().hex}"
         sandbox_id = hashlib.sha256(identity.encode()).hexdigest()[:24]
+        request_key = self._run_mount_request_key(
+            scope=scope,
+            thread_id=thread_id,
+            run_id=run_id,
+        )
+        with self._lock:
+            pending_owner_id = self._pending_run_readonly_mount_owners.get(
+                request_key,
+            )
+        derived_owner_id = self._dedicated_run_mount_owner_id(mounts)
+        if pending_owner_id is not None and derived_owner_id != pending_owner_id:
+            raise SandboxRuntimeError("Run read-only mount owner label mismatch")
+        mount_owner_id = pending_owner_id or derived_owner_id
+        box_name = self._run_box_name(mount_owner_id, sandbox_id) if mount_owner_id is not None else self._box_name(sandbox_id)
         volumes: list[tuple[str, str, str]] = []
         for mount in mounts:
             source = Path(mount.host_path)
             if not source.exists() or source.is_symlink():
                 raise SandboxRuntimeError("Invalid private read-only mount source")
             volumes.append((mount.host_path, mount.container_path, "ro"))
-        box = self._create_box(sandbox_id, volumes=tuple(volumes))
+        box = self._create_box(
+            sandbox_id,
+            volumes=tuple(volumes),
+            box_name=box_name,
+            private=True,
+        )
         try:
             with self._lock:
                 self._boxes[sandbox_id] = box
@@ -401,6 +479,332 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         except BaseException:
             box.close()
             raise
+
+    @staticmethod
+    def _run_mount_request_key(
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+    ) -> tuple[str, str, str, str]:
+        return (
+            scope.project_id,
+            scope.owner_user_id,
+            thread_id,
+            run_id,
+        )
+
+    @staticmethod
+    def _dedicated_run_mount_owner_id(
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> uuid.UUID | None:
+        if len(mounts) != 1 or mounts[0].container_path != _RUN_SKILLS_CONTAINER_PATH:
+            return None
+        from deerflow.config.paths import get_paths
+
+        try:
+            trusted_root = (
+                get_paths()
+                .run_skill_materialization_root()
+                .resolve(
+                    strict=True,
+                )
+            )
+            source = Path(mounts[0].host_path).resolve(strict=True)
+            relative = source.relative_to(trusted_root)
+            if len(relative.parts) != 2 or relative.parts[1] != "tree":
+                return None
+            return uuid.UUID(hex=relative.parts[0])
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _run_box_name(owner_id: uuid.UUID, sandbox_id: str) -> str:
+        return f"{_RUN_BOX_NAME_PREFIX}{owner_id.hex}-{sandbox_id}"
+
+    @staticmethod
+    def _run_box_owner_prefix(owner_id: uuid.UUID) -> str:
+        return f"{_RUN_BOX_NAME_PREFIX}{owner_id.hex}-"
+
+    def _run_box_state(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        expected_sandbox_id: str,
+    ) -> str:
+        """Return active/absent/unknown from BoxLite's persistent registry."""
+
+        runtime_cls = _import_sync_boxlite_runtime()
+        runtime = runtime_cls.default().start()
+        try:
+            infos = runtime.list_info()
+        finally:
+            runtime.stop()
+        prefix = self._run_box_owner_prefix(owner_id)
+        owner_infos = tuple(info for info in infos if isinstance(getattr(info, "name", None), str) and getattr(info, "name").startswith(prefix))
+        if not owner_infos:
+            return "absent"
+        expected_name = self._run_box_name(owner_id, expected_sandbox_id)
+        if len(owner_infos) == 1 and owner_infos[0].name == expected_name:
+            return "active"
+        return "unknown"
+
+    def _discard_in_process_run_mount(
+        self,
+        entry: _BoxliteRunReadonlyMount,
+    ) -> None:
+        box_to_close: BoxliteBox | None = None
+        with self._lock:
+            active = self._boxes.pop(entry.lease.sandbox_id, None)
+            warm = self._warm_pool.pop(entry.lease.sandbox_id, None)
+            box_to_close = active or (warm[0] if warm is not None else None)
+            self._skip_health_check_warm_ids.discard(entry.lease.sandbox_id)
+            for key in [key for key, registered in self._thread_boxes.items() if registered == entry.lease.sandbox_id]:
+                self._thread_boxes.pop(key, None)
+        private_lock, private_leases = self._private_lease_state()
+        with private_lock:
+            private_leases.pop(entry.lease.sandbox_id, None)
+            releasing = getattr(self, "_private_releasing", None)
+            if releasing is not None:
+                releasing.discard(entry.lease.sandbox_id)
+        if box_to_close is not None:
+            box_to_close.close()
+
+    def prepare_run_readonly_mount(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        source: RunReadonlyMountSource,
+    ) -> ProviderRunMountLease:
+        from deerflow.config.paths import get_paths
+
+        validated = validate_run_readonly_mount_source(
+            source,
+            trusted_root=get_paths().run_skill_materialization_root(),
+        )
+        request_key = self._run_mount_request_key(
+            scope=scope,
+            thread_id=thread_id,
+            run_id=run_id,
+        )
+        with self._lock:
+            if source.owner_id in self._run_readonly_mount_owner_ids:
+                raise SandboxRuntimeError(
+                    "Run read-only mount owner is already registered",
+                )
+            if request_key in self._pending_run_readonly_mount_owners:
+                raise SandboxRuntimeError(
+                    "Run read-only mount request is already registered",
+                )
+            self._run_readonly_mount_owner_ids.add(source.owner_id)
+            self._pending_run_readonly_mount_owners[request_key] = source.owner_id
+        try:
+            private_lease = self.acquire_private(
+                thread_id,
+                scope=scope,
+                user_id=scope.owner_user_id,
+                run_id=run_id,
+                mounts=(
+                    RunScopedReadOnlyMount(
+                        run_id=run_id,
+                        container_path=_RUN_SKILLS_CONTAINER_PATH,
+                        host_path=str(source.worker_root),
+                    ),
+                ),
+            )
+        except BaseException:
+            with self._lock:
+                self._run_readonly_mount_owner_ids.discard(source.owner_id)
+            raise
+        finally:
+            with self._lock:
+                if self._pending_run_readonly_mount_owners.get(request_key) == source.owner_id:
+                    self._pending_run_readonly_mount_owners.pop(request_key, None)
+
+        lease = ProviderRunMountLease(
+            owner_id=source.owner_id,
+            provider_kind="boxlite",
+            sandbox_id=private_lease.sandbox_id,
+            mount_lease_id=uuid.uuid4().hex,
+        )
+        entry = _BoxliteRunReadonlyMount(
+            lease=lease,
+            private_lease=private_lease,
+            source=source,
+            probe_content=validated.probe_content,
+        )
+        with self._lock:
+            self._run_readonly_mounts[lease.mount_lease_id] = entry
+        try:
+            return self.readback_run_readonly_mount(lease)
+        except BaseException:
+            self.release_run_readonly_mount(lease)
+            raise
+
+    def readback_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> ProviderRunMountLease:
+        if type(lease) is not ProviderRunMountLease or lease.provider_kind != "boxlite":
+            raise SandboxRuntimeError("Invalid provider run mount lease")
+        with self._lock:
+            entry = self._run_readonly_mounts.get(lease.mount_lease_id)
+        if entry is None or entry.lease != lease:
+            raise SandboxRuntimeError("Run read-only mount lease is not active")
+        try:
+            state = self._run_box_state(
+                lease.owner_id,
+                expected_sandbox_id=lease.sandbox_id,
+            )
+        except Exception as exc:
+            raise SandboxRuntimeError(
+                "BoxLite run read-only mount owner readback failed",
+            ) from exc
+        if state != "active":
+            raise SandboxRuntimeError("BoxLite run read-only mount is absent")
+        sandbox = self.get(lease.sandbox_id)
+        probe = getattr(sandbox, "probe_run_readonly_mount", None)
+        if not callable(probe):
+            raise SandboxRuntimeError(
+                "BoxLite run read-only mount probe is unavailable",
+            )
+        try:
+            probe(
+                owner_id=lease.owner_id,
+                expected_manifest=entry.probe_content,
+            )
+        except Exception as exc:
+            raise SandboxRuntimeError(
+                "BoxLite run read-only mount probe failed",
+            ) from exc
+        return lease
+
+    def release_run_readonly_mount(
+        self,
+        lease: ProviderRunMountLease,
+    ) -> RunMountReleaseOutcome:
+        if type(lease) is not ProviderRunMountLease or lease.provider_kind != "boxlite":
+            raise SandboxRuntimeError("Invalid provider run mount lease")
+        with self._lock:
+            prior = self._run_readonly_mount_outcomes.get(lease.mount_lease_id)
+            entry = self._run_readonly_mounts.get(lease.mount_lease_id)
+        if prior is not None:
+            if type(prior) is Released and prior.matches_lease(lease):
+                return prior
+            if type(prior) is not Orphaned or not prior.matches_lease(lease):
+                raise SandboxRuntimeError("Run read-only mount lease mismatch")
+        if entry is None or entry.lease != lease:
+            raise SandboxRuntimeError("Run read-only mount lease is not active")
+
+        try:
+            state = self._run_box_state(
+                lease.owner_id,
+                expected_sandbox_id=lease.sandbox_id,
+            )
+        except Exception:
+            state = "unknown"
+        if state == "active" or (state == "absent" and self.get(lease.sandbox_id) is not None):
+            try:
+                self.release_private(entry.private_lease)
+            except Exception:
+                state = "unknown"
+            else:
+                try:
+                    state = self._run_box_state(
+                        lease.owner_id,
+                        expected_sandbox_id=lease.sandbox_id,
+                    )
+                except Exception:
+                    state = "unknown"
+        observed: RunMountReleaseOutcome = (
+            Released(proof=ProviderMountAbsentProof.from_lease(lease))
+            if state == "absent"
+            else Orphaned.from_lease(
+                lease,
+                reason_code="release_readback_unknown",
+                last_lifecycle_state="release_pending",
+            )
+        )
+        outcome = observed if prior is None else merge_run_mount_release_outcome(prior, observed)
+        with self._lock:
+            self._run_readonly_mount_outcomes[lease.mount_lease_id] = outcome
+            if type(outcome) is Released:
+                self._run_readonly_mounts.pop(lease.mount_lease_id, None)
+                self._run_readonly_mount_owner_ids.discard(lease.owner_id)
+        if type(outcome) is Released:
+            self._discard_in_process_run_mount(entry)
+        return outcome
+
+    def ensure_run_readonly_mount_owner_absent(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        persisted_lease: ProviderRunMountLease | None,
+    ) -> ProviderRunMountOwnerReconciliation:
+        """Remove and re-enumerate exact owner-named VMs across processes."""
+
+        if type(owner_id) is not uuid.UUID:
+            raise SandboxRuntimeError("Invalid run read-only mount owner")
+        if persisted_lease is not None and (type(persisted_lease) is not ProviderRunMountLease or persisted_lease.owner_id != owner_id or persisted_lease.provider_kind != "boxlite"):
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="boxlite",
+                reason_code="owner_lease_mismatch",
+            )
+        runtime = None
+        try:
+            runtime_cls = _import_sync_boxlite_runtime()
+            runtime = runtime_cls.default().start()
+            prefix = self._run_box_owner_prefix(owner_id)
+            infos = tuple(info for info in runtime.list_info() if isinstance(getattr(info, "name", None), str) and info.name.startswith(prefix))
+            if persisted_lease is not None:
+                expected_name = self._run_box_name(
+                    owner_id,
+                    persisted_lease.sandbox_id,
+                )
+                if any(info.name != expected_name for info in infos):
+                    return ProviderRunMountOwnerUnknown(
+                        owner_id=owner_id,
+                        provider_kind="boxlite",
+                        reason_code="owner_lease_mismatch",
+                    )
+            for info in infos:
+                runtime.remove(
+                    getattr(info, "id", None) or info.name,
+                    force=True,
+                )
+            remaining = tuple(info for info in runtime.list_info() if isinstance(getattr(info, "name", None), str) and info.name.startswith(prefix))
+        except Exception:
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="boxlite",
+                reason_code="owner_readback_unknown",
+            )
+        finally:
+            if runtime is not None:
+                try:
+                    runtime.stop()
+                except Exception:
+                    pass
+        if remaining:
+            return ProviderRunMountOwnerUnknown(
+                owner_id=owner_id,
+                provider_kind="boxlite",
+                reason_code="owner_readback_unknown",
+            )
+        with self._lock:
+            stale_entries = tuple((lease_id, entry) for lease_id, entry in self._run_readonly_mounts.items() if entry.lease.owner_id == owner_id)
+            for lease_id, entry in stale_entries:
+                self._run_readonly_mounts.pop(lease_id, None)
+            self._run_readonly_mount_owner_ids.discard(owner_id)
+        for _lease_id, entry in stale_entries:
+            self._discard_in_process_run_mount(entry)
+        return ProviderRunMountOwnerAbsentProof(
+            owner_id=owner_id,
+            provider_kind="boxlite",
+        )
 
     def _destroy_private_sandbox(self, sandbox_id: str) -> None:
         with self._lock:
@@ -430,6 +834,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         sandbox_id: str,
         *,
         volumes: tuple[tuple[str, str, str], ...] = (),
+        box_name: str | None = None,
+        private: bool = False,
     ) -> BoxliteBox:
         # Enforce replica limit: evict oldest warm-pool box if active + warm boxes are at capacity.
         replicas, total = self._replica_count()
@@ -441,7 +847,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
         async def _make() -> SimpleBox:
             options: dict[str, object] = {
-                "name": self._box_name(sandbox_id),
+                "name": box_name or self._box_name(sandbox_id),
                 "image": self._config["image"],
                 "memory_mib": self._config["memory_mib"],
                 "cpus": self._config["cpus"],
@@ -454,11 +860,34 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             await box.start()
             # Materialise ActWeave's virtual prefixes so file ops resolve natively.
             await box.exec("sh", "-lc", mkdir_cmd)
+            if private:
+                bootstrap = (
+                    "set -eu; command -v setpriv >/dev/null; "
+                    f"if id -u {_PRIVATE_EXECUTION_USER} >/dev/null 2>&1; then exit 64; fi; "
+                    f"useradd --create-home --shell /bin/sh {_PRIVATE_EXECUTION_USER}; "
+                    f"install -d -o {_PRIVATE_EXECUTION_USER} -g {_PRIVATE_EXECUTION_USER} -m 0700 "
+                    f"{VIRTUAL_PATH_PREFIX}/workspace {VIRTUAL_PATH_PREFIX}/uploads "
+                    f"{VIRTUAL_PATH_PREFIX}/outputs /mnt/acp-workspace"
+                )
+                result = await box.exec("sh", "-lc", bootstrap)
+                if result.exit_code not in (0, None) or result.stderr:
+                    await box.stop()
+                    raise SandboxRuntimeError(
+                        "Failed to provision private BoxLite identity",
+                    )
             return box
 
         box = self._loop.run(_make())
-        logger.info("Created BoxLite box %s (name=%s, image=%s)", sandbox_id, self._box_name(sandbox_id), self._config["image"])
-        return BoxliteBox(sandbox_id, box, self._loop.run, default_env=self._config["environment"], on_terminal_failure=self._invalidate_box)
+        effective_box_name = box_name or self._box_name(sandbox_id)
+        logger.info("Created BoxLite box %s (name=%s, image=%s)", sandbox_id, effective_box_name, self._config["image"])
+        return BoxliteBox(
+            sandbox_id,
+            box,
+            self._loop.run,
+            default_env=self._config["environment"],
+            execution_user=(_PRIVATE_EXECUTION_USER if private else None),
+            on_terminal_failure=self._invalidate_box,
+        )
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         with self._lock:

@@ -9,6 +9,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import text
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 from support.system_model_seed import (
     frozen_system_model_execution,
     seed_system_model_config,
@@ -62,6 +63,7 @@ from deerflow.persistence.shared_assets.agent_model import AgentRow
 from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 
 def _owner_ref(_owner_user_id: str) -> JobOwnerRef:
@@ -168,6 +170,10 @@ async def _admit_prepare(
         jobs=_jobs(session),
     ).admit(
         scope,
+        account_private_generation=AccountPrivateGeneration(
+            owner_user_id=scope.owner_user_id,
+            generation=1,
+        ),
         thread_id=thread_id,
         operation_id=uuid.uuid4(),
         request_id="memory-reset-postgres-test",
@@ -203,7 +209,8 @@ async def _add_snapshot_only_scope(
         )
     )
     await session.flush()
-    session.add(
+    await add_sealed_test_run(
+        session,
         RunRow(
             run_id=run_id,
             thread_id=thread_id,
@@ -218,9 +225,8 @@ async def _add_snapshot_only_scope(
             project_id=scope.project_id,
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
-    await session.flush()
     session.add(
         RunMemoryContextSnapshotRow(
             project_id=scope.project_id,
@@ -334,6 +340,10 @@ async def _admit_prepared_dream(
         jobs=_jobs(session),
     ).admit_dream(
         scope,
+        account_private_generation=AccountPrivateGeneration(
+            owner_user_id=scope.owner_user_id,
+            generation=1,
+        ),
         trigger="manual_dream",
         frozen=frozen,
         initial_content=EMPTY_MEMORY_DOCUMENT,
@@ -541,6 +551,10 @@ async def test_account_reset_projects_episode_snapshot_and_active_jobs_only(
                     run_id=None,
                     occurrence_id=None,
                     max_attempts=3,
+                    owner_private_generation=AccountPrivateGeneration(
+                        owner_user_id=scope.owner_user_id,
+                        generation=1,
+                    ),
                     retry_safety="safe",
                 )
             )
@@ -555,6 +569,10 @@ async def test_account_reset_projects_episode_snapshot_and_active_jobs_only(
                     run_id=None,
                     occurrence_id=None,
                     max_attempts=3,
+                    owner_private_generation=AccountPrivateGeneration(
+                        owner_user_id=scope.owner_user_id,
+                        generation=1,
+                    ),
                     retry_safety="safe",
                 )
             )

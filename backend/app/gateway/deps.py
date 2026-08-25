@@ -207,6 +207,7 @@ async def gateway_platform_runtime(
     """
     from deerflow.persistence.engine import (
         close_engine,
+        get_engine,
         get_session_factory,
         init_engine_from_config,
     )
@@ -219,6 +220,23 @@ async def gateway_platform_runtime(
         # Initialize and probe PostgreSQL before opening checkpointer/store pools.
         await init_engine_from_config(config.database)
         stack.push_async_callback(close_engine)
+        engine = get_engine()
+        if engine is None:
+            raise RuntimeError("Run Skill writer cohort engine is unavailable")
+        from app.private_work.legacy_run_skill_snapshot_writer import (
+            frozen_run_skill_snapshot_writer,
+        )
+        from app.private_work.run_skill_writer_cohort import (
+            RunSkillWriterCohortLease,
+        )
+
+        writer_cohort = await RunSkillWriterCohortLease.acquire(
+            engine,
+            frozen_run_skill_snapshot_writer(),
+            process_role="gateway",
+            process_authority=True,
+        )
+        stack.push_async_callback(writer_cohort.close)
 
         app.state._raw_checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
