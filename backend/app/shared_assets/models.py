@@ -176,7 +176,7 @@ class ResolvedRunAssetClosure:
         ):
             raise TypeError("run asset closure contains an invalid snapshot")
         if len({item.version_id for item in agents}) != len(agents):
-            raise ValueError("run asset closure contains duplicate Agent versions")
+            raise ValueError("run asset closure contains duplicate Agent definitions")
         if len({item.version_id for item in self.skills}) != len(self.skills):
             raise ValueError("run asset closure contains duplicate Skill versions")
         if len({item.version_id for item in self.mcps}) != len(self.mcps):

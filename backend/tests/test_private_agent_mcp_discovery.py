@@ -61,7 +61,7 @@ def _runtime(
 ) -> PrivateAgentRuntime:
     manifest = PrivateAgentManifest(
         agent_asset_id=uuid.uuid4(),
-        agent_version_id=uuid.uuid4(),
+        agent_definition_id=uuid.uuid4(),
         checksum="b" * 64,
         catalog_generation=1,
         description="MCP degradation test",

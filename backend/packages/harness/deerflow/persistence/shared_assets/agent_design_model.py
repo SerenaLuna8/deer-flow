@@ -73,7 +73,6 @@ class AgentDesignSessionRow(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_agent_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
-    created_agent_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     create_idempotency_key_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     create_request_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
@@ -107,11 +106,10 @@ class AgentDesignSessionRow(Base):
         CheckConstraint(
             "(status = 'completed' AND ("
             "(created_agent_deleted IS FALSE AND created_agent_id IS NOT NULL "
-            "AND created_agent_version_id IS NOT NULL) OR "
-            "(created_agent_deleted IS TRUE AND created_agent_id IS NULL "
-            "AND created_agent_version_id IS NULL))) OR "
+            ") OR "
+            "(created_agent_deleted IS TRUE AND created_agent_id IS NULL))) OR "
             "(status <> 'completed' AND created_agent_deleted IS FALSE "
-            "AND created_agent_id IS NULL AND created_agent_version_id IS NULL)",
+            "AND created_agent_id IS NULL)",
             name="ck_agent_design_sessions_completion",
         ),
         CheckConstraint(
@@ -148,12 +146,6 @@ class AgentDesignSessionRow(Base):
             ["project_id", "created_agent_id"],
             ["agents.project_id", "agents.id"],
             name="fk_agent_design_sessions_created_agent_project",
-            ondelete="RESTRICT",
-        ),
-        ForeignKeyConstraint(
-            ["created_agent_id", "created_agent_version_id"],
-            ["agent_versions.agent_id", "agent_versions.id"],
-            name="fk_agent_design_sessions_created_agent_version",
             ondelete="RESTRICT",
         ),
         Index(

@@ -621,13 +621,13 @@ class RunAgentPrivateExecutor:
                     runtime_models: dict[str, ModelConfig] = {
                         lead_model.name: lead_model,
                     }
-                    delegated_agent_versions: set[uuid.UUID] = set()
+                    delegated_agent_definitions: set[uuid.UUID] = set()
                     for asset in execution.snapshot.assets:
                         if asset.kind is not AssetKind.AGENT or asset.dependency_order == 0:
                             continue
-                        if asset.version_id in delegated_agent_versions:
+                        if asset.version_id in delegated_agent_definitions:
                             raise PermanentExecutionError("RUN_ASSET_STALE")
-                        delegated_agent_versions.add(asset.version_id)
+                        delegated_agent_definitions.add(asset.version_id)
                         delegated_model = await self._model_materializer.materialize_snapshot(
                             project_id=execution.context.project_id,
                             owner_user_id=str(execution.context.user_id),

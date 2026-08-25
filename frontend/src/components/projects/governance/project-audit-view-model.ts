@@ -208,7 +208,15 @@ const METADATA_LABELS: Record<string, LocalizedLabel> = {
   previous_role: { "zh-CN": "原角色", "en-US": "Previous role" },
   asset_kind: { "zh-CN": "资产类型", "en-US": "Asset type" },
   operation: { "zh-CN": "具体操作", "en-US": "Operation" },
+  definition_revision: {
+    "zh-CN": "Definition 修订",
+    "en-US": "Definition revision",
+  },
   version_number: { "zh-CN": "资产版本", "en-US": "Asset version" },
+  affected_agent_count: {
+    "zh-CN": "受影响 Agent 数",
+    "en-US": "Affected Agents",
+  },
   trigger_kind: { "zh-CN": "触发方式", "en-US": "Trigger" },
   member_limit: { "zh-CN": "成员上限", "en-US": "Member limit" },
   storage_bytes_limit: { "zh-CN": "存储上限", "en-US": "Storage limit" },

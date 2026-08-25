@@ -44,9 +44,9 @@ describe("Project asset detail version picker placement", () => {
     ).not.toContain('role="switch"');
   });
 
-  test("places the Agent picker before its editor while preserving the Skill history layout", () => {
-    expect(projectAssetDetailVersionPickerPlacement("agents")).toBe(
-      "before-editor",
+  test("shows the single Agent Definition without a version history picker", () => {
+    expect(projectAssetDetailShowsVersionHistory("agents", "project")).toBe(
+      false,
     );
     expect(projectAssetDetailVersionPickerPlacement("skills")).toBe(
       "version-section",

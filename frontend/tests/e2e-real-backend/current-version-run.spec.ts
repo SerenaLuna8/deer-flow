@@ -53,24 +53,24 @@ async function successfulRunIds(
   );
 }
 
-async function leadAgentVersion(
+async function leadAgentSnapshotDefinition(
   context: BrowserContext,
   project: ReplayProjectScope,
   runId: string,
 ): Promise<string> {
   const response = await context.request.get(
-    `${APP}/api/projects/${project.id}/test-only/runs/${runId}/lead-agent-version`,
+    `${APP}/api/projects/${project.id}/test-only/runs/${runId}/lead-agent-definition`,
   );
   expect(response.status(), await response.text()).toBe(200);
-  const body = (await response.json()) as { version_id?: unknown };
-  expect(typeof body.version_id).toBe("string");
-  if (typeof body.version_id !== "string") {
-    throw new Error("lead Agent snapshot is missing its version ID");
+  const body = (await response.json()) as { definition_id?: unknown };
+  expect(typeof body.definition_id).toBe("string");
+  if (typeof body.definition_id !== "string") {
+    throw new Error("lead Agent snapshot is missing its Definition ID");
   }
-  return body.version_id;
+  return body.definition_id;
 }
 
-test("the same Thread resolves the Current Agent for each new Run", async ({
+test("the same Thread resolves the current Agent Definition for each new Run", async ({
   page,
   context,
 }) => {
@@ -100,26 +100,30 @@ test("the same Thread resolves the Current Agent for each new Run", async ({
   if (!firstRunId) {
     throw new Error("the initial chat did not create a successful Run");
   }
-  const firstVersionId = await leadAgentVersion(context, project, firstRunId);
+  const firstDefinitionId = await leadAgentSnapshotDefinition(
+    context,
+    project,
+    firstRunId,
+  );
   await page.screenshot({
     path:
       process.env.CURRENT_VERSION_EVIDENCE_PATH ??
-      "/tmp/deer-flow-current-version-same-thread.png",
+      "/tmp/deer-flow-current-definition-same-thread.png",
     fullPage: true,
   });
 
-  const activated = await context.request.post(
-    `${APP}/api/projects/${project.id}/test-only/agents/${project.agent.id}/activate-next-version`,
+  const saved = await context.request.post(
+    `${APP}/api/projects/${project.id}/test-only/agents/${project.agent.id}/save-next-definition`,
     { headers: { "X-CSRF-Token": project.csrf } },
   );
-  expect(activated.status(), await activated.text()).toBe(200);
-  const activatedBody = (await activated.json()) as {
-    version_id?: unknown;
-    version_number?: unknown;
+  expect(saved.status(), await saved.text()).toBe(200);
+  const savedBody = (await saved.json()) as {
+    definition_id?: unknown;
+    revision?: unknown;
   };
-  expect(activatedBody.version_number).toBe(2);
-  expect(typeof activatedBody.version_id).toBe("string");
-  expect(activatedBody.version_id).not.toBe(firstVersionId);
+  expect(savedBody.revision).toBe(2);
+  expect(typeof savedBody.definition_id).toBe("string");
+  expect(savedBody.definition_id).not.toBe(firstDefinitionId);
 
   const assistantTurn = chat.locator("[data-assistant-turn]").last();
   await assistantTurn.hover();
@@ -139,6 +143,10 @@ test("the same Thread resolves the Current Agent for each new Run", async ({
   if (!secondRunId) {
     throw new Error("regenerate did not create a second Run");
   }
-  const secondVersionId = await leadAgentVersion(context, project, secondRunId);
-  expect(secondVersionId).toBe(activatedBody.version_id);
+  const secondDefinitionId = await leadAgentSnapshotDefinition(
+    context,
+    project,
+    secondRunId,
+  );
+  expect(secondDefinitionId).toBe(savedBody.definition_id);
 });

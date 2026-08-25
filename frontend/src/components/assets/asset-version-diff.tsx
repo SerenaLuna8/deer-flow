@@ -1,7 +1,5 @@
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
-import { resolveModelDisplayName } from "@/core/models/presentation";
-import type { Model } from "@/core/models/types";
 import type { AssetVersion } from "@/core/shared-assets";
 
 type DiffRow = {
@@ -19,57 +17,18 @@ function list(items: readonly string[], separator: string): string {
   return items.length === 0 ? "—" : items.join(separator);
 }
 
-function jsonObject(value: Record<string, unknown> | undefined): string {
-  const document = value ?? {};
-  return JSON.stringify(
-    document,
-    Object.keys(document).sort((left, right) => left.localeCompare(right)),
-    2,
-  );
-}
-
 type DiffCopy = Translations["adminAssets"]["diff"];
-type StatusCopy = Translations["adminAssets"]["status"];
 
 function describe(
   version: AssetVersion,
   copy: DiffCopy,
-  statuses: StatusCopy,
   separator: string,
-  includeAgentDocuments: boolean,
-  models: readonly Model[],
-  unavailableModelLabel: string,
 ): Record<string, string> {
   const common = {
     [copy.payloadChecksum]: value(
       "payload_checksum" in version ? version.payload_checksum : undefined,
     ),
   };
-  if ("agent_id" in version) {
-    const modelLabel =
-      resolveModelDisplayName(version.model_ref, models) ??
-      unavailableModelLabel;
-    return {
-      ...common,
-      [copy.description]: value(version.description),
-      [copy.payloadSchemaVersion]: String(version.payload_schema_version),
-      [copy.model]: `${modelLabel}\n${jsonObject(version.model_settings)}`,
-      [copy.toolGroups]: list(version.tool_groups, separator),
-      [copy.skillVersions]: list(
-        version.skill_refs.map((ref) => `${ref.scope}:${ref.asset_id}`),
-        separator,
-      ),
-      [copy.mcpVersions]: list(version.mcp_version_ids, separator),
-      ...(includeAgentDocuments
-        ? {
-            "AGENTS.md": value(version.agents_instructions),
-            "SOUL.md": value(version.soul),
-            "IDENTITY.md": value(version.identity),
-            "USER.md": value(version.user_context),
-          }
-        : {}),
-    };
-  }
   if ("skill_id" in version) {
     return {
       ...common,
@@ -113,32 +72,10 @@ function diffRows(
   previous: AssetVersion | null,
   current: AssetVersion,
   copy: DiffCopy,
-  statuses: StatusCopy,
   separator: string,
-  includeAgentDocuments: boolean,
-  models: readonly Model[],
-  unavailableModelLabel: string,
 ): DiffRow[] {
-  const before = previous
-    ? describe(
-        previous,
-        copy,
-        statuses,
-        separator,
-        includeAgentDocuments,
-        models,
-        unavailableModelLabel,
-      )
-    : {};
-  const after = describe(
-    current,
-    copy,
-    statuses,
-    separator,
-    includeAgentDocuments,
-    models,
-    unavailableModelLabel,
-  );
+  const before = previous ? describe(previous, copy, separator) : {};
+  const after = describe(current, copy, separator);
   return Object.entries(after)
     .filter(([key, currentValue]) => before[key] !== currentValue)
     .map(([label, currentValue]) => ({
@@ -151,13 +88,9 @@ function diffRows(
 export function AssetVersionDiff({
   previous = null,
   current,
-  includeAgentDocuments = false,
-  models,
 }: {
   previous?: AssetVersion | null;
   current: AssetVersion;
-  includeAgentDocuments?: boolean;
-  models: readonly Model[];
 }) {
   const { locale, t } = useI18n();
   const isMcp = "mcp_server_id" in current;
@@ -165,11 +98,7 @@ export function AssetVersionDiff({
     previous,
     current,
     t.adminAssets.diff,
-    t.adminAssets.status,
     locale === "zh-CN" ? "、" : ", ",
-    includeAgentDocuments,
-    models,
-    t.adminSystemSettings.fields.unavailableModel,
   );
   if (rows.length === 0) {
     return (

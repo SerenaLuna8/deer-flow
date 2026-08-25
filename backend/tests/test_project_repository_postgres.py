@@ -17,6 +17,8 @@ from app.projects.context import resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
 from app.projects.models import CreateProject, ProjectChanges
 from app.projects.repository import ProjectRepository
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+from app.shared_assets.models import AgentModelSettings, AgentPayload
 from deerflow.persistence.shared_assets.agent_model import AgentRow
 from deerflow.persistence.shared_assets.binding_model import (
     ProjectSystemAgentBindingRow,
@@ -100,25 +102,46 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
             view = await repository.get(context)
             assert session.in_transaction() is False
             assert view.member_count == 1 and view.agent_count == view.skill_count == view.mcp_count == 0
+            agent_payload = AgentPayload(
+                description="",
+                soul="Helpful",
+                model_ref="default",
+                model_settings=AgentModelSettings(),
+                tool_groups=(),
+                skill_refs=(),
+                mcp_version_ids=(),
+                payload_schema_version=4,
+            )
+            agent_definition_id = uuid.uuid4()
             async with session.begin():
-                agent = AgentRow(scope="project", project_id=context.project_id, slug="alpha-agent", display_name="Alpha Agent", created_by_user_id=str(owner))
+                agent = AgentRow(
+                    scope="project",
+                    project_id=context.project_id,
+                    slug="alpha-agent",
+                    display_name="Alpha Agent",
+                    status="suspended",
+                    definition_id=agent_definition_id,
+                    description=agent_payload.description,
+                    soul=agent_payload.soul,
+                    model_ref=agent_payload.model_ref,
+                    model_settings={},
+                    tool_groups=[],
+                    payload_schema_version=4,
+                    payload_checksum=agent_payload_checksum(agent_payload),
+                    created_by_user_id=str(owner),
+                    updated_by_user_id=str(owner),
+                )
                 skill = SkillRow(scope="project", project_id=context.project_id, slug="alpha-skill", display_name="Alpha Skill", created_by_user_id=str(owner))
                 mcp = McpServerRow(scope="project", project_id=context.project_id, slug="alpha-mcp", display_name="Alpha MCP", created_by_user_id=str(owner))
                 session.add_all((agent, skill, mcp))
             draft_summary = await repository.get(context)
             assert (draft_summary.agent_count, draft_summary.skill_count, draft_summary.mcp_count) == (0, 0, 0)
-            agent_version_id, skill_version_id, mcp_version_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+            skill_version_id, mcp_version_id = uuid.uuid4(), uuid.uuid4()
             skill_fixture = sealed_skill_version_fixture(
                 skill_version_id,
                 name="alpha-skill",
             )
             async with session.begin():
-                await session.execute(
-                    text("""INSERT INTO agent_versions
-                    (id,agent_id,version_number,soul,model_ref,payload_checksum,created_by_user_id)
-                    VALUES (:version,:asset,1,'Helpful','test-model',:checksum,:user)"""),
-                    {"version": agent_version_id, "asset": agent.id, "checksum": "a" * 64, "user": str(owner)},
-                )
                 await session.execute(
                     text("""INSERT INTO skill_versions
                     (id,skill_id,version_number,scan_decision,payload_checksum,
@@ -143,8 +166,8 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
                     {"version": mcp_version_id, "asset": mcp.id, "checksum": "c" * 64, "user": str(owner)},
                 )
                 await session.execute(
-                    text("UPDATE agents SET current_version_id=:version WHERE id=:asset"),
-                    {"version": agent_version_id, "asset": agent.id},
+                    text("UPDATE agents SET status='active',revision=revision+1 WHERE id=:asset"),
+                    {"asset": agent.id},
                 )
                 await session.execute(
                     text("UPDATE skills SET current_version_id=:version WHERE id=:asset"),

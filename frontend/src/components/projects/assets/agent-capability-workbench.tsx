@@ -19,7 +19,8 @@ import {
   SharedAssetApiError,
   useProjectAssets,
   useUpdateProjectAgentCapabilityBindings,
-  type AssetVersion,
+  type AgentDefinition,
+  type AgentDefinitionResponse,
   type ProjectAssetItem,
   type ProjectAssetList,
 } from "@/core/shared-assets";
@@ -31,9 +32,6 @@ import {
 } from "./agent-authoring-recovery";
 import { useMcpDependencyRuntime } from "./use-mcp-dependency-runtime";
 
-export { agentAuthoringBaseVersion } from "./agent-authoring-recovery";
-
-type AgentAssetVersion = Extract<AssetVersion, { agent_id: string }>;
 type DependencyKind = "skill" | "mcp";
 
 export type AgentDependencyOption = {
@@ -312,22 +310,22 @@ export function AgentCapabilityWorkbench({
   accountId,
   projectId,
   item,
-  version,
+  definition,
   canAuthor,
   authoringPreparationPending = false,
   onBeginEditing,
   onDirtyChange,
-  onVersionCreated,
+  onDefinitionSaved,
 }: {
   accountId: string;
   projectId: string;
   item: ProjectAssetItem;
-  version: AgentAssetVersion | null;
+  definition: AgentDefinition | null;
   canAuthor: boolean;
   authoringPreparationPending?: boolean;
   onBeginEditing: () => Promise<boolean>;
   onDirtyChange: (dirty: boolean) => void;
-  onVersionCreated: (versionId: string) => void;
+  onDefinitionSaved: (response: AgentDefinitionResponse) => void;
 }) {
   const { t } = useI18n();
   const copy = t.agents.capabilities;
@@ -337,8 +335,8 @@ export function AgentCapabilityWorkbench({
   const privateWork = usePrivateWorkAccess();
   const update = useUpdateProjectAgentCapabilityBindings(accountId, projectId);
   const initialSkills =
-    version?.skill_refs.map((ref) => `${ref.scope}:${ref.asset_id}`) ?? [];
-  const initialMcps = version?.mcp_version_ids ?? [];
+    definition?.skill_refs.map((ref) => `${ref.scope}:${ref.asset_id}`) ?? [];
+  const initialMcps = definition?.mcp_version_ids ?? [];
   const [baselineSkills, setBaselineSkills] = useState(initialSkills);
   const [baselineMcps, setBaselineMcps] = useState(initialMcps);
   const [draftSkills, setDraftSkills] = useState(initialSkills);
@@ -353,7 +351,6 @@ export function AgentCapabilityWorkbench({
   const mountedRef = useRef(false);
   const scopeKey = `${accountId}:${projectId}:${item.id}`;
   const scopeKeyRef = useRef(scopeKey);
-  const savedVersionIdRef = useRef<string | null>(null);
   const expectedRevisionRef = useRef(item.revision);
   const dirty =
     !sameIds(baselineSkills, draftSkills) || !sameIds(baselineMcps, draftMcps);
@@ -419,27 +416,19 @@ export function AgentCapabilityWorkbench({
 
   useEffect(() => {
     if (conflictRecovery || dirty || update.isPending) return;
-    if (
-      savedVersionIdRef.current &&
-      version?.id !== savedVersionIdRef.current
-    ) {
-      if (item.revision <= expectedRevisionRef.current) return;
-    }
-    savedVersionIdRef.current = null;
     const nextSkills =
-      version?.skill_refs.map((ref) => `${ref.scope}:${ref.asset_id}`) ?? [];
-    const nextMcps = version?.mcp_version_ids ?? [];
+      definition?.skill_refs.map((ref) => `${ref.scope}:${ref.asset_id}`) ?? [];
+    const nextMcps = definition?.mcp_version_ids ?? [];
     setBaselineSkills(nextSkills);
     setBaselineMcps(nextMcps);
     setDraftSkills(nextSkills);
     setDraftMcps(nextMcps);
     expectedRevisionRef.current = item.revision;
-  }, [conflictRecovery, dirty, item.revision, update.isPending, version]);
+  }, [conflictRecovery, definition, dirty, item.revision, update.isPending]);
 
   function discard() {
     cancelRecovery();
     setConflictRecovery(null);
-    savedVersionIdRef.current = null;
     setDraftSkills(baselineSkills);
     setDraftMcps(baselineMcps);
     setEditing(false);
@@ -479,14 +468,13 @@ export function AgentCapabilityWorkbench({
         isCurrent: () => recoveryIsCurrent(recovery, controller),
       });
       if (!recoveryIsCurrent(recovery, controller)) return;
-      const nextSkills = reload.version.skill_refs.map(
+      const nextSkills = reload.definition.skill_refs.map(
         (ref) => `${ref.scope}:${ref.asset_id}`,
       );
-      const nextMcps = reload.version.mcp_version_ids;
+      const nextMcps = reload.definition.mcp_version_ids;
       setBaselineSkills(nextSkills);
       setBaselineMcps(nextMcps);
       expectedRevisionRef.current = reload.item.revision;
-      savedVersionIdRef.current = reload.version.id;
       setConflictRecovery(null);
       setLocalError(
         sameIds(nextSkills, draftSkills) && sameIds(nextMcps, draftMcps)
@@ -547,19 +535,18 @@ export function AgentCapabilityWorkbench({
       ) {
         return;
       }
-      const nextVersion = result.data;
-      const nextSkillRefs = nextVersion.skill_refs.map(
+      const nextDefinition = result.definition;
+      const nextSkillRefs = nextDefinition.skill_refs.map(
         (ref) => `${ref.scope}:${ref.asset_id}`,
       );
       setBaselineSkills(nextSkillRefs);
-      setBaselineMcps(nextVersion.mcp_version_ids);
+      setBaselineMcps(nextDefinition.mcp_version_ids);
       setDraftSkills(nextSkillRefs);
-      setDraftMcps(nextVersion.mcp_version_ids);
-      expectedRevisionRef.current += 1;
-      savedVersionIdRef.current = nextVersion.id;
+      setDraftMcps(nextDefinition.mcp_version_ids);
+      expectedRevisionRef.current = result.item.revision;
       setConflictRecovery(null);
       setEditing(false);
-      onVersionCreated(nextVersion.id);
+      onDefinitionSaved(result);
     } catch (error) {
       if (
         !mountedRef.current ||
@@ -599,7 +586,7 @@ export function AgentCapabilityWorkbench({
     : !canAuthor
       ? copy.permissionBlocked
       : authoringPreparationPending
-        ? copy.preparingCandidate
+        ? copy.preparingDefinition
         : catalogLoading
           ? copy.catalogLoading
           : catalogError
@@ -647,13 +634,13 @@ export function AgentCapabilityWorkbench({
                 {update.isPending ? (
                   <Loader2Icon aria-hidden className="size-4 animate-spin" />
                 ) : null}
-                {update.isPending ? copy.saving : copy.saveCandidate}
+                {update.isPending ? copy.saving : copy.save}
               </Button>
             </>
           ) : canAuthor ? (
             <Button
               type="button"
-              disabled={!version || catalogLoading || Boolean(catalogError)}
+              disabled={!definition || catalogLoading || Boolean(catalogError)}
               onClick={() => {
                 setLocalError(null);
                 void onBeginEditing().then((ready) => {
@@ -670,7 +657,7 @@ export function AgentCapabilityWorkbench({
       <div className="bg-muted/30 flex flex-wrap items-center gap-2 rounded-xl px-4 py-3 text-sm">
         <span className="text-muted-foreground">{copy.builtinGroups}</span>
         <span className="font-medium">
-          {t.agents.common.count(version?.tool_groups.length ?? 0)}
+          {t.agents.common.count(definition?.tool_groups.length ?? 0)}
         </span>
         <span className="text-muted-foreground">{copy.unchanged}</span>
       </div>

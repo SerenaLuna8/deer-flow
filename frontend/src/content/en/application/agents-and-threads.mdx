@@ -13,9 +13,9 @@ ActWeave App supports multiple named agents and maintains conversation state acr
 
 ### Main and the project default
 
-Main is the project-level orchestrator and the fallback when the project has no custom default Agent. For every Run, the server resolves all effective System assets plus all active Agent, Skill, and MCP assets owned by the entered project. Agent and Skill assets resolve through their Current Version; MCP resolves through its admitted configuration. The complete definitions are then frozen in the Run Snapshot. Main can delegate to the other admitted Agents, but it never sees assets owned by another project.
+Main is the project-level orchestrator and the fallback when the project has no custom default Agent. For every Run, the server resolves each Agent's current Definition, each Skill's Current Version, and the admitted MCP configurations available in the entered project. The complete definitions are then frozen in the Run Snapshot. Main can delegate to the other admitted Agents, but it never sees assets owned by another project.
 
-A project administrator may instead select an active project Agent with a Current Version as the project default. A configured default that is no longer executable fails closed; ActWeave does not silently switch it back to Main.
+A project administrator may instead select an active project Agent with a valid Definition as the project default. A configured default that is no longer executable fails closed; ActWeave does not silently switch it back to Main.
 
 The current project default Agent can be deleted directly. Deletion soft-archives it, clears the default automatically, and makes subsequent project work fall back to Main. Existing conversations, Automations, Channels, OAuth connections, and Run records are retained rather than cascade-deleted. An already admitted Run continues with its frozen snapshot; starting a new Run from an existing conversation reports that the Agent was deleted and requires switching Agents. An archived record no longer occupies the project name, so the same slug may be reused by a new Agent with a new ID; old conversations remain bound to the archived ID.
 
@@ -31,16 +31,16 @@ Custom agents are named variants of the Lead Agent. Each one can have:
 
 Agents are created and managed from the entered project's **Agents** page. Platform administrators manage system agents under **Admin > Assets > Agents**. The corresponding authenticated APIs are scoped to that project or to the system-admin asset surface; there is no global workspace Agent client.
 
-The slug is derived from the display name and must be unique among non-deleted Agents within its asset scope. After an Agent is archived, its slug can be reused by a new Agent with a new ID. Immutable versions, Current Version pointers, and explicit project bindings are stored in PostgreSQL. Unlike Main, a custom Agent loads only the Skill assets and MCP configurations referenced by its Current Version. Each Skill reference is `{scope, asset_id}` and resolves that Skill's Current Version during Run Admission.
+The slug is derived from the display name and must be unique among non-deleted Agents within its asset scope. After an Agent is archived, its slug can be reused by a new Agent with a new ID. Each Agent's one current Definition and explicit project bindings are stored in PostgreSQL. Unlike Main, a custom Agent loads only the Skill assets and MCP configurations referenced by its Definition. Each Skill reference is `{scope, asset_id}` and resolves that Skill's Current Version during Run Admission.
 
 To create an Agent in the app, open **Agents**, choose **New Agent**, enter a name and brief, and answer the AI Builder's clarification questions. Review the generated Blueprint, assumptions, and conflicts before confirming. Error-severity conflicts block creation until another AI turn regenerates the candidate; editing a document alone does not resolve them. Builder creation automatically binds enabled System Skill assets and MCP configurations. Project Skills are selected by asset identity; MCP remains an exact configuration reference.
 
-Creating an Agent produces a suspended asset and immutable Candidate Version v1. Editor and Admin may save further forward Candidate Versions and activate one. Activation atomically sets `current_version_id` and enables the asset. Historical Versions are read-only and cannot be edited, deleted, copied, or reactivated. The asset-level switch may later suspend or re-enable the same Current Version.
+Creating an Agent produces a suspended asset with its initial Definition. Editor and Admin may save its instructions or capability bindings under optimistic `revision`; a successful save replaces the Definition used by later Run Admission and does not create version history. The asset-level switch separately enables or suspends the Agent without changing its Definition.
 
 If a session owner later retains only `shared_assets.read`, the saved Builder session remains available read-only, but it cannot be continued, edited, cancelled, or committed. In Builder review, the normalized name becomes both the new Agent's display name and slug; the general API still accepts `display_name` and `slug` separately.
 Each user may retain up to eight incomplete design sessions in a project. Resume or cancel an existing design before starting another after that limit is reached.
 
-The project API accepts only a complete definition at `POST /api/projects/{project_id}/agents`: `slug`, `display_name`, `description`, `agents_instructions`, `soul`, `identity`, `user_context`, `model_ref`, `model_settings`, `tool_groups`, `skill_refs`, and `mcp_version_ids`. The response contains the suspended Agent and Candidate Version v1. Activate a reviewed candidate with `POST /api/projects/{project_id}/agents/{agent_id}/versions/{version_id}/activate` and the current `expected_revision`.
+The project API accepts only a complete definition at `POST /api/projects/{project_id}/agents`: `slug`, `display_name`, `description`, `agents_instructions`, `soul`, `identity`, `user_context`, `model_ref`, `model_settings`, `tool_groups`, `skill_refs`, and `mcp_version_ids`. The response contains the suspended Agent and its initial Definition. Read that Definition from `GET /api/projects/{project_id}/agents/{agent_id}`; save its four instruction documents with `PUT /api/projects/{project_id}/agents/{agent_id}/instructions`, save Skill/MCP references with `PUT /api/projects/{project_id}/agents/{agent_id}/capability-bindings`, and include the current `expected_revision` in either update. Enablement remains a separate Agent status operation.
 
 ### Restricting agent capabilities
 
@@ -83,11 +83,11 @@ Threads are listed under the entered project's **Chats** page. Clicking a thread
 
 A new thread is created when you start a conversation. The thread ID is generated and the initial configuration (model, agent, skills) is recorded.
 
-The composer follows that Thread's Agent: Main suggests every effective Skill in the current project, while a custom Agent suggests only the Skill assets referenced by its Current Version. Every Skill consumer resolves the referenced asset's Current Version. Historical `/skill` messages remain readable even if the current Agent or catalog later changes.
+The composer follows that Thread's Agent: Main suggests every effective Skill in the current project, while a custom Agent suggests only the Skill assets referenced by its Definition. Every Skill consumer resolves the referenced asset's Current Version. Historical `/skill` messages remain readable even if the current Agent or catalog later changes.
 
 #### Run
 
-Each user message, including a later message in an existing Thread, resolves the Agent and Skill Current Versions and admits a new Run with a complete immutable Run Snapshot. The Worker executes only that snapshot and does not reread Current Versions during execution or retry. Tokens and tool calls stream to the browser while the Thread state is updated.
+Each user message, including a later message in an existing Thread, resolves the Agent Definition and the Skill Current Versions and admits a new Run with a complete immutable Run Snapshot. The Worker executes only that snapshot and does not reread the current Definition or Current Versions during execution or retry. Tokens and tool calls stream to the browser while the Thread state is updated.
 
 If the project Agent is suspended, the existing thread history remains readable, but sending, retry/regenerate, edited rerun, and human-input submission are disabled. Reactivate that Agent or start a new thread with another Agent.
 

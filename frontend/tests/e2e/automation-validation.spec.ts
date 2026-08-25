@@ -6,7 +6,7 @@ import type { ProjectAssetItem } from "@/core/shared-assets";
 const ACCOUNT_ID = "90000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const AGENT_ID = "20000000-0000-4000-8000-000000000001";
-const AGENT_VERSION_ID = "30000000-0000-4000-8000-000000000001";
+const AGENT_DEFINITION_ID = "30000000-0000-4000-8000-000000000001";
 const TIMESTAMP = "2026-08-17T03:26:00Z";
 
 const project: Project = {
@@ -51,7 +51,7 @@ const systemAgent: ProjectAssetItem = {
   display_name: "Main",
   description: "Main project Agent",
   status: "active",
-  current_version_id: AGENT_VERSION_ID,
+  definition_id: AGENT_DEFINITION_ID,
   revision: 1,
   capabilities: ["shared_assets.execute"],
   binding: null,
@@ -134,7 +134,7 @@ async function mockProjectAutomations(page: Page) {
         items: [
           {
             agent_asset_id: AGENT_ID,
-            selected_version_id: AGENT_VERSION_ID,
+            selected_definition_id: AGENT_DEFINITION_ID,
             status: "ready",
             reason_code: null,
           },

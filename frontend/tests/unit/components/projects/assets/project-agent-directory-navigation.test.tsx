@@ -26,7 +26,7 @@ function agent(
     display_name: displayName,
     description: null,
     status: "active",
-    current_version_id: null,
+    definition_id: "00000000-0000-4000-8000-000000000003",
     revision: 1,
     created_by_user_id: "00000000-0000-4000-8000-000000000002",
     created_at: "2026-08-13T00:00:00Z",

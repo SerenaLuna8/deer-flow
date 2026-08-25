@@ -32,7 +32,8 @@ import {
 import {
   SharedAssetApiError,
   useUpdateProjectAgentInstructions,
-  type AssetVersion,
+  type AgentDefinition,
+  type AgentDefinitionResponse,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
 import { SafeStreamdown } from "@/core/streamdown/components";
@@ -42,8 +43,6 @@ import {
   projectAgentAuthoringCacheEpochs,
   reloadProjectAgentAuthoringState,
 } from "./agent-authoring-recovery";
-
-type AgentAssetVersion = Extract<AssetVersion, { agent_id: string }>;
 
 export const AGENT_INSTRUCTION_FILES = [
   {
@@ -70,16 +69,16 @@ export type AgentInstructionField =
 export type AgentInstructionDraft = Record<AgentInstructionField, string>;
 
 export function agentInstructionDraft(
-  version: Pick<
-    AgentAssetVersion,
+  definition: Pick<
+    AgentDefinition,
     "agents_instructions" | "soul" | "identity" | "user_context"
   > | null,
 ): AgentInstructionDraft {
   return {
-    agents_instructions: version?.agents_instructions ?? "",
-    soul: version?.soul ?? "",
-    identity: version?.identity ?? "",
-    user_context: version?.user_context ?? "",
+    agents_instructions: definition?.agents_instructions ?? "",
+    soul: definition?.soul ?? "",
+    identity: definition?.identity ?? "",
+    user_context: definition?.user_context ?? "",
   };
 }
 
@@ -92,30 +91,12 @@ export function agentInstructionDraftIsDirty(
   );
 }
 
-type PendingSavedAgentVersion = {
-  assetId: string;
-  versionId: string;
-  assetRevision: number;
-};
-
 type AgentInstructionConflictRecovery = {
   assetId: string;
   assetRevision: number;
   generation: number;
   status: "refreshing" | "error";
 };
-
-export function agentInstructionSaveIsPending(
-  pending: PendingSavedAgentVersion | null,
-  item: Pick<ProjectAssetItem, "id" | "revision">,
-  version: Pick<AgentAssetVersion, "id"> | null,
-): boolean {
-  if (pending?.assetId !== item.id) return false;
-  if (item.revision < pending.assetRevision) return true;
-  return (
-    item.revision === pending.assetRevision && version?.id !== pending.versionId
-  );
-}
 
 function selectedInstructionFile(field: AgentInstructionField) {
   return (
@@ -147,7 +128,6 @@ export function AgentInstructionWorkspace({
   editing,
   canEdit = true,
   readOnly = false,
-  historical = false,
   pending,
   inputDisabled = false,
   dirty,
@@ -167,7 +147,6 @@ export function AgentInstructionWorkspace({
   editing: boolean;
   canEdit?: boolean;
   readOnly?: boolean;
-  historical?: boolean;
   pending: boolean;
   inputDisabled?: boolean;
   dirty: boolean;
@@ -185,13 +164,11 @@ export function AgentInstructionWorkspace({
   const copy = t.agents.instructions;
   const selectedFile = selectedInstructionFile(selectedField);
   const content = draft[selectedField];
-  const description = historical
-    ? copy.historicalDescription
-    : readOnly
-      ? copy.readOnlyDescription
-      : saveTarget === "draft"
-        ? copy.editDescription
-        : null;
+  const description = readOnly
+    ? copy.readOnlyDescription
+    : saveTarget === "draft"
+      ? copy.editDescription
+      : null;
 
   return (
     <section className="space-y-4" aria-label={copy.sectionAria}>
@@ -311,9 +288,7 @@ export function AgentInstructionWorkspace({
       {editing ? (
         <div className="bg-background/95 sticky bottom-0 z-10 flex flex-col gap-3 rounded-xl border p-3 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
           {saveTarget === "draft" ? (
-            <p className="text-muted-foreground text-xs">
-              {copy.candidateSaveHint}
-            </p>
+            <p className="text-muted-foreground text-xs">{copy.saveHint}</p>
           ) : null}
           <div className="flex gap-2 sm:ml-auto">
             <Button
@@ -350,28 +325,28 @@ export function AgentInstructionsWorkbench({
   accountId,
   projectId,
   item,
-  version,
+  definition,
   canAuthor,
   authoringPreparationPending = false,
   editing,
   onEditingChange,
   onDirtyChange,
-  onVersionCreated,
+  onDefinitionSaved,
 }: {
   accountId: string;
   projectId: string;
   item: ProjectAssetItem;
-  version: AgentAssetVersion | null;
+  definition: AgentDefinition | null;
   canAuthor: boolean;
   authoringPreparationPending?: boolean;
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
-  onVersionCreated: (versionId: string) => void;
+  onDefinitionSaved: (response: AgentDefinitionResponse) => void;
 }) {
   const { t } = useI18n();
   const copy = t.agents.instructions;
-  const initialDraft = agentInstructionDraft(version);
+  const initialDraft = agentInstructionDraft(definition);
   const [baseline, setBaseline] = useState<AgentInstructionDraft>(initialDraft);
   const [draft, setDraft] = useState<AgentInstructionDraft>(initialDraft);
   const [selectedField, setSelectedField] = useState<AgentInstructionField>(
@@ -384,9 +359,8 @@ export function AgentInstructionsWorkbench({
   const [localError, setLocalError] = useState<string | null>(null);
   const expectedRevisionRef = useRef(item.revision);
   const appliedServerStateRef = useRef(
-    `${item.id}:${item.revision}:${version?.id ?? "empty"}`,
+    `${item.id}:${item.revision}:${definition?.definition_id ?? "empty"}`,
   );
-  const pendingSavedVersionRef = useRef<PendingSavedAgentVersion | null>(null);
   const [conflictRecovery, setConflictRecovery] =
     useState<AgentInstructionConflictRecovery | null>(null);
   const recoveryGenerationRef = useRef(0);
@@ -394,13 +368,13 @@ export function AgentInstructionsWorkbench({
   const mountedRef = useRef(false);
   const scopeKey = `${accountId}:${projectId}:${item.id}`;
   const scopeKeyRef = useRef(scopeKey);
-  const authoringBaseVersionIdRef = useRef<string | null>(null);
+  const authoringDefinitionIdRef = useRef<string | null>(null);
   const queryClient = useQueryClient();
   const privateWork = usePrivateWorkAccess();
   const update = useUpdateProjectAgentInstructions(accountId, projectId);
   const dirty = agentInstructionDraftIsDirty(baseline, draft);
   const isEditing = canAuthor && editing;
-  const serverState = `${item.id}:${item.revision}:${version?.id ?? "empty"}`;
+  const serverState = `${item.id}:${item.revision}:${definition?.definition_id ?? "empty"}`;
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -422,32 +396,17 @@ export function AgentInstructionsWorkbench({
   useEffect(() => {
     if (conflictRecovery) return;
 
-    const pendingSavedVersion = pendingSavedVersionRef.current;
-    if (pendingSavedVersion?.assetId === item.id) {
-      if (
-        agentInstructionSaveIsPending(
-          pendingSavedVersion,
-          { id: item.id, revision: item.revision },
-          version,
-        )
-      ) {
-        return;
-      }
-      pendingSavedVersionRef.current = null;
-    } else if (pendingSavedVersion) {
-      pendingSavedVersionRef.current = null;
-    }
     if (
-      authoringBaseVersionIdRef.current &&
+      authoringDefinitionIdRef.current &&
       editing &&
-      version?.id !== authoringBaseVersionIdRef.current
+      definition?.definition_id !== authoringDefinitionIdRef.current
     ) {
       return;
     }
-    authoringBaseVersionIdRef.current = null;
+    authoringDefinitionIdRef.current = null;
     if (serverState === appliedServerStateRef.current || dirty) return;
 
-    const nextDraft = agentInstructionDraft(version);
+    const nextDraft = agentInstructionDraft(definition);
     setBaseline(nextDraft);
     setDraft(nextDraft);
     setLocalError(null);
@@ -461,7 +420,7 @@ export function AgentInstructionsWorkbench({
     item.id,
     item.revision,
     serverState,
-    version,
+    definition,
   ]);
 
   useEffect(() => {
@@ -510,7 +469,7 @@ export function AgentInstructionsWorkbench({
   function discardChanges() {
     cancelRecovery();
     setConflictRecovery(null);
-    authoringBaseVersionIdRef.current = null;
+    authoringDefinitionIdRef.current = null;
     setDraft(baseline);
     setDiscardOpen(false);
     setLocalError(null);
@@ -550,12 +509,11 @@ export function AgentInstructionsWorkbench({
         isCurrent: () => recoveryIsCurrent(recovery, controller),
       });
       if (!recoveryIsCurrent(recovery, controller)) return;
-      const nextBaseline = agentInstructionDraft(reload.version);
+      const nextBaseline = agentInstructionDraft(reload.definition);
       setBaseline(nextBaseline);
       expectedRevisionRef.current = reload.item.revision;
-      appliedServerStateRef.current = `${reload.item.id}:${reload.item.revision}:${reload.version.id}`;
-      pendingSavedVersionRef.current = null;
-      authoringBaseVersionIdRef.current = reload.version.id;
+      appliedServerStateRef.current = `${reload.item.id}:${reload.item.revision}:${reload.definition.definition_id}`;
+      authoringDefinitionIdRef.current = reload.definition.definition_id;
       setConflictRecovery(null);
       setLocalError(
         agentInstructionDraftIsDirty(nextBaseline, draft)
@@ -609,26 +567,17 @@ export function AgentInstructionsWorkbench({
       ) {
         return;
       }
-      const nextVersion = result.data;
-      if (!("agent_id" in nextVersion)) {
-        setLocalError(copy.invalidResponse);
-        return;
-      }
-      const nextDraft = agentInstructionDraft(nextVersion);
-      const savedRevision = expectedRevisionRef.current + 1;
-      pendingSavedVersionRef.current = {
-        assetId: item.id,
-        versionId: nextVersion.id,
-        assetRevision: savedRevision,
-      };
+      const nextDefinition = result.definition;
+      const nextDraft = agentInstructionDraft(nextDefinition);
       setConflictRecovery(null);
-      authoringBaseVersionIdRef.current = null;
-      expectedRevisionRef.current = savedRevision;
+      authoringDefinitionIdRef.current = null;
+      expectedRevisionRef.current = result.item.revision;
+      appliedServerStateRef.current = `${result.item.id}:${result.item.revision}:${nextDefinition.definition_id}`;
       setBaseline(nextDraft);
       setDraft(nextDraft);
       onDirtyChange(false);
       onEditingChange(false);
-      onVersionCreated(nextVersion.id);
+      onDefinitionSaved(result);
     } catch (error) {
       if (
         !mountedRef.current ||
@@ -670,7 +619,6 @@ export function AgentInstructionsWorkbench({
         editing={isEditing}
         canEdit={canAuthor}
         readOnly={item.scope !== "project"}
-        historical={version?.relation === "historical"}
         inputDisabled={
           update.isPending ||
           authoringPreparationPending ||

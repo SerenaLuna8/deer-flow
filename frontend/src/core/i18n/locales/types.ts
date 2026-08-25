@@ -904,6 +904,9 @@ export interface Translations {
       currentVersionStatus: string;
       currentVersionAvailable: string;
       currentVersionMissing: string;
+      definitionStatus: string;
+      definitionAvailable: string;
+      definitionMissing: string;
       assetRevision: string;
       actions: string;
       viewDetails: string;
@@ -966,7 +969,7 @@ export interface Translations {
       description: string;
       model: string;
       toolGroups: string;
-      skillVersions: string;
+      skillAssets: string;
       mcpVersions: string;
       compatibility: string;
       files: string;
@@ -1019,6 +1022,7 @@ export interface Translations {
         switchTitle: string;
         enableTitle: string;
         description: (name: string) => string;
+        agentDescription: (name: string) => string;
         selectPublished: string;
         selectPublishedAria: string;
         selectPlaceholder: string;
@@ -1440,7 +1444,7 @@ export interface Translations {
       title: string;
       editDescription: string;
       readOnlyDescription: string;
-      historicalDescription: string;
+      adminProjectReadOnlyDescription: string;
       edit: string;
       fixedFiles: string;
       displayMode: string;
@@ -1448,7 +1452,7 @@ export interface Translations {
       preview: string;
       empty: string;
       editFile: (name: string) => string;
-      candidateSaveHint: string;
+      saveHint: string;
       discard: string;
       saving: string;
       save: string;
@@ -1496,7 +1500,7 @@ export interface Translations {
       reloadRequired: string;
       reloading: string;
       permissionBlocked: string;
-      preparingCandidate: string;
+      preparingDefinition: string;
       catalogLoading: string;
       catalogLoadFailed: string;
       validatingMcp: string;
@@ -1504,7 +1508,7 @@ export interface Translations {
       title: string;
       description: string;
       saving: string;
-      saveCandidate: string;
+      save: string;
       edit: string;
       builtinGroups: string;
       unchanged: string;
@@ -1530,13 +1534,13 @@ export interface Translations {
       chatForbidden: string;
       unavailable: string;
       executeForbidden: string;
-      currentVersionRequired: string;
+      definitionRequired: string;
       defaultAdminOnly: string;
       defaultUnavailable: string;
       systemDefaultUnavailable: string;
       mainUnavailable: string;
       mainExecuteForbidden: string;
-      mainVersionUnavailable: string;
+      mainDefinitionUnavailable: string;
       emptySystem: string;
       emptyProject: string;
       defaultLoadFailed: string;

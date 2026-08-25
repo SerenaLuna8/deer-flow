@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   AgentSelectorDialog,
   createProjectChatForAgent,
+  executableProjectAgents,
   otherProjectAgents,
   projectAgentCreatePath,
 } from "@/components/projects/private-work/agent-selector-dialog";
@@ -17,7 +18,7 @@ const ACCOUNT_ID = "00000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "00000000-0000-4000-8000-000000000002";
 const CURRENT_AGENT_ID = "00000000-0000-4000-8000-000000000003";
 const OTHER_AGENT_ID = "00000000-0000-4000-8000-000000000004";
-const VERSION_ID = "00000000-0000-4000-8000-000000000005";
+const DEFINITION_ID = "00000000-0000-4000-8000-000000000005";
 const NEW_THREAD_ID = "00000000-0000-4000-8000-000000000006";
 const CURRENT_THREAD_ID = "00000000-0000-4000-8000-000000000007";
 
@@ -34,7 +35,7 @@ function agent(
     display_name: displayName,
     description: null,
     status: "active",
-    current_version_id: VERSION_ID,
+    definition_id: DEFINITION_ID,
     revision: 1,
     created_by_user_id: ACCOUNT_ID,
     created_at: "2026-08-13T00:00:00Z",
@@ -45,6 +46,22 @@ function agent(
 }
 
 describe("use another Agent for a new project chat", () => {
+  test("requires the Agent's single Definition instead of a version pointer", () => {
+    const ready = agent(CURRENT_AGENT_ID, "project", "Ready");
+    const missingDefinition = {
+      ...agent(OTHER_AGENT_ID, "project", "Missing"),
+      definition_id: undefined,
+    };
+
+    expect(
+      executableProjectAgents({
+        project_items: [ready, missingDefinition],
+        system_items: [],
+        request_id: "catalog",
+      }),
+    ).toEqual([ready]);
+  });
+
   test("excludes only the Agent pinned to the current Thread", () => {
     const current = agent(CURRENT_AGENT_ID, "project", "Current");
     const other = agent(OTHER_AGENT_ID, "project", "Other");

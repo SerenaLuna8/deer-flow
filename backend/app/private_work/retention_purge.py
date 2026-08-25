@@ -44,6 +44,9 @@ from app.private_work.run_skill_tree_orphan_reaper import (
     scan_materialization_owner_ids,
 )
 from app.quotas.integration import ProjectQuotaEnforcer
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+from app.shared_assets.models import AgentPayload
+from app.shared_assets.skill_deletion import ArchivedSkillPurger
 from deerflow.config.paths import get_paths
 from deerflow.persistence.execution_approvals import (
     EXECUTION_APPROVAL_ACTIVE_STATUSES,
@@ -80,6 +83,17 @@ from deerflow.utils.asyncio import joined_to_thread
 
 _PURGE_NAMESPACE = uuid.UUID("1960a83e-df43-4f8c-85f4-b7193c08a9d0")
 _PROVIDER_MOUNT_OWNER_STATES = frozenset({"acquiring", "mounted", "release_pending"})
+_PURGED_AGENT_PAYLOAD_CHECKSUM = agent_payload_checksum(
+    AgentPayload(
+        description="",
+        soul="",
+        model_ref="default",
+        tool_groups=(),
+        skill_refs=(),
+        mcp_version_ids=(),
+        payload_schema_version=4,
+    )
+)
 
 
 class RetentionNotEligible(RuntimeError):
@@ -530,6 +544,7 @@ class RetentionPurgeRepository:
         *,
         quota: ProjectQuotaEnforcer,
         approval_audit: RetentionExecutionApprovalAuditPort,
+        archived_skill_purger: ArchivedSkillPurger | None = None,
     ) -> int:
         if candidate.resource_kind == "project":
             assert candidate.project_id is not None
@@ -597,6 +612,12 @@ class RetentionPurgeRepository:
                 request_id=candidate.request_id,
                 approval_audit=approval_audit,
             )
+            if archived_skill_purger is not None:
+                await archived_skill_purger.purge_project_in_session(
+                    session,
+                    candidate.project_id,
+                    request_id=candidate.request_id,
+                )
             return 1
         assert candidate.owner_user_id is not None
         for project_id in candidate.project_ids:
@@ -624,6 +645,12 @@ class RetentionPurgeRepository:
                 request_id=candidate.request_id,
                 approval_audit=approval_audit,
             )
+            if archived_skill_purger is not None:
+                await archived_skill_purger.purge_project_in_session(
+                    session,
+                    project_id,
+                    request_id=candidate.request_id,
+                )
         completed = await session.execute(
             update(UserRow)
             .where(
@@ -1003,10 +1030,9 @@ async def purge_private_scope(
     )
 
     # Agent Builder sessions contain private conversation and generated
-    # blueprint bodies.  Delete the exact project/owner scope before shared
-    # Agent versions are purged; operations cascade from the session row and
-    # completed sessions otherwise retain RESTRICT references to their created
-    # Agent/version.
+    # blueprint bodies. Delete the exact project/owner scope before shared
+    # Agents are purged; operations cascade from the session row and completed
+    # sessions otherwise retain RESTRICT references to their created Agent.
     await session.execute(
         delete(AgentDesignSessionRow).where(
             AgentDesignSessionRow.project_id == project_id,
@@ -1221,7 +1247,6 @@ async def _delete_project_version_leaves(
     """Delete an exact project's immutable version chain from leaves to root."""
 
     if (asset_table, version_table, asset_id_column) not in {
-        ("agents", "agent_versions", "agent_id"),
         ("skills", "skill_versions", "skill_id"),
         ("mcp_servers", "mcp_server_versions", "mcp_server_id"),
     }:
@@ -1361,9 +1386,9 @@ async def purge_project_shared_scope(
     """Irreversibly remove one deleted project's shared assets and secrets.
 
     The project, memberships, immutable jobs, and audit rows remain as bounded
-    governance tombstones.  Project Agent rows that are still required by a
-    retained Thread/Automation FK are reduced to a content-free shell; every
-    version body is physically removed.
+    governance tombstones. Project Agent rows that are still required by a
+    retained Thread/Automation FK are reduced to a content-free definition
+    shell. Skill and MCP version bodies are physically removed.
     """
 
     project_uuid = uuid.UUID(str(project_id))
@@ -1432,15 +1457,14 @@ async def purge_project_shared_scope(
         JOIN mcp_servers AS asset ON asset.id=version.mcp_server_id
         WHERE asset.scope='project' AND asset.project_id=:project_id"""
 
-    # Remove immutable published children only after the project is locked,
+    # Remove Agent definition references only after the project is locked,
     # pending deletion, and due. The database trigger independently enforces
-    # that same eligibility before allowing each child DELETE.
+    # that same eligibility before allowing each reference DELETE.
     await session.execute(
         text(
-            """DELETE FROM agent_version_skill_refs AS ref
-               WHERE ref.agent_version_id IN (
-                   SELECT version.id FROM agent_versions AS version
-                   JOIN agents AS asset ON asset.id=version.agent_id
+            """DELETE FROM agent_skill_refs AS ref
+               WHERE ref.agent_id IN (
+                   SELECT asset.id FROM agents AS asset
                    WHERE asset.scope='project' AND asset.project_id=:project_id
                ) OR (
                    ref.skill_asset_scope='project'
@@ -1455,10 +1479,9 @@ async def purge_project_shared_scope(
     )
     await session.execute(
         text(
-            """DELETE FROM agent_version_mcp_refs AS ref
-               WHERE ref.agent_version_id IN (
-                   SELECT version.id FROM agent_versions AS version
-                   JOIN agents AS asset ON asset.id=version.agent_id
+            """DELETE FROM agent_mcp_refs AS ref
+               WHERE ref.agent_id IN (
+                   SELECT asset.id FROM agents AS asset
                    WHERE asset.scope='project' AND asset.project_id=:project_id
                ) OR ref.mcp_server_version_id IN (
                    SELECT version.id FROM mcp_server_versions AS version
@@ -1488,7 +1511,6 @@ async def purge_project_shared_scope(
     )
 
     for table_name, pointer_column, revision_column in (
-        ("agents", "current_version_id", "revision"),
         ("skills", "current_version_id", "revision"),
         ("mcp_servers", "current_published_version_id", "version"),
     ):
@@ -1503,13 +1525,6 @@ async def purge_project_shared_scope(
             parameters,
         )
 
-    await _delete_project_version_leaves(
-        session,
-        project_id=project_uuid,
-        asset_table="agents",
-        version_table="agent_versions",
-        asset_id_column="agent_id",
-    )
     await _delete_project_version_leaves(
         session,
         project_id=project_uuid,
@@ -1556,16 +1571,53 @@ async def purge_project_shared_scope(
         ),
         parameters,
     )
-    await session.execute(
-        text(
-            """UPDATE agents
-                  SET slug='purged-' || replace(id::text, '-', ''),
-                      display_name='purged', status='archived', source_key=NULL,
-                      updated_at=:purged_at, revision=revision + 1
-                WHERE scope='project' AND project_id=:project_id"""
-        ),
-        parameters,
+    retained_agent_ids = (
+        (
+            await session.execute(
+                text(
+                    """SELECT id FROM agents
+                         WHERE scope='project' AND project_id=:project_id
+                         ORDER BY id
+                         FOR UPDATE"""
+                ),
+                parameters,
+            )
+        )
+        .scalars()
+        .all()
     )
+    for agent_id in retained_agent_ids:
+        # Retained Thread/Automation shells still require an Agent FK target,
+        # but no authored definition content survives final project purge.
+        await session.execute(
+            text("SELECT set_config('deerflow.agent_definition_mutation_id', :agent_id, true)"),
+            {"agent_id": str(agent_id)},
+        )
+        await session.execute(
+            text(
+                """UPDATE agents
+                      SET slug='purged-' || replace(id::text, '-', ''),
+                          display_name='purged', status='archived',
+                          definition_id=:definition_id,
+                          description='', soul='', model_ref='default',
+                          model_settings='{}'::jsonb, tool_groups='[]'::jsonb,
+                          payload_checksum=:payload_checksum,
+                          agents_instructions='', identity='', user_context='',
+                          payload_schema_version=4, source_key=NULL,
+                          updated_at=:purged_at, revision=revision + 1
+                    WHERE id=:agent_id AND scope='project'
+                      AND project_id=:project_id"""
+            ),
+            {
+                **parameters,
+                "agent_id": agent_id,
+                "definition_id": uuid.uuid5(
+                    _PURGE_NAMESPACE,
+                    f"purged-agent-definition:{agent_id}",
+                ),
+                "payload_checksum": _PURGED_AGENT_PAYLOAD_CHECKSUM,
+            },
+        )
     await session.execute(
         text(
             """UPDATE projects
@@ -1586,6 +1638,7 @@ class RetentionPurger:
         approval_audit: RetentionExecutionApprovalAuditPort,
         quota: ProjectQuotaEnforcer,
         repository: RetentionPurgeRepository | None = None,
+        archived_skill_purger: ArchivedSkillPurger | None = None,
     ) -> None:
         if type(audit) is not TrustedOperationAuditSink:
             raise TypeError("retention purge requires audit authority")
@@ -1598,6 +1651,7 @@ class RetentionPurger:
         self._approval_audit = approval_audit
         self._quota = quota
         self.repository = RetentionPurgeRepository() if repository is None else repository
+        self._archived_skill_purger = archived_skill_purger
 
     async def purge(
         self,
@@ -1616,6 +1670,7 @@ class RetentionPurger:
                 candidate,
                 quota=self._quota,
                 approval_audit=self._approval_audit,
+                archived_skill_purger=self._archived_skill_purger,
             )
             await session.flush()
             await self._audit.purge_completed(

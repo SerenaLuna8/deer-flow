@@ -66,8 +66,8 @@ from app.shared_assets.agent_design_repository import (
 from app.shared_assets.agent_repository import AgentRepository
 from app.shared_assets.agent_service import (
     AgentAssetView,
+    AgentDefinitionView,
     AgentService,
-    AgentVersionView,
     CreateAgent,
 )
 from app.shared_assets.errors import (
@@ -118,7 +118,7 @@ _CONFLICT_CONSTRAINTS = frozenset(
         "uq_agent_design_operations_idempotency",
         "uq_agent_design_sessions_create_idempotency",
         "uq_agents_project_slug",
-        "uq_agent_versions_asset_number",
+        "uq_agents_definition_id",
     }
 )
 
@@ -345,7 +345,7 @@ class AgentDesignSessionPage:
 class AgentDesignCommitResult:
     session: AgentDesignSessionView
     agent: AgentAssetView
-    version: AgentVersionView
+    definition: AgentDefinitionView
 
 
 class _RepositoryFactory(Protocol):
@@ -456,7 +456,6 @@ class AgentDesignService:
                         error_code=None,
                         error_message=None,
                         created_agent_id=None,
-                        created_agent_version_id=None,
                         create_idempotency_key_hash=idempotency_hash,
                         create_request_checksum=request_checksum,
                         created_at=now,
@@ -994,7 +993,6 @@ class AgentDesignService:
                     row.slug = created.asset.slug
                     row.display_name = created.asset.display_name
                     row.created_agent_id = created.asset.id
-                    row.created_agent_version_id = created.version.id
                     row.revision += 1
                     row.progress_json = self._progress_json(AgentDesignProgressStatus.COMPLETED)
                     operation.status = "completed"
@@ -1017,7 +1015,7 @@ class AgentDesignService:
                     return AgentDesignCommitResult(
                         session=self._session_view(row),
                         agent=created.asset,
-                        version=created.version,
+                        definition=created.definition,
                     )
         except SharedAssetError:
             await self._record_commit_failure(
@@ -2202,22 +2200,18 @@ class AgentDesignService:
         context: ProjectContext,
         row: AgentDesignSessionRow,
     ) -> AgentDesignCommitResult:
-        if row.created_agent_id is None or row.created_agent_version_id is None:
+        if row.created_agent_id is None:
             raise AssetConflict(context.request_id)
         repository = AgentRepository(session)
         asset = await repository.get_project_asset(
             context,
             row.created_agent_id,
         )
-        version = await repository.get_project_version(
-            context,
-            row.created_agent_id,
-            row.created_agent_version_id,
-        )
+        definition = await repository.get_definition(asset)
         return AgentDesignCommitResult(
             session=self._session_view(row),
             agent=AgentService._asset_view(asset),
-            version=AgentService._version_view(version),
+            definition=AgentService._definition_view(definition),
         )
 
     def _append_turn_input(

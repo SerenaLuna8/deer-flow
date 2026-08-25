@@ -221,25 +221,25 @@ async def test_batch_assessment_preserves_input_order_and_fails_closed_per_agent
     assert result == (
         AgentRuntimeAssessment(
             agent_asset_id=_UNAVAILABLE_AGENT_ID,
-            selected_version_id=None,
+            selected_definition_id=None,
             status="blocked",
             reason_code="agent_unavailable",
         ),
         AgentRuntimeAssessment(
             agent_asset_id=_READY_AGENT_ID,
-            selected_version_id=_closure(_READY_AGENT_ID).lead_agent.version_id,
+            selected_definition_id=_closure(_READY_AGENT_ID).lead_agent.version_id,
             status="ready",
             reason_code=None,
         ),
         AgentRuntimeAssessment(
             agent_asset_id=_DEPENDENCY_AGENT_ID,
-            selected_version_id=_closure(_DEPENDENCY_AGENT_ID).lead_agent.version_id,
+            selected_definition_id=_closure(_DEPENDENCY_AGENT_ID).lead_agent.version_id,
             status="blocked",
             reason_code="runtime_dependency_unavailable",
         ),
         AgentRuntimeAssessment(
             agent_asset_id=_MODEL_AGENT_ID,
-            selected_version_id=_closure(_MODEL_AGENT_ID).lead_agent.version_id,
+            selected_definition_id=_closure(_MODEL_AGENT_ID).lead_agent.version_id,
             status="blocked",
             reason_code="model_unavailable",
         ),
@@ -332,7 +332,7 @@ async def test_batch_assessment_validates_every_delegated_agent_model() -> None:
     assert await service.assess(_context(), (_READY_AGENT_ID,)) == (
         AgentRuntimeAssessment(
             agent_asset_id=_READY_AGENT_ID,
-            selected_version_id=lead_closure.lead_agent.version_id,
+            selected_definition_id=lead_closure.lead_agent.version_id,
             status="blocked",
             reason_code="model_unavailable",
         ),
@@ -349,7 +349,7 @@ class _HttpService:
         return tuple(
             AgentRuntimeAssessment(
                 agent_asset_id=agent_id,
-                selected_version_id=uuid.uuid5(
+                selected_definition_id=uuid.uuid5(
                     uuid.NAMESPACE_URL,
                     f"http-assessment:{agent_id}",
                 ),
@@ -361,7 +361,7 @@ class _HttpService:
 
 
 @pytest.mark.parametrize(
-    ("selected_version_id", "status", "reason_code"),
+    ("selected_definition_id", "status", "reason_code"),
     [
         (None, "ready", None),
         (_READY_AGENT_ID, "ready", "model_unavailable"),
@@ -371,14 +371,14 @@ class _HttpService:
     ],
 )
 def test_runtime_assessment_response_rejects_invalid_state_combinations(
-    selected_version_id: uuid.UUID | None,
+    selected_definition_id: uuid.UUID | None,
     status: str,
     reason_code: str | None,
 ) -> None:
     with pytest.raises(ValueError):
         project_assets.AgentRuntimeAssessmentItemResponse(
             agent_asset_id=_READY_AGENT_ID,
-            selected_version_id=selected_version_id,
+            selected_definition_id=selected_definition_id,
             status=status,
             reason_code=reason_code,
         )
@@ -421,7 +421,7 @@ async def test_runtime_assessment_http_contract_is_strict_and_ordered() -> None:
         "items": [
             {
                 "agent_asset_id": str(_MODEL_AGENT_ID),
-                "selected_version_id": str(
+                "selected_definition_id": str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
                         f"http-assessment:{_MODEL_AGENT_ID}",
@@ -432,7 +432,7 @@ async def test_runtime_assessment_http_contract_is_strict_and_ordered() -> None:
             },
             {
                 "agent_asset_id": str(_READY_AGENT_ID),
-                "selected_version_id": str(
+                "selected_definition_id": str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
                         f"http-assessment:{_READY_AGENT_ID}",

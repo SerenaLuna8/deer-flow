@@ -19,13 +19,15 @@ import {
 } from "./skill-secret-declarations";
 import {
   adminAssetListSchema,
+  adminAgentAssetListSchema,
+  agentAssetMutationResponseSchema,
+  agentSystemBindingSchema,
   agentCapabilityBindingsInputSchema,
   agentCreateResponseSchema,
+  agentDefinitionResponseSchema,
   agentInstructionsInputSchema,
   agentRuntimeAssessmentsInputSchema,
   agentRuntimeAssessmentsResponseSchema,
-  agentVersionHistoryResponseSchema,
-  agentVersionResponseSchema,
   assetIdSchema,
   assetKindSchema,
   assetListKindSchema,
@@ -49,11 +51,13 @@ import {
   mcpVersionInputSchema,
   mcpVersionResponseSchema,
   projectAssetListSchema,
+  projectAgentAssetListSchema,
   projectDefaultAgentInputSchema,
   projectDefaultAgentSchema,
   projectMcpEditableConfigurationResponseSchema,
   projectSkillImportResponseSchema,
   skillActivationInputSchema,
+  skillDeleteResultSchema,
   skillSecretReplaceInputSchema,
   skillSecretSetResponseSchema,
   secretClearInputSchema,
@@ -72,9 +76,9 @@ import {
   type AdminProjectAssetStatusAction,
   type AgentCapabilityBindingsInput,
   type AgentCreateResponse,
+  type AgentDefinitionResponse,
   type AgentInstructionsInput,
   type AgentRuntimeAssessmentsResponse,
-  type AgentVersionResponse,
   type AssetKind,
   type AssetListKind,
   type AssetMutationResponse,
@@ -88,6 +92,7 @@ import {
   type ExpectedRevisionInput,
   type MoveSystemBindingInput,
   type SkillActivationInput,
+  type SkillDeleteResult,
   type McpToolDiscoveryAttemptResponse,
   type McpVersionInput,
   type McpToolInventoryResponse,
@@ -113,7 +118,7 @@ import {
 } from "./types";
 
 type MutableAssetListKind = AssetListKind;
-type VersionedAssetListKind = MutableAssetListKind;
+type VersionedAssetListKind = Exclude<MutableAssetListKind, "agents">;
 
 export type SkillDistributionDownload = {
   filename: string;
@@ -402,9 +407,8 @@ function systemCatalogUrl(kind: AssetListKind): string {
 }
 
 function versionHistorySchema(
-  kind: AssetListKind,
+  kind: VersionedAssetListKind,
 ): z.ZodType<VersionHistoryResponse> {
-  if (kind === "agents") return agentVersionHistoryResponseSchema;
   if (kind === "skills") return skillVersionHistoryResponseSchema;
   return mcpVersionHistoryResponseSchema;
 }
@@ -412,7 +416,6 @@ function versionHistorySchema(
 function versionResponseSchema(
   kind: VersionedAssetListKind,
 ): z.ZodType<VersionResponse> {
-  if (kind === "agents") return agentVersionResponseSchema;
   if (kind === "skills") return skillVersionResponseSchema;
   return mcpVersionResponseSchema;
 }
@@ -423,12 +426,14 @@ export async function listProjectAssets(
   signal?: AbortSignal,
 ): Promise<ProjectAssetList> {
   const response = await request(projectAssetUrl(projectId, kind), { signal });
-  return parseResponse(
+  return (await parseResponse<unknown>(
     response,
-    kind === "mcp-servers"
-      ? legacyCompatibleProjectAssetListSchema
-      : projectAssetListSchema,
-  );
+    kind === "agents"
+      ? projectAgentAssetListSchema
+      : kind === "mcp-servers"
+        ? legacyCompatibleProjectAssetListSchema
+        : projectAssetListSchema,
+  )) as ProjectAssetList;
 }
 
 export async function getProjectDefaultAgent(
@@ -463,12 +468,14 @@ export async function listAdminAssets(
   signal?: AbortSignal,
 ): Promise<AdminAssetList> {
   const response = await request(adminAssetUrl(kind), { signal });
-  return parseResponse(
+  return (await parseResponse<unknown>(
     response,
-    kind === "mcp-servers"
-      ? legacyCompatibleAdminAssetListSchema
-      : adminAssetListSchema,
-  );
+    kind === "agents"
+      ? adminAgentAssetListSchema
+      : kind === "mcp-servers"
+        ? legacyCompatibleAdminAssetListSchema
+        : adminAssetListSchema,
+  )) as AdminAssetList;
 }
 
 export async function listAdminProjectAssets(
@@ -479,12 +486,14 @@ export async function listAdminProjectAssets(
   const response = await request(adminProjectAssetUrl(projectId, kind), {
     signal,
   });
-  return parseResponse(
+  return (await parseResponse<unknown>(
     response,
-    kind === "mcp-servers"
-      ? legacyCompatibleProjectAssetListSchema
-      : projectAssetListSchema,
-  );
+    kind === "agents"
+      ? projectAgentAssetListSchema
+      : kind === "mcp-servers"
+        ? legacyCompatibleProjectAssetListSchema
+        : projectAssetListSchema,
+  )) as ProjectAssetList;
 }
 
 export async function listSystemAssetCatalog(
@@ -492,12 +501,14 @@ export async function listSystemAssetCatalog(
   signal?: AbortSignal,
 ): Promise<AdminAssetList> {
   const response = await request(systemCatalogUrl(kind), { signal });
-  return parseResponse(
+  return (await parseResponse<unknown>(
     response,
-    kind === "mcp-servers"
-      ? legacyCompatibleAdminAssetListSchema
-      : adminAssetListSchema,
-  );
+    kind === "agents"
+      ? adminAgentAssetListSchema
+      : kind === "mcp-servers"
+        ? legacyCompatibleAdminAssetListSchema
+        : adminAssetListSchema,
+  )) as AdminAssetList;
 }
 
 export async function createProjectAgent(
@@ -523,6 +534,43 @@ export async function createProjectAgent(
         });
       }
     }),
+  );
+}
+
+export async function getProjectAgentDefinition(
+  projectId: string,
+  assetId: string,
+  signal?: AbortSignal,
+): Promise<AgentDefinitionResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  return parseResponse(
+    await request(`${projectAssetUrl(projectId, "agents")}/${id}`, { signal }),
+    agentDefinitionResponseSchema,
+  );
+}
+
+export async function getAdminAgentDefinition(
+  assetId: string,
+  signal?: AbortSignal,
+): Promise<AgentDefinitionResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  return parseResponse(
+    await request(`${adminAssetUrl("agents")}/${id}`, { signal }),
+    agentDefinitionResponseSchema,
+  );
+}
+
+export async function getAdminProjectAgentDefinition(
+  projectId: string,
+  assetId: string,
+  signal?: AbortSignal,
+): Promise<AgentDefinitionResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  return parseResponse(
+    await request(`${adminProjectAssetUrl(projectId, "agents")}/${id}`, {
+      signal,
+    }),
+    agentDefinitionResponseSchema,
   );
 }
 
@@ -755,7 +803,7 @@ export async function updateProjectAgentInstructions(
   assetId: string,
   input: AgentInstructionsInput,
   signal?: AbortSignal,
-): Promise<AgentVersionResponse> {
+): Promise<AgentDefinitionResponse> {
   const id = parseInput(assetIdSchema, assetId);
   const body = parseInput(agentInstructionsInputSchema, input);
   const response = await request(
@@ -767,7 +815,7 @@ export async function updateProjectAgentInstructions(
       signal,
     },
   );
-  return parseResponse(response, agentVersionResponseSchema);
+  return parseResponse(response, agentDefinitionResponseSchema);
 }
 
 export async function updateProjectAgentCapabilityBindings(
@@ -775,7 +823,7 @@ export async function updateProjectAgentCapabilityBindings(
   assetId: string,
   input: AgentCapabilityBindingsInput,
   signal?: AbortSignal,
-): Promise<AgentVersionResponse> {
+): Promise<AgentDefinitionResponse> {
   const id = parseInput(assetIdSchema, assetId);
   const body = parseInput(agentCapabilityBindingsInputSchema, input);
   const response = await request(
@@ -787,7 +835,7 @@ export async function updateProjectAgentCapabilityBindings(
       signal,
     },
   );
-  return parseResponse(response, agentVersionResponseSchema);
+  return parseResponse(response, agentDefinitionResponseSchema);
 }
 
 export async function importProjectSkillArchive(
@@ -1021,10 +1069,11 @@ export function createAdminProjectAssetVersion(
 async function changeAssetStatus(
   url: string,
   input: ExpectedAssetVersionInput | ExpectedRevisionInput,
-  currentVersionContract: boolean,
+  kind: MutableAssetListKind,
   signal?: AbortSignal,
 ): Promise<AssetMutationResponse> {
-  const body = currentVersionContract
+  const currentRevisionContract = kind === "agents" || kind === "skills";
+  const body = currentRevisionContract
     ? parseInput(expectedRevisionInputSchema, input)
     : parseInput(expectedAssetVersionInputSchema, input);
   const response = await request(url, {
@@ -1033,12 +1082,13 @@ async function changeAssetStatus(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse(
-    response,
-    currentVersionContract
-      ? assetMutationResponseSchema
-      : legacyCompatibleAssetMutationResponseSchema,
-  );
+  if (kind === "agents") {
+    return parseResponse(response, agentAssetMutationResponseSchema);
+  }
+  if (kind === "skills") {
+    return parseResponse(response, assetMutationResponseSchema);
+  }
+  return parseResponse(response, legacyCompatibleAssetMutationResponseSchema);
 }
 
 export function changeProjectAssetStatus<Kind extends MutableAssetListKind>(
@@ -1049,8 +1099,8 @@ export function changeProjectAssetStatus<Kind extends MutableAssetListKind>(
   input: ExpectedAssetVersionInput | ExpectedRevisionInput,
   signal?: AbortSignal,
 ) {
-  const currentVersionContract = kind === "agents" || kind === "skills";
-  const validAction = currentVersionContract
+  const currentRevisionContract = kind === "agents" || kind === "skills";
+  const validAction = currentRevisionContract
     ? action === "enable" || action === "suspend"
     : action === "activate" || action === "suspend";
   if (!validAction) {
@@ -1064,7 +1114,7 @@ export function changeProjectAssetStatus<Kind extends MutableAssetListKind>(
   return changeAssetStatus(
     `${projectAssetUrl(projectId, kind)}/${id}/${action}`,
     input,
-    currentVersionContract,
+    kind,
     signal,
   );
 }
@@ -1094,7 +1144,7 @@ export function changeAdminProjectAssetStatus<
   return changeAssetStatus(
     `${adminProjectAssetUrl(projectId, kind)}/${id}/${action}`,
     input,
-    kind === "skills" || kind === "agents",
+    kind,
     signal,
   );
 }
@@ -1104,9 +1154,20 @@ export async function deleteProjectSkill(
   assetId: string,
   input: ExpectedRevisionInput,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<SkillDeleteResult> {
   const id = parseInput(assetIdSchema, assetId);
   const body = parseInput(expectedRevisionInputSchema, input);
+  const responseSchema = skillDeleteResultSchema.superRefine(
+    (value, context) => {
+      if (value.skill_id !== id) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["skill_id"],
+          message: "Deleted Skill must match the requested asset",
+        });
+      }
+    },
+  );
   const response = await request(
     `${projectAssetUrl(projectId, "skills")}/${id}`,
     {
@@ -1116,7 +1177,7 @@ export async function deleteProjectSkill(
       signal,
     },
   );
-  if (!response.ok) await throwResponseError(response);
+  return parseResponse(response, responseSchema);
 }
 
 export async function deleteProjectAgent(
@@ -1161,7 +1222,7 @@ export async function deleteProjectMcp(
 
 export async function listProjectAssetVersions(
   projectId: string,
-  kind: AssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
   signal?: AbortSignal,
 ): Promise<VersionHistoryResponse> {
@@ -1174,7 +1235,7 @@ export async function listProjectAssetVersions(
 }
 
 export async function listSystemAssetVersions(
-  kind: Exclude<AssetListKind, "mcp-servers">,
+  kind: "skills",
   assetId: string,
   signal?: AbortSignal,
 ): Promise<VersionHistoryResponse> {
@@ -1272,7 +1333,7 @@ export async function requestProjectMcpToolDiscovery(
 }
 
 export async function listAdminAssetVersions(
-  kind: AssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
   signal?: AbortSignal,
 ): Promise<VersionHistoryResponse> {
@@ -1285,7 +1346,7 @@ export async function listAdminAssetVersions(
 
 export async function listAdminProjectAssetVersions(
   projectId: string,
-  kind: AssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
   signal?: AbortSignal,
 ): Promise<VersionHistoryResponse> {
@@ -1458,15 +1519,7 @@ export function activateProjectAssetVersion(
 ): Promise<VersionResponse>;
 export function activateProjectAssetVersion(
   projectId: string,
-  kind: "agents",
-  assetId: string,
-  versionId: string,
-  input: ExpectedRevisionInput,
-  signal?: AbortSignal,
-): Promise<VersionResponse>;
-export function activateProjectAssetVersion(
-  projectId: string,
-  kind: "agents" | "skills",
+  kind: "skills",
   assetId: string,
   versionId: string,
   input: ExpectedRevisionInput | SkillActivationInput,
@@ -1476,9 +1529,7 @@ export function activateProjectAssetVersion(
   const version = parseInput(assetIdSchema, versionId);
   return postVersionMutation(
     `${projectAssetUrl(projectId, kind)}/${asset}/versions/${version}/activate`,
-    kind === "skills"
-      ? skillActivationInputSchema
-      : expectedRevisionInputSchema,
+    skillActivationInputSchema,
     versionResponseSchema(kind),
     input,
     signal,
@@ -1487,7 +1538,7 @@ export function activateProjectAssetVersion(
 
 export function activateAdminProjectAssetVersion(
   projectId: string,
-  kind: "agents" | "skills",
+  kind: "skills",
   assetId: string,
   versionId: string,
   input: ExpectedRevisionInput | SkillActivationInput,
@@ -1497,9 +1548,7 @@ export function activateAdminProjectAssetVersion(
   const version = parseInput(assetIdSchema, versionId);
   return postVersionMutation(
     `${adminProjectAssetUrl(projectId, kind)}/${asset}/versions/${version}/activate`,
-    kind === "skills"
-      ? skillActivationInputSchema
-      : expectedRevisionInputSchema,
+    skillActivationInputSchema,
     versionResponseSchema(kind),
     input,
     signal,
@@ -1627,6 +1676,14 @@ async function mutateProjectBinding(
   return parseResponse(response, responseSchema);
 }
 
+function bindingResponseSchema(
+  kind: AssetKind,
+): z.ZodType<SystemBinding, z.ZodTypeDef, unknown> {
+  if (kind === "agent") return agentSystemBindingSchema;
+  if (kind === "skill") return currentSystemBindingSchema;
+  return systemBindingSchema;
+}
+
 export function enableProjectSystemBinding(
   projectId: string,
   kind: AssetKind,
@@ -1640,9 +1697,7 @@ export function enableProjectSystemBinding(
       : enableSystemBindingInputSchema,
     input,
     signal,
-    kind === "agent" || kind === "skill"
-      ? currentSystemBindingSchema
-      : systemBindingSchema,
+    bindingResponseSchema(kind),
   );
 }
 
@@ -1750,9 +1805,7 @@ export function disableProjectSystemBinding(
     disableSystemBindingInputSchema,
     input,
     signal,
-    kind === "agent" || kind === "skill"
-      ? currentSystemBindingSchema
-      : systemBindingSchema,
+    bindingResponseSchema(kind),
   );
 }
 
@@ -1769,9 +1822,7 @@ export function enableAdminProjectSystemBinding(
       : enableSystemBindingInputSchema,
     input,
     signal,
-    kind === "agent" || kind === "skill"
-      ? currentSystemBindingSchema
-      : systemBindingSchema,
+    bindingResponseSchema(kind),
   );
 }
 
@@ -1839,8 +1890,6 @@ export function disableAdminProjectSystemBinding(
     disableSystemBindingInputSchema,
     input,
     signal,
-    kind === "agent" || kind === "skill"
-      ? currentSystemBindingSchema
-      : systemBindingSchema,
+    bindingResponseSchema(kind),
   );
 }

@@ -29,6 +29,7 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.skill_builder_contract import SkillBuilderCandidateFileList
 from app.shared_assets.skill_builder_run_admission import SkillBuilderRunAdmissionService
+from app.shared_assets.skill_deletion import SkillDeleteResult
 from app.shared_assets.skill_design_activity import SkillDesignActivityKind
 from app.shared_assets.skill_design_repository import SkillDesignRepository
 from app.shared_assets.skill_design_service import (
@@ -1413,7 +1414,7 @@ async def test_revision_delete_and_commit_converge_without_deadlock(
         for result in results:
             assert not isinstance(result, OperationalError)
         delete_result, commit_result = results
-        delete_ok = delete_result is None
+        delete_ok = isinstance(delete_result, SkillDeleteResult)
         commit_ok = not isinstance(commit_result, Exception)
         assert delete_ok != commit_ok, (delete_result, commit_result)
         if delete_ok:
@@ -1613,7 +1614,7 @@ async def test_revision_delete_project_gate_prevents_builder_lock_cycle(
 
         assert not isinstance(retry_result, Exception), retry_result
         assert retry_result.run_id == admitted.run_id
-        assert delete_result is None
+        assert isinstance(delete_result, SkillDeleteResult)
         closed = await design.get(context, opened.id)
         assert closed.status is SkillDesignStatus.FAILED
         assert closed.target_skill_deleted is True

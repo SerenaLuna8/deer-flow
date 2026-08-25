@@ -198,7 +198,7 @@ export function SkillAssetDetail({
     const access = resolveSkillSecretConfigurationAccess({
       scope: workspace.item.scope,
       selectedVersionId: version.id,
-      currentVersionId: workspace.item.current_version_id,
+      currentVersionId: workspace.item.current_version_id ?? null,
       relation: version.relation,
       canManageSecrets,
       systemBindingEnabled: workspace.item.binding?.enabled === true,

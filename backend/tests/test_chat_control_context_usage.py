@@ -976,13 +976,13 @@ async def test_context_usage_authority_uses_composer_selection_without_active_ru
     service._session_factory = lambda: _AuthoritySession(None)
     service._revalidator = SimpleNamespace(require=lambda *_args, **_kwargs: _async_value(object()))
     agent_asset_id = uuid.uuid4()
-    agent_version_id = uuid.uuid4()
+    agent_definition_id = uuid.uuid4()
 
     class _Resolved:
         scope = AssetScope.PROJECT
         payload = SimpleNamespace(model_ref="default")
         asset_id = agent_asset_id
-        version_id = agent_version_id
+        version_id = agent_definition_id
         checksum = "a" * 64
         catalog_generation = 7
 
@@ -997,7 +997,7 @@ async def test_context_usage_authority_uses_composer_selection_without_active_ru
                     dependency_order=0,
                     scope=AssetScope.PROJECT,
                     asset_id=agent_asset_id,
-                    version_id=agent_version_id,
+                    version_id=agent_definition_id,
                     checksum="a" * 64,
                     catalog_generation=7,
                 ),
@@ -1043,7 +1043,7 @@ async def test_idle_context_usage_authority_compares_exact_assets_across_generat
     service._session_factory = lambda: _IdleClosureSession(profile_run_id)
     service._revalidator = SimpleNamespace(require=lambda *_args, **_kwargs: _async_value(object()))
     agent_asset_id = uuid.uuid4()
-    agent_version_id = uuid.uuid4()
+    agent_definition_id = uuid.uuid4()
     skill_asset_id = uuid.uuid4()
     skill_version_id = uuid.uuid4()
 
@@ -1051,7 +1051,7 @@ async def test_idle_context_usage_authority_compares_exact_assets_across_generat
         scope = AssetScope.PROJECT
         payload = SimpleNamespace(model_ref="default")
         asset_id = agent_asset_id
-        version_id = agent_version_id
+        version_id = agent_definition_id
         checksum = "a" * 64
         catalog_generation = 9
 
@@ -1061,7 +1061,7 @@ async def test_idle_context_usage_authority_compares_exact_assets_across_generat
             dependency_order=0,
             scope=AssetScope.PROJECT,
             asset_id=agent_asset_id,
-            version_id=agent_version_id,
+            version_id=agent_definition_id,
             checksum="a" * 64,
             catalog_generation=9,
         ),
@@ -1089,7 +1089,7 @@ async def test_idle_context_usage_authority_compares_exact_assets_across_generat
             dependency_order=0,
             scope=AssetScope.PROJECT,
             asset_id=agent_asset_id,
-            version_id=agent_version_id,
+            version_id=agent_definition_id,
             checksum="a" * 64,
             catalog_generation=7,
         ),
@@ -1132,11 +1132,11 @@ async def test_idle_context_usage_authority_compares_exact_assets_across_generat
     )
 
     assert authority.closure_identity == provider_request_closure_identity(
-        agent_facts=((str(agent_version_id), "a" * 64),),
+        agent_facts=((str(agent_definition_id), "a" * 64),),
         catalog_generation=9,
     )
     assert authority.profile_closure_identity == provider_request_closure_identity(
-        agent_facts=((str(agent_version_id), "a" * 64),),
+        agent_facts=((str(agent_definition_id), "a" * 64),),
         catalog_generation=7,
     )
     assert authority.asset_facts == authority.profile_asset_facts

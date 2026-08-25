@@ -10,6 +10,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.agent_definition_seed import direct_agent_definition_fields
 from support.run_closure import add_sealed_test_run
 
 from app.private_work import run_skill_tree_materializer as materializer_module
@@ -174,6 +175,10 @@ async def _enqueue_private_run(
     scope: _OwnerScope,
 ) -> tuple[uuid.UUID, str]:
     agent_id = uuid.uuid4()
+    definition = direct_agent_definition_fields(
+        updated_by_user_id=scope.user_id,
+        description="Retention Mount Agent",
+    )
     thread_id = f"retention-mount-{uuid.uuid4()}"
     run_id = str(uuid.uuid4())
     trace_id = uuid.uuid4().hex
@@ -181,10 +186,17 @@ async def _enqueue_private_run(
         text(
             """INSERT INTO agents (
                    id, scope, project_id, slug, display_name,
-                   status, created_by_user_id
+                   status, definition_id, description, agents_instructions,
+                   soul, identity, user_context, model_ref, model_settings,
+                   tool_groups, payload_schema_version, payload_checksum,
+                   revision, created_by_user_id, updated_by_user_id
                ) VALUES (
                    :agent_id, 'project', :project_id, :slug,
-                   'Retention Mount Agent', 'active', :user_id
+                   'Retention Mount Agent', 'active', :definition_id,
+                   :description, :agents_instructions, :soul, :identity,
+                   :user_context, :model_ref, '{}'::jsonb, '[]'::jsonb,
+                   :payload_schema_version, :payload_checksum, 1, :user_id,
+                   :updated_by_user_id
                )"""
         ),
         {
@@ -192,6 +204,7 @@ async def _enqueue_private_run(
             "project_id": scope.project_id,
             "slug": f"retention-mount-{agent_id.hex}",
             "user_id": scope.user_id,
+            **definition,
         },
     )
     await session.execute(
@@ -1325,6 +1338,10 @@ async def test_begin_execution_stamps_only_the_exact_current_attempt_once(
         async with factory() as session, session.begin():
             owner = await _seed_owner(session, "attempt")
             agent_id = uuid.uuid4()
+            definition = direct_agent_definition_fields(
+                updated_by_user_id=owner.user_id,
+                description="Attempt Agent",
+            )
             thread_id = f"attempt-{uuid.uuid4()}"
             run_id = str(uuid.uuid4())
             trace_id = uuid.uuid4().hex
@@ -1332,16 +1349,26 @@ async def test_begin_execution_stamps_only_the_exact_current_attempt_once(
                 text(
                     """INSERT INTO agents (
                            id, scope, project_id, slug, display_name,
-                           status, created_by_user_id
+                           status, definition_id, description,
+                           agents_instructions, soul, identity, user_context,
+                           model_ref, model_settings, tool_groups,
+                           payload_schema_version, payload_checksum, revision,
+                           created_by_user_id, updated_by_user_id
                        ) VALUES (
                            :agent_id, 'project', :project_id, 'attempt-agent',
-                           'Attempt Agent', 'active', :user_id
+                           'Attempt Agent', 'active', :definition_id,
+                           :description, :agents_instructions, :soul,
+                           :identity, :user_context, :model_ref, '{}'::jsonb,
+                           '[]'::jsonb, :payload_schema_version,
+                           :payload_checksum, 1, :user_id,
+                           :updated_by_user_id
                        )"""
                 ),
                 {
                     "agent_id": agent_id,
                     "project_id": owner.project_id,
                     "user_id": owner.user_id,
+                    **definition,
                 },
             )
             await session.execute(

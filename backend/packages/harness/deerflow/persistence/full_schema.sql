@@ -646,21 +646,70 @@ CREATE TABLE agents (
     slug VARCHAR(63) NOT NULL,
     display_name VARCHAR(120) NOT NULL,
     status VARCHAR(16) DEFAULT 'active' NOT NULL,
-    current_version_id UUID,
+    definition_id UUID NOT NULL,
+    description TEXT DEFAULT '' NOT NULL,
+    soul TEXT DEFAULT '' NOT NULL,
+    model_ref VARCHAR(255) DEFAULT 'default' NOT NULL,
+    model_settings JSONB DEFAULT '{}'::jsonb NOT NULL,
+    tool_groups JSONB DEFAULT '[]'::jsonb NOT NULL,
+    payload_checksum CHAR(64) NOT NULL,
+    agents_instructions TEXT DEFAULT '' NOT NULL,
+    identity TEXT DEFAULT '' NOT NULL,
+    user_context TEXT DEFAULT '' NOT NULL,
+    payload_schema_version INTEGER DEFAULT 4 NOT NULL,
     revision BIGINT DEFAULT 1 NOT NULL,
     source_key VARCHAR(255),
     created_by_user_id VARCHAR(36) NOT NULL,
+    updated_by_user_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     PRIMARY KEY (id),
     CONSTRAINT ck_agents_scope_project CHECK ((scope = 'system' AND project_id IS NULL) OR (scope = 'project' AND project_id IS NOT NULL)),
     CONSTRAINT ck_agents_status CHECK (status IN ('active', 'archived', 'suspended')),
+    CONSTRAINT ck_agents_payload_schema_version CHECK (payload_schema_version = 4),
+    CONSTRAINT ck_agents_model_settings CHECK (
+            jsonb_typeof(model_settings) = 'object'
+            AND model_settings - 'temperature' - 'max_tokens'
+                - 'thinking_enabled' - 'reasoning_effort' = '{}'::jsonb
+            AND (
+                NOT (model_settings ? 'temperature')
+                OR (
+                    jsonb_typeof(model_settings->'temperature') = 'number'
+                    AND (model_settings->>'temperature')::numeric BETWEEN 0 AND 2
+                )
+            )
+            AND (
+                NOT (model_settings ? 'max_tokens')
+                OR (
+                    jsonb_typeof(model_settings->'max_tokens') = 'number'
+                    AND (model_settings->>'max_tokens')::numeric
+                        = trunc((model_settings->>'max_tokens')::numeric)
+                    AND (model_settings->>'max_tokens')::numeric
+                        BETWEEN 1 AND 200000
+                )
+            )
+            AND (
+                NOT (model_settings ? 'thinking_enabled')
+                OR jsonb_typeof(model_settings->'thinking_enabled') = 'boolean'
+            )
+            AND (
+                NOT (model_settings ? 'reasoning_effort')
+                OR (
+                    jsonb_typeof(model_settings->'reasoning_effort') = 'string'
+                    AND model_settings->>'reasoning_effort'
+                        IN ('low', 'medium', 'high')
+                )
+            )
+            ),
+    CONSTRAINT ck_agents_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_agents_revision CHECK (revision >= 1),
+    CONSTRAINT uq_agents_definition_id UNIQUE (definition_id),
     CONSTRAINT uq_agents_id_scope UNIQUE (id, scope),
     CONSTRAINT uq_agents_project_id_id UNIQUE (project_id, id),
     CONSTRAINT uq_agents_source_key UNIQUE (source_key),
     FOREIGN KEY(project_id) REFERENCES projects (id),
-    FOREIGN KEY(created_by_user_id) REFERENCES users (id)
+    FOREIGN KEY(created_by_user_id) REFERENCES users (id),
+    FOREIGN KEY(updated_by_user_id) REFERENCES users (id)
 );
 
 CREATE UNIQUE INDEX uq_agents_system_slug ON agents (lower(slug)) WHERE scope = 'system';
@@ -739,11 +788,13 @@ CREATE TABLE skills (
     FOREIGN KEY(created_by_user_id) REFERENCES users (id)
 );
 
-CREATE UNIQUE INDEX uq_skills_project_display_name ON skills (project_id, lower(display_name)) WHERE scope = 'project';
+CREATE UNIQUE INDEX uq_skills_project_display_name ON skills (project_id, lower(display_name)) WHERE scope = 'project' AND status != 'archived';
 
 CREATE UNIQUE INDEX uq_skills_system_slug ON skills (lower(slug)) WHERE scope = 'system';
 
-CREATE UNIQUE INDEX uq_skills_project_slug ON skills (project_id, lower(slug)) WHERE scope = 'project';
+CREATE UNIQUE INDEX uq_skills_project_slug ON skills (project_id, lower(slug)) WHERE scope = 'project' AND status != 'archived';
+
+CREATE INDEX ix_skills_archived_purge ON skills (project_id, id) WHERE scope = 'project' AND status = 'archived';
 
 CREATE TABLE project_skill_secret_tombstones (
     id UUID NOT NULL,
@@ -763,7 +814,7 @@ CREATE TABLE project_skill_secret_tombstones (
     CONSTRAINT uq_project_skill_secret_tombstones_generation UNIQUE (project_id, skill_id, skill_version_id, secret_name, destroyed_generation_id),
     CONSTRAINT ck_project_skill_secret_tombstones_revision CHECK (revision >= 1),
     CONSTRAINT ck_project_skill_secret_tombstones_digest CHECK (envelope_digest ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT ck_project_skill_secret_tombstones_reason CHECK (reason IN ('replace', 'clear', 'version_purge'))
+    CONSTRAINT ck_project_skill_secret_tombstones_reason CHECK (reason IN ('replace', 'clear', 'version_purge', 'skill_delete'))
 );
 
 CREATE TABLE system_runtime_policy_versions (
@@ -1348,72 +1399,6 @@ CREATE INDEX ix_run_skill_secret_snapshots_generation ON run_skill_secret_snapsh
 
 CREATE INDEX ix_run_skill_secret_snapshots_private_run ON run_skill_secret_snapshots (project_id, owner_user_id, thread_id, run_id);
 
-CREATE TABLE agent_versions (
-    id UUID NOT NULL,
-    agent_id UUID NOT NULL,
-    version_number BIGINT NOT NULL,
-    description TEXT DEFAULT '' NOT NULL,
-    soul TEXT NOT NULL,
-    model_ref VARCHAR(255) NOT NULL,
-    model_settings JSONB DEFAULT '{}'::jsonb NOT NULL,
-    tool_groups JSONB DEFAULT '[]'::jsonb NOT NULL,
-    supersedes_version_id UUID,
-    payload_checksum CHAR(64) NOT NULL,
-    created_by_user_id VARCHAR(36) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
-    agents_instructions TEXT DEFAULT '' NOT NULL,
-    identity TEXT DEFAULT '' NOT NULL,
-    user_context TEXT DEFAULT '' NOT NULL,
-    payload_schema_version INTEGER DEFAULT 1 NOT NULL,
-    PRIMARY KEY (id),
-    CONSTRAINT ck_agent_versions_number CHECK (version_number >= 1),
-    CONSTRAINT ck_agent_versions_payload_schema_version CHECK (payload_schema_version IN (1, 2, 3, 4)),
-    CONSTRAINT ck_agent_versions_model_settings CHECK (
-            jsonb_typeof(model_settings) = 'object'
-            AND (
-                payload_schema_version IN (3, 4)
-                OR model_settings = '{}'::jsonb
-            )
-            AND model_settings - 'temperature' - 'max_tokens'
-                - 'thinking_enabled' - 'reasoning_effort' = '{}'::jsonb
-            AND (
-                NOT (model_settings ? 'temperature')
-                OR (
-                    jsonb_typeof(model_settings->'temperature') = 'number'
-                    AND (model_settings->>'temperature')::numeric BETWEEN 0 AND 2
-                )
-            )
-            AND (
-                NOT (model_settings ? 'max_tokens')
-                OR (
-                    jsonb_typeof(model_settings->'max_tokens') = 'number'
-                    AND (model_settings->>'max_tokens')::numeric
-                        = trunc((model_settings->>'max_tokens')::numeric)
-                    AND (model_settings->>'max_tokens')::numeric
-                        BETWEEN 1 AND 200000
-                )
-            )
-            AND (
-                NOT (model_settings ? 'thinking_enabled')
-                OR jsonb_typeof(model_settings->'thinking_enabled') = 'boolean'
-            )
-            AND (
-                NOT (model_settings ? 'reasoning_effort')
-                OR (
-                    jsonb_typeof(model_settings->'reasoning_effort') = 'string'
-                    AND model_settings->>'reasoning_effort'
-                        IN ('low', 'medium', 'high')
-                )
-            )
-            ),
-    CONSTRAINT ck_agent_versions_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT uq_agent_versions_asset_number UNIQUE (agent_id, version_number),
-    CONSTRAINT uq_agent_versions_asset_id UNIQUE (agent_id, id),
-    FOREIGN KEY(agent_id) REFERENCES agents (id) ON DELETE RESTRICT,
-    FOREIGN KEY(supersedes_version_id) REFERENCES agent_versions (id) ON DELETE RESTRICT,
-    FOREIGN KEY(created_by_user_id) REFERENCES users (id)
-);
-
 CREATE TABLE project_system_agent_bindings (
     project_id UUID NOT NULL,
     system_agent_id UUID NOT NULL,
@@ -1940,7 +1925,6 @@ CREATE TABLE agent_design_sessions (
     error_code VARCHAR(64),
     error_message VARCHAR(255),
     created_agent_id UUID,
-    created_agent_version_id UUID,
     create_idempotency_key_hash CHAR(64) NOT NULL,
     create_request_checksum CHAR(64) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
@@ -1952,7 +1936,7 @@ CREATE TABLE agent_design_sessions (
     CONSTRAINT ck_agent_design_sessions_status CHECK (status IN ('interviewing', 'generating', 'awaiting_clarification', 'proposal_ready', 'committing', 'completed', 'failed', 'cancelled')),
     CONSTRAINT ck_agent_design_sessions_revision CHECK (revision >= 1),
     CONSTRAINT ck_agent_design_sessions_blueprint CHECK ((blueprint_json IS NULL AND blueprint_checksum IS NULL) OR (blueprint_json IS NOT NULL AND blueprint_checksum IS NOT NULL)),
-    CONSTRAINT ck_agent_design_sessions_completion CHECK ((status = 'completed' AND ((created_agent_deleted IS FALSE AND created_agent_id IS NOT NULL AND created_agent_version_id IS NOT NULL) OR (created_agent_deleted IS TRUE AND created_agent_id IS NULL AND created_agent_version_id IS NULL))) OR (status <> 'completed' AND created_agent_deleted IS FALSE AND created_agent_id IS NULL AND created_agent_version_id IS NULL)),
+    CONSTRAINT ck_agent_design_sessions_completion CHECK ((status = 'completed' AND ((created_agent_deleted IS FALSE AND created_agent_id IS NOT NULL) OR (created_agent_deleted IS TRUE AND created_agent_id IS NULL))) OR (status <> 'completed' AND created_agent_deleted IS FALSE AND created_agent_id IS NULL)),
     CONSTRAINT ck_agent_design_sessions_ready_blueprint CHECK ((status IN ('proposal_ready', 'committing', 'completed') AND blueprint_json IS NOT NULL AND blueprint_checksum IS NOT NULL) OR status NOT IN ('proposal_ready', 'committing', 'completed')),
     CONSTRAINT ck_agent_design_sessions_clarification CHECK ((status = 'awaiting_clarification' AND active_clarification_json IS NOT NULL) OR (status <> 'awaiting_clarification' AND active_clarification_json IS NULL)),
     CONSTRAINT ck_agent_design_sessions_error CHECK ((status = 'failed' AND error_code IS NOT NULL AND error_message IS NOT NULL) OR (status <> 'failed' AND error_code IS NULL AND error_message IS NULL)),
@@ -1962,33 +1946,32 @@ CREATE TABLE agent_design_sessions (
     CONSTRAINT uq_agent_design_sessions_create_idempotency UNIQUE (project_id, owner_user_id, create_idempotency_key_hash),
     CONSTRAINT fk_agent_design_sessions_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
     CONSTRAINT fk_agent_design_sessions_created_agent_project FOREIGN KEY(project_id, created_agent_id) REFERENCES agents (project_id, id) ON DELETE RESTRICT,
-    CONSTRAINT fk_agent_design_sessions_created_agent_version FOREIGN KEY(created_agent_id, created_agent_version_id) REFERENCES agent_versions (agent_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_agent_design_sessions_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
     CONSTRAINT fk_agent_design_sessions_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT
 );
 
 CREATE INDEX ix_agent_design_sessions_resume ON agent_design_sessions (project_id, owner_user_id, created_at DESC, id DESC) WHERE status NOT IN ('completed', 'cancelled');
 
-CREATE TABLE agent_version_skill_refs (
-    agent_version_id UUID NOT NULL,
+CREATE TABLE agent_skill_refs (
+    agent_id UUID NOT NULL,
     sort_order BIGINT DEFAULT 0 NOT NULL,
     skill_asset_scope VARCHAR(16) NOT NULL,
     skill_asset_id UUID NOT NULL,
-    PRIMARY KEY (agent_version_id, skill_asset_scope, skill_asset_id),
-    FOREIGN KEY(agent_version_id) REFERENCES agent_versions (id) ON DELETE RESTRICT,
+    PRIMARY KEY (agent_id, skill_asset_scope, skill_asset_id),
+    FOREIGN KEY(agent_id) REFERENCES agents (id) ON DELETE RESTRICT,
     FOREIGN KEY(skill_asset_id, skill_asset_scope) REFERENCES skills (id, scope) ON DELETE RESTRICT,
-    CONSTRAINT ck_agent_version_skill_refs_scope CHECK (skill_asset_scope IN ('system', 'project')),
-    CONSTRAINT ck_agent_version_skill_refs_sort_order CHECK (sort_order >= 0)
+    CONSTRAINT ck_agent_skill_refs_scope CHECK (skill_asset_scope IN ('system', 'project')),
+    CONSTRAINT ck_agent_skill_refs_sort_order CHECK (sort_order >= 0)
 );
 
-CREATE TABLE agent_version_mcp_refs (
-    agent_version_id UUID NOT NULL,
+CREATE TABLE agent_mcp_refs (
+    agent_id UUID NOT NULL,
     mcp_server_version_id UUID NOT NULL,
     sort_order BIGINT DEFAULT 0 NOT NULL,
-    PRIMARY KEY (agent_version_id, mcp_server_version_id),
-    FOREIGN KEY(agent_version_id) REFERENCES agent_versions (id) ON DELETE RESTRICT,
+    PRIMARY KEY (agent_id, mcp_server_version_id),
+    FOREIGN KEY(agent_id) REFERENCES agents (id) ON DELETE RESTRICT,
     FOREIGN KEY(mcp_server_version_id) REFERENCES mcp_server_versions (id) ON DELETE RESTRICT,
-    CONSTRAINT ck_agent_version_mcp_refs_sort_order CHECK (sort_order >= 0)
+    CONSTRAINT ck_agent_mcp_refs_sort_order CHECK (sort_order >= 0)
 );
 
 CREATE TABLE project_system_mcp_bindings (
@@ -2654,8 +2637,6 @@ ALTER TABLE scheduled_task_runs ADD CONSTRAINT fk_scheduled_task_runs_task FOREI
 
 ALTER TABLE project_mcp_secret_states ADD CONSTRAINT fk_project_mcp_secret_states_current_generation FOREIGN KEY(project_id, mcp_server_id, mcp_server_version_id, slot_id, current_generation_id) REFERENCES project_mcp_secret_generations (project_id, mcp_server_id, mcp_server_version_id, slot_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE agents ADD CONSTRAINT fk_agents_current_version FOREIGN KEY(id, current_version_id) REFERENCES agent_versions (agent_id, id);
-
 ALTER TABLE system_runtime_policies ADD CONSTRAINT fk_system_runtime_policies_current_version FOREIGN KEY(section, current_version_id) REFERENCES system_runtime_policy_versions (section, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE scheduled_task_runs ADD CONSTRAINT fk_scheduled_task_runs_private_thread FOREIGN KEY(project_id, owner_user_id, thread_id) REFERENCES threads_meta (project_id, owner_user_id, thread_id) ON DELETE RESTRICT;
@@ -2741,13 +2722,9 @@ DECLARE
     asset_scope text;
 BEGIN
     IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
-       AND TG_TABLE_NAME IN ('agent_versions', 'mcp_server_versions') THEN
-        IF TG_TABLE_NAME = 'agent_versions' THEN
-            SELECT scope INTO asset_scope FROM agents WHERE id = NEW.agent_id;
-        ELSE
-            SELECT scope INTO asset_scope FROM mcp_servers
-            WHERE id = NEW.mcp_server_id;
-        END IF;
+       AND TG_TABLE_NAME = 'mcp_server_versions' THEN
+        SELECT scope INTO asset_scope FROM mcp_servers
+        WHERE id = NEW.mcp_server_id;
         IF asset_scope = 'system' THEN
             RETURN NEW;
         END IF;
@@ -2833,7 +2810,7 @@ DECLARE
 BEGIN
     CASE TG_TABLE_NAME
         WHEN 'project_system_agent_bindings' THEN
-            SELECT current_version_id, status INTO current_id, asset_status
+            SELECT definition_id, status INTO current_id, asset_status
             FROM agents
             WHERE id = NEW.system_agent_id AND scope = 'system'
             FOR UPDATE;
@@ -2870,7 +2847,7 @@ BEGIN
        AND (current_id IS NULL OR asset_status IS DISTINCT FROM 'active'
        OR (TG_TABLE_NAME = 'project_system_skill_bindings'
            AND version_revoked_at IS NOT NULL)) THEN
-        RAISE EXCEPTION 'system binding requires an eligible Current Version'
+        RAISE EXCEPTION 'system binding requires an eligible definition or Current Version'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     RETURN NEW;
@@ -3001,95 +2978,28 @@ BEGIN
                           )
                           OR (
                               project.status = 'active'
-                              AND project.is_suspended IS FALSE
                               AND asset.status = 'archived'
                               AND asset.current_version_id IS NULL
                               AND current_setting(
-                                  'deerflow.skill_hard_delete_asset_id',
+                                  'deerflow.archived_skill_purge_asset_id',
                                   true
                               ) = asset.id::text
                           )
                       )
-                ) INTO purge_allowed;
-            END IF;
-        WHEN 'agent_version_skill_refs' THEN
-            parent_version_id := CASE WHEN TG_OP = 'DELETE'
-                THEN OLD.agent_version_id ELSE NEW.agent_version_id END;
-            SELECT asset.scope, asset.project_id, asset.id
-            INTO parent_scope, parent_project_id, parent_asset_id
-            FROM agent_versions version
-            JOIN agents asset ON asset.id = version.agent_id
-            WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
-            IF TG_OP = 'DELETE' THEN
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM agent_versions version
-                    JOIN agents asset ON asset.id = version.agent_id
-                    JOIN projects project ON project.id = asset.project_id
-                    WHERE version.id = OLD.agent_version_id
-                      AND asset.scope = 'project'
-                      AND (
-                          (
-                              project.status = 'pending_deletion'
-                              AND project.deletion_effective_at IS NOT NULL
-                              AND project.deletion_effective_at <= now()
-                          )
-                          OR (
-                              project.status = 'active'
-                              AND project.is_suspended IS FALSE
-                              AND asset.status = 'archived'
-                              AND asset.current_version_id IS NULL
-                              AND current_setting(
-                                  'deerflow.agent_hard_delete_asset_id',
-                                  true
-                              ) = asset.id::text
-                          )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM run_skill_version_refs pinned
+                          WHERE pinned.skill_version_id = version.id
                       )
-                ) INTO purge_allowed;
-            END IF;
-        WHEN 'agent_version_mcp_refs' THEN
-            parent_version_id := CASE WHEN TG_OP = 'DELETE'
-                THEN OLD.agent_version_id ELSE NEW.agent_version_id END;
-            SELECT asset.scope, asset.project_id, asset.id
-            INTO parent_scope, parent_project_id, parent_asset_id
-            FROM agent_versions version
-            JOIN agents asset ON asset.id = version.agent_id
-            WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
-            IF TG_OP = 'DELETE' THEN
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM agent_versions version
-                    JOIN agents asset ON asset.id = version.agent_id
-                    JOIN projects project ON project.id = asset.project_id
-                    WHERE version.id = OLD.agent_version_id
-                      AND asset.scope = 'project'
-                      AND (
-                          (
-                              project.status = 'pending_deletion'
-                              AND project.deletion_effective_at IS NOT NULL
-                              AND project.deletion_effective_at <= now()
-                          )
-                          OR (
-                              project.status = 'active'
-                              AND project.is_suspended IS FALSE
-                              AND asset.status = 'archived'
-                              AND asset.current_version_id IS NULL
-                              AND current_setting(
-                                  'deerflow.agent_hard_delete_asset_id',
-                                  true
-                              ) = asset.id::text
-                          )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM run_asset_versions legacy
+                          WHERE legacy.asset_kind = 'skill'
+                            AND legacy.asset_scope = 'project'
+                            AND legacy.asset_id = asset.id
+                            AND legacy.version_id = version.id
+                            AND legacy.snapshot_schema_version IN (2, 3)
                       )
-                ) OR EXISTS (
-                    SELECT 1
-                    FROM mcp_server_versions version
-                    JOIN mcp_servers asset ON asset.id = version.mcp_server_id
-                    JOIN projects project ON project.id = asset.project_id
-                    WHERE version.id = OLD.mcp_server_version_id
-                      AND asset.scope = 'project'
-                      AND project.status = 'pending_deletion'
-                      AND project.deletion_effective_at IS NOT NULL
-                      AND project.deletion_effective_at <= now()
                 ) INTO purge_allowed;
             END IF;
         WHEN 'mcp_version_secret_slots' THEN
@@ -3144,11 +3054,7 @@ BEGIN
         RAISE EXCEPTION 'Skill version files are immutable outside initial assembly'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
-    IF TG_TABLE_NAME IN (
-        'agent_version_skill_refs',
-        'agent_version_mcp_refs',
-        'mcp_version_secret_slots'
-    ) THEN
+    IF TG_TABLE_NAME = 'mcp_version_secret_slots' THEN
         IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
            AND parent_scope = 'system' THEN
             IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
@@ -3162,7 +3068,7 @@ BEGIN
         IF TG_OP = 'DELETE' AND purge_allowed THEN
             RETURN OLD;
         END IF;
-        RAISE EXCEPTION 'Agent and Skill version child rows are immutable'
+        RAISE EXCEPTION 'MCP version child rows are immutable'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     IF TG_OP = 'DELETE' AND purge_allowed THEN
@@ -3194,7 +3100,138 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_agent_versions_immutable BEFORE UPDATE ON agent_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update();
+CREATE OR REPLACE FUNCTION enforce_agent_definition_mutation()
+RETURNS trigger AS $$
+DECLARE
+    target_agent_id uuid;
+    target_scope text;
+    target_project_id uuid;
+    project_status text;
+    project_deletion_effective_at timestamptz;
+    referenced_scope text;
+    referenced_project_id uuid;
+    referenced_status text;
+BEGIN
+    IF TG_TABLE_NAME = 'agents' THEN
+        IF OLD.scope = 'system'
+           AND current_setting('deerflow.system_asset_upgrade', true)
+               IS NOT DISTINCT FROM 'on' THEN
+            IF NEW.definition_id IS DISTINCT FROM OLD.definition_id
+               OR NEW.revision != OLD.revision + 1 THEN
+                RAISE EXCEPTION 'System Agent definition identity is immutable and revision must advance once'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+            RETURN NEW;
+        END IF;
+        IF OLD.scope IS DISTINCT FROM 'project'
+           OR current_setting(
+               'deerflow.agent_definition_mutation_id', true
+           ) IS DISTINCT FROM OLD.id::text
+           OR NEW.definition_id IS NOT DISTINCT FROM OLD.definition_id
+           OR NEW.revision != OLD.revision + 1 THEN
+            RAISE EXCEPTION 'Project Agent definition mutation requires its transaction fence and one revision advance'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    target_agent_id := CASE WHEN TG_OP = 'DELETE'
+        THEN OLD.agent_id ELSE NEW.agent_id END;
+    SELECT agent.scope, agent.project_id, project.status,
+           project.deletion_effective_at
+    INTO target_scope, target_project_id, project_status,
+         project_deletion_effective_at
+    FROM agents agent
+    LEFT JOIN projects project ON project.id = agent.project_id
+    WHERE agent.id = target_agent_id
+    FOR UPDATE OF agent;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Agent definition reference requires an Agent'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+
+    IF NOT (
+        (target_scope = 'system'
+         AND current_setting('deerflow.system_asset_upgrade', true)
+             IS NOT DISTINCT FROM 'on')
+        OR
+        (target_scope = 'project'
+         AND current_setting(
+             'deerflow.agent_definition_mutation_id', true
+         ) IS NOT DISTINCT FROM target_agent_id::text)
+        OR
+        (target_scope = 'project'
+         AND project_status = 'pending_deletion'
+         AND project_deletion_effective_at IS NOT NULL
+         AND project_deletion_effective_at <= now())
+        OR
+        (target_scope = 'project'
+         AND current_setting(
+             'deerflow.agent_hard_delete_asset_id', true
+         ) IS NOT DISTINCT FROM target_agent_id::text)
+    ) THEN
+        RAISE EXCEPTION 'Agent definition reference mutation requires its transaction fence'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    IF NEW.agent_id IS DISTINCT FROM target_agent_id THEN
+        RAISE EXCEPTION 'Agent definition reference cannot move between Agents'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF TG_TABLE_NAME = 'agent_skill_refs' THEN
+        SELECT skill.scope, skill.project_id, skill.status
+        INTO referenced_scope, referenced_project_id, referenced_status
+        FROM skills skill
+        WHERE skill.id = NEW.skill_asset_id
+          AND skill.scope = NEW.skill_asset_scope
+        FOR SHARE;
+    ELSIF TG_TABLE_NAME = 'agent_mcp_refs' THEN
+        SELECT server.scope, server.project_id, server.status
+        INTO referenced_scope, referenced_project_id, referenced_status
+        FROM mcp_server_versions version
+        JOIN mcp_servers server ON server.id = version.mcp_server_id
+        WHERE version.id = NEW.mcp_server_version_id
+        FOR SHARE OF version, server;
+    ELSE
+        RAISE EXCEPTION 'unsupported Agent definition reference table';
+    END IF;
+    IF NOT FOUND
+       OR referenced_status = 'archived'
+       OR (target_scope = 'system' AND referenced_scope != 'system')
+       OR (
+           target_scope = 'project'
+           AND referenced_scope = 'project'
+           AND referenced_project_id IS DISTINCT FROM target_project_id
+       ) THEN
+        RAISE EXCEPTION 'Agent definition reference crosses its governed scope'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION enforce_skill_archive_transition()
+RETURNS trigger AS $$
+BEGIN
+    IF OLD.status = 'archived' AND NEW.status IS DISTINCT FROM 'archived' THEN
+        RAISE EXCEPTION 'archived Skill status is terminal'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_agents_definition_mutation BEFORE UPDATE OF definition_id, description, agents_instructions, soul, identity, user_context, model_ref, model_settings, tool_groups, payload_schema_version, payload_checksum ON agents FOR EACH ROW EXECUTE FUNCTION enforce_agent_definition_mutation();
+
+CREATE TRIGGER trg_agent_skill_refs_definition_mutation BEFORE INSERT OR UPDATE OR DELETE ON agent_skill_refs FOR EACH ROW EXECUTE FUNCTION enforce_agent_definition_mutation();
+
+CREATE TRIGGER trg_agent_mcp_refs_definition_mutation BEFORE INSERT OR UPDATE OR DELETE ON agent_mcp_refs FOR EACH ROW EXECUTE FUNCTION enforce_agent_definition_mutation();
+
+CREATE TRIGGER trg_skills_archive_terminal BEFORE UPDATE OF status ON skills FOR EACH ROW EXECUTE FUNCTION enforce_skill_archive_transition();
 
 CREATE TRIGGER trg_skill_versions_immutable BEFORE UPDATE ON skill_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update();
 
@@ -3208,10 +3245,6 @@ CREATE TRIGGER trg_mcp_server_versions_immutable BEFORE UPDATE ON mcp_server_ver
 
 CREATE TRIGGER trg_skill_version_files_immutable BEFORE UPDATE ON skill_version_files FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update();
 
-CREATE TRIGGER trg_agent_version_skill_refs_immutable BEFORE UPDATE ON agent_version_skill_refs FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update();
-
-CREATE TRIGGER trg_agent_version_mcp_refs_immutable BEFORE UPDATE ON agent_version_mcp_refs FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update();
-
 CREATE TRIGGER trg_mcp_secret_slots_immutable BEFORE UPDATE ON mcp_version_secret_slots FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update();
 
 CREATE TRIGGER trg_agent_bindings_current BEFORE INSERT OR UPDATE ON project_system_agent_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version();
@@ -3224,15 +3257,11 @@ CREATE TRIGGER trg_mcp_server_versions_bound_published BEFORE UPDATE OF workflow
 
 CREATE TRIGGER trg_skill_version_files_child_immutable BEFORE INSERT OR DELETE ON skill_version_files FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation();
 
-CREATE TRIGGER trg_agent_version_skill_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_skill_refs FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation();
-
-CREATE TRIGGER trg_agent_version_mcp_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_mcp_refs FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation();
-
 CREATE TRIGGER trg_mcp_secret_slots_child_immutable BEFORE INSERT OR DELETE ON mcp_version_secret_slots FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation();
 
 CREATE TRIGGER trg_mcp_server_versions_state_transition BEFORE UPDATE OF workflow_status ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition();
 
-CREATE TRIGGER trg_agents_generation AFTER UPDATE OF status, current_version_id, revision ON agents FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
+CREATE TRIGGER trg_agents_generation AFTER UPDATE OF status, definition_id, revision ON agents FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
 
 CREATE TRIGGER trg_skills_generation AFTER UPDATE OF status, current_version_id, revision ON skills FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
 
@@ -4078,7 +4107,7 @@ INSERT INTO alembic_version (version_num) VALUES ('schema_v1');
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 97 static tables and 1194 columns.
+-- Coverage: 96 static tables and 1188 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE project_invitation_rate_limits IS '记录项目邀请码失败尝试的限流窗口。';
@@ -4450,17 +4479,28 @@ COMMENT ON COLUMN project_usage_ledger.idempotency_key IS '项目用量台账：
 COMMENT ON COLUMN project_usage_ledger.request_id IS '项目用量台账：请求标识。';
 COMMENT ON COLUMN project_usage_ledger.occurred_at IS '项目用量台账：发生时间。';
 
-COMMENT ON TABLE agents IS '保存智能体的逻辑身份和 Current Version 指针。';
+COMMENT ON TABLE agents IS '保存智能体身份及唯一可变定义；运行快照另行冻结精确代次。';
 COMMENT ON COLUMN agents.id IS '项目智能体：主键标识。';
 COMMENT ON COLUMN agents.scope IS '项目智能体：资产或数据归属范围。';
 COMMENT ON COLUMN agents.project_id IS '项目智能体：所属项目标识。';
 COMMENT ON COLUMN agents.slug IS '项目智能体：稳定可读标识名。';
 COMMENT ON COLUMN agents.display_name IS '项目智能体：展示名称。';
 COMMENT ON COLUMN agents.status IS '项目智能体：生命周期状态。';
-COMMENT ON COLUMN agents.current_version_id IS '项目智能体：当前版本标识。';
+COMMENT ON COLUMN agents.definition_id IS '项目智能体：智能体定义的执行代次标识。';
+COMMENT ON COLUMN agents.description IS '项目智能体：用途描述。';
+COMMENT ON COLUMN agents.soul IS '项目智能体：项目智能体人格设定。';
+COMMENT ON COLUMN agents.model_ref IS '项目智能体：模型引用。';
+COMMENT ON COLUMN agents.model_settings IS '项目智能体：模型调用设置。';
+COMMENT ON COLUMN agents.tool_groups IS '项目智能体：允许使用的工具分组。';
+COMMENT ON COLUMN agents.payload_checksum IS '项目智能体：载荷内容校验和。';
+COMMENT ON COLUMN agents.agents_instructions IS '项目智能体：项目智能体行为指令。';
+COMMENT ON COLUMN agents.identity IS '项目智能体：身份。';
+COMMENT ON COLUMN agents.user_context IS '项目智能体：智能体使用的用户上下文。';
+COMMENT ON COLUMN agents.payload_schema_version IS '项目智能体：载荷架构版本号。';
 COMMENT ON COLUMN agents.revision IS '项目智能体：配置修订号。';
 COMMENT ON COLUMN agents.source_key IS '项目智能体：来源键。';
 COMMENT ON COLUMN agents.created_by_user_id IS '项目智能体：创建操作的用户标识。';
+COMMENT ON COLUMN agents.updated_by_user_id IS '项目智能体：最近更新操作的用户标识。';
 COMMENT ON COLUMN agents.created_at IS '项目智能体：记录创建时间。';
 COMMENT ON COLUMN agents.updated_at IS '项目智能体：记录最近更新时间。';
 
@@ -4804,24 +4844,6 @@ COMMENT ON COLUMN run_skill_secret_snapshots.secret_generation_id IS '运行技�
 COMMENT ON COLUMN run_skill_secret_snapshots.secret_generation_digest IS '运行技能秘密快照：机密项代次摘要。';
 COMMENT ON COLUMN run_skill_secret_snapshots.created_at IS '运行技能秘密快照：记录创建时间。';
 
-COMMENT ON TABLE agent_versions IS '保存不可变的项目智能体版本内容与运行配置。';
-COMMENT ON COLUMN agent_versions.id IS '智能体版本：主键标识。';
-COMMENT ON COLUMN agent_versions.agent_id IS '智能体版本：智能体标识。';
-COMMENT ON COLUMN agent_versions.version_number IS '智能体版本：版本编号。';
-COMMENT ON COLUMN agent_versions.description IS '智能体版本：用途描述。';
-COMMENT ON COLUMN agent_versions.soul IS '智能体版本：项目智能体人格设定。';
-COMMENT ON COLUMN agent_versions.model_ref IS '智能体版本：模型引用。';
-COMMENT ON COLUMN agent_versions.model_settings IS '智能体版本：模型调用设置。';
-COMMENT ON COLUMN agent_versions.tool_groups IS '智能体版本：允许使用的工具分组。';
-COMMENT ON COLUMN agent_versions.supersedes_version_id IS '智能体版本：替代目标版本标识。';
-COMMENT ON COLUMN agent_versions.payload_checksum IS '智能体版本：载荷内容校验和。';
-COMMENT ON COLUMN agent_versions.created_by_user_id IS '智能体版本：创建操作的用户标识。';
-COMMENT ON COLUMN agent_versions.created_at IS '智能体版本：记录创建时间。';
-COMMENT ON COLUMN agent_versions.agents_instructions IS '智能体版本：项目智能体行为指令。';
-COMMENT ON COLUMN agent_versions.identity IS '智能体版本：身份。';
-COMMENT ON COLUMN agent_versions.user_context IS '智能体版本：智能体使用的用户上下文。';
-COMMENT ON COLUMN agent_versions.payload_schema_version IS '智能体版本：载荷架构版本号。';
-
 COMMENT ON TABLE project_system_agent_bindings IS '保存项目对系统智能体资产的启用绑定。';
 COMMENT ON COLUMN project_system_agent_bindings.project_id IS '项目系统智能体绑定：所属项目标识。';
 COMMENT ON COLUMN project_system_agent_bindings.system_agent_id IS '项目系统智能体绑定：系统智能体标识。';
@@ -5104,7 +5126,6 @@ COMMENT ON COLUMN agent_design_sessions.blueprint_checksum IS '智能体设计�
 COMMENT ON COLUMN agent_design_sessions.error_code IS '智能体设计会话：稳定错误代码。';
 COMMENT ON COLUMN agent_design_sessions.error_message IS '智能体设计会话：受限的错误说明。';
 COMMENT ON COLUMN agent_design_sessions.created_agent_id IS '智能体设计会话：创建智能体标识。';
-COMMENT ON COLUMN agent_design_sessions.created_agent_version_id IS '智能体设计会话：创建智能体版本标识。';
 COMMENT ON COLUMN agent_design_sessions.create_idempotency_key_hash IS '智能体设计会话：创建操作幂等键的不可逆哈希。';
 COMMENT ON COLUMN agent_design_sessions.create_request_checksum IS '智能体设计会话：创建请求校验和。';
 COMMENT ON COLUMN agent_design_sessions.created_at IS '智能体设计会话：记录创建时间。';
@@ -5113,16 +5134,16 @@ COMMENT ON COLUMN agent_design_sessions.created_agent_deleted IS '智能体设�
 COMMENT ON COLUMN agent_design_sessions.generation_model_ref IS '智能体设计会话：生成模型引用。';
 COMMENT ON COLUMN agent_design_sessions.generation_mode IS '智能体设计会话：生成模式。';
 
-COMMENT ON TABLE agent_version_skill_refs IS '保存智能体版本到技能资产的有序依赖；运行时解析其 Current Version。';
-COMMENT ON COLUMN agent_version_skill_refs.agent_version_id IS '智能体技能引用：智能体版本标识。';
-COMMENT ON COLUMN agent_version_skill_refs.sort_order IS '智能体技能引用：排序顺序。';
-COMMENT ON COLUMN agent_version_skill_refs.skill_asset_scope IS '智能体技能引用：技能资产范围。';
-COMMENT ON COLUMN agent_version_skill_refs.skill_asset_id IS '智能体技能引用：技能资产标识。';
+COMMENT ON TABLE agent_skill_refs IS '保存智能体定义到技能资产的有序依赖；运行准入时解析其 Current Version。';
+COMMENT ON COLUMN agent_skill_refs.agent_id IS '智能体技能引用：智能体标识。';
+COMMENT ON COLUMN agent_skill_refs.sort_order IS '智能体技能引用：排序顺序。';
+COMMENT ON COLUMN agent_skill_refs.skill_asset_scope IS '智能体技能引用：技能资产范围。';
+COMMENT ON COLUMN agent_skill_refs.skill_asset_id IS '智能体技能引用：技能资产标识。';
 
-COMMENT ON TABLE agent_version_mcp_refs IS '保存智能体版本到 MCP 服务版本的有序依赖。';
-COMMENT ON COLUMN agent_version_mcp_refs.agent_version_id IS '智能体 MCP 引用：智能体版本标识。';
-COMMENT ON COLUMN agent_version_mcp_refs.mcp_server_version_id IS '智能体 MCP 引用：MCP服务版本标识。';
-COMMENT ON COLUMN agent_version_mcp_refs.sort_order IS '智能体 MCP 引用：排序顺序。';
+COMMENT ON TABLE agent_mcp_refs IS '保存智能体定义到 MCP 服务版本的有序依赖。';
+COMMENT ON COLUMN agent_mcp_refs.agent_id IS '智能体 MCP 引用：智能体标识。';
+COMMENT ON COLUMN agent_mcp_refs.mcp_server_version_id IS '智能体 MCP 引用：MCP服务版本标识。';
+COMMENT ON COLUMN agent_mcp_refs.sort_order IS '智能体 MCP 引用：排序顺序。';
 
 COMMENT ON TABLE project_system_mcp_bindings IS '保存项目对系统 MCP 资产的启用绑定。';
 COMMENT ON COLUMN project_system_mcp_bindings.project_id IS '项目系统 MCP 绑定：所属项目标识。';

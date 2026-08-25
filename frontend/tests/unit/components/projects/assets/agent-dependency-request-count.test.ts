@@ -52,7 +52,7 @@ function projectAgent(index: number): ProjectAssetItem {
     id: `30000000-0000-4000-8000-${suffix}`,
     scope: "project",
     slug: `agent-${index}`,
-    current_version_id: `40000000-0000-4000-8000-${suffix}`,
+    definition_id: `40000000-0000-4000-8000-${suffix}`,
   } as ProjectAssetItem;
 }
 
@@ -61,7 +61,7 @@ function mainAgent(): ProjectAssetItem {
     id: "50000000-0000-4000-8000-000000000000",
     scope: "system",
     slug: MAIN_PROJECT_AGENT_SLUG,
-    current_version_id: "50000000-0000-4000-8000-000000000001",
+    definition_id: "50000000-0000-4000-8000-000000000001",
   } as ProjectAssetItem;
 }
 
@@ -78,13 +78,13 @@ function responseForIds(
       return agentId === blockedAgentId
         ? {
             agent_asset_id: agent.id,
-            selected_version_id: null,
+            selected_definition_id: null,
             status: "blocked" as const,
             reason_code: "agent_unavailable" as const,
           }
         : {
             agent_asset_id: agent.id,
-            selected_version_id: agent.current_version_id!,
+            selected_definition_id: agent.definition_id!,
             status: "ready" as const,
             reason_code: null,
           };
@@ -212,7 +212,7 @@ describe("cold Agent runtime assessment request fan-out", () => {
     expect(result.assessments).toHaveLength(agents.length);
     expect(result.assessments[0]).toEqual({
       status: "blocked",
-      reason: "Agent 当前版本或项目绑定不可用，请刷新后重试。",
+      reason: "Agent Definition 或项目绑定不可用，请刷新后重试。",
     });
     expect(result.assessments.slice(1)).toEqual(
       Array.from({ length: 100 }, () => ({ status: "ready", reason: null })),

@@ -43,7 +43,6 @@ from app.shared_assets.skill_service import SkillService
 from deerflow.persistence.private_work import RunAssetVersionRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
-    AgentVersionRow,
     SkillRow,
     SkillVersionRow,
 )
@@ -255,10 +254,6 @@ async def test_admission_snapshot_first_survives_concurrent_agent_archive(
 
         async with seed.factory() as session:
             agent = await session.get(AgentRow, seed.project_agent_id)
-            version = await session.get(
-                AgentVersionRow,
-                admitted.snapshot.assets[0].version_id,
-            )
             persisted = await session.scalar(
                 select(RunAssetVersionRow).where(
                     RunAssetVersionRow.project_id == seed.owner_a.project_id,
@@ -269,11 +264,10 @@ async def test_admission_snapshot_first_survives_concurrent_agent_archive(
                 )
             )
         assert agent is not None and agent.status == "archived"
-        assert version is not None
         assert persisted is not None
-        assert persisted.version_id == version.id
+        assert persisted.version_id == agent.definition_id
         assert persisted.payload_checksum == admitted.snapshot.assets[0].checksum
-        assert persisted.payload_checksum != version.payload_checksum
+        assert persisted.payload_checksum == agent.payload_checksum
 
         runtime = await PrivateAssetRuntime(seed.factory).materialize(
             seed.owner_a,
@@ -281,7 +275,7 @@ async def test_admission_snapshot_first_survives_concurrent_agent_archive(
         )
         try:
             assert runtime.safe_manifest.agent_asset_id == seed.project_agent_id
-            assert runtime.safe_manifest.agent_version_id == version.id
+            assert runtime.safe_manifest.agent_definition_id == agent.definition_id
         finally:
             await runtime.aclose()
     finally:
@@ -401,7 +395,7 @@ async def test_exact_run_materialization_uses_snapshot_after_agent_suspension(
         )
         try:
             assert runtime.safe_manifest.agent_asset_id == seed.project_agent_id
-            assert runtime.safe_manifest.agent_version_id == admitted.snapshot.assets[0].version_id
+            assert runtime.safe_manifest.agent_definition_id == admitted.snapshot.assets[0].version_id
         finally:
             await runtime.aclose()
     finally:
@@ -450,7 +444,7 @@ async def test_admitted_run_uses_system_skill_snapshot_after_governance_revocati
             seed.factory,
             catalog_validator=_AcceptingAgentCatalogValidator(),
         )
-        candidate = await agent_service.create_version(
+        await agent_service.replace_definition(
             context,
             seed.project_agent_id,
             AgentPayload(
@@ -465,14 +459,9 @@ async def test_admitted_run_uses_system_skill_snapshot_after_governance_revocati
                     ),
                 ),
                 mcp_version_ids=(),
+                payload_schema_version=4,
             ),
             expected_asset_version=1,
-        )
-        await agent_service.activate_version(
-            context,
-            seed.project_agent_id,
-            candidate.id,
-            expected_asset_version=2,
         )
         await _create_thread(seed, thread_id)
         admitted = await PrivateRunAdmissionService(seed.factory).admit(

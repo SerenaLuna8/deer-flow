@@ -9,7 +9,6 @@ from app.shared_assets.agent_payload_checksum import (
     agent_payload_checksum,
     agent_payload_checksum_matches,
 )
-from app.shared_assets.agent_service import AgentService
 from app.shared_assets.models import (
     AgentModelSettings,
     AgentPayload,
@@ -83,13 +82,6 @@ def test_agent_payload_checksum_preserves_schema_contracts(
     expected: str,
 ) -> None:
     assert agent_payload_checksum(payload) == expected
-    assert (
-        AgentService._payload_checksum(  # noqa: SLF001 - compatibility wrapper contract
-            payload,
-            payload_schema_version=payload.payload_schema_version,
-        )
-        == expected
-    )
 
 
 def test_agent_payload_checksum_covers_only_fields_introduced_by_each_schema() -> None:

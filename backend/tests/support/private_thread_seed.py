@@ -66,7 +66,7 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
         "owner_b": uuid.uuid4(),
     }
     project_agent_id = uuid.uuid4()
-    project_agent_version_id = uuid.uuid4()
+    project_agent_definition_id = uuid.uuid4()
     project_agent_checksum = agent_payload_checksum(
         AgentPayload(
             description="",
@@ -75,7 +75,9 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
             tool_groups=(),
             skill_refs=(),
             mcp_version_ids=(),
-        )
+            payload_schema_version=4,
+        ),
+        payload_schema_version=4,
     )
 
     async with engine.begin() as connection:
@@ -127,40 +129,27 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
         await connection.execute(
             text(
                 """INSERT INTO agents
-                (id,scope,project_id,slug,display_name,status,revision,created_by_user_id)
-                VALUES (:id,:scope,:project_id,:slug,:name,'active',1,:owner)"""
+                (id,scope,project_id,slug,display_name,status,definition_id,
+                 description,soul,model_ref,model_settings,tool_groups,
+                 payload_checksum,agents_instructions,identity,user_context,
+                 payload_schema_version,revision,created_by_user_id,
+                 updated_by_user_id)
+                VALUES (:id,:scope,:project_id,:slug,:name,'active',
+                        :definition_id,'','thread agent',:model_ref,
+                        '{}'::jsonb,'[]'::jsonb,:checksum,'','','',4,1,
+                        :owner,:owner)"""
             ),
             {
                 "id": project_agent_id,
                 "scope": "project",
                 "project_id": project_a_id,
+                "definition_id": project_agent_definition_id,
                 "slug": "project-thread-agent",
                 "name": "Project Thread Agent",
-                "owner": str(owner_a_id),
-            },
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO agent_versions
-                (id,agent_id,version_number,description,soul,
-                 model_ref,tool_groups,payload_checksum,created_by_user_id)
-                VALUES (:id,:agent_id,1,'','thread agent',:model_ref,
-                        '[]'::jsonb,:checksum,:owner)"""
-            ),
-            {
-                "id": project_agent_version_id,
-                "agent_id": project_agent_id,
                 "model_ref": TEST_MODEL_REF,
                 "checksum": project_agent_checksum,
                 "owner": str(owner_a_id),
             },
-        )
-        await connection.execute(
-            text(
-                """UPDATE agents SET current_version_id=:version_id
-                WHERE id=:agent_id"""
-            ),
-            {"agent_id": project_agent_id, "version_id": project_agent_version_id},
         )
 
     return PrivateThreadSeed(

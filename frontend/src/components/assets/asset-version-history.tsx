@@ -5,7 +5,6 @@ import { ChevronDownIcon } from "lucide-react";
 import { versionWorkflowActions } from "@/components/admin/assets/admin-asset-view-model";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
-import { useModels } from "@/core/models/hooks";
 import type {
   AssetListKind,
   AssetScope,
@@ -38,7 +37,7 @@ export function AssetVersionHistory({
   onPublish,
   currentVersionId,
 }: {
-  kind: AssetListKind;
+  kind: Exclude<AssetListKind, "agents">;
   scope: AssetScope;
   versions: AssetVersion[];
   pending?: boolean;
@@ -47,7 +46,6 @@ export function AssetVersionHistory({
   currentVersionId?: string | null;
 }) {
   const { locale, t } = useI18n();
-  const { models } = useModels({ enabled: kind === "agents" });
 
   if (versions.length === 0) {
     return (
@@ -136,7 +134,6 @@ export function AssetVersionHistory({
             <AssetVersionDiff
               previous={isMcp ? null : (displayedVersions[index + 1] ?? null)}
               current={version}
-              models={models}
             />
           </div>
         );

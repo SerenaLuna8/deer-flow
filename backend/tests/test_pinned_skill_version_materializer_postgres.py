@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from support.agent_definition_seed import direct_agent_definition_fields
 
 from app.private_work import asset_runtime as asset_runtime_module
 from app.private_work.asset_runtime import PrivateAssetRuntime
@@ -583,6 +584,10 @@ async def _seed_scope(session: AsyncSession) -> _Scope:
         agent_id=uuid.uuid4(),
         thread_id="pinned-materializer-thread",
     )
+    definition = direct_agent_definition_fields(
+        updated_by_user_id=str(scope.user_id),
+        description="Materializer Agent",
+    )
     await session.execute(
         text(
             """INSERT INTO users (
@@ -630,16 +635,24 @@ async def _seed_scope(session: AsyncSession) -> _Scope:
         text(
             """INSERT INTO agents (
                    id, scope, project_id, slug, display_name,
-                   status, created_by_user_id
+                   status, definition_id, description, agents_instructions,
+                   soul, identity, user_context, model_ref, model_settings,
+                   tool_groups, payload_schema_version, payload_checksum,
+                   revision, created_by_user_id, updated_by_user_id
                ) VALUES (
                    :agent_id, 'project', :project_id, 'materializer-agent',
-                   'Materializer Agent', 'active', :user_id
+                   'Materializer Agent', 'active', :definition_id,
+                   :description, :agents_instructions, :soul, :identity,
+                   :user_context, :model_ref, '{}'::jsonb, '[]'::jsonb,
+                   :payload_schema_version, :payload_checksum, 1, :user_id,
+                   :updated_by_user_id
                )"""
         ),
         {
             "agent_id": scope.agent_id,
             "project_id": scope.project_id,
             "user_id": str(scope.user_id),
+            **definition,
         },
     )
     await session.execute(
@@ -824,7 +837,7 @@ async def _seed_run(
         text("SELECT set_config('deerflow.run_asset_closure_assembly', :run_id, true)"),
         {"run_id": run_id},
     )
-    agent_version_id = uuid.uuid4()
+    agent_definition_id = uuid.uuid4()
     payload = AgentPayload(
         description="Materializer Agent",
         soul="Materialize exact pinned Skills.",
@@ -845,7 +858,7 @@ async def _seed_run(
         kind=AssetKind.AGENT,
         scope=AssetScope.PROJECT,
         asset_id=scope.agent_id,
-        version_id=agent_version_id,
+        version_id=agent_definition_id,
         checksum=agent_checksum,
         catalog_generation=7,
         dependency_version_ids=tuple(version.version_id for version in versions),
@@ -872,7 +885,7 @@ async def _seed_run(
             "thread_id": scope.thread_id,
             "run_id": run_id,
             "asset_id": scope.agent_id,
-            "version_id": agent_version_id,
+            "version_id": agent_definition_id,
             "checksum": agent_checksum,
             "snapshot": json.dumps(encode_run_asset_snapshot(agent_snapshot)),
         },

@@ -61,6 +61,7 @@ from app.reliability.run_execution.vision_dispatch import (
     PrivateRunVisionDispatchAuthority,
 )
 from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+from app.shared_assets.catalog_state_repository import CatalogStateRepository
 from app.shared_assets.models import (
     AgentPayload,
     AssetKind,
@@ -872,12 +873,12 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
     selected_name = str(selected_model_id)
     try:
         async with seed.factory() as session, session.begin():
-            agent_version = (
+            agent_definition = (
                 await session.execute(
                     text(
-                        """SELECT id,payload_checksum
-                        FROM agent_versions
-                        WHERE agent_id=:agent_id"""
+                        """SELECT definition_id,payload_checksum
+                        FROM agents
+                        WHERE id=:agent_id"""
                     ),
                     {"agent_id": seed.project_agent_id},
                 )
@@ -928,7 +929,7 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
                 ),
                 {"model": default_model_id},
             )
-            generation = int((await session.execute(text("SELECT generation FROM asset_catalog_state WHERE id=1"))).scalar_one())
+            generation = await CatalogStateRepository(session).read_generation()
 
         resolved_payload = AgentPayload(
             description="",
@@ -944,7 +945,7 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
             kind=AssetKind.AGENT,
             scope=AssetScope.PROJECT,
             asset_id=seed.project_agent_id,
-            version_id=agent_version.id,
+            version_id=agent_definition.definition_id,
             checksum=agent_payload_checksum(resolved_payload),
             catalog_generation=generation,
             dependency_version_ids=(),
@@ -1012,38 +1013,30 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
             tool_groups=resolved.payload.tool_groups,
             skill_refs=resolved.payload.skill_refs,
             mcp_version_ids=resolved.payload.mcp_version_ids,
+            agents_instructions=resolved.payload.agents_instructions,
+            identity=resolved.payload.identity,
+            user_context=resolved.payload.user_context,
             payload_schema_version=4,
         )
         incompatible_checksum = agent_payload_checksum(incompatible_payload)
         async with seed.factory() as session, session.begin():
             await session.execute(
-                text(
-                    """INSERT INTO agent_versions
-                       (id,agent_id,version_number,description,soul,model_ref,
-                        model_settings,tool_groups,supersedes_version_id,
-                        payload_checksum,created_by_user_id,agents_instructions,
-                        identity,user_context,payload_schema_version)
-                       SELECT :id,agent_id,2,description,soul,model_ref,
-                              CAST(:model_settings AS jsonb),tool_groups,id,
-                              :checksum,created_by_user_id,agents_instructions,
-                              identity,user_context,4
-                       FROM agent_versions WHERE id=:current_id""",
-                ),
-                {
-                    "id": incompatible_version_id,
-                    "model_settings": '{"max_tokens":64}',
-                    "checksum": incompatible_checksum,
-                    "current_id": resolved.version_id,
-                },
+                text("SELECT set_config('deerflow.agent_definition_mutation_id',:agent_id,true)"),
+                {"agent_id": str(seed.project_agent_id)},
             )
             await session.execute(
                 text(
                     """UPDATE agents
-                       SET current_version_id=:version_id,revision=revision+1
+                       SET definition_id=:version_id,
+                           model_settings=CAST(:model_settings AS jsonb),
+                           payload_checksum=:checksum,
+                           revision=revision+1
                        WHERE id=:agent_id""",
                 ),
                 {
                     "version_id": incompatible_version_id,
+                    "model_settings": '{"max_tokens":64}',
+                    "checksum": incompatible_checksum,
                     "agent_id": seed.project_agent_id,
                 },
             )

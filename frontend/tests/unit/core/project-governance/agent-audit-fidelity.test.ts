@@ -14,21 +14,21 @@ const base = {
 } as const;
 
 describe("Agent audit fidelity", () => {
-  test("accepts and presents the safe operation and version number", () => {
+  test("accepts and presents the safe Definition operation and revision", () => {
     const item = auditItemSchema.parse({
       ...base,
       metadata: {
         asset_kind: "agent",
-        operation: "agent.version.activate",
-        version_number: 7,
+        operation: "agent.definition.update",
+        definition_revision: 7,
       },
     });
 
     const presentation = describeAuditItem(item, "zh-CN");
     expect(presentation.metadata).toEqual(
       expect.arrayContaining([
-        { label: "具体操作", value: "agent.version.activate" },
-        { label: "资产版本", value: "7" },
+        { label: "具体操作", value: "agent.definition.update" },
+        { label: "Definition 修订", value: "7" },
       ]),
     );
   });
@@ -49,19 +49,28 @@ describe("Agent audit fidelity", () => {
     );
   });
 
-  test("rejects raw identifiers, unknown operations, and missing version coordinates", () => {
+  test("rejects raw identifiers, unknown operations, and invalid Definition coordinates", () => {
     for (const metadata of [
       {
         asset_kind: "agent",
-        operation: "agent.version.activate",
+        operation: "agent.definition.update",
         version_id: "22222222-2222-4222-8222-222222222222",
-        version_number: 7,
+        definition_revision: 7,
       },
-      { asset_kind: "agent", operation: "agent.unknown", version_number: 7 },
-      { asset_kind: "agent", operation: "agent.version.activate" },
+      {
+        asset_kind: "agent",
+        operation: "agent.unknown",
+        definition_revision: 7,
+      },
+      { asset_kind: "agent", operation: "agent.definition.update" },
       {
         asset_kind: "skill",
-        operation: "agent.version.activate",
+        operation: "agent.definition.update",
+        definition_revision: 7,
+      },
+      {
+        asset_kind: "agent",
+        operation: "agent.definition.update",
         version_number: 7,
       },
     ]) {

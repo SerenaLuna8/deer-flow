@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import text
+from support.agent_definition_seed import direct_agent_definition_fields
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
 from support.run_closure import add_sealed_test_run
 from support.system_model_seed import (
@@ -129,6 +130,10 @@ async def _add_thread(
     owner_user_id: str,
     label: str,
 ) -> str:
+    definition = direct_agent_definition_fields(
+        updated_by_user_id=owner_user_id,
+        description=f"Memory reset {label}",
+    )
     agent = AgentRow(
         id=uuid.uuid4(),
         scope="project",
@@ -136,6 +141,7 @@ async def _add_thread(
         slug=f"memory-reset-{label}-{uuid.uuid4().hex[:8]}",
         display_name=f"Memory reset {label}",
         created_by_user_id=owner_user_id,
+        **definition,
     )
     session.add(agent)
     await session.flush()

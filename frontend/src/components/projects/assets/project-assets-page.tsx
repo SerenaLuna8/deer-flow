@@ -20,6 +20,7 @@ import {
 import { SystemAssetSection } from "./system-asset-section";
 
 type MutableKind = AssetListKind;
+type VersionedKind = Exclude<MutableKind, "agents">;
 
 export function ProjectAssetCatalogView({
   kind,
@@ -66,7 +67,7 @@ function ErrorNotice({ error }: { error: unknown }) {
   );
 }
 
-export function ProjectAssetHistoryView<Kind extends MutableKind>({
+export function ProjectAssetHistoryView<Kind extends VersionedKind>({
   kind,
   item,
   versions,
@@ -114,9 +115,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
                 ? t.adminAssets.catalog.archive
                 : action === "enable"
                   ? t.adminAssets.catalog.activate
-                  : kind === "agents"
-                    ? t.adminAssets.catalog.disable
-                    : t.adminAssets.catalog.suspend}
+                  : t.adminAssets.catalog.suspend}
             </Button>
           ))}
         </div>

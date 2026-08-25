@@ -1,41 +1,15 @@
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
+  getProjectAgentDefinition,
   listProjectAssets,
-  listProjectAssetVersions,
+  projectAgentDefinitionKey,
   projectAssetKey,
-  projectAssetVersionsKey,
-  type AssetVersion,
+  type AgentDefinition,
+  type AgentDefinitionResponse,
   type ProjectAssetItem,
   type ProjectAssetList,
-  type VersionHistoryResponse,
 } from "@/core/shared-assets";
-
-export type AgentAssetVersion = Extract<AssetVersion, { agent_id: string }>;
-
-export function agentAuthoringBaseVersion<
-  T extends Pick<
-    AgentAssetVersion,
-    "id" | "agent_id" | "version_number" | "relation" | "supersedes_version_id"
-  >,
->(versions: readonly T[], currentVersionId: string | null): T | null {
-  const latest = versions.reduce<T | null>(
-    (current, candidate) =>
-      !current || candidate.version_number > current.version_number
-        ? candidate
-        : current,
-    null,
-  );
-  if (
-    latest &&
-    (latest.id === currentVersionId || latest.relation === "candidate")
-  ) {
-    return latest;
-  }
-  return (
-    versions.find((candidate) => candidate.id === currentVersionId) ?? null
-  );
-}
 
 function catalogAgent(
   catalog: ProjectAssetList,
@@ -50,12 +24,12 @@ function catalogAgent(
 
 export type ProjectAgentAuthoringState = {
   item: ProjectAssetItem;
-  version: AgentAssetVersion;
+  definition: AgentDefinition;
 };
 
 export type ProjectAgentAuthoringReload = ProjectAgentAuthoringState & {
   agentCatalog: ProjectAssetList;
-  history: VersionHistoryResponse;
+  aggregate: AgentDefinitionResponse;
   skillCatalog: ProjectAssetList | null;
   mcpCatalog: ProjectAssetList | null;
 };
@@ -67,7 +41,7 @@ type ProjectAgentAuthoringCacheEpoch = {
 
 export type ProjectAgentAuthoringCacheEpochs = {
   agentCatalog: ProjectAgentAuthoringCacheEpoch;
-  history: ProjectAgentAuthoringCacheEpoch;
+  definition: ProjectAgentAuthoringCacheEpoch;
   skillCatalog: ProjectAgentAuthoringCacheEpoch;
   mcpCatalog: ProjectAgentAuthoringCacheEpoch;
 };
@@ -99,9 +73,9 @@ export function projectAgentAuthoringCacheEpochs({
       queryClient,
       projectAssetKey(accountId, projectId, "agents"),
     ),
-    history: queryCacheEpoch(
+    definition: queryCacheEpoch(
       queryClient,
-      projectAssetVersionsKey(accountId, projectId, "agents", assetId),
+      projectAgentDefinitionKey(accountId, projectId, assetId),
     ),
     skillCatalog: queryCacheEpoch(
       queryClient,
@@ -116,14 +90,14 @@ export function projectAgentAuthoringCacheEpochs({
 
 export function resolveProjectAgentAuthoringState({
   beforeCatalog,
-  history,
+  aggregate,
   afterCatalog,
   assetId,
   attemptedRevision,
   minimumRevision,
 }: {
   beforeCatalog: ProjectAssetList;
-  history: VersionHistoryResponse;
+  aggregate: AgentDefinitionResponse;
   afterCatalog: ProjectAssetList;
   assetId: string;
   attemptedRevision?: number;
@@ -139,7 +113,11 @@ export function resolveProjectAgentAuthoringState({
   }
   if (
     beforeItem.revision !== item.revision ||
-    beforeItem.current_version_id !== item.current_version_id ||
+    beforeItem.definition_id !== item.definition_id ||
+    aggregate.item.revision !== item.revision ||
+    aggregate.item.definition_id !== item.definition_id ||
+    aggregate.definition.agent_id !== assetId ||
+    aggregate.definition.definition_id !== item.definition_id ||
     (attemptedRevision !== undefined && item.revision <= attemptedRevision) ||
     (minimumRevision !== undefined && item.revision < minimumRevision)
   ) {
@@ -147,15 +125,7 @@ export function resolveProjectAgentAuthoringState({
       "Agent changed while its latest authoring state was loading",
     );
   }
-
-  const versions = history.data.filter(
-    (candidate): candidate is AgentAssetVersion => "agent_id" in candidate,
-  );
-  const version = agentAuthoringBaseVersion(versions, item.current_version_id);
-  if (version?.agent_id !== assetId) {
-    throw new Error("Agent authoring base is unavailable");
-  }
-  return { item, version };
+  return { item, definition: aggregate.definition };
 }
 
 export async function reloadProjectAgentAuthoringState({
@@ -183,8 +153,8 @@ export async function reloadProjectAgentAuthoringState({
       "agents",
       batchSignal,
     );
-    const [history, skills, mcps] = await Promise.all([
-      listProjectAssetVersions(projectId, "agents", assetId, batchSignal),
+    const [aggregate, skills, mcps] = await Promise.all([
+      getProjectAgentDefinition(projectId, assetId, batchSignal),
       includeDependencyCatalogs
         ? listProjectAssets(projectId, "skills", batchSignal)
         : Promise.resolve(null),
@@ -199,7 +169,7 @@ export async function reloadProjectAgentAuthoringState({
     );
     const state = resolveProjectAgentAuthoringState({
       beforeCatalog,
-      history,
+      aggregate,
       afterCatalog,
       assetId,
       attemptedRevision,
@@ -209,7 +179,7 @@ export async function reloadProjectAgentAuthoringState({
     return {
       ...state,
       agentCatalog: afterCatalog,
-      history,
+      aggregate,
       skillCatalog: skills,
       mcpCatalog: mcps,
     };
@@ -237,15 +207,14 @@ export async function cacheProjectAgentAuthoringReload({
   isCurrent: () => boolean;
 }): Promise<void> {
   const agentKey = projectAssetKey(accountId, projectId, "agents");
-  const historyKey = projectAssetVersionsKey(
+  const definitionKey = projectAgentDefinitionKey(
     accountId,
     projectId,
-    "agents",
     assetId,
   );
   const skillKey = projectAssetKey(accountId, projectId, "skills");
   const mcpKey = projectAssetKey(accountId, projectId, "mcp-servers");
-  const keysToReplace = [agentKey, historyKey];
+  const keysToReplace = [agentKey, definitionKey];
   if (reload.skillCatalog !== null) keysToReplace.push(skillKey);
   if (reload.mcpCatalog !== null) keysToReplace.push(mcpKey);
   await Promise.all(
@@ -272,7 +241,7 @@ export async function cacheProjectAgentAuthoringReload({
     current.data === initial.data;
   if (
     !unchanged(currentEpochs.agentCatalog, startedAt.agentCatalog) ||
-    !unchanged(currentEpochs.history, startedAt.history) ||
+    !unchanged(currentEpochs.definition, startedAt.definition) ||
     (reload.skillCatalog !== null &&
       !unchanged(currentEpochs.skillCatalog, startedAt.skillCatalog)) ||
     (reload.mcpCatalog !== null &&
@@ -287,11 +256,8 @@ export async function cacheProjectAgentAuthoringReload({
   }
 
   queryClient.setQueryData(agentKey, reload.agentCatalog);
-  queryClient.setQueryData(historyKey, reload.history);
-  if (reload.skillCatalog) {
+  queryClient.setQueryData(definitionKey, reload.aggregate);
+  if (reload.skillCatalog)
     queryClient.setQueryData(skillKey, reload.skillCatalog);
-  }
-  if (reload.mcpCatalog) {
-    queryClient.setQueryData(mcpKey, reload.mcpCatalog);
-  }
+  if (reload.mcpCatalog) queryClient.setQueryData(mcpKey, reload.mcpCatalog);
 }

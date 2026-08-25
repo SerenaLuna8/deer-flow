@@ -2,8 +2,8 @@ import { z } from "zod";
 
 import {
   agentModelSettingsSchema,
+  agentAssetSummarySchema,
   assetScopeSchema,
-  currentVersionAssetSummarySchema,
 } from "@/core/shared-assets/types";
 
 const uuidSchema = z.string().uuid();
@@ -348,7 +348,7 @@ export const agentBuilderCommitResponseSchema = z
     data: z
       .object({
         session: agentBuilderSessionSchema,
-        agent: currentVersionAssetSummarySchema,
+        agent: agentAssetSummarySchema,
       })
       .strict(),
     request_id: z.string().trim().min(1),

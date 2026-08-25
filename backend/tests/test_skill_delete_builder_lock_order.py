@@ -8,11 +8,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from app.shared_assets import skill_service as skill_service_module
+from app.shared_assets import skill_deletion as skill_deletion_module
+from app.shared_assets.skill_deletion import SkillDeleteResult, SkillDeletionCoordinator
 from app.shared_assets.skill_repository import SkillRepository
 
 
@@ -34,17 +36,6 @@ class _GateSession:
         return _Rows(self._project_id)
 
 
-class _TransactionSession:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, _exc_type, _exc, _traceback):
-        return False
-
-    def begin(self):
-        return self
-
-
 def _context() -> ProjectContext:
     return ProjectContext(
         user_id=uuid.uuid4(),
@@ -58,20 +49,27 @@ def _context() -> ProjectContext:
 
 
 @pytest.mark.asyncio
-async def test_delete_scope_takes_project_update_lock() -> None:
+async def test_delete_scope_locks_project_then_exact_membership() -> None:
     context = _context()
     session = _GateSession(context.project_id)
 
     await SkillRepository(session).lock_project_delete_scope(context)  # type: ignore[arg-type]
 
-    assert len(session.statements) == 1
-    sql = str(session.statements[0].compile(dialect=postgresql.dialect()))  # type: ignore[attr-defined]
-    assert "FOR UPDATE OF projects" in sql
-    assert "FOR SHARE" not in sql
+    assert len(session.statements) == 2
+    project_sql = str(
+        session.statements[0].compile(dialect=postgresql.dialect())  # type: ignore[attr-defined]
+    )
+    membership_sql = str(
+        session.statements[1].compile(dialect=postgresql.dialect())  # type: ignore[attr-defined]
+    )
+    assert "FOR UPDATE OF projects" in project_sql
+    assert "project_memberships" not in project_sql
+    assert "FOR UPDATE OF project_memberships" in membership_sql
+    assert "projects" not in membership_sql
 
 
 @pytest.mark.asyncio
-async def test_delete_takes_project_gate_before_asset_and_builder_cleanup(
+async def test_delete_coordinates_project_asset_agents_secrets_then_archive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context()
@@ -98,43 +96,51 @@ async def test_delete_takes_project_gate_before_asset_and_builder_cleanup(
         events.append("asset")
         return asset
 
-    async def plan_project_asset_deletion(
+    async def destroy_project_asset_secrets(
         _actor: ProjectContext,
         _asset: object,
-    ) -> tuple[()]:
-        events.append("plan")
-        return ()
+    ) -> int:
+        events.append("secrets")
+        return 0
 
-    async def delete_project_asset(
+    async def archive_project_asset(
         _actor: ProjectContext,
         _asset: object,
-        _version_ids: tuple[uuid.UUID, ...],
     ) -> None:
-        events.append("cleanup")
+        events.append("archive")
 
-    transaction = _TransactionSession()
+    session = AsyncMock(spec=AsyncSession)
+    session.in_transaction.return_value = True
     repository = SimpleNamespace(
-        session=transaction,
         lock_project_delete_scope=lock_project_delete_scope,
         get_project_asset=get_project_asset,
-        plan_project_asset_deletion=plan_project_asset_deletion,
-        delete_project_asset=delete_project_asset,
+        destroy_project_asset_secrets=destroy_project_asset_secrets,
+        archive_project_asset=archive_project_asset,
     )
     monkeypatch.setattr(
-        skill_service_module,
+        skill_deletion_module,
         "SkillRepository",
         lambda _session: repository,
     )
 
-    await skill_service_module.SkillService(
-        lambda: transaction,
-        governance_sink=SimpleNamespace(
-            append_project=AsyncMock(),
-        ),
-    ).delete(
+    async def remove_project_skill_from_definitions_in_session(
+        _session: AsyncSession,
+        _actor: ProjectContext,
+        _skill_id: uuid.UUID,
+    ) -> tuple[object, ...]:
+        events.append("agents")
+        return (object(), object())
+
+    result = await SkillDeletionCoordinator(
+        SimpleNamespace(
+            remove_project_skill_from_definitions_in_session=(remove_project_skill_from_definitions_in_session),
+        )
+    ).delete_in_session(
+        session,
         context,
         asset.id,
-        expected_asset_version=asset.revision,
+        asset.revision,
     )
 
-    assert events == ["project", "asset", "plan", "cleanup"]
+    assert result == SkillDeleteResult(affected_agent_count=2)
+    assert events == ["project", "asset", "agents", "secrets", "archive"]

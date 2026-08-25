@@ -69,14 +69,26 @@ class SkillRow(Base):
             project_id,
             func.lower(slug),
             unique=True,
-            postgresql_where=text("scope = 'project'"),
+            postgresql_where=text(
+                "scope = 'project' AND status != 'archived'",
+            ),
         ),
         Index(
             "uq_skills_project_display_name",
             project_id,
             func.lower(display_name),
             unique=True,
-            postgresql_where=text("scope = 'project'"),
+            postgresql_where=text(
+                "scope = 'project' AND status != 'archived'",
+            ),
+        ),
+        Index(
+            "ix_skills_archived_purge",
+            project_id,
+            id,
+            postgresql_where=text(
+                "scope = 'project' AND status = 'archived'",
+            ),
         ),
     )
 

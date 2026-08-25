@@ -208,12 +208,12 @@ describe("Run execution state", () => {
     const previouslyExecuting = runExecutionStateSchema.parse(
       state("executing", "running"),
     );
-    expect(
-      selectObservedRunExecutionState(previouslyExecuting, true),
-    ).toBe("unavailable");
-    expect(
-      selectObservedRunExecutionState(previouslyExecuting, false),
-    ).toBe(previouslyExecuting);
+    expect(selectObservedRunExecutionState(previouslyExecuting, true)).toBe(
+      "unavailable",
+    );
+    expect(selectObservedRunExecutionState(previouslyExecuting, false)).toBe(
+      previouslyExecuting,
+    );
 
     const runA = runExecutionStateObserverQueryKey(
       ACCESS.scope,

@@ -21,6 +21,7 @@ from app.audit.models import AuditError
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.quotas.models import QuotaError, QuotaExceeded
+from app.shared_assets.agent_service import AgentService
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import (
     AssetConflict,
@@ -42,6 +43,10 @@ from app.shared_assets.skill_archive import (
     MAX_SKILL_ARCHIVE_FILES,
     dump_skill_distribution_zip,
     load_skill_archive_package,
+)
+from app.shared_assets.skill_deletion import (
+    SkillDeleteResult,
+    SkillDeletionCoordinator,
 )
 from app.shared_assets.skill_repository import (
     SkillRepository,
@@ -602,6 +607,7 @@ class SkillService:
         self._session_factory = session_factory
         self._governance_sink = governance_sink or SharedAssetGovernanceEventSink()
         self._quota = quota
+        self._deletion = SkillDeletionCoordinator(AgentService(session_factory))
 
     async def preview_archive(
         self,
@@ -1144,61 +1150,31 @@ class SkillService:
         asset_id: uuid.UUID,
         *,
         expected_asset_version: int,
-    ) -> None:
+    ) -> SkillDeleteResult:
         if not isinstance(actor, ProjectContext):
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
-        async def operation(repository: SkillRepository) -> None:
-            await repository.lock_project_delete_scope(actor)
-            asset = await repository.get_project_asset(
+        async def operation(repository: SkillRepository) -> SkillDeleteResult:
+            return await self._deletion.delete_in_session(
+                repository.session,
                 actor,
                 asset_id,
-                for_update=True,
-            )
-            self._require_expected_version(
-                actor,
-                asset,
                 expected_asset_version,
             )
-            versions = await repository.plan_project_asset_deletion(actor, asset)
-            quota = self._quota
-            if versions and quota is None:
-                raise AssetStorageUnavailable(actor.request_id)
-            for version in versions:
-                assert quota is not None
-                try:
-                    await quota.release_skill_version_if_reserved(
-                        repository.session,
-                        actor.project_id,
-                        version_id=version.version_id,
-                        size=version.size_bytes,
-                    )
-                except QuotaError:
-                    raise AssetStorageUnavailable(actor.request_id) from None
-            await repository.delete_project_asset(
-                actor,
-                asset,
-                tuple(version.version_id for version in versions),
-            )
-            if quota is not None:
-                try:
-                    await quota.reconcile_project_storage(
-                        repository.session,
-                        actor.project_id,
-                    )
-                except QuotaError:
-                    raise AssetStorageUnavailable(actor.request_id) from None
 
-        await self._execute(
+        return await self._execute(
             actor,
             operation,
-            governance=lambda session, _result: self._record_governance(
+            governance=lambda session, result: self._record_governance(
                 session,
                 actor,
                 asset_id,
                 None,
                 "skill.delete",
+                metadata={
+                    "affected_agent_count": result.affected_agent_count,
+                },
             ),
         )
 
@@ -2229,6 +2205,8 @@ class SkillService:
         asset_id: uuid.UUID,
         version_id: uuid.UUID | None,
         action: str,
+        *,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         if isinstance(actor, ProjectContext):
             await self._governance_sink.append_project(
@@ -2240,6 +2218,7 @@ class SkillService:
                 action=action,
                 request_id=actor.request_id,
                 asset_kind="skill",
+                secret_metadata=metadata,
             )
             return
         if not isinstance(actor, SystemAssetGovernanceContext):
@@ -2253,4 +2232,5 @@ class SkillService:
             action=action,
             request_id=actor.request_id,
             asset_kind="skill",
+            secret_metadata=metadata,
         )

@@ -37,7 +37,7 @@ def _blank_to_none(value: str | None) -> str | None:
 
 
 class AgentModelSettings(BaseModel):
-    """Strict immutable settings carried by one exact Agent version."""
+    """Strict settings carried by one exact Agent Definition snapshot."""
 
     model_config = ConfigDict(
         extra="forbid",

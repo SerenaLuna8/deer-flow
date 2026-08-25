@@ -83,35 +83,30 @@ async def _create_thread(
         )
 
 
-async def _activate_agent_v2(seed: PrivateThreadSeed) -> uuid.UUID:
+async def _replace_agent_definition(seed: PrivateThreadSeed) -> uuid.UUID:
     service = AgentService(
         seed.factory,
         catalog_validator=_AcceptingAgentCatalogValidator(),
     )
     context = _project_context(seed)
-    candidate = await service.create_version(
+    result = await service.replace_definition(
         context,
         seed.project_agent_id,
         AgentPayload(
-            description="Current Version entry-point test Agent",
-            soul="VERSION_TWO",
+            description="Current Definition entry-point test Agent",
+            soul="DEFINITION_TWO",
             model_ref=TEST_MODEL_REF,
             tool_groups=(),
             skill_refs=(),
             mcp_version_ids=(),
+            payload_schema_version=4,
         ),
         expected_asset_version=1,
     )
-    await service.activate_version(
-        context,
-        seed.project_agent_id,
-        candidate.id,
-        expected_asset_version=2,
-    )
-    return candidate.id
+    return result.definition.definition_id
 
 
-async def _admitted_agent_version_id(
+async def _admitted_agent_definition_id(
     seed: PrivateThreadSeed,
     run_id: str,
 ) -> uuid.UUID:
@@ -131,7 +126,7 @@ async def _admitted_agent_version_id(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_reuse_thread_automation_resolves_current_agent_at_occurrence_admission(
+async def test_reuse_thread_automation_resolves_latest_agent_definition_at_occurrence_admission(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -147,7 +142,7 @@ async def test_reuse_thread_automation_resolves_current_agent_at_occurrence_admi
         ).create(
             seed.owner_a,
             AutomationCreate(
-                title="Reuse Current Version",
+                title="Reuse Current Definition",
                 prompt="Use the Agent that is current when this occurrence runs.",
                 context_mode="reuse_thread",
                 thread_id=thread_id,
@@ -158,7 +153,7 @@ async def test_reuse_thread_automation_resolves_current_agent_at_occurrence_admi
                 timezone="UTC",
             ),
         )
-        current_version_id = await _activate_agent_v2(seed)
+        current_definition_id = await _replace_agent_definition(seed)
 
         result = await AutomationDispatcher(seed.factory).admit_occurrence(
             AutomationDefinitionRef(
@@ -174,11 +169,11 @@ async def test_reuse_thread_automation_resolves_current_agent_at_occurrence_admi
         assert isinstance(result, AdmittedAutomationOccurrence)
         assert result.run.thread_id == thread_id
         assert (
-            await _admitted_agent_version_id(
+            await _admitted_agent_definition_id(
                 seed,
                 result.run.run_id,
             )
-            == current_version_id
+            == current_definition_id
         )
     finally:
         await seed.engine.dispose()
@@ -274,7 +269,7 @@ async def test_scheduler_legacy_admission_failure_remains_due_without_terminal(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_channel_message_resolves_current_agent_at_run_admission(
+async def test_channel_message_resolves_latest_agent_definition_at_run_admission(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -321,7 +316,7 @@ async def test_channel_message_resolves_current_agent_at_run_admission(
                 )
             )
 
-        current_version_id = await _activate_agent_v2(seed)
+        current_definition_id = await _replace_agent_definition(seed)
         resolved = ResolvedInboundPrivateWork(
             account_id=seed.owner_a.user_id,
             context=seed.owner_a,
@@ -377,11 +372,11 @@ async def test_channel_message_resolves_current_agent_at_run_admission(
         assert isinstance(run_id, str)
         assert result.resolved.thread_id == thread_id
         assert (
-            await _admitted_agent_version_id(
+            await _admitted_agent_definition_id(
                 seed,
                 run_id,
             )
-            == current_version_id
+            == current_definition_id
         )
     finally:
         await seed.engine.dispose()

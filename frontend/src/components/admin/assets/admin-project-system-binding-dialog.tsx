@@ -59,15 +59,7 @@ export function isAdminSystemBindingConflict(error: unknown): boolean {
   );
 }
 
-export function AdminProjectSystemBindingDialog({
-  accountId,
-  projectId,
-  kind,
-  item,
-  open,
-  onOpenChange,
-  onConflict,
-}: {
+type AdminProjectSystemBindingDialogProps = {
   accountId: string;
   projectId: string;
   kind: AssetListKind;
@@ -75,6 +67,126 @@ export function AdminProjectSystemBindingDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConflict?: () => void;
+};
+
+function AdminProjectSystemAgentBindingDialog({
+  accountId,
+  projectId,
+  item,
+  open,
+  onOpenChange,
+  onConflict,
+}: Omit<AdminProjectSystemBindingDialogProps, "kind">) {
+  const { t } = useI18n();
+  const enable = useEnableAdminProjectSystemBinding(
+    accountId,
+    projectId,
+    "agent",
+  );
+  const disable = useDisableAdminProjectSystemBinding(
+    accountId,
+    projectId,
+    "agent",
+  );
+  const pending = enable.isPending || disable.isPending;
+  const error = enable.error ?? disable.error;
+  const mutationSucceeded = () => onOpenChange(false);
+  const mutationFailed = (mutationError: unknown) => {
+    if (isAdminSystemBindingConflict(mutationError)) onConflict?.();
+  };
+  const canEnable =
+    item.status === "active" &&
+    Boolean(item.definition_id) &&
+    item.binding?.enabled !== true;
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!pending) onOpenChange(nextOpen);
+      }}
+    >
+      <DialogContent closeLabel={t.adminOperations.ui.close}>
+        <DialogHeader>
+          <DialogTitle>
+            {item.binding?.enabled
+              ? t.adminAssets.catalog.bindingStatus
+              : t.adminAssets.dialogs.binding.enableTitle}
+          </DialogTitle>
+          <DialogDescription>
+            {t.adminAssets.dialogs.binding.agentDescription(item.display_name)}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+          <div className="min-w-0">
+            <p className="text-muted-foreground text-xs">Definition ID</p>
+            <p className="truncate font-mono text-xs">
+              {item.definition_id ?? t.adminAssets.catalog.none}
+            </p>
+          </div>
+          <AssetStatusBadge status={item.status} />
+        </div>
+        {error ? (
+          <p role="alert" className="text-destructive text-sm">
+            {isAdminSystemBindingConflict(error)
+              ? t.adminAssets.errors.conflict
+              : adminAssetErrorMessage(error, t.adminAssets.errors)}
+          </p>
+        ) : null}
+        <DialogFooter className="gap-2 sm:justify-between">
+          {item.binding?.enabled ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={() =>
+                disable.mutate(
+                  {
+                    assetId: item.id,
+                    input: { expected_binding_version: item.binding!.version },
+                  },
+                  { onSuccess: mutationSucceeded, onError: mutationFailed },
+                )
+              }
+            >
+              {t.adminAssets.dialogs.binding.disable}
+            </Button>
+          ) : null}
+          {canEnable ? (
+            <Button
+              type="button"
+              disabled={pending}
+              onClick={() =>
+                enable.mutate(
+                  {
+                    asset_id: item.id,
+                    ...(item.binding
+                      ? { expected_binding_version: item.binding.version }
+                      : {}),
+                  },
+                  { onSuccess: mutationSucceeded, onError: mutationFailed },
+                )
+              }
+            >
+              {t.adminAssets.dialogs.binding.enable}
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function VersionedAdminProjectSystemBindingDialog({
+  accountId,
+  projectId,
+  kind,
+  item,
+  open,
+  onOpenChange,
+  onConflict,
+}: AdminProjectSystemBindingDialogProps & {
+  kind: Exclude<AssetListKind, "agents">;
 }) {
   const { t } = useI18n();
   const assetKind = BINDING_KIND[kind];
@@ -172,7 +284,7 @@ export function AdminProjectSystemBindingDialog({
     if (!open) return;
     setSelectedVersionId(
       item.binding?.enabled
-        ? item.binding.current_version_id
+        ? (item.binding.current_version_id ?? "")
         : defaultUnboundVersionId,
     );
   }, [
@@ -470,5 +582,25 @@ export function AdminProjectSystemBindingDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+export function AdminProjectSystemBindingDialog(
+  props: AdminProjectSystemBindingDialogProps,
+) {
+  if (props.kind === "agents") {
+    return (
+      <AdminProjectSystemAgentBindingDialog
+        accountId={props.accountId}
+        projectId={props.projectId}
+        item={props.item}
+        open={props.open}
+        onOpenChange={props.onOpenChange}
+        onConflict={props.onConflict}
+      />
+    );
+  }
+  return (
+    <VersionedAdminProjectSystemBindingDialog {...props} kind={props.kind} />
   );
 }

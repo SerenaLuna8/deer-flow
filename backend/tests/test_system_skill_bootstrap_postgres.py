@@ -28,10 +28,9 @@ from app.shared_assets.models import (
     SkillArchiveFile,
 )
 from deerflow.persistence.shared_assets import (
+    AgentMcpRefRow,
     AgentRow,
-    AgentVersionMcpRefRow,
-    AgentVersionRow,
-    AgentVersionSkillRefRow,
+    AgentSkillRefRow,
     AssetCatalogStateRow,
     McpServerRow,
     ProjectSystemAgentBindingRow,
@@ -323,18 +322,15 @@ async def test_postgres_packaged_v3_catalog_bootstraps_and_reruns_idempotently(
                     )
                 )
             ).scalar_one()
-            builder_versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == builder.id).order_by(AgentVersionRow.version_number))).scalars().all())
-            assert [version.version_number for version in builder_versions] == [1]
-            assert builder.current_version_id == builder_versions[0].id
             assert builder.revision == 1
-            assert builder_versions[0].tool_groups == [
+            assert isinstance(builder.definition_id, uuid.UUID)
+            assert builder.tool_groups == [
                 "web",
                 "file:read",
                 "file:write",
                 "bash",
                 "task",
             ]
-            assert builder_versions[0].supersedes_version_id is None
 
             creator = (
                 await session.execute(
@@ -346,11 +342,11 @@ async def test_postgres_packaged_v3_catalog_bootstraps_and_reruns_idempotently(
             skill_refs = (
                 (
                     await session.execute(
-                        select(AgentVersionSkillRefRow)
+                        select(AgentSkillRefRow)
                         .where(
-                            AgentVersionSkillRefRow.agent_version_id.in_(tuple(version.id for version in builder_versions)),
+                            AgentSkillRefRow.agent_id == builder.id,
                         )
-                        .order_by(AgentVersionSkillRefRow.agent_version_id)
+                        .order_by(AgentSkillRefRow.sort_order)
                     )
                 )
                 .scalars()
@@ -367,8 +363,8 @@ async def test_postgres_packaged_v3_catalog_bootstraps_and_reruns_idempotently(
             mcp_refs = (
                 (
                     await session.execute(
-                        select(AgentVersionMcpRefRow).where(
-                            AgentVersionMcpRefRow.agent_version_id.in_(tuple(version.id for version in builder_versions)),
+                        select(AgentMcpRefRow).where(
+                            AgentMcpRefRow.agent_id == builder.id,
                         )
                     )
                 )
@@ -731,7 +727,7 @@ async def test_postgres_system_skill_v1_rejects_changed_packaged_content(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempotently(
+async def test_postgres_system_agent_upgrade_preserves_definition_id_and_reruns_idempotently(
     migrated_postgres_database_url: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -811,14 +807,6 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
             )
         async with factory.begin() as session:
             asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == source_key))).scalar_one()
-            version_one = (
-                await session.execute(
-                    select(AgentVersionRow).where(
-                        AgentVersionRow.agent_id == asset.id,
-                        AgentVersionRow.version_number == 1,
-                    )
-                )
-            ).scalar_one()
             session.add(
                 ProjectSystemAgentBindingRow(
                     project_id=project.project_id,
@@ -830,11 +818,11 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
             )
 
         version_one_snapshot = (
-            version_one.id,
-            version_one.description,
-            tuple(version_one.tool_groups),
-            version_one.payload_checksum,
-            version_one.created_at,
+            asset.definition_id,
+            asset.description,
+            tuple(asset.tool_groups),
+            asset.payload_checksum,
+            asset.created_at,
         )
         active_root = version_two_root
         upgraded = await upgrade_system_assets(migrated_postgres_database_url)
@@ -842,35 +830,23 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
 
         async with factory() as session:
             asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == source_key))).scalar_one()
-            versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == asset.id).order_by(AgentVersionRow.version_number))).scalars().all())
             binding = await session.get(
                 ProjectSystemAgentBindingRow,
                 (project.project_id, asset.id),
             )
             assert binding is not None
             assert asset.revision == 2
-            assert asset.current_version_id == versions[0].id
-            assert [version.version_number for version in versions] == [1]
-            assert versions[0].supersedes_version_id is None
-            assert versions[0].id == version_one_snapshot[0]
-            assert versions[0].description != version_one_snapshot[1]
-            assert tuple(versions[0].tool_groups) != version_one_snapshot[2]
-            assert versions[0].payload_checksum != version_one_snapshot[3]
-            assert versions[0].created_at == version_one_snapshot[4]
+            assert asset.definition_id == version_one_snapshot[0]
+            assert asset.description != version_one_snapshot[1]
+            assert tuple(asset.tool_groups) != version_one_snapshot[2]
+            assert asset.payload_checksum != version_one_snapshot[3]
+            assert asset.created_at == version_one_snapshot[4]
             assert binding.enabled is True
             assert binding.version == 1
             upgraded_snapshot = (
-                asset.current_version_id,
+                asset.definition_id,
                 asset.revision,
-                tuple(
-                    (
-                        version.id,
-                        version.version_number,
-                        version.supersedes_version_id,
-                        version.payload_checksum,
-                    )
-                    for version in versions
-                ),
+                asset.payload_checksum,
                 binding.version,
             )
 
@@ -878,24 +854,15 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
         assert repeated.applied_changes == 0
         async with factory() as session:
             asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == source_key))).scalar_one()
-            versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == asset.id).order_by(AgentVersionRow.version_number))).scalars().all())
             binding = await session.get(
                 ProjectSystemAgentBindingRow,
                 (project.project_id, asset.id),
             )
             assert binding is not None
             assert (
-                asset.current_version_id,
+                asset.definition_id,
                 asset.revision,
-                tuple(
-                    (
-                        version.id,
-                        version.version_number,
-                        version.supersedes_version_id,
-                        version.payload_checksum,
-                    )
-                    for version in versions
-                ),
+                asset.payload_checksum,
                 binding.version,
             ) == upgraded_snapshot
     finally:

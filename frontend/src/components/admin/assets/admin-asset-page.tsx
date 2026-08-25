@@ -21,7 +21,9 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   useAdminAssets,
+  useAdminAgentDefinition,
   useAdminAssetVersions,
+  type AgentDefinition,
   type AssetListKind,
   type AssetSummary,
   type AssetVersion,
@@ -55,7 +57,7 @@ export function VersionTimeline({
   kind,
   versions,
 }: {
-  kind: AssetListKind;
+  kind: Exclude<AssetListKind, "agents">;
   versions: AssetVersion[];
 }) {
   return <AssetVersionHistory kind={kind} scope="system" versions={versions} />;
@@ -76,14 +78,123 @@ export function filterAdminCatalogItems<T extends AssetSummary>(
   );
 }
 
-function AssetDetail({
+export function AgentDefinitionSummary({
+  definition,
+  scope,
+}: {
+  definition: AgentDefinition;
+  scope: "project" | "system";
+}) {
+  const { t } = useI18n();
+  const rows = [
+    [t.adminAssets.diff.description, definition.description],
+    [t.adminAssets.diff.model, definition.model_ref],
+    [t.adminAssets.diff.toolGroups, definition.tool_groups.join(", ")],
+    [
+      t.adminAssets.diff.skillAssets,
+      definition.skill_refs
+        .map((ref) => `${ref.scope}:${ref.asset_id}`)
+        .join(", "),
+    ],
+    [t.adminAssets.diff.mcpVersions, definition.mcp_version_ids.join(", ")],
+  ] as const;
+  const documents = [
+    ["AGENTS.md", definition.agents_instructions],
+    ["SOUL.md", definition.soul],
+    ["IDENTITY.md", definition.identity],
+    ["USER.md", definition.user_context],
+  ] as const;
+  return (
+    <div data-testid="admin-agent-definition" className="space-y-4">
+      <p className="text-muted-foreground text-sm">
+        {scope === "system"
+          ? t.agents.instructions.readOnlyDescription
+          : t.agents.instructions.adminProjectReadOnlyDescription}
+      </p>
+      <dl className="grid gap-3 text-sm">
+        {rows.map(([label, content]) => (
+          <div key={label}>
+            <dt className="text-muted-foreground text-xs">{label}</dt>
+            <dd className="mt-1 whitespace-pre-wrap">{content || "—"}</dd>
+          </div>
+        ))}
+      </dl>
+      {documents.map(([name, content]) => (
+        <section key={name} className="rounded-lg border p-3">
+          <h3 className="font-mono text-xs font-semibold">{name}</h3>
+          <pre className="mt-2 overflow-x-auto text-xs whitespace-pre-wrap">
+            {content || "—"}
+          </pre>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function AdminAgentDetail({
+  accountId,
+  item,
+  onClose,
+}: {
+  accountId: string;
+  item: AssetSummary;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
+  const definition = useAdminAgentDefinition(accountId, item.id);
+  return (
+    <Sheet open onOpenChange={(open) => !open && onClose()}>
+      <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
+        <SheetHeader>
+          <SheetTitle>{item.display_name}</SheetTitle>
+          <SheetDescription>
+            {item.slug} · {t.adminAssets.catalog.system} Agent
+          </SheetDescription>
+        </SheetHeader>
+        <div className="space-y-5 px-4 pb-6">
+          <div className="flex items-center gap-3">
+            <AssetStatusBadge status={item.status} />
+            <span className="text-muted-foreground text-xs">
+              {t.adminAssets.common.assetVersion} {item.revision}
+            </span>
+          </div>
+          {definition.isLoading ? (
+            <Skeleton className="h-40 w-full" />
+          ) : definition.error ? (
+            <div className="space-y-3">
+              <p role="alert" className="text-destructive text-sm">
+                {definition.error instanceof Error
+                  ? definition.error.message
+                  : t.adminAssets.catalog.catalogUnavailable}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void definition.refetch()}
+              >
+                {t.adminAssets.common.retry}
+              </Button>
+            </div>
+          ) : definition.data ? (
+            <AgentDefinitionSummary
+              definition={definition.data.definition}
+              scope="system"
+            />
+          ) : null}
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function VersionedAssetDetail({
   accountId,
   kind,
   item,
   onClose,
 }: {
   accountId: string;
-  kind: AssetListKind;
+  kind: Exclude<AssetListKind, "agents">;
   item: AssetSummary;
   onClose: () => void;
 }) {
@@ -134,6 +245,24 @@ function AssetDetail({
       </SheetContent>
     </Sheet>
   );
+}
+
+function AssetDetail(props: {
+  accountId: string;
+  kind: AssetListKind;
+  item: AssetSummary;
+  onClose: () => void;
+}) {
+  if (props.kind === "agents") {
+    return (
+      <AdminAgentDetail
+        accountId={props.accountId}
+        item={props.item}
+        onClose={props.onClose}
+      />
+    );
+  }
+  return <VersionedAssetDetail {...props} kind={props.kind} />;
 }
 
 function AuthenticatedAdminAssetPage({

@@ -287,13 +287,15 @@ or downgrade an application database.
 - Packaged System Agent/Skill/MCP definitions are bootstrap-only and immutable at
   runtime. Global admin definition routes are read-only; Projects configure their
   own secret values after binding exact System Skill/MCP versions.
-- Packaged System Agent and Skill assets have one deterministic v1 identity and
-  expose it through `current_version_id`. A changed System Skill v1 payload is
+- A packaged System Agent has one deterministic Agent identity and one
+  deterministic `definition_id`; only the explicit System Asset Upgrade path may
+  replace its payload in place. A packaged System Skill has one deterministic v1
+  exposed through `current_version_id`; a changed System Skill payload is
   rejected and must ship under a new identity. Same-byte bootstrap is idempotent.
   Project bindings store only the System Agent/Skill asset identity.
 - Server-owned Builder Agents are absent from every regular project, global-admin,
-  and runtime System Agent catalog, including direct detail and version-history
-  lookup. Only bootstrap and the dedicated internal resolver may address them.
+  and runtime System Agent catalog, including direct definition lookup. Only
+  bootstrap and the dedicated internal resolver may address them.
 - A packaged Skill's authenticated v1 bytes are immutable. Retrospective denial
   uses explicit System governance revocation. A same-byte bootstrap preserves
   revocation; changed authenticated bytes clear it.
@@ -302,12 +304,14 @@ or downgrade an application database.
 
 #### Project assets and domain secrets
 
-- Project Agent/Skill/MCP versions are immutable. Agent/Skill creation saves a
-  complete suspended asset plus Candidate Version v1. Further versions may be
-  authored only from the latest forward head. Activation atomically sets
-  `current_version_id` and enables the asset; skipped and older versions become
-  Historical Versions. No flow mutates, deletes, copies, or reactivates history,
-  and content cannot be moved backward under a higher version number.
+- A Project Agent owns one mutable Definition on the Agent aggregate. Creation
+  saves a complete suspended Agent with its initial Definition; instruction and
+  capability saves replace that Definition under optimistic `revision`, rotate
+  its opaque Definition identity, and immediately affect later Run Admission.
+  Project Agent APIs expose no Candidate, activation, or history lifecycle.
+  Project Skill/MCP versions remain immutable. Skill creation saves a suspended
+  asset plus Candidate Version v1; activation atomically sets
+  `current_version_id`, and skipped or older versions become Historical.
 - Project Skill creation is available only through a validated archive upload
   or an AI Builder commit; there is no metadata-only or template-create API.
   Browser archive upload persists a suspended Candidate and never moves
@@ -336,13 +340,24 @@ or downgrade an application database.
   Activation requires every required declaration to be configured. Secret
   values never enter Skill bytes, public readiness, audit metadata, or API
   responses.
+- Project Skill deletion is an irreversible transition to `archived`, not a
+  reference-gated physical delete. In one Project-governed transaction it hides
+  the Skill, removes every direct Agent Skill reference, advances each affected
+  Agent Definition without changing Agent status, destroys Skill Secret
+  ciphertext, and records the affected count. Archived Skills are absent from
+  all ordinary detail/version/file/secret reads and do not reserve slug or
+  display-name uniqueness. A trusted purger removes Version files and releases
+  quota only after both current and legacy retained Run references are absent;
+  it keeps the Skill identity and Secret Tombstones. Thread deletion alone does
+  not delete retained Runs or release those references.
 #### Runtime admission and MCP
 
 - Runtime-visible Skill names are unique case-insensitively within a project,
   across active Project Skills and enabled System Skill bindings. Activation and
   binding enable enforce the inverse checks under the project lock; Run
   resolution rejects any legacy conflicting closure.
-- Every Run Admission resolves current Agent/Skill asset pointers, including later
+- Every Run Admission resolves the current Agent Definition and Skill Current
+  Version, including later
   messages in an existing Thread, Automation, Channel, edit, regeneration, and
   fork paths. It then persists an immutable referential Run closure: exact
   Agent/MCP payloads, Skill version-4 manifests and database-protected exact
@@ -380,7 +395,7 @@ or downgrade an application database.
 #### Project Agents and Builder
 
 - Project Agent logical `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are
-  immutable version fields, not files in this repository.
+  fields of its single persisted Definition, not files in this repository.
 - Agent payload checksums are recomputed at resolution and Worker materialization.
   Legacy schema v1 fields outside its historical digest must remain empty.
 - Incomplete Agent Builder pagination uses an opaque, immutable `created_at + id`
@@ -411,11 +426,11 @@ or downgrade an application database.
   Authoring-owner reads with edit capability fail stale in-progress Commit
   operations and restore a stranded `committing` session to its still-validated
   candidate so it can be retried.
-- Project Agent DELETE is a soft archive. It retains immutable versions and all
+- Project Agent DELETE is a soft archive. It retains the Agent tombstone and all
   Thread/Run/Automation/Channel/OAuth references, atomically clears a matching
   project-default pointer, hides the Agent from project catalogs, and rejects new
-  Run admission with `PRIVATE_WORK_AGENT_ARCHIVED`. Exact snapshots admitted
-  before archive may still materialize; suspended Agents remain fail-closed.
+  Run admission with `PRIVATE_WORK_AGENT_ARCHIVED`. Exact Run Snapshots admitted
+  before archive retain their Definition payload; suspended Agents remain fail-closed.
   Archived project Agents retain their slug for history but do not occupy the
   active project namespace, so a new Agent may reuse that slug with a new ID.
 

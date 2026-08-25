@@ -116,7 +116,7 @@ class BindingService:
                 existing.version += 1
                 existing.updated_by_user_id = str(actor.user_id)
                 await repository.session.flush()
-                return self._view(selection.kind, existing, target.version.id)
+                return self._view(selection.kind, existing, target.version_id)
             if expected_binding_version is not None:
                 raise AssetConflict(actor.request_id)
             target = await repository.lock_target(actor, selection)
@@ -129,7 +129,7 @@ class BindingService:
             return self._view(
                 selection.kind,
                 await repository.add_binding(actor, selection),
-                target.version.id,
+                target.version_id,
             )
 
         return await self._execute(
@@ -204,7 +204,7 @@ class BindingService:
             selection = AssetSelection(
                 AssetKind.MCP,
                 asset_id,
-                target.version.id,
+                target.version_id,
             )
             if existing is not None and existing.enabled and existing.mcp_server_version_id == selection.version_id:
                 raise AssetConflict(actor.request_id)
@@ -334,8 +334,9 @@ class BindingService:
                 raise AssetConflict(actor.request_id)
             target = await repository.lock_target(actor, selection)
             await repository.validate_target_dependencies(actor, selection)
-            # Agent and Skill bindings follow the aggregate Current Version.
-            # Only MCP retains an exact bound release and can move it.
+            # Agent bindings follow the current Definition and Skill bindings
+            # follow the Current Version. Only MCP retains an exact bound
+            # release and can move it.
             version_column = "mcp_server_version_id"
             current_version_id = getattr(row, version_column)
             if current_version_id == selection.version_id:

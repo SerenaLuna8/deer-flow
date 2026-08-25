@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
+from support.agent_definition_seed import direct_agent_definition_fields
 
 from deerflow.persistence.bootstrap import (
     SchemaRecreateRequired,
@@ -34,6 +35,10 @@ async def _seed_event_scope(connection: AsyncConnection) -> dict[str, object]:
     project_id = uuid.uuid4()
     membership_id = uuid.uuid4()
     agent_id = uuid.uuid4()
+    definition = direct_agent_definition_fields(
+        updated_by_user_id=owner_id,
+        description="Partition Agent",
+    )
     thread_id = f"partition-{uuid.uuid4()}"
     run_ids = {
         "sequence": str(uuid.uuid4()),
@@ -71,10 +76,22 @@ async def _seed_event_scope(connection: AsyncConnection) -> dict[str, object]:
     await connection.execute(
         text(
             """INSERT INTO agents
-            (id,scope,project_id,slug,display_name,status,revision,created_by_user_id)
-            VALUES (:id,'project',:project,'partition-agent','Partition Agent','active',1,:owner)"""
+            (id,scope,project_id,slug,display_name,status,definition_id,
+             description,agents_instructions,soul,identity,user_context,
+             model_ref,model_settings,tool_groups,payload_schema_version,
+             payload_checksum,revision,created_by_user_id,updated_by_user_id)
+            VALUES (:id,'project',:project,'partition-agent','Partition Agent',
+                    'active',:definition_id,:description,:agents_instructions,
+                    :soul,:identity,:user_context,:model_ref,'{}'::jsonb,
+                    '[]'::jsonb,:payload_schema_version,:payload_checksum,1,
+                    :owner,:updated_by_user_id)"""
         ),
-        {"id": agent_id, "project": project_id, "owner": owner_id},
+        {
+            "id": agent_id,
+            "project": project_id,
+            "owner": owner_id,
+            **definition,
+        },
     )
     await connection.execute(
         text(

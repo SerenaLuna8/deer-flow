@@ -756,6 +756,7 @@ class SkillDesignRepository:
                     exists().where(
                         SkillRow.scope == "project",
                         SkillRow.project_id == context.project_id,
+                        SkillRow.status != "archived",
                         ((func.lower(SkillRow.slug) == slug.casefold()) | (func.lower(SkillRow.display_name) == display_name.casefold())),
                     )
                 )

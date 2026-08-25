@@ -145,10 +145,9 @@ from deerflow.persistence.private_work.model import (
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets.agent_model import (
+    AgentMcpRefRow,
     AgentRow,
-    AgentVersionMcpRefRow,
-    AgentVersionRow,
-    AgentVersionSkillRefRow,
+    AgentSkillRefRow,
 )
 from deerflow.persistence.shared_assets.mcp_model import (
     McpSecretSlotRow,
@@ -223,12 +222,12 @@ def _r1_snapshot_schema_version(
     return schema_version
 
 
-def agent_model_snapshot_purpose(version_id: uuid.UUID) -> str:
-    """Return the stable Run-model purpose for one delegated Agent version."""
+def agent_model_snapshot_purpose(definition_id: uuid.UUID) -> str:
+    """Return the stable Run-model purpose for one delegated Agent Definition."""
 
-    if not isinstance(version_id, uuid.UUID):
-        raise TypeError("Agent version_id must be a UUID")
-    return f"agent.{version_id.hex}"
+    if not isinstance(definition_id, uuid.UUID):
+        raise TypeError("Agent definition_id must be a UUID")
+    return f"agent.{definition_id.hex}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,52 +588,48 @@ class RunSnapshotRepository:
         session: AsyncSession,
         snapshot: ResolvedAgentSnapshot,
         project_id: uuid.UUID,
-    ) -> tuple[AgentRow, AgentVersionRow]:
-        row = (
+    ) -> tuple[AgentRow, AgentRow]:
+        asset = (
             await session.execute(
-                select(AgentRow, AgentVersionRow)
-                .join(AgentVersionRow, AgentVersionRow.agent_id == AgentRow.id)
-                .where(
+                select(AgentRow).where(
                     AgentRow.id == snapshot.asset_id,
-                    AgentVersionRow.id == snapshot.version_id,
+                    AgentRow.definition_id == snapshot.version_id,
                 )
             )
-        ).one_or_none()
-        if row is None:
+        ).scalar_one_or_none()
+        if asset is None:
             raise RunSnapshotAssetStale
-        asset, version = row
         try:
             persisted_payload = replace(
                 snapshot.payload,
-                description=version.description,
-                agents_instructions=version.agents_instructions,
-                soul=version.soul,
-                identity=version.identity,
-                user_context=version.user_context,
-                model_ref=version.model_ref,
+                description=asset.description,
+                agents_instructions=asset.agents_instructions,
+                soul=asset.soul,
+                identity=asset.identity,
+                user_context=asset.user_context,
+                model_ref=asset.model_ref,
                 model_settings=AgentModelSettings.model_validate(
-                    {} if version.model_settings is None else version.model_settings,
+                    {} if asset.model_settings is None else asset.model_settings,
                 ),
-                tool_groups=tuple(version.tool_groups),
-                payload_schema_version=version.payload_schema_version,
+                tool_groups=tuple(asset.tool_groups),
+                payload_schema_version=asset.payload_schema_version,
             )
         except (AttributeError, TypeError, ValueError):
             raise RunSnapshotAssetStale from None
-        runtime_payload = replace(persisted_payload, payload_schema_version=4) if version.payload_schema_version in (1, 2, 3) else persisted_payload
+        runtime_payload = persisted_payload
         if (
             asset.scope != snapshot.scope.value
             or asset.status != "active"
-            or asset.current_version_id != version.id
+            or asset.definition_id != snapshot.version_id
             or runtime_payload != snapshot.payload
             or not persisted_agent_payload_checksum_matches(
                 persisted_payload,
-                version.payload_checksum,
+                asset.payload_checksum,
             )
             or not agent_payload_checksum_matches(
                 runtime_payload,
                 snapshot.checksum,
             )
-            or (asset.scope == AssetScope.SYSTEM.value and version.version_number != 1)
             or not RunSnapshotRepository._asset_allowed(
                 asset_scope=asset.scope,
                 asset_project_id=asset.project_id,
@@ -642,7 +637,7 @@ class RunSnapshotRepository:
             )
         ):
             raise RunSnapshotAssetStale
-        return asset, version
+        return asset, asset
 
     @staticmethod
     async def _skills(
@@ -752,22 +747,22 @@ class RunSnapshotRepository:
             (
                 await session.execute(
                     select(
-                        AgentVersionSkillRefRow.skill_asset_scope,
-                        AgentVersionSkillRefRow.skill_asset_id,
+                        AgentSkillRefRow.skill_asset_scope,
+                        AgentSkillRefRow.skill_asset_id,
                     )
-                    .where(AgentVersionSkillRefRow.agent_version_id == snapshot.version_id)
-                    .order_by(AgentVersionSkillRefRow.sort_order)
+                    .where(AgentSkillRefRow.agent_id == snapshot.asset_id)
+                    .order_by(AgentSkillRefRow.sort_order)
                 )
             ).all()
         )
         mcp_ids = tuple(
             (
                 await session.execute(
-                    select(AgentVersionMcpRefRow.mcp_server_version_id)
-                    .where(AgentVersionMcpRefRow.agent_version_id == snapshot.version_id)
+                    select(AgentMcpRefRow.mcp_server_version_id)
+                    .where(AgentMcpRefRow.agent_id == snapshot.asset_id)
                     .order_by(
-                        AgentVersionMcpRefRow.sort_order,
-                        AgentVersionMcpRefRow.mcp_server_version_id,
+                        AgentMcpRefRow.sort_order,
+                        AgentMcpRefRow.mcp_server_version_id,
                     )
                 )
             ).scalars()

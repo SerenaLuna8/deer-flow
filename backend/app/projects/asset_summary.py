@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from deerflow.persistence.projects.model import ProjectRow
-from deerflow.persistence.shared_assets.agent_model import AgentRow, AgentVersionRow
+from deerflow.persistence.shared_assets.agent_model import AgentRow
 from deerflow.persistence.shared_assets.binding_model import (
     ProjectSystemAgentBindingRow,
     ProjectSystemMcpBindingRow,
@@ -31,17 +31,11 @@ def project_asset_summary_columns(
     project_agents = (
         select(func.count())
         .select_from(AgentRow)
-        .join(
-            AgentVersionRow,
-            and_(
-                AgentVersionRow.agent_id == AgentRow.id,
-                AgentVersionRow.id == AgentRow.current_version_id,
-            ),
-        )
         .where(
             AgentRow.scope == "project",
             AgentRow.project_id == project_id,
             AgentRow.status == "active",
+            AgentRow.definition_id.is_not(None),
         )
         .correlate(ProjectRow)
         .scalar_subquery()
@@ -57,18 +51,11 @@ def project_asset_summary_columns(
                 AgentRow.project_id.is_(None),
             ),
         )
-        .join(
-            AgentVersionRow,
-            and_(
-                AgentVersionRow.agent_id == AgentRow.id,
-                AgentVersionRow.id == AgentRow.current_version_id,
-                AgentVersionRow.version_number == 1,
-            ),
-        )
         .where(
             ProjectSystemAgentBindingRow.project_id == project_id,
             ProjectSystemAgentBindingRow.enabled.is_(True),
             AgentRow.status == "active",
+            AgentRow.definition_id.is_not(None),
         )
         .correlate(ProjectRow)
         .scalar_subquery()

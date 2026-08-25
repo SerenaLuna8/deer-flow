@@ -12,6 +12,7 @@ import {
   runPrivateWorkAbortable,
 } from "@/core/private-work/types";
 import { projectKeys } from "@/core/projects/query-keys";
+import { skillBuilderRootKey } from "@/core/skill-builder/query-keys";
 
 import {
   SharedAssetApiError,
@@ -30,6 +31,9 @@ import {
   enableAdminProjectSystemBinding,
   enableProjectSystemBinding,
   forkProjectSkillVersion,
+  getAdminAgentDefinition,
+  getAdminProjectAgentDefinition,
+  getProjectAgentDefinition,
   getProjectMcpEditableConfiguration,
   getProjectMcpToolInventory,
   getProjectDefaultAgent,
@@ -67,12 +71,15 @@ import {
 } from "./api";
 import {
   adminAssetKey,
+  adminAgentDefinitionKey,
   adminAssetVersionsKey,
   adminProjectAssetKey,
+  adminProjectAgentDefinitionKey,
   adminProjectAssetVersionsKey,
   projectAssetKey,
   projectAssetMutationKey,
   projectAssetVersionsKey,
+  projectAgentDefinitionKey,
   projectAgentRuntimeAssessmentsRoot,
   projectDefaultAgentKey,
   projectMcpEditableConfigurationKey,
@@ -91,6 +98,7 @@ import type {
   AgentCapabilityBindingsInput,
   AdminProjectAssetStatusAction,
   AgentInstructionsInput,
+  AgentDefinitionResponse,
   AssetKind,
   AssetListKind,
   ConfiguredMcpResponse,
@@ -117,13 +125,15 @@ import type {
   SkillSecretReplaceInput,
   SkillActivationInput,
   SkillVersionFileContentResponse,
+  SkillDeleteResult,
   SyncCurrentSystemMcpBindingInput,
   UpdateConfiguredMcpInput,
   VersionHistoryResponse,
 } from "./types";
 
 type MutableAssetKind = AssetListKind;
-type ActivatableVersionKind = "agents" | "skills";
+type VersionedAssetListKind = Exclude<MutableAssetKind, "agents">;
+type ActivatableVersionKind = "skills";
 type AuthorableVersionKind = Exclude<MutableAssetKind, "agents">;
 type VersionAuthoringInput = SkillVersionInput | McpVersionInput;
 
@@ -246,6 +256,49 @@ export function invalidateProjectSkillConflictQueries(
   ]);
 }
 
+export async function applyProjectSkillDeletionToCache(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+  assetId: string,
+): Promise<void> {
+  const skillCatalogKey = projectAssetKey(accountId, projectId, "skills");
+  const skillTreeKey = projectAssetVersionsKey(
+    accountId,
+    projectId,
+    "skills",
+    assetId,
+  );
+  const agentRootKey = projectAssetKey(accountId, projectId, "agents");
+  const builderRootKey = skillBuilderRootKey(accountId, projectId);
+
+  await Promise.all([
+    queryClient.cancelQueries({ queryKey: skillCatalogKey }),
+    queryClient.cancelQueries({ queryKey: skillTreeKey }),
+    queryClient.cancelQueries({ queryKey: agentRootKey }),
+    queryClient.cancelQueries({ queryKey: builderRootKey }),
+  ]);
+  queryClient.setQueryData<ProjectAssetList>(skillCatalogKey, (current) =>
+    current
+      ? {
+          ...current,
+          project_items: current.project_items.filter(
+            (item) => item.id !== assetId,
+          ),
+        }
+      : current,
+  );
+  queryClient.removeQueries({ queryKey: skillTreeKey });
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: skillCatalogKey }),
+    queryClient.invalidateQueries({ queryKey: agentRootKey }),
+    queryClient.invalidateQueries({ queryKey: builderRootKey }),
+    queryClient.invalidateQueries({
+      queryKey: projectKeys.workspace(accountId),
+    }),
+  ]);
+}
+
 export function projectAgentMutationQueryKeys(
   accountId: string,
   projectId: string,
@@ -253,7 +306,7 @@ export function projectAgentMutationQueryKeys(
 ) {
   return [
     projectAssetKey(accountId, projectId, "agents"),
-    projectAssetVersionsKey(accountId, projectId, "agents", assetId),
+    projectAgentDefinitionKey(accountId, projectId, assetId),
   ] as const;
 }
 
@@ -291,12 +344,7 @@ export function invalidateProjectAgentConflictQueries(
     ...(assetId
       ? [
           queryClient.invalidateQueries({
-            queryKey: projectAssetVersionsKey(
-              accountId,
-              projectId,
-              "agents",
-              assetId,
-            ),
+            queryKey: projectAgentDefinitionKey(accountId, projectId, assetId),
             exact: true,
           }),
         ]
@@ -527,23 +575,43 @@ export function useSystemAssetCatalog(accountId: string, kind: AssetListKind) {
 export function useProjectAssetVersions(
   accountId: string,
   projectId: string,
-  kind: AssetListKind,
+  kind: VersionedAssetListKind | null,
   assetId: string,
   enabled = true,
   scope: "project" | "system" = "project",
 ) {
   const hasAssetId = assetId.trim() !== "";
+  const queryKind = kind ?? "skills";
   return useQuery<VersionHistoryResponse>({
     queryKey: projectAssetVersionsKey(
       accountId,
       projectId,
-      kind,
+      queryKind,
       hasAssetId ? assetId : "__unselected__",
     ),
     queryFn: ({ signal }) =>
-      scope === "system" && (kind === "agents" || kind === "skills")
-        ? listSystemAssetVersions(kind, assetId, signal)
-        : listProjectAssetVersions(projectId, kind, assetId, signal),
+      scope === "system" && queryKind === "skills"
+        ? listSystemAssetVersions(queryKind, assetId, signal)
+        : listProjectAssetVersions(projectId, queryKind, assetId, signal),
+    enabled: enabled && kind !== null && hasAssetId,
+  });
+}
+
+export function useProjectAgentDefinition(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+  enabled = true,
+) {
+  const hasAssetId = assetId.trim() !== "";
+  return useQuery<AgentDefinitionResponse>({
+    queryKey: projectAgentDefinitionKey(
+      accountId,
+      projectId,
+      hasAssetId ? assetId : "00000000-0000-4000-8000-000000000000",
+    ),
+    queryFn: ({ signal }) =>
+      getProjectAgentDefinition(projectId, assetId, signal),
     enabled: enabled && hasAssetId,
   });
 }
@@ -870,7 +938,7 @@ export function useClearProjectSkillSecret(
 
 export function useAdminAssetVersions(
   accountId: string,
-  kind: AssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
 ) {
   return useQuery<VersionHistoryResponse>({
@@ -879,16 +947,35 @@ export function useAdminAssetVersions(
   });
 }
 
+export function useAdminAgentDefinition(accountId: string, assetId: string) {
+  return useQuery<AgentDefinitionResponse>({
+    queryKey: adminAgentDefinitionKey(accountId, assetId),
+    queryFn: ({ signal }) => getAdminAgentDefinition(assetId, signal),
+  });
+}
+
 export function useAdminProjectAssetVersions(
   accountId: string,
   projectId: string,
-  kind: AssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
 ) {
   return useQuery<VersionHistoryResponse>({
     queryKey: adminProjectAssetVersionsKey(accountId, projectId, kind, assetId),
     queryFn: ({ signal }) =>
       listAdminProjectAssetVersions(projectId, kind, assetId, signal),
+  });
+}
+
+export function useAdminProjectAgentDefinition(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+) {
+  return useQuery<AgentDefinitionResponse>({
+    queryKey: adminProjectAgentDefinitionKey(accountId, projectId, assetId),
+    queryFn: ({ signal }) =>
+      getAdminProjectAgentDefinition(projectId, assetId, signal),
   });
 }
 
@@ -1290,7 +1377,6 @@ export function useChangeProjectAssetStatus<Kind extends MutableAssetKind>(
 
 export function useDeleteProjectSkill(accountId: string, projectId: string) {
   const queryClient = useQueryClient();
-  const invalidate = useProjectInvalidation(accountId, projectId, "skills");
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -1314,34 +1400,18 @@ export function useDeleteProjectSkill(accountId: string, projectId: string) {
       ),
     onSuccess: whenActive(
       (
-        _data: void,
+        _data: SkillDeleteResult,
         variables: {
           assetId: string;
           input: ExpectedRevisionInput;
         },
-      ) => {
-        queryClient.setQueryData<ProjectAssetList>(
-          projectAssetKey(accountId, projectId, "skills"),
-          (current) =>
-            current
-              ? {
-                  ...current,
-                  project_items: current.project_items.filter(
-                    (item) => item.id !== variables.assetId,
-                  ),
-                }
-              : current,
-        );
-        queryClient.removeQueries({
-          queryKey: projectAssetVersionsKey(
-            accountId,
-            projectId,
-            "skills",
-            variables.assetId,
-          ),
-        });
-        void invalidate();
-      },
+      ) =>
+        applyProjectSkillDeletionToCache(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+        ),
     ),
   });
 }
@@ -1390,10 +1460,9 @@ export function useDeleteProjectAgent(accountId: string, projectId: string) {
               : current,
         );
         queryClient.removeQueries({
-          queryKey: projectAssetVersionsKey(
+          queryKey: projectAgentDefinitionKey(
             accountId,
             projectId,
-            "agents",
             variables.assetId,
           ),
         });
@@ -1512,7 +1581,6 @@ export function useActivateProjectAssetVersion(
   projectId: string,
   kind: ActivatableVersionKind,
 ) {
-  const queryClient = useQueryClient();
   const queryKind = kind;
   const invalidate = useProjectInvalidation(accountId, projectId, queryKind);
   const { runMutation, whenActive } = useProjectMutationRunner(
@@ -1534,63 +1602,18 @@ export function useActivateProjectAssetVersion(
       assetId: string;
       versionId: string;
       input: ExpectedRevisionInput | SkillActivationInput;
-    }) => {
-      return runMutation((signal) =>
-        kind === "skills"
-          ? activateProjectAssetVersion(
-              projectId,
-              kind,
-              assetId,
-              versionId,
-              input as SkillActivationInput,
-              signal,
-            )
-          : activateProjectAssetVersion(
-              projectId,
-              kind,
-              assetId,
-              versionId,
-              input as ExpectedRevisionInput,
-              signal,
-            ),
-      );
-    },
-    onSuccess: whenActive(
-      (
-        _data,
-        variables: {
-          assetId: string;
-          versionId: string;
-          input: ExpectedRevisionInput | SkillActivationInput;
-        },
-      ) =>
-        kind === "agents"
-          ? invalidateProjectAgentMutationQueries(
-              queryClient,
-              accountId,
-              projectId,
-              variables.assetId,
-            )
-          : invalidate(),
-    ),
-    onError: whenActive(
-      async (
-        error: unknown,
-        variables: {
-          assetId: string;
-          versionId: string;
-          input: ExpectedRevisionInput | SkillActivationInput;
-        },
-      ) => {
-        if (kind !== "agents" || !isProjectAgentCasConflict(error)) return;
-        await invalidateProjectAgentConflictQueries(
-          queryClient,
-          accountId,
+    }) =>
+      runMutation((signal) =>
+        activateProjectAssetVersion(
           projectId,
-          variables.assetId,
-        );
-      },
-    ),
+          kind,
+          assetId,
+          versionId,
+          input as SkillActivationInput,
+          signal,
+        ),
+      ),
+    onSuccess: whenActive(() => invalidate()),
   });
 }
 

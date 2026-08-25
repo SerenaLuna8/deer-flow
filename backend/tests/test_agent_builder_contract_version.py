@@ -118,7 +118,7 @@ class _BuilderService:
                 slug=self.view.slug,
                 display_name=self.view.display_name,
                 status="suspended",
-                current_version_id=None,
+                definition_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
                 revision=1,
                 created_by_user_id=self.view.owner_user_id,
                 created_at=_NOW,

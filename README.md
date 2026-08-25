@@ -34,13 +34,15 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   Run 工具并向 Agent 提供安全的能力降级提示；其他能力和主回复继续执行。授权撤销、
   冻结快照漂移、Secret 材料化不确定等安全边界仍会终止 Run。Skill 脚本及普通
   工具失败以错误结果返回 Agent，由其使用现有上下文继续或明确说明未完成部分。
-- System/Project Agent、Skill、MCP 的不可变版本和准入快照。Model、Skill、MCP、
+- System/Project Agent、Skill、MCP 的受治理定义和不可变准入快照。Model、Skill、MCP、
   Channels 分别拥有自己的加密 Secret 与生命周期。Project
   MCP 的访问凭证按请求参数逐行声明，每行选择 Header 或 Query；两类参数可在同一
   凭证组中同时配置并一次加密保存，值不写入 MCP URL、资产定义或浏览器缓存。
-  Agent/Skill 保存后生成不可变 Candidate Version；显式激活会原子设置
+  Project Agent 只有一个可变 Definition，保存后增加 revision 并立即影响后续新 Run，
+  不再创建 Candidate/Historical Version；System Agent 仍是平台管理的单一定义。
+  Project Skill 保存后生成不可变 Candidate Version；显式激活会原子设置
   `current_version_id` 并启用资产，历史版本只读且不能恢复、复制或重新激活。System
-  Agent/Skill 只有自动成为 Current Version 的 v1，用户不能创建、保存或手工激活版本。
+  Skill 只有自动成为 Current Version 的 v1，用户不能创建、保存或手工激活版本。
   项目 Skill 仅可通过 AI 对话创建/修订，或上传 `.zip`、`.skill`、`.tar`、`.tar.gz`
   或 `.tgz` 包；常见 macOS 归档元数据会被忽略。超出上传、解压、单文件或成员数限制
   的包会以明确的大小限制错误拒绝。项目与系统 Skill 的上传、Builder、导入、保存、安装和激活
@@ -52,9 +54,12 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   Secret 值、密钥或版本历史，被治理撤销的 System Skill v1 不可导出。
   项目 Agent 的删除采用软归档：从项目目录移除并拒绝后续
   Run，既有会话、运行记录及已准入的执行快照继续保留；已归档 Agent 不再占用项目
-  名称，同一名称可用于创建具有新 ID 的 Agent。Agent 详情按所选不可变版本展示
-  指令和能力；只有最新向前派生的版本可以继续编辑，Historical Version 不能形成内容
-  回退。Skill 可在 `SKILL.md` 中通过
+  名称，同一名称可用于创建具有新 ID 的 Agent。Agent 详情直接编辑唯一 Definition，
+  保存使用 revision 做并发控制。项目 Skill 删除同样是不可恢复的归档：它从普通页面隐藏，
+  自动从全部 Agent Definition 解绑且不改变 Agent 的启用/停用状态；同名 Skill 可重新创建。
+  删除会立即销毁该 Skill 的 Secret 密文，因此尚未物化秘密或后续重试的旧 Run 会失败关闭；
+  已固定的 Skill Version 文件在最后一条 Run 引用清理后才释放配额并物理清除，Skill 墓碑保留。
+  Skill 可在 `SKILL.md` 中通过
   `required-secrets` 声明敏感环境变量；版本工作台和 AI Builder 提供结构化表单并与
   同一源码副本同步。版本工作台的“运行秘密”按精确 Skill Version 和变量名保存项目独有
   密文：声明仍只写入 `SKILL.md`，值只存 PostgreSQL。Candidate Version 激活前必须完成
@@ -65,19 +70,19 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - Agent Builder 以独立于普通会话的设计会话展示真实模型思考和校验、保存阶段，支持按模型
   能力选择思考强度、停止当前生成并继续设计，以及断线后完整回放过程。它不调用工具，也不
   展示 Provider 原始响应、系统提示或最终 JSON；生成后的四份指令文档在独立设计稿侧栏中
-  查看和编辑，聊天区只保留摘要入口。最终确认只创建 suspended Agent 和 Candidate
-  Version，不会自动激活。每次模型生成回合的默认值和硬上限均为 600 秒，不限制整个 Agent
+  查看和编辑，聊天区只保留摘要入口。最终确认只创建 suspended Agent 及其初始
+  Definition，不会自动启用。每次模型生成回合的默认值和硬上限均为 600 秒，不限制整个 Agent
   设计会话。
 - AI Skill Builder 由仅供专用解析器访问的内置 Agent 执行，不出现在项目、全局管理或
   运行时 Agent 目录及其常规 API。它复用普通 Agent 的 Web、文件、Sandbox 和任务委派
   装配，并遵循 Local/AIO Provider 各自的安全策略；候选文件只能经受管工具、检查和
   显式提交进入不可变版本历史。
 - 每个 Run（包括既有 Thread 的后续消息、编辑/重新生成、Automation 和 Channel）都在
-  准入时重新解析 Agent 与 Skill 的 Current Version，并冻结为不可变执行闭包。Agent 与
+  准入时重新解析 Agent Definition 与 Skill 的 Current Version，并冻结为不可变执行闭包。Agent 与
   MCP 继续保存精确快照；Skill 文件只在不可变 Skill Version 中保存一次，Run 保存无文件
   内容的 v4 manifest 和受数据库保护的精确 Version 引用。Worker 按该引用校验、物化并
   只读挂载 Run 专属 Skill tree，执行、重试和恢复期间都不会重新查询 Current Version。
-  Agent 对 Skill 的依赖仍只保存 Skill Asset ID，只有新 Run 准入时解析其 Current Version；
+  Agent Definition 对 Skill 的依赖仍只保存 Skill Asset ID，只有新 Run 准入时解析其 Current Version；
   MCP 仍绑定精确配置。
   `run_skill_snapshots.writer_mode` 是进程启动时冻结的发布选择，默认且正常发布必须使用
   `v4_reference`。仅在受控 R1 回滚期间，operator 才可让全部 Gateway 与 Scheduler 同时切换
@@ -122,7 +127,7 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 | 项目角色 | 项目菜单             | 主要边界                                         |
 | -------- | -------------------- | ------------------------------------------------ |
 | Admin    | 工作、能力、项目管理 | 项目治理、成员、各域秘密配置、审计及资产生命周期 |
-| Editor   | 工作、能力           | 运行工作，并保存、激活或停用项目 Agent/Skill     |
+| Editor   | 工作、能力           | 运行工作，保存/启停 Agent，并保存/激活/启停 Skill |
 | Runner   | 工作、Agent（只读）  | 运行工作；只读查看 Agent                         |
 | Viewer   | 工作、Agent（只读）  | 查看自己的既有工作和 Agent；不能运行             |
 

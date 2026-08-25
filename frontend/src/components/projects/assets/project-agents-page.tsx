@@ -51,7 +51,8 @@ import {
   useChangeProjectAssetStatus,
   useProjectDefaultAgent,
   useSetProjectDefaultAgent,
-  type AssetVersion,
+  type AgentDefinition,
+  type AgentDefinitionResponse,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
 import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
@@ -63,7 +64,6 @@ import {
   cacheProjectAgentAuthoringReload,
   projectAgentAuthoringCacheEpochs,
   reloadProjectAgentAuthoringState,
-  type AgentAssetVersion as AuthoringAgentVersion,
 } from "./agent-authoring-recovery";
 import { AgentCapabilityWorkbench } from "./agent-capability-workbench";
 import { AgentInstructionsWorkbench } from "./agent-instructions-workbench";
@@ -75,28 +75,24 @@ import {
 
 export type ProjectAgentViewMode = "cards" | "list";
 
-type AgentAssetVersion = Extract<AssetVersion, { agent_id: string }>;
-
 function AgentDetailWorkbench({
   accountId,
   projectId,
   item,
-  version,
+  definition,
   canAuthor,
   editing,
   onEditingChange,
   onDirtyChange,
-  onVersionCreated,
 }: {
   accountId: string;
   projectId: string;
   item: ProjectAssetItem;
-  version: AgentAssetVersion | null;
+  definition: AgentDefinition | null;
   canAuthor: boolean;
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
-  onVersionCreated: (versionId: string) => void;
 }) {
   const { t } = useI18n();
   const project = useCurrentProject();
@@ -113,7 +109,7 @@ function AgentDetailWorkbench({
   const [capabilityDirty, setCapabilityDirty] = useState(false);
   const [authoringSnapshot, setAuthoringSnapshot] = useState<{
     item: ProjectAssetItem;
-    version: AuthoringAgentVersion;
+    definition: AgentDefinition;
   } | null>(null);
   const [authoringPreparationPending, setAuthoringPreparationPending] =
     useState(false);
@@ -222,7 +218,7 @@ function AgentDetailWorkbench({
         }
         setAuthoringSnapshot({
           item: reload.item,
-          version: reload.version,
+          definition: reload.definition,
         });
         return true;
       } catch {
@@ -271,8 +267,17 @@ function AgentDetailWorkbench({
     [onEditingChange, prepareAuthoring],
   );
 
-  const authoringVersion = authoringSnapshot?.version ?? version;
+  const authoringDefinition = authoringSnapshot?.definition ?? definition;
   const authoringItem = authoringSnapshot?.item ?? item;
+  const handleDefinitionSaved = useCallback(
+    (response: AgentDefinitionResponse) => {
+      setAuthoringSnapshot({
+        item: response.item as ProjectAssetItem,
+        definition: response.definition,
+      });
+    },
+    [],
+  );
   const preparationStatus = authoringPreparationPending ? (
     <p role="status" className="text-muted-foreground text-sm">
       {copy.authoringLoading}
@@ -291,13 +296,13 @@ function AgentDetailWorkbench({
           accountId={accountId}
           projectId={projectId}
           item={authoringItem}
-          version={authoringVersion}
+          definition={authoringDefinition}
           canAuthor={canAuthor}
           authoringPreparationPending={authoringPreparationPending}
           editing={editing}
           onEditingChange={handleInstructionEditingChange}
           onDirtyChange={handleInstructionDirty}
-          onVersionCreated={onVersionCreated}
+          onDefinitionSaved={handleDefinitionSaved}
         />
       </div>
     );
@@ -330,13 +335,13 @@ function AgentDetailWorkbench({
           accountId={accountId}
           projectId={projectId}
           item={authoringItem}
-          version={authoringVersion}
+          definition={authoringDefinition}
           canAuthor={canAuthor}
           authoringPreparationPending={authoringPreparationPending}
           editing={editing}
           onEditingChange={handleInstructionEditingChange}
           onDirtyChange={handleInstructionDirty}
-          onVersionCreated={onVersionCreated}
+          onDefinitionSaved={handleDefinitionSaved}
         />
       </TabsContent>
       <TabsContent
@@ -348,12 +353,12 @@ function AgentDetailWorkbench({
           accountId={accountId}
           projectId={projectId}
           item={authoringItem}
-          version={authoringVersion}
+          definition={authoringDefinition}
           canAuthor={canAuthor}
           authoringPreparationPending={authoringPreparationPending}
           onBeginEditing={() => prepareAuthoring(true)}
           onDirtyChange={handleCapabilityDirty}
-          onVersionCreated={onVersionCreated}
+          onDefinitionSaved={handleDefinitionSaved}
         />
       </TabsContent>
     </Tabs>
@@ -443,8 +448,8 @@ export function projectAgentChatAvailability(
   if (!item.capabilities.includes("shared_assets.execute")) {
     return { enabled: false, reason: copy.executeForbidden };
   }
-  if (!item.current_version_id) {
-    return { enabled: false, reason: copy.currentVersionRequired };
+  if (!item.definition_id) {
+    return { enabled: false, reason: copy.definitionRequired };
   }
   if (mcpDependencyReason) {
     return { enabled: false, reason: mcpDependencyReason };
@@ -460,7 +465,7 @@ export function projectAgentCanActivate(
     item.status === "suspended" &&
     projectCapabilities.includes("shared_assets.manage_bindings") &&
     item.capabilities.includes("shared_assets.manage_bindings") &&
-    item.current_version_id !== null
+    Boolean(item.definition_id)
   );
 }
 
@@ -482,8 +487,8 @@ export function projectAgentDefaultAvailability(
   if (!item.capabilities.includes("shared_assets.execute")) {
     return { enabled: false, reason: copy.executeForbidden };
   }
-  if (!item.current_version_id) {
-    return { enabled: false, reason: copy.currentVersionRequired };
+  if (!item.definition_id) {
+    return { enabled: false, reason: copy.definitionRequired };
   }
   if (mcpDependencyReason) {
     return { enabled: false, reason: mcpDependencyReason };
@@ -508,8 +513,8 @@ function projectMainDefaultAvailability(
   if (!item.capabilities.includes("shared_assets.execute")) {
     return { enabled: false, reason: copy.mainExecuteForbidden };
   }
-  if (!item.current_version_id) {
-    return { enabled: false, reason: copy.mainVersionUnavailable };
+  if (!item.definition_id) {
+    return { enabled: false, reason: copy.mainDefinitionUnavailable };
   }
   return { enabled: true, reason: null };
 }
@@ -1214,18 +1219,27 @@ export function ProjectAgentsPage({
           onSelect={onSelect}
         />
       )}
-      renderAssetEditor={(version, context) => (
+      renderAssetEditor={(definition, context) => (
         <AgentDetailWorkbench
-          key={version?.id ?? "empty"}
+          key={
+            definition && "definition_id" in definition
+              ? definition.definition_id
+              : "empty"
+          }
           accountId={context.accountId}
           projectId={context.projectId}
           item={context.item}
-          version={version && "agent_id" in version ? version : null}
+          definition={
+            definition &&
+            "definition_id" in definition &&
+            "agent_id" in definition
+              ? definition
+              : null
+          }
           canAuthor={context.canAuthor}
           editing={context.editing}
           onEditingChange={context.onEditingChange}
           onDirtyChange={context.onDirtyChange}
-          onVersionCreated={context.onVersionCreated}
         />
       )}
     />

@@ -149,7 +149,7 @@ def _resolve_runtime_option(
     agent_value: object,
     default: object,
 ) -> object:
-    """Resolve ``request > exact Agent version > global`` without losing false."""
+    """Resolve ``request > exact Agent Definition > global`` without losing false."""
 
     if key in cfg:
         return cfg[key]
@@ -750,14 +750,14 @@ def _make_lead_agent(
         ),
     )
     agent_config = load_agent_config(agent_name) if private_runtime is None else None
-    agent_version_model_settings = getattr(private_runtime, "model_settings", None) if private_runtime is not None else getattr(agent_config, "model_settings", None)
-    if agent_version_model_settings is not None:
+    agent_definition_model_settings = getattr(private_runtime, "model_settings", None) if private_runtime is not None else getattr(agent_config, "model_settings", None)
+    if agent_definition_model_settings is not None:
         thinking_enabled = bool(
             _resolve_runtime_option(
                 cfg,
                 "thinking_enabled",
                 getattr(
-                    agent_version_model_settings,
+                    agent_definition_model_settings,
                     "thinking_enabled",
                     None,
                 ),
@@ -768,7 +768,7 @@ def _make_lead_agent(
             cfg,
             "reasoning_effort",
             getattr(
-                agent_version_model_settings,
+                agent_definition_model_settings,
                 "reasoning_effort",
                 None,
             ),
@@ -798,8 +798,8 @@ def _make_lead_agent(
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. A platform administrator must configure an active model in System Settings, and the request must reference its model UUID.")
-    exact_agent_thinking = getattr(agent_version_model_settings, "thinking_enabled", None) if agent_version_model_settings is not None else None
-    exact_agent_reasoning = getattr(agent_version_model_settings, "reasoning_effort", None) if agent_version_model_settings is not None else None
+    exact_agent_thinking = getattr(agent_definition_model_settings, "thinking_enabled", None) if agent_definition_model_settings is not None else None
+    exact_agent_reasoning = getattr(agent_definition_model_settings, "reasoning_effort", None) if agent_definition_model_settings is not None else None
     if "thinking_enabled" not in cfg and exact_agent_thinking is True and not model_config.supports_thinking:
         raise ValueError(f"Model {model_name} does not support exact Agent thinking")
     if "reasoning_effort" not in cfg and exact_agent_reasoning is not None and not model_config.supports_reasoning_effort:
@@ -943,9 +943,9 @@ def _make_lead_agent(
     raw_capability_notice = getattr(private_runtime, "capability_notice", "") if private_runtime is not None else ""
     runtime_capability_notice = raw_capability_notice if isinstance(raw_capability_notice, str) else ""
     agent_model_overrides: dict[str, object] = {}
-    if agent_version_model_settings is not None:
+    if agent_definition_model_settings is not None:
         sampling_overrides = getattr(
-            agent_version_model_settings,
+            agent_definition_model_settings,
             "sampling_overrides",
             None,
         )

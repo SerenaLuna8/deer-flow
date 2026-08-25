@@ -4,24 +4,17 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets import agent_service as agent_service_module
-from app.shared_assets.agent_repository import AgentVersionRecord
-from app.shared_assets.agent_service import (
-    AgentCapabilityBindings,
-    AgentService,
-)
-from app.shared_assets.errors import AssetValidationFailed
-from app.shared_assets.models import (
-    AgentModelSettings,
-    AssetScope,
-    SkillAssetRef,
-    VersionRelation,
-)
-from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+from app.shared_assets.agent_repository import AgentDefinitionRecord
+from app.shared_assets.agent_service import AgentService
+from app.shared_assets.models import AgentModelSettings, AgentPayload, AssetScope, SkillAssetRef
+from deerflow.persistence.shared_assets import AgentRow
 
 
 def _context() -> ProjectContext:
@@ -30,231 +23,120 @@ def _context() -> ProjectContext:
         project_id=uuid.uuid4(),
         membership_id=uuid.uuid4(),
         role=ProjectRole.ADMIN,
-        capabilities=frozenset(
-            {
-                Capability.SHARED_ASSETS_READ,
-                Capability.SHARED_ASSETS_EDIT,
-            }
-        ),
+        capabilities=frozenset({Capability.SHARED_ASSETS_READ, Capability.SHARED_ASSETS_EDIT}),
         membership_version=1,
-        request_id="request-1",
+        request_id="skill-delete-agent-unbind",
     )
 
 
-def _asset(context: ProjectContext, version_id: uuid.UUID) -> AgentRow:
+def _record(
+    actor: ProjectContext,
+    status: str,
+    deleted_skill_id: uuid.UUID,
+    retained_skill_id: uuid.UUID,
+) -> AgentDefinitionRecord:
+    skill_refs = (
+        SkillAssetRef(AssetScope.PROJECT, deleted_skill_id),
+        SkillAssetRef(AssetScope.PROJECT, retained_skill_id),
+    )
+    payload = AgentPayload(
+        description=f"{status} Agent",
+        agents_instructions="Review the task.",
+        soul="Be precise.",
+        identity="Reviewer",
+        user_context="Use Chinese.",
+        model_ref="default",
+        model_settings=AgentModelSettings(),
+        tool_groups=(),
+        skill_refs=skill_refs,
+        mcp_version_ids=(),
+        payload_schema_version=4,
+    )
     now = datetime.now(UTC)
-    return AgentRow(
+    row = AgentRow(
         id=uuid.uuid4(),
         scope="project",
-        project_id=context.project_id,
+        project_id=actor.project_id,
+        slug=f"{status}-agent",
+        display_name=f"{status.title()} Agent",
+        status=status,
+        definition_id=uuid.uuid4(),
+        description=payload.description,
+        agents_instructions=payload.agents_instructions,
+        soul=payload.soul,
+        identity=payload.identity,
+        user_context=payload.user_context,
+        model_ref=payload.model_ref,
+        model_settings=payload.model_settings.model_dump(exclude_none=True),
+        tool_groups=list(payload.tool_groups),
+        payload_schema_version=4,
+        payload_checksum=agent_payload_checksum(payload),
+        revision=7,
         source_key=None,
-        slug="reviewer",
-        display_name="Reviewer",
-        status="active",
-        current_version_id=version_id,
-        revision=3,
-        created_by_user_id=str(context.user_id),
+        created_by_user_id=str(actor.user_id),
+        updated_by_user_id=str(actor.user_id),
         created_at=now,
         updated_at=now,
     )
-
-
-def _version(asset_id: uuid.UUID, version_id: uuid.UUID) -> AgentVersionRecord:
-    now = datetime.now(UTC)
-    row = AgentVersionRow(
-        id=version_id,
-        agent_id=asset_id,
-        version_number=1,
-        description="审查代码并输出建议",
-        agents_instructions="# AGENTS.md\n\nReview code.",
-        soul="# SOUL.md\n\nBe precise.",
-        identity="# IDENTITY.md\n\nReviewer.",
-        user_context="# USER.md\n\nUse Chinese.",
-        model_ref="default",
-        model_settings=AgentModelSettings().model_dump(exclude_none=True),
-        tool_groups=["web", "file:read", "task"],
-        supersedes_version_id=None,
-        payload_schema_version=2,
-        payload_checksum="a" * 64,
-        created_by_user_id="creator",
-        created_at=now,
-    )
-    return AgentVersionRecord(
-        row,
-        (SkillAssetRef(AssetScope.PROJECT, uuid.uuid4()),),
-        (),
-    )
+    return AgentDefinitionRecord(row, skill_refs, ())
 
 
 @pytest.mark.asyncio
-async def test_update_capability_bindings_creates_a_forward_candidate(
+async def test_skill_delete_unbinds_all_project_agent_definitions_without_changing_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    context = _context()
-    current_version_id = uuid.uuid4()
-    asset = _asset(context, current_version_id)
-    current = _version(asset.id, current_version_id)
-    latest_candidate = _version(asset.id, uuid.uuid4())
-    latest_candidate.row.version_number = 2
-    latest_candidate.row.supersedes_version_id = current_version_id
-    latest_candidate.row.agents_instructions = "# AGENTS.md\n\nKeep this Candidate edit."
-    latest_candidate.row.soul = "# SOUL.md\n\nCandidate soul."
-    latest_candidate.row.identity = "# IDENTITY.md\n\nCandidate identity."
-    latest_candidate.row.user_context = "# USER.md\n\nCandidate context."
-    selected_skills = (
-        SkillAssetRef(AssetScope.PROJECT, uuid.uuid4()),
-        SkillAssetRef(AssetScope.SYSTEM, uuid.uuid4()),
-    )
-    selected_mcps = (uuid.uuid4(),)
-    created: list[AgentVersionRecord] = []
-    audit_actions: list[str] = []
-
-    class _Session:
-        async def flush(self) -> None:
-            return None
+    actor = _context()
+    deleted_skill_id = uuid.uuid4()
+    retained_skill_id = uuid.uuid4()
+    records = tuple(_record(actor, status, deleted_skill_id, retained_skill_id) for status in ("active", "suspended", "archived"))
+    before = {record.row.id: (record.row.status, record.row.definition_id, record.row.revision) for record in records}
+    replacements: list[AgentDefinitionRecord] = []
 
     class _Repository:
-        def __init__(self, session: object) -> None:
+        def __init__(self, session: AsyncSession) -> None:
             self.session = session
 
-        async def get_project_asset(self, *_args, **_kwargs) -> AgentRow:
-            return asset
-
-        async def get_project_version_history(self, *_args) -> tuple[AgentVersionRecord, ...]:
-            return (latest_candidate, current)
-
-        async def resolve_project_skill_refs(self, *_args, **_kwargs) -> tuple[SkillAssetRef, ...]:
-            return selected_skills
-
-        async def resolve_project_mcp_versions(self, *_args) -> tuple[uuid.UUID, ...]:
-            return selected_mcps
-
-        async def lock_skill_asset_slugs(self, values) -> tuple[str, ...]:
-            assert tuple(values) == selected_skills
-            return ("first-skill", "second-skill")
-
-        async def next_project_version_number(self, *_args) -> int:
-            return 3
-
-        async def create_project_version(
+        async def lock_project_agents_referencing_skill(
             self,
-            _actor: object,
-            asset_id: uuid.UUID,
-            row: AgentVersionRow,
-            skill_refs,
-            mcp_version_ids,
-        ) -> AgentVersionRecord:
-            assert asset_id == asset.id
-            row.id = uuid.uuid4()
-            record = AgentVersionRecord(
-                row,
-                tuple(skill_refs),
-                tuple(mcp_version_ids),
+            _actor: ProjectContext,
+            _skill_id: uuid.UUID,
+        ) -> tuple[AgentDefinitionRecord, ...]:
+            return records
+
+        async def replace_definition(
+            self,
+            row: AgentRow,
+            payload: AgentPayload,
+            *,
+            definition_id: uuid.UUID,
+            payload_checksum: str,
+            updated_by_user_id: str,
+        ) -> AgentDefinitionRecord:
+            row.definition_id = definition_id
+            row.payload_checksum = payload_checksum
+            row.updated_by_user_id = updated_by_user_id
+            row.revision += 1
+            changed = AgentDefinitionRecord(row, payload.skill_refs, payload.mcp_version_ids)
+            replacements.append(changed)
+            return changed
+
+    monkeypatch.setattr(agent_service_module, "AgentRepository", _Repository)
+    session = AsyncSession()
+    try:
+        async with session.begin():
+            affected = await AgentService(lambda: session).remove_project_skill_from_definitions_in_session(
+                session,
+                actor,
+                deleted_skill_id,
             )
-            created.append(record)
-            return record
+    finally:
+        await session.close()
 
-    class _SessionContext:
-        async def __aenter__(self) -> _Session:
-            return _Session()
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-    class _Transaction:
-        async def __aenter__(self) -> None:
-            return None
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-    class _SessionWithBegin(_Session):
-        def begin(self) -> _Transaction:
-            return _Transaction()
-
-    class _FactoryContext:
-        async def __aenter__(self) -> _SessionWithBegin:
-            return _SessionWithBegin()
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-    class _AuditSink:
-        async def append_project(self, _session, **kwargs) -> None:
-            audit_actions.append(kwargs["action"])
-
-    monkeypatch.setattr(agent_service_module, "AgentRepository", _Repository)
-    service = AgentService(lambda: _FactoryContext(), governance_sink=_AuditSink())  # type: ignore[arg-type]
-
-    result = await service.update_capability_bindings(
-        context,
-        asset.id,
-        AgentCapabilityBindings(selected_skills, selected_mcps),
-        expected_asset_version=3,
-    )
-
-    assert result.version_number == 3
-    assert result.relation is VersionRelation.CANDIDATE
-    assert result.skill_refs == selected_skills
-    assert result.mcp_version_ids == selected_mcps
-    assert result.agents_instructions == latest_candidate.row.agents_instructions
-    assert result.soul == latest_candidate.row.soul
-    assert result.identity == latest_candidate.row.identity
-    assert result.user_context == latest_candidate.row.user_context
-    assert result.tool_groups == tuple(current.row.tool_groups)
-    assert len(created) == 1
-    assert created[0].row.supersedes_version_id == latest_candidate.row.id
-    assert asset.current_version_id == current_version_id
-    assert asset.revision == 4
-    assert audit_actions == ["agent.capability_bindings.update"]
-
-
-@pytest.mark.asyncio
-async def test_update_capability_bindings_rejects_out_of_scope_dependencies(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = _context()
-    current_version_id = uuid.uuid4()
-    asset = _asset(context, current_version_id)
-    current = _version(asset.id, current_version_id)
-    selected_skill = SkillAssetRef(AssetScope.PROJECT, uuid.uuid4())
-
-    class _Session:
-        async def flush(self) -> None:
-            return None
-
-        def begin(self):
-            return self
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-    class _Repository:
-        def __init__(self, session: object) -> None:
-            self.session = session
-
-        async def get_project_asset(self, *_args, **_kwargs) -> AgentRow:
-            return asset
-
-        async def get_project_version_history(self, *_args) -> tuple[AgentVersionRecord, ...]:
-            return (current,)
-
-        async def resolve_project_skill_refs(self, *_args, **_kwargs) -> tuple[SkillAssetRef, ...]:
-            return ()
-
-        async def resolve_project_mcp_versions(self, *_args) -> tuple[uuid.UUID, ...]:
-            return ()
-
-    monkeypatch.setattr(agent_service_module, "AgentRepository", _Repository)
-    service = AgentService(lambda: _Session())  # type: ignore[arg-type]
-
-    with pytest.raises(AssetValidationFailed):
-        await service.update_capability_bindings(
-            context,
-            asset.id,
-            AgentCapabilityBindings((selected_skill,), ()),
-            expected_asset_version=3,
-        )
+    assert {item.id for item in affected} == {record.row.id for record in records}
+    assert len(replacements) == 3
+    for changed in replacements:
+        status, old_definition_id, old_revision = before[changed.row.id]
+        assert changed.row.status == status
+        assert changed.row.definition_id != old_definition_id
+        assert changed.row.revision == old_revision + 1
+        assert changed.skill_refs == (SkillAssetRef(AssetScope.PROJECT, retained_skill_id),)

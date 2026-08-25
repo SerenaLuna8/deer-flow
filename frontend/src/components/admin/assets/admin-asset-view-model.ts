@@ -69,7 +69,8 @@ export function adminAssetCatalogSummary(
     if (item.status === "active") active += 1;
     if (item.status === "suspended") suspended += 1;
     if (item.status === "archived") archived += 1;
-    if (item.current_version_id === null) unpublished += 1;
+    if (!item.definition_id && item.current_version_id == null)
+      unpublished += 1;
 
     const updatedTime = Date.parse(item.updated_at);
     if (updatedTime > latestUpdatedTime) {
@@ -100,7 +101,8 @@ function matchesAdminAssetPublication(
   publication: AdminAssetPublicationFilter,
 ): boolean {
   if (publication === "all") return true;
-  const isPublished = item.current_version_id !== null;
+  const isPublished =
+    Boolean(item.definition_id) || item.current_version_id != null;
   return publication === "published" ? isPublished : !isPublished;
 }
 

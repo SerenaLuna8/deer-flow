@@ -427,7 +427,17 @@ async def _seed_scope(
     user_id = uuid.uuid4()
     project_id = uuid.uuid4()
     agent_id = uuid.uuid4()
+    definition_id = uuid.uuid4()
     thread_id = f"r1-profile-{uuid.uuid4().hex}"
+    agent_payload = AgentPayload(
+        description="R1 resource agent",
+        soul="",
+        model_ref="default",
+        tool_groups=(),
+        skill_refs=(),
+        mcp_version_ids=(),
+        payload_schema_version=4,
+    )
     await session.execute(
         text(
             """INSERT INTO users (
@@ -471,16 +481,25 @@ async def _seed_scope(
         text(
             """INSERT INTO agents (
                    id,scope,project_id,slug,display_name,status,
-                   created_by_user_id
+                   definition_id,description,agents_instructions,soul,
+                   identity,user_context,model_ref,model_settings,tool_groups,
+                   payload_schema_version,payload_checksum,revision,
+                   created_by_user_id,updated_by_user_id
                ) VALUES (
                    :agent_id,'project',:project_id,'r1-resource-agent',
-                   'R1 resource agent','active',:user_id
+                   'R1 resource agent','active',:definition_id,:description,
+                   '','', '', '',:model_ref,'{}'::jsonb,'[]'::jsonb,4,
+                   :payload_checksum,1,:user_id,:user_id
                )"""
         ),
         {
             "agent_id": agent_id,
             "project_id": project_id,
             "user_id": str(user_id),
+            "definition_id": definition_id,
+            "description": agent_payload.description,
+            "model_ref": agent_payload.model_ref,
+            "payload_checksum": agent_payload_checksum(agent_payload),
         },
     )
     await session.execute(
@@ -763,7 +782,7 @@ async def _persist_run(
         text("SELECT set_config('deerflow.run_asset_closure_assembly', :run_id,true)"),
         {"run_id": run_id},
     )
-    agent_version_id = uuid.uuid4()
+    agent_definition_id = uuid.uuid4()
     agent_payload = AgentPayload(
         description="R1 rollback resource profile",
         soul="Materialize one exact admitted Skill.",
@@ -784,7 +803,7 @@ async def _persist_run(
             kind=AssetKind.AGENT,
             scope=AssetScope.PROJECT,
             asset_id=coordinates.agent_id,
-            version_id=agent_version_id,
+            version_id=agent_definition_id,
             checksum=agent_checksum,
             catalog_generation=7,
             dependency_version_ids=(version.version_id,),
@@ -811,7 +830,7 @@ async def _persist_run(
             "thread_id": coordinates.thread_id,
             "run_id": run_id,
             "asset_id": coordinates.agent_id,
-            "version_id": agent_version_id,
+            "version_id": agent_definition_id,
             "checksum": agent_checksum,
             "snapshot": json.dumps(agent_snapshot),
         },

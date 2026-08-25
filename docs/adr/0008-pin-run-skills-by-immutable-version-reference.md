@@ -35,5 +35,7 @@ unnecessary operational complexity.
 
 This decision supersedes only the physical "self-contained Skill bytes" and
 "Worker decode-only" clauses of ADR-0002 and the backend guide. ADR-0002's
-Current/Candidate/Historical Version and Version Activation semantics remain
-accepted; ADR-0007's System Skill identity immutability remains accepted.
+Project Skill Current/Candidate/Historical Version and Version Activation
+semantics remain accepted; ADR-0009 supersedes its version semantics for both
+Project and System Agents, and ADR-0007's System Skill identity immutability
+remains accepted.

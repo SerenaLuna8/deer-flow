@@ -12,11 +12,11 @@ import {
 
 type ProjectLifecycleItem = Pick<
   ProjectAssetItem,
-  "capabilities" | "current_version_id" | "status"
+  "capabilities" | "current_version_id" | "definition_id" | "status"
 >;
 type ProjectAssetDeleteItem = Pick<
   ProjectAssetItem,
-  "capabilities" | "current_version_id" | "scope"
+  "capabilities" | "current_version_id" | "definition_id" | "scope"
 >;
 type ProjectVersionActivationItem = Pick<
   ProjectAssetItem,
@@ -65,7 +65,7 @@ export function projectMcpDeleteErrorMessage(error: unknown): string {
 
 export function projectSkillDeleteErrorMessage(error: unknown): string {
   if (error instanceof SharedAssetApiError && error.code === "ASSET_IN_USE") {
-    return "无法删除此 Skill：仍有 Agent 或历史运行引用它的版本。可先停用以阻止后续使用；物理删除需解除 Agent 引用，并等待历史运行按保留策略清理后重试。";
+    return "Skill 删除未能完成，请刷新后重试。";
   }
   if (error instanceof SharedAssetApiError && error.code === "ASSET_CONFLICT") {
     return "Skill 状态已发生变化，请刷新后重试。";
@@ -103,21 +103,6 @@ export function projectAssetCanAuthor(
   );
 }
 
-export function projectAgentVersionCanActivate(
-  item: ProjectVersionActivationItem,
-  projectCapabilities: readonly Capability[],
-  version: {
-    relation: string;
-  } | null,
-): boolean {
-  return (
-    item.scope === "project" &&
-    version?.relation === "candidate" &&
-    projectCapabilities.includes("shared_assets.edit") &&
-    item.capabilities.includes("shared_assets.edit")
-  );
-}
-
 export function projectSkillVersionCanActivate(
   item: ProjectVersionActivationItem,
   projectCapabilities: readonly Capability[],
@@ -145,10 +130,15 @@ export function projectAssetDetailLifecycleActions<
     if (!canManageLifecycle) {
       return [] as ProjectAssetDetailLifecycleAction<Kind>[];
     }
+    const hasRunnableDefinition =
+      kind === "agents"
+        ? Boolean(item.definition_id)
+        : item.current_version_id !== null &&
+          item.current_version_id !== undefined;
     return (
       item.status === "active"
         ? ["suspend" as const]
-        : item.status === "suspended" && item.current_version_id !== null
+        : item.status === "suspended" && hasRunnableDefinition
           ? ["enable" as const]
           : []
     ) as ProjectAssetDetailLifecycleAction<Kind>[];

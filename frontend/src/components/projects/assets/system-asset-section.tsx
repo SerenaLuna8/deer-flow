@@ -74,16 +74,22 @@ export function SystemAssetSection({
                       <dt className="text-muted-foreground text-xs">
                         {kind === "mcp-servers"
                           ? t.adminAssets.catalog.systemPublishStatus
-                          : t.adminAssets.catalog.currentVersionStatus}
+                          : kind === "agents"
+                            ? t.adminAssets.catalog.definitionStatus
+                            : t.adminAssets.catalog.currentVersionStatus}
                       </dt>
                       <dd>
-                        {item.current_version_id
-                          ? kind === "mcp-servers"
-                            ? t.adminAssets.catalog.publishedAvailable
-                            : t.adminAssets.catalog.currentVersionAvailable
-                          : kind === "mcp-servers"
-                            ? t.adminAssets.catalog.unpublished
-                            : t.adminAssets.catalog.currentVersionMissing}
+                        {kind === "agents"
+                          ? item.definition_id
+                            ? t.adminAssets.catalog.definitionAvailable
+                            : t.adminAssets.catalog.definitionMissing
+                          : item.current_version_id
+                            ? kind === "mcp-servers"
+                              ? t.adminAssets.catalog.publishedAvailable
+                              : t.adminAssets.catalog.currentVersionAvailable
+                            : kind === "mcp-servers"
+                              ? t.adminAssets.catalog.unpublished
+                              : t.adminAssets.catalog.currentVersionMissing}
                       </dd>
                     </div>
                     <div>

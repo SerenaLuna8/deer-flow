@@ -13,7 +13,7 @@ from app.shared_assets.agent_service import AgentService
 from app.shared_assets.errors import AssetResolutionUnavailable
 from app.shared_assets.models import AgentPayload, AssetScope
 from app.shared_assets.resolver import ProjectAssetResolver, _ResolvedRecord
-from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
+from deerflow.persistence.shared_assets import AgentRow
 
 
 class _EmptyScalarResult:
@@ -54,13 +54,7 @@ def test_design_create_has_no_implicit_activation_escape_hatch() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "field",
-    ("agents_instructions", "identity", "user_context"),
-)
-async def test_resolver_rejects_unauthenticated_legacy_v1_fields(
-    field: str,
-) -> None:
+async def test_resolver_rejects_non_v4_agent_definition() -> None:
     context = _context(ProjectRole.ADMIN)
     asset_id = uuid.uuid4()
     version_id = uuid.uuid4()
@@ -71,14 +65,8 @@ async def test_resolver_rejects_unauthenticated_legacy_v1_fields(
         tool_groups=(),
         skill_refs=(),
         mcp_version_ids=(),
-        payload_schema_version=1,
+        payload_schema_version=4,
     )
-    version_values = {
-        "agents_instructions": "",
-        "identity": "",
-        "user_context": "",
-    }
-    version_values[field] = "not covered by the v1 checksum"
     asset = AgentRow(
         id=asset_id,
         scope="project",
@@ -86,32 +74,26 @@ async def test_resolver_rejects_unauthenticated_legacy_v1_fields(
         slug="legacy-agent",
         display_name="Legacy Agent",
         status="active",
-        current_version_id=version_id,
-        revision=1,
-        created_by_user_id=str(context.user_id),
-    )
-    version = AgentVersionRow(
-        id=version_id,
-        agent_id=asset_id,
-        version_number=1,
+        definition_id=version_id,
         description=payload.description,
-        agents_instructions=version_values["agents_instructions"],
+        agents_instructions=payload.agents_instructions,
         soul=payload.soul,
-        identity=version_values["identity"],
-        user_context=version_values["user_context"],
+        identity=payload.identity,
+        user_context=payload.user_context,
         model_ref=payload.model_ref,
         model_settings={},
         tool_groups=[],
-        supersedes_version_id=None,
-        payload_schema_version=1,
+        payload_schema_version=3,
         payload_checksum=agent_payload_checksum(payload),
+        revision=1,
         created_by_user_id=str(context.user_id),
+        updated_by_user_id=str(context.user_id),
     )
 
     with pytest.raises(AssetResolutionUnavailable):
         await ProjectAssetResolver(lambda: None)._agent_snapshot(  # noqa: SLF001
             _EmptyRefSession(),  # type: ignore[arg-type]
             context,
-            _ResolvedRecord(AssetScope.PROJECT, asset, version),
+            _ResolvedRecord(AssetScope.PROJECT, asset, asset),
             1,
         )

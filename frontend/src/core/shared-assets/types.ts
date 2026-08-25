@@ -113,6 +113,22 @@ export const currentVersionAssetSummarySchema = z
   })
   .strict();
 
+export const agentAssetSummarySchema = z
+  .object({
+    id: assetIdSchema,
+    scope: assetScopeSchema,
+    project_id: assetIdSchema.nullable(),
+    slug: z.string().min(1),
+    display_name: z.string().min(1),
+    status: assetStatusSchema,
+    definition_id: assetIdSchema,
+    revision: z.number().int().positive(),
+    created_by_user_id: z.string().min(1),
+    created_at: z.string().datetime({ offset: true }),
+    updated_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
 export const legacyCompatibleAssetSummarySchema = z
   .union([currentVersionAssetSummarySchema, assetSummarySchema])
   .transform((value) => {
@@ -219,12 +235,10 @@ export const agentModelSettingsSchema = z
   })
   .strict();
 
-export const agentVersionSchema = z
+export const agentDefinitionSchema = z
   .object({
-    id: assetIdSchema,
+    definition_id: assetIdSchema,
     agent_id: assetIdSchema,
-    version_number: z.number().int().positive(),
-    relation: versionRelationSchema,
     description: z.string(),
     agents_instructions: z.string(),
     soul: z.string(),
@@ -232,16 +246,15 @@ export const agentVersionSchema = z
     user_context: z.string(),
     payload_schema_version: z.number().int().positive(),
     model_ref: z.string(),
-    model_settings: agentModelSettingsSchema.optional(),
+    model_settings: agentModelSettingsSchema,
     tool_groups: z.array(z.string()),
     skill_refs: z.array(
       z.object({ scope: assetScopeSchema, asset_id: assetIdSchema }).strict(),
     ),
     mcp_version_ids: z.array(assetIdSchema),
-    supersedes_version_id: assetIdSchema.nullable(),
     payload_checksum: z.string().min(1),
-    created_by_user_id: z.string().min(1),
-    created_at: z.string().datetime({ offset: true }),
+    updated_by_user_id: z.string().min(1),
+    updated_at: z.string().datetime({ offset: true }),
   })
   .strict();
 
@@ -620,14 +633,10 @@ export const mcpToolDiscoveryAttemptResponseSchema = z
   .strict();
 
 export const assetVersionSchema = z.union([
-  agentVersionSchema,
   skillVersionSchema,
   mcpVersionSchema,
 ]);
 
-export const agentVersionResponseSchema = z
-  .object({ data: agentVersionSchema, request_id: z.string().min(1) })
-  .strict();
 export const skillVersionResponseSchema = z
   .object({ data: skillVersionSchema, request_id: z.string().min(1) })
   .strict();
@@ -759,9 +768,6 @@ export const projectMcpEditableConfigurationResponseSchema = z
 export const versionResponseSchema = z
   .object({ data: assetVersionSchema, request_id: z.string().min(1) })
   .strict();
-export const agentVersionHistoryResponseSchema = z
-  .object({ data: z.array(agentVersionSchema), request_id: z.string().min(1) })
-  .strict();
 export const skillVersionHistoryResponseSchema = z
   .object({ data: z.array(skillVersionSchema), request_id: z.string().min(1) })
   .strict();
@@ -790,7 +796,7 @@ export const agentRuntimeAssessmentSchema = z.discriminatedUnion(
     z
       .object({
         agent_asset_id: assetIdSchema,
-        selected_version_id: assetIdSchema,
+        selected_definition_id: assetIdSchema,
         status: z.literal("ready"),
         reason_code: z.null(),
       })
@@ -798,7 +804,7 @@ export const agentRuntimeAssessmentSchema = z.discriminatedUnion(
     z
       .object({
         agent_asset_id: assetIdSchema,
-        selected_version_id: z.null(),
+        selected_definition_id: z.null(),
         status: z.literal("blocked"),
         reason_code: z.literal("agent_unavailable"),
       })
@@ -806,7 +812,7 @@ export const agentRuntimeAssessmentSchema = z.discriminatedUnion(
     z
       .object({
         agent_asset_id: assetIdSchema,
-        selected_version_id: assetIdSchema,
+        selected_definition_id: assetIdSchema,
         status: z.literal("blocked"),
         reason_code: z.literal("runtime_dependency_unavailable"),
       })
@@ -814,7 +820,7 @@ export const agentRuntimeAssessmentSchema = z.discriminatedUnion(
     z
       .object({
         agent_asset_id: assetIdSchema,
-        selected_version_id: assetIdSchema,
+        selected_definition_id: assetIdSchema,
         status: z.literal("blocked"),
         reason_code: z.literal("model_unavailable"),
       })
@@ -873,6 +879,21 @@ const currentSystemBindingItemSchema = z
   })
   .strict();
 
+export const agentSystemBindingItemSchema = z
+  .object({
+    project_id: assetIdSchema,
+    kind: z.literal("agent"),
+    asset_id: assetIdSchema,
+    definition_id: assetIdSchema,
+    enabled: z.boolean(),
+    version: z.number().int().positive(),
+    created_by_user_id: z.string().min(1),
+    updated_by_user_id: z.string().min(1),
+    created_at: z.string().datetime({ offset: true }),
+    updated_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
 const systemBindingItemSchema = z
   .union([currentSystemBindingItemSchema, legacySystemBindingItemSchema])
   .transform((value) => {
@@ -900,6 +921,10 @@ export const currentSystemBindingSchema = currentSystemBindingItemSchema
   .extend({ request_id: z.string().min(1) })
   .strict();
 
+export const agentSystemBindingSchema = agentSystemBindingItemSchema
+  .extend({ request_id: z.string().min(1) })
+  .strict();
+
 const legacyProjectAssetItemSchema = assetSummarySchema
   .extend({
     capabilities: assetCapabilitiesSchema,
@@ -916,6 +941,14 @@ export const currentVersionProjectAssetItemSchema =
       description: z.string().nullable().optional(),
     })
     .strict();
+
+export const agentProjectAssetItemSchema = agentAssetSummarySchema
+  .extend({
+    capabilities: assetCapabilitiesSchema,
+    binding: agentSystemBindingItemSchema.nullable(),
+    description: z.string().nullable().optional(),
+  })
+  .strict();
 
 export const legacyCompatibleProjectAssetItemSchema = z
   .union([currentVersionProjectAssetItemSchema, legacyProjectAssetItemSchema])
@@ -939,6 +972,14 @@ export const projectAssetListSchema = z
   })
   .strict();
 
+export const projectAgentAssetListSchema = z
+  .object({
+    system_items: z.array(agentProjectAssetItemSchema),
+    project_items: z.array(agentProjectAssetItemSchema),
+    request_id: z.string().min(1),
+  })
+  .strict();
+
 export const legacyCompatibleProjectAssetListSchema = z
   .object({
     system_items: z.array(legacyCompatibleProjectAssetItemSchema),
@@ -950,6 +991,13 @@ export const legacyCompatibleProjectAssetListSchema = z
 export const adminAssetListSchema = z
   .object({
     items: z.array(currentVersionAssetSummarySchema),
+    request_id: z.string().min(1),
+  })
+  .strict();
+
+export const adminAgentAssetListSchema = z
+  .object({
+    items: z.array(agentAssetSummarySchema),
     request_id: z.string().min(1),
   })
   .strict();
@@ -968,6 +1016,33 @@ export const assetMutationResponseSchema = z
   })
   .strict();
 
+export const agentAssetMutationResponseSchema = z
+  .object({
+    item: agentAssetSummarySchema,
+    request_id: z.string().min(1),
+  })
+  .strict();
+
+export const agentDefinitionResponseSchema = z
+  .object({
+    item: agentAssetSummarySchema,
+    definition: agentDefinitionSchema,
+    request_id: z.string().min(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.item.id !== value.definition.agent_id ||
+      value.item.definition_id !== value.definition.definition_id
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Agent Definition must belong to the returned asset",
+        path: ["definition", "agent_id"],
+      });
+    }
+  });
+
 export const legacyCompatibleAssetMutationResponseSchema = z
   .object({
     item: legacyCompatibleAssetSummarySchema,
@@ -979,6 +1054,14 @@ export const projectSkillImportResponseSchema = z
   .object({
     item: currentVersionAssetSummarySchema,
     version: skillVersionSchema,
+    request_id: z.string().min(1),
+  })
+  .strict();
+
+export const skillDeleteResultSchema = z
+  .object({
+    skill_id: assetIdSchema,
+    affected_agent_count: z.number().int().nonnegative(),
     request_id: z.string().min(1),
   })
   .strict();
@@ -1002,43 +1085,14 @@ export const createAgentInputSchema = z
   })
   .strict();
 
-export const agentCreateResponseSchema = z
-  .object({
-    item: currentVersionAssetSummarySchema,
-    version: agentVersionSchema,
-    request_id: z.string().min(1),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    const invalid = (path: (string | number)[], message: string) =>
-      context.addIssue({ code: z.ZodIssueCode.custom, path, message });
-    if (value.item.id !== value.version.agent_id) {
-      invalid(
-        ["version", "agent_id"],
-        "Created Agent version must belong to the returned asset",
-      );
-    }
+export const agentCreateResponseSchema =
+  agentDefinitionResponseSchema.superRefine((value, context) => {
     if (value.item.scope !== "project" || value.item.project_id === null) {
-      invalid(["item", "scope"], "Created Agent must be project scoped");
-    }
-    if (
-      value.item.status !== "suspended" ||
-      value.item.current_version_id !== null
-    ) {
-      invalid(
-        ["item", "status"],
-        "Created Agent must start suspended without a live version",
-      );
-    }
-    if (
-      value.version.version_number !== 1 ||
-      value.version.relation !== "candidate" ||
-      value.version.supersedes_version_id !== null
-    ) {
-      invalid(
-        ["version"],
-        "Created Agent must return an initial standalone Candidate Version",
-      );
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["item", "scope"],
+        message: "Created Agent must be project scoped",
+      });
     }
   });
 
@@ -1348,10 +1402,40 @@ export type AdminProjectAssetStatusAction<Kind extends MutableAssetListKind> =
 export type AssetScope = z.infer<typeof assetScopeSchema>;
 export type AssetStatus = z.infer<typeof assetStatusSchema>;
 export type SecretPayloadGroup = z.infer<typeof secretPayloadGroupSchema>;
-export type AssetSummary = z.infer<typeof currentVersionAssetSummarySchema>;
-export type ProjectAssetItem = z.infer<typeof projectAssetItemSchema>;
+type CurrentVersionAssetSummary = z.infer<
+  typeof currentVersionAssetSummarySchema
+>;
+export type AgentAssetSummary = z.infer<typeof agentAssetSummarySchema>;
+export type AssetSummary = Omit<
+  CurrentVersionAssetSummary,
+  "current_version_id"
+> & {
+  current_version_id?: string | null;
+  definition_id?: string;
+};
+export type AgentProjectAssetItem = z.infer<typeof agentProjectAssetItemSchema>;
+type CurrentVersionProjectAssetItem = z.infer<typeof projectAssetItemSchema>;
+type CurrentVersionProjectBinding = NonNullable<
+  CurrentVersionProjectAssetItem["binding"]
+>;
+type AgentProjectBinding = NonNullable<AgentProjectAssetItem["binding"]>;
+export type ProjectAssetBinding = Omit<
+  CurrentVersionProjectBinding,
+  "current_version_id"
+> & {
+  current_version_id?: string;
+  definition_id?: string;
+} & Partial<Pick<AgentProjectBinding, "definition_id">>;
+export type ProjectAssetItem = Omit<
+  CurrentVersionProjectAssetItem,
+  "binding" | "current_version_id"
+> & {
+  binding: ProjectAssetBinding | null;
+  current_version_id?: string | null;
+  definition_id?: string;
+};
 export type AssetVersion = z.infer<typeof assetVersionSchema>;
-export type AgentVersion = z.infer<typeof agentVersionSchema>;
+export type AgentDefinition = z.infer<typeof agentDefinitionSchema>;
 export type SkillVersion = z.infer<typeof skillVersionSchema>;
 export type McpVersion = z.infer<typeof mcpVersionSchema>;
 export type McpTool = z.infer<typeof mcpToolSchema>;
@@ -1366,7 +1450,6 @@ export type McpToolDiscoveryAttemptResponse = z.infer<
   typeof mcpToolDiscoveryAttemptResponseSchema
 >;
 export type VersionResponse = z.infer<typeof versionResponseSchema>;
-export type AgentVersionResponse = z.infer<typeof agentVersionResponseSchema>;
 export type McpVersionResponse = z.infer<typeof mcpVersionResponseSchema>;
 export type ConfiguredMcpResponse = z.infer<typeof configuredMcpResponseSchema>;
 export type ProjectMcpEditableConfigurationResponse = z.infer<
@@ -1387,16 +1470,31 @@ export type AgentRuntimeAssessmentsInput = z.input<
 export type AgentRuntimeAssessmentsResponse = z.infer<
   typeof agentRuntimeAssessmentsResponseSchema
 >;
-export type SystemBinding = z.infer<typeof systemBindingSchema>;
-export type ProjectAssetList = z.infer<typeof projectAssetListSchema>;
+export type SystemBinding =
+  | z.infer<typeof systemBindingSchema>
+  | z.infer<typeof agentSystemBindingSchema>;
+export type ProjectAssetList = {
+  system_items: ProjectAssetItem[];
+  project_items: ProjectAssetItem[];
+  request_id: string;
+};
 export type ProjectDefaultAgent = z.infer<typeof projectDefaultAgentSchema>;
-export type AdminAssetList = z.infer<typeof adminAssetListSchema>;
-export type AssetMutationResponse = z.infer<typeof assetMutationResponseSchema>;
+export type AdminAssetList = {
+  items: AssetSummary[];
+  request_id: string;
+};
+export type AssetMutationResponse =
+  | z.infer<typeof assetMutationResponseSchema>
+  | z.infer<typeof agentAssetMutationResponseSchema>;
 export type ProjectSkillImportResponse = z.infer<
   typeof projectSkillImportResponseSchema
 >;
+export type SkillDeleteResult = z.infer<typeof skillDeleteResultSchema>;
 export type CreateAgentInput = z.input<typeof createAgentInputSchema>;
 export type AgentCreateResponse = z.infer<typeof agentCreateResponseSchema>;
+export type AgentDefinitionResponse = z.infer<
+  typeof agentDefinitionResponseSchema
+>;
 export type AgentInstructionsInput = z.input<
   typeof agentInstructionsInputSchema
 >;

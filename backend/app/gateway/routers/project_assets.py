@@ -152,7 +152,7 @@ class AssetItemResponse(_StrictModel):
 
 
 class CurrentVersionAssetItemResponse(_StrictModel):
-    """Public Agent/Skill aggregate contract.
+    """Public Skill aggregate contract.
 
     MCP intentionally retains ``AssetItemResponse`` and its established
     release workflow; Current Version unification does not change MCP.
@@ -165,6 +165,20 @@ class CurrentVersionAssetItemResponse(_StrictModel):
     display_name: str
     status: str
     current_version_id: uuid.UUID | None
+    revision: int
+    created_by_user_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentAssetItemResponse(_StrictModel):
+    id: uuid.UUID
+    scope: AssetScope
+    project_id: uuid.UUID | None
+    slug: str
+    display_name: str
+    status: str
+    definition_id: uuid.UUID
     revision: int
     created_by_user_id: str
     created_at: datetime
@@ -197,6 +211,19 @@ class CurrentBindingItemResponse(_StrictModel):
     updated_at: datetime
 
 
+class AgentBindingItemResponse(_StrictModel):
+    project_id: uuid.UUID
+    kind: Literal[AssetKind.AGENT]
+    asset_id: uuid.UUID
+    definition_id: uuid.UUID
+    enabled: bool
+    version: int
+    created_by_user_id: str
+    updated_by_user_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class ProjectAssetItemResponse(AssetItemResponse):
     capabilities: list[Capability]
     binding: BindingItemResponse | None
@@ -210,6 +237,12 @@ class ProjectSkillItemResponse(ProjectAssetItemResponse):
 class ProjectCurrentVersionAssetItemResponse(CurrentVersionAssetItemResponse):
     capabilities: list[Capability]
     binding: CurrentBindingItemResponse | None
+    description: str = ""
+
+
+class ProjectAgentItemResponse(AgentAssetItemResponse):
+    capabilities: list[Capability]
+    binding: AgentBindingItemResponse | None
     description: str = ""
 
 
@@ -237,6 +270,12 @@ class ScopedCurrentVersionAssetListResponse(_StrictModel):
     request_id: str
 
 
+class ScopedAgentAssetListResponse(_StrictModel):
+    system_items: list[ProjectAgentItemResponse]
+    project_items: list[ProjectAgentItemResponse]
+    request_id: str
+
+
 class ScopedCurrentVersionSkillAssetListResponse(_StrictModel):
     system_items: list[ProjectCurrentVersionSkillItemResponse]
     project_items: list[ProjectCurrentVersionSkillItemResponse]
@@ -245,10 +284,15 @@ class ScopedCurrentVersionSkillAssetListResponse(_StrictModel):
 
 def _binding_item_response(
     view,
-) -> BindingItemResponse | CurrentBindingItemResponse:
+) -> BindingItemResponse | CurrentBindingItemResponse | AgentBindingItemResponse:
     values = vars(view)
     if view.kind is AssetKind.MCP:
         return BindingItemResponse(**values)
+    if view.kind is AssetKind.AGENT:
+        return AgentBindingItemResponse(
+            **{key: value for key, value in values.items() if key != "version_id"},
+            definition_id=view.version_id,
+        )
     return CurrentBindingItemResponse(
         **{key: value for key, value in values.items() if key != "version_id"},
         current_version_id=view.version_id,
@@ -265,6 +309,11 @@ class SystemCurrentVersionCatalogResponse(_StrictModel):
     request_id: str
 
 
+class SystemAgentCatalogResponse(_StrictModel):
+    items: list[AgentAssetItemResponse]
+    request_id: str
+
+
 class AssetMutationResponse(_StrictModel):
     item: AssetItemResponse
     request_id: str
@@ -272,6 +321,17 @@ class AssetMutationResponse(_StrictModel):
 
 class CurrentVersionAssetMutationResponse(_StrictModel):
     item: CurrentVersionAssetItemResponse
+    request_id: str
+
+
+class AgentAssetMutationResponse(_StrictModel):
+    item: AgentAssetItemResponse
+    request_id: str
+
+
+class SkillDeleteResponse(_StrictModel):
+    skill_id: uuid.UUID
+    affected_agent_count: int = Field(ge=0)
     request_id: str
 
 
@@ -392,6 +452,20 @@ class CurrentBindingResponse(_StrictModel):
     request_id: str
 
 
+class AgentBindingResponse(_StrictModel):
+    project_id: uuid.UUID
+    kind: Literal[AssetKind.AGENT]
+    asset_id: uuid.UUID
+    definition_id: uuid.UUID
+    enabled: bool
+    version: int
+    created_by_user_id: str
+    updated_by_user_id: str
+    created_at: datetime
+    updated_at: datetime
+    request_id: str
+
+
 class AgentInstructionsRequest(_StrictModel):
     agents_instructions: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
     soul: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
@@ -421,7 +495,7 @@ class AgentRuntimeAssessmentsRequest(_StrictModel):
 
 class AgentRuntimeAssessmentItemResponse(_StrictModel):
     agent_asset_id: uuid.UUID
-    selected_version_id: uuid.UUID | None
+    selected_definition_id: uuid.UUID | None
     status: Literal["ready", "blocked"]
     reason_code: (
         Literal[
@@ -435,16 +509,16 @@ class AgentRuntimeAssessmentItemResponse(_StrictModel):
     @model_validator(mode="after")
     def validate_runtime_assessment(self) -> AgentRuntimeAssessmentItemResponse:
         if self.status == "ready":
-            if self.selected_version_id is None or self.reason_code is not None:
+            if self.selected_definition_id is None or self.reason_code is not None:
                 raise ValueError("ready Agent runtime assessment is invalid")
         elif self.reason_code == "agent_unavailable":
-            if self.selected_version_id is not None:
+            if self.selected_definition_id is not None:
                 raise ValueError("unavailable Agent runtime assessment is invalid")
         elif self.reason_code in {
             "runtime_dependency_unavailable",
             "model_unavailable",
         }:
-            if self.selected_version_id is None:
+            if self.selected_definition_id is None:
                 raise ValueError("blocked Agent runtime assessment is invalid")
         else:
             raise ValueError("blocked Agent runtime assessment reason is invalid")
@@ -553,11 +627,9 @@ class McpSecretClearRequest(_StrictModel):
     confirmed: Literal[True]
 
 
-class AgentVersionItemResponse(_StrictModel):
-    id: uuid.UUID
+class AgentDefinitionItemResponse(_StrictModel):
+    definition_id: uuid.UUID
     agent_id: uuid.UUID
-    version_number: int
-    relation: VersionRelation
     description: str
     agents_instructions: str
     soul: str
@@ -568,11 +640,10 @@ class AgentVersionItemResponse(_StrictModel):
     tool_groups: list[str]
     skill_refs: list[SkillAssetRefRequest]
     mcp_version_ids: list[uuid.UUID]
-    supersedes_version_id: uuid.UUID | None
     payload_schema_version: int
     payload_checksum: str
-    created_by_user_id: str
-    created_at: datetime
+    updated_by_user_id: str
+    updated_at: datetime
 
 
 class SkillSecretRequirementResponse(_StrictModel):
@@ -732,14 +803,9 @@ class McpVersionItemResponse(_StrictModel):
     created_at: datetime
 
 
-class AgentVersionResponse(_StrictModel):
-    data: AgentVersionItemResponse
-    request_id: str
-
-
-class AgentCreateResponse(_StrictModel):
-    item: CurrentVersionAssetItemResponse
-    version: AgentVersionItemResponse
+class AgentDefinitionResponse(_StrictModel):
+    item: AgentAssetItemResponse
+    definition: AgentDefinitionItemResponse
     request_id: str
 
 
@@ -767,11 +833,6 @@ class McpVersionResponse(_StrictModel):
 class McpConfiguredResponse(_StrictModel):
     item: AssetItemResponse
     version: McpVersionItemResponse
-    request_id: str
-
-
-class AgentVersionHistoryResponse(_StrictModel):
-    data: list[AgentVersionItemResponse]
     request_id: str
 
 
@@ -1068,6 +1129,20 @@ def _current_version_asset_item(view) -> CurrentVersionAssetItemResponse:
     )
 
 
+def _agent_asset_item(view) -> AgentAssetItemResponse:
+    return AgentAssetItemResponse.model_validate(view, from_attributes=True)
+
+
+def _agent_definition_response(result, request_id: str) -> AgentDefinitionResponse:
+    return AgentDefinitionResponse(
+        item=_agent_asset_item(result.asset),
+        definition=AgentDefinitionItemResponse.model_validate(
+            _response_data(result.definition),
+        ),
+        request_id=request_id,
+    )
+
+
 async def _list_system_catalog(
     actor: SystemAssetReadContext,
     service,
@@ -1094,15 +1169,28 @@ async def _list_system_current_version_catalog(
         raise_asset_domain(exc)
 
 
+async def _list_system_agent_catalog(
+    actor: SystemAssetReadContext,
+    service: AgentService,
+) -> SystemAgentCatalogResponse:
+    try:
+        return SystemAgentCatalogResponse(
+            items=[_agent_asset_item(view) for view in await service.list_visible(actor)],
+            request_id=actor.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
 @catalog_router.get(
     "/agents",
-    response_model=SystemCurrentVersionCatalogResponse,
+    response_model=SystemAgentCatalogResponse,
 )
 async def list_system_catalog_agents(
     actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],
     service: Annotated[AgentService, Depends(get_agent_service)],
 ):
-    return await _list_system_current_version_catalog(actor, service)
+    return await _list_system_agent_catalog(actor, service)
 
 
 @catalog_router.get(
@@ -1117,21 +1205,21 @@ async def list_system_catalog_skills(
 
 
 @catalog_router.get(
-    "/agents/{asset_id}/versions",
-    response_model=AgentVersionHistoryResponse,
+    "/agents/{asset_id}",
+    response_model=AgentDefinitionResponse,
 )
-async def list_system_catalog_agent_versions(
+async def get_system_catalog_agent(
     asset_id: uuid.UUID,
     actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],
     service: Annotated[AgentService, Depends(get_agent_service)],
 ):
-    """Return the immutable Current Version definition for a visible System Agent."""
-
-    return await _version_history(
-        actor,
-        lambda: service.get_version_history(actor, asset_id),
-        AgentVersionHistoryResponse,
-    )
+    try:
+        return _agent_definition_response(
+            await service.get(actor, asset_id),
+            actor.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
 
 
 @catalog_router.get(
@@ -1180,14 +1268,14 @@ def _scoped_assets(
     bindings,
     context: ProjectContext,
     kind: AssetKind,
-) -> ScopedAssetListResponse | ScopedCurrentVersionAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
+) -> ScopedAssetListResponse | ScopedAgentAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
     by_asset_id = {binding.asset_id: binding for binding in bindings}
     if kind is AssetKind.SKILL:
         item_model = ProjectCurrentVersionSkillItemResponse
         response_model = ScopedCurrentVersionSkillAssetListResponse
     elif kind is AssetKind.AGENT:
-        item_model = ProjectCurrentVersionAssetItemResponse
-        response_model = ScopedCurrentVersionAssetListResponse
+        item_model = ProjectAgentItemResponse
+        response_model = ScopedAgentAssetListResponse
     else:
         item_model = ProjectAssetItemResponse
         response_model = ScopedAssetListResponse
@@ -1211,7 +1299,7 @@ async def _list_assets(
     kind: AssetKind,
     service,
     binding_service: BindingService,
-) -> ScopedAssetListResponse | ScopedCurrentVersionAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
+) -> ScopedAssetListResponse | ScopedAgentAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
     try:
         views = await service.list_visible(context)
         bindings = await binding_service.list_visible(context, kind)
@@ -1235,6 +1323,13 @@ async def _current_version_asset_call(actor, operation):
             item=_current_version_asset_item(result),
             request_id=actor.request_id,
         )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+async def _agent_definition_call(actor, operation):
+    try:
+        return _agent_definition_response(await operation(), actor.request_id)
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 
@@ -1492,16 +1587,12 @@ def register_asset_routes(
                     mcp_version_ids=tuple(body.mcp_version_ids),
                 ),
             )
-            return AgentCreateResponse(
-                item=_current_version_asset_item(result.asset),
-                version=AgentVersionItemResponse.model_validate(_response_data(result.version)),
-                request_id=actor.request_id,
-            )
+            return _agent_definition_response(result, actor.request_id)
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
     async def get_agent(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
-        return await _current_version_asset_call(
+        return await _agent_definition_call(
             actor,
             lambda: service.get(actor, asset_id),
         )
@@ -1513,7 +1604,7 @@ def register_asset_routes(
             identity=body.identity,
             user_context=body.user_context,
         )
-        return await _version_call(
+        return await _agent_definition_call(
             actor,
             lambda: service.update_instructions(
                 actor,
@@ -1521,7 +1612,6 @@ def register_asset_routes(
                 instructions,
                 expected_asset_version=body.expected_revision,
             ),
-            AgentVersionResponse,
         )
 
     async def update_agent_capability_bindings(
@@ -1530,7 +1620,7 @@ def register_asset_routes(
         actor=Depends(actor_dependency),
         service=Depends(get_agent_service),
     ):
-        return await _version_call(
+        return await _agent_definition_call(
             actor,
             lambda: service.update_capability_bindings(
                 actor,
@@ -1541,29 +1631,7 @@ def register_asset_routes(
                 ),
                 expected_asset_version=body.expected_revision,
             ),
-            AgentVersionResponse,
         )
-
-    async def activate_agent_version(
-        asset_id: uuid.UUID,
-        version_id: uuid.UUID,
-        body: ExpectedRevisionRequest,
-        actor=Depends(actor_dependency),
-        service=Depends(get_agent_service),
-    ):
-        return await _version_call(
-            actor,
-            lambda: service.activate_version(
-                actor,
-                asset_id,
-                version_id,
-                expected_asset_version=body.expected_revision,
-            ),
-            AgentVersionResponse,
-        )
-
-    async def get_agent_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
-        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), AgentVersionHistoryResponse)
 
     async def delete_agent(asset_id: uuid.UUID, body: ExpectedRevisionRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         try:
@@ -1605,14 +1673,18 @@ def register_asset_routes(
 
     async def delete_skill(asset_id: uuid.UUID, body: ExpectedRevisionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         try:
-            await service.delete(
+            result = await service.delete(
                 actor,
                 asset_id,
                 expected_asset_version=body.expected_revision,
             )
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
+        return SkillDeleteResponse(
+            skill_id=asset_id,
+            affected_agent_count=result.affected_agent_count,
+            request_id=actor.request_id,
+        )
 
     async def create_mcp(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _asset_call(actor, lambda: service.create_asset(actor, CreateMcpServer(body.slug, body.display_name)))
@@ -1668,13 +1740,28 @@ def register_asset_routes(
 
             return await _asset_call(actor, operation)
 
-        current_contract = segment in {"agents", "skills"}
+        current_contract = segment == "skills"
+        agent_contract = segment == "agents"
+
+        async def change_agent(asset_id: uuid.UUID, body: ExpectedRevisionRequest, actor=Depends(actor_dependency), service=Depends(service_dependency)):
+            try:
+                result = await getattr(service, action)(
+                    actor,
+                    asset_id,
+                    expected_asset_version=body.expected_revision,
+                )
+                return AgentAssetMutationResponse(
+                    item=_agent_asset_item(result),
+                    request_id=actor.request_id,
+                )
+            except ASSET_ERRORS as exc:
+                raise_asset_domain(exc)
 
         router.add_api_route(
             f"/{segment}/{{asset_id}}/{action}",
-            change_current if current_contract else change_legacy,
+            change_agent if agent_contract else (change_current if current_contract else change_legacy),
             methods=["POST"],
-            response_model=(CurrentVersionAssetMutationResponse if current_contract else AssetMutationResponse),
+            response_model=(AgentAssetMutationResponse if agent_contract else (CurrentVersionAssetMutationResponse if current_contract else AssetMutationResponse)),
             name=f"{action}_{segment}",
         )
 
@@ -1713,18 +1800,16 @@ def register_asset_routes(
             raise_asset_domain(exc)
 
     read_routes = (
-        ("/agents/{asset_id}", get_agent, ["GET"], CurrentVersionAssetMutationResponse, 200),
-        ("/agents/{asset_id}/versions", get_agent_versions, ["GET"], AgentVersionHistoryResponse, 200),
+        ("/agents/{asset_id}", get_agent, ["GET"], AgentDefinitionResponse, 200),
         ("/skills/{asset_id}", get_skill, ["GET"], CurrentVersionAssetMutationResponse, 200),
         ("/skills/{asset_id}/versions", get_skill_versions, ["GET"], SkillVersionHistoryResponse, 200),
         ("/mcp-servers/{asset_id}", get_mcp, ["GET"], AssetMutationResponse, 200),
         ("/mcp-servers/{asset_id}/versions", get_mcp_versions, ["GET"], McpVersionHistoryResponse, 200),
     )
     shared_asset_write_routes = (
-        ("/agents", create_agent, ["POST"], AgentCreateResponse, 201),
-        ("/agents/{asset_id}/instructions", update_agent_instructions, ["PUT"], AgentVersionResponse, 200),
-        ("/agents/{asset_id}/capability-bindings", update_agent_capability_bindings, ["PUT"], AgentVersionResponse, 200),
-        ("/agents/{asset_id}/versions/{version_id}/activate", activate_agent_version, ["POST"], AgentVersionResponse, 200),
+        ("/agents", create_agent, ["POST"], AgentDefinitionResponse, 201),
+        ("/agents/{asset_id}/instructions", update_agent_instructions, ["PUT"], AgentDefinitionResponse, 200),
+        ("/agents/{asset_id}/capability-bindings", update_agent_capability_bindings, ["PUT"], AgentDefinitionResponse, 200),
         ("/skills/{asset_id}/versions", create_skill_version, ["POST"], SkillVersionResponse, 201),
         ("/skills/{asset_id}/versions/{version_id}/activate", activate_skill_version, ["POST"], SkillVersionResponse, 200),
         ("/mcp-servers", create_mcp, ["POST"], AssetMutationResponse, 201),
@@ -1759,8 +1844,8 @@ def register_asset_routes(
             "/skills/{asset_id}",
             delete_skill,
             methods=["DELETE"],
-            response_model=None,
-            status_code=status.HTTP_204_NO_CONTENT,
+            response_model=SkillDeleteResponse,
+            status_code=status.HTTP_200_OK,
             name="delete_project_skill",
         )
         router.add_api_route(
@@ -2048,7 +2133,7 @@ async def clear_project_skill_version_secret(
 
 @project_router.get(
     "/agents",
-    response_model=ScopedCurrentVersionAssetListResponse,
+    response_model=ScopedAgentAssetListResponse,
 )
 async def list_project_agents(
     context: Annotated[ProjectContext, Depends(project_asset_context)],
@@ -2330,10 +2415,16 @@ _BINDING_KINDS = {
 def _binding_response(
     view,
     request_id: str,
-) -> BindingResponse | CurrentBindingResponse:
+) -> AgentBindingResponse | BindingResponse | CurrentBindingResponse:
     values = vars(view)
     if view.kind is AssetKind.MCP:
         return BindingResponse(**values, request_id=request_id)
+    if view.kind is AssetKind.AGENT:
+        return AgentBindingResponse(
+            **{key: value for key, value in values.items() if key != "version_id"},
+            definition_id=view.version_id,
+            request_id=request_id,
+        )
     return CurrentBindingResponse(
         **{key: value for key, value in values.items() if key != "version_id"},
         current_version_id=view.version_id,
@@ -2440,7 +2531,7 @@ def _register_binding_routes(segment: str, kind: AssetKind) -> None:
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
-    response_model = BindingResponse if kind is AssetKind.MCP else CurrentBindingResponse
+    response_model = BindingResponse if kind is AssetKind.MCP else AgentBindingResponse if kind is AssetKind.AGENT else CurrentBindingResponse
     project_router.add_api_route(
         path,
         enable_exact if kind is AssetKind.MCP else enable_current,

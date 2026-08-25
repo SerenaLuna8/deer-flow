@@ -165,21 +165,17 @@ generator. A necessary local patch needs focused coverage and an explanation.
 
 #### Agents and Builder
 
-- Project Agent/Skill/MCP versions are immutable server objects. The UI authors
-  through aggregate mutations and optimistic revisions; it never fabricates a
-  Current Version, capability, binding, or dependency closure.
-- Saving a Project Agent or Skill creates an immutable Candidate Version without
-  moving `current_version_id`. Activation atomically selects the Candidate and
-  enables the asset. Asset suspension is a separate emergency stop that keeps the
-  same Current Version. Editor and Admin may save, activate, enable, and suspend.
-- An Agent version selection owns the visible Instructions and Capabilities for
-  that exact immutable version. Only the latest forward head is editable.
-  Historical Versions are view-only and have no restore, copy, delete, edit, or
-  activation action. A `409` recovery reloads the catalog and complete history,
-  preserves unsaved local edits, and adopts authority only from a newer CAS
-  revision.
+- A Project Agent has one mutable server-owned Definition. The UI reads and
+  saves that aggregate with optimistic `revision`; it exposes no Candidate,
+  activation, version picker, diff, or history. A successful save immediately
+  becomes authoritative for later Run Admission. A `409` recovery reloads the
+  catalog and Definition, preserves unsaved local edits, and adopts authority
+  only from a newer CAS revision. Asset suspension remains a separate emergency
+  stop and is not changed by Definition edits.
+- Project Skill/MCP versions remain immutable server objects. The UI never
+  fabricates a Current Version, capability, binding, or dependency closure.
 - Agent `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are four logical
-  version fields, not a filesystem editor.
+  Definition fields, not a filesystem editor.
 - Builder sessions are account/project/owner scoped. Candidate edits remain
   revision/checksum-bound; final confirmation is one server transaction and does
   not imply activation or binding unless the response says so.
@@ -222,11 +218,19 @@ generator. A necessary local patch needs focused coverage and an explanation.
   Archive plus Builder create/revise results with declarations
   must lead to the exact created version's Runtime secrets controls; AI never
   chooses or sees a secret value.
+- Project Skill deletion is a terminal archive action. The confirmation explains
+  that the Skill is hidden, removed from every Agent without suspending those
+  Agents, and immediately loses its Secret ciphertext; queued or retried Runs
+  that still require an unmaterialized secret may fail. On success, remove the
+  Skill query subtree, invalidate Agent Definition/catalog/runtime and Builder
+  caches, and show the server-returned affected Agent count. Do not show
+  `ASSET_IN_USE`, physical-delete, or manual-unbind guidance for this action.
 - System asset definitions are read-only in global admin views. Project binding
   and domain-secret operations are separate, narrow mutations.
-- System Agent/Skill definitions are read-only single-v1 assets. Project bindings
-  store only the asset identity and runtime resolves its Current Version. System
-  Skill revocation is displayed as governance eligibility, not a version state;
+- System Agent definitions are read-only single Definitions; System Skills are
+  read-only single-v1 assets. Project bindings store only the asset identity and
+  runtime resolves the Agent Definition or Skill Current Version. System Skill
+  revocation is displayed as governance eligibility, not a version state;
   optimistic `409` responses refresh authority and require a fresh choice.
 - Project and global System Skill details export the currently selected,
   persisted version through the same `Export ZIP` interaction. Unsaved Skill or

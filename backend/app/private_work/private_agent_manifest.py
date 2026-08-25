@@ -31,7 +31,7 @@ def build_private_agent_manifest(
         raise RunSnapshotAssetStale
     return PrivateAgentManifest(
         agent_asset_id=agent.asset_id,
-        agent_version_id=agent.version_id,
+        agent_definition_id=agent.version_id,
         checksum=agent.checksum,
         catalog_generation=agent.catalog_generation,
         description=agent.payload.description,

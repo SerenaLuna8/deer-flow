@@ -48,7 +48,8 @@ from app.reliability.jobs import (
     JobScope,
     PrivateRunJobRepository,
 )
-from app.shared_assets.errors import AssetInUse
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+from app.shared_assets.agent_service import AgentService
 from app.shared_assets.models import (
     AgentPayload,
     AssetKind,
@@ -56,14 +57,23 @@ from app.shared_assets.models import (
     ResolvedAgentSnapshot,
     ResolvedRunAssetClosure,
     ResolvedSkillVersionSnapshot,
+    SkillAssetRef,
 )
-from app.shared_assets.skill_repository import SkillRepository
+from app.shared_assets.skill_deletion import (
+    ArchivedSkillPurger,
+    SkillDeletionCoordinator,
+)
 from app.shared_assets.skill_version_facts import skill_version_archive_facts
 from deerflow.config.run_skill_snapshot_config import RunSkillSnapshotConfig
 from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository as HarnessRunRepository
-from deerflow.persistence.shared_assets import SkillRow, SkillVersionRow
+from deerflow.persistence.shared_assets import (
+    AgentRow,
+    AgentSkillRefRow,
+    SkillRow,
+    SkillVersionRow,
+)
 from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
 
 pytestmark = pytest.mark.run_skill_writer_cohort_control
@@ -167,13 +177,21 @@ async def _seed_scope(session: AsyncSession) -> _Scope:
         text(
             """INSERT INTO agents (
                    id, scope, project_id, slug, display_name,
-                   status, created_by_user_id
+                   status, definition_id, payload_checksum,
+                   created_by_user_id, updated_by_user_id
                ) VALUES (
                    :id, 'project', :project_id, 'run-agent', 'Run Agent',
-                   'active', :user_id
+                   'active', :definition_id, :payload_checksum,
+                   :user_id, :user_id
                )"""
         ),
-        {"id": agent_id, "project_id": project_id, "user_id": str(user_id)},
+        {
+            "id": agent_id,
+            "project_id": project_id,
+            "definition_id": uuid.uuid4(),
+            "payload_checksum": "a" * 64,
+            "user_id": str(user_id),
+        },
     )
     await session.execute(
         text(
@@ -249,6 +267,10 @@ async def _seed_scope(session: AsyncSession) -> _Scope:
         text("UPDATE skill_versions SET files_sealed=true WHERE id=:version_id"),
         {"version_id": skill_version_id},
     )
+    await session.execute(
+        text("UPDATE skills SET current_version_id=:version_id WHERE id=:skill_id"),
+        {"version_id": skill_version_id, "skill_id": skill_id},
+    )
     return _Scope(
         user_id=user_id,
         project_id=project_id,
@@ -260,6 +282,55 @@ async def _seed_scope(session: AsyncSession) -> _Scope:
         skill_file_count=1,
         skill_content_size=len(content),
     )
+
+
+async def _bind_agent_to_skill(
+    session: AsyncSession,
+    scope: _Scope,
+) -> None:
+    payload = AgentPayload(
+        description="",
+        soul="",
+        model_ref="default",
+        tool_groups=(),
+        skill_refs=(SkillAssetRef(AssetScope.PROJECT, scope.skill_id),),
+        mcp_version_ids=(),
+        payload_schema_version=4,
+    )
+    await session.scalar(
+        select(
+            func.set_config(
+                "deerflow.agent_definition_mutation_id",
+                str(scope.agent_id),
+                True,
+            )
+        )
+    )
+    await session.execute(
+        text(
+            """UPDATE agents
+                  SET definition_id=:definition_id,
+                      payload_checksum=:payload_checksum,
+                      revision=revision + 1,
+                      updated_by_user_id=:user_id
+                WHERE id=:agent_id"""
+        ),
+        {
+            "agent_id": scope.agent_id,
+            "definition_id": uuid.uuid4(),
+            "payload_checksum": agent_payload_checksum(payload),
+            "user_id": str(scope.user_id),
+        },
+    )
+    session.add(
+        AgentSkillRefRow(
+            agent_id=scope.agent_id,
+            skill_asset_scope="project",
+            skill_asset_id=scope.skill_id,
+            sort_order=0,
+        )
+    )
+    await session.flush()
 
 
 async def _insert_run(
@@ -450,7 +521,7 @@ async def _insert_agent_parent(
     typed_checksum: str = "a" * 64,
     json_checksum: str | None = None,
 ) -> None:
-    agent_version_id = uuid.uuid4()
+    agent_definition_id = uuid.uuid4()
     await _insert_asset(
         session,
         scope,
@@ -458,7 +529,7 @@ async def _insert_agent_parent(
         kind="agent",
         dependency_order=dependency_order,
         asset_id=scope.agent_id,
-        version_id=agent_version_id,
+        version_id=agent_definition_id,
         checksum=typed_checksum,
         schema_version=schema_version,
         snapshot=_snapshot(
@@ -466,7 +537,7 @@ async def _insert_agent_parent(
             kind="agent",
             scope="project",
             asset_id=scope.agent_id,
-            version_id=agent_version_id,
+            version_id=agent_definition_id,
             checksum=(typed_checksum if json_checksum is None else json_checksum),
         ),
     )
@@ -1427,10 +1498,51 @@ async def test_postgres_legacy_mode_uses_same_repository_to_write_v3_without_ref
         await engine.dispose()
 
 
+class _ArchivedSkillPurgeQuota:
+    def __init__(self) -> None:
+        self.released: list[uuid.UUID] = []
+
+    async def release_skill_version_if_reserved(
+        self,
+        _session: AsyncSession,
+        _project_id: uuid.UUID,
+        *,
+        version_id: uuid.UUID,
+        size: int,
+    ) -> bool:
+        assert size >= 0
+        self.released.append(version_id)
+        return True
+
+    async def reconcile_project_storage(
+        self,
+        _session: AsyncSession,
+        _project_id: uuid.UUID,
+    ) -> None:
+        return None
+
+
+class _ArchivedSkillPurgeAudit:
+    def __init__(self) -> None:
+        self.events: list[tuple[uuid.UUID, int]] = []
+
+    async def archived_skill_purged(
+        self,
+        _session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        skill_id: uuid.UUID,
+        version_count: int,
+        request_id: str,
+    ) -> None:
+        del project_id, request_id
+        self.events.append((skill_id, version_count))
+
+
 @pytest.mark.parametrize("schema_version", [3, 4], ids=["legacy-v3", "reference-v4"])
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_admission_first_blocks_delete_then_reports_asset_in_use(
+async def test_postgres_admission_first_allows_archive_but_purger_keeps_run_package(
     postgres_database_url: str,
     schema_version: int,
 ) -> None:
@@ -1442,6 +1554,7 @@ async def test_postgres_admission_first_blocks_delete_then_reports_asset_in_use(
         await _install_full_schema(engine)
         async with factory() as session, session.begin():
             scope = await _seed_scope(session)
+            await _bind_agent_to_skill(session, scope)
         actor = _project_context(scope, f"admission-first-{schema_version}")
 
         locked = (
@@ -1470,32 +1583,59 @@ async def test_postgres_admission_first_blocks_delete_then_reports_asset_in_use(
 
         pid_ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
 
-        async def delete_after_lock() -> tuple[object, ...]:
+        async def archive_after_lock():
             async with factory() as session, session.begin():
                 pid = int(await session.scalar(text("SELECT pg_backend_pid()")))
                 pid_ready.set_result(pid)
-                repository = SkillRepository(session)
-                await repository.lock_project_delete_scope(actor)
-                asset = await repository.get_project_asset(
+                return await SkillDeletionCoordinator(AgentService(factory)).delete_in_session(
+                    session,
                     actor,
                     scope.skill_id,
-                    for_update=True,
+                    1,
                 )
-                return await repository.plan_project_asset_deletion(actor, asset)
 
-        delete_task = asyncio.create_task(delete_after_lock())
+        archive_task = asyncio.create_task(archive_after_lock())
         await _wait_for_backend_lock(factory, await pid_ready)
         await admission_transaction.commit()
-        with pytest.raises(AssetInUse):
-            await delete_task
+        archived = await archive_task
+        assert archived.affected_agent_count == 1
+
+        quota = _ArchivedSkillPurgeQuota()
+        audit = _ArchivedSkillPurgeAudit()
+        report = await ArchivedSkillPurger(
+            factory,
+            quota=quota,
+            audit=audit,
+        ).purge_project(scope.project_id)
+        assert report.skills_purged == 0
+        assert quota.released == []
+        assert audit.events == []
 
         async with factory() as session:
+            agent = await session.get(AgentRow, scope.agent_id)
+            assert agent is not None
+            assert agent.status == "active"
+            assert agent.revision == 3
+            assert await session.scalar(select(func.count()).select_from(AgentSkillRefRow).where(AgentSkillRefRow.agent_id == scope.agent_id)) == 0
+            skill = await session.get(SkillRow, scope.skill_id)
+            assert skill is not None
+            assert skill.status == "archived"
+            assert skill.current_version_id == scope.skill_version_id
+            assert await session.get(SkillVersionRow, scope.skill_version_id) is not None
             assert (
                 await session.scalar(
                     text("SELECT count(*) FROM run_asset_versions WHERE run_id=:run_id"),
                     {"run_id": run_id},
                 )
                 == 2
+            )
+            expected_ref_count = 1 if schema_version == 4 else 0
+            assert (
+                await session.scalar(
+                    text("SELECT count(*) FROM run_skill_version_refs WHERE run_id=:run_id"),
+                    {"run_id": run_id},
+                )
+                == expected_ref_count
             )
     finally:
         if admission.in_transaction():
@@ -1511,7 +1651,7 @@ async def test_postgres_admission_first_blocks_delete_then_reports_asset_in_use(
 )
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_delete_first_makes_both_writer_modes_fail_stale(
+async def test_postgres_archive_first_rejects_admission_then_purger_removes_package(
     postgres_database_url: str,
     writer_mode: str,
 ) -> None:
@@ -1524,6 +1664,7 @@ async def test_postgres_delete_first_makes_both_writer_modes_fail_stale(
         await _install_full_schema(engine)
         async with factory() as session, session.begin():
             scope = await _seed_scope(session)
+            await _bind_agent_to_skill(session, scope)
         actor = _project_context(scope, f"delete-first-{writer_mode}")
         config = (
             RunSkillSnapshotConfig()
@@ -1536,15 +1677,13 @@ async def test_postgres_delete_first_makes_both_writer_modes_fail_stale(
         )
         freeze_run_skill_snapshot_writer(config)
 
-        repository = SkillRepository(deletion)
-        await repository.lock_project_delete_scope(actor)
-        asset = await repository.get_project_asset(
+        deleted = await SkillDeletionCoordinator(AgentService(factory)).delete_in_session(
+            deletion,
             actor,
             scope.skill_id,
-            for_update=True,
+            1,
         )
-        versions = await repository.plan_project_asset_deletion(actor, asset)
-        assert tuple(item.version_id for item in versions) == (scope.skill_version_id,)
+        assert deleted.affected_agent_count == 1
 
         pid_ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
 
@@ -1559,17 +1698,33 @@ async def test_postgres_delete_first_makes_both_writer_modes_fail_stale(
 
         admission_task = asyncio.create_task(validate_after_delete())
         await _wait_for_backend_lock(factory, await pid_ready)
-        await repository.delete_project_asset(
-            actor,
-            asset,
-            (scope.skill_version_id,),
-        )
         await deletion_transaction.commit()
         with pytest.raises(RunSnapshotAssetStale):
             await admission_task
 
+        quota = _ArchivedSkillPurgeQuota()
+        audit = _ArchivedSkillPurgeAudit()
+        report = await ArchivedSkillPurger(
+            factory,
+            quota=quota,
+            audit=audit,
+        ).purge_project(scope.project_id)
+        assert report.skills_purged == 1
+        assert report.versions_purged == 1
+        assert quota.released == [scope.skill_version_id]
+        assert audit.events == [(scope.skill_id, 1)]
+
         async with factory() as session:
-            assert await session.get(SkillRow, scope.skill_id) is None
+            agent = await session.get(AgentRow, scope.agent_id)
+            assert agent is not None
+            assert agent.status == "active"
+            assert agent.revision == 3
+            assert await session.scalar(select(func.count()).select_from(AgentSkillRefRow).where(AgentSkillRefRow.agent_id == scope.agent_id)) == 0
+            skill = await session.get(SkillRow, scope.skill_id)
+            assert skill is not None
+            assert skill.status == "archived"
+            assert skill.current_version_id is None
+            assert await session.get(SkillVersionRow, scope.skill_version_id) is None
     finally:
         reset_run_skill_snapshot_writer_for_testing()
         if deletion.in_transaction():

@@ -60,6 +60,7 @@ import {
   assetIdSchema,
   type AssetKind,
   type AssetListKind,
+  type AgentDefinition,
   type AssetVersion,
   type DisableSystemBindingInput,
   type EnableCurrentSystemBindingInput,
@@ -152,12 +153,16 @@ function assetAvailability(
     if (!item.binding) return "未启用";
     if (!item.binding.enabled) return "已从项目停用";
     if (
+      kind !== "agents" &&
       item.current_version_id &&
       item.current_version_id !== item.binding.current_version_id
     ) {
       return kind === "mcp-servers" ? "有新配置" : "有新版本";
     }
     return "已在项目启用";
+  }
+  if (kind === "agents") {
+    return item.definition_id ? "Definition 可用" : "Definition 不可用";
   }
   if (!item.current_version_id) {
     return kind === "mcp-servers" ? "尚未生效" : "尚无当前版本";
@@ -297,9 +302,13 @@ export function systemBindingToggleState(
     (item.status === "active" || checked);
   const targetVersionId =
     item.scope === "system"
-      ? kind === "mcp-servers"
-        ? item.current_version_id
-        : (item.binding?.current_version_id ?? item.current_version_id)
+      ? kind === "agents"
+        ? (item.binding?.definition_id ?? item.definition_id ?? null)
+        : kind === "mcp-servers"
+          ? (item.current_version_id ?? null)
+          : (item.binding?.current_version_id ??
+            item.current_version_id ??
+            null)
       : null;
   return {
     checked,
@@ -848,7 +857,7 @@ function ProjectAssetCatalog({
     editing: boolean;
   }) => ReactNode;
   renderAssetEditor?: (
-    effectiveVersion: AssetVersion | null,
+    definitionOrVersion: AgentDefinition | AssetVersion | null,
     context: ProjectAssetVersionRenderContext,
   ) => ReactNode;
   renderVersion?: (
@@ -1978,7 +1987,7 @@ export function ProjectAssetPageShell({
     editing: boolean;
   }) => ReactNode;
   renderAssetEditor?: (
-    effectiveVersion: AssetVersion | null,
+    definitionOrVersion: AgentDefinition | AssetVersion | null,
     context: ProjectAssetVersionRenderContext,
   ) => ReactNode;
   renderVersion?: (

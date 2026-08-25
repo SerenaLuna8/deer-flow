@@ -127,15 +127,7 @@ export function systemBindingDialogAvailability({
   };
 }
 
-export function SystemBindingDialog({
-  accountId,
-  projectId,
-  kind,
-  item,
-  open,
-  onOpenChange,
-  onConflict,
-}: {
+type SystemBindingDialogProps = {
   accountId: string;
   projectId: string;
   kind: AssetListKind;
@@ -143,6 +135,116 @@ export function SystemBindingDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConflict?: () => void;
+};
+
+function AgentSystemBindingDialog({
+  accountId,
+  projectId,
+  item,
+  open,
+  onOpenChange,
+  onConflict,
+}: Omit<SystemBindingDialogProps, "kind">) {
+  const enable = useEnableProjectSystemBinding(accountId, projectId, "agent");
+  const disable = useDisableProjectSystemBinding(accountId, projectId, "agent");
+  const pending = enable.isPending || disable.isPending;
+  const error = enable.error ?? disable.error;
+  const canEnable =
+    item.status === "active" &&
+    Boolean(item.definition_id) &&
+    item.binding?.enabled !== true;
+  const mutationSucceeded = () => onOpenChange(false);
+  const mutationFailed = (mutationError: unknown) => {
+    if (isSystemBindingConflict(mutationError)) onConflict?.();
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!pending) onOpenChange(nextOpen);
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {item.binding?.enabled ? "项目使用状态" : "启用到项目"}
+          </DialogTitle>
+          <DialogDescription>
+            {item.display_name}。项目使用该系统 Agent 的唯一只读 Definition。
+          </DialogDescription>
+        </DialogHeader>
+        <dl className="grid gap-2 text-sm">
+          <div>
+            <dt className="text-muted-foreground text-xs">项目状态</dt>
+            <dd>{item.binding?.enabled ? "已启用" : "未启用"}</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground text-xs">Definition ID</dt>
+            <dd className="font-mono text-xs">{item.definition_id ?? "—"}</dd>
+          </div>
+        </dl>
+        {error ? (
+          <p role="alert" className="text-destructive text-sm">
+            {isSystemBindingConflict(error)
+              ? "项目使用状态已变化，请刷新后重试。"
+              : adminAssetErrorMessage(error)}
+          </p>
+        ) : null}
+        <DialogFooter className="gap-2 sm:justify-between">
+          {item.binding?.enabled ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={() =>
+                disable.mutate(
+                  {
+                    assetId: item.id,
+                    input: { expected_binding_version: item.binding!.version },
+                  },
+                  { onSuccess: mutationSucceeded, onError: mutationFailed },
+                )
+              }
+            >
+              从项目停用
+            </Button>
+          ) : null}
+          {canEnable ? (
+            <Button
+              type="button"
+              disabled={pending}
+              onClick={() =>
+                enable.mutate(
+                  {
+                    asset_id: item.id,
+                    ...(item.binding
+                      ? { expected_binding_version: item.binding.version }
+                      : {}),
+                  },
+                  { onSuccess: mutationSucceeded, onError: mutationFailed },
+                )
+              }
+            >
+              启用到项目
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function VersionedSystemBindingDialog({
+  accountId,
+  projectId,
+  kind,
+  item,
+  open,
+  onOpenChange,
+  onConflict,
+}: SystemBindingDialogProps & {
+  kind: Exclude<AssetListKind, "agents">;
 }) {
   const assetKind = BINDING_KIND[kind];
   const isMcp = kind === "mcp-servers";
@@ -344,4 +446,20 @@ export function SystemBindingDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+export function SystemBindingDialog(props: SystemBindingDialogProps) {
+  if (props.kind === "agents") {
+    return (
+      <AgentSystemBindingDialog
+        accountId={props.accountId}
+        projectId={props.projectId}
+        item={props.item}
+        open={props.open}
+        onOpenChange={props.onOpenChange}
+        onConflict={props.onConflict}
+      />
+    );
+  }
+  return <VersionedSystemBindingDialog {...props} kind={props.kind} />;
 }

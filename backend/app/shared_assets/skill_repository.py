@@ -14,16 +14,17 @@ from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAsset
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
-    AssetInUse,
     AssetNotFound,
     AssetValidationFailed,
     SkillRuntimeNameConflict,
 )
 from app.shared_assets.skill_version_facts import skill_version_archive_facts
-from deerflow.persistence.private_work.model import RunAssetVersionRow
+from deerflow.persistence.private_work.model import (
+    RunAssetVersionRow,
+    RunSkillVersionRefRow,
+)
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
-    AgentVersionSkillRefRow,
     ProjectSystemSkillBindingRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
@@ -32,6 +33,8 @@ from deerflow.persistence.shared_assets import (
     SkillVersionRow,
 )
 from deerflow.persistence.shared_assets.skill_secret_model import (
+    ProjectSkillSecretGenerationRow,
+    ProjectSkillSecretStateRow,
     ProjectSkillSecretTombstoneRow,
 )
 
@@ -206,25 +209,30 @@ class SkillRepository:
         """
 
         self._require_project_actor(context)
-        statement = (
+        project_statement = (
             select(ProjectRow.id)
-            .join(
-                ProjectMembershipRow,
-                ProjectMembershipRow.project_id == ProjectRow.id,
-            )
             .where(
                 ProjectRow.id == context.project_id,
                 ProjectRow.status == "active",
                 ProjectRow.is_suspended.is_(False),
+            )
+            .with_for_update(of=ProjectRow)
+        )
+        if (await self.session.execute(project_statement)).scalar_one_or_none() is None:
+            raise AssetNotFound(context.request_id)
+
+        membership_statement = (
+            select(ProjectMembershipRow.id)
+            .where(
                 ProjectMembershipRow.id == context.membership_id,
                 ProjectMembershipRow.project_id == context.project_id,
                 ProjectMembershipRow.user_id == str(context.user_id),
                 ProjectMembershipRow.status == "active",
                 ProjectMembershipRow.version == context.membership_version,
             )
-            .with_for_update(of=ProjectRow)
+            .with_for_update(of=ProjectMembershipRow)
         )
-        if (await self.session.execute(statement)).scalar_one_or_none() is None:
+        if (await self.session.execute(membership_statement)).scalar_one_or_none() is None:
             raise AssetNotFound(context.request_id)
 
     async def _lock_override_project(self, context: SystemAssetGovernanceContext) -> None:
@@ -258,106 +266,19 @@ class SkillRepository:
         await self.session.flush()
         return row
 
-    async def plan_project_asset_deletion(
+    async def archive_project_asset(
         self,
         context: ProjectContext,
         asset: SkillRow,
-    ) -> tuple[SkillVersionStorageRecord, ...]:
-        """Lock a project Skill package and reject immutable external references."""
+    ) -> None:
+        """Irreversibly archive one locked Project Skill and its Builder links."""
 
         self._require_project_actor(context)
-        if asset.scope != "project" or asset.project_id != context.project_id:
-            raise AssetNotFound(context.request_id)
-        version_ids = tuple(
-            (await self.session.execute(select(SkillVersionRow.id).where(SkillVersionRow.skill_id == asset.id).order_by(SkillVersionRow.version_number, SkillVersionRow.id).with_for_update(of=SkillVersionRow))).scalars().all()
-        )
-        if not version_ids:
-            return ()
-        agent_reference_exists = await self.session.scalar(
-            select(
-                exists().where(
-                    AgentVersionSkillRefRow.skill_asset_id == asset.id,
-                    AgentVersionSkillRefRow.skill_asset_scope == "project",
-                )
-            )
-        )
-        run_reference_exists = await self.session.scalar(
-            select(
-                exists().where(
-                    RunAssetVersionRow.project_id == context.project_id,
-                    RunAssetVersionRow.asset_kind == "skill",
-                    RunAssetVersionRow.asset_scope == "project",
-                    RunAssetVersionRow.asset_id == asset.id,
-                    RunAssetVersionRow.version_id.in_(version_ids),
-                )
-            )
-        )
-        if agent_reference_exists or run_reference_exists:
-            raise AssetInUse(context.request_id)
-        size_rows = (
-            await self.session.execute(
-                select(
-                    SkillVersionFileRow.skill_version_id,
-                    func.coalesce(func.sum(SkillVersionFileRow.size_bytes), 0),
-                )
-                .where(SkillVersionFileRow.skill_version_id.in_(version_ids))
-                .group_by(SkillVersionFileRow.skill_version_id)
-            )
-        ).all()
-        sizes = {version_id: int(size_bytes) for version_id, size_bytes in size_rows}
-        return tuple(
-            SkillVersionStorageRecord(
-                version_id=version_id,
-                size_bytes=sizes.get(version_id, 0),
-            )
-            for version_id in version_ids
-        )
-
-    async def ensure_project_skill_runtime_name_available(
-        self,
-        context: ProjectContext | SystemAssetGovernanceContext,
-        asset: SkillRow,
-    ) -> None:
-        """Reject activation when an enabled System Skill owns the same name.
-
-        Project Skill activation already holds the project row lock before this
-        check. System binding enable takes the same lock before its inverse
-        check, which serializes the two state transitions.
-        """
-
-        project_id = getattr(context, "project_id", None)
-        if not isinstance(project_id, uuid.UUID) or asset.scope != "project" or asset.project_id != project_id:
-            raise AssetValidationFailed(_request_id(context))
-        conflict = await self.session.scalar(
-            select(
-                exists().where(
-                    ProjectSystemSkillBindingRow.project_id == project_id,
-                    ProjectSystemSkillBindingRow.enabled.is_(True),
-                    SkillRow.id == ProjectSystemSkillBindingRow.system_skill_id,
-                    SkillRow.scope == "system",
-                    SkillRow.project_id.is_(None),
-                    func.lower(SkillRow.slug) == asset.slug.casefold(),
-                )
-            )
-        )
-        if conflict:
-            raise SkillRuntimeNameConflict(_request_id(context))
-
-    async def delete_project_asset(
-        self,
-        context: ProjectContext,
-        asset: SkillRow,
-        version_ids: Sequence[uuid.UUID],
-    ) -> None:
-        """Physically remove one already-locked project Skill package."""
-
-        self._require_project_actor(context)
-        selected_version_ids = tuple(version_ids)
-        if asset.scope != "project" or asset.project_id != context.project_id or len(set(selected_version_ids)) != len(selected_version_ids):
+        if asset.scope != "project" or asset.project_id != context.project_id or asset.status == "archived":
             raise AssetNotFound(context.request_id)
 
-        # Preserve owner-private Builder history while severing the deleted
-        # shared-asset reference. Completed commit retries then fail closed.
+        # Preserve owner-private Builder history while severing the ordinary
+        # catalog link. Completed commit retries then report the deleted result.
         await self.session.execute(
             update(SkillDesignSessionRow)
             .where(
@@ -371,9 +292,7 @@ class SkillRepository:
             )
         )
 
-        # Sever revision sessions that pinned this Skill as their target, and
-        # fail-close the ones that could still progress. In-flight Builder
-        # Runs observe the failed operation at their next tool-call boundary.
+        # A revision session may no longer progress once its target is archived.
         revise_rows = (
             (
                 await self.session.execute(
@@ -417,27 +336,270 @@ class SkillRepository:
                     )
                 )
 
-        # This transient state is never committed: it combines with the cleared
-        # pointer to authorize the immutable-child trigger added in revision 0002.
-        asset.current_version_id = None
         asset.status = "archived"
+        asset.revision += 1
+        await self.session.flush()
+
+    async def destroy_project_asset_secrets(
+        self,
+        context: ProjectContext,
+        asset: SkillRow,
+    ) -> int:
+        """Destroy every ciphertext generation and retain secret tombstones."""
+
+        self._require_project_actor(context)
+        if asset.scope != "project" or asset.project_id != context.project_id:
+            raise AssetNotFound(context.request_id)
+        states = tuple(
+            (
+                await self.session.execute(
+                    select(ProjectSkillSecretStateRow)
+                    .where(
+                        ProjectSkillSecretStateRow.project_id == context.project_id,
+                        ProjectSkillSecretStateRow.skill_id == asset.id,
+                    )
+                    .order_by(
+                        ProjectSkillSecretStateRow.skill_version_id,
+                        ProjectSkillSecretStateRow.secret_name,
+                    )
+                    .with_for_update(of=ProjectSkillSecretStateRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        generations = tuple(
+            (
+                await self.session.execute(
+                    select(ProjectSkillSecretGenerationRow)
+                    .where(
+                        ProjectSkillSecretGenerationRow.project_id == context.project_id,
+                        ProjectSkillSecretGenerationRow.skill_id == asset.id,
+                    )
+                    .order_by(
+                        ProjectSkillSecretGenerationRow.skill_version_id,
+                        ProjectSkillSecretGenerationRow.secret_name,
+                        ProjectSkillSecretGenerationRow.revision,
+                        ProjectSkillSecretGenerationRow.id,
+                    )
+                    .with_for_update(of=ProjectSkillSecretGenerationRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for state in states:
+            state.current_generation_id = None
+            state.revision += 1
+            state.updated_by_user_id = str(context.user_id)
+        await self.session.flush()
+        self.session.add_all(
+            tuple(
+                ProjectSkillSecretTombstoneRow(
+                    project_id=generation.project_id,
+                    skill_id=generation.skill_id,
+                    skill_version_id=generation.skill_version_id,
+                    secret_name=generation.secret_name,
+                    destroyed_generation_id=generation.id,
+                    revision=generation.revision,
+                    envelope_digest=generation.envelope_digest,
+                    reason="skill_delete",
+                    destroyed_by_user_id=str(context.user_id),
+                )
+                for generation in generations
+            )
+        )
+        if generations:
+            await self.session.execute(
+                delete(ProjectSkillSecretGenerationRow).where(
+                    ProjectSkillSecretGenerationRow.id.in_(
+                        tuple(generation.id for generation in generations),
+                    )
+                )
+            )
+        await self.session.flush()
+        return len(generations)
+
+    async def ensure_project_skill_runtime_name_available(
+        self,
+        context: ProjectContext | SystemAssetGovernanceContext,
+        asset: SkillRow,
+    ) -> None:
+        """Reject activation when an enabled System Skill owns the same name.
+
+        Project Skill activation already holds the project row lock before this
+        check. System binding enable takes the same lock before its inverse
+        check, which serializes the two state transitions.
+        """
+
+        project_id = getattr(context, "project_id", None)
+        if not isinstance(project_id, uuid.UUID) or asset.scope != "project" or asset.project_id != project_id:
+            raise AssetValidationFailed(_request_id(context))
+        conflict = await self.session.scalar(
+            select(
+                exists().where(
+                    ProjectSystemSkillBindingRow.project_id == project_id,
+                    ProjectSystemSkillBindingRow.enabled.is_(True),
+                    SkillRow.id == ProjectSystemSkillBindingRow.system_skill_id,
+                    SkillRow.scope == "system",
+                    SkillRow.project_id.is_(None),
+                    func.lower(SkillRow.slug) == asset.slug.casefold(),
+                )
+            )
+        )
+        if conflict:
+            raise SkillRuntimeNameConflict(_request_id(context))
+
+    async def lock_project_purge_scope(self, project_id: uuid.UUID) -> None:
+        """Serialize trusted archived-Skill cleanup with Project governance."""
+
+        project = await self.session.scalar(
+            select(ProjectRow.id)
+            .where(
+                ProjectRow.id == project_id,
+                or_(
+                    ProjectRow.status == "active",
+                    and_(
+                        ProjectRow.status == "pending_deletion",
+                        ProjectRow.deletion_effective_at.is_not(None),
+                        ProjectRow.deletion_effective_at <= func.now(),
+                    ),
+                ),
+            )
+            .with_for_update(of=ProjectRow)
+        )
+        if project is None:
+            raise AssetNotFound("archived-skill-purge")
+
+    async def list_archived_project_assets_for_purge(
+        self,
+        project_id: uuid.UUID,
+        *,
+        limit: int,
+    ) -> tuple[SkillRow, ...]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("archived Skill purge limit is invalid")
+        rows = (
+            (
+                await self.session.execute(
+                    select(SkillRow)
+                    .where(
+                        SkillRow.scope == "project",
+                        SkillRow.project_id == project_id,
+                        SkillRow.status == "archived",
+                        exists().where(SkillVersionRow.skill_id == SkillRow.id),
+                        ~exists().where(
+                            RunSkillVersionRefRow.project_id == project_id,
+                            RunSkillVersionRefRow.asset_scope == "project",
+                            RunSkillVersionRefRow.skill_project_id == project_id,
+                            RunSkillVersionRefRow.skill_id == SkillRow.id,
+                        ),
+                        ~exists().where(
+                            RunAssetVersionRow.project_id == project_id,
+                            RunAssetVersionRow.asset_kind == "skill",
+                            RunAssetVersionRow.asset_scope == "project",
+                            RunAssetVersionRow.asset_id == SkillRow.id,
+                            RunAssetVersionRow.snapshot_schema_version.in_((2, 3)),
+                        ),
+                    )
+                    .order_by(SkillRow.id)
+                    .limit(limit)
+                    .with_for_update(of=SkillRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return tuple(rows)
+
+    async def plan_archived_project_asset_purge(
+        self,
+        project_id: uuid.UUID,
+        asset: SkillRow,
+    ) -> tuple[SkillVersionStorageRecord, ...] | None:
+        """Return locked Version sizes, or ``None`` while any Run retains them."""
+
+        if asset.scope != "project" or asset.project_id != project_id or asset.status != "archived":
+            raise AssetNotFound("archived-skill-purge")
+        versions = tuple((await self.session.execute(select(SkillVersionRow).where(SkillVersionRow.skill_id == asset.id).order_by(SkillVersionRow.version_number, SkillVersionRow.id).with_for_update(of=SkillVersionRow))).scalars().all())
+        if not versions:
+            return ()
+        version_ids = tuple(version.id for version in versions)
+        v4_reference_exists = bool(
+            await self.session.scalar(
+                select(
+                    exists().where(
+                        RunSkillVersionRefRow.project_id == project_id,
+                        RunSkillVersionRefRow.asset_scope == "project",
+                        RunSkillVersionRefRow.skill_project_id == project_id,
+                        RunSkillVersionRefRow.skill_id == asset.id,
+                        RunSkillVersionRefRow.skill_version_id.in_(version_ids),
+                    )
+                )
+            )
+        )
+        legacy_reference_exists = bool(
+            await self.session.scalar(
+                select(
+                    exists().where(
+                        RunAssetVersionRow.project_id == project_id,
+                        RunAssetVersionRow.asset_kind == "skill",
+                        RunAssetVersionRow.asset_scope == "project",
+                        RunAssetVersionRow.asset_id == asset.id,
+                        RunAssetVersionRow.version_id.in_(version_ids),
+                        RunAssetVersionRow.snapshot_schema_version.in_((2, 3)),
+                    )
+                )
+            )
+        )
+        if v4_reference_exists or legacy_reference_exists:
+            return None
+        return tuple(
+            SkillVersionStorageRecord(
+                version_id=version.id,
+                size_bytes=int(version.content_size_bytes),
+            )
+            for version in versions
+        )
+
+    async def purge_archived_project_asset_versions(
+        self,
+        project_id: uuid.UUID,
+        asset: SkillRow,
+        versions: Sequence[SkillVersionStorageRecord],
+    ) -> None:
+        """Remove one eligible archived package while retaining its Skill row."""
+
+        selected_version_ids = tuple(version.version_id for version in versions)
+        if asset.scope != "project" or asset.project_id != project_id or asset.status != "archived" or len(set(selected_version_ids)) != len(selected_version_ids):
+            raise AssetNotFound("archived-skill-purge")
+        asset.current_version_id = None
+        asset.revision += 1
         await self.session.flush()
         await self.session.scalar(
             select(
                 func.set_config(
-                    "deerflow.skill_hard_delete_asset_id",
+                    "deerflow.archived_skill_purge_asset_id",
                     str(asset.id),
                     True,
                 )
             )
         )
-
         if selected_version_ids:
             await self.session.execute(
-                delete(ProjectSkillSecretTombstoneRow).where(
-                    ProjectSkillSecretTombstoneRow.project_id == context.project_id,
-                    ProjectSkillSecretTombstoneRow.skill_id == asset.id,
-                    ProjectSkillSecretTombstoneRow.skill_version_id.in_(
+                delete(ProjectSkillSecretStateRow).where(
+                    ProjectSkillSecretStateRow.project_id == project_id,
+                    ProjectSkillSecretStateRow.skill_id == asset.id,
+                    ProjectSkillSecretStateRow.skill_version_id.in_(
+                        selected_version_ids,
+                    ),
+                )
+            )
+            await self.session.execute(
+                delete(ProjectSkillSecretGenerationRow).where(
+                    ProjectSkillSecretGenerationRow.project_id == project_id,
+                    ProjectSkillSecretGenerationRow.skill_id == asset.id,
+                    ProjectSkillSecretGenerationRow.skill_version_id.in_(
                         selected_version_ids,
                     ),
                 )
@@ -459,7 +621,9 @@ class SkillRepository:
                             .where(
                                 SkillVersionRow.id.in_(remaining),
                                 SkillVersionRow.skill_id == asset.id,
-                                ~exists().where(child.supersedes_version_id == SkillVersionRow.id),
+                                ~exists().where(
+                                    child.supersedes_version_id == SkillVersionRow.id,
+                                ),
                             )
                             .returning(SkillVersionRow.id)
                         )
@@ -468,10 +632,8 @@ class SkillRepository:
                     .all()
                 )
                 if not deleted_ids:
-                    raise AssetConflict(context.request_id)
+                    raise AssetConflict("archived-skill-purge")
                 remaining.difference_update(deleted_ids)
-
-        await self.session.delete(asset)
         await self.session.flush()
 
     async def get_project_asset(
@@ -488,6 +650,7 @@ class SkillRepository:
             SkillRow.id == asset_id,
             SkillRow.scope == "project",
             SkillRow.project_id == context.project_id,
+            SkillRow.status != "archived",
             self._project_context_exists(context),
         )
         if for_update:
@@ -534,6 +697,7 @@ class SkillRepository:
             SkillRow.id == asset_id,
             SkillRow.scope == "project",
             SkillRow.project_id == context.project_id,
+            SkillRow.status != "archived",
         )
         if for_update:
             statement = statement.with_for_update(of=SkillRow)
@@ -551,6 +715,7 @@ class SkillRepository:
                 SkillRow.id == asset.id,
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
+                SkillRow.status != "archived",
                 self._project_context_exists(context),
             )
         )
@@ -680,6 +845,7 @@ class SkillRepository:
                 SkillVersionRow.skill_id == asset_id,
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
+                SkillRow.status != "archived",
                 self._project_context_exists(context),
             )
         )
@@ -711,6 +877,7 @@ class SkillRepository:
                     and_(
                         SkillRow.scope == "project",
                         SkillRow.project_id == context.project_id,
+                        SkillRow.status != "archived",
                     ),
                     and_(
                         SkillRow.scope == "system",
@@ -753,6 +920,7 @@ class SkillRepository:
                     and_(
                         SkillRow.scope == "project",
                         SkillRow.project_id == context.project_id,
+                        SkillRow.status != "archived",
                     ),
                     and_(
                         SkillRow.scope == "system",
@@ -862,6 +1030,7 @@ class SkillRepository:
                     and_(
                         SkillRow.scope == "project",
                         SkillRow.project_id == context.project_id,
+                        SkillRow.status != "archived",
                     ),
                     and_(
                         SkillRow.scope == "system",
@@ -926,6 +1095,7 @@ class SkillRepository:
                 SkillVersionRow.skill_id == asset_id,
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
+                SkillRow.status != "archived",
             )
         )
         if for_update:
@@ -1057,6 +1227,7 @@ class SkillRepository:
                     and_(
                         SkillRow.scope == "project",
                         SkillRow.project_id == context.project_id,
+                        SkillRow.status != "archived",
                     ),
                     and_(
                         SkillRow.scope == "system",
@@ -1107,6 +1278,7 @@ class SkillRepository:
                 SkillVersionRow.skill_id == asset_id,
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
+                SkillRow.status != "archived",
             )
             .order_by(SkillVersionRow.version_number.desc())
         )
@@ -1190,6 +1362,7 @@ class SkillRepository:
         project_statement = select(SkillRow).where(
             SkillRow.scope == "project",
             SkillRow.project_id == context.project_id,
+            SkillRow.status != "archived",
             self._project_context_exists(context),
         )
         system_statement = select(SkillRow).where(
@@ -1245,6 +1418,7 @@ class SkillRepository:
             .where(
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
+                SkillRow.status != "archived",
             )
             .order_by(SkillRow.created_at, SkillRow.id)
         )

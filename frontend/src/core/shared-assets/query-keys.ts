@@ -4,6 +4,8 @@ import {
   type AssetListKind,
 } from "./types";
 
+type VersionedAssetListKind = Exclude<AssetListKind, "agents">;
+
 function requireKeyPart(value: string, label: string): string {
   if (value.trim() === "") throw new Error(`${label} is required`);
   return value;
@@ -114,7 +116,7 @@ export function projectAssetMutationKey(
 
 export function adminAssetVersionsKey(
   accountId: string,
-  kind: AssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
 ) {
   return [
@@ -128,7 +130,7 @@ export function adminAssetVersionsKey(
 export function adminProjectAssetVersionsKey(
   accountId: string,
   projectId: string,
-  kind: AssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
 ) {
   return [
@@ -139,10 +141,32 @@ export function adminProjectAssetVersionsKey(
   ] as const;
 }
 
+export function adminAgentDefinitionKey(accountId: string, assetId: string) {
+  return [
+    ...adminAssetKey(accountId, "agents"),
+    "asset",
+    assetIdSchema.parse(assetId),
+    "definition",
+  ] as const;
+}
+
+export function adminProjectAgentDefinitionKey(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+) {
+  return [
+    ...adminProjectAssetKey(accountId, projectId, "agents"),
+    "asset",
+    assetIdSchema.parse(assetId),
+    "definition",
+  ] as const;
+}
+
 export function projectAssetVersionsKey(
   accountId: string,
   projectId: string,
-  kind: AssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
 ) {
   return [
@@ -150,6 +174,19 @@ export function projectAssetVersionsKey(
     "asset",
     requireKeyPart(assetId, "Asset ID"),
     "versions",
+  ] as const;
+}
+
+export function projectAgentDefinitionKey(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+) {
+  return [
+    ...projectAssetKey(accountId, projectId, "agents"),
+    "asset",
+    assetIdSchema.parse(assetId),
+    "definition",
   ] as const;
 }
 

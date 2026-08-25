@@ -182,14 +182,14 @@ describe("completed Agent Builder workspace", () => {
       showsPermissionFailure: html.includes(
         "Your account cannot continue designing this Agent. Saved session content remains available to view.",
       ),
-      showsCandidateVersion: header.includes("Candidate Version v1"),
+      showsInitialDefinition: header.includes("Initial Agent Definition"),
       showsReadOnly: header.includes("Read-only"),
       showsDesignRecordExplanation: header.includes("design record"),
       showsMoreActions: header.includes('aria-label="More actions"'),
     }).toEqual({
       showsAutosave: false,
       showsPermissionFailure: false,
-      showsCandidateVersion: true,
+      showsInitialDefinition: true,
       showsReadOnly: true,
       showsDesignRecordExplanation: false,
       showsMoreActions: false,

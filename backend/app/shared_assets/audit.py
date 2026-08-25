@@ -18,16 +18,15 @@ from app.audit.models import (
 )
 from app.audit.service import AuditService
 from deerflow.persistence.projects.model import ProjectMembershipRow
-from deerflow.persistence.shared_assets.agent_model import AgentVersionRow
+from deerflow.persistence.shared_assets.agent_model import AgentRow
 from deerflow.persistence.shared_assets.skill_model import SkillVersionRow
 from deerflow.persistence.user.model import UserRow
 
 _ACTIONS: dict[str, AuditAction] = {
     "agent.create": AuditAction.ASSET_CREATED,
-    "agent.version.create": AuditAction.ASSET_UPDATED,
+    "agent.definition.update": AuditAction.ASSET_UPDATED,
     "agent.instructions.update": AuditAction.ASSET_UPDATED,
     "agent.capability_bindings.update": AuditAction.ASSET_UPDATED,
-    "agent.version.activate": AuditAction.ASSET_UPDATED,
     "agent.delete": AuditAction.ASSET_DELETED,
     "agent.enable": AuditAction.ASSET_UPDATED,
     "agent.suspend": AuditAction.ASSET_DEPRECATED,
@@ -72,12 +71,12 @@ _ACTIONS: dict[str, AuditAction] = {
     "channel.secret.clear": AuditAction.ASSET_UPDATED,
 }
 
-_VERSIONED_AGENT_OPERATIONS = frozenset(
+_DEFINITION_AGENT_OPERATIONS = frozenset(
     {
-        "agent.version.create",
+        "agent.create",
+        "agent.definition.update",
         "agent.instructions.update",
         "agent.capability_bindings.update",
-        "agent.version.activate",
     }
 )
 _VERSIONED_SKILL_OPERATIONS = frozenset(
@@ -131,6 +130,13 @@ class DurableSharedAssetGovernanceEventSink:
             operation=action,
             asset_kind=selected_kind,
         )
+        definition_revision = await self._safe_definition_revision(
+            session,
+            asset_id=asset_id,
+            version_id=version_id,
+            operation=action,
+            asset_kind=selected_kind,
+        )
         context = resolve_system_audit_context(
             SimpleNamespace(
                 id=uuid.UUID(str(actor)),
@@ -148,6 +154,7 @@ class DurableSharedAssetGovernanceEventSink:
             asset_kind=selected_kind,
             operation=action,
             version_number=version_number,
+            definition_revision=definition_revision,
             secret_metadata=secret_metadata,
         )
 
@@ -181,6 +188,13 @@ class DurableSharedAssetGovernanceEventSink:
             operation=action,
             asset_kind=selected_kind,
         )
+        definition_revision = await self._safe_definition_revision(
+            session,
+            asset_id=asset_id,
+            version_id=version_id,
+            operation=action,
+            asset_kind=selected_kind,
+        )
         await self._append(
             session,
             actor=AuditActor.user(uuid.UUID(str(actor))),
@@ -191,6 +205,7 @@ class DurableSharedAssetGovernanceEventSink:
             asset_kind=selected_kind,
             operation=action,
             version_number=version_number,
+            definition_revision=definition_revision,
             secret_metadata=secret_metadata,
         )
 
@@ -218,6 +233,13 @@ class DurableSharedAssetGovernanceEventSink:
             operation=action,
             asset_kind=selected_kind,
         )
+        definition_revision = await self._safe_definition_revision(
+            session,
+            asset_id=asset_id,
+            version_id=version_id,
+            operation=action,
+            asset_kind=selected_kind,
+        )
         await self._append(
             session,
             actor=AuditActor.trusted_process(context),
@@ -228,6 +250,7 @@ class DurableSharedAssetGovernanceEventSink:
             asset_kind=selected_kind,
             operation=action,
             version_number=version_number,
+            definition_revision=definition_revision,
             secret_metadata=secret_metadata,
         )
 
@@ -254,18 +277,10 @@ class DurableSharedAssetGovernanceEventSink:
         asset_kind: str,
     ) -> int | None:
         if asset_kind == "agent" and operation.startswith("agent."):
-            expects_version = operation in _VERSIONED_AGENT_OPERATIONS
-            if expects_version != (version_id is not None):
+            if version_id is not None:
                 raise AuditAuthorityRejected()
-            if version_id is None:
-                return None
-            version_number = await session.scalar(
-                select(AgentVersionRow.version_number).where(
-                    AgentVersionRow.agent_id == asset_id,
-                    AgentVersionRow.id == version_id,
-                )
-            )
-        elif asset_kind == "skill" and operation in _VERSIONED_SKILL_OPERATIONS:
+            return None
+        if asset_kind == "skill" and operation in _VERSIONED_SKILL_OPERATIONS:
             if version_id is None:
                 raise AuditAuthorityRejected()
             version_number = await session.scalar(
@@ -280,6 +295,26 @@ class DurableSharedAssetGovernanceEventSink:
             raise AuditAuthorityRejected()
         return version_number
 
+    @staticmethod
+    async def _safe_definition_revision(
+        session: AsyncSession,
+        *,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID | None,
+        operation: str,
+        asset_kind: str,
+    ) -> int | None:
+        if asset_kind != "agent" or not operation.startswith("agent."):
+            return None
+        if version_id is not None:
+            raise AuditAuthorityRejected()
+        if operation not in _DEFINITION_AGENT_OPERATIONS:
+            return None
+        revision = await session.scalar(select(AgentRow.revision).where(AgentRow.id == asset_id))
+        if type(revision) is not int or revision < 1:
+            raise AuditAuthorityRejected()
+        return revision
+
     async def _append(
         self,
         session: AsyncSession,
@@ -292,6 +327,7 @@ class DurableSharedAssetGovernanceEventSink:
         asset_kind: str,
         operation: str,
         version_number: int | None,
+        definition_revision: int | None,
         secret_metadata: dict[str, object] | None,
     ) -> None:
         metadata: dict[str, object] = {
@@ -300,6 +336,8 @@ class DurableSharedAssetGovernanceEventSink:
         }
         if version_number is not None:
             metadata["version_number"] = version_number
+        if definition_revision is not None:
+            metadata["definition_revision"] = definition_revision
         if secret_metadata is not None:
             metadata.update(secret_metadata)
         await self._service.append(

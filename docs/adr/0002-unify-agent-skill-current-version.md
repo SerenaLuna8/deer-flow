@@ -5,8 +5,9 @@
 
 > **Partially superseded:** ADR-0006 replaces this ADR's secret ownership,
 > permission, and Skill-secret inheritance rules. ADR-0007 replaces its
-> in-place System Skill v1 upgrade rule. The Agent and Project Skill version
-> lifecycle defined here remains accepted.
+> in-place System Skill v1 upgrade rule. ADR-0009 replaces all Project and
+> System Agent version semantics with one Definition per Agent. The Project
+> Skill version lifecycle defined here remains accepted.
 
 ## Context
 

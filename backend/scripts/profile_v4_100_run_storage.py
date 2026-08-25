@@ -279,7 +279,7 @@ class _SeedCoordinates:
     project_id: uuid.UUID
     membership_id: uuid.UUID
     agent_id: uuid.UUID
-    agent_version_id: uuid.UUID
+    agent_definition_id: uuid.UUID
     agent_checksum: str
     skill_id: uuid.UUID
     skill_version_id: uuid.UUID
@@ -404,7 +404,7 @@ async def _seed_version_once(
     project_id = uuid.uuid4()
     membership_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    agent_version_id = uuid.uuid4()
+    agent_definition_id = uuid.uuid4()
     skill_id = uuid.uuid4()
     skill_version_id = uuid.uuid4()
     thread_id = f"v4-storage-{uuid.uuid4().hex}"
@@ -561,33 +561,22 @@ async def _seed_version_once(
             text(
                 """INSERT INTO agents (
                        id,scope,project_id,slug,display_name,status,
-                       created_by_user_id
+                       definition_id,description,soul,model_ref,
+                       model_settings,tool_groups,payload_checksum,
+                       agents_instructions,identity,user_context,
+                       payload_schema_version,created_by_user_id,
+                       updated_by_user_id
                    ) VALUES (
                        :agent_id,'project',:project_id,'storage-agent',
-                       'Storage Agent','active',:user_id
+                       'Storage Agent','active',:definition_id,:description,
+                       :soul,:model_ref,'{}'::jsonb,'[]'::jsonb,:checksum,
+                       '','','',4,:user_id,:user_id
                    )"""
             ),
             {
                 "agent_id": agent_id,
+                "definition_id": agent_definition_id,
                 "project_id": project_id,
-                "user_id": str(user_id),
-            },
-        )
-        await session.execute(
-            text(
-                """INSERT INTO agent_versions (
-                       id,agent_id,version_number,description,soul,model_ref,
-                       model_settings,tool_groups,payload_checksum,
-                       created_by_user_id,agents_instructions,identity,
-                       user_context,payload_schema_version
-                   ) VALUES (
-                       :version_id,:agent_id,1,:description,:soul,:model_ref,
-                       '{}'::jsonb,'[]'::jsonb,:checksum,:user_id,'','','',4
-                   )"""
-            ),
-            {
-                "version_id": agent_version_id,
-                "agent_id": agent_id,
                 "description": payload.description,
                 "soul": payload.soul,
                 "model_ref": payload.model_ref,
@@ -596,25 +585,17 @@ async def _seed_version_once(
             },
         )
         await session.execute(
-            text(
-                "SELECT set_config('deerflow.asset_version_assembly', :version_id, true)",
-            ),
-            {"version_id": str(agent_version_id)},
+            text("SELECT set_config('deerflow.agent_definition_mutation_id', :agent_id, true)"),
+            {"agent_id": str(agent_id)},
         )
         await session.execute(
             text(
-                """INSERT INTO agent_version_skill_refs (
-                       agent_version_id,sort_order,skill_asset_scope,
+                """INSERT INTO agent_skill_refs (
+                       agent_id,sort_order,skill_asset_scope,
                        skill_asset_id
-                   ) VALUES (:version_id,0,'project',:skill_id)"""
+                   ) VALUES (:agent_id,0,'project',:skill_id)"""
             ),
-            {"version_id": agent_version_id, "skill_id": skill_id},
-        )
-        await session.execute(
-            text(
-                "UPDATE agents SET current_version_id=:version_id WHERE id=:agent_id",
-            ),
-            {"version_id": agent_version_id, "agent_id": agent_id},
+            {"agent_id": agent_id, "skill_id": skill_id},
         )
         await session.execute(
             text(
@@ -646,7 +627,7 @@ async def _seed_version_once(
         project_id=project_id,
         membership_id=membership_id,
         agent_id=agent_id,
-        agent_version_id=agent_version_id,
+        agent_definition_id=agent_definition_id,
         agent_checksum=agent_checksum,
         skill_id=skill_id,
         skill_version_id=skill_version_id,
@@ -686,7 +667,7 @@ def _resolved_closure(seed: _SeedCoordinates) -> ResolvedRunAssetClosure:
         kind=AssetKind.AGENT,
         scope=AssetScope.PROJECT,
         asset_id=seed.agent_id,
-        version_id=seed.agent_version_id,
+        version_id=seed.agent_definition_id,
         checksum=seed.agent_checksum,
         catalog_generation=seed.catalog_generation,
         dependency_version_ids=(seed.skill_version_id,),

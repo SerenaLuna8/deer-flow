@@ -154,13 +154,9 @@ DECLARE
     asset_scope text;
 BEGIN
     IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
-       AND TG_TABLE_NAME IN ('agent_versions', 'mcp_server_versions') THEN
-        IF TG_TABLE_NAME = 'agent_versions' THEN
-            SELECT scope INTO asset_scope FROM agents WHERE id = NEW.agent_id;
-        ELSE
-            SELECT scope INTO asset_scope FROM mcp_servers
-            WHERE id = NEW.mcp_server_id;
-        END IF;
+       AND TG_TABLE_NAME = 'mcp_server_versions' THEN
+        SELECT scope INTO asset_scope FROM mcp_servers
+        WHERE id = NEW.mcp_server_id;
         IF asset_scope = 'system' THEN
             RETURN NEW;
         END IF;
@@ -254,7 +250,7 @@ DECLARE
 BEGIN
     CASE TG_TABLE_NAME
         WHEN 'project_system_agent_bindings' THEN
-            SELECT current_version_id, status INTO current_id, asset_status
+            SELECT definition_id, status INTO current_id, asset_status
             FROM agents
             WHERE id = NEW.system_agent_id AND scope = 'system'
             FOR UPDATE;
@@ -291,7 +287,7 @@ BEGIN
        AND (current_id IS NULL OR asset_status IS DISTINCT FROM 'active'
        OR (TG_TABLE_NAME = 'project_system_skill_bindings'
            AND version_revoked_at IS NOT NULL)) THEN
-        RAISE EXCEPTION 'system binding requires an eligible Current Version'
+        RAISE EXCEPTION 'system binding requires an eligible definition or Current Version'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     RETURN NEW;
@@ -428,95 +424,28 @@ BEGIN
                           )
                           OR (
                               project.status = 'active'
-                              AND project.is_suspended IS FALSE
                               AND asset.status = 'archived'
                               AND asset.current_version_id IS NULL
                               AND current_setting(
-                                  'deerflow.skill_hard_delete_asset_id',
+                                  'deerflow.archived_skill_purge_asset_id',
                                   true
                               ) = asset.id::text
                           )
                       )
-                ) INTO purge_allowed;
-            END IF;
-        WHEN 'agent_version_skill_refs' THEN
-            parent_version_id := CASE WHEN TG_OP = 'DELETE'
-                THEN OLD.agent_version_id ELSE NEW.agent_version_id END;
-            SELECT asset.scope, asset.project_id, asset.id
-            INTO parent_scope, parent_project_id, parent_asset_id
-            FROM agent_versions version
-            JOIN agents asset ON asset.id = version.agent_id
-            WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
-            IF TG_OP = 'DELETE' THEN
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM agent_versions version
-                    JOIN agents asset ON asset.id = version.agent_id
-                    JOIN projects project ON project.id = asset.project_id
-                    WHERE version.id = OLD.agent_version_id
-                      AND asset.scope = 'project'
-                      AND (
-                          (
-                              project.status = 'pending_deletion'
-                              AND project.deletion_effective_at IS NOT NULL
-                              AND project.deletion_effective_at <= now()
-                          )
-                          OR (
-                              project.status = 'active'
-                              AND project.is_suspended IS FALSE
-                              AND asset.status = 'archived'
-                              AND asset.current_version_id IS NULL
-                              AND current_setting(
-                                  'deerflow.agent_hard_delete_asset_id',
-                                  true
-                              ) = asset.id::text
-                          )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM run_skill_version_refs pinned
+                          WHERE pinned.skill_version_id = version.id
                       )
-                ) INTO purge_allowed;
-            END IF;
-        WHEN 'agent_version_mcp_refs' THEN
-            parent_version_id := CASE WHEN TG_OP = 'DELETE'
-                THEN OLD.agent_version_id ELSE NEW.agent_version_id END;
-            SELECT asset.scope, asset.project_id, asset.id
-            INTO parent_scope, parent_project_id, parent_asset_id
-            FROM agent_versions version
-            JOIN agents asset ON asset.id = version.agent_id
-            WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
-            IF TG_OP = 'DELETE' THEN
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM agent_versions version
-                    JOIN agents asset ON asset.id = version.agent_id
-                    JOIN projects project ON project.id = asset.project_id
-                    WHERE version.id = OLD.agent_version_id
-                      AND asset.scope = 'project'
-                      AND (
-                          (
-                              project.status = 'pending_deletion'
-                              AND project.deletion_effective_at IS NOT NULL
-                              AND project.deletion_effective_at <= now()
-                          )
-                          OR (
-                              project.status = 'active'
-                              AND project.is_suspended IS FALSE
-                              AND asset.status = 'archived'
-                              AND asset.current_version_id IS NULL
-                              AND current_setting(
-                                  'deerflow.agent_hard_delete_asset_id',
-                                  true
-                              ) = asset.id::text
-                          )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM run_asset_versions legacy
+                          WHERE legacy.asset_kind = 'skill'
+                            AND legacy.asset_scope = 'project'
+                            AND legacy.asset_id = asset.id
+                            AND legacy.version_id = version.id
+                            AND legacy.snapshot_schema_version IN (2, 3)
                       )
-                ) OR EXISTS (
-                    SELECT 1
-                    FROM mcp_server_versions version
-                    JOIN mcp_servers asset ON asset.id = version.mcp_server_id
-                    JOIN projects project ON project.id = asset.project_id
-                    WHERE version.id = OLD.mcp_server_version_id
-                      AND asset.scope = 'project'
-                      AND project.status = 'pending_deletion'
-                      AND project.deletion_effective_at IS NOT NULL
-                      AND project.deletion_effective_at <= now()
                 ) INTO purge_allowed;
             END IF;
         WHEN 'mcp_version_secret_slots' THEN
@@ -571,11 +500,7 @@ BEGIN
         RAISE EXCEPTION 'Skill version files are immutable outside initial assembly'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
-    IF TG_TABLE_NAME IN (
-        'agent_version_skill_refs',
-        'agent_version_mcp_refs',
-        'mcp_version_secret_slots'
-    ) THEN
+    IF TG_TABLE_NAME = 'mcp_version_secret_slots' THEN
         IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
            AND parent_scope = 'system' THEN
             IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
@@ -589,7 +514,7 @@ BEGIN
         IF TG_OP = 'DELETE' AND purge_allowed THEN
             RETURN OLD;
         END IF;
-        RAISE EXCEPTION 'Agent and Skill version child rows are immutable'
+        RAISE EXCEPTION 'MCP version child rows are immutable'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     IF TG_OP = 'DELETE' AND purge_allowed THEN
@@ -601,6 +526,135 @@ BEGIN
     END IF;
     IF TG_OP = 'DELETE' THEN
         RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+"""
+
+_CREATE_AGENT_DEFINITION_MUTATION_FUNCTION = """
+CREATE OR REPLACE FUNCTION enforce_agent_definition_mutation()
+RETURNS trigger AS $$
+DECLARE
+    target_agent_id uuid;
+    target_scope text;
+    target_project_id uuid;
+    project_status text;
+    project_deletion_effective_at timestamptz;
+    referenced_scope text;
+    referenced_project_id uuid;
+    referenced_status text;
+BEGIN
+    IF TG_TABLE_NAME = 'agents' THEN
+        IF OLD.scope = 'system'
+           AND current_setting('deerflow.system_asset_upgrade', true)
+               IS NOT DISTINCT FROM 'on' THEN
+            IF NEW.definition_id IS DISTINCT FROM OLD.definition_id
+               OR NEW.revision != OLD.revision + 1 THEN
+                RAISE EXCEPTION 'System Agent definition identity is immutable and revision must advance once'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+            RETURN NEW;
+        END IF;
+        IF OLD.scope IS DISTINCT FROM 'project'
+           OR current_setting(
+               'deerflow.agent_definition_mutation_id', true
+           ) IS DISTINCT FROM OLD.id::text
+           OR NEW.definition_id IS NOT DISTINCT FROM OLD.definition_id
+           OR NEW.revision != OLD.revision + 1 THEN
+            RAISE EXCEPTION 'Project Agent definition mutation requires its transaction fence and one revision advance'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    target_agent_id := CASE WHEN TG_OP = 'DELETE'
+        THEN OLD.agent_id ELSE NEW.agent_id END;
+    SELECT agent.scope, agent.project_id, project.status,
+           project.deletion_effective_at
+    INTO target_scope, target_project_id, project_status,
+         project_deletion_effective_at
+    FROM agents agent
+    LEFT JOIN projects project ON project.id = agent.project_id
+    WHERE agent.id = target_agent_id
+    FOR UPDATE OF agent;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Agent definition reference requires an Agent'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+
+    IF NOT (
+        (target_scope = 'system'
+         AND current_setting('deerflow.system_asset_upgrade', true)
+             IS NOT DISTINCT FROM 'on')
+        OR
+        (target_scope = 'project'
+         AND current_setting(
+             'deerflow.agent_definition_mutation_id', true
+         ) IS NOT DISTINCT FROM target_agent_id::text)
+        OR
+        (target_scope = 'project'
+         AND project_status = 'pending_deletion'
+         AND project_deletion_effective_at IS NOT NULL
+         AND project_deletion_effective_at <= now())
+        OR
+        (target_scope = 'project'
+         AND current_setting(
+             'deerflow.agent_hard_delete_asset_id', true
+         ) IS NOT DISTINCT FROM target_agent_id::text)
+    ) THEN
+        RAISE EXCEPTION 'Agent definition reference mutation requires its transaction fence'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    IF NEW.agent_id IS DISTINCT FROM target_agent_id THEN
+        RAISE EXCEPTION 'Agent definition reference cannot move between Agents'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF TG_TABLE_NAME = 'agent_skill_refs' THEN
+        SELECT skill.scope, skill.project_id, skill.status
+        INTO referenced_scope, referenced_project_id, referenced_status
+        FROM skills skill
+        WHERE skill.id = NEW.skill_asset_id
+          AND skill.scope = NEW.skill_asset_scope
+        FOR SHARE;
+    ELSIF TG_TABLE_NAME = 'agent_mcp_refs' THEN
+        SELECT server.scope, server.project_id, server.status
+        INTO referenced_scope, referenced_project_id, referenced_status
+        FROM mcp_server_versions version
+        JOIN mcp_servers server ON server.id = version.mcp_server_id
+        WHERE version.id = NEW.mcp_server_version_id
+        FOR SHARE OF version, server;
+    ELSE
+        RAISE EXCEPTION 'unsupported Agent definition reference table';
+    END IF;
+    IF NOT FOUND
+       OR referenced_status = 'archived'
+       OR (target_scope = 'system' AND referenced_scope != 'system')
+       OR (
+           target_scope = 'project'
+           AND referenced_scope = 'project'
+           AND referenced_project_id IS DISTINCT FROM target_project_id
+       ) THEN
+        RAISE EXCEPTION 'Agent definition reference crosses its governed scope'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+"""
+
+_CREATE_SKILL_ARCHIVE_FUNCTION = """
+CREATE OR REPLACE FUNCTION enforce_skill_archive_transition()
+RETURNS trigger AS $$
+BEGIN
+    IF OLD.status = 'archived' AND NEW.status IS DISTINCT FROM 'archived' THEN
+        RAISE EXCEPTION 'archived Skill status is terminal'
+            USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     RETURN NEW;
 END;
@@ -633,27 +687,34 @@ _TRIGGER_DDL = (
     _CREATE_SKILL_REVOCATION_FUNCTION,
     _CREATE_BOUND_VERSION_FUNCTION,
     _CREATE_CHILD_IMMUTABILITY_FUNCTION,
+    _CREATE_AGENT_DEFINITION_MUTATION_FUNCTION,
+    _CREATE_SKILL_ARCHIVE_FUNCTION,
     _CREATE_VERSION_STATE_FUNCTION,
-    "CREATE TRIGGER trg_agent_versions_immutable BEFORE UPDATE ON agent_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
+    (
+        "CREATE TRIGGER trg_agents_definition_mutation BEFORE UPDATE OF "
+        "definition_id, description, agents_instructions, soul, identity, "
+        "user_context, model_ref, model_settings, tool_groups, "
+        "payload_schema_version, payload_checksum ON agents FOR EACH ROW "
+        "EXECUTE FUNCTION enforce_agent_definition_mutation()"
+    ),
+    "CREATE TRIGGER trg_agent_skill_refs_definition_mutation BEFORE INSERT OR UPDATE OR DELETE ON agent_skill_refs FOR EACH ROW EXECUTE FUNCTION enforce_agent_definition_mutation()",
+    "CREATE TRIGGER trg_agent_mcp_refs_definition_mutation BEFORE INSERT OR UPDATE OR DELETE ON agent_mcp_refs FOR EACH ROW EXECUTE FUNCTION enforce_agent_definition_mutation()",
+    "CREATE TRIGGER trg_skills_archive_terminal BEFORE UPDATE OF status ON skills FOR EACH ROW EXECUTE FUNCTION enforce_skill_archive_transition()",
     "CREATE TRIGGER trg_skill_versions_immutable BEFORE UPDATE ON skill_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_skill_versions_files_seal_transition BEFORE UPDATE OF files_sealed ON skill_versions FOR EACH ROW EXECUTE FUNCTION enforce_skill_version_files_seal_transition()",
     "CREATE CONSTRAINT TRIGGER trg_skill_versions_facts_complete AFTER INSERT OR UPDATE ON skill_versions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION verify_skill_version_file_facts()",
     "CREATE TRIGGER trg_skill_versions_revocation BEFORE INSERT OR UPDATE OF revoked_at, revoked_by_user_id, revocation_reason_code ON skill_versions FOR EACH ROW EXECUTE FUNCTION enforce_system_skill_version_revocation()",
     "CREATE TRIGGER trg_mcp_server_versions_immutable BEFORE UPDATE ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_skill_version_files_immutable BEFORE UPDATE ON skill_version_files FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
-    "CREATE TRIGGER trg_agent_version_skill_refs_immutable BEFORE UPDATE ON agent_version_skill_refs FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
-    "CREATE TRIGGER trg_agent_version_mcp_refs_immutable BEFORE UPDATE ON agent_version_mcp_refs FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_mcp_secret_slots_immutable BEFORE UPDATE ON mcp_version_secret_slots FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_agent_bindings_current BEFORE INSERT OR UPDATE ON project_system_agent_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version()",
     "CREATE TRIGGER trg_skill_bindings_current BEFORE INSERT OR UPDATE ON project_system_skill_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version()",
     "CREATE TRIGGER trg_mcp_bindings_published BEFORE INSERT OR UPDATE ON project_system_mcp_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version()",
     "CREATE TRIGGER trg_mcp_server_versions_bound_published BEFORE UPDATE OF workflow_status ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION prevent_bound_mcp_published_version_downgrade()",
     "CREATE TRIGGER trg_skill_version_files_child_immutable BEFORE INSERT OR DELETE ON skill_version_files FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation()",
-    "CREATE TRIGGER trg_agent_version_skill_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_skill_refs FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation()",
-    "CREATE TRIGGER trg_agent_version_mcp_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_mcp_refs FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation()",
     "CREATE TRIGGER trg_mcp_secret_slots_child_immutable BEFORE INSERT OR DELETE ON mcp_version_secret_slots FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation()",
     "CREATE TRIGGER trg_mcp_server_versions_state_transition BEFORE UPDATE OF workflow_status ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition()",
-    "CREATE TRIGGER trg_agents_generation AFTER UPDATE OF status, current_version_id, revision ON agents FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
+    "CREATE TRIGGER trg_agents_generation AFTER UPDATE OF status, definition_id, revision ON agents FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_skills_generation AFTER UPDATE OF status, current_version_id, revision ON skills FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_mcp_servers_generation AFTER UPDATE OF status, current_published_version_id ON mcp_servers FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_skill_version_revocations_generation AFTER UPDATE OF revoked_at ON skill_versions FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
@@ -665,9 +726,8 @@ _TRIGGER_DDL = (
 
 _TRIGGER_TABLES = frozenset(
     {
-        "agent_versions",
-        "agent_version_skill_refs",
-        "agent_version_mcp_refs",
+        "agent_skill_refs",
+        "agent_mcp_refs",
         "skill_versions",
         "skill_version_files",
         "mcp_server_versions",

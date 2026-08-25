@@ -16,8 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from app.gateway.deps import get_config
 from app.gateway.routers.project_assets import (
     ASSET_ERRORS,
+    AgentAssetItemResponse,
     AssetRoute,
-    CurrentVersionAssetItemResponse,
     SkillAssetRefRequest,
     project_asset_context,
     raise_asset_domain,
@@ -367,17 +367,17 @@ class AgentDesignSessionListV2Response(_StrictModel):
 
 class AgentDesignCommitDataV1Response(_StrictModel):
     session: AgentDesignSessionItemV1Response
-    agent: CurrentVersionAssetItemResponse
+    agent: AgentAssetItemResponse
 
 
 class AgentDesignCommitDataV2Response(_StrictModel):
     session: AgentDesignSessionItemV2Response
-    agent: CurrentVersionAssetItemResponse
+    agent: AgentAssetItemResponse
 
 
 class AgentDesignCommitDataV3Response(_StrictModel):
     session: AgentDesignSessionItemV3Response
-    agent: CurrentVersionAssetItemResponse
+    agent: AgentAssetItemResponse
 
 
 class AgentDesignCommitV1Response(_StrictModel):
@@ -618,7 +618,7 @@ def _commit_response(
     *,
     contract_version: Literal["1", "2", "3"],
 ) -> AgentDesignCommitNegotiatedResponse:
-    agent = CurrentVersionAssetItemResponse.model_validate(
+    agent = AgentAssetItemResponse.model_validate(
         result.agent,
         from_attributes=True,
     )

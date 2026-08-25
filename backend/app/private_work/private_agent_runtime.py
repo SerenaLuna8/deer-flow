@@ -226,11 +226,11 @@ class PrivateAgentRuntime:
         self._agent_catalog = build_runtime_agent_catalog(())
 
     def __repr__(self) -> str:
-        return f"PrivateAgentRuntime(run_id={self._run_id!r}, agent_version_id={self.agent_version_id!r}, closed={self._closed!r})"
+        return f"PrivateAgentRuntime(run_id={self._run_id!r}, agent_definition_id={self.agent_definition_id!r}, closed={self._closed!r})"
 
     @property
-    def agent_version_id(self) -> uuid.UUID:
-        return self.safe_manifest.agent_version_id
+    def agent_definition_id(self) -> uuid.UUID:
+        return self.safe_manifest.agent_definition_id
 
     @property
     def model_ref(self) -> str:
@@ -308,7 +308,7 @@ class PrivateAgentRuntime:
         )
 
         return provider_request_closure_identity(
-            agent_facts=((str(self.safe_manifest.agent_version_id), self.safe_manifest.checksum),),
+            agent_facts=((str(self.safe_manifest.agent_definition_id), self.safe_manifest.checksum),),
             catalog_generation=self.safe_manifest.catalog_generation,
         )
 
@@ -648,7 +648,7 @@ class PrivateAgentRuntime:
         app_config = peek_current_app_config()
         if app_config is None:
             raise PrivateWorkAssetStale(self._context.request_id)
-        if self._delegate_model_names is not None and set(self._delegate_model_names) != {manifest.agent_version_id for manifest in self._delegate_manifests}:
+        if self._delegate_model_names is not None and set(self._delegate_model_names) != {manifest.agent_definition_id for manifest in self._delegate_manifests}:
             raise PrivateWorkAssetStale(self._context.request_id)
         skills_by_version = {
             manifest.version_id: skill
@@ -667,7 +667,7 @@ class PrivateAgentRuntime:
                     model = resolve_model_ref(app_config, manifest.model_ref)
                     model_name = getattr(model, "name", None)
                 else:
-                    model_name = self._delegate_model_names.get(manifest.agent_version_id)
+                    model_name = self._delegate_model_names.get(manifest.agent_definition_id)
                     model = app_config.get_model_config(model_name) if isinstance(model_name, str) else None
                 if not isinstance(model_name, str) or not model_name:
                     raise RunSnapshotAssetStale

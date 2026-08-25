@@ -21,6 +21,7 @@ from app.shared_assets.agent_payload_checksum import (
 )
 from app.shared_assets.errors import AssetResolutionUnavailable
 from app.shared_assets.models import (
+    AgentModelSettings,
     AgentPayload,
     AssetKind,
     AssetScope,
@@ -38,7 +39,7 @@ from app.shared_assets.run_snapshot_codec import (
     decode_run_asset_snapshot,
     encode_run_asset_snapshot,
 )
-from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow, SkillRow, SkillVersionRow
+from deerflow.persistence.shared_assets import AgentRow, SkillRow, SkillVersionRow
 
 _MODEL_REF = "88888888-8888-4888-8888-888888888891"
 
@@ -534,26 +535,20 @@ async def test_resolver_recomputes_database_agent_payload_checksum(
         slug="agent-a",
         display_name="Agent A",
         status="active",
-        current_version_id=snapshot.version_id,
-        revision=1,
-        created_by_user_id=str(uuid.uuid4()),
-    )
-    version = AgentVersionRow(
-        id=snapshot.version_id,
-        agent_id=snapshot.asset_id,
-        version_number=1,
+        definition_id=snapshot.version_id,
         description=description,
         agents_instructions=snapshot.payload.agents_instructions,
         soul=snapshot.payload.soul,
         identity=snapshot.payload.identity,
         user_context=snapshot.payload.user_context,
         model_ref=snapshot.payload.model_ref,
-        model_settings={},
+        model_settings=AgentModelSettings(),
         tool_groups=tool_groups,
-        supersedes_version_id=None,
-        payload_schema_version=snapshot.payload.payload_schema_version,
+        payload_schema_version=4,
         payload_checksum=snapshot.checksum,
+        revision=1,
         created_by_user_id=str(uuid.uuid4()),
+        updated_by_user_id=str(uuid.uuid4()),
     )
     context = ProjectContext(
         user_id=uuid.uuid4(),
@@ -570,7 +565,7 @@ async def test_resolver_recomputes_database_agent_payload_checksum(
         await resolver._agent_snapshot(  # noqa: SLF001 - exact runtime integrity boundary
             _EmptyRefSession(),  # type: ignore[arg-type]
             context,
-            _ResolvedRecord(AssetScope.PROJECT, asset, version),
+            _ResolvedRecord(AssetScope.PROJECT, asset, asset),
             snapshot.catalog_generation,
         )
 
@@ -587,15 +582,7 @@ async def test_resolver_rejects_system_agent_project_skill_reference() -> None:
         slug="system-agent",
         display_name="System Agent",
         status="active",
-        current_version_id=snapshot.version_id,
-        revision=1,
-        source_key="builtin:agent:system-agent",
-        created_by_user_id=str(uuid.uuid4()),
-    )
-    version = AgentVersionRow(
-        id=snapshot.version_id,
-        agent_id=snapshot.asset_id,
-        version_number=1,
+        definition_id=snapshot.version_id,
         description=snapshot.payload.description,
         agents_instructions=snapshot.payload.agents_instructions,
         soul=snapshot.payload.soul,
@@ -604,10 +591,12 @@ async def test_resolver_rejects_system_agent_project_skill_reference() -> None:
         model_ref=snapshot.payload.model_ref,
         model_settings={},
         tool_groups=list(snapshot.payload.tool_groups),
-        supersedes_version_id=None,
         payload_schema_version=4,
         payload_checksum=snapshot.checksum,
+        revision=1,
+        source_key="builtin:agent:system-agent",
         created_by_user_id=str(uuid.uuid4()),
+        updated_by_user_id=str(uuid.uuid4()),
     )
     context = ProjectContext(
         user_id=uuid.uuid4(),
@@ -623,45 +612,52 @@ async def test_resolver_rejects_system_agent_project_skill_reference() -> None:
         await ProjectAssetResolver(lambda: None)._agent_snapshot(  # noqa: SLF001
             _ProjectSkillRefSession(),  # type: ignore[arg-type]
             context,
-            _ResolvedRecord(AssetScope.SYSTEM, asset, version),
+            _ResolvedRecord(AssetScope.SYSTEM, asset, asset),
             1,
         )
 
 
 @pytest.mark.asyncio
-async def test_resolver_projects_attested_legacy_agent_into_runtime_v4() -> None:
+async def test_resolver_uses_definition_identity_in_run_snapshot_version_wire() -> None:
     project_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    agent_version_id = uuid.uuid4()
+    definition_id = uuid.uuid4()
     skill_id = uuid.uuid4()
     current_skill_version_id = uuid.uuid4()
-    asset = AgentRow(
-        id=agent_id,
-        scope="project",
-        project_id=project_id,
-        slug="legacy-agent",
-        display_name="Legacy Agent",
-        status="active",
-        current_version_id=agent_version_id,
-        revision=1,
-        created_by_user_id=str(uuid.uuid4()),
-    )
-    version = AgentVersionRow(
-        id=agent_version_id,
-        agent_id=agent_id,
-        version_number=3,
-        description="legacy definition",
+    payload = AgentPayload(
+        description="current definition",
         agents_instructions="instructions",
         soul="soul",
         identity="identity",
         user_context="user",
         model_ref=_MODEL_REF,
+        model_settings=AgentModelSettings(),
+        tool_groups=("task",),
+        skill_refs=(SkillAssetRef(AssetScope.PROJECT, skill_id),),
+        mcp_version_ids=(),
+        payload_schema_version=4,
+    )
+    asset = AgentRow(
+        id=agent_id,
+        scope="project",
+        project_id=project_id,
+        slug="current-agent",
+        display_name="Current Agent",
+        status="active",
+        definition_id=definition_id,
+        description=payload.description,
+        agents_instructions=payload.agents_instructions,
+        soul=payload.soul,
+        identity=payload.identity,
+        user_context=payload.user_context,
+        model_ref=payload.model_ref,
         model_settings={},
         tool_groups=["task"],
-        supersedes_version_id=None,
-        payload_schema_version=3,
-        payload_checksum="a" * 64,
+        payload_schema_version=4,
+        payload_checksum=agent_payload_checksum(payload),
+        revision=1,
         created_by_user_id=str(uuid.uuid4()),
+        updated_by_user_id=str(uuid.uuid4()),
     )
     skill = SkillRow(
         id=skill_id,
@@ -700,7 +696,7 @@ async def test_resolver_projects_attested_legacy_agent_into_runtime_v4() -> None
     snapshot = await ProjectAssetResolver(lambda: None)._agent_snapshot(  # noqa: SLF001
         _SequencedRefSession([[("project", skill_id)], []]),  # type: ignore[arg-type]
         actor,
-        _ResolvedRecord(AssetScope.PROJECT, asset, version),
+        _ResolvedRecord(AssetScope.PROJECT, asset, asset),
         3,
         exact_dependency_records=(
             (_ResolvedRecord(AssetScope.PROJECT, skill, skill_version),),
@@ -708,8 +704,8 @@ async def test_resolver_projects_attested_legacy_agent_into_runtime_v4() -> None
         ),
     )
 
-    assert snapshot.payload.payload_schema_version == 4
+    assert snapshot.version_id == definition_id
+    assert snapshot.payload == payload
     assert snapshot.skill_version_ids == (current_skill_version_id,)
     assert snapshot.checksum == agent_payload_checksum(snapshot.payload)
-    assert snapshot.checksum != version.payload_checksum
     assert decode_run_asset_snapshot(encode_run_asset_snapshot(snapshot)) == snapshot

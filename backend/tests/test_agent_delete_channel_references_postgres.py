@@ -19,7 +19,9 @@ from app.private_work.errors import PrivateWorkNotFound
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum
 from app.shared_assets.agent_service import AgentService
+from app.shared_assets.models import AgentPayload
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRepository,
     ChannelConnectionRow,
@@ -33,7 +35,7 @@ from deerflow.persistence.projects.model import (
     ProjectMembershipRow,
     ProjectRow,
 )
-from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
+from deerflow.persistence.shared_assets import AgentRow
 from deerflow.persistence.user import UserRow
 
 _ReferenceKind = Literal["binding", "challenge", "connection", "oauth_state"]
@@ -122,10 +124,19 @@ async def _seed_agent_reference(
     case: _ReferenceCase,
 ) -> tuple[uuid.UUID, uuid.UUID | str]:
     agent_id = uuid.uuid4()
-    version_id = uuid.uuid4()
+    definition_id = uuid.uuid4()
     reference_id = uuid.uuid4()
     now = datetime.now(UTC)
     async with factory() as session, session.begin():
+        payload = AgentPayload(
+            description="",
+            soul="",
+            model_ref="default",
+            tool_groups=(),
+            skill_refs=(),
+            mcp_version_ids=(),
+            payload_schema_version=4,
+        )
         session.add(
             AgentRow(
                 id=agent_id,
@@ -134,29 +145,26 @@ async def _seed_agent_reference(
                 slug=f"delete-{case.name}-{agent_id.hex[:8]}",
                 display_name=f"Delete matrix: {case.name}",
                 status="suspended",
+                definition_id=definition_id,
+                description=payload.description,
+                agents_instructions=payload.agents_instructions,
+                soul=payload.soul,
+                identity=payload.identity,
+                user_context=payload.user_context,
+                model_ref=payload.model_ref,
+                model_settings={},
+                tool_groups=[],
+                payload_schema_version=4,
+                payload_checksum=agent_payload_checksum(
+                    payload,
+                    payload_schema_version=4,
+                ),
                 revision=2,
                 created_by_user_id=str(seed.actor.user_id),
+                updated_by_user_id=str(seed.actor.user_id),
             )
         )
         await session.flush()
-        session.add(
-            AgentVersionRow(
-                id=version_id,
-                agent_id=agent_id,
-                version_number=1,
-                description="",
-                agents_instructions="",
-                soul="",
-                identity="",
-                user_context="",
-                model_ref="default",
-                model_settings={},
-                tool_groups=[],
-                payload_schema_version=3,
-                payload_checksum="0" * 64,
-                created_by_user_id=str(seed.actor.user_id),
-            )
-        )
 
         if case.kind == "binding":
             deleted_at = now if case.state == "soft_deleted" else None
@@ -267,11 +275,10 @@ async def _assert_persisted_state(
             reference = await session.get(ChannelOAuthStateRow, reference_id)
         else:
             reference = await session.scalar(select(reference_model).where(reference_model.id == reference_id))
-        version = await session.scalar(select(AgentVersionRow).where(AgentVersionRow.agent_id == agent_id))
     assert agent is not None, case.name
     assert agent.status == "archived", case.name
     assert agent.revision == 3, case.name
-    assert version is not None, case.name
+    assert isinstance(agent.definition_id, uuid.UUID), case.name
     assert reference is not None, case.name
 
 
@@ -328,8 +335,17 @@ async def _seed_executable_agent_with_oauth_state(
     state: str,
 ) -> uuid.UUID:
     agent_id = uuid.uuid4()
-    version_id = uuid.uuid4()
+    definition_id = uuid.uuid4()
     async with factory() as session, session.begin():
+        payload = AgentPayload(
+            description="",
+            soul="",
+            model_ref="default",
+            tool_groups=(),
+            skill_refs=(),
+            mcp_version_ids=(),
+            payload_schema_version=4,
+        )
         agent = AgentRow(
             id=agent_id,
             scope="project",
@@ -337,31 +353,26 @@ async def _seed_executable_agent_with_oauth_state(
             slug=f"callback-race-{agent_id.hex[:8]}",
             display_name="Callback deletion race",
             status="active",
+            definition_id=definition_id,
+            description=payload.description,
+            agents_instructions=payload.agents_instructions,
+            soul=payload.soul,
+            identity=payload.identity,
+            user_context=payload.user_context,
+            model_ref=payload.model_ref,
+            model_settings={},
+            tool_groups=[],
+            payload_schema_version=4,
+            payload_checksum=agent_payload_checksum(
+                payload,
+                payload_schema_version=4,
+            ),
             revision=2,
             created_by_user_id=str(seed.actor.user_id),
+            updated_by_user_id=str(seed.actor.user_id),
         )
         session.add(agent)
         await session.flush()
-        session.add(
-            AgentVersionRow(
-                id=version_id,
-                agent_id=agent_id,
-                version_number=1,
-                description="",
-                agents_instructions="",
-                soul="",
-                identity="",
-                user_context="",
-                model_ref="default",
-                model_settings={},
-                tool_groups=[],
-                payload_schema_version=3,
-                payload_checksum="0" * 64,
-                created_by_user_id=str(seed.actor.user_id),
-            )
-        )
-        await session.flush()
-        agent.current_version_id = version_id
         session.add(
             ChannelOAuthStateRow(
                 state_hash=ChannelConnectionRepository.hash_state(state),
@@ -429,7 +440,7 @@ class _PauseAfterAgentGuardRepository(ChannelConnectionRepository):
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_agent_archive_clears_default_pointer_and_preserves_published_version(
+async def test_agent_archive_clears_default_pointer_and_preserves_definition(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -465,18 +476,8 @@ async def test_agent_archive_clears_default_pointer_and_preserves_published_vers
                 ProjectDefaultAgentRow,
                 seed.actor.project_id,
             )
-            versions = tuple(
-                (
-                    await session.scalars(
-                        select(AgentVersionRow).where(
-                            AgentVersionRow.agent_id == agent_id,
-                        )
-                    )
-                ).all()
-            )
         assert agent is not None and agent.status == "archived"
-        assert agent.current_version_id == versions[0].id
-        assert len(versions) == 1
+        assert isinstance(agent.definition_id, uuid.UUID)
         assert default is not None
         assert default.agent_asset_id is None
         assert default.revision == 2
@@ -536,7 +537,7 @@ async def test_agent_archive_wins_race_with_oauth_callback_without_dangling_conn
                 )
             )
         assert agent is not None and agent.status == "archived"
-        assert agent.current_version_id is not None
+        assert isinstance(agent.definition_id, uuid.UUID)
         assert connection is None
     finally:
         resume.set()

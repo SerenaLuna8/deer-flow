@@ -28,7 +28,6 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
-    AgentVersionRow,
     ProjectSystemAgentBindingRow,
 )
 
@@ -655,17 +654,15 @@ class PostgresProjectChannelGroupBindingRepository:
         agent_asset_id: uuid.UUID,
         agent_scope: str,
     ) -> bool:
-        statement = select(AgentRow.id).join(
-            AgentVersionRow,
-            AgentVersionRow.id == AgentRow.current_version_id,
-        )
+        statement = select(AgentRow.id)
         if agent_scope == "project":
             statement = statement.where(
                 AgentRow.id == agent_asset_id,
                 AgentRow.scope == "project",
                 AgentRow.project_id == project_id,
                 AgentRow.status == "active",
-            ).with_for_update(read=True, of=[AgentRow, AgentVersionRow])
+                AgentRow.definition_id.is_not(None),
+            ).with_for_update(read=True, of=AgentRow)
         elif agent_scope == "system":
             statement = (
                 statement.join(
@@ -677,12 +674,12 @@ class PostgresProjectChannelGroupBindingRepository:
                     AgentRow.scope == "system",
                     AgentRow.project_id.is_(None),
                     AgentRow.status == "active",
+                    AgentRow.definition_id.is_not(None),
                     ProjectSystemAgentBindingRow.enabled.is_(True),
-                    AgentVersionRow.version_number == 1,
                 )
                 .with_for_update(
                     read=True,
-                    of=[AgentRow, AgentVersionRow, ProjectSystemAgentBindingRow],
+                    of=[AgentRow, ProjectSystemAgentBindingRow],
                 )
             )
         else:

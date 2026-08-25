@@ -28,10 +28,31 @@ function errorResponse(code: string, message: string, status = 409) {
 }
 
 describe("Project Skill error contract", () => {
-  test("accepts the stable in-use delete error", async () => {
+  test("returns the number of Agent Definitions unbound by logical deletion", async () => {
+    rs.stubGlobal("document", { cookie: "csrf_token=asset-token" });
+    const response = {
+      skill_id: ASSET_ID,
+      affected_agent_count: 2,
+      request_id: "skill-delete",
+    };
+    rs.stubGlobal("fetch", async () => Response.json(response));
+
+    await expect(
+      deleteProjectSkill(PROJECT_ID, ASSET_ID, {
+        expected_revision: 3,
+      }),
+    ).resolves.toEqual(response);
+  });
+
+  test("rejects malformed Skill deletion results", async () => {
     rs.stubGlobal("document", { cookie: "csrf_token=asset-token" });
     rs.stubGlobal("fetch", async () =>
-      errorResponse("ASSET_IN_USE", "Asset is still referenced"),
+      Response.json({
+        skill_id: ASSET_ID,
+        affected_agent_count: 2,
+        request_id: "skill-delete",
+        agent_ids: ["55555555-5555-4555-8555-555555555555"],
+      }),
     );
 
     await expect(
@@ -39,8 +60,26 @@ describe("Project Skill error contract", () => {
         expected_revision: 3,
       }),
     ).rejects.toMatchObject({
-      status: 409,
-      code: "ASSET_IN_USE",
+      code: "ASSET_RESPONSE_INVALID",
+    } satisfies Partial<SharedAssetApiError>);
+  });
+
+  test("rejects a Skill deletion result for another asset", async () => {
+    rs.stubGlobal("document", { cookie: "csrf_token=asset-token" });
+    rs.stubGlobal("fetch", async () =>
+      Response.json({
+        skill_id: "33333333-3333-4333-8333-333333333333",
+        affected_agent_count: 2,
+        request_id: "skill-delete",
+      }),
+    );
+
+    await expect(
+      deleteProjectSkill(PROJECT_ID, ASSET_ID, {
+        expected_revision: 3,
+      }),
+    ).rejects.toMatchObject({
+      code: "ASSET_RESPONSE_INVALID",
     } satisfies Partial<SharedAssetApiError>);
   });
 

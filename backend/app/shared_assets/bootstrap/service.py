@@ -49,10 +49,9 @@ from app.shared_assets.skill_service import (
 from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.persistence.projects import ProjectMembershipRow
 from deerflow.persistence.shared_assets import (
+    AgentMcpRefRow,
     AgentRow,
-    AgentVersionMcpRefRow,
-    AgentVersionRow,
-    AgentVersionSkillRefRow,
+    AgentSkillRefRow,
     McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
@@ -556,8 +555,8 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
     version_id = _version_id(entry)
     asset = await _existing_asset(session, entry)
     if asset is None:
-        expected_skill_refs = _expected_agent_skill_refs(version_id, payload)
-        expected_mcp_refs = _expected_agent_mcp_refs(version_id, payload)
+        expected_skill_refs = _expected_agent_skill_refs(asset_id, payload)
+        expected_mcp_refs = _expected_agent_mcp_refs(asset_id, payload)
         asset = AgentRow(
             id=asset_id,
             scope="system",
@@ -565,39 +564,7 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
             slug=entry.slug,
             display_name=entry.display_name,
             status="active",
-            current_version_id=None,
-            revision=1,
-            source_key=entry.source_key,
-            created_by_user_id=str(BUILTIN_ASSET_USER_ID),
-        )
-        version = _agent_version_row(version_id, asset_id, payload, checksum)
-        session.add_all([asset, version])
-        await session.flush()
-        session.add_all(_agent_skill_ref_rows(expected_skill_refs))
-        session.add_all(_agent_mcp_ref_rows(expected_mcp_refs))
-        await session.flush()
-        asset.current_version_id = version_id
-        await session.flush()
-        return True
-
-    _validate_asset_row(asset, entry)
-    versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == asset.id).with_for_update(of=AgentVersionRow))).scalars().all())
-    if len(versions) != 1 or versions[0].version_number != 1 or asset.current_version_id != versions[0].id:
-        raise BootstrapConflict("existing System Agent is not a single Current v1")
-    version = versions[0]
-    if uuid.UUID(str(version.id)) != version_id:
-        raise BootstrapConflict("existing System Agent Current v1 identity is not canonical")
-    expected_skill_refs = _expected_agent_skill_refs(version_id, payload)
-    expected_mcp_refs = _expected_agent_mcp_refs(version_id, payload)
-    skill_refs = tuple(
-        (await session.execute(select(AgentVersionSkillRefRow).where(AgentVersionSkillRefRow.agent_version_id == version_id).order_by(AgentVersionSkillRefRow.sort_order).with_for_update(of=AgentVersionSkillRefRow))).scalars().all()
-    )
-    mcp_refs = tuple((await session.execute(select(AgentVersionMcpRefRow).where(AgentVersionMcpRefRow.agent_version_id == version_id).order_by(AgentVersionMcpRefRow.sort_order).with_for_update(of=AgentVersionMcpRefRow))).scalars().all())
-    exact = (
-        _matches(
-            version,
-            agent_id=asset_id,
-            version_number=1,
+            definition_id=version_id,
             description=payload.description,
             agents_instructions=payload.agents_instructions,
             soul=payload.soul,
@@ -606,43 +573,80 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
             model_ref=payload.model_ref,
             model_settings={},
             tool_groups=list(payload.tool_groups),
-            supersedes_version_id=None,
+            payload_checksum=checksum,
+            payload_schema_version=4,
+            revision=1,
+            source_key=entry.source_key,
+            created_by_user_id=str(BUILTIN_ASSET_USER_ID),
+            updated_by_user_id=str(BUILTIN_ASSET_USER_ID),
+        )
+        session.add(asset)
+        await session.flush()
+        session.add_all(_agent_skill_ref_rows(expected_skill_refs))
+        session.add_all(_agent_mcp_ref_rows(expected_mcp_refs))
+        await session.flush()
+        return True
+
+    _validate_asset_row(asset, entry)
+    if uuid.UUID(str(asset.definition_id)) != version_id:
+        raise BootstrapConflict("existing System Agent Definition identity is not canonical")
+    expected_skill_refs = _expected_agent_skill_refs(asset_id, payload)
+    expected_mcp_refs = _expected_agent_mcp_refs(asset_id, payload)
+    skill_refs = tuple((await session.execute(select(AgentSkillRefRow).where(AgentSkillRefRow.agent_id == asset_id).order_by(AgentSkillRefRow.sort_order).with_for_update(of=AgentSkillRefRow))).scalars().all())
+    mcp_refs = tuple((await session.execute(select(AgentMcpRefRow).where(AgentMcpRefRow.agent_id == asset_id).order_by(AgentMcpRefRow.sort_order).with_for_update(of=AgentMcpRefRow))).scalars().all())
+    exact = (
+        _matches(
+            asset,
+            definition_id=version_id,
+            description=payload.description,
+            agents_instructions=payload.agents_instructions,
+            soul=payload.soul,
+            identity=payload.identity,
+            user_context=payload.user_context,
+            model_ref=payload.model_ref,
+            model_settings={},
+            tool_groups=list(payload.tool_groups),
             payload_checksum=checksum,
             payload_schema_version=4,
             created_by_user_id=str(BUILTIN_ASSET_USER_ID),
+            updated_by_user_id=str(BUILTIN_ASSET_USER_ID),
         )
-        and tuple((row.agent_version_id, row.skill_asset_scope, row.skill_asset_id, row.sort_order) for row in skill_refs) == expected_skill_refs
-        and tuple((row.agent_version_id, row.mcp_server_version_id, row.sort_order) for row in mcp_refs) == expected_mcp_refs
+        and tuple((row.agent_id, row.skill_asset_scope, row.skill_asset_id, row.sort_order) for row in skill_refs) == expected_skill_refs
+        and tuple((row.agent_id, row.mcp_server_version_id, row.sort_order) for row in mcp_refs) == expected_mcp_refs
     )
-    if version.payload_checksum == checksum:
+    if asset.payload_checksum == checksum:
         if not exact:
             raise BootstrapConflict("existing System Agent checksum has drifted content")
         return False
 
-    before_checksum = version.payload_checksum
-    version.description = payload.description
-    version.agents_instructions = payload.agents_instructions
-    version.soul = payload.soul
-    version.identity = payload.identity
-    version.user_context = payload.user_context
-    version.model_ref = payload.model_ref
-    version.model_settings = {}
-    version.tool_groups = list(payload.tool_groups)
-    version.payload_checksum = checksum
-    version.payload_schema_version = 4
+    before_checksum = asset.payload_checksum
+    asset.description = payload.description
+    asset.agents_instructions = payload.agents_instructions
+    asset.soul = payload.soul
+    asset.identity = payload.identity
+    asset.user_context = payload.user_context
+    asset.model_ref = payload.model_ref
+    asset.model_settings = {}
+    asset.tool_groups = list(payload.tool_groups)
+    asset.payload_checksum = checksum
+    asset.payload_schema_version = 4
+    asset.updated_by_user_id = str(BUILTIN_ASSET_USER_ID)
+    # The first ref DELETE may autoflush this mapped payload mutation. Advance
+    # the aggregate revision before that boundary so the Schema V1 Definition
+    # trigger observes one complete System upgrade transition.
+    asset.revision += 1
     await session.execute(
-        delete(AgentVersionSkillRefRow).where(
-            AgentVersionSkillRefRow.agent_version_id == version_id,
+        delete(AgentSkillRefRow).where(
+            AgentSkillRefRow.agent_id == asset_id,
         )
     )
     await session.execute(
-        delete(AgentVersionMcpRefRow).where(
-            AgentVersionMcpRefRow.agent_version_id == version_id,
+        delete(AgentMcpRefRow).where(
+            AgentMcpRefRow.agent_id == asset_id,
         )
     )
     session.add_all(_agent_skill_ref_rows(expected_skill_refs))
     session.add_all(_agent_mcp_ref_rows(expected_mcp_refs))
-    asset.revision += 1
     await session.flush()
     await _record_system_upgrade(
         session,
@@ -656,69 +660,44 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
     return True
 
 
-def _agent_version_row(
-    version_id: uuid.UUID,
-    asset_id: uuid.UUID,
-    payload: AgentPayload,
-    checksum: str,
-) -> AgentVersionRow:
-    return AgentVersionRow(
-        id=version_id,
-        agent_id=asset_id,
-        version_number=1,
-        description=payload.description,
-        agents_instructions=payload.agents_instructions,
-        soul=payload.soul,
-        identity=payload.identity,
-        user_context=payload.user_context,
-        model_ref=payload.model_ref,
-        model_settings={},
-        tool_groups=list(payload.tool_groups),
-        supersedes_version_id=None,
-        payload_checksum=checksum,
-        payload_schema_version=4,
-        created_by_user_id=str(BUILTIN_ASSET_USER_ID),
-    )
-
-
 def _agent_skill_ref_rows(
     refs: tuple[tuple[uuid.UUID, str, uuid.UUID, int], ...],
-) -> tuple[AgentVersionSkillRefRow, ...]:
+) -> tuple[AgentSkillRefRow, ...]:
     return tuple(
-        AgentVersionSkillRefRow(
-            agent_version_id=version_id,
+        AgentSkillRefRow(
+            agent_id=agent_id,
             skill_asset_scope=scope,
             skill_asset_id=asset_id,
             sort_order=sort_order,
         )
-        for version_id, scope, asset_id, sort_order in refs
+        for agent_id, scope, asset_id, sort_order in refs
     )
 
 
 def _expected_agent_skill_refs(
-    version_id: uuid.UUID,
+    agent_id: uuid.UUID,
     payload: AgentPayload,
 ) -> tuple[tuple[uuid.UUID, str, uuid.UUID, int], ...]:
-    return tuple((version_id, ref.scope.value, ref.asset_id, index) for index, ref in enumerate(payload.skill_refs))
+    return tuple((agent_id, ref.scope.value, ref.asset_id, index) for index, ref in enumerate(payload.skill_refs))
 
 
 def _expected_agent_mcp_refs(
-    version_id: uuid.UUID,
+    agent_id: uuid.UUID,
     payload: AgentPayload,
 ) -> tuple[tuple[uuid.UUID, uuid.UUID, int], ...]:
-    return tuple((version_id, mcp_id, index) for index, mcp_id in enumerate(payload.mcp_version_ids))
+    return tuple((agent_id, mcp_id, index) for index, mcp_id in enumerate(payload.mcp_version_ids))
 
 
 def _agent_mcp_ref_rows(
     refs: tuple[tuple[uuid.UUID, uuid.UUID, int], ...],
-) -> tuple[AgentVersionMcpRefRow, ...]:
+) -> tuple[AgentMcpRefRow, ...]:
     return tuple(
-        AgentVersionMcpRefRow(
-            agent_version_id=version_id,
+        AgentMcpRefRow(
+            agent_id=agent_id,
             mcp_server_version_id=mcp_id,
             sort_order=sort_order,
         )
-        for version_id, mcp_id, sort_order in refs
+        for agent_id, mcp_id, sort_order in refs
     )
 
 

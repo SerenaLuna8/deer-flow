@@ -1129,7 +1129,7 @@ export const enUS: Translations = {
       systemAssetsDescription:
         "System assets are shared read-only. Project bindings pin an explicit version and never upgrade automatically.",
       systemCurrentAssetsDescription:
-        "System Agents and Skills are shared read-only. Projects bind the asset and runtime resolves its Current Version.",
+        "System Agents and Skills are shared read-only. Projects bind the asset; runtime resolves the Agent Definition and Skill Current Version.",
       systemMcpDescription:
         "System MCPs are shared read-only. Project bindings pin an explicit configuration and never switch automatically.",
       searchPlaceholder: "Search by name or identifier",
@@ -1157,6 +1157,9 @@ export const enUS: Translations = {
       currentVersionStatus: "Version status",
       currentVersionAvailable: "Current Version available",
       currentVersionMissing: "No Current Version",
+      definitionStatus: "Definition status",
+      definitionAvailable: "Definition available",
+      definitionMissing: "Definition unavailable",
       assetRevision: "Asset revision",
       actions: "Actions",
       viewDetails: "View details",
@@ -1187,7 +1190,7 @@ export const enUS: Translations = {
       manageBinding: "Manage binding",
       projectAssets: "Project assets",
       projectAgentDescription:
-        "Owned by this project. Saving Agent settings creates a Candidate Version; activating it makes it Current.",
+        "Owned by this project. Saving updates its single Agent Definition for future Runs.",
       projectVersionedDescription:
         "Owned by this project. Content changes create immutable new versions.",
       noProjectAssets: "This project has no assets of this type.",
@@ -1222,7 +1225,7 @@ export const enUS: Translations = {
       description: "Description",
       model: "Model",
       toolGroups: "Tool groups",
-      skillVersions: "Skill versions",
+      skillAssets: "Skill assets",
       mcpVersions: "MCP configurations",
       compatibility: "Compatibility",
       files: "Files",
@@ -1288,6 +1291,8 @@ export const enUS: Translations = {
         enableTitle: "Enable system asset",
         description: (name) =>
           `${name}. This changes only the current project binding. It never modifies the packaged system definition or version.`,
+        agentDescription: (name) =>
+          `${name}. This project only enables or disables the System Agent's single read-only Definition.`,
         selectPublished: "Select a published version",
         selectPublishedAria: "Select a published version",
         selectPlaceholder: "Select a version",
@@ -1604,7 +1609,7 @@ export const enUS: Translations = {
         blockingConflictHint:
           "Continue the conversation so the Agent regenerates the blueprint. The Agent cannot be created until all red conflicts disappear.",
         createHint:
-          "Saves immutable candidate version v1. Activate it before it can run.",
+          "Creates the initial Agent Definition. The Agent starts suspended and must be enabled manually.",
         creating: "Creating…",
         createAgent: "Create Agent",
         validation: {
@@ -1633,7 +1638,7 @@ export const enUS: Translations = {
         modelLabel: "Conversation model used to design the Agent",
         backToAgents: "Continue later and return to Agents",
         designAgent: "Design Agent",
-        completedRecord: "Candidate Version v1 · Read-only",
+        completedRecord: "Initial Agent Definition · Read-only",
         more: "More actions",
         abandon: "Abandon this design",
         conversationAria: "Agent design conversation",
@@ -1676,11 +1681,11 @@ export const enUS: Translations = {
       sectionAria: "Agent instruction documents",
       title: "Instruction documents",
       editDescription:
-        "Edit the four fixed Markdown documents and save an immutable Agent Candidate Version.",
+        "Edit the four fixed Markdown documents in the current Agent Definition. Saving applies to future Runs immediately.",
       readOnlyDescription:
-        "Read-only instruction documents for the System Agent's sole v1.",
-      historicalDescription:
-        "Immutable instruction documents from a Historical Version. Historical content is view-only and cannot be used as an editing baseline.",
+        "Read-only instruction documents for the System Agent's sole immutable Definition.",
+      adminProjectReadOnlyDescription:
+        "Read-only view of this Project Agent's current mutable Definition. Project saves replace it for future Runs.",
       edit: "Edit",
       fixedFiles: "Fixed files",
       displayMode: "Display mode",
@@ -1688,23 +1693,23 @@ export const enUS: Translations = {
       preview: "Preview",
       empty: "No content",
       editFile: (name) => `Edit ${name}`,
-      candidateSaveHint:
-        "Saving creates a new Agent Candidate Version without activating it.",
+      saveHint:
+        "Saving immediately updates the Agent Definition used by future Runs.",
       discard: "Discard changes",
       saving: "Saving…",
-      save: "Save Candidate Version",
+      save: "Save",
       permissionLost:
         "Editing permission was revoked. Local changes are preserved but cannot be saved yet.",
       recoveryPreserved:
-        "The server version changed. Local changes were preserved; review them before saving again.",
+        "The server Definition changed. Local changes were preserved; review them before saving again.",
       recoverySynced:
-        "The server version changed and the latest version has been loaded.",
+        "The server Definition changed and the latest Definition has been loaded.",
       recoveryFailed:
-        "The latest version could not be loaded. Local changes were preserved.",
-      recoveryReloading: "Loading the latest version…",
-      invalidResponse: "The server returned an invalid Agent version.",
-      conflictDetected: "A version conflict was detected.",
-      reloadRequired: "Reload the latest version before editing.",
+        "The latest Definition could not be loaded. Local changes were preserved.",
+      recoveryReloading: "Loading the latest Definition…",
+      invalidResponse: "The server returned an invalid Agent Definition.",
+      conflictDetected: "A Definition conflict was detected.",
+      reloadRequired: "Reload the latest Definition before editing.",
       reloading: "Reloading…",
       reload: "Reload",
       discardTitle: "Discard instruction changes?",
@@ -1733,24 +1738,24 @@ export const enUS: Translations = {
       unavailablePrefix: (reason) => `Unavailable: ${reason}`,
       remediationPrefix: (reason) => `Next step: ${reason}`,
       historicalDisabled:
-        "Capability bindings cannot be edited on historical versions.",
-      historicalVersion: "Historical version",
+        "Unavailable historical bindings can only be removed.",
+      historicalVersion: "Unavailable historical binding",
       historicalVersionDescription:
-        "Capability bindings are read-only for this historical version.",
+        "The target is no longer present in the current capability catalog.",
       permissionLost:
         "Editing permission was revoked. Local changes are preserved but cannot be saved yet.",
       recoverySynced:
-        "The server version changed and the latest version has been loaded.",
+        "The server Definition changed and the latest Definition has been loaded.",
       recoveryPreserved:
-        "The server version changed. Local changes were preserved; review them before saving again.",
+        "The server Definition changed. Local changes were preserved; review them before saving again.",
       recoveryFailed:
-        "The latest version could not be loaded. Local changes were preserved.",
-      recoveryReloading: "Loading the latest version…",
-      conflictDetected: "A version conflict was detected.",
-      reloadRequired: "Reload the latest version before editing.",
+        "The latest Definition could not be loaded. Local changes were preserved.",
+      recoveryReloading: "Loading the latest Definition…",
+      conflictDetected: "A Definition conflict was detected.",
+      reloadRequired: "Reload the latest Definition before editing.",
       reloading: "Reloading…",
       permissionBlocked: "Your account cannot edit Agent capabilities.",
-      preparingCandidate: "Preparing the Candidate Version…",
+      preparingDefinition: "Preparing the Agent Definition…",
       catalogLoading: "Loading capability catalog…",
       catalogLoadFailed: "Capability catalog could not be loaded.",
       validatingMcp: "Validating MCP dependencies…",
@@ -1759,7 +1764,7 @@ export const enUS: Translations = {
       description:
         "Choose the tool groups, Skills, and MCPs this Agent can use.",
       saving: "Saving…",
-      saveCandidate: "Save Candidate Version",
+      save: "Save",
       edit: "Edit",
       builtinGroups: "Built-in tool groups",
       unchanged: "Unchanged",
@@ -1785,15 +1790,14 @@ export const enUS: Translations = {
       chatForbidden: "Your account cannot create chats in this project.",
       unavailable: "This Agent is unavailable.",
       executeForbidden: "Your account cannot run Agents.",
-      currentVersionRequired:
-        "The Agent needs a Current Version and the asset must be active.",
+      definitionRequired: "The Agent Definition is unavailable.",
       defaultAdminOnly: "Only administrators can set the default Agent.",
       defaultUnavailable: "This Agent cannot be set as default.",
       systemDefaultUnavailable:
         "Enable this system Agent in the project first.",
       mainUnavailable: "The main Agent is unavailable.",
       mainExecuteForbidden: "Your account cannot run the main Agent.",
-      mainVersionUnavailable: "The main Agent has no available version.",
+      mainDefinitionUnavailable: "The main Agent has no available Definition.",
       emptySystem: "No system Agents are available.",
       emptyProject: "No project Agents yet.",
       defaultLoadFailed: "The default Agent could not be loaded.",
@@ -2559,7 +2563,7 @@ export const enUS: Translations = {
     agentArchivedAction: "Choose another Agent for a new chat",
     agentModelUnavailableTitle: "Agent model unavailable",
     agentModelUnavailableDescription:
-      "The Agent's configured model could not be resolved. Check its system binding, Current Version, and active model catalog entry, then retry.",
+      "The Agent's configured model could not be resolved. Check its system binding, Definition, and active model catalog entry, then retry.",
     runExecutionProfile: (modelDisplayName, modeName, supportsVision) =>
       `Effective run: ${modelDisplayName} · ${modeName} · ${supportsVision ? "vision-capable" : "text only"}`,
   },

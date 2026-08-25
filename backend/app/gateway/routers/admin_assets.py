@@ -9,24 +9,27 @@ from pydantic import Field, StrictInt
 from app.gateway.deps import get_current_user_from_request, require_admin_user
 from app.gateway.routers.project_assets import (
     ASSET_ERRORS,
+    AgentAssetItemResponse,
+    AgentBindingResponse,
     AssetItemResponse,
     AssetRoute,
-    BindingItemResponse,
     BindingResponse,
     CurrentBindingResponse,
     CurrentSystemBindingRequest,
     CurrentVersionAssetItemResponse,
     DisableSystemBindingRequest,
     MoveSystemBindingRequest,
+    ProjectAgentItemResponse,
     ProjectAssetItemResponse,
-    ProjectCurrentVersionAssetItemResponse,
     ProjectCurrentVersionSkillItemResponse,
+    ScopedAgentAssetListResponse,
     ScopedAssetListResponse,
-    ScopedCurrentVersionAssetListResponse,
     ScopedCurrentVersionSkillAssetListResponse,
     SkillVersionResponse,
     SystemBindingRequest,
+    _agent_asset_item,
     _asset_item,
+    _binding_item_response,
     _binding_response,
     _current_version_asset_item,
     _StrictModel,
@@ -71,6 +74,11 @@ class AdminAssetListResponse(_StrictModel):
 
 class AdminCurrentVersionAssetListResponse(_StrictModel):
     items: list[CurrentVersionAssetItemResponse]
+    request_id: str
+
+
+class AdminAgentAssetListResponse(_StrictModel):
+    items: list[AgentAssetItemResponse]
     request_id: str
 
 
@@ -127,6 +135,19 @@ async def _list_assets(
         raise_asset_domain(exc)
 
 
+async def _list_agent_assets(
+    actor: SystemAssetGovernanceContext,
+    service: AgentService,
+) -> AdminAgentAssetListResponse:
+    try:
+        return AdminAgentAssetListResponse(
+            items=[_agent_asset_item(view) for view in await service.list_visible(actor)],
+            request_id=actor.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
 def _override_asset_capabilities(scope: AssetScope, kind: AssetKind) -> list[Capability]:
     allowed = {
         Capability.SHARED_ASSETS_READ,
@@ -143,7 +164,7 @@ async def _list_override_assets(
     kind: AssetKind,
     service,
     binding_service,
-) -> ScopedAssetListResponse | ScopedCurrentVersionAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
+) -> ScopedAssetListResponse | ScopedAgentAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
     try:
         project_views = await service.list_visible(actor)
         catalog_actor = SystemAssetReadContext(
@@ -161,8 +182,8 @@ async def _list_override_assets(
             item_model = ProjectCurrentVersionSkillItemResponse
             response_model = ScopedCurrentVersionSkillAssetListResponse
         elif kind is AssetKind.AGENT:
-            item_model = ProjectCurrentVersionAssetItemResponse
-            response_model = ScopedCurrentVersionAssetListResponse
+            item_model = ProjectAgentItemResponse
+            response_model = ScopedAgentAssetListResponse
         else:
             item_model = ProjectAssetItemResponse
             response_model = ScopedAssetListResponse
@@ -170,7 +191,7 @@ async def _list_override_assets(
             item_model(
                 **vars(view),
                 capabilities=_override_asset_capabilities(view.scope, kind),
-                binding=(BindingItemResponse(**vars(by_asset_id[view.id])) if view.id in by_asset_id else None),
+                binding=(_binding_item_response(by_asset_id[view.id]) if view.id in by_asset_id else None),
             )
             for view in system_views
         ]
@@ -193,13 +214,13 @@ async def _list_override_assets(
 
 @admin_router.get(
     "/agents",
-    response_model=AdminCurrentVersionAssetListResponse,
+    response_model=AdminAgentAssetListResponse,
 )
 async def list_system_agents(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
     service: Annotated[AgentService, Depends(get_agent_service)],
 ):
-    return await _list_assets(actor, service, current_version=True)
+    return await _list_agent_assets(actor, service)
 
 
 @admin_router.get(
@@ -247,7 +268,7 @@ async def list_system_mcp_servers(
 
 @admin_project_router.get(
     "/agents",
-    response_model=ScopedCurrentVersionAssetListResponse,
+    response_model=ScopedAgentAssetListResponse,
 )
 async def list_override_agents(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_project_actor)],
@@ -343,7 +364,7 @@ def _register_override_binding_routes(segment: str, kind: AssetKind) -> None:
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
-    response_model = BindingResponse if kind is AssetKind.MCP else CurrentBindingResponse
+    response_model = BindingResponse if kind is AssetKind.MCP else AgentBindingResponse if kind is AssetKind.AGENT else CurrentBindingResponse
     admin_project_router.add_api_route(
         path,
         enable_exact if kind is AssetKind.MCP else enable_current,

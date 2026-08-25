@@ -78,11 +78,8 @@ def test_skill_version_seal_triggers_match_schema_v1() -> None:
         "verify_skill_version_file_facts",
     } <= REQUIRED_FUNCTIONS
     assert "'files_sealed'" in _CREATE_IMMUTABLE_FUNCTION
-    assert "'skill_versions'" not in re.search(
-        r"TG_TABLE_NAME IN \((.*?)\)",
-        _CREATE_IMMUTABLE_FUNCTION,
-        re.DOTALL,
-    ).group(1)
+    assert "TG_TABLE_NAME = 'mcp_server_versions'" in _CREATE_IMMUTABLE_FUNCTION
+    assert "TG_TABLE_NAME = 'skill_versions'" not in _CREATE_IMMUTABLE_FUNCTION
 
     assert "OLD.files_sealed IS FALSE" in _CREATE_SKILL_VERSION_SEAL_FUNCTION
     assert "NEW.files_sealed IS TRUE" in _CREATE_SKILL_VERSION_SEAL_FUNCTION

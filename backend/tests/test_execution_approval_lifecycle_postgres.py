@@ -107,7 +107,7 @@ from deerflow.persistence.private_work import (
 from deerflow.persistence.private_work.file_repository import PrivateFileRepository
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
+from deerflow.persistence.shared_assets import AgentRow
 from deerflow.persistence.system_runtime_settings import (
     RunRuntimePolicySnapshotRow,
     SystemRuntimePolicyRow,
@@ -210,7 +210,7 @@ async def _running_job(
     lease_token: str,
     model_ref: str,
     execution_domain_affinity: str | None = None,
-    agent_version_id: uuid.UUID | None = None,
+    agent_definition_id: uuid.UUID | None = None,
     closure_rows: tuple[object, ...] = (),
 ) -> tuple[JobRow, JobAttemptRow]:
     now = datetime.now(UTC)
@@ -234,7 +234,7 @@ async def _running_job(
         execution_heartbeat_at=now,
         execution_started_at=now,
     )
-    if agent_version_id is None:
+    if agent_definition_id is None:
         await add_sealed_test_run(session, run)
     else:
         await begin_test_run_closure(session, run)
@@ -244,7 +244,7 @@ async def _running_job(
             asset_kind="agent",
             dependency_order=0,
             asset_id=agent_id,
-            version_id=agent_version_id,
+            version_id=agent_definition_id,
             payload_checksum="a" * 64,
             catalog_generation=1,
         )
@@ -4337,7 +4337,7 @@ class _AtomicContinuationAdmission:
         project_id: uuid.UUID,
         owner_user_id: str,
         agent_id: uuid.UUID,
-        agent_version_id: uuid.UUID,
+        agent_definition_id: uuid.UUID,
         model_config_id: uuid.UUID,
         model_payload_checksum: str,
         runtime_policy_version_id: uuid.UUID,
@@ -4350,7 +4350,7 @@ class _AtomicContinuationAdmission:
         self._project_id = project_id
         self._owner_user_id = owner_user_id
         self._agent_id = agent_id
-        self._agent_version_id = agent_version_id
+        self._agent_definition_id = agent_definition_id
         self._model_config_id = model_config_id
         self._model_payload_checksum = model_payload_checksum
         self._runtime_policy_version_id = runtime_policy_version_id
@@ -4407,7 +4407,7 @@ class _AtomicContinuationAdmission:
                     lease_token=self.lease_token,
                     model_ref=str(self._model_config_id),
                     execution_domain_affinity=(server_context.host_execution_domain_affinity),
-                    agent_version_id=self._agent_version_id,
+                    agent_definition_id=self._agent_definition_id,
                     closure_rows=(
                         RunModelConfigSnapshotRow(
                             project_id=self._project_id,
@@ -4478,7 +4478,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
     membership_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     worker_id = uuid.uuid4()
-    agent_version_id = uuid.uuid4()
+    agent_definition_id = uuid.uuid4()
     model_config_id = uuid.uuid4()
     model_payload_checksum = "b" * 64
     drifted_model_payload_checksum = "c" * 64
@@ -4533,26 +4533,23 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 project_id=project_id,
                 slug="approval-agent",
                 display_name="Approval Agent",
+                status="active",
+                definition_id=agent_definition_id,
+                description="",
+                agents_instructions="",
+                soul="test",
+                identity="",
+                user_context="",
+                model_ref=str(model_config_id),
+                model_settings={},
+                tool_groups=[],
+                payload_schema_version=4,
+                payload_checksum="a" * 64,
                 created_by_user_id=str(owner_id),
+                updated_by_user_id=str(owner_id),
             )
             session.add(agent)
             await session.flush()
-            session.add(
-                AgentVersionRow(
-                    id=agent_version_id,
-                    agent_id=agent_id,
-                    version_number=1,
-                    description="",
-                    soul="test",
-                    model_ref=str(model_config_id),
-                    model_settings={},
-                    tool_groups=[],
-                    payload_checksum="a" * 64,
-                    created_by_user_id=str(owner_id),
-                ),
-            )
-            await session.flush()
-            agent.current_version_id = agent_version_id
             model_config = SystemModelConfigRow(
                 id=model_config_id,
                 display_name="Test model",
@@ -4618,7 +4615,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 run_id=source_run_id,
                 lease_token=source_token,
                 model_ref=str(model_config_id),
-                agent_version_id=agent_version_id,
+                agent_definition_id=agent_definition_id,
                 closure_rows=(
                     RunModelConfigSnapshotRow(
                         project_id=project_id,
@@ -4745,7 +4742,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
             project_id=project_id,
             owner_user_id=str(owner_id),
             agent_id=agent_id,
-            agent_version_id=agent_version_id,
+            agent_definition_id=agent_definition_id,
             model_config_id=model_config_id,
             model_payload_checksum=(drifted_model_payload_checksum if snapshot_drift == "model" else model_payload_checksum),
             runtime_policy_version_id=(drifted_runtime_policy_version_id if snapshot_drift == "runtime" else runtime_policy_version.id),

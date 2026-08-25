@@ -26,10 +26,9 @@ from app.shared_assets.skill_secret_closure import (
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
+    AgentMcpRefRow,
     AgentRow,
-    AgentVersionMcpRefRow,
-    AgentVersionRow,
-    AgentVersionSkillRefRow,
+    AgentSkillRefRow,
     McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
@@ -46,7 +45,15 @@ _Actor = ProjectContext | SystemAssetGovernanceContext
 @dataclass(frozen=True)
 class BindingTarget:
     asset: AgentRow | SkillRow | McpServerRow
-    version: AgentVersionRow | SkillVersionRow | McpServerVersionRow
+    version: AgentRow | SkillVersionRow | McpServerVersionRow
+
+    @property
+    def version_id(self) -> uuid.UUID:
+        """Return the stable wire identifier for the selected definition/version."""
+
+        if isinstance(self.version, AgentRow):
+            return self.version.definition_id
+        return self.version.id
 
 
 _BINDING_TYPES = {
@@ -67,7 +74,6 @@ _BINDING_TYPES = {
     ),
 }
 _TARGET_TYPES = {
-    AssetKind.AGENT: (AgentRow, AgentVersionRow, "agent_id"),
     AssetKind.SKILL: (SkillRow, SkillVersionRow, "skill_id"),
     AssetKind.MCP: (McpServerRow, McpServerVersionRow, "mcp_server_id"),
 }
@@ -194,6 +200,17 @@ class BindingRepository:
         if kind is AssetKind.MCP:
             row = await self.get_binding(context, kind, asset_id, read=True)
             return uuid.UUID(str(row.mcp_server_version_id))
+        if kind is AssetKind.AGENT:
+            value = await self.session.scalar(
+                select(AgentRow.definition_id).where(
+                    AgentRow.id == asset_id,
+                    AgentRow.scope == AssetScope.SYSTEM.value,
+                    AgentRow.project_id.is_(None),
+                )
+            )
+            if not isinstance(value, uuid.UUID):
+                raise AssetNotFound(context.request_id)
+            return value
         asset_type, _version_type, _parent_column = _TARGET_TYPES[kind]
         value = await self.session.scalar(
             select(asset_type.current_version_id).where(
@@ -216,7 +233,10 @@ class BindingRepository:
     ) -> BindingTarget:
         if selection.kind is AssetKind.MCP and selection.version_id is None:
             raise AssetValidationFailed(context.request_id)
-        asset_type, version_type, parent_column = _TARGET_TYPES[selection.kind]
+        if selection.kind is AssetKind.AGENT:
+            asset_type = AgentRow
+        else:
+            asset_type, version_type, parent_column = _TARGET_TYPES[selection.kind]
         asset_statement = (
             select(asset_type)
             .where(
@@ -235,6 +255,10 @@ class BindingRepository:
             raise AssetNotFound(context.request_id)
         if asset.status == "suspended" or (asset.status == "archived" and not allow_archived):
             raise AssetValidationFailed(context.request_id)
+        if selection.kind is AssetKind.AGENT:
+            if selection.version_id is not None and selection.version_id != asset.definition_id:
+                raise AssetValidationFailed(context.request_id)
+            return BindingTarget(asset, asset)
         resolved_version_id = selection.version_id if selection.kind is AssetKind.MCP else asset.current_version_id
         if not isinstance(resolved_version_id, uuid.UUID):
             raise AssetValidationFailed(context.request_id)
@@ -343,6 +367,21 @@ class BindingRepository:
         allow_revoked: bool = False,
     ):
         self._require_actor(context)
+        if kind is AssetKind.AGENT:
+            statement = (
+                select(AgentRow)
+                .where(
+                    AgentRow.id == asset_id,
+                    AgentRow.scope == AssetScope.SYSTEM.value,
+                    AgentRow.project_id.is_(None),
+                    AgentRow.definition_id == version_id,
+                )
+                .with_for_update(read=read, of=AgentRow)
+            )
+            definition = (await self.session.execute(statement)).scalar_one_or_none()
+            if definition is None:
+                raise AssetNotFound(context.request_id)
+            return definition
         _asset_type, version_type, parent_column = _TARGET_TYPES[kind]
         statement = (
             select(version_type)
@@ -407,24 +446,17 @@ class BindingRepository:
             (
                 await self.session.execute(
                     select(
-                        AgentVersionSkillRefRow.skill_asset_scope,
-                        AgentVersionSkillRefRow.skill_asset_id,
+                        AgentSkillRefRow.skill_asset_scope,
+                        AgentSkillRefRow.skill_asset_id,
                     )
-                    .where(AgentVersionSkillRefRow.agent_version_id == target.version.id)
-                    .order_by(AgentVersionSkillRefRow.sort_order)
-                    .with_for_update(read=True, of=AgentVersionSkillRefRow)
+                    .where(AgentSkillRefRow.agent_id == target.asset.id)
+                    .order_by(AgentSkillRefRow.sort_order)
+                    .with_for_update(read=True, of=AgentSkillRefRow)
                 )
             ).all()
         )
         mcp_ids = tuple(
-            (
-                await self.session.execute(
-                    select(AgentVersionMcpRefRow.mcp_server_version_id)
-                    .where(AgentVersionMcpRefRow.agent_version_id == target.version.id)
-                    .order_by(AgentVersionMcpRefRow.mcp_server_version_id)
-                    .with_for_update(read=True, of=AgentVersionMcpRefRow)
-                )
-            )
+            (await self.session.execute(select(AgentMcpRefRow.mcp_server_version_id).where(AgentMcpRefRow.agent_id == target.asset.id).order_by(AgentMcpRefRow.mcp_server_version_id).with_for_update(read=True, of=AgentMcpRefRow)))
             .scalars()
             .all()
         )

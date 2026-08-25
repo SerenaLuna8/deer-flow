@@ -19,7 +19,7 @@ export function projectAssetDeleteDescription(
   assetName: string,
 ): string {
   if (assetKind === "Skill") {
-    return `将永久删除整个 Skill 包“${assetName}”，包括包内所有版本与文件。此操作不可恢复；若 Agent 或历史运行仍引用该 Skill 的任一版本，将无法删除。此时可先停用以阻止后续使用；物理删除需解除 Agent 引用，并等待历史运行按保留策略清理。`;
+    return `删除后，Skill“${assetName}”将从项目中隐藏并停止用于新运行。系统会从所有 Agent 中移除该 Skill；这些 Agent 将保持各自当前状态，不会被自动停用。Skill 保存的秘密会立即销毁。历史记录与已固定的版本文件保留，但尚未物化秘密或后续重试的运行可能失败。此操作不可恢复。`;
   }
   if (assetKind === "Agent") {
     return `删除后，Agent“${assetName}”将不再出现在项目 Agent 列表中，也不再用于新的运行。已有对话和运行记录会保留，正在执行的运行会继续完成。`;
@@ -45,7 +45,21 @@ export function projectAssetDeleteConfirmLabel(
   if (pending) return "删除中…";
   if (assetKind === "Agent") return "确认删除";
   if (remainingSeconds > 0) return `确认删除（${remainingSeconds} 秒）`;
-  return "确认永久删除";
+  return assetKind === "Skill" ? "确认删除" : "确认永久删除";
+}
+
+export function projectAssetDeleteTitle(
+  assetKind: "Skill" | "Agent" | "MCP",
+): string {
+  return assetKind === "MCP"
+    ? `永久删除 ${assetKind}？`
+    : `删除 ${assetKind}？`;
+}
+
+export function projectSkillDeleteSuccessMessage(
+  affectedAgentCount: number,
+): string {
+  return `已删除 Skill，并从 ${affectedAgentCount} 个 Agent 中移除绑定。`;
 }
 
 export function ProjectSkillDeleteConfirmation({
@@ -149,15 +163,12 @@ function ProjectAssetDeleteConfirmation({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const isAgentArchive = assetKind === "Agent";
-  const waiting = !isAgentArchive && remainingSeconds > 0;
+  const waiting = assetKind !== "Agent" && remainingSeconds > 0;
 
   return (
     <>
       <DialogHeader>
-        <DialogTitle>
-          {isAgentArchive ? "删除 Agent？" : `永久删除 ${assetKind}？`}
-        </DialogTitle>
+        <DialogTitle>{projectAssetDeleteTitle(assetKind)}</DialogTitle>
         <DialogDescription>
           {projectAssetDeleteDescription(assetKind, assetName)}
         </DialogDescription>

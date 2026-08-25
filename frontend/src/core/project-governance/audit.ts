@@ -79,10 +79,9 @@ const roleChangedMetadataSchema = z
   .strict();
 const assetOperationSchema = z.enum([
   "agent.create",
-  "agent.version.create",
+  "agent.definition.update",
   "agent.instructions.update",
   "agent.capability_bindings.update",
-  "agent.version.activate",
   "agent.delete",
   "agent.enable",
   "agent.suspend",
@@ -127,11 +126,11 @@ const assetOperationSchema = z.enum([
   "channel.secret.replace",
   "channel.secret.clear",
 ]);
-const versionedAgentOperations = new Set([
-  "agent.version.create",
+const definitionAgentOperations = new Set([
+  "agent.create",
+  "agent.definition.update",
   "agent.instructions.update",
   "agent.capability_bindings.update",
-  "agent.version.activate",
 ]);
 const versionedSkillOperations = new Set([
   "skill.version.create",
@@ -148,7 +147,9 @@ const currentAssetMetadataSchema = z
   .object({
     asset_kind: z.enum(["agent", "skill", "mcp", "model", "channel"]),
     operation: assetOperationSchema,
+    definition_revision: z.number().int().positive().optional(),
     version_number: z.number().int().positive().optional(),
+    affected_agent_count: z.number().int().nonnegative().optional(),
     version_id: z.string().uuid().optional(),
     slot_id: z.string().uuid().optional(),
     secret_name: z.string().min(1).max(255).optional(),
@@ -177,14 +178,24 @@ const currentAssetMetadataSchema = z
       !["agent", "skill", "mcp"].includes(operationDomain) ||
       operationDomain === value.asset_kind;
     const versionMatches =
-      operationDomain === "agent"
-        ? versionedAgentOperations.has(value.operation) ===
+      operationDomain === "skill"
+        ? versionedSkillOperations.has(value.operation) ===
           (value.version_number !== undefined)
-        : operationDomain === "skill"
-          ? versionedSkillOperations.has(value.operation) ===
-            (value.version_number !== undefined)
-          : value.version_number === undefined;
-    if (!kindMatches || !versionMatches) {
+        : value.version_number === undefined;
+    const definitionMatches =
+      operationDomain === "agent"
+        ? definitionAgentOperations.has(value.operation) ===
+          (value.definition_revision !== undefined)
+        : value.definition_revision === undefined;
+    const affectedAgentCountMatches =
+      (value.operation === "skill.delete") ===
+      (value.affected_agent_count !== undefined);
+    if (
+      !kindMatches ||
+      !versionMatches ||
+      !definitionMatches ||
+      !affectedAgentCountMatches
+    ) {
       context.addIssue({
         code: "custom",
         message: "Asset audit metadata is inconsistent",

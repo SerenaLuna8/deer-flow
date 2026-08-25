@@ -41,7 +41,7 @@ from deerflow.persistence.channel_connections.model import (
 )
 from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
-from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
+from deerflow.persistence.shared_assets import AgentRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user import UserRow
 from deerflow.runtime.private_scope import PrivateResourceScope
@@ -94,7 +94,7 @@ async def _add_published_agent(
     slug: str,
 ) -> uuid.UUID:
     agent_id = uuid.uuid4()
-    version_id = uuid.uuid4()
+    definition_id = uuid.uuid4()
     payload = AgentPayload(
         description=slug,
         soul="",
@@ -102,7 +102,7 @@ async def _add_published_agent(
         tool_groups=(),
         skill_refs=(),
         mcp_version_ids=(),
-        payload_schema_version=3,
+        payload_schema_version=4,
     )
     agent = AgentRow(
         id=agent_id,
@@ -111,31 +111,25 @@ async def _add_published_agent(
         slug=slug,
         display_name=slug,
         status="active",
+        definition_id=definition_id,
+        description=payload.description,
+        agents_instructions=payload.agents_instructions,
+        soul=payload.soul,
+        identity=payload.identity,
+        user_context=payload.user_context,
+        model_ref=payload.model_ref,
+        model_settings={},
+        tool_groups=[],
+        payload_schema_version=4,
+        payload_checksum=agent_payload_checksum(
+            payload,
+            payload_schema_version=4,
+        ),
         revision=1,
         created_by_user_id=str(actor_id),
+        updated_by_user_id=str(actor_id),
     )
     session.add(agent)
-    await session.flush()
-    session.add(
-        AgentVersionRow(
-            id=version_id,
-            agent_id=agent_id,
-            version_number=1,
-            description=payload.description,
-            agents_instructions=payload.agents_instructions,
-            soul=payload.soul,
-            identity=payload.identity,
-            user_context=payload.user_context,
-            model_ref=payload.model_ref,
-            model_settings={},
-            tool_groups=[],
-            payload_schema_version=payload.payload_schema_version,
-            payload_checksum=agent_payload_checksum(payload),
-            created_by_user_id=str(actor_id),
-        )
-    )
-    await session.flush()
-    agent.current_version_id = version_id
     await session.flush()
     return agent_id
 

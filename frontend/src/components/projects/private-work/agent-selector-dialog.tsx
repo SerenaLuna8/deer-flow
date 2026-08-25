@@ -19,27 +19,24 @@ import { projectAgentsStartChatPath } from "@/core/private-work/start-chat-inten
 import type { ProjectClientScope } from "@/core/private-work/types";
 import type { Project } from "@/core/projects/types";
 import {
+  getProjectAgentDefinition,
+  projectAgentDefinitionKey,
   useEnableProjectSystemBinding,
   useProjectAssets,
-  listProjectAssetVersions,
-  projectAssetVersionsKey,
+  type AgentDefinitionResponse,
   type EnableCurrentSystemBindingInput,
   type ProjectDefaultAgent,
   type ProjectAssetItem,
   type ProjectAssetList,
-  type VersionHistoryResponse,
 } from "@/core/shared-assets";
-import {
-  supportedMcpVersionIds,
-  type ScopedMcpVersion,
-} from "@/core/shared-assets/mcp-runtime";
+import { supportedMcpVersionIds } from "@/core/shared-assets/mcp-runtime";
 import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
 
 import {
-  agentMcpDependencyAssessment,
   isMainProjectAgent,
   MAIN_PROJECT_AGENT_SLUG,
+  useAgentMcpDependencyRuntime,
   useMcpDependencyRuntime,
 } from "../assets/use-mcp-dependency-runtime";
 
@@ -76,7 +73,7 @@ export function configurableSystemAgents(
   return catalog.system_items.filter(
     (item) =>
       item.status === "active" &&
-      item.current_version_id !== null &&
+      Boolean(item.definition_id) &&
       !isMainProjectAgent(item) &&
       item.binding?.enabled !== true &&
       item.capabilities.includes("shared_assets.execute") &&
@@ -86,44 +83,27 @@ export function configurableSystemAgents(
 
 export type SystemAgentDependencyAvailability = "loading" | "ready" | "blocked";
 
-function selectedAgentVersion(
-  agent: ProjectAssetItem,
-  history: VersionHistoryResponse,
-) {
-  const versionId = agent.current_version_id;
-  return history.data.find(
-    (version) =>
-      "agent_id" in version &&
-      version.id === versionId &&
-      version.relation === "current",
-  );
-}
-
-export function agentMcpDependencyAvailability(
-  agent: ProjectAssetItem,
-  history: VersionHistoryResponse | undefined,
-  mcpVersions: readonly ScopedMcpVersion[] | undefined,
-): SystemAgentDependencyAvailability {
-  return agentMcpDependencyAssessment(agent, history, mcpVersions).status;
-}
-
 export function systemAgentDependencyAvailability(
   agent: ProjectAssetItem,
-  history: VersionHistoryResponse | undefined,
+  aggregate: AgentDefinitionResponse | undefined,
   boundSkillAssetRefs: ReadonlySet<string>,
   boundMcpVersionIds: ReadonlySet<string>,
 ): SystemAgentDependencyAvailability {
-  if (!history) return "loading";
-  const currentVersion = history.data.find(
-    (version) =>
-      "agent_id" in version &&
-      version.id === agent.current_version_id &&
-      version.relation === "current",
-  );
-  if (!currentVersion || !("agent_id" in currentVersion)) return "blocked";
-  return currentVersion.skill_refs.every((ref) =>
+  if (!aggregate) return "loading";
+  if (
+    aggregate.item.id !== agent.id ||
+    aggregate.item.definition_id !== agent.definition_id ||
+    aggregate.definition.agent_id !== agent.id ||
+    aggregate.definition.definition_id !== agent.definition_id
+  ) {
+    return "blocked";
+  }
+  return aggregate.definition.skill_refs.every((ref) =>
     boundSkillAssetRefs.has(`${ref.scope}:${ref.asset_id}`),
-  ) && currentVersion.mcp_version_ids.every((id) => boundMcpVersionIds.has(id))
+  ) &&
+    aggregate.definition.mcp_version_ids.every((id) =>
+      boundMcpVersionIds.has(id),
+    )
     ? "ready"
     : "blocked";
 }
@@ -161,12 +141,12 @@ export function executableProjectAgents(
     item.capabilities.includes("shared_assets.execute");
   return [
     ...catalog.project_items.filter(
-      (item) => executable(item) && item.current_version_id !== null,
+      (item) => executable(item) && Boolean(item.definition_id),
     ),
     ...catalog.system_items.filter(
       (item) =>
         executable(item) &&
-        item.current_version_id !== null &&
+        Boolean(item.definition_id) &&
         (item.binding?.enabled === true || isMainProjectAgent(item)),
     ),
   ];
@@ -181,7 +161,7 @@ export function mainProjectAgent(
       (item) =>
         isMainProjectAgent(item) &&
         item.status === "active" &&
-        item.current_version_id !== null &&
+        Boolean(item.definition_id) &&
         item.capabilities.includes("shared_assets.execute"),
     ) ?? null
   );
@@ -238,7 +218,7 @@ export function resolveProjectDefaultAgent(
     (item) =>
       item.id === setting.agent_asset_id &&
       item.status === "active" &&
-      item.current_version_id !== null &&
+      Boolean(item.definition_id) &&
       item.capabilities.includes("shared_assets.execute"),
   );
   return agent
@@ -334,7 +314,7 @@ export async function enableSystemAgentAndCreateProjectChat({
   if (
     agent.scope !== "system" ||
     agent.status !== "active" ||
-    agent.current_version_id === null
+    !agent.definition_id
   ) {
     throw new Error(systemAgentUnavailableMessage);
   }
@@ -651,78 +631,41 @@ export function ProjectAgentSelectorDialog({
     "mcp-servers",
     systemDependencyCheck,
   );
-  const candidateAgentHistories = useQueries({
-    queries: candidateAgents.map((agent) => ({
-      queryKey: projectAssetVersionsKey(
-        user?.id ?? "",
-        project.id,
-        "agents",
-        agent.id,
-      ),
-      queryFn: ({ signal }: { signal: AbortSignal }) =>
-        listProjectAssetVersions(project.id, "agents", agent.id, signal),
-      enabled: shouldCheckDependencies && !isMainProjectAgent(agent),
-    })),
+  const candidateRuntime = useAgentMcpDependencyRuntime({
+    accountId: user?.id ?? "",
+    projectId: project.id,
+    agents: candidateAgents,
+    enabled: shouldCheckDependencies,
   });
-  const systemAgentHistories = useQueries({
+  const systemAgentDefinitions = useQueries({
     queries: systemAgents.map((agent) => ({
-      queryKey: projectAssetVersionsKey(
-        user?.id ?? "",
-        project.id,
-        "agents",
-        agent.id,
-      ),
+      queryKey: projectAgentDefinitionKey(user?.id ?? "", project.id, agent.id),
       queryFn: ({ signal }: { signal: AbortSignal }) =>
-        listProjectAssetVersions(project.id, "agents", agent.id, signal),
+        getProjectAgentDefinition(project.id, agent.id, signal),
       enabled: systemDependencyCheck,
     })),
   });
   const requiredMcpVersionIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const [index, agent] of candidateAgents.entries()) {
-      if (isMainProjectAgent(agent)) continue;
-      const version = candidateAgentHistories[index]?.data
-        ? selectedAgentVersion(agent, candidateAgentHistories[index].data)
-        : undefined;
-      if (version && "agent_id" in version) {
-        for (const id of version.mcp_version_ids) ids.add(id);
-      }
-    }
-    for (const [index, agent] of systemAgents.entries()) {
-      const version = systemAgentHistories[index]?.data
-        ? selectedAgentVersion(agent, systemAgentHistories[index].data)
-        : undefined;
-      if (version && "agent_id" in version) {
-        for (const id of version.mcp_version_ids) ids.add(id);
+    for (const definition of systemAgentDefinitions) {
+      for (const id of definition.data?.definition.mcp_version_ids ?? []) {
+        ids.add(id);
       }
     }
     return [...ids];
-  }, [
-    candidateAgentHistories,
-    candidateAgents,
-    systemAgentHistories,
-    systemAgents,
-  ]);
+  }, [systemAgentDefinitions]);
   const mcpDependencyRuntime = useMcpDependencyRuntime({
     accountId: user?.id ?? "",
     projectId: project.id,
     requiredVersionIds: requiredMcpVersionIds,
-    enabled: shouldCheckDependencies,
+    enabled: systemDependencyCheck,
   });
-  const candidateDependencyAvailability = candidateAgents.map((agent, index) =>
-    agentMcpDependencyAvailability(
-      agent,
-      candidateAgentHistories[index]?.data,
-      mcpDependencyRuntime.isLoading || mcpDependencyRuntime.error
-        ? undefined
-        : mcpDependencyRuntime.versions,
-    ),
-  );
   const agents = candidateAgents.filter(
-    (_agent, index) => candidateDependencyAvailability[index] === "ready",
+    (_agent, index) => candidateRuntime.assessments[index]?.status === "ready",
   );
   const blockedRuntimeAgents = candidateAgents.filter(
-    (_agent, index) => candidateDependencyAvailability[index] === "blocked",
+    (_agent, index) =>
+      candidateRuntime.assessments[index]?.status === "blocked",
   );
   const boundSkillAssetRefs = useMemo(
     () => boundSystemSkillAssetRefs(skillAssets.data),
@@ -736,7 +679,7 @@ export function ProjectAgentSelectorDialog({
   const dependencyAvailability = systemAgents.map((agent, index) =>
     systemAgentDependencyAvailability(
       agent,
-      systemAgentHistories[index]?.data,
+      systemAgentDefinitions[index]?.data,
       boundSkillAssetRefs,
       boundMcpVersionIds,
     ),
@@ -749,18 +692,18 @@ export function ProjectAgentSelectorDialog({
   );
   const dependencyLoading =
     shouldCheckDependencies &&
-    (candidateAgentHistories.some((query) => query.isLoading) ||
-      mcpDependencyRuntime.isLoading ||
+    (candidateRuntime.isLoading ||
       (systemDependencyCheck &&
         (skillAssets.isLoading ||
           mcpAssets.isLoading ||
-          systemAgentHistories.some((query) => query.isLoading))));
+          mcpDependencyRuntime.isLoading ||
+          systemAgentDefinitions.some((query) => query.isLoading))));
   const rawDependencyError =
-    candidateAgentHistories.find((query) => query.error)?.error ??
-    mcpDependencyRuntime.error ??
+    candidateRuntime.error ??
     (systemDependencyCheck ? skillAssets.error : null) ??
     (systemDependencyCheck ? mcpAssets.error : null) ??
-    systemAgentHistories.find((query) => query.error)?.error ??
+    (systemDependencyCheck ? mcpDependencyRuntime.error : null) ??
+    systemAgentDefinitions.find((query) => query.error)?.error ??
     null;
   const dependencyError =
     rawDependencyError instanceof Error

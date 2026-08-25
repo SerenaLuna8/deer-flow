@@ -30,6 +30,8 @@ def _now() -> datetime:
 
 
 class AgentRow(Base):
+    """One governed Agent asset and its single current definition."""
+
     __tablename__ = "agents"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -38,10 +40,21 @@ class AgentRow(Base):
     slug: Mapped[str] = mapped_column(String(63), nullable=False)
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
-    current_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    definition_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, default=uuid.uuid4)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    soul: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    model_ref: Mapped[str] = mapped_column(String(255), nullable=False, default="default", server_default="default")
+    model_settings: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    tool_groups: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    agents_instructions: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    identity: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    user_context: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    payload_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=4, server_default=text("4"))
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
     source_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    updated_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -58,73 +71,10 @@ class AgentRow(Base):
         ),
         CheckConstraint("status IN ('active', 'archived', 'suspended')", name="ck_agents_status"),
         CheckConstraint("revision >= 1", name="ck_agents_revision"),
-        UniqueConstraint("id", "scope", name="uq_agents_id_scope"),
-        UniqueConstraint("project_id", "id", name="uq_agents_project_id_id"),
-        UniqueConstraint("source_key", name="uq_agents_source_key"),
-        ForeignKeyConstraint(
-            ["id", "current_version_id"],
-            ["agent_versions.agent_id", "agent_versions.id"],
-            name="fk_agents_current_version",
-            use_alter=True,
-        ),
-        Index(
-            "uq_agents_system_slug",
-            func.lower(slug),
-            unique=True,
-            postgresql_where=text("scope = 'system'"),
-        ),
-        Index(
-            "uq_agents_project_slug",
-            project_id,
-            func.lower(slug),
-            unique=True,
-            postgresql_where=text(
-                "scope = 'project' AND status != 'archived'",
-            ),
-        ),
-    )
-
-
-class AgentVersionRow(Base):
-    __tablename__ = "agent_versions"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="RESTRICT"), nullable=False)
-    version_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
-    soul: Mapped[str] = mapped_column(Text, nullable=False)
-    model_ref: Mapped[str] = mapped_column(String(255), nullable=False)
-    model_settings: Mapped[dict[str, object]] = mapped_column(
-        JSONB,
-        nullable=False,
-        default=dict,
-        server_default=text("'{}'::jsonb"),
-    )
-    tool_groups: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
-    supersedes_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agent_versions.id", ondelete="RESTRICT"), nullable=True)
-    payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    created_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
-    # These fields were introduced after the original payload columns. Keep
-    # their declaration order aligned with the consolidated physical catalog.
-    agents_instructions: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
-    identity: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
-    user_context: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
-    payload_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
-
-    __table_args__ = (
-        CheckConstraint("version_number >= 1", name="ck_agent_versions_number"),
-        CheckConstraint(
-            "payload_schema_version IN (1, 2, 3, 4)",
-            name="ck_agent_versions_payload_schema_version",
-        ),
+        CheckConstraint("payload_schema_version = 4", name="ck_agents_payload_schema_version"),
         CheckConstraint(
             """
             jsonb_typeof(model_settings) = 'object'
-            AND (
-                payload_schema_version IN (3, 4)
-                OR model_settings = '{}'::jsonb
-            )
             AND model_settings - 'temperature' - 'max_tokens'
                 - 'thinking_enabled' - 'reasoning_effort' = '{}'::jsonb
             AND (
@@ -157,46 +107,49 @@ class AgentVersionRow(Base):
                 )
             )
             """,
-            name="ck_agent_versions_model_settings",
+            name="ck_agents_model_settings",
         ),
-        CheckConstraint("payload_checksum ~ '^[0-9a-f]{64}$'", name="ck_agent_versions_checksum"),
-        UniqueConstraint("agent_id", "version_number", name="uq_agent_versions_asset_number"),
-        UniqueConstraint("agent_id", "id", name="uq_agent_versions_asset_id"),
+        CheckConstraint("payload_checksum ~ '^[0-9a-f]{64}$'", name="ck_agents_checksum"),
+        UniqueConstraint("id", "scope", name="uq_agents_id_scope"),
+        UniqueConstraint("project_id", "id", name="uq_agents_project_id_id"),
+        UniqueConstraint("definition_id", name="uq_agents_definition_id"),
+        UniqueConstraint("source_key", name="uq_agents_source_key"),
+        Index("uq_agents_system_slug", func.lower(slug), unique=True, postgresql_where=text("scope = 'system'")),
+        Index(
+            "uq_agents_project_slug",
+            project_id,
+            func.lower(slug),
+            unique=True,
+            postgresql_where=text("scope = 'project' AND status != 'archived'"),
+        ),
     )
 
 
-class AgentVersionSkillRefRow(Base):
-    __tablename__ = "agent_version_skill_refs"
+class AgentSkillRefRow(Base):
+    __tablename__ = "agent_skill_refs"
 
-    agent_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     sort_order: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
     skill_asset_scope: Mapped[str] = mapped_column(String(16), primary_key=True)
     skill_asset_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
 
     __table_args__ = (
-        ForeignKeyConstraint(["agent_version_id"], ["agent_versions.id"], ondelete="RESTRICT"),
-        ForeignKeyConstraint(
-            ["skill_asset_id", "skill_asset_scope"],
-            ["skills.id", "skills.scope"],
-            ondelete="RESTRICT",
-        ),
-        CheckConstraint(
-            "skill_asset_scope IN ('system', 'project')",
-            name="ck_agent_version_skill_refs_scope",
-        ),
-        CheckConstraint("sort_order >= 0", name="ck_agent_version_skill_refs_sort_order"),
+        ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["skill_asset_id", "skill_asset_scope"], ["skills.id", "skills.scope"], ondelete="RESTRICT"),
+        CheckConstraint("skill_asset_scope IN ('system', 'project')", name="ck_agent_skill_refs_scope"),
+        CheckConstraint("sort_order >= 0", name="ck_agent_skill_refs_sort_order"),
     )
 
 
-class AgentVersionMcpRefRow(Base):
-    __tablename__ = "agent_version_mcp_refs"
+class AgentMcpRefRow(Base):
+    __tablename__ = "agent_mcp_refs"
 
-    agent_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     mcp_server_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     sort_order: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
 
     __table_args__ = (
-        ForeignKeyConstraint(["agent_version_id"], ["agent_versions.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="RESTRICT"),
         ForeignKeyConstraint(["mcp_server_version_id"], ["mcp_server_versions.id"], ondelete="RESTRICT"),
-        CheckConstraint("sort_order >= 0", name="ck_agent_version_mcp_refs_sort_order"),
+        CheckConstraint("sort_order >= 0", name="ck_agent_mcp_refs_sort_order"),
     )

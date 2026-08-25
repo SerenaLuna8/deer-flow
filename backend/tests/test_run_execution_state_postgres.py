@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from support.agent_definition_seed import direct_agent_definition_fields
 from support.run_closure import add_sealed_test_run
 
 from app.private_work.context import PrivateWorkContext
@@ -53,6 +54,10 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> _Seed:
     worker_id = uuid.uuid4()
     trace_id = f"run-execution-state-{uuid.uuid4().hex}"
     created_at = datetime.now(UTC) - timedelta(seconds=10)
+    definition = direct_agent_definition_fields(
+        updated_by_user_id=str(owner_id),
+        description="Execution state Agent",
+    )
     async with factory() as session, session.begin():
         session.add_all(
             [
@@ -116,6 +121,7 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> _Seed:
                 status="active",
                 revision=1,
                 created_by_user_id=str(owner_id),
+                **definition,
             )
         )
         await session.flush()

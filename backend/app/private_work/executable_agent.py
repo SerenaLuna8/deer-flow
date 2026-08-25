@@ -8,7 +8,6 @@ from app.private_work.errors import PrivateWorkNotFound
 from app.private_work.thread_repository import ThreadAgentRef
 from deerflow.persistence.shared_assets import (
     AgentRow,
-    AgentVersionRow,
     ProjectSystemAgentBindingRow,
 )
 
@@ -20,7 +19,7 @@ async def require_executable_agent(
     context: PrivateWorkContext,
     agent: ThreadAgentRef,
 ) -> None:
-    """Require an enabled Agent with a Current Version for private execution."""
+    """Require an enabled Agent with one available Definition for execution."""
 
     if agent.scope == "project":
         asset = (
@@ -35,9 +34,8 @@ async def require_executable_agent(
                 .with_for_update(read=True, of=AgentRow)
             )
         ).scalar_one_or_none()
-        if asset is None or asset.current_version_id is None:
+        if asset is None:
             raise PrivateWorkNotFound(context.request_id)
-        version_id = asset.current_version_id
     elif agent.scope == "system":
         asset = (
             await session.execute(
@@ -54,9 +52,7 @@ async def require_executable_agent(
         if asset is None:
             raise PrivateWorkNotFound(context.request_id)
         if asset.source_key == _BUILTIN_MAIN_AGENT_SOURCE_KEY:
-            if asset.current_version_id is None:
-                raise PrivateWorkNotFound(context.request_id)
-            version_id = asset.current_version_id
+            pass
         else:
             binding = (
                 await session.execute(
@@ -71,25 +67,7 @@ async def require_executable_agent(
             ).scalar_one_or_none()
             if binding is None:
                 raise PrivateWorkNotFound(context.request_id)
-            if asset.current_version_id is None:
-                raise PrivateWorkNotFound(context.request_id)
-            version_id = asset.current_version_id
     else:
-        raise PrivateWorkNotFound(context.request_id)
-
-    version = (
-        await session.execute(
-            select(AgentVersionRow.id)
-            .where(
-                AgentVersionRow.id == version_id,
-                AgentVersionRow.agent_id == agent.asset_id,
-                AgentVersionRow.id == asset.current_version_id,
-                *((AgentVersionRow.version_number == 1,) if asset.scope == "system" else ()),
-            )
-            .with_for_update(read=True, of=AgentVersionRow)
-        )
-    ).scalar_one_or_none()
-    if version is None:
         raise PrivateWorkNotFound(context.request_id)
 
 

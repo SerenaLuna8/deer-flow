@@ -2,18 +2,18 @@ import { beforeEach, describe, expect, rs, test } from "@rstest/core";
 
 import { reloadProjectAgentAuthoringState } from "@/components/projects/assets/agent-authoring-recovery";
 import {
+  getProjectAgentDefinition,
   listProjectAssets,
-  listProjectAssetVersions,
+  type AgentDefinitionResponse,
   type ProjectAssetItem,
   type ProjectAssetList,
-  type VersionHistoryResponse,
 } from "@/core/shared-assets";
 
 rs.mock("@/core/shared-assets", () => ({
   listProjectAssets: rs.fn(),
-  listProjectAssetVersions: rs.fn(),
+  getProjectAgentDefinition: rs.fn(),
   projectAssetKey: (...parts: unknown[]) => parts,
-  projectAssetVersionsKey: (...parts: unknown[]) => parts,
+  projectAgentDefinitionKey: (...parts: unknown[]) => parts,
 }));
 
 const PROJECT_ID = "00000000-0000-4000-8000-000000000002";
@@ -22,36 +22,56 @@ const VERSION_ID = "00000000-0000-4000-8000-000000000004";
 
 const item = {
   id: AGENT_ID,
+  scope: "project",
+  project_id: PROJECT_ID,
+  slug: "reviewer",
+  display_name: "Reviewer",
+  status: "active",
   revision: 2,
-  current_version_id: VERSION_ID,
+  definition_id: VERSION_ID,
+  created_by_user_id: "00000000-0000-4000-8000-000000000005",
+  created_at: "2026-08-25T00:00:00Z",
+  updated_at: "2026-08-25T00:00:00Z",
+  capabilities: [],
+  binding: null,
 } as ProjectAssetItem;
 const catalog = {
   system_items: [],
   project_items: [item],
   request_id: "catalog",
 } as ProjectAssetList;
-const history = {
-  data: [
-    {
-      id: VERSION_ID,
-      agent_id: AGENT_ID,
-      version_number: 1,
-      relation: "current",
-      supersedes_version_id: null,
-    },
-  ],
-  request_id: "history",
-} as VersionHistoryResponse;
+const aggregate = {
+  item,
+  definition: {
+    definition_id: VERSION_ID,
+    agent_id: AGENT_ID,
+    description: "Review changes",
+    agents_instructions: "# AGENTS",
+    soul: "# SOUL",
+    identity: "# IDENTITY",
+    user_context: "# USER",
+    model_ref: "default",
+    model_settings: {},
+    tool_groups: ["file:read"],
+    skill_refs: [],
+    mcp_version_ids: [],
+    payload_schema_version: 2,
+    payload_checksum: "a".repeat(64),
+    updated_by_user_id: "00000000-0000-4000-8000-000000000005",
+    updated_at: "2026-08-25T00:00:00Z",
+  },
+  request_id: "definition",
+} as AgentDefinitionResponse;
 
 const mockedListAssets = rs.mocked(listProjectAssets);
-const mockedListVersions = rs.mocked(listProjectAssetVersions);
+const mockedGetDefinition = rs.mocked(getProjectAgentDefinition);
 
 describe("Agent authoring recovery requests", () => {
   beforeEach(() => {
     mockedListAssets.mockReset();
-    mockedListVersions.mockReset();
+    mockedGetDefinition.mockReset();
     mockedListAssets.mockResolvedValue(catalog);
-    mockedListVersions.mockResolvedValue(history);
+    mockedGetDefinition.mockResolvedValue(aggregate);
   });
 
   test("forwards one lifecycle AbortSignal to every recovery read", async () => {
@@ -73,14 +93,13 @@ describe("Agent authoring recovery requests", () => {
         [PROJECT_ID, "agents"],
       ],
     );
-    expect(mockedListVersions.mock.calls[0]?.slice(0, 3)).toEqual([
+    expect(mockedGetDefinition.mock.calls[0]?.slice(0, 2)).toEqual([
       PROJECT_ID,
-      "agents",
       AGENT_ID,
     ]);
     const forwardedSignals = [
       ...mockedListAssets.mock.calls.map((call) => call[2]),
-      ...mockedListVersions.mock.calls.map((call) => call[3]),
+      ...mockedGetDefinition.mock.calls.map((call) => call[2]),
     ];
     expect(
       forwardedSignals.every(

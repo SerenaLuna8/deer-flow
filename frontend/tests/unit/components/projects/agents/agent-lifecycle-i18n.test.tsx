@@ -26,7 +26,7 @@ const AGENT: ExecutableProjectAgent = {
   display_name: "Reviewer",
   description: "Reviews changes before release.",
   status: "active",
-  current_version_id: "00000000-0000-4000-8000-000000000003",
+  definition_id: "00000000-0000-4000-8000-000000000003",
   revision: 1,
   capabilities: PROJECT_CAPABILITIES,
   binding: null,

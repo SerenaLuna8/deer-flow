@@ -2,6 +2,7 @@ import { expect, test } from "@rstest/core";
 
 import {
   legacyCompatibleProjectAssetListSchema,
+  projectAgentAssetListSchema,
   projectAssetListSchema,
 } from "@/core/shared-assets";
 
@@ -29,6 +30,38 @@ const response = {
 
 test("Agent and Skill lists reject removed lifecycle response aliases", () => {
   expect(projectAssetListSchema.safeParse(response).success).toBe(false);
+});
+
+test("Agent lists accept definition identity and reject Current Version identity", () => {
+  const item = {
+    ...legacyItem,
+    slug: "definition-agent",
+    display_name: "Definition Agent",
+    definition_id: "00000000-0000-4000-8000-000000000005",
+    revision: 3,
+  } as Record<string, unknown>;
+  delete item.current_published_version_id;
+  delete item.version;
+  const definitionResponse = {
+    system_items: [],
+    project_items: [item],
+    request_id: "definition-contract",
+  };
+
+  expect(projectAgentAssetListSchema.parse(definitionResponse)).toEqual(
+    definitionResponse,
+  );
+  expect(
+    projectAgentAssetListSchema.safeParse({
+      ...definitionResponse,
+      project_items: [
+        {
+          ...item,
+          current_version_id: item.definition_id,
+        },
+      ],
+    }).success,
+  ).toBe(false);
 });
 
 test("the isolated MCP compatibility schema still normalizes legacy fields", () => {

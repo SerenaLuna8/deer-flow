@@ -187,7 +187,6 @@ def _row(
         error_code=None,
         error_message=None,
         created_agent_id=None,
-        created_agent_version_id=None,
         create_idempotency_key_hash="a" * 64,
         create_request_checksum="b" * 64,
         created_at=now,
@@ -702,7 +701,7 @@ async def test_commit_override_replaces_legacy_display_name_and_syncs_identity(
                     slug="recovered-reviewer",
                     display_name="recovered-reviewer",
                 ),
-                version=SimpleNamespace(id=created_version_id),
+                definition=SimpleNamespace(definition_id=created_version_id),
             )
 
     service = AgentDesignService(

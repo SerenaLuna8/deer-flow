@@ -26,7 +26,6 @@ from app.shared_assets.resolver import (
 )
 from deerflow.persistence.shared_assets import (
     AgentRow,
-    AgentVersionRow,
     McpServerRow,
     McpServerVersionRow,
     SkillRow,
@@ -73,7 +72,7 @@ def _agent_snapshot(
         kind=AssetKind.AGENT,
         scope=record.scope,
         asset_id=record.asset.id,
-        version_id=record.version.id,
+        version_id=record.version_id,
         checksum=checksum,
         catalog_generation=0,
         dependency_version_ids=(*skill_version_ids, *mcp_version_ids),
@@ -97,14 +96,17 @@ def _agent_record(
     checksum: str,
     source_key: str | None = None,
 ) -> _ResolvedRecord:
+    agent = AgentRow(
+        id=uuid.UUID(int=asset_int),
+        scope=scope.value,
+        source_key=source_key,
+        definition_id=uuid.UUID(int=version_int),
+        payload_checksum=checksum,
+    )
     return _ResolvedRecord(
         scope,
-        AgentRow(
-            id=uuid.UUID(int=asset_int),
-            scope=scope.value,
-            source_key=source_key,
-        ),
-        AgentVersionRow(id=uuid.UUID(int=version_int), payload_checksum=checksum),
+        agent,
+        agent,
     )
 
 
@@ -148,7 +150,7 @@ def _fact(
         dependency_order=dependency_order,
         scope=record.scope,
         asset_id=record.asset.id,
-        version_id=record.version.id,
+        version_id=record.version_id,
         checksum=checksum,
         catalog_generation=12,
     )

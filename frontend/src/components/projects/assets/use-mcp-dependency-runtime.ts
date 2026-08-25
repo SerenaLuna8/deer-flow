@@ -12,7 +12,6 @@ import {
   MAX_AGENT_RUNTIME_ASSESSMENTS,
   type AgentRuntimeAssessmentReasonCode,
   type ProjectAssetItem,
-  type VersionHistoryResponse,
 } from "@/core/shared-assets";
 import {
   mcpDependencyRuntimeBlockReason,
@@ -30,7 +29,7 @@ const AGENT_RUNTIME_BLOCK_REASONS: Record<
   AgentRuntimeAssessmentReasonCode,
   string
 > = {
-  agent_unavailable: "Agent 当前版本或项目绑定不可用，请刷新后重试。",
+  agent_unavailable: "Agent Definition 或项目绑定不可用，请刷新后重试。",
   runtime_dependency_unavailable:
     "Agent 的 Skill、MCP 或秘密依赖当前不可用，请完成配置后重试。",
   model_unavailable: "Agent 配置的模型当前不可用，请联系管理员。",
@@ -40,46 +39,6 @@ export function isMainProjectAgent(
   agent: Pick<ProjectAssetItem, "scope" | "slug">,
 ): boolean {
   return agent.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG;
-}
-
-function selectedAgentVersion(
-  agent: ProjectAssetItem,
-  history: VersionHistoryResponse,
-) {
-  const versionId = agent.current_version_id;
-  return history.data.find(
-    (version) =>
-      "agent_id" in version &&
-      version.id === versionId &&
-      version.relation === "current",
-  );
-}
-
-export function agentMcpDependencyAssessment(
-  agent: ProjectAssetItem,
-  history: VersionHistoryResponse | undefined,
-  mcpVersions: readonly ScopedMcpVersion[] | undefined,
-): AgentMcpDependencyAssessment {
-  if (isMainProjectAgent(agent)) {
-    return { status: "ready", reason: null };
-  }
-  if (!history || !mcpVersions) {
-    return { status: "loading", reason: null };
-  }
-  const currentVersion = selectedAgentVersion(agent, history);
-  if (!currentVersion || !("agent_id" in currentVersion)) {
-    return {
-      status: "blocked",
-      reason: "Agent 当前版本无法确认，请刷新后重试。",
-    };
-  }
-  const reason = mcpDependencyRuntimeBlockReason(
-    currentVersion.mcp_version_ids,
-    mcpVersions,
-  );
-  return reason
-    ? { status: "blocked", reason }
-    : { status: "ready", reason: null };
 }
 
 export function useMcpDependencyRuntime({

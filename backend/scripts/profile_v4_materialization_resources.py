@@ -409,7 +409,7 @@ async def _seed_run(
         text("SELECT set_config('deerflow.run_asset_closure_assembly', :run_id, true)"),
         {"run_id": run_id},
     )
-    agent_version_id = uuid.uuid4()
+    agent_definition_id = uuid.uuid4()
     payload = AgentPayload(
         description="Mixed materialization resource profile",
         soul="Materialize one exact Skill from its admitted source.",
@@ -429,7 +429,7 @@ async def _seed_run(
         kind=AssetKind.AGENT,
         scope=AssetScope.PROJECT,
         asset_id=coordinates.agent_id,
-        version_id=agent_version_id,
+        version_id=agent_definition_id,
         checksum=checksum,
         catalog_generation=7,
         dependency_version_ids=(run.version_id,),
@@ -456,7 +456,7 @@ async def _seed_run(
             "thread_id": coordinates.thread_id,
             "run_id": run_id,
             "asset_id": coordinates.agent_id,
-            "version_id": agent_version_id,
+            "version_id": agent_definition_id,
             "checksum": checksum,
             "snapshot": json.dumps(encode_run_asset_snapshot(snapshot)),
         },

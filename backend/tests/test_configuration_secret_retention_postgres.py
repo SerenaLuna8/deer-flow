@@ -34,11 +34,14 @@ from app.projects.models import ProjectRole
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.reliability.owner_refs import AuditHmacKeyring
-from app.shared_assets.errors import AssetConflict, AssetInUse
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+from app.shared_assets.errors import AssetConflict
 from app.shared_assets.mcp_repository import McpRepository
 from app.shared_assets.mcp_secret_store import McpSecretStore
-from app.shared_assets.skill_repository import SkillRepository
+from app.shared_assets.models import AgentPayload, AssetScope, SkillAssetRef
+from app.shared_assets.skill_deletion import ArchivedSkillPurger
 from app.shared_assets.skill_secret_store import SkillSecretStore
+from app.shared_assets.skill_service import SkillService
 from app.system_settings.secrets import (
     model_secret_envelope_digest,
     model_secret_recipient,
@@ -54,10 +57,9 @@ from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import (
+    AgentMcpRefRow,
     AgentRow,
-    AgentVersionMcpRefRow,
-    AgentVersionRow,
-    AgentVersionSkillRefRow,
+    AgentSkillRefRow,
     McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
@@ -457,6 +459,11 @@ class _RetentionApprovalAudit(NoopHostExecutionApprovalAudit):
         del args, kwargs
 
 
+class _ArchivedSkillPurgeAudit:
+    async def archived_skill_purged(self, *args, **kwargs) -> None:
+        del args, kwargs
+
+
 @pytest.mark.asyncio
 async def test_project_pending_deletion_restore_and_final_purge_secret_ownership(
     migrated_postgres_database_url: str,
@@ -485,17 +492,6 @@ async def test_project_pending_deletion_restore_and_final_purge_secret_ownership
                 context.project_id,
             )
         assert set(expected_counts.values()) == {1}
-
-        async with seed.factory() as session, session.begin():
-            skill_repository = SkillRepository(session)
-            await skill_repository.lock_project_delete_scope(context)
-            skill = await skill_repository.get_project_asset(
-                context,
-                fixture.skill_id,
-                for_update=True,
-            )
-            with pytest.raises(AssetInUse):
-                await skill_repository.plan_project_asset_deletion(context, skill)
 
         async with seed.factory() as session, session.begin():
             mcp_repository = McpRepository(session)
@@ -658,7 +654,7 @@ async def test_project_pending_deletion_restore_and_final_purge_secret_ownership
 
 
 @pytest.mark.asyncio
-async def test_skill_and_mcp_hard_delete_reference_gates_and_secret_cascades(
+async def test_skill_archive_destroys_secrets_while_mcp_delete_keeps_reference_gate(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -667,7 +663,7 @@ async def test_skill_and_mcp_hard_delete_reference_gates_and_secret_cascades(
         base64.b64encode(b"h" * 32).decode("ascii"),
     )
     seed = await seed_private_thread_database(migrated_postgres_database_url)
-    context = _context(seed, request_id="asset-hard-delete-secrets")
+    context = _context(seed, request_id="asset-archive-secrets")
     try:
         async with seed.factory() as session, session.begin():
             referenced_skill, referenced_skill_version = await _add_skill_secret_pair(
@@ -691,6 +687,15 @@ async def test_skill_and_mcp_hard_delete_reference_gates_and_secret_cascades(
                 slug=f"deletable-mcp-{uuid.uuid4().hex[:12]}",
             )
 
+            payload = AgentPayload(
+                description="Secret reference gate",
+                soul="Reference gate",
+                model_ref=TEST_MODEL_REF,
+                tool_groups=(),
+                skill_refs=(SkillAssetRef(AssetScope.PROJECT, referenced_skill.id),),
+                mcp_version_ids=(referenced_mcp_version.id,),
+                payload_schema_version=4,
+            )
             agent = AgentRow(
                 id=uuid.uuid4(),
                 scope="project",
@@ -698,59 +703,85 @@ async def test_skill_and_mcp_hard_delete_reference_gates_and_secret_cascades(
                 slug=f"secret-reference-agent-{uuid.uuid4().hex[:12]}",
                 display_name="Secret reference gate",
                 status="active",
+                definition_id=uuid.uuid4(),
+                description=payload.description,
+                agents_instructions=payload.agents_instructions,
+                soul=payload.soul,
+                identity=payload.identity,
+                user_context=payload.user_context,
+                model_ref=payload.model_ref,
+                model_settings={},
+                tool_groups=[],
+                payload_schema_version=4,
+                payload_checksum=agent_payload_checksum(
+                    payload,
+                    payload_schema_version=4,
+                ),
                 revision=1,
                 created_by_user_id=str(context.user_id),
+                updated_by_user_id=str(context.user_id),
             )
-            agent_version = AgentVersionRow(
-                id=uuid.uuid4(),
-                agent_id=agent.id,
-                version_number=1,
-                description="Secret reference gate",
-                soul="Reference gate",
-                model_ref=TEST_MODEL_REF,
-                tool_groups=[],
-                payload_checksum="e" * 64,
-                created_by_user_id=str(context.user_id),
-            )
-            session.add_all((agent, agent_version))
+            session.add(agent)
             await session.flush()
             await session.scalar(
                 select(
                     func.set_config(
-                        "deerflow.asset_version_assembly",
-                        str(agent_version.id),
+                        "deerflow.agent_definition_mutation_id",
+                        str(agent.id),
                         True,
                     )
                 )
             )
             session.add_all(
                 (
-                    AgentVersionSkillRefRow(
-                        agent_version_id=agent_version.id,
+                    AgentSkillRefRow(
+                        agent_id=agent.id,
                         skill_asset_scope="project",
                         skill_asset_id=referenced_skill.id,
                         sort_order=0,
                     ),
-                    AgentVersionMcpRefRow(
-                        agent_version_id=agent_version.id,
+                    AgentMcpRefRow(
+                        agent_id=agent.id,
                         mcp_server_version_id=referenced_mcp_version.id,
                         sort_order=0,
                     ),
                 )
             )
             await session.flush()
-            agent.current_version_id = agent_version.id
 
-        async with seed.factory() as session, session.begin():
-            skill_repository = SkillRepository(session)
-            await skill_repository.lock_project_delete_scope(context)
-            skill = await skill_repository.get_project_asset(
-                context,
-                referenced_skill.id,
-                for_update=True,
+        deleted = await SkillService(seed.factory).delete(
+            context,
+            referenced_skill.id,
+            expected_asset_version=1,
+        )
+        assert deleted.affected_agent_count == 1
+
+        async with seed.factory() as session:
+            archived = await session.get(SkillRow, referenced_skill.id)
+            assert archived is not None
+            assert archived.status == "archived"
+            assert archived.current_version_id == referenced_skill_version.id
+            assert await session.scalar(select(func.count()).select_from(AgentSkillRefRow).where(AgentSkillRefRow.skill_asset_id == referenced_skill.id)) == 0
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ProjectSkillSecretGenerationRow)
+                    .where(
+                        ProjectSkillSecretGenerationRow.skill_id == referenced_skill.id,
+                    )
+                )
+                == 0
             )
-            with pytest.raises(AssetInUse):
-                await skill_repository.plan_project_asset_deletion(context, skill)
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ProjectSkillSecretTombstoneRow)
+                    .where(
+                        ProjectSkillSecretTombstoneRow.skill_id == referenced_skill.id,
+                    )
+                )
+                >= 1
+            )
 
         async with seed.factory() as session, session.begin():
             mcp_repository = McpRepository(session)
@@ -762,23 +793,27 @@ async def test_skill_and_mcp_hard_delete_reference_gates_and_secret_cascades(
             with pytest.raises(AssetConflict):
                 await mcp_repository.plan_project_asset_deletion(context, mcp)
 
-        async with seed.factory() as session, session.begin():
-            skill_repository = SkillRepository(session)
-            await skill_repository.lock_project_delete_scope(context)
-            skill = await skill_repository.get_project_asset(
-                context,
-                deletable_skill.id,
-                for_update=True,
-            )
-            skill_versions = await skill_repository.plan_project_asset_deletion(
-                context,
-                skill,
-            )
-            await skill_repository.delete_project_asset(
-                context,
-                skill,
-                tuple(record.version_id for record in skill_versions),
-            )
+        await SkillService(seed.factory).delete(
+            context,
+            deletable_skill.id,
+            expected_asset_version=1,
+        )
+
+        keyring = AuditHmacKeyring(
+            "archived-skill-test",
+            {"archived-skill-test": b"p" * 32},
+        )
+        await ArchivedSkillPurger(
+            seed.factory,
+            quota=ProjectQuotaEnforcer(
+                QuotaService(
+                    seed.factory,
+                    QuotaConfig(),
+                    source_ref_hasher=keyring,
+                )
+            ),
+            audit=_ArchivedSkillPurgeAudit(),
+        ).purge_project(context.project_id)
 
         async with seed.factory() as session, session.begin():
             mcp_repository = McpRepository(session)
@@ -798,7 +833,13 @@ async def test_skill_and_mcp_hard_delete_reference_gates_and_secret_cascades(
             )
 
         async with seed.factory() as session:
-            assert await session.get(SkillRow, deletable_skill.id) is None
+            deleted_skill_tombstone = await session.get(
+                SkillRow,
+                deletable_skill.id,
+            )
+            assert deleted_skill_tombstone is not None
+            assert deleted_skill_tombstone.status == "archived"
+            assert deleted_skill_tombstone.current_version_id is None
             assert await session.get(SkillVersionRow, deletable_skill_version.id) is None
             assert await session.get(McpServerRow, deletable_mcp.id) is None
             assert await session.get(McpServerVersionRow, deletable_mcp_version.id) is None
@@ -807,11 +848,6 @@ async def test_skill_and_mcp_hard_delete_reference_gates_and_secret_cascades(
                 (
                     ProjectSkillSecretGenerationRow,
                     ProjectSkillSecretGenerationRow.skill_id,
-                    deletable_skill.id,
-                ),
-                (
-                    ProjectSkillSecretTombstoneRow,
-                    ProjectSkillSecretTombstoneRow.skill_id,
                     deletable_skill.id,
                 ),
                 (
@@ -839,7 +875,19 @@ async def test_skill_and_mcp_hard_delete_reference_gates_and_secret_cascades(
                     SkillVersionRow,
                     referenced_skill_version.id,
                 )
-                is not None
+                is None
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ProjectSkillSecretTombstoneRow)
+                    .where(
+                        ProjectSkillSecretTombstoneRow.skill_id.in_(
+                            (referenced_skill.id, deletable_skill.id),
+                        )
+                    )
+                )
+                >= 2
             )
             assert await session.get(McpServerRow, referenced_mcp.id) is not None
             assert (

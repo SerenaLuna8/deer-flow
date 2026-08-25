@@ -375,7 +375,7 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
                 },
             )
 
-        binding_error = "system binding requires an eligible Current Version"
+        binding_error = "system binding requires an eligible definition or Current Version"
         await _expect_database_error(
             engine,
             """UPDATE project_system_skill_bindings

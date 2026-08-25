@@ -2,12 +2,12 @@ import { useCallback, useMemo } from "react";
 
 import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 
-import { useProjectAssets, useProjectAssetVersions } from "./hooks";
+import { useProjectAgentDefinition, useProjectAssets } from "./hooks";
 import type {
-  AgentVersion,
+  AgentDefinition,
+  AgentDefinitionResponse,
   ProjectAssetItem,
   ProjectAssetList,
-  VersionHistoryResponse,
 } from "./types";
 
 export type ProjectSlashSkill = {
@@ -16,7 +16,7 @@ export type ProjectSlashSkill = {
   enabled: boolean;
 };
 
-type SkillRef = AgentVersion["skill_refs"][number];
+type SkillRef = AgentDefinition["skill_refs"][number];
 
 export type ProjectSkillRuntime =
   | { kind: "main" }
@@ -108,44 +108,42 @@ export function isThreadProjectAgentArchived(
   return !catalog.project_items.some((item) => item.id === id);
 }
 
-function selectedAgentVersionId(agent: ProjectAssetItem | null): string {
+function selectedAgentDefinitionId(agent: ProjectAssetItem | null): string {
   if (agent?.status !== "active") return "";
   if (agent.scope === "system" && agent.binding?.enabled !== true) return "";
-  return agent.current_version_id ?? "";
+  return agent.definition_id ?? "";
 }
 
 function isSuspendedProjectAgent(agent: ProjectAssetItem | null): boolean {
   return agent?.scope === "project" && agent?.status === "suspended";
 }
 
-function currentAgentVersion(
-  history: VersionHistoryResponse | undefined,
+function currentAgentDefinition(
+  aggregate: AgentDefinitionResponse | undefined,
   agent: ProjectAssetItem | null,
-): AgentVersion | null {
+): AgentDefinition | null {
   if (!agent) return null;
-  const versionId = selectedAgentVersionId(agent);
-  const version = history?.data.find(
-    (candidate) =>
-      "agent_id" in candidate &&
-      candidate.agent_id === agent.id &&
-      candidate.id === versionId &&
-      candidate.relation === "current",
-  );
-  return version && "agent_id" in version ? version : null;
+  const definitionId = selectedAgentDefinitionId(agent);
+  return aggregate?.item.id === agent.id &&
+    aggregate.item.definition_id === definitionId &&
+    aggregate.definition.agent_id === agent.id &&
+    aggregate.definition.definition_id === definitionId
+    ? aggregate.definition
+    : null;
 }
 
 export function resolveThreadAgentModelRef(
   catalog: ProjectAssetList | undefined,
   metadata: ThreadAgentMetadata | null | undefined,
-  history: VersionHistoryResponse | undefined,
+  aggregate: AgentDefinitionResponse | undefined,
 ): string | null {
   const agent = threadAgent(catalog, metadata);
   if (!agent || isSuspendedProjectAgent(agent)) return null;
   if (agent.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG) {
     return "default";
   }
-  const version = currentAgentVersion(history, agent);
-  return version?.model_ref.trim() ? version.model_ref : null;
+  const definition = currentAgentDefinition(aggregate, agent);
+  return definition?.model_ref.trim() ? definition.model_ref : null;
 }
 
 export function useThreadAgentModelRef(
@@ -177,19 +175,17 @@ export function useThreadAgentModelRef(
     metadata,
     catalogSettled,
   );
-  const versionId = isMain ? "" : selectedAgentVersionId(agent);
-  const versionQuery = useProjectAssetVersions(
+  const definitionId = isMain ? "" : selectedAgentDefinitionId(agent);
+  const definitionQuery = useProjectAgentDefinition(
     scope.accountId,
     scope.projectId,
-    "agents",
     agent?.id ?? "",
-    enabled && Boolean(agent && !isMain && !agentSuspended && versionId),
-    agent?.scope ?? "project",
+    enabled && Boolean(agent && !isMain && !agentSuspended && definitionId),
   );
   const modelRef = resolveThreadAgentModelRef(
     catalog,
     metadata,
-    versionQuery.data,
+    definitionQuery.data,
   );
   const isLoading =
     agentQuery.isLoading ||
@@ -197,21 +193,28 @@ export function useThreadAgentModelRef(
     Boolean(
       agent &&
       !isMain &&
-      versionId &&
-      (versionQuery.isLoading || versionQuery.isFetching),
+      definitionId &&
+      (definitionQuery.isLoading || definitionQuery.isFetching),
     );
   const refetch = useCallback(async () => {
     await agentQuery.refetch();
-    if (agent && !isMain && !agentSuspended && versionId) {
-      await versionQuery.refetch();
+    if (agent && !isMain && !agentSuspended && definitionId) {
+      await definitionQuery.refetch();
     }
-  }, [agent, agentQuery, agentSuspended, isMain, versionId, versionQuery]);
+  }, [
+    agent,
+    agentQuery,
+    agentSuspended,
+    definitionId,
+    definitionQuery,
+    isMain,
+  ]);
   return {
     modelRef,
     agentArchived,
     agentSuspended,
     isLoading,
-    error: agentQuery.error ?? versionQuery.error,
+    error: agentQuery.error ?? definitionQuery.error,
     refetch,
   };
 }
@@ -247,34 +250,32 @@ export function useProjectRuntimeSlashSkills(
   );
   const main =
     agent?.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG;
-  const versionId = main ? "" : selectedAgentVersionId(agent);
-  const versionQuery = useProjectAssetVersions(
+  const definitionId = main ? "" : selectedAgentDefinitionId(agent);
+  const definitionQuery = useProjectAgentDefinition(
     scope.accountId,
     scope.projectId,
-    "agents",
     agent?.id ?? "",
-    Boolean(agent && !main && versionId),
-    agent?.scope ?? "project",
+    Boolean(agent && !main && definitionId),
   );
-  const version = currentAgentVersion(versionQuery.data, agent);
-  const error = skillQuery.error ?? agentQuery.error ?? versionQuery.error;
+  const definition = currentAgentDefinition(definitionQuery.data, agent);
+  const error = skillQuery.error ?? agentQuery.error ?? definitionQuery.error;
   const skills = useMemo(() => {
     const catalog = skillQuery.data;
     if (error || !catalog || !agent) return [];
     if (main) return projectRuntimeSlashSkills(catalog, { kind: "main" });
-    return version
+    return definition
       ? projectRuntimeSlashSkills(catalog, {
           kind: "explicit",
-          skillRefs: version.skill_refs,
+          skillRefs: definition.skill_refs,
         })
       : [];
-  }, [agent, error, main, skillQuery.data, version]);
+  }, [agent, definition, error, main, skillQuery.data]);
   return {
     skills,
     isLoading:
       skillQuery.isLoading ||
       agentQuery.isLoading ||
-      Boolean(agent && !main && versionId && versionQuery.isLoading),
+      Boolean(agent && !main && definitionId && definitionQuery.isLoading),
     error,
   };
 }

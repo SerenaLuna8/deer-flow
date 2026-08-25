@@ -70,7 +70,7 @@ function commitResponse() {
         slug: "renamed-agent",
         display_name: "renamed-agent",
         status: "suspended",
-        current_version_id: null,
+        definition_id: "88888888-8888-4888-8888-888888888888",
         revision: 1,
         created_by_user_id: "owner-1",
         created_at: NOW,

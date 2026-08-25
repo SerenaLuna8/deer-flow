@@ -105,19 +105,18 @@ function catalog(): ProjectAssetList {
 }
 
 describe("Agent capability bindings", () => {
-  test("places activation in the upper detail actions before lifecycle and delete", () => {
+  test("shows lifecycle controls and delete without Agent version activation", () => {
     const html = renderToStaticMarkup(
       <ProjectAgentDetailActions
         actionPending={false}
         canDelete
         onDelete={() => undefined}
-        primaryVersionAction={<button type="button">激活版本</button>}
         lifecycleActions={<button type="button">停用</button>}
       />,
     );
 
-    expect(html.indexOf("激活版本")).toBeLessThan(html.indexOf("停用"));
     expect(html.indexOf("停用")).toBeLessThan(html.indexOf("删除"));
+    expect(html).not.toContain("激活版本");
   });
 
   test("shows every dependency and marks unavailable choices as disabled", () => {

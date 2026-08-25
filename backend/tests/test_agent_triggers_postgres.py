@@ -1,70 +1,44 @@
 from __future__ import annotations
 
-import asyncio
 import uuid
 from dataclasses import dataclass
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from support.skill_version_fixture import (
-    assemble_and_seal_skill_version,
-    sealed_skill_version_fixture,
-)
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from app.projects.context import ProjectContext, resolve_project_context
 from app.shared_assets.agent_payload_checksum import agent_payload_checksum
-from app.shared_assets.default_agent_service import ProjectDefaultAgentService
-from app.shared_assets.errors import AssetConflict, AssetForbidden
-from app.shared_assets.models import AgentPayload
+from app.shared_assets.models import AgentModelSettings, AgentPayload
 
 
-@dataclass(frozen=True)
-class _TriggerSeed:
-    user_id: uuid.UUID
+@dataclass(frozen=True, slots=True)
+class _Seed:
     project_id: uuid.UUID
     agent_id: uuid.UUID
-    agent_version_id: uuid.UUID
-    skill_ids: tuple[uuid.UUID, uuid.UUID]
-    mcp_version_ids: tuple[uuid.UUID, uuid.UUID]
+    definition_id: uuid.UUID
+    skill_id: uuid.UUID
 
 
-@dataclass(frozen=True)
-class _DefaultAgentSeed:
-    admin: ProjectContext
-    editor: ProjectContext
-    outsider_admin: ProjectContext
-    agent_id: uuid.UUID
-    outsider_agent_id: uuid.UUID
-
-
-def _assert_database_message(error: DBAPIError, expected: str) -> None:
-    assert expected in str(error.orig)
-
-
-async def _seed_trigger_graph(engine: AsyncEngine) -> _TriggerSeed:
+async def _seed(engine: AsyncEngine) -> _Seed:
     user_id = uuid.uuid4()
     project_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    agent_version_id = uuid.uuid4()
-    skill_ids = (uuid.uuid4(), uuid.uuid4())
-    skill_version_ids = (uuid.uuid4(), uuid.uuid4())
-    skill_version_fixtures = tuple(
-        sealed_skill_version_fixture(
-            version_id,
-            name=f"trigger-skill-{index}",
-        )
-        for index, version_id in enumerate(skill_version_ids, start=1)
+    definition_id = uuid.uuid4()
+    skill_id = uuid.uuid4()
+    payload = AgentPayload(
+        description="Initial Definition",
+        agents_instructions="Review carefully.",
+        soul="Be precise.",
+        identity="Reviewer",
+        user_context="Use Chinese.",
+        model_ref="default",
+        model_settings=AgentModelSettings(),
+        tool_groups=(),
+        skill_refs=(),
+        mcp_version_ids=(),
+        payload_schema_version=4,
     )
-    mcp_ids = (uuid.uuid4(), uuid.uuid4())
-    mcp_version_ids = (uuid.uuid4(), uuid.uuid4())
-
     async with engine.begin() as connection:
         await connection.execute(
             text(
@@ -72,781 +46,197 @@ async def _seed_trigger_graph(engine: AsyncEngine) -> _TriggerSeed:
                 (id,email,system_role,created_at,needs_setup,token_version)
                 VALUES (:id,:email,'user',now(),false,0)"""
             ),
-            {
-                "id": str(user_id),
-                "email": f"agent-triggers-{user_id}@example.com",
-            },
+            {"id": str(user_id), "email": f"agent-definition-{user_id}@example.test"},
         )
         await connection.execute(
             text(
                 """INSERT INTO projects
                 (id,slug,display_name,created_by_user_id)
-                VALUES (:id,:slug,'Agent trigger tests',:owner)"""
+                VALUES (:id,:slug,'Agent Definition trigger',:owner)"""
             ),
             {
                 "id": project_id,
-                "slug": f"agent-triggers-{project_id.hex[:8]}",
+                "slug": f"agent-definition-{project_id.hex[:12]}",
                 "owner": str(user_id),
             },
         )
         await connection.execute(
             text(
                 """INSERT INTO agents
-                (id,scope,project_id,slug,display_name,status,
-                 created_by_user_id)
+                (id,scope,project_id,slug,display_name,status,definition_id,
+                 description,agents_instructions,soul,identity,user_context,
+                 model_ref,model_settings,tool_groups,payload_schema_version,
+                 payload_checksum,revision,created_by_user_id,updated_by_user_id)
                 VALUES
-                (:id,'project',:project,'trigger-agent','Trigger Agent',
-                 'active',:owner)"""
+                (:id,'project',:project,'definition-agent','Definition Agent',
+                 'active',:definition_id,:description,:instructions,:soul,
+                 :identity,:user_context,'default','{}'::jsonb,'[]'::jsonb,4,
+                 :checksum,1,:owner,:owner)"""
             ),
             {
                 "id": agent_id,
                 "project": project_id,
-                "owner": str(user_id),
-            },
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO agent_versions
-                (id,agent_id,version_number,description,
-                 agents_instructions,soul,identity,user_context,model_ref,
-                 model_settings,tool_groups,payload_schema_version,
-                 payload_checksum,created_by_user_id)
-                VALUES
-                (:id,:agent,1,'Initial description','# Agent',
-                 '# Soul','# Identity','# User','default','{}'::jsonb,
-                 '["research"]'::jsonb,3,:checksum,:owner)"""
-            ),
-            {
-                "id": agent_version_id,
-                "agent": agent_id,
-                "checksum": "a" * 64,
+                "definition_id": definition_id,
+                "description": payload.description,
+                "instructions": payload.agents_instructions,
+                "soul": payload.soul,
+                "identity": payload.identity,
+                "user_context": payload.user_context,
+                "checksum": agent_payload_checksum(payload),
                 "owner": str(user_id),
             },
         )
         await connection.execute(
             text(
                 """INSERT INTO skills
-                (id,scope,project_id,slug,display_name,status,
-                 created_by_user_id)
+                (id,scope,project_id,slug,display_name,status,created_by_user_id)
                 VALUES
-                (:id,'project',:project,:slug,:display,'active',:owner)"""
+                (:id,'project',:project,'definition-skill','Definition Skill',
+                 'active',:owner)"""
             ),
-            [
-                {
-                    "id": skill_id,
-                    "project": project_id,
-                    "slug": f"trigger-skill-{index}",
-                    "display": f"Trigger Skill {index}",
-                    "owner": str(user_id),
-                }
-                for index, skill_id in enumerate(skill_ids, start=1)
-            ],
+            {"id": skill_id, "project": project_id, "owner": str(user_id)},
         )
-        await connection.execute(
-            text(
-                """INSERT INTO skill_versions
-                (id,skill_id,version_number,scan_decision,
-                 payload_checksum,file_count,content_size_bytes,files_sealed,
-                 created_by_user_id)
-                VALUES
-                (:id,:asset,1,'allow',:checksum,:file_count,:content_size,false,
-                 :owner)"""
-            ),
-            [
-                {
-                    "id": version_id,
-                    "asset": asset_id,
-                    "checksum": fixture.payload_checksum,
-                    "file_count": fixture.file_count,
-                    "content_size": fixture.content_size_bytes,
-                    "owner": str(user_id),
-                }
-                for asset_id, version_id, fixture in zip(
-                    skill_ids,
-                    skill_version_ids,
-                    skill_version_fixtures,
-                    strict=True,
-                )
-            ],
-        )
-        for fixture in skill_version_fixtures:
-            await assemble_and_seal_skill_version(connection, fixture)
-        await connection.execute(
-            text(
-                """UPDATE skills
-                SET current_version_id=:version
-                WHERE id=:asset"""
-            ),
-            [
-                {"asset": asset_id, "version": version_id}
-                for asset_id, version_id in zip(
-                    skill_ids,
-                    skill_version_ids,
-                    strict=True,
-                )
-            ],
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO mcp_servers
-                (id,scope,project_id,slug,display_name,status,
-                 created_by_user_id)
-                VALUES
-                (:id,'project',:project,:slug,:display,'active',:owner)"""
-            ),
-            [
-                {
-                    "id": mcp_id,
-                    "project": project_id,
-                    "slug": f"trigger-mcp-{index}",
-                    "display": f"Trigger MCP {index}",
-                    "owner": str(user_id),
-                }
-                for index, mcp_id in enumerate(mcp_ids, start=1)
-            ],
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO mcp_server_versions
-                (id,mcp_server_id,version_number,workflow_status,transport,
-                 payload_checksum,created_by_user_id)
-                VALUES
-                (:id,:asset,1,'published','stdio',:checksum,:owner)"""
-            ),
-            [
-                {
-                    "id": version_id,
-                    "asset": asset_id,
-                    "checksum": str(index + 2) * 64,
-                    "owner": str(user_id),
-                }
-                for index, (asset_id, version_id) in enumerate(
-                    zip(mcp_ids, mcp_version_ids, strict=True),
-                    start=1,
-                )
-            ],
-        )
-        await connection.execute(
-            text(
-                """UPDATE mcp_servers
-                SET current_published_version_id=:version
-                WHERE id=:asset"""
-            ),
-            [
-                {"asset": asset_id, "version": version_id}
-                for asset_id, version_id in zip(
-                    mcp_ids,
-                    mcp_version_ids,
-                    strict=True,
-                )
-            ],
-        )
-        await connection.execute(
-            text(
-                """SELECT set_config(
-                    'deerflow.asset_version_assembly',
-                    :version_id,
-                    true
-                )"""
-            ),
-            {"version_id": str(agent_version_id)},
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO agent_version_skill_refs
-                (agent_version_id,skill_asset_scope,skill_asset_id,sort_order)
-                VALUES (:agent_version,'project',:dependency,0)"""
-            ),
-            {
-                "agent_version": agent_version_id,
-                "dependency": skill_ids[0],
-            },
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO agent_version_mcp_refs
-                (agent_version_id,mcp_server_version_id,sort_order)
-                VALUES (:agent_version,:dependency,0)"""
-            ),
-            {
-                "agent_version": agent_version_id,
-                "dependency": mcp_version_ids[0],
-            },
-        )
-        await connection.execute(
-            text(
-                """UPDATE agents SET current_version_id=:version
-                WHERE id=:agent"""
-            ),
-            {"agent": agent_id, "version": agent_version_id},
-        )
-
-    return _TriggerSeed(
-        user_id=user_id,
-        project_id=project_id,
-        agent_id=agent_id,
-        agent_version_id=agent_version_id,
-        skill_ids=skill_ids,
-        mcp_version_ids=mcp_version_ids,
-    )
+    return _Seed(project_id, agent_id, definition_id, skill_id)
 
 
-async def _resolve_context(
-    factory: async_sessionmaker[AsyncSession],
-    user_id: uuid.UUID,
-    project_id: uuid.UUID,
-    request_id: str,
-) -> ProjectContext:
-    async with factory() as session:
-        return await resolve_project_context(
-            session,
-            user_id,
-            project_id,
-            request_id,
-        )
-
-
-async def _seed_default_agent_matrix(
-    engine: AsyncEngine,
-    factory: async_sessionmaker[AsyncSession],
-) -> _DefaultAgentSeed:
-    admin_id = uuid.uuid4()
-    editor_id = uuid.uuid4()
-    outsider_id = uuid.uuid4()
-    project_id = uuid.uuid4()
-    outsider_project_id = uuid.uuid4()
-    agent_id = uuid.uuid4()
-    outsider_agent_id = uuid.uuid4()
-    version_id = uuid.uuid4()
-    outsider_version_id = uuid.uuid4()
-    default_agent_checksum = agent_payload_checksum(
-        AgentPayload(
-            description="Default Agent",
-            soul="Reliable",
-            model_ref="default",
-            tool_groups=(),
-            skill_refs=(),
-            mcp_version_ids=(),
-            payload_schema_version=3,
-        )
-    )
-
-    async with engine.begin() as connection:
-        await connection.execute(
-            text(
-                """INSERT INTO users
-                (id,email,system_role,created_at,needs_setup,token_version)
-                VALUES (:id,:email,'user',now(),false,0)"""
-            ),
-            [
-                {
-                    "id": str(user_id),
-                    "email": f"default-agent-{label}-{user_id}@example.com",
-                }
-                for label, user_id in (
-                    ("admin", admin_id),
-                    ("editor", editor_id),
-                    ("outsider", outsider_id),
-                )
-            ],
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO projects
-                (id,slug,display_name,created_by_user_id)
-                VALUES (:id,:slug,:display,:owner)"""
-            ),
-            [
-                {
-                    "id": project_id,
-                    "slug": f"default-agent-{project_id.hex[:8]}",
-                    "display": "Default Agent Project",
-                    "owner": str(admin_id),
-                },
-                {
-                    "id": outsider_project_id,
-                    "slug": f"default-agent-{outsider_project_id.hex[:8]}",
-                    "display": "Outsider Agent Project",
-                    "owner": str(outsider_id),
-                },
-            ],
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO project_memberships
-                (id,project_id,user_id,role,status,version)
-                VALUES (:id,:project,:user,:role,'active',1)"""
-            ),
-            [
-                {
-                    "id": uuid.uuid4(),
-                    "project": project_id,
-                    "user": str(admin_id),
-                    "role": "admin",
-                },
-                {
-                    "id": uuid.uuid4(),
-                    "project": project_id,
-                    "user": str(editor_id),
-                    "role": "editor",
-                },
-                {
-                    "id": uuid.uuid4(),
-                    "project": outsider_project_id,
-                    "user": str(outsider_id),
-                    "role": "admin",
-                },
-            ],
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO agents
-                (id,scope,project_id,slug,display_name,status,
-                 created_by_user_id)
-                VALUES
-                (:id,'project',:project,:slug,:display,'active',:owner)"""
-            ),
-            [
-                {
-                    "id": agent_id,
-                    "project": project_id,
-                    "slug": "default-agent-target",
-                    "display": "Default Agent Target",
-                    "owner": str(admin_id),
-                },
-                {
-                    "id": outsider_agent_id,
-                    "project": outsider_project_id,
-                    "slug": "outsider-agent-target",
-                    "display": "Outsider Agent Target",
-                    "owner": str(outsider_id),
-                },
-            ],
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO agent_versions
-                (id,agent_id,version_number,description,
-                 soul,model_ref,model_settings,tool_groups,
-                 payload_schema_version,payload_checksum,created_by_user_id)
-                VALUES
-                (:id,:agent,1,'Default Agent','Reliable',
-                 'default','{}'::jsonb,'[]'::jsonb,3,:checksum,:owner)"""
-            ),
-            [
-                {
-                    "id": version_id,
-                    "agent": agent_id,
-                    "checksum": default_agent_checksum,
-                    "owner": str(admin_id),
-                },
-                {
-                    "id": outsider_version_id,
-                    "agent": outsider_agent_id,
-                    "checksum": default_agent_checksum,
-                    "owner": str(outsider_id),
-                },
-            ],
-        )
-        await connection.execute(
-            text(
-                """UPDATE agents
-                SET current_version_id=:version
-                WHERE id=:asset"""
-            ),
-            [
-                {"asset": agent_id, "version": version_id},
-                {
-                    "asset": outsider_agent_id,
-                    "version": outsider_version_id,
-                },
-            ],
-        )
-
-    admin = await _resolve_context(
-        factory,
-        admin_id,
-        project_id,
-        "req-default-admin",
-    )
-    editor = await _resolve_context(
-        factory,
-        editor_id,
-        project_id,
-        "req-default-editor",
-    )
-    outsider_admin = await _resolve_context(
-        factory,
-        outsider_id,
-        outsider_project_id,
-        "req-default-outsider",
-    )
-    return _DefaultAgentSeed(
-        admin=admin,
-        editor=editor,
-        outsider_admin=outsider_admin,
-        agent_id=agent_id,
-        outsider_agent_id=outsider_agent_id,
-    )
+def _assert_database_message(error: DBAPIError, expected: str) -> None:
+    assert expected in str(error.orig)
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_agent_version_payload_is_immutable(
+async def test_project_agent_definition_requires_fence_rotation_and_one_revision(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
     try:
-        seed = await _seed_trigger_graph(engine)
-        payload_mutations = (
-            "SET version_number=2",
-            "SET description='Changed description'",
-            "SET agents_instructions='# Changed Agent'",
-            "SET soul='# Changed Soul'",
-            "SET identity='# Changed Identity'",
-            "SET user_context='# Changed User'",
-            "SET model_ref='changed-model'",
-            "SET model_settings=jsonb_build_object('temperature',0.5)",
-            "SET tool_groups='[\"changed\"]'::jsonb",
-            "SET supersedes_version_id=id",
-            f"SET payload_checksum='{'b' * 64}'",
-            "SET payload_schema_version=2",
-        )
-        for mutation in payload_mutations:
-            with pytest.raises(DBAPIError) as error:
-                async with engine.begin() as connection:
-                    await connection.execute(
-                        text(
-                            f"""UPDATE agent_versions {mutation}
-                            WHERE id=:version"""
-                        ),
-                        {"version": seed.agent_version_id},
-                    )
-            _assert_database_message(
-                error.value,
-                "shared asset version payload is immutable",
-            )
+        seed = await _seed(engine)
+        replacement_id = uuid.uuid4()
 
-        async with engine.connect() as connection:
-            row = (
-                await connection.execute(
-                    text(
-                        """SELECT description,
-                                  agents_instructions,soul,identity,user_context,
-                                  model_ref,model_settings,tool_groups,
-                                  payload_schema_version,payload_checksum
-                        FROM agent_versions WHERE id=:version"""
-                    ),
-                    {"version": seed.agent_version_id},
-                )
-            ).one()
-        assert row == (
-            "Initial description",
-            "# Agent",
-            "# Soul",
-            "# Identity",
-            "# User",
-            "default",
-            {},
-            ["research"],
-            3,
-            "a" * 64,
-        )
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_agent_refs_are_frozen_and_delete_escape_is_exact(
-    migrated_postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(migrated_postgres_database_url)
-    try:
-        seed = await _seed_trigger_graph(engine)
-
-        # Version child rows may only be assembled under the exact version GUC.
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """SELECT set_config(
-                        'deerflow.asset_version_assembly',
-                        :version_id,
-                        true
-                    )"""
-                ),
-                {"version_id": str(seed.agent_version_id)},
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO agent_version_skill_refs
-                    (agent_version_id,skill_asset_scope,skill_asset_id,sort_order)
-                    VALUES (:version,'project',:dependency,1)"""
-                ),
-                {
-                    "version": seed.agent_version_id,
-                    "dependency": seed.skill_ids[1],
-                },
-            )
-            await connection.execute(
-                text(
-                    """DELETE FROM agent_version_skill_refs
-                    WHERE agent_version_id=:version
-                      AND skill_asset_id=:dependency"""
-                ),
-                {
-                    "version": seed.agent_version_id,
-                    "dependency": seed.skill_ids[1],
-                },
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO agent_version_mcp_refs
-                    (agent_version_id,mcp_server_version_id,sort_order)
-                    VALUES (:version,:dependency,1)"""
-                ),
-                {
-                    "version": seed.agent_version_id,
-                    "dependency": seed.mcp_version_ids[1],
-                },
-            )
-            await connection.execute(
-                text(
-                    """DELETE FROM agent_version_mcp_refs
-                    WHERE agent_version_id=:version
-                      AND mcp_server_version_id=:dependency"""
-                ),
-                {
-                    "version": seed.agent_version_id,
-                    "dependency": seed.mcp_version_ids[1],
-                },
-            )
-
-        frozen_mutations = (
-            (
-                """INSERT INTO agent_version_skill_refs
-                (agent_version_id,skill_asset_scope,skill_asset_id,sort_order)
-                VALUES (:version,'project',:dependency,1)""",
-                seed.skill_ids[1],
-                "Agent and Skill version child rows are immutable",
-            ),
-            (
-                """INSERT INTO agent_version_mcp_refs
-                (agent_version_id,mcp_server_version_id,sort_order)
-                VALUES (:version,:dependency,1)""",
-                seed.mcp_version_ids[1],
-                "Agent and Skill version child rows are immutable",
-            ),
-            (
-                """UPDATE agent_version_skill_refs SET sort_order=1
-                WHERE agent_version_id=:version
-                  AND skill_asset_id=:dependency""",
-                seed.skill_ids[0],
-                "shared asset version payload is immutable",
-            ),
-            (
-                """UPDATE agent_version_mcp_refs SET sort_order=1
-                WHERE agent_version_id=:version
-                  AND mcp_server_version_id=:dependency""",
-                seed.mcp_version_ids[0],
-                "shared asset version payload is immutable",
-            ),
-            (
-                """DELETE FROM agent_version_skill_refs
-                WHERE agent_version_id=:version
-                  AND skill_asset_id=:dependency""",
-                seed.skill_ids[0],
-                "Agent and Skill version child rows are immutable",
-            ),
-            (
-                """DELETE FROM agent_version_mcp_refs
-                WHERE agent_version_id=:version
-                  AND mcp_server_version_id=:dependency""",
-                seed.mcp_version_ids[0],
-                "Agent and Skill version child rows are immutable",
-            ),
-        )
-        for statement, dependency_id, message in frozen_mutations:
-            with pytest.raises(DBAPIError) as error:
-                async with engine.begin() as connection:
-                    await connection.execute(
-                        text(statement),
-                        {
-                            "version": seed.agent_version_id,
-                            "dependency": dependency_id,
-                        },
-                    )
-            _assert_database_message(error.value, message)
-
-        # An exact GUC alone is insufficient while the Agent remains active
-        # and still has its published pointer.
-        with pytest.raises(DBAPIError) as error:
+        with pytest.raises(DBAPIError) as missing_fence:
             async with engine.begin() as connection:
                 await connection.execute(
                     text(
-                        """SELECT set_config(
-                            'deerflow.agent_hard_delete_asset_id',
-                            :asset_id,
-                            true
-                        )"""
+                        """UPDATE agents
+                        SET definition_id=:definition_id,description='Changed',
+                            revision=revision+1,payload_checksum=:checksum
+                        WHERE id=:agent_id"""
                     ),
-                    {"asset_id": str(seed.agent_id)},
+                    {
+                        "agent_id": seed.agent_id,
+                        "definition_id": replacement_id,
+                        "checksum": "b" * 64,
+                    },
+                )
+        _assert_database_message(missing_fence.value, "requires its transaction fence")
+
+        with pytest.raises(DBAPIError) as unchanged_identity:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("SELECT set_config('deerflow.agent_definition_mutation_id',:agent_id,true)"),
+                    {"agent_id": str(seed.agent_id)},
                 )
                 await connection.execute(
                     text(
-                        """DELETE FROM agent_version_skill_refs
-                        WHERE agent_version_id=:version"""
+                        """UPDATE agents
+                        SET description='Changed',revision=revision+1,
+                            payload_checksum=:checksum
+                        WHERE id=:agent_id"""
                     ),
-                    {"version": seed.agent_version_id},
+                    {"agent_id": seed.agent_id, "checksum": "b" * 64},
                 )
-        _assert_database_message(
-            error.value,
-            "Agent and Skill version child rows are immutable",
-        )
+        _assert_database_message(unchanged_identity.value, "requires its transaction fence")
 
         async with engine.begin() as connection:
+            await connection.execute(
+                text("SELECT set_config('deerflow.agent_definition_mutation_id',:agent_id,true)"),
+                {"agent_id": str(seed.agent_id)},
+            )
             await connection.execute(
                 text(
                     """UPDATE agents
-                    SET status='archived',current_version_id=NULL
-                    WHERE id=:agent"""
+                    SET definition_id=:definition_id,description='Changed',
+                        revision=revision+1,payload_checksum=:checksum
+                    WHERE id=:agent_id"""
                 ),
-                {"agent": seed.agent_id},
+                {
+                    "agent_id": seed.agent_id,
+                    "definition_id": replacement_id,
+                    "checksum": "b" * 64,
+                },
             )
+            row = (
+                await connection.execute(
+                    text("SELECT definition_id,revision,status FROM agents WHERE id=:agent_id"),
+                    {"agent_id": seed.agent_id},
+                )
+            ).one()
 
-        for hard_delete_id in (None, str(uuid.uuid4())):
-            with pytest.raises(DBAPIError) as error:
-                async with engine.begin() as connection:
-                    if hard_delete_id is not None:
-                        await connection.execute(
-                            text(
-                                """SELECT set_config(
-                                    'deerflow.agent_hard_delete_asset_id',
-                                    :asset_id,
-                                    true
-                                )"""
-                            ),
-                            {"asset_id": hard_delete_id},
-                        )
-                    await connection.execute(
-                        text(
-                            """DELETE FROM agent_version_skill_refs
-                            WHERE agent_version_id=:version"""
-                        ),
-                        {"version": seed.agent_version_id},
-                    )
-            _assert_database_message(
-                error.value,
-                "Agent and Skill version child rows are immutable",
-            )
-
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """SELECT set_config(
-                        'deerflow.agent_hard_delete_asset_id',
-                        :asset_id,
-                        true
-                    )"""
-                ),
-                {"asset_id": str(seed.agent_id)},
-            )
-            await connection.execute(
-                text(
-                    """DELETE FROM agent_version_skill_refs
-                    WHERE agent_version_id=:version"""
-                ),
-                {"version": seed.agent_version_id},
-            )
-            await connection.execute(
-                text(
-                    """DELETE FROM agent_version_mcp_refs
-                    WHERE agent_version_id=:version"""
-                ),
-                {"version": seed.agent_version_id},
-            )
-
-        async with engine.connect() as connection:
-            skill_ref_count = await connection.scalar(
-                text(
-                    """SELECT count(*) FROM agent_version_skill_refs
-                    WHERE agent_version_id=:version"""
-                ),
-                {"version": seed.agent_version_id},
-            )
-            mcp_ref_count = await connection.scalar(
-                text(
-                    """SELECT count(*) FROM agent_version_mcp_refs
-                    WHERE agent_version_id=:version"""
-                ),
-                {"version": seed.agent_version_id},
-            )
-        assert skill_ref_count == 0
-        assert mcp_ref_count == 0
+        assert tuple(row) == (replacement_id, 2, "active")
     finally:
         await engine.dispose()
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_default_agent_first_write_cas_permission_and_composite_fk(
+async def test_agent_direct_references_require_exact_definition_fence(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        seed = await _seed_default_agent_matrix(engine, factory)
-        service = ProjectDefaultAgentService(factory)
+        seed = await _seed(engine)
 
-        assert (await service.get(seed.admin)).revision == 0
-        with pytest.raises(AssetForbidden):
-            await service.replace(
-                seed.editor,
-                seed.agent_id,
-                expected_revision=0,
-            )
+        async with engine.begin() as connection:
+            precondition = (
+                await connection.execute(
+                    text(
+                        """SELECT project.status,project.deletion_effective_at,
+                                  current_setting(
+                                      'deerflow.agent_definition_mutation_id',true
+                                  ),
+                                  current_setting(
+                                      'deerflow.agent_hard_delete_asset_id',true
+                                  )
+                             FROM projects project
+                            WHERE project.id=:project_id"""
+                    ),
+                    {"project_id": seed.project_id},
+                )
+            ).one()
+        assert tuple(precondition) == ("active", None, None, None)
 
-        results = await asyncio.gather(
-            service.replace(
-                seed.admin,
-                seed.agent_id,
-                expected_revision=0,
-            ),
-            service.replace(
-                seed.admin,
-                seed.agent_id,
-                expected_revision=0,
-            ),
-            return_exceptions=True,
-        )
-        assert sum(not isinstance(result, Exception) for result in results) == 1
-        assert sum(isinstance(result, AssetConflict) for result in results) == 1
-        selected = await service.get(seed.admin)
-        assert selected.agent_asset_id == seed.agent_id
-        assert selected.revision == 1
-
-        with pytest.raises(IntegrityError) as cross_project_fk:
+        with pytest.raises(DBAPIError) as missing_fence:
             async with engine.begin() as connection:
                 await connection.execute(
                     text(
-                        """UPDATE project_default_agents
-                        SET agent_asset_id=:outsider_agent
-                        WHERE project_id=:project"""
+                        """INSERT INTO agent_skill_refs
+                        (agent_id,skill_asset_scope,skill_asset_id,sort_order)
+                        VALUES (:agent_id,'project',:skill_id,0)"""
                     ),
-                    {
-                        "outsider_agent": seed.outsider_agent_id,
-                        "project": seed.admin.project_id,
-                    },
+                    {"agent_id": seed.agent_id, "skill_id": seed.skill_id},
                 )
-        assert "fk_project_default_agents_project_agent" in str(cross_project_fk.value.orig)
+        _assert_database_message(missing_fence.value, "requires its transaction fence")
 
-        cleared = await service.replace(
-            seed.admin,
-            None,
-            expected_revision=1,
-        )
-        assert cleared.agent_asset_id is None
-        assert cleared.revision == 2
-        assert (await service.get(seed.outsider_admin)).revision == 0
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("SELECT set_config('deerflow.agent_definition_mutation_id',:agent_id,true)"),
+                {"agent_id": str(seed.agent_id)},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO agent_skill_refs
+                    (agent_id,skill_asset_scope,skill_asset_id,sort_order)
+                    VALUES (:agent_id,'project',:skill_id,0)"""
+                ),
+                {"agent_id": seed.agent_id, "skill_id": seed.skill_id},
+            )
+
+        with pytest.raises(DBAPIError) as delete_without_fence:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("DELETE FROM agent_skill_refs WHERE agent_id=:agent_id"),
+                    {"agent_id": seed.agent_id},
+                )
+        _assert_database_message(delete_without_fence.value, "requires its transaction fence")
     finally:
         await engine.dispose()

@@ -9,14 +9,14 @@ A governed reusable execution definition. An Agent asset is distinct from the Le
 _Avoid_: Lead Agent
 
 **Project Agent**:
-An Agent authored and governed within one Project. It may reference Project Skill and System Skill assets by stable asset identity.
+An Agent authored and governed within one Project through one mutable Agent Definition. It may reference Project Skill and System Skill assets by stable asset identity.
 
 **System Agent**:
-A platform-governed Agent with one Current Version numbered v1 whose definition may reference only System Skill assets. Projects can use it but cannot create, save, or activate its versions.
+A platform-governed Agent with one immutable definition that may reference only System Skill assets. Projects can use it but cannot create or save its definition.
 
-**Project Agent Version**:
-An immutable snapshot of a Project Agent's complete authored definition at one point in its history.
-_Avoid_: Editable Agent version
+**Agent Definition**:
+The one mutable authored definition of a Project Agent. A successful save replaces what future Run Admission resolves, advances the Agent revision, and rotates an opaque Definition identity, while admitted Runs retain their exact earlier definition in their Run Snapshots. The Definition identity is an execution-generation fact, not a user-visible Version or retained history.
+_Avoid_: Agent Version, Current Agent Version
 
 **Agent Design Session**:
 An owner-private design conversation that progressively defines one prospective Project Agent and has at most one active Agent Design Generation Turn. It is distinct from a Thread and does not become part of the created Agent's execution history.
@@ -43,8 +43,8 @@ An owner-requested terminal outcome that stops the active Agent Design Generatio
 _Avoid_: Agent Design Session cancellation
 
 **Agent Design Commit**:
-The final operation that validates a ready design and creates its suspended Project Agent plus Candidate Version. Its real validation and persistence stages may emit Agent Design Activities, but a manual blueprint edit never represents model reasoning.
-_Avoid_: Version Activation
+The final operation that validates a ready design and creates its suspended Project Agent with its initial Agent Definition. Its real validation and persistence stages may emit Agent Design Activities, but a manual blueprint edit never represents model reasoning.
+_Avoid_: Agent Version Activation
 
 ## Skill assets
 
@@ -80,6 +80,14 @@ _Avoid_: Version Activation
 
 **Project Skill**:
 A Skill authored and governed within one Project.
+
+**Skill Deletion**:
+The irreversible archival of a Project Skill that hides it from project use, prevents future Run Admission from resolving it, removes it from every Project Agent Definition without changing those Agents' lifecycle status, and destroys its Configuration Secret ciphertext. Retained Runs keep their admitted definition and Version-file closure, but one that has not materialized a destroyed secret, or later retries, fails closed.
+_Avoid_: Skill Suspension, immediate physical purge
+
+**Archived Skill Purge**:
+The eventual removal of an archived Project Skill's Version files and Version records after no retained Run still pins them. The minimal archived Skill identity and already-created Secret Tombstones remain. A logical Thread deletion does not release its retained Runs; individual Run deletion or retention cleanup does.
+_Avoid_: Skill Deletion, Run retention
 
 **System Skill**:
 A platform-governed Skill installed once as an immutable v1. Projects can use it but cannot create, save, activate, or replace its definition; changed content requires a different System Skill identity.
@@ -130,30 +138,30 @@ _Avoid_: Deleted Credential, archived secret
 A platform-administered model endpoint and capability definition with a stable identity and no version history. It owns an independently replaceable API Key as its Configuration Secret.
 _Avoid_: System Model Version, model Credential
 
-## Agent and Skill versions
+## Skill versions
 
 **Current Version**:
-The one Agent or Skill definition resolved for future Run Admission. A Project asset selects it through Version Activation; a System Agent or Skill always uses its sole v1.
+The one Skill definition resolved for future Run Admission. A Project Skill selects it through Version Activation; a System Skill always uses its sole v1.
 _Avoid_: Active Version
 
 **Candidate Version**:
-A saved, immutable Project Agent or Project Skill Version on the forward lineage after the Current Version and still eligible for activation.
+A saved, immutable Project Skill Version on the forward lineage after the Current Version and still eligible for activation.
 _Avoid_: Editable Version
 
 **Historical Version**:
-A persisted Project Agent or Project Skill Version that can no longer become the Current Version. It may remain referenced by exact Run Snapshots admitted while it was current.
+A persisted Project Skill Version that can no longer become the Current Version. It may remain referenced by exact Run Snapshots admitted while it was current.
 _Avoid_: Rollback Version
 
 **Version Activation**:
-The forward-only selection of a Candidate Version as the Current Version together with enabling its Project Agent or Project Skill. Future Run Admission resolves the new Current Version, and any bypassed Candidate Versions become Historical Versions.
+The forward-only selection of a Candidate Version as the Current Version together with enabling its Project Skill. Future Run Admission resolves the new Current Version, and any bypassed Candidate Versions become Historical Versions.
 _Avoid_: Release, Rollback
 
 **Asset Suspension**:
-The temporary prevention of new execution for a Project Agent or Project Skill without changing its Current Version.
+The temporary prevention of new execution for a Project Agent or Project Skill without changing its Agent Definition or Skill Current Version.
 _Avoid_: Version deactivation
 
 **System Asset Upgrade**:
-The maintenance replacement of a System Agent's sole v1 definition at the same deterministic version identity. It does not create another version and affects only Runs admitted after the replacement; immutable System Skills are excluded.
+The maintenance replacement of a System Agent's sole definition at the same deterministic identity. It affects only Runs admitted after the replacement; immutable System Skills are excluded.
 
 **System Governance Eligibility**:
 Whether a System Skill's current v1 definition is permitted for new Run Admission. Security revocation removes eligibility without becoming a version lifecycle state.
@@ -161,7 +169,7 @@ Whether a System Skill's current v1 definition is permitted for new Run Admissio
 ## Agent execution
 
 **Thread**:
-The durable conversation-continuity boundary within a Project. A Thread owns an ordered history of Runs and their shared graph state; each new Run resolves the Current Versions of its Project and System Agent/Skill assets.
+The durable conversation-continuity boundary within a Project. A Thread owns an ordered history of Runs and their shared graph state; each new Run resolves its Agent Definition and the Current Versions of its Skill assets.
 _Avoid_: Chat, Session
 
 **Run**:

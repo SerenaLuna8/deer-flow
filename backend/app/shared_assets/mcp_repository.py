@@ -14,7 +14,7 @@ from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFoun
 from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
-    AgentVersionMcpRefRow,
+    AgentMcpRefRow,
     McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
@@ -200,7 +200,7 @@ class McpRepository:
                 select(
                     or_(
                         exists().where(
-                            AgentVersionMcpRefRow.mcp_server_version_id.in_(
+                            AgentMcpRefRow.mcp_server_version_id.in_(
                                 version_ids,
                             ),
                         ),

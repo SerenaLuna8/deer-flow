@@ -54,20 +54,20 @@ AgentRuntimeAssessmentReason = Literal[
 @dataclass(frozen=True, slots=True)
 class AgentRuntimeAssessment:
     agent_asset_id: uuid.UUID
-    selected_version_id: uuid.UUID | None
+    selected_definition_id: uuid.UUID | None
     status: AgentRuntimeAssessmentStatus
     reason_code: AgentRuntimeAssessmentReason | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_asset_id, uuid.UUID):
             raise TypeError("Agent runtime assessment requires an Agent ID")
-        if self.selected_version_id is not None and not isinstance(
-            self.selected_version_id,
+        if self.selected_definition_id is not None and not isinstance(
+            self.selected_definition_id,
             uuid.UUID,
         ):
-            raise TypeError("Agent runtime assessment version is invalid")
+            raise TypeError("Agent runtime assessment Definition is invalid")
         if self.status == "ready":
-            if self.selected_version_id is None or self.reason_code is not None:
+            if self.selected_definition_id is None or self.reason_code is not None:
                 raise ValueError("ready Agent runtime assessment is invalid")
         elif self.status == "blocked":
             if self.reason_code not in {
@@ -76,8 +76,8 @@ class AgentRuntimeAssessment:
                 "model_unavailable",
             }:
                 raise ValueError("blocked Agent runtime assessment is invalid")
-            if (self.reason_code == "agent_unavailable" and self.selected_version_id is not None) or (self.reason_code != "agent_unavailable" and self.selected_version_id is None):
-                raise ValueError("blocked Agent runtime assessment version is invalid")
+            if (self.reason_code == "agent_unavailable" and self.selected_definition_id is not None) or (self.reason_code != "agent_unavailable" and self.selected_definition_id is None):
+                raise ValueError("blocked Agent runtime assessment Definition is invalid")
         else:
             raise ValueError("Agent runtime assessment status is invalid")
 
@@ -236,14 +236,14 @@ class AgentRuntimeAssessmentService:
         except (AssetNotFound, AssetResolutionUnavailable, AssetValidationFailed):
             return AgentRuntimeAssessment(
                 agent_asset_id=agent_id,
-                selected_version_id=None,
+                selected_definition_id=None,
                 status="blocked",
                 reason_code="agent_unavailable",
             )
         if type(closure) is not ResolvedRunAssetClosure:
             raise AssetStorageUnavailable(context.request_id)
 
-        selected_version_id = closure.lead_agent.version_id
+        selected_definition_id = closure.lead_agent.version_id
         try:
             await self._closure_validator.validate_run_asset_closure_in_session(
                 session,
@@ -253,7 +253,7 @@ class AgentRuntimeAssessmentService:
         except (RunSnapshotAssetStale, AssetResolutionUnavailable):
             return AgentRuntimeAssessment(
                 agent_asset_id=agent_id,
-                selected_version_id=selected_version_id,
+                selected_definition_id=selected_definition_id,
                 status="blocked",
                 reason_code="runtime_dependency_unavailable",
             )
@@ -273,14 +273,14 @@ class AgentRuntimeAssessmentService:
             if not available:
                 return AgentRuntimeAssessment(
                     agent_asset_id=agent_id,
-                    selected_version_id=selected_version_id,
+                    selected_definition_id=selected_definition_id,
                     status="blocked",
                     reason_code="model_unavailable",
                 )
 
         return AgentRuntimeAssessment(
             agent_asset_id=agent_id,
-            selected_version_id=selected_version_id,
+            selected_definition_id=selected_definition_id,
             status="ready",
             reason_code=None,
         )

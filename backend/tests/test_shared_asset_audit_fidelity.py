@@ -21,11 +21,10 @@ from app.shared_assets.audit import (
 )
 
 _AGENT_ACTIONS = (
-    ("agent.create", AuditAction.ASSET_CREATED, None),
-    ("agent.version.create", AuditAction.ASSET_UPDATED, 7),
+    ("agent.create", AuditAction.ASSET_CREATED, 7),
+    ("agent.definition.update", AuditAction.ASSET_UPDATED, 7),
     ("agent.instructions.update", AuditAction.ASSET_UPDATED, 7),
     ("agent.capability_bindings.update", AuditAction.ASSET_UPDATED, 7),
-    ("agent.version.activate", AuditAction.ASSET_UPDATED, 7),
     ("agent.delete", AuditAction.ASSET_DELETED, None),
     ("agent.enable", AuditAction.ASSET_UPDATED, None),
     ("agent.suspend", AuditAction.ASSET_DEPRECATED, None),
@@ -52,7 +51,7 @@ class _Session:
             return "system_admin"
         if "project_memberships" in rendered:
             return self.membership_id
-        if "agent_versions" in rendered or "skill_versions" in rendered:
+        if "agents" in rendered or "skill_versions" in rendered:
             return self.version_number
         raise AssertionError(f"unexpected audit authority query: {rendered}")
 
@@ -80,25 +79,24 @@ def _operator_sink() -> tuple[
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("operation", "audit_action", "version_number"), _AGENT_ACTIONS)
-async def test_agent_governance_keeps_exact_operation_and_safe_version_number(
+@pytest.mark.parametrize(("operation", "audit_action", "definition_revision"), _AGENT_ACTIONS)
+async def test_agent_governance_keeps_exact_operation_and_definition_revision(
     operation: str,
     audit_action: AuditAction,
-    version_number: int | None,
+    definition_revision: int | None,
 ) -> None:
     sink, append = _sink()
     session = _Session()
     actor_id = uuid.uuid4()
     project_id = uuid.uuid4()
     asset_id = uuid.uuid4()
-    version_id = uuid.uuid4() if version_number is not None else None
 
     await sink.append_project(
         session,  # type: ignore[arg-type]
         actor=actor_id,
         project_id=project_id,
         asset_id=asset_id,
-        version_id=version_id,
+        version_id=None,
         action=operation,
         request_id="req-agent-audit",
         asset_kind="agent",
@@ -110,44 +108,42 @@ async def test_agent_governance_keeps_exact_operation_and_safe_version_number(
         "asset_kind": "agent",
         "operation": operation,
     }
-    if version_number is not None:
-        expected["version_number"] = version_number
+    if definition_revision is not None:
+        expected["definition_revision"] = definition_revision
     assert metadata == expected
     assert "version_id" not in metadata
-    assert version_id is None or str(version_id) not in repr(metadata)
 
     rendered = tuple(str(statement) for statement in session.statements)
-    version_queries = tuple(statement for statement in rendered if "agent_versions" in statement)
-    if version_id is None:
-        assert version_queries == ()
+    revision_queries = tuple(statement for statement in rendered if "agents.revision" in statement)
+    if definition_revision is None:
+        assert revision_queries == ()
     else:
-        assert len(version_queries) == 1
-        assert "agent_versions.agent_id" in version_queries[0]
-        assert "agent_versions.id" in version_queries[0]
+        assert len(revision_queries) == 1
+        assert "agents.id" in revision_queries[0]
 
 
-def test_asset_audit_metadata_accepts_only_safe_agent_version_coordinates() -> None:
+def test_asset_audit_metadata_accepts_only_agent_definition_revision() -> None:
     metadata_model = AUDIT_METADATA_MODELS[AuditAction.ASSET_UPDATED]
 
     parsed = metadata_model.model_validate(
         {
             "asset_kind": "agent",
-            "operation": "agent.version.activate",
-            "version_number": 7,
+            "operation": "agent.definition.update",
+            "definition_revision": 7,
         }
     )
 
     assert parsed.model_dump(mode="json", exclude_none=True) == {
         "asset_kind": "agent",
-        "operation": "agent.version.activate",
-        "version_number": 7,
+        "operation": "agent.definition.update",
+        "definition_revision": 7,
     }
     with pytest.raises(ValueError):
         metadata_model.model_validate(
             {
                 "asset_kind": "agent",
-                "operation": "agent.version.activate",
-                "version_number": 7,
+                "operation": "agent.definition.update",
+                "definition_revision": 7,
                 "version_id": str(uuid.uuid4()),
             }
         )
@@ -164,14 +160,14 @@ def test_asset_audit_metadata_accepts_only_safe_agent_version_coordinates() -> N
         metadata_model.model_validate(
             {
                 "asset_kind": "agent",
-                "operation": "agent.version.activate",
+                "operation": "agent.definition.update",
             }
         )
     with pytest.raises(ValueError):
         metadata_model.model_validate(
             {
                 "asset_kind": "agent",
-                "operation": "agent.create",
+                "operation": "agent.definition.update",
                 "version_number": 7,
             }
         )
@@ -188,10 +184,15 @@ def test_every_governance_operation_has_a_valid_closed_audit_encoding(
         "operation": operation,
     }
     if operation in {
-        "agent.version.create",
+        "agent.create",
+        "agent.definition.update",
         "agent.instructions.update",
         "agent.capability_bindings.update",
-        "agent.version.activate",
+    }:
+        metadata["definition_revision"] = 7
+    if operation == "skill.delete":
+        metadata["affected_agent_count"] = 2
+    if operation in {
         "skill.version.create",
         "skill.version.activate",
         "skill.export",
@@ -242,15 +243,14 @@ async def test_system_override_audit_uses_the_same_safe_agent_coordinates() -> N
     actor_id = uuid.uuid4()
     project_id = uuid.uuid4()
     asset_id = uuid.uuid4()
-    version_id = uuid.uuid4()
 
     await sink.append_override(
         session,  # type: ignore[arg-type]
         actor=actor_id,
         project_id=project_id,
         asset_id=asset_id,
-        version_id=version_id,
-        action="agent.version.activate",
+        version_id=None,
+        action="agent.definition.update",
         request_id="req-agent-override-audit",
         asset_kind="agent",
     )
@@ -258,10 +258,9 @@ async def test_system_override_audit_uses_the_same_safe_agent_coordinates() -> N
     assert append.await_args.args[2] is AuditAction.ASSET_UPDATED
     assert append.await_args.args[5] == {
         "asset_kind": "agent",
-        "operation": "agent.version.activate",
-        "version_number": 7,
+        "operation": "agent.definition.update",
+        "definition_revision": 7,
     }
-    assert str(version_id) not in repr(append.await_args.args[5])
 
 
 @pytest.mark.asyncio
@@ -390,7 +389,7 @@ async def test_skill_export_audit_uses_a_distinct_read_action_and_safe_version_n
 
 
 @pytest.mark.asyncio
-async def test_agent_version_audit_rejects_unknown_or_cross_asset_version() -> None:
+async def test_agent_definition_audit_rejects_legacy_version_coordinate() -> None:
     sink, append = _sink()
     session = _Session(version_number=None)
 
@@ -401,7 +400,7 @@ async def test_agent_version_audit_rejects_unknown_or_cross_asset_version() -> N
             project_id=uuid.uuid4(),
             asset_id=uuid.uuid4(),
             version_id=uuid.uuid4(),
-            action="agent.version.activate",
+            action="agent.definition.update",
             request_id="req-agent-audit-missing-version",
             asset_kind="agent",
         )
@@ -420,7 +419,7 @@ async def test_agent_operation_cannot_be_relabelled_as_another_asset_kind() -> N
             project_id=uuid.uuid4(),
             asset_id=uuid.uuid4(),
             version_id=uuid.uuid4(),
-            action="agent.version.activate",
+            action="agent.definition.update",
             request_id="req-agent-audit-kind-mismatch",
             asset_kind="skill",
         )

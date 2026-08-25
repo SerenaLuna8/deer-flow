@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.agent_definition_seed import direct_agent_definition_fields
 from support.run_closure import (
     add_legacy_test_run_asset,
     add_sealed_test_run,
@@ -165,6 +166,10 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
     run_one = str(uuid.uuid4())
     run_two = str(uuid.uuid4())
     run_bad = str(uuid.uuid4())
+    definition = direct_agent_definition_fields(
+        updated_by_user_id=str(admin_id),
+        description="Runtime Agent",
+    )
     try:
         assert await bootstrap_system_runtime_policies(factory) == 1
         assert await bootstrap_system_runtime_policies(factory) == 1
@@ -207,13 +212,23 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
             await connection.execute(
                 text(
                     """INSERT INTO agents
-                    (id,scope,project_id,slug,display_name,status,revision,created_by_user_id)
-                    VALUES (:id,'project',:project,'runtime-agent','Runtime Agent','active',1,:user)"""
+                    (id,scope,project_id,slug,display_name,status,definition_id,
+                     description,agents_instructions,soul,identity,user_context,
+                     model_ref,model_settings,tool_groups,payload_schema_version,
+                     payload_checksum,revision,created_by_user_id,
+                     updated_by_user_id)
+                    VALUES (:id,'project',:project,'runtime-agent',
+                            'Runtime Agent','active',:definition_id,
+                            :description,:agents_instructions,:soul,:identity,
+                            :user_context,:model_ref,'{}'::jsonb,'[]'::jsonb,
+                            :payload_schema_version,:payload_checksum,1,:user,
+                            :updated_by_user_id)"""
                 ),
                 {
                     "id": agent_id,
                     "project": project_id,
                     "user": str(admin_id),
+                    **definition,
                 },
             )
             await connection.execute(

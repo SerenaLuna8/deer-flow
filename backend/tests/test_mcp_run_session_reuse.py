@@ -618,7 +618,7 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
     mcp_slot_id = uuid.uuid4()
     current_mcp_version_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    agent_version_id = uuid.uuid4()
+    agent_definition_id = uuid.uuid4()
     agent_checksum = agent_payload_checksum(
         AgentPayload(
             description="",
@@ -627,6 +627,7 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
             tool_groups=(),
             skill_refs=(),
             mcp_version_ids=(mcp_version_id,),
+            payload_schema_version=4,
         )
     )
     try:
@@ -718,27 +719,20 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
             await session.execute(
                 text(
                     """INSERT INTO agents
-                    (id,scope,project_id,slug,display_name,status,revision,created_by_user_id)
-                    VALUES (:id,'project',:project_id,:slug,'MCP Run Agent','active',1,:owner)"""
+                    (id,scope,project_id,slug,display_name,status,definition_id,
+                     description,agents_instructions,soul,identity,user_context,
+                     model_ref,model_settings,tool_groups,payload_schema_version,
+                     payload_checksum,revision,created_by_user_id,updated_by_user_id)
+                    VALUES
+                    (:id,'project',:project_id,:slug,'MCP Run Agent','active',
+                     :definition_id,'','','mcp run agent','','',:model_ref,
+                     '{}'::jsonb,'[]'::jsonb,4,:checksum,1,:owner,:owner)"""
                 ),
                 {
                     "id": agent_id,
                     "project_id": seed.owner_a.project_id,
                     "slug": f"mcp-run-agent-{agent_id.hex[:12]}",
-                    "owner": str(seed.owner_a.user_id),
-                },
-            )
-            await session.execute(
-                text(
-                    """INSERT INTO agent_versions
-                    (id,agent_id,version_number,description,soul,
-                     model_ref,tool_groups,payload_checksum,created_by_user_id)
-                    VALUES (:id,:agent_id,1,'','mcp run agent',:model_ref,
-                            '[]'::jsonb,:checksum,:owner)"""
-                ),
-                {
-                    "id": agent_version_id,
-                    "agent_id": agent_id,
+                    "definition_id": agent_definition_id,
                     "model_ref": TEST_MODEL_REF,
                     "checksum": agent_checksum,
                     "owner": str(seed.owner_a.user_id),
@@ -747,27 +741,23 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
             await session.execute(
                 text(
                     """SELECT set_config(
-                        'deerflow.asset_version_assembly',
-                        :version_id,
+                        'deerflow.agent_definition_mutation_id',
+                        :agent_id,
                         true
                     )"""
                 ),
-                {"version_id": str(agent_version_id)},
+                {"agent_id": str(agent_id)},
             )
             await session.execute(
                 text(
-                    """INSERT INTO agent_version_mcp_refs
-                    (agent_version_id,mcp_server_version_id,sort_order)
-                    VALUES (:agent_version_id,:mcp_version_id,0)"""
+                    """INSERT INTO agent_mcp_refs
+                    (agent_id,mcp_server_version_id,sort_order)
+                    VALUES (:agent_id,:mcp_version_id,0)"""
                 ),
                 {
-                    "agent_version_id": agent_version_id,
+                    "agent_id": agent_id,
                     "mcp_version_id": mcp_version_id,
                 },
-            )
-            await session.execute(
-                text("UPDATE agents SET current_version_id=:version_id WHERE id=:agent_id"),
-                {"version_id": agent_version_id, "agent_id": agent_id},
             )
             closure = await lock_mcp_secret_closure(
                 session,

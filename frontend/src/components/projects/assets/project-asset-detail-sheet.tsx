@@ -7,13 +7,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { toast } from "sonner";
 
 import {
   adminAssetErrorMessage,
   versionWorkflowActions,
 } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
-import { AssetVersionDiff } from "@/components/assets/asset-version-diff";
 import {
   skillExportBlockReason,
   SkillExportButton,
@@ -36,7 +36,6 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useModels } from "@/core/models/hooks";
 import type { Capability } from "@/core/projects/types";
 import {
   useChangeProjectAssetStatus,
@@ -44,11 +43,13 @@ import {
   useDeleteProjectMcp,
   useDeleteProjectSkill,
   exportProjectSkillVersion,
+  useProjectAgentDefinition,
   useProjectAssetVersions,
   useProjectMcpEditableConfiguration,
   useActivateProjectAssetVersion,
   usePublishProjectMcpVersion,
   type AssetListKind,
+  type AgentDefinition,
   type AssetVersion,
   type ProjectAssetItem,
   type ProjectMcpEditableConfigurationResponse,
@@ -56,14 +57,12 @@ import {
 import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
 import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
-import { agentAuthoringBaseVersion } from "./agent-authoring-recovery";
 import {
   projectAssetCanCreateVersion,
   projectAssetCanDelete,
   projectAssetDetailLifecycleActions,
   projectAssetCanAuthor,
   projectAgentDeleteErrorMessage,
-  projectAgentVersionCanActivate,
   projectMcpDeleteErrorMessage,
   projectSkillDeleteErrorMessage,
   projectSkillSecretSetupRequired,
@@ -73,6 +72,7 @@ import {
   ProjectAgentDeleteDialog,
   ProjectMcpDeleteDialog,
   ProjectSkillDeleteDialog,
+  projectSkillDeleteSuccessMessage,
 } from "./project-skill-delete-dialog";
 import { SkillActivationDialog } from "./skill-activation-dialog";
 import { isMainProjectAgent } from "./use-mcp-dependency-runtime";
@@ -82,11 +82,7 @@ export function projectAssetDetailShowsVersionHistory(
   kind: MutableAssetKind,
   scope: ProjectAssetItem["scope"],
 ): boolean {
-  return (
-    kind === "skills" ||
-    kind === "agents" ||
-    (kind === "mcp-servers" && scope === "project")
-  );
+  return kind === "skills" || (kind === "mcp-servers" && scope === "project");
 }
 
 export function projectAssetDetailShowsLifecycleControls(
@@ -99,44 +95,6 @@ export function projectAssetDetailVersionPickerPlacement(
   kind: MutableAssetKind,
 ): "before-editor" | "version-section" {
   return kind === "agents" ? "before-editor" : "version-section";
-}
-
-export function projectAgentVersionWorkbenchSelection<T extends { id: string }>(
-  selectedVersion: T | null,
-  authoringBaseVersion: T | null,
-): { version: T | null; canAuthor: boolean } {
-  return {
-    version: selectedVersion,
-    canAuthor:
-      selectedVersion !== null &&
-      selectedVersion.id === authoringBaseVersion?.id,
-  };
-}
-
-export function ProjectAgentVersionWorkbenchSlot<T extends { id: string }>({
-  selectedVersion,
-  authoringBaseVersion,
-  canAuthor,
-  render,
-}: {
-  selectedVersion: T | null;
-  authoringBaseVersion: T | null;
-  canAuthor: boolean;
-  render: (version: T | null, canAuthor: boolean) => ReactNode;
-}) {
-  const selection = projectAgentVersionWorkbenchSelection(
-    selectedVersion,
-    authoringBaseVersion,
-  );
-
-  return (
-    <div
-      data-agent-version-id={selection.version?.id}
-      className="border-border/70 border-t pt-5"
-    >
-      {render(selection.version, canAuthor && selection.canAuthor)}
-    </div>
-  );
 }
 
 export function projectAssetDetailPreferredVersionId(
@@ -179,23 +137,6 @@ export function projectSkillSecretRepairVersionId(
   currentVersionId: string | null,
 ): string | null {
   return projectSkillSecretSetupRequired(error) ? currentVersionId : null;
-}
-
-export function projectAgentPreviousVersion(
-  versions: readonly AssetVersion[],
-  selectedVersion: AssetVersion | null,
-): AssetVersion | null {
-  if (!selectedVersion || !("agent_id" in selectedVersion)) {
-    return null;
-  }
-  const previous =
-    versions.find(
-      (version) =>
-        "agent_id" in version &&
-        version.agent_id === selectedVersion.agent_id &&
-        version.version_number === selectedVersion.version_number - 1,
-    ) ?? null;
-  return previous && "agent_id" in previous ? previous : null;
 }
 
 export function projectMcpEditableConfigurationEnabled(
@@ -252,14 +193,17 @@ export function projectCurrentVersionSystemUsageLabel(
   kind: MutableAssetKind,
   item: Pick<
     ProjectAssetItem,
-    "binding" | "current_version_id" | "scope" | "slug" | "status"
+    | "binding"
+    | "current_version_id"
+    | "definition_id"
+    | "scope"
+    | "slug"
+    | "status"
   >,
 ): string {
   if (kind === "mcp-servers") return projectMcpSystemUsageLabel(item);
   if (kind === "agents" && isMainProjectAgent(item)) {
-    return item.status === "active" && item.current_version_id
-      ? "可用"
-      : "不可用";
+    return item.status === "active" && item.definition_id ? "可用" : "不可用";
   }
   if (!item.binding) return "未启用";
   return item.binding.enabled ? "已启用" : "已从项目停用";
@@ -514,35 +458,6 @@ export function projectAssetVersionDisplayStatus(
   return version.relation;
 }
 
-function AgentVersionCapabilitySummary({
-  version,
-}: {
-  version: Extract<AssetVersion, { agent_id: string }>;
-}) {
-  return (
-    <dl className="grid gap-3 sm:grid-cols-3">
-      <div className="bg-muted/35 rounded-xl p-4">
-        <dt className="text-muted-foreground text-xs">内置工具组</dt>
-        <dd className="mt-2 text-sm font-medium">
-          {version.tool_groups.length} 个
-        </dd>
-      </div>
-      <div className="bg-muted/35 rounded-xl p-4">
-        <dt className="text-muted-foreground text-xs">Skill</dt>
-        <dd className="mt-2 text-sm font-medium">
-          {version.skill_refs.length} 个
-        </dd>
-      </div>
-      <div className="bg-muted/35 rounded-xl p-4">
-        <dt className="text-muted-foreground text-xs">MCP</dt>
-        <dd className="mt-2 text-sm font-medium">
-          {version.mcp_version_ids.length} 个
-        </dd>
-      </div>
-    </dl>
-  );
-}
-
 export function primaryVersionActionDisabled(
   actionPending: boolean,
   versionDirty: boolean,
@@ -692,17 +607,14 @@ export function ProjectAgentDetailActions({
   canDelete,
   lifecycleActions,
   onDelete,
-  primaryVersionAction,
 }: {
   actionPending: boolean;
   canDelete: boolean;
   lifecycleActions?: ReactNode;
   onDelete: () => void;
-  primaryVersionAction?: ReactNode;
 }) {
   return (
     <>
-      {primaryVersionAction}
       {lifecycleActions}
       {canDelete ? (
         <Button
@@ -808,7 +720,7 @@ export function ProjectAssetDetailSheet({
     editing: boolean;
   }) => ReactNode;
   renderAssetEditor?: (
-    effectiveVersion: AssetVersion | null,
+    definitionOrVersion: AgentDefinition | AssetVersion | null,
     context: ProjectAssetVersionRenderContext,
   ) => ReactNode;
   renderVersion?: (
@@ -819,14 +731,19 @@ export function ProjectAssetDetailSheet({
   onSkillSecretsFocused?: () => void;
   onSkillSecretSetupRequired?: (versionId: string | null) => void;
 }) {
-  const { models } = useModels({ enabled: open && kind === "agents" });
   const history = useProjectAssetVersions(
     accountId,
     projectId,
-    kind,
+    kind === "agents" ? null : kind,
     item.id,
-    true,
+    kind !== "agents",
     item.scope,
+  );
+  const agentDefinition = useProjectAgentDefinition(
+    accountId,
+    projectId,
+    item.id,
+    open && kind === "agents",
   );
   const editableMcpConfigurationEnabled =
     projectMcpEditableConfigurationEnabled(open, kind, item);
@@ -840,14 +757,14 @@ export function ProjectAssetDetailSheet({
     kind,
     item.scope,
   );
-  const showsVersionContent = true;
+  const showsVersionContent = kind !== "agents";
   const versionTerms = projectAssetDetailVersionTerms(kind, item.scope);
   const revisionCopy = projectAssetDetailRevisionCopy(kind);
   const discardCopy = projectAssetDiscardCopy(kind);
   const activate = useActivateProjectAssetVersion(
     accountId,
     projectId,
-    kind === "skills" ? "skills" : "agents",
+    "skills",
   );
   const publishMcp = usePublishProjectMcpVersion(accountId, projectId);
   const changeStatus = useChangeProjectAssetStatus(accountId, projectId, kind);
@@ -903,7 +820,7 @@ export function ProjectAssetDetailSheet({
       ? resolveMcpCurrentConfiguration(
           versions,
           item.scope,
-          item.current_version_id,
+          item.current_version_id ?? null,
         )
       : null;
   const selectedVersion =
@@ -928,12 +845,6 @@ export function ProjectAssetDetailSheet({
       );
     },
     [selectedVersionIdentity],
-  );
-  const selectedAgentVersion =
-    selectedVersion && "agent_id" in selectedVersion ? selectedVersion : null;
-  const previousAgentVersion = projectAgentPreviousVersion(
-    versions,
-    selectedVersion,
   );
   const editBaseVersion = projectAssetEditBaseVersion(
     kind,
@@ -964,19 +875,10 @@ export function ProjectAssetDetailSheet({
     currentVersion,
     versions[0],
   );
-  const agentAuthoringVersion = agentAuthoringBaseVersion(
-    versions.filter(
-      (version): version is Extract<AssetVersion, { agent_id: string }> =>
-        "agent_id" in version,
-    ),
-    item.current_version_id,
-  );
-  const agentWorkbenchSelection = projectAgentVersionWorkbenchSelection(
-    selectedAgentVersion,
-    agentAuthoringVersion,
-  );
   const editorVersion =
-    kind === "agents" ? agentWorkbenchSelection.version : effectiveVersion;
+    kind === "agents"
+      ? (agentDefinition.data?.definition ?? null)
+      : effectiveVersion;
 
   useEffect(() => {
     if (!open) return;
@@ -1000,7 +902,7 @@ export function ProjectAssetDetailSheet({
       kind,
       item.scope,
       versions,
-      item.current_version_id,
+      item.current_version_id ?? null,
     );
     setSelectedVersionId((current) =>
       versions.some((version) => version.id === current)
@@ -1048,18 +950,12 @@ export function ProjectAssetDetailSheet({
   const canAuthor =
     item.scope === "project" && projectAssetCanAuthor(item, kind);
   const canAuthorSelectedVersion =
+    kind !== "agents" &&
     canAuthor &&
     selectedVersion !== null &&
     "relation" in selectedVersion &&
     selectedVersion.relation !== "historical" &&
     versions[0]?.id === selectedVersion.id;
-  const canActivateSelectedAgentVersion =
-    kind === "agents" &&
-    projectAgentVersionCanActivate(
-      item,
-      projectCapabilities,
-      selectedAgentVersion,
-    );
   const canActivateSelectedSkillVersion =
     kind === "skills" &&
     projectSkillVersionCanActivate(
@@ -1078,8 +974,7 @@ export function ProjectAssetDetailSheet({
     (canAuthor || canDeleteAsset || canActivateSelectedSkillVersion);
   const canExportSkill =
     kind === "skills" && projectCapabilities.includes("shared_assets.edit");
-  const showAgentDetailActions =
-    kind === "agents" && (canActivateSelectedAgentVersion || canDeleteAsset);
+  const showAgentDetailActions = kind === "agents" && canDeleteAsset;
   const showDetailActions =
     canCreateVersion ||
     lifecycleActions.length > 0 ||
@@ -1135,22 +1030,7 @@ export function ProjectAssetDetailSheet({
   function activateSelectedVersion(version: AssetVersion) {
     if ("skill_id" in version) {
       setSkillActivationVersion(version);
-      return;
     }
-    if (!("agent_id" in version)) return;
-    activate.mutate(
-      {
-        assetId: item.id,
-        versionId: version.id,
-        input: { expected_revision: item.revision },
-      },
-      {
-        onSuccess: (result) => {
-          setSelectedVersionId(result.data.id);
-          handleWorkbenchVersionCreated(result.data.id);
-        },
-      },
-    );
   }
 
   function publishSelectedMcpVersion(version: AssetVersion) {
@@ -1229,7 +1109,7 @@ export function ProjectAssetDetailSheet({
     const snapshot = skillDeleteSnapshot;
     if (!snapshot) return;
     try {
-      await deleteSkill.mutateAsync({
+      const result = await deleteSkill.mutateAsync({
         assetId: snapshot.assetId,
         input: {
           expected_revision: snapshot.expectedAssetVersion,
@@ -1237,6 +1117,9 @@ export function ProjectAssetDetailSheet({
       });
       setSkillDeleteSnapshot(null);
       onDeleted(snapshot.assetId);
+      toast.success(
+        projectSkillDeleteSuccessMessage(result.affected_agent_count),
+      );
     } catch {
       // The mutation exposes only its mapped public error inside the dialog.
     }
@@ -1295,7 +1178,7 @@ export function ProjectAssetDetailSheet({
               {projectAssetVersionPickerStatusLabel(
                 kind,
                 version,
-                item.current_version_id,
+                item.current_version_id ?? null,
               )}
             </option>
           ))}
@@ -1303,6 +1186,13 @@ export function ProjectAssetDetailSheet({
       </label>
     </div>
   ) : null;
+  const editorLoading =
+    kind === "agents" ? agentDefinition.isLoading : history.isLoading;
+  const editorFetching =
+    kind === "agents" ? agentDefinition.isFetching : history.isFetching;
+  const editorError = kind === "agents" ? agentDefinition.error : history.error;
+  const refetchEditor = () =>
+    kind === "agents" ? agentDefinition.refetch() : history.refetch();
 
   const editorRenderContext = (
     versionCanAuthor: boolean,
@@ -1440,33 +1330,6 @@ export function ProjectAssetDetailSheet({
                           {projectAssetLifecycleActionLabel(kind, action)}
                         </Button>
                       ))}
-                      primaryVersionAction={
-                        selectedVersion !== null &&
-                        canActivateSelectedAgentVersion ? (
-                          <Button
-                            type="button"
-                            disabled={primaryVersionActionDisabled(
-                              actionPending ||
-                                Boolean(selectedRuntimeBlockReason),
-                              detailDirty,
-                              versionSelectionPending,
-                            )}
-                            title={
-                              selectedRuntimeBlockReason ??
-                              (detailDirty
-                                ? "请先保存或放弃当前未保存修改"
-                                : versionSelectionPending
-                                  ? revisionCopy.loading
-                                  : undefined)
-                            }
-                            onClick={() =>
-                              activateSelectedVersion(selectedVersion)
-                            }
-                          >
-                            {revisionCopy.primaryAction}
-                          </Button>
-                        ) : undefined
-                      }
                       onDelete={() => {
                         deleteAgent.reset();
                         setAgentDeleteSnapshot(
@@ -1594,7 +1457,7 @@ export function ProjectAssetDetailSheet({
                 : null}
 
               {renderAssetEditor ? (
-                history.isLoading ? (
+                editorLoading ? (
                   <div
                     className="border-border/70 space-y-3 border-t pt-5"
                     aria-label="正在加载 Agent 设置"
@@ -1602,37 +1465,26 @@ export function ProjectAssetDetailSheet({
                     <Skeleton className="h-8 w-40" />
                     <Skeleton className="h-40 w-full rounded-xl" />
                   </div>
-                ) : history.error ? (
+                ) : editorError ? (
                   <div className="border-destructive/30 space-y-3 rounded-xl border p-4">
-                    <ErrorNotice error={history.error} />
+                    <ErrorNotice error={editorError} />
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={history.isFetching}
-                      onClick={() => void history.refetch()}
+                      disabled={editorFetching}
+                      onClick={() => void refetchEditor()}
                     >
-                      {history.isFetching ? "重试中…" : "重试"}
+                      {editorFetching ? "重试中…" : "重试"}
                     </Button>
                   </div>
-                ) : kind === "agents" ? (
-                  <ProjectAgentVersionWorkbenchSlot
-                    selectedVersion={selectedAgentVersion}
-                    authoringBaseVersion={agentAuthoringVersion}
-                    canAuthor={canAuthor && !versionSelectionPending}
-                    render={(version, versionCanAuthor) =>
-                      renderAssetEditor(
-                        version,
-                        editorRenderContext(versionCanAuthor),
-                      )
-                    }
-                  />
                 ) : (
                   <div className="border-border/70 border-t pt-5">
                     {renderAssetEditor(
                       editorVersion,
                       editorRenderContext(
-                        canAuthor && !versionSelectionPending,
+                        canAuthor &&
+                          (kind === "agents" || !versionSelectionPending),
                       ),
                     )}
                   </div>
@@ -1720,11 +1572,6 @@ export function ProjectAssetDetailSheet({
                         key={selectedVersion.id}
                         className="border-border/70 border-t pt-5"
                       >
-                        {"agent_id" in selectedVersion ? (
-                          <AgentVersionCapabilitySummary
-                            version={selectedVersion}
-                          />
-                        ) : null}
                         {renderVersion?.(
                           detailContentVersion ?? selectedVersion,
                           {
@@ -1748,22 +1595,6 @@ export function ProjectAssetDetailSheet({
                           },
                         )}
                       </div>
-
-                      {selectedAgentVersion && previousAgentVersion ? (
-                        <details className="border-border/70 rounded-xl border px-4 py-3">
-                          <summary className="cursor-pointer text-sm font-medium">
-                            与前一版本比较
-                          </summary>
-                          <div className="mt-3 max-h-[32rem] overflow-auto">
-                            <AssetVersionDiff
-                              previous={previousAgentVersion}
-                              current={selectedAgentVersion}
-                              includeAgentDocuments
-                              models={models}
-                            />
-                          </div>
-                        </details>
-                      ) : null}
 
                       <details className="border-border/70 rounded-xl border px-4 py-3">
                         <summary className="cursor-pointer text-sm font-medium">

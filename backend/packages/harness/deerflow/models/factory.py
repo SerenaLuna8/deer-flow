@@ -211,11 +211,11 @@ def _validated_agent_model_overrides(
     model_name: str,
     overrides: Mapping[str, object] | None,
 ) -> dict[str, float | int]:
-    """Validate and map the bounded Agent-version sampling surface.
+    """Validate and map the bounded Agent Definition sampling surface.
 
     A canonical Agent ``max_tokens`` setting maps only to a field explicitly
     declared by the selected provider class.  This prevents an immutable
-    version from silently forwarding an unsupported key into a provider
+    Definition from silently forwarding an unsupported key into a provider
     request body.
     """
 
@@ -421,7 +421,7 @@ def create_chat_model(
 
     # Apply exact Agent/request sampling values only after every global model
     # profile and thinking-mode merge. This preserves the public precedence
-    # contract: request > exact Agent version > global configuration.
+    # contract: request > exact Agent Definition > global configuration.
     if agent_model_overrides:
         if "max_tokens" in agent_model_overrides or "max_output_tokens" in agent_model_overrides:
             model_settings_from_config.pop("max_tokens", None)

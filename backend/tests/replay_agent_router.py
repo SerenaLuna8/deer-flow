@@ -226,12 +226,12 @@ async def prepare_replay_agent(
                 tool_groups=("file:read", "file:write"),
                 skill_refs=(),
                 mcp_version_ids=(),
+                payload_schema_version=4,
             ),
         )
-    await service.activate_version(
+    await service.enable(
         project_context,
         created.asset.id,
-        created.version.id,
         expected_asset_version=created.asset.revision,
     )
 
@@ -241,13 +241,13 @@ async def prepare_replay_agent(
     }
 
 
-@router.post("/agents/{agent_id}/activate-next-version")
-async def activate_next_replay_agent_version(
+@router.post("/agents/{agent_id}/save-next-definition")
+async def save_next_replay_agent_definition(
     project_id: uuid.UUID,
     agent_id: uuid.UUID,
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> dict[str, object]:
-    """Create and activate the next immutable Agent version for browser tests."""
+    """Save the next mutable Agent Definition for browser tests."""
 
     context = require_issued_private_work_context(context)
     if context.project_id != project_id:
@@ -269,41 +269,26 @@ async def activate_next_replay_agent_version(
             StaticToolGroupCatalog(("file:read", "file:write")),
         ),
     )
-    asset = await service.get(project_context, agent_id)
-    history = await service.get_version_history(project_context, agent_id)
-    current = next(
-        (version for version in history if version.id == asset.current_version_id),
-        None,
-    )
-    if current is None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT)
-
-    candidate = await service.update_instructions(
+    current = await service.get(project_context, agent_id)
+    saved = await service.update_instructions(
         project_context,
         agent_id,
         AgentInstructions(
-            agents_instructions=current.agents_instructions,
-            soul=current.soul,
-            identity=current.identity,
-            user_context=current.user_context,
+            agents_instructions=current.definition.agents_instructions,
+            soul=current.definition.soul,
+            identity=current.definition.identity,
+            user_context=current.definition.user_context,
         ),
-        expected_asset_version=asset.revision,
-    )
-    saved_asset = await service.get(project_context, agent_id)
-    await service.activate_version(
-        project_context,
-        agent_id,
-        candidate.id,
-        expected_asset_version=saved_asset.revision,
+        expected_asset_version=current.asset.revision,
     )
     return {
-        "version_id": str(candidate.id),
-        "version_number": candidate.version_number,
+        "definition_id": str(saved.definition.definition_id),
+        "revision": saved.asset.revision,
     }
 
 
-@router.get("/runs/{run_id}/lead-agent-version")
-async def get_replay_run_lead_agent_version(
+@router.get("/runs/{run_id}/lead-agent-definition")
+async def get_replay_run_lead_agent_definition(
     project_id: uuid.UUID,
     run_id: str,
     context: PrivateWorkContext = Depends(private_work_context),
@@ -316,7 +301,7 @@ async def get_replay_run_lead_agent_version(
 
     session_factory = get_session_factory()
     async with session_factory() as session:
-        version_id = (
+        definition_id = (
             await session.execute(
                 select(RunAssetVersionRow.version_id).where(
                     RunAssetVersionRow.project_id == context.project_id,
@@ -327,6 +312,6 @@ async def get_replay_run_lead_agent_version(
                 )
             )
         ).scalar_one_or_none()
-    if version_id is None:
+    if definition_id is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    return {"version_id": str(version_id)}
+    return {"definition_id": str(definition_id)}

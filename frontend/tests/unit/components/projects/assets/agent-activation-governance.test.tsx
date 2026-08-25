@@ -3,10 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { AgentBuilderBlueprintReview } from "@/components/projects/agents/agent-builder-blueprint-review";
 import { AgentInstructionWorkspace } from "@/components/projects/assets/agent-instructions-workbench";
-import {
-  projectAgentVersionCanActivate,
-  projectAssetCanDelete,
-} from "@/components/projects/assets/project-asset-view-model";
+import { projectAssetCanDelete } from "@/components/projects/assets/project-asset-view-model";
 import { I18nProvider } from "@/core/i18n/context";
 
 const MANAGE_BINDINGS = "shared_assets.manage_bindings" as const;
@@ -18,78 +15,32 @@ function renderAgentUi(node: React.ReactNode) {
   );
 }
 
-describe("Agent author and activation governance", () => {
-  test("lets an Editor or Admin activate a project candidate", () => {
-    const candidate = { relation: "candidate" as const };
-    const editorItem = {
-      scope: "project" as const,
-      capabilities: [EDIT],
-      current_version_id: null,
-    };
-    const adminItem = {
-      scope: "project" as const,
-      capabilities: [EDIT, MANAGE_BINDINGS],
-      current_version_id: null,
-    };
-
-    expect(projectAgentVersionCanActivate(editorItem, [EDIT], candidate)).toBe(
-      true,
-    );
-    expect(
-      projectAgentVersionCanActivate(
-        adminItem,
-        [EDIT, MANAGE_BINDINGS],
-        candidate,
-      ),
-    ).toBe(true);
-    expect(
-      projectAgentVersionCanActivate(adminItem, [EDIT, MANAGE_BINDINGS], {
-        relation: "current",
-      }),
-    ).toBe(false);
-    expect(
-      projectAgentVersionCanActivate(
-        { ...adminItem, scope: "system" },
-        [EDIT, MANAGE_BINDINGS],
-        candidate,
-      ),
-    ).toBe(false);
-    expect(
-      projectAgentVersionCanActivate(
-        {
-          ...adminItem,
-        },
-        [EDIT, MANAGE_BINDINGS],
-        candidate,
-      ),
-    ).toBe(true);
-  });
-
-  test("lets an Editor delete an Agent asset regardless of Current Version", () => {
+describe("Agent Definition authoring governance", () => {
+  test("lets an Editor delete an Agent asset regardless of Definition state", () => {
     expect(
       projectAssetCanDelete("agents", {
         scope: "project",
         capabilities: [EDIT],
-        current_version_id: null,
+        definition_id: "11111111-1111-4111-8111-111111111111",
       }),
     ).toBe(true);
     expect(
       projectAssetCanDelete("agents", {
         scope: "project",
         capabilities: [EDIT],
-        current_version_id: "11111111-1111-4111-8111-111111111111",
+        definition_id: "11111111-1111-4111-8111-111111111111",
       }),
     ).toBe(true);
     expect(
       projectAssetCanDelete("agents", {
         scope: "project",
         capabilities: [EDIT, MANAGE_BINDINGS],
-        current_version_id: "11111111-1111-4111-8111-111111111111",
+        definition_id: "11111111-1111-4111-8111-111111111111",
       }),
     ).toBe(true);
   });
 
-  test("explains that Builder saves an inactive v1 Candidate Version", () => {
+  test("explains that Builder creates one suspended Agent Definition", () => {
     const html = renderAgentUi(
       <AgentBuilderBlueprintReview
         blueprint={{
@@ -128,12 +79,12 @@ describe("Agent author and activation governance", () => {
       />,
     );
 
-    expect(html).toContain("不可变的 v1 候选版本");
-    expect(html).toContain("激活后才会用于运行");
-    expect(html).not.toContain("创建后默认停用，需手动启用");
+    expect(html).toContain("初始 Agent Definition");
+    expect(html).toContain("创建后默认停用，需手动启用");
+    expect(html).not.toContain("候选版本");
   });
 
-  test("describes an instruction save as a Candidate Version without activation", () => {
+  test("describes an instruction save as an immediate Definition update", () => {
     const html = renderAgentUi(
       <AgentInstructionWorkspace
         draft={{
@@ -159,12 +110,12 @@ describe("Agent author and activation governance", () => {
       />,
     );
 
-    expect(html).toContain("保存后创建不可变的候选版本");
-    expect(html).toContain("激活后才会用于后续运行");
-    expect(html).not.toContain("保存后将用于后续运行");
+    expect(html).toContain("保存后立即用于后续新运行");
+    expect(html).toContain("保存会立即更新 Agent Definition");
+    expect(html).not.toContain("候选版本");
   });
 
-  test("describes System Agent instructions as an immutable read-only v1", () => {
+  test("describes System Agent instructions as one immutable Definition", () => {
     const html = renderAgentUi(
       <AgentInstructionWorkspace
         draft={{
@@ -191,40 +142,8 @@ describe("Agent author and activation governance", () => {
       />,
     );
 
-    expect(html).toContain("系统 Agent 的唯一 v1 指令文档，只读展示");
-    expect(html).not.toContain("保存后创建不可变的候选版本");
-  });
-
-  test("describes historical Agent instructions as view-only and not an editing baseline", () => {
-    const html = renderAgentUi(
-      <AgentInstructionWorkspace
-        draft={{
-          agents_instructions: "# AGENTS",
-          soul: "# SOUL",
-          identity: "# IDENTITY",
-          user_context: "# USER",
-        }}
-        selectedField="agents_instructions"
-        displayMode="preview"
-        editing={false}
-        canEdit={false}
-        historical
-        pending={false}
-        dirty={false}
-        errorMessage={null}
-        saveDisabledReason={null}
-        onSelect={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onChange={() => undefined}
-        onEdit={() => undefined}
-        onSave={() => undefined}
-        onDiscard={() => undefined}
-      />,
-    );
-
-    expect(html).toContain("历史版本中的不可变指令文档");
-    expect(html).toContain("不能修改或作为新版本的编辑基线");
-    expect(html).not.toContain("保存后创建不可变的候选版本");
+    expect(html).toContain("系统 Agent 的唯一不可变 Definition，只读展示");
+    expect(html).not.toContain("候选版本");
   });
 
   test("freezes instruction edits while a save is pending", () => {

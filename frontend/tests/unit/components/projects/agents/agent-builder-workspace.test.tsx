@@ -619,7 +619,8 @@ describe("Agent Builder workspace", () => {
     expect(html).not.toContain("显示名称与 slug 均使用此值");
     expect(html).not.toContain("查看并编辑四个固定 Markdown 文档");
     expect(html).not.toContain(">固定文件<");
-    expect(html).toContain("不可变的 v1 候选版本");
+    expect(html).toContain("创建初始 Agent Definition");
+    expect(html).toContain("创建后默认停用，需手动启用");
     const inputId = html.indexOf('id="agent-builder-commit-name"');
     const inputStart = html.lastIndexOf("<input", inputId);
     expect(inputStart).toBeGreaterThanOrEqual(0);

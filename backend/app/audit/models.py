@@ -527,6 +527,12 @@ _ACTION_CONTRACTS[AuditAction.PURGE_COMPLETED] = AuditActionContract(
             metadata_equals=(("resource_kind", "former_owner"),),
         ),
         _variant(
+            AuditScope.PROJECT,
+            "process",
+            processes=(AuditProcess.GATEWAY, AuditProcess.WORKER),
+            metadata_equals=(("resource_kind", "archived_skill"),),
+        ),
+        _variant(
             AuditScope.PLATFORM,
             "process",
             processes=(AuditProcess.WORKER,),
@@ -837,10 +843,9 @@ class AssetAuditMetadata(_AuditMetadata):
     asset_kind: Literal["agent", "skill", "mcp", "model", "channel"]
     operation: Literal[
         "agent.create",
-        "agent.version.create",
+        "agent.definition.update",
         "agent.instructions.update",
         "agent.capability_bindings.update",
-        "agent.version.activate",
         "agent.delete",
         "agent.enable",
         "agent.suspend",
@@ -885,6 +890,7 @@ class AssetAuditMetadata(_AuditMetadata):
         "channel.secret.clear",
     ]
     version_number: StrictInt | None = Field(default=None, ge=1)
+    definition_revision: StrictInt | None = Field(default=None, ge=1)
     version_id: uuid.UUID | None = None
     slot_id: uuid.UUID | None = None
     secret_name: StrictStr | None = Field(default=None, min_length=1, max_length=255)
@@ -904,17 +910,20 @@ class AssetAuditMetadata(_AuditMetadata):
         | None
     ) = None
     readiness: Literal["ready", "unready"] | None = None
+    affected_agent_count: StrictInt | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_asset_operation(self) -> Self:
         operation_domain = self.operation.partition(".")[0]
         if operation_domain in {"agent", "skill", "mcp", "model", "channel"} and operation_domain != self.asset_kind:
             raise ValueError("asset audit operation does not match the asset kind")
-        versioned_agent_operations = {
-            "agent.version.create",
+        if (self.operation == "skill.delete") != (self.affected_agent_count is not None):
+            raise ValueError("affected Agent count is required only for Skill deletion")
+        definition_agent_operations = {
+            "agent.create",
+            "agent.definition.update",
             "agent.instructions.update",
             "agent.capability_bindings.update",
-            "agent.version.activate",
         }
         versioned_skill_operations = {
             "skill.version.create",
@@ -928,15 +937,21 @@ class AssetAuditMetadata(_AuditMetadata):
             "skill.secret.invalidate",
         }
         if operation_domain == "agent":
-            expects_version = self.operation in versioned_agent_operations
-            if expects_version != (self.version_number is not None):
-                raise ValueError("Agent audit version coordinates are inconsistent")
+            if self.version_number is not None:
+                raise ValueError("Agent audit version number is not supported")
+            expects_definition_revision = self.operation in definition_agent_operations
+            if expects_definition_revision != (self.definition_revision is not None):
+                raise ValueError("Agent audit Definition revision is inconsistent")
         elif operation_domain == "skill":
             expects_version = self.operation in versioned_skill_operations
             if expects_version != (self.version_number is not None):
                 raise ValueError("Skill audit version coordinates are inconsistent")
+            if self.definition_revision is not None:
+                raise ValueError("Definition revision is only supported for Agent operations")
         elif operation_domain not in {"skill"} and self.version_number is not None:
             raise ValueError("asset audit version number is not supported for this operation")
+        elif self.definition_revision is not None:
+            raise ValueError("Definition revision is only supported for Agent operations")
         secret_operation = ".secret." in self.operation
         secret_coordinates = (
             self.version_id,
@@ -1169,7 +1184,13 @@ class JobAuditMetadata(_AuditMetadata):
 
 
 class PurgeAuditMetadata(_AuditMetadata):
-    resource_kind: Literal["project", "account", "file", "former_owner"]
+    resource_kind: Literal[
+        "project",
+        "account",
+        "file",
+        "former_owner",
+        "archived_skill",
+    ]
     purged_count: StrictInt = Field(ge=0)
 
 

@@ -4,10 +4,9 @@ from deerflow.persistence.shared_assets.agent_design_model import (
     AgentDesignSessionRow,
 )
 from deerflow.persistence.shared_assets.agent_model import (
+    AgentMcpRefRow,
     AgentRow,
-    AgentVersionMcpRefRow,
-    AgentVersionRow,
-    AgentVersionSkillRefRow,
+    AgentSkillRefRow,
 )
 from deerflow.persistence.shared_assets.binding_model import (
     AssetCatalogStateRow,
@@ -49,9 +48,8 @@ __all__ = [
     "AgentDesignActivityRow",
     "AgentDesignOperationRow",
     "AgentDesignSessionRow",
-    "AgentVersionMcpRefRow",
-    "AgentVersionRow",
-    "AgentVersionSkillRefRow",
+    "AgentMcpRefRow",
+    "AgentSkillRefRow",
     "AssetCatalogStateRow",
     "McpSecretSlotRow",
     "McpServerRow",

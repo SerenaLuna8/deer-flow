@@ -24,7 +24,7 @@ _RUNTIME_AGENT_KEY_PATTERN = re.compile(r"^(?:system|project)/[a-z0-9](?:[a-z0-9
 
 
 class RuntimeAgentProfile:
-    """One exact, namespaced Agent version admitted for subagent execution."""
+    """One exact, namespaced Agent Definition admitted for subagent execution."""
 
     __slots__ = (
         "_description",

@@ -25,7 +25,7 @@ class PrivateMcpManifest:
 @dataclass(frozen=True, slots=True, repr=False)
 class PrivateAgentManifest:
     agent_asset_id: uuid.UUID
-    agent_version_id: uuid.UUID
+    agent_definition_id: uuid.UUID
     checksum: str
     catalog_generation: int
     description: str
@@ -45,7 +45,7 @@ class PrivateAgentManifest:
         return (
             "PrivateAgentManifest("
             f"agent_asset_id={self.agent_asset_id!r}, "
-            f"agent_version_id={self.agent_version_id!r}, "
+            f"agent_definition_id={self.agent_definition_id!r}, "
             f"checksum={self.checksum!r}, "
             f"catalog_generation={self.catalog_generation!r}, "
             f"payload_schema_version={self.payload_schema_version!r}, "

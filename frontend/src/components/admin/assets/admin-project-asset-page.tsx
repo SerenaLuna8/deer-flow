@@ -12,6 +12,7 @@ import {
   AdminPageHeader,
   AdminSection,
 } from "@/components/admin/ui/admin-page";
+import { adminProjectAssetDetailLifecycleActions } from "@/components/projects/assets/project-asset-view-model";
 import {
   ProjectAssetCatalogView,
   ProjectAssetHistoryView,
@@ -23,6 +24,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   useAdminProjectAssets,
+  useAdminProjectAgentDefinition,
   useAdminProjectAssetVersions,
   useChangeAdminProjectAssetStatus,
   useCreateAdminProjectAssetVersion,
@@ -33,6 +35,7 @@ import {
   type ProjectAssetList,
 } from "@/core/shared-assets";
 
+import { AgentDefinitionSummary } from "./admin-asset-page";
 import { AdminProjectSystemBindingDialog } from "./admin-project-system-binding-dialog";
 
 type VersionedKind = Exclude<AssetListKind, "agents">;
@@ -56,7 +59,81 @@ export function filterAdminProjectDirectoryItems<
   );
 }
 
-function AssetHistory({
+function AdminProjectAgentDefinition({
+  accountId,
+  projectId,
+  item,
+}: {
+  accountId: string;
+  projectId: string;
+  item: ProjectAssetItem;
+}) {
+  const { t } = useI18n();
+  const definition = useAdminProjectAgentDefinition(
+    accountId,
+    projectId,
+    item.id,
+  );
+  const changeStatus = useChangeAdminProjectAssetStatus(
+    accountId,
+    projectId,
+    "agents",
+  );
+  return (
+    <div className="border-border/70 mt-4 space-y-3 border-t pt-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold">Agent Definition</h3>
+        <div className="flex flex-wrap gap-2">
+          {adminProjectAssetDetailLifecycleActions("agents", item).map(
+            (action) => (
+              <Button
+                key={action}
+                type="button"
+                size="sm"
+                variant="destructive"
+                disabled={changeStatus.isPending}
+                onClick={() =>
+                  changeStatus.mutate({
+                    assetId: item.id,
+                    action,
+                    input: { expected_revision: item.revision },
+                  })
+                }
+              >
+                {action === "enable"
+                  ? t.adminAssets.catalog.activate
+                  : t.adminAssets.catalog.disable}
+              </Button>
+            ),
+          )}
+        </div>
+      </div>
+      {definition.isLoading ? (
+        <Skeleton className="h-20 w-full" />
+      ) : definition.error ? (
+        <p role="alert" className="text-destructive text-sm">
+          {definition.error instanceof Error
+            ? definition.error.message
+            : t.adminAssets.errors.fallback}
+        </p>
+      ) : definition.data ? (
+        <AgentDefinitionSummary
+          definition={definition.data.definition}
+          scope="project"
+        />
+      ) : null}
+      {changeStatus.error ? (
+        <p role="alert" className="text-destructive text-sm">
+          {changeStatus.error instanceof Error
+            ? changeStatus.error.message
+            : t.adminAssets.errors.fallback}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function VersionedAssetHistory({
   accountId,
   projectId,
   kind,
@@ -64,7 +141,7 @@ function AssetHistory({
 }: {
   accountId: string;
   projectId: string;
-  kind: AssetListKind;
+  kind: VersionedKind;
   item: ProjectAssetItem;
 }) {
   const history = useAdminProjectAssetVersions(
@@ -110,6 +187,18 @@ function AssetHistory({
       }
     />
   );
+}
+
+function AssetHistory(props: {
+  accountId: string;
+  projectId: string;
+  kind: AssetListKind;
+  item: ProjectAssetItem;
+}) {
+  if (props.kind === "agents") {
+    return <AdminProjectAgentDefinition {...props} />;
+  }
+  return <VersionedAssetHistory {...props} kind={props.kind} />;
 }
 
 function ProjectAssets({
