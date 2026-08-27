@@ -856,11 +856,13 @@ def build_subagent_runtime_middlewares(
     *,
     app_config: AppConfig | None = None,
     model_name: str | None = None,
+    context_model: object | None = None,
     lazy_init: bool = True,
     deferred_setup: DeferredToolSetup | None = None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     agent_name: str | None = None,
     tool_call_control: AgentMiddleware | None = None,
+    context_compaction_observer: object | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -874,6 +876,46 @@ def build_subagent_runtime_middlewares(
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
     )
+
+    from deerflow.agents.middlewares.summarization_middleware import (
+        create_summarization_middleware,
+    )
+
+    if app_config.summarization.enabled and context_model is None:
+        raise ValueError(
+            "Sub-Agent summarization requires its exact context model",
+        )
+    summarization_middleware = create_summarization_middleware(
+        app_config=app_config,
+        context_model=context_model,
+        context_compaction_observer=context_compaction_observer,
+    )
+    if summarization_middleware is not None:
+        from deerflow.agents.middlewares.durable_context_middleware import (
+            DurableContextMiddleware,
+        )
+
+        middlewares.append(
+            _layer(
+                DurableContextMiddleware(
+                    skills_container_path=app_config.skills.container_path,
+                    skill_file_read_tool_names=(app_config.summarization.skill_file_read_tool_names),
+                ),
+                layer_id="subagent_durable_context",
+                phase=MiddlewarePhase.PRIVATE_CONTEXT,
+                slot=10,
+                why=("A compacted Sub-Agent summary must be injected into its next model request without entering the Lead context."),
+            )
+        )
+        middlewares.append(
+            _layer(
+                summarization_middleware,
+                layer_id="summarization",
+                phase=MiddlewarePhase.COMPACTION,
+                slot=10,
+                why=("Each Sub-Agent Task compacts its own ephemeral history from the frozen parent Run policy."),
+            )
+        )
 
     if model_name is None and app_config.models:
         model_name = app_config.models[0].name

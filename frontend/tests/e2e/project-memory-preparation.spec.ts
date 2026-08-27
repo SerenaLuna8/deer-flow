@@ -51,7 +51,10 @@ const thread = {
   agent_scope: "system",
   display_name: "Durable Dream preparation",
   status: "idle",
-  metadata: {},
+  metadata: {
+    agent_asset_id: AGENT_ID,
+    agent_scope: "system",
+  },
   version: 1,
   created_at: TIMESTAMP,
   updated_at: TIMESTAMP,
@@ -64,7 +67,7 @@ const systemAgent = {
   slug: "project-assistant",
   display_name: "Main",
   status: "active",
-  current_version_id: null,
+  definition_id: "30000000-0000-4000-8000-000000000003",
   revision: 1,
   created_by_user_id: ACCOUNT_ID,
   created_at: TIMESTAMP,
@@ -80,6 +83,46 @@ function json(route: Route, body: unknown, status = 200) {
     contentType: "application/json",
     body: JSON.stringify(body),
   });
+}
+
+function emptyContextProjection(threadId: string) {
+  return {
+    contract_version: 2,
+    thread_id: threadId,
+    subject: { kind: "lead_thread", thread_id: threadId, execution_id: null },
+    phase: "idle",
+    projection_seq: "0",
+    evidence_seq: "0",
+    context_window_generation: "60000000-0000-4000-8000-000000000001",
+    checkpoint_id: null,
+    projector_revision: "context-projector-v2",
+    model: {
+      identity_digest: "a".repeat(64),
+      context_window_tokens: 100_000,
+    },
+    basis: "empty",
+    coverage: "complete",
+    freshness: "current",
+    totals: {
+      projected_tokens: 0,
+      lower_bound_tokens: 0,
+      safety_upper_bound_tokens: 0,
+      context_window_tokens: 100_000,
+      remaining_tokens: 100_000,
+      progress_percent: 0,
+    },
+    lanes: [],
+    last_provider_observation: null,
+    compaction: {
+      enabled: true,
+      threshold_tokens: 80_000,
+      reached: false,
+      authority: "idle_history",
+      blocked_reason: null,
+    },
+    notices: [],
+    as_of: TIMESTAMP,
+  };
 }
 
 function queuedPreparation(jobId: string): MemoryDreamPreparationStatus {
@@ -236,16 +279,13 @@ async function mockProjectChatWithDreamPreparation(page: Page) {
       path === `${privateWorkBase}/threads/${THREAD_ID}/context-usage` &&
       method === "GET"
     ) {
-      return json(route, {
-        thread_id: THREAD_ID,
-        enabled: true,
-        estimated_tokens: 0,
-        message_count: 0,
-        summary_present: false,
-        context_window_tokens: 100_000,
-        triggers: [],
-        primary_trigger: null,
-      });
+      return json(route, emptyContextProjection(THREAD_ID));
+    }
+    if (
+      path === `${privateWorkBase}/threads/${THREAD_ID}/context-usage/stream` &&
+      method === "GET"
+    ) {
+      return route.fulfill({ status: 204 });
     }
     if (
       path ===

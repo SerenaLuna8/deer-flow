@@ -111,6 +111,7 @@ def test_every_durable_error_terminal_is_nonretryable() -> None:
 
     assert typed_result.public_error_code == "MODEL_OUTPUT_LIMIT"
     assert typed_result.retryable is False
+    assert typed_result.durable_terminal is True
     assert legacy_result.public_error_code == "AGENT_EXECUTION_FAILED"
     assert legacy_result.retryable is False
     assert current_upload_result.public_error_code == "CURRENT_UPLOAD_UNAVAILABLE"
@@ -138,7 +139,8 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
         "LOOP_FINALIZATION_FAILED",
         "PROVIDER_REQUEST_USAGE_UNSUPPORTED",
         "PROVIDER_REQUEST_PROFILE_DRIFT",
-        "PROVIDER_REQUEST_CAPACITY_EXCEEDED",
+        "CONTEXT_CAPACITY_EXCEEDED",
+        "CONTEXT_PROVIDER_CALL_AMBIGUOUS",
         "SIDE_EFFECT_STATE_UNKNOWN",
     }
     assert StreamFrame.end(
@@ -199,6 +201,7 @@ def test_executor_outcome_mapping_is_nonretryable_for_output_limit() -> None:
     assert result.public_error_code == "MODEL_OUTPUT_LIMIT"
     assert result.retryable is False
     assert result.attempt_usage == _usage()
+    assert result.durable_terminal is True
 
 
 def test_executor_generic_durable_terminal_is_nonretryable() -> None:
@@ -243,6 +246,18 @@ def test_executor_provider_terminal_is_typed_and_nonretryable() -> None:
     assert result.public_error_code == "LLM_PROVIDER_UNAVAILABLE"
     assert result.retryable is False
     assert result.attempt_usage == _usage()
+
+
+def test_context_provider_ambiguity_is_typed_and_nonretryable() -> None:
+    result = RunAgentPrivateExecutor._terminal_failure_result(
+        "CONTEXT_PROVIDER_CALL_AMBIGUOUS",
+        attempt_usage=_usage(),
+    )
+
+    assert result.public_error_code == "CONTEXT_PROVIDER_CALL_AMBIGUOUS"
+    assert result.retryable is False
+    assert result.attempt_usage == _usage()
+    assert result.durable_terminal is True
 
 
 def test_unknown_retry_safety_preserves_reviewed_nonretryable_terminal_codes() -> None:
@@ -293,6 +308,22 @@ def test_unknown_retry_safety_preserves_reviewed_nonretryable_terminal_codes() -
             retryable=False,
         )
         == "LLM_PROVIDER_UNAVAILABLE"
+    )
+    assert (
+        _dead_error_code_for_failure(
+            retry_safety="unknown",
+            public_error_code="CONTEXT_CAPACITY_EXCEEDED",
+            retryable=False,
+        )
+        == "CONTEXT_CAPACITY_EXCEEDED"
+    )
+    assert (
+        _dead_error_code_for_failure(
+            retry_safety="unknown",
+            public_error_code="CONTEXT_PROVIDER_CALL_AMBIGUOUS",
+            retryable=False,
+        )
+        == "CONTEXT_PROVIDER_CALL_AMBIGUOUS"
     )
     assert (
         _dead_error_code_for_failure(

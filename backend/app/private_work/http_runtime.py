@@ -5,7 +5,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Request
 
@@ -54,6 +54,7 @@ async def start_private_run(
     run_id: str | None = None,
     server_context: PrivateRunAdmissionServerContext | Mapping[str, object] | None = None,
     admission_service: PrivateRunAdmissionService | None = None,
+    context_rebase_reason: Literal["regeneration", "message_edit"] | None = None,
 ) -> RunRecord:
     """Persist a project-private Run and durable job for Worker execution."""
 
@@ -132,15 +133,18 @@ async def start_private_run(
         trusted_admission_context = replace(
             server_context,
             origin_trace_id=origin_trace_id,
+            context_rebase_reason=context_rebase_reason,
         )
     elif isinstance(server_context, Mapping) and server_context.get("non_interactive") is True:
         trusted_admission_context = PrivateRunAdmissionServerContext(
             non_interactive=True,
             origin_trace_id=origin_trace_id,
+            context_rebase_reason=context_rebase_reason,
         )
     else:
         trusted_admission_context = PrivateRunAdmissionServerContext(
             origin_trace_id=origin_trace_id,
+            context_rebase_reason=context_rebase_reason,
         )
     admitted = await admission_service.admit(
         context,

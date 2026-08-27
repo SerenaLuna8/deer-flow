@@ -5,6 +5,8 @@ import {
   advanceProjectStreamCursorState,
   clearProjectReconnectStorage,
   clearProjectThreadRuntimeState,
+  CONTEXT_CAPACITY_EXCEEDED,
+  CONTEXT_PROVIDER_CALL_AMBIGUOUS,
   disposeProjectAPIClient,
   emptyProjectStreamCursorState,
   getProjectAPIClient,
@@ -1062,6 +1064,30 @@ describe("private stream reconnect", () => {
         message: SIDE_EFFECT_STATE_UNKNOWN,
       },
     });
+  });
+
+  test("preserves both terminal Context authority failures", () => {
+    for (const failureCode of [
+      CONTEXT_CAPACITY_EXCEEDED,
+      CONTEXT_PROVIDER_CALL_AMBIGUOUS,
+    ] as const) {
+      const terminal = {
+        id: "9",
+        event: "end",
+        data: { status: "error", error_code: failureCode },
+      };
+
+      expect(projectStreamFailureName(terminal)).toBe(failureCode);
+      expect(projectStreamFrameForUI(terminal)).toEqual({
+        id: "9",
+        event: "custom",
+        data: {
+          type: "project_run_terminal_failure",
+          error: failureCode,
+          message: failureCode,
+        },
+      });
+    }
   });
 
   test("preserves the stable output-delivery failure until the durable terminal", () => {

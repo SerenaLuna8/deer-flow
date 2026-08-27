@@ -155,6 +155,13 @@ def _without_recovered_llm_failure_receipts(value: Any) -> Any:
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
 
+    # Run Events are durable execution facts, not optional telemetry.  In
+    # particular, ``on_llm_end`` awaits persistence of a completed Lead
+    # Provider response before execution can advance.  LangChain otherwise
+    # logs and suppresses callback failures, which would let cancellation
+    # revoke the lease and silently erase that completed response.
+    raise_error = True
+
     def __init__(
         self,
         run_id: str,
@@ -295,7 +302,7 @@ class RunJournal(BaseCallbackHandler):
         self._persist_recovered_llm_failures()
         self._reconcile_final_token_budget_message(outputs)
         self._reconcile_final_tool_messages(outputs)
-        terminal_status = "error" if self._had_llm_error_fallback or (self._semantic_stop_recorder is not None and self._semantic_stop_recorder.reason == "loop_capped") else "success"
+        terminal_status = "error" if self._had_llm_error_fallback or (self._semantic_stop_recorder is not None and self._semantic_stop_recorder.reason is not None) else "success"
         self._put(
             event_type="run.end",
             category="outputs",
@@ -425,7 +432,7 @@ class RunJournal(BaseCallbackHandler):
         if has_visible_content and window.started_at is not None and window.ended_at is None:
             window.ended_at = observed_at
 
-    def on_llm_end(
+    async def on_llm_end(
         self,
         response: Any,
         *,
@@ -554,6 +561,14 @@ class RunJournal(BaseCallbackHandler):
 
         if messages:
             self._counted_message_llm_run_ids.add(str(run_id))
+            if caller == "lead_agent":
+                # A completed Provider response is already user-visible and is
+                # independent from whether the Graph later commits or rolls
+                # back that message. Persist it while the execution lease can
+                # still authorize Run Event writes: a later owner cancellation
+                # intentionally revokes new execution writes and must not erase
+                # the response that completed before the cancellation.
+                await self.flush()
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         rid = str(run_id)

@@ -28,6 +28,7 @@ from deerflow.error_codes import (
     CURRENT_UPLOAD_FAILURE_DETAIL,
     PublicRunError,
 )
+from deerflow.models.provider_outcome import ProviderNoResponseProvenError
 from deerflow.public_error_codes import (
     llm_error_code_for_reason,
     normalize_llm_error_reason,
@@ -269,6 +270,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def _classify_error(self, exc: BaseException) -> tuple[bool, str]:
         status_code = _extract_status_code(exc)
         exception_names = _exception_type_names(exc)
+
+        # The innermost Provider boundary emits this marker only after its
+        # adapter has proved that no response could have been produced.  The
+        # outer LLM retry layer may therefore start a fresh, independently
+        # identified Provider call.  Ordinary transport exceptions retain
+        # their ambiguity and never reach this marker path.
+        if isinstance(exc, ProviderNoResponseProvenError):
+            return True, "transient"
 
         # Middleware that runs before the provider call can fail locally. Its
         # bounded error text must never be interpreted as a provider response

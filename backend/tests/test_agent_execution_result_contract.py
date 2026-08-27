@@ -14,6 +14,25 @@ def test_success_may_carry_exact_suspended_approval_anchor() -> None:
     assert result.suspended_approval_id == "approval-current-run"
 
 
+def test_only_failed_result_may_carry_durable_terminal_receipt() -> None:
+    result = AgentExecutionResult.failed(
+        "MODEL_OUTPUT_LIMIT",
+        retryable=False,
+        durable_terminal=True,
+    )
+
+    assert result.durable_terminal is True
+
+    with pytest.raises(
+        ValueError,
+        match="only failed execution may carry a durable terminal",
+    ):
+        AgentExecutionResult(
+            status="succeeded",
+            durable_terminal=True,
+        )
+
+
 @pytest.mark.parametrize("status", ["cancelled", "failed"])
 def test_non_success_cannot_carry_suspended_approval_anchor(
     status: str,

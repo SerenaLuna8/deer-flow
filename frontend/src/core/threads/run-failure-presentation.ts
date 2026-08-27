@@ -1,5 +1,7 @@
 import type { Translations } from "@/core/i18n/locales/types";
 import {
+  CONTEXT_CAPACITY_EXCEEDED,
+  CONTEXT_PROVIDER_CALL_AMBIGUOUS,
   CURRENT_UPLOAD_UNAVAILABLE,
   LLM_AUTHENTICATION_FAILED,
   LLM_CIRCUIT_OPEN,
@@ -97,6 +99,16 @@ export function resolveRunFailureCopy(
       return {
         title: conversation.runPolicyStaleTitle,
         description: conversation.runPolicyStaleDescription,
+      };
+    case CONTEXT_CAPACITY_EXCEEDED:
+      return {
+        title: conversation.contextCapacityExceededTitle,
+        description: conversation.contextCapacityExceededDescription,
+      };
+    case CONTEXT_PROVIDER_CALL_AMBIGUOUS:
+      return {
+        title: conversation.contextProviderCallAmbiguousTitle,
+        description: conversation.contextProviderCallAmbiguousDescription,
       };
     case TOOL_CALL_CONTROL_STATE_INVALID:
       return {

@@ -277,6 +277,52 @@ class OutputLimitRecoveryMiddleware(AgentMiddleware[OutputLimitRecoveryState]):
             model_settings={},
         )
 
+    def _budget_hard_stopped_for_request(
+        self,
+        request: ModelRequest,
+        run_id: str,
+    ) -> bool:
+        hard_stop = (request.state or {}).get(
+            OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY,
+        )
+        if isinstance(hard_stop, Mapping) and hard_stop.get("run_id") == run_id:
+            return True
+        return self._budget_hard_stopped is not None and self._budget_hard_stopped(
+            run_id,
+        )
+
+    def _record_terminal_output_limit(
+        self,
+        request: ModelRequest,
+        facts: _RecoveryFacts,
+        *,
+        recovery: bool,
+        run_id: str,
+    ) -> None:
+        if self._budget_hard_stopped_for_request(request, run_id):
+            return
+        if recovery:
+            terminal = facts["limit_hit"] or not facts["safe"] or not facts["visible"]
+        else:
+            terminal = facts["limit_hit"] and not facts["safe"]
+        if not terminal:
+            return
+        # This middleware is imported by runtime.serialization while the
+        # deerflow.runtime package is still initializing. Resolve the
+        # server-owned context contract lazily to avoid a package cycle.
+        from deerflow.runtime.context_keys import RuntimeContextKeys
+        from deerflow.runtime.runs.execution_contracts import (
+            RunSemanticStopRecorder,
+        )
+
+        context = getattr(request.runtime, "context", None)
+        recorder = context.get(RuntimeContextKeys.RUN_SEMANTIC_STOP_RECORDER) if isinstance(context, Mapping) else None
+        if isinstance(recorder, RunSemanticStopRecorder):
+            # The model handler has returned at this point. RunJournal's async
+            # on_llm_end durable barrier therefore completed before this
+            # receipt becomes visible to cancellation arbitration.
+            recorder.record("model_output_limit")
+
     def _wrap_result(
         self,
         request: ModelRequest,
@@ -290,6 +336,12 @@ class OutputLimitRecoveryMiddleware(AgentMiddleware[OutputLimitRecoveryState]):
             request,
             response,
             phase="recovery_observed" if recovery else "initial_observed",
+            run_id=run_id,
+        )
+        self._record_terminal_output_limit(
+            request,
+            facts,
+            recovery=recovery,
             run_id=run_id,
         )
         if recovery or facts["limit_hit"]:

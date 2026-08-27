@@ -4,7 +4,11 @@ import type { InfiniteData, QueryClient } from "@tanstack/react-query";
 import { privateWorkRoot } from "../private-work/query-keys";
 import type { ProjectClientScope } from "../private-work/types";
 
-import { threadContextUsageQueryKey } from "./context-usage";
+import {
+  disposeThreadContextProjection,
+  refreshThreadContextProjection,
+  threadContextUsageQueryKey,
+} from "./context-usage";
 import { INFINITE_THREADS_QUERY_KEY_PREFIX } from "./thread-lists";
 import { scopedThreadQueryKey } from "./thread-query-key";
 import { threadTokenUsageQueryKey } from "./token-usage";
@@ -50,6 +54,7 @@ export async function removeDeletedThreadCaches(
   threadId: string,
   scope: ProjectClientScope,
 ): Promise<void> {
+  disposeThreadContextProjection(scope, threadId);
   const predicate = (query: { queryKey: readonly unknown[] }) =>
     isExactScopedThreadQuery(query.queryKey, scope, threadId);
   await queryClient.cancelQueries({ predicate });
@@ -168,6 +173,7 @@ export async function invalidateStartedThreadContextUsage(
   };
   await queryClient.cancelQueries(filters);
   await queryClient.invalidateQueries(filters);
+  refreshThreadContextProjection(scope, threadId);
 }
 
 export function invalidateStoppedThreadCaches(

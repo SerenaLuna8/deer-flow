@@ -2520,6 +2520,13 @@ export const enUS: Translations = {
     runPolicyStaleTitle: "Run policy unavailable",
     runPolicyStaleDescription:
       "The Run Snapshot's frozen runtime policy could not be materialized, so execution failed closed. Validate the active policy and start a new Run.",
+    contextCapacityExceededTitle: "Context exceeds the model capacity",
+    contextCapacityExceededDescription:
+      "The frozen request still could not fit after automatic compaction. Shorten the conversation, reduce fixed instructions or tools, or select a model with a larger context window before starting a new Run.",
+    contextProviderCallAmbiguousTitle:
+      "Provider call outcome could not be confirmed",
+    contextProviderCallAmbiguousDescription:
+      "The Provider may already have processed this request, so it must not be replayed automatically. Review the conversation state before starting distinct follow-up work.",
     toolCallControlStateInvalidTitle: "Tool-call control state invalid",
     toolCallControlStateInvalidDescription:
       "The checkpointed tool-call control state did not match the frozen policy or execution scope, so the Run failed closed.",
@@ -2811,20 +2818,40 @@ export const enUS: Translations = {
   },
 
   contextWindow: {
-    title: "Context window",
+    title: "Context Usage",
+    close: "Close context usage",
+    full: (percent: string) => `${percent} Full`,
     usage: "Estimated context usage",
     loading: "Measuring the current context…",
     unavailable: "Current context usage is unavailable.",
     disabled: "Off",
     progressLabel: (percent: string) => `Estimated context usage ${percent}`,
     usageWithoutCapacity: (estimated: string) =>
-      `Estimated context ${estimated}; window limit is not configured`,
+      `Approximately ${estimated} context; window capacity is unknown`,
+    lowerBoundUsage: (lowerBound: string) => `At least ${lowerBound} context`,
     capacityUnavailable:
       "The model has no configured context window limit, so usage cannot be calculated.",
+    capacityUnknown: "Model context capacity is unknown",
     contextWindowLimit: "Total context",
     notConfigured: "Not configured",
     safetyBound: "Safe occupancy bound",
-    previousProviderInput: "Previous provider measurement (input)",
+    previousProviderInput: "Last Provider input",
+    compactionThreshold: "Automatic compaction line",
+    stale: "Data is stale",
+    unmeasuredVisuals: (count: number) =>
+      `${count} additional image${count === 1 ? " is" : "s are"} not yet measured`,
+    lanes: {
+      system_prompt: "System prompt",
+      agent_instructions: "Agent instructions",
+      tool_definitions: "Tool definitions",
+      skills: "Skills",
+      mcp_dynamic_tools: "MCP & dynamic tools",
+      subagent_definitions: "Sub-Agent definitions",
+      summarized_conversation: "Summarized conversation",
+      conversation: "Conversation",
+      visual_media: "Images & media",
+      provider_overhead: "Provider request overhead",
+    },
     compressionConditions: "Automatic compression conditions",
     noCompressionConditions: "No automatic compression conditions configured.",
     current: "Current condition value",

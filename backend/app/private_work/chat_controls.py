@@ -7,7 +7,7 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -31,25 +31,28 @@ from app.private_work.checkpoint_state import (
 )
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext, require_issued_private_work_context
+from app.private_work.context_projection import (
+    ContextProjectionTransaction,
+    align_checkpoint_snapshot_to_rebase,
+    empty_lead_context_projection,
+    rebuild_context_projection_head,
+)
+from app.private_work.context_replacement import (
+    bootstrap_checkpoint_projection_snapshot,
+    compaction_checkpoint_receipt,
+    deterministic_generation_id,
+    idle_checkpoint_projection_source,
+    idle_compaction_projection_source,
+)
 from app.private_work.errors import (
     PrivateWorkAssetStale,
     PrivateWorkCompactionDisabled,
     PrivateWorkConflict,
-    PrivateWorkContextUsageUnsupported,
     PrivateWorkError,
     PrivateWorkInvalid,
     PrivateWorkNotFound,
-    PrivateWorkRunExecutionProfileUnsupported,
-    PrivateWorkRunModelSelectionLocked,
-    PrivateWorkRunModelUnavailable,
     PrivateWorkThreadBusy,
     PrivateWorkUnavailable,
-)
-from app.private_work.execution_profile import (
-    RequestedRunExecutionProfile,
-    RunExecutionProfileUnsupported,
-    RunModelSelectionLocked,
-    selected_run_model_ref,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import PrivateRunRecord, PrivateRunRepository
@@ -60,9 +63,6 @@ from app.private_work.snapshot_repository import (
 from app.private_work.thread_repository import PrivateThreadRecord, PrivateThreadRepository
 from app.private_work.thread_service import PrivateThreadService
 from app.projects.capabilities import Capability
-from app.reliability.run_execution.tool_call_control_policy import (
-    resolve_run_tool_call_control_policy,
-)
 from app.shared_assets.errors import (
     AssetForbidden,
     AssetResolutionUnavailable,
@@ -73,14 +73,8 @@ from app.shared_assets.models import (
     AssetKind,
     AssetSelection,
     ResolvedAgentSnapshot,
-    ResolvedRunAssetFact,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
-from app.system_runtime_settings import (
-    SystemRuntimePolicyMaterializer,
-    project_memory_compaction_app_config_policy,
-)
-from app.system_runtime_settings.errors import SystemRuntimePolicyUnavailable
 from app.system_settings import (
     SystemModelMaterializationUnavailable,
     SystemModelMaterializer,
@@ -88,34 +82,40 @@ from app.system_settings import (
 from app.system_settings.execution_payload import model_execution_provenance
 from app.system_settings.model_refs import ConfiguredModelRefResolver
 from deerflow.agents.memory.snip import SnipArchiveContext
-from deerflow.agents.middlewares.provider_request_usage import (
-    ProviderRequestUsageUnsupported,
-    provider_request_closure_identity,
-    provider_request_runtime_policy_compatibility_identity,
-    provider_request_runtime_policy_identity,
-)
 from deerflow.agents.provider_request_contract import (
-    PROVIDER_REQUEST_PROFILE_STATE_KEY,
+    CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
+    CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
 )
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.model_config import ModelConfig
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.models import ModelRuntimeProfile
+from deerflow.persistence.context_evidence import (
+    ContextEvidenceRepository,
+    ContextEvidenceScope,
+    ContextProjectionHeadRecord,
+    ContextSubjectRef,
+)
 from deerflow.persistence.private_work.memory_document_repository import (
     DEFAULT_MEMORY_NAMESPACE,
 )
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.system_settings import RunModelConfigSnapshotRow
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
-    ContextUsageUnsupported,
     ThreadCompactionResult,
-    ThreadContextUsage,
     commit_thread_compaction,
     has_complete_turns,
-    measure_thread_context_usage,
     prepare_thread_compaction,
+)
+from deerflow.runtime.context_evidence import (
+    CompactionAuthority,
+    CompactionCommittedV1,
+    CompactionProjection,
+    ContextCheckpointProjectionSnapshot,
+    ContextCompactionCheckpointReceipt,
+    ContextProjectionHead,
+    ContextWindowGeneration,
+    ProjectionPhase,
 )
 from deerflow.runtime.events.store import RunEventStore
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state
@@ -129,45 +129,29 @@ _HISTORY_SCAN_LIMIT = 200
 _SUGGESTION_MESSAGE_LIMIT = 6
 _SUGGESTION_MESSAGE_CHARS = 4000
 _SUGGESTION_TOTAL_CHARS = 12000
-_CONTEXT_USAGE_AUTHORITY_RETRY_LIMIT = 3
+_TERMINAL_PRIVATE_RUN_STATUSES = frozenset(
+    {"success", "error", "timeout", "interrupted"},
+)
 
 
-def _context_usage_active_run_predicate():
-    """Keep Gauge marker and full-read Run authority exactly aligned."""
+async def _context_projection_head_requires_repair(
+    session: AsyncSession,
+    context: PrivateWorkContext,
+    record: ContextProjectionHeadRecord,
+) -> bool:
+    """Detect a Head whose active Run can no longer advance it."""
 
-    return or_(
-        RunRow.status.in_(("pending", "running")),
-        RunRow.finalization_status == "finalizing",
+    active_run_id = record.active_run_id
+    if record.phase != "active":
+        return active_run_id is not None
+    if active_run_id is None:
+        return True
+    run = await PrivateRunRepository(session).get(
+        scope=context.resource_scope,
+        run_id=active_run_id,
+        lock=False,
     )
-
-
-@dataclass(frozen=True, slots=True)
-class ContextUsageAuthorityMarker:
-    """Cheap cache identity for the exact Thread's Gauge authority."""
-
-    cache_marker: str
-
-
-@dataclass(frozen=True, slots=True)
-class _ContextUsageAuthority:
-    """One authoritative source for the Gauge's Lead model and runtime policy."""
-
-    run_id: str | None
-    lead_model_ref: str
-    closure_identity: str | None = None
-    profile_authority_identity: str | None = None
-    profile_closure_identity: str | None = None
-    asset_facts: tuple[ResolvedRunAssetFact, ...] | None = None
-    profile_asset_facts: tuple[ResolvedRunAssetFact, ...] | None = None
-    profile_run_kwargs: Mapping[str, object] | None = None
-    profile_proof_attempted: bool = False
-    profile_runtime_policy_identity: str | None = None
-    profile_runtime_policy_compatibility_identity: str | None = None
-    lead_model_payload_checksum: str | None = None
-    profile_lead_model_payload_checksum: str | None = None
-    resolved_lead_model_name: str | None = None
-    profile_lead_model_name: str | None = None
-    profile_title_model_name: str | None = None
+    return run is None or run.status in _TERMINAL_PRIVATE_RUN_STATUSES
 
 
 class ProjectChatControlService:
@@ -183,7 +167,6 @@ class ProjectChatControlService:
         resolver: ProjectAssetResolver | None = None,
         endpoint_policy: McpEndpointPolicy | None = None,
         model_materializer: SystemModelMaterializer | None = None,
-        runtime_policy_materializer: SystemRuntimePolicyMaterializer | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._project_scoped_checkpointer = project_scoped_checkpointer
@@ -196,7 +179,6 @@ class ProjectChatControlService:
         )
         self._revalidator = PrivateWorkRevalidator()
         self._model_materializer = model_materializer
-        self._runtime_policy_materializer = runtime_policy_materializer
 
     async def get_goal(
         self,
@@ -392,10 +374,43 @@ class ProjectChatControlService:
                     raise PrivateWorkNotFound(context.request_id)
                 if snapshot_checkpoint_id(current) != prepared.source_checkpoint_id:
                     raise PrivateWorkConflict(context.request_id)
-                return await commit_thread_compaction(
-                    locked_state,
-                    prepared,
+                source_projection_snapshot = self._checkpoint_projection_snapshot(
+                    current,
+                    request_id=context.request_id,
+                    thread_id=thread_id,
+                    checkpoint_id=prepared.source_checkpoint_id,
+                    app_config=runtime_config,
                 )
+                result_values = self._compaction_result_values(
+                    current,
+                    prepared,
+                    request_id=context.request_id,
+                )
+                receipt = compaction_checkpoint_receipt(
+                    source_projection_snapshot,
+                    source_checkpoint_id=prepared.source_checkpoint_id,
+                    checkpoint_values=result_values,
+                    result_generation=ContextWindowGeneration(
+                        generation_id=uuid.uuid4(),
+                    ),
+                )
+                prepared_with_receipt = replace(
+                    prepared,
+                    update_values={
+                        **dict(prepared.update_values or {}),
+                        CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY: (receipt.projection_snapshot.to_safe_mapping()),
+                        CONTEXT_COMPACTION_RECEIPT_STATE_KEY: (receipt.to_safe_mapping()),
+                    },
+                )
+                result = await commit_thread_compaction(
+                    locked_state,
+                    prepared_with_receipt,
+                )
+                if result.checkpoint_id is None:
+                    raise ContextCompactionFailed(
+                        "Committed compaction has no checkpoint identity.",
+                    )
+                return result
         except AuthorizationRevoked:
             raise authorization_boundary.private_error() from None
         except ContextCompactionDisabled:
@@ -415,120 +430,349 @@ class ProjectChatControlService:
             )
             raise PrivateWorkUnavailable(context.request_id) from None
 
-    async def context_usage(
+    @staticmethod
+    def _checkpoint_projection_snapshot(
+        snapshot: object,
+        *,
+        request_id: str,
+        thread_id: str,
+        checkpoint_id: str,
+        app_config: AppConfig,
+    ) -> ContextCheckpointProjectionSnapshot:
+        values = getattr(snapshot, "values", None)
+        if not isinstance(values, Mapping):
+            raise PrivateWorkUnavailable(request_id)
+        raw = values.get(CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY)
+        if raw is None:
+            enabled = app_config.summarization.enabled
+            return bootstrap_checkpoint_projection_snapshot(
+                generation=ContextWindowGeneration(
+                    generation_id=deterministic_generation_id(
+                        thread_id=thread_id,
+                        operation="checkpoint-bootstrap",
+                        source_checkpoint_id=checkpoint_id,
+                        result_checkpoint_id=checkpoint_id,
+                    ),
+                ),
+                checkpoint_values=values,
+                compaction=CompactionProjection(
+                    enabled=enabled,
+                    reached=False,
+                    authority=(CompactionAuthority.IDLE_HISTORY if enabled else None),
+                ),
+            )
+        if not isinstance(raw, Mapping):
+            raise PrivateWorkUnavailable(request_id)
+        try:
+            return ContextCheckpointProjectionSnapshot.from_safe_mapping(raw)
+        except (TypeError, ValueError):
+            raise PrivateWorkUnavailable(request_id) from None
+
+    @staticmethod
+    def _compaction_result_values(
+        current: object,
+        prepared: object,
+        *,
+        request_id: str,
+    ) -> dict[str, object]:
+        current_values = getattr(current, "values", None)
+        update_values = getattr(prepared, "update_values", None)
+        if not isinstance(current_values, Mapping) or not isinstance(
+            update_values,
+            Mapping,
+        ):
+            raise PrivateWorkUnavailable(request_id)
+        messages_update = update_values.get("messages")
+        messages = getattr(messages_update, "value", messages_update)
+        if not isinstance(messages, list):
+            raise PrivateWorkUnavailable(request_id)
+        return {
+            "messages": messages,
+            "summary_text": update_values.get("summary_text"),
+        }
+
+    async def context_projection(
         self,
         context: PrivateWorkContext,
         thread_id: str,
         *,
-        app_config: AppConfig,
-        selected_model_name: str | None = None,
-    ) -> ThreadContextUsage:
-        """Measure the authorized materialized Thread head without writing it."""
+        subject_kind: str,
+        execution_id: str | None,
+    ) -> ContextProjectionHead:
+        """Read one safe V2 Projection without consulting mutable runtime policy."""
 
         context = require_issued_private_work_context(context)
+        if subject_kind == "lead_thread":
+            if execution_id is not None:
+                raise PrivateWorkInvalid(context.request_id)
+            subject = ContextSubjectRef.lead_thread(thread_id)
+        elif subject_kind == "subagent_task":
+            if execution_id is None:
+                raise PrivateWorkInvalid(context.request_id)
+            try:
+                subject = ContextSubjectRef.subagent_task(execution_id)
+            except ValueError:
+                raise PrivateWorkInvalid(context.request_id) from None
+        else:
+            raise PrivateWorkInvalid(context.request_id)
+
         try:
-            authority = await self._resolve_context_usage_authority(
-                context,
+            scope = ContextEvidenceScope.from_resource(
+                context.resource_scope,
                 thread_id,
-                selected_model_name=selected_model_name,
             )
-            for _attempt in range(_CONTEXT_USAGE_AUTHORITY_RETRY_LIMIT):
-                (
-                    runtime_config,
-                    context_model_name,
-                    current_lead_model,
-                ) = await self._materialize_context_usage_config(
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
                     context,
-                    app_config,
-                    authority=authority,
-                    selected_model_name=selected_model_name,
+                    Capability.PRIVATE_WORK_READ_OWN,
+                    lock=False,
                 )
-                snapshot = await self._state(
-                    context,
-                    runtime_config,
-                    as_node="context_usage",
-                ).aget(checkpoint_config(thread_id))
-                if snapshot_checkpoint_id(snapshot) is None:
+                thread = await PrivateThreadRepository(session).get(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                    lock=False,
+                )
+                if thread is None:
                     raise PrivateWorkNotFound(context.request_id)
-                profile_authority_identity = None
-                if authority.run_id is None:
-                    values = getattr(snapshot, "values", None)
-                    profile = values.get(PROVIDER_REQUEST_PROFILE_STATE_KEY) if isinstance(values, Mapping) else None
-                    value = profile.get("authority_identity") if isinstance(profile, Mapping) else None
-                    if isinstance(value, str) and value:
-                        profile_authority_identity = value
-                current_authority = await self._resolve_context_usage_authority(
+                record = await ContextEvidenceRepository(session).read_head(
+                    scope,
+                    subject,
+                    lock=False,
+                )
+                if record is not None:
+                    try:
+                        projection = self._validate_context_projection(
+                            record.projection,
+                            thread_id=thread_id,
+                            subject=subject,
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        if not await _context_projection_head_requires_repair(
+                            session,
+                            context,
+                            record,
+                        ):
+                            return projection
+
+            # Missing or malformed Heads are derived state. Rebuild under the
+            # same independent read capability; do not consult mutable model,
+            # Agent, Skill, MCP, or runtime-policy configuration.
+            checkpoint_repair = (
+                await self._context_checkpoint_repair_snapshot(
                     context,
                     thread_id,
-                    selected_model_name=selected_model_name,
-                    profile_authority_identity=profile_authority_identity,
                 )
-                if self._same_context_usage_current_authority(
-                    current_authority,
-                    authority,
-                ):
-                    authority = current_authority
-                    idle_profile = None
-                    if authority.run_id is None:
-                        if (
-                            getattr(
-                                authority,
-                                "profile_authority_identity",
-                                None,
-                            )
-                            is not None
-                        ):
-                            authority = await self._prove_idle_provider_profile(
-                                context,
-                                authority=authority,
-                                runtime_config=runtime_config,
-                                current_lead_model=current_lead_model,
-                            )
-                        idle_profile = self._idle_provider_request_profile(
-                            snapshot,
-                            runtime_config=runtime_config,
-                            authority=authority,
+                if subject.kind == "lead_thread"
+                else None
+            )
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_READ_OWN,
+                    lock=True,
+                )
+                thread = await PrivateThreadRepository(session).get(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                    lock=True,
+                )
+                if thread is None:
+                    raise PrivateWorkNotFound(context.request_id)
+                repository = ContextEvidenceRepository(session)
+                current = await repository.read_head(
+                    scope,
+                    subject,
+                    lock=True,
+                )
+                repair_terminal_head = False
+                if current is not None:
+                    try:
+                        projection = self._validate_context_projection(
+                            current.projection,
+                            thread_id=thread_id,
+                            subject=subject,
                         )
-                    return measure_thread_context_usage(
-                        snapshot,
-                        app_config=runtime_config,
-                        context_model_name=context_model_name,
-                        provider_request_profile=idle_profile,
-                        expected_authority_identity=authority.run_id,
-                        require_provider_request_profile=True,
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        repair_terminal_head = await _context_projection_head_requires_repair(
+                            session,
+                            context,
+                            current,
+                        )
+                        if not repair_terminal_head:
+                            return projection
+                if checkpoint_repair is not None and checkpoint_repair[2] is not None:
+                    if current is not None:
+                        await repository.delete_head(scope, subject)
+                    checkpoint_id, _snapshot, receipt = checkpoint_repair
+                    assert receipt is not None
+                    if repair_terminal_head and receipt.phase.value == "active":
+                        receipt = receipt.model_copy(
+                            update={"phase": ProjectionPhase.IDLE},
+                        )
+                    source = idle_compaction_projection_source(
+                        receipt,
+                        thread_id=thread_id,
+                        result_checkpoint_id=checkpoint_id,
                     )
-                authority = current_authority
-            raise PrivateWorkUnavailable(context.request_id)
+                    projection = await ContextProjectionTransaction(
+                        repository,
+                    ).append_and_project(
+                        scope=scope,
+                        source=source,
+                        payloads=(
+                            CompactionCommittedV1(
+                                receipt_id=receipt.receipt_id,
+                                source_checkpoint_id=(receipt.source_checkpoint_id),
+                                result_checkpoint_id=checkpoint_id,
+                                source_generation=receipt.source_generation,
+                                result_generation=receipt.result_generation,
+                                source_tokens=receipt.source_tokens,
+                                result_tokens=receipt.result_tokens,
+                                summary_digest=receipt.summary_digest,
+                            ),
+                        ),
+                        origin_run_id=receipt.origin_run_id,
+                        active_run_id=(receipt.origin_run_id if receipt.phase.value == "active" else None),
+                    )
+                else:
+                    try:
+                        projection = await rebuild_context_projection_head(
+                            repository,
+                            scope=scope,
+                            subject=subject,
+                            discard_existing_head=current is not None,
+                        )
+                    except (LookupError, ValueError):
+                        if checkpoint_repair is None:
+                            if subject.kind != "lead_thread":
+                                raise
+                            if current is not None:
+                                await repository.delete_head(scope, subject)
+                            projection = empty_lead_context_projection(
+                                thread_id,
+                            )
+                            return self._validate_context_projection(
+                                projection.to_safe_mapping(),
+                                thread_id=thread_id,
+                                subject=subject,
+                            )
+                        checkpoint_id, snapshot, _receipt = checkpoint_repair
+                        if current is not None:
+                            await repository.delete_head(scope, subject)
+                        snapshot = await align_checkpoint_snapshot_to_rebase(
+                            repository,
+                            scope=scope,
+                            subject=subject,
+                            checkpoint_id=checkpoint_id,
+                            snapshot=snapshot,
+                        )
+                        projection = await ContextProjectionTransaction(
+                            repository,
+                        ).append_and_project(
+                            scope=scope,
+                            source=idle_checkpoint_projection_source(
+                                snapshot,
+                                thread_id=thread_id,
+                                checkpoint_id=checkpoint_id,
+                            ),
+                            payloads=(),
+                            origin_run_id=None,
+                            active_run_id=None,
+                        )
+                return self._validate_context_projection(
+                    projection.to_safe_mapping(),
+                    thread_id=thread_id,
+                    subject=subject,
+                )
         except PrivateWorkError:
             raise
-        except ContextUsageUnsupported:
-            raise PrivateWorkContextUsageUnsupported(context.request_id) from None
-        except (ContextCompactionFailed, ValueError):
-            raise PrivateWorkUnavailable(context.request_id) from None
+        except LookupError:
+            raise PrivateWorkNotFound(context.request_id) from None
         except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except (TypeError, ValueError):
             raise PrivateWorkUnavailable(context.request_id) from None
         except Exception:
             logger.exception(
-                "Project context usage measurement failed: request_id=%s",
+                "Project Context Projection read failed: request_id=%s",
                 context.request_id,
             )
             raise PrivateWorkUnavailable(context.request_id) from None
 
-    async def context_usage_authority_marker(
+    async def _context_checkpoint_repair_snapshot(
         self,
         context: PrivateWorkContext,
         thread_id: str,
-    ) -> ContextUsageAuthorityMarker:
-        """Project only Run identity; never materialize Gauge inputs."""
+    ) -> (
+        tuple[
+            str,
+            ContextCheckpointProjectionSnapshot,
+            ContextCompactionCheckpointReceipt | None,
+        ]
+        | None
+    ):
+        snapshot = await self._state(
+            context,
+            get_app_config(),
+            as_node="context_projection_repair",
+        ).aget(checkpoint_config(thread_id))
+        checkpoint_id = snapshot_checkpoint_id(snapshot)
+        values = getattr(snapshot, "values", None)
+        if checkpoint_id is None or not isinstance(values, Mapping):
+            return None
+        raw_projection = values.get(CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY)
+        if not isinstance(raw_projection, Mapping):
+            return None
+        projection = ContextCheckpointProjectionSnapshot.from_safe_mapping(
+            raw_projection,
+        )
+        raw_receipt = values.get(CONTEXT_COMPACTION_RECEIPT_STATE_KEY)
+        receipt = ContextCompactionCheckpointReceipt.from_safe_mapping(raw_receipt) if isinstance(raw_receipt, Mapping) else None
+        if receipt is not None and receipt.projection_snapshot != projection:
+            raise ValueError("Context checkpoint Projection and compaction receipt disagree")
+        return checkpoint_id, projection, receipt
+
+    @staticmethod
+    def _validate_context_projection(
+        value: Mapping[str, object],
+        *,
+        thread_id: str,
+        subject: ContextSubjectRef,
+    ) -> ContextProjectionHead:
+        projection = ContextProjectionHead.from_safe_mapping(value)
+        if projection.subject.thread_id != thread_id:
+            raise ValueError("Context Projection Thread scope is invalid")
+        if subject.kind == "lead_thread":
+            if projection.subject.execution_id is not None:
+                raise ValueError("Lead Context Projection identity is invalid")
+        elif projection.subject.execution_id != subject.subject_id:
+            raise ValueError("Sub-Agent Context Projection identity is invalid")
+        return projection
+
+    async def context_projection_updates(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+        *,
+        after_projection_seq: int,
+    ) -> tuple[ContextProjectionHead, ...]:
+        """Read current Subject Heads newer than one Thread-wide cursor."""
 
         context = require_issued_private_work_context(context)
+        if type(after_projection_seq) is not int or after_projection_seq < 0:
+            raise PrivateWorkInvalid(context.request_id)
         try:
             async with self._session_factory() as session, session.begin():
                 await self._revalidator.require(
                     session,
                     context,
-                    Capability.PRIVATE_WORK_CREATE,
-                    Capability.SHARED_ASSETS_EXECUTE,
+                    Capability.PRIVATE_WORK_READ_OWN,
                     lock=False,
                 )
                 thread = await PrivateThreadRepository(session).get(
@@ -538,489 +782,31 @@ class ProjectChatControlService:
                 )
                 if thread is None:
                     raise PrivateWorkNotFound(context.request_id)
-
-                private_run_scope = (
-                    RunRow.project_id == context.project_id,
-                    RunRow.owner_user_id == str(context.user_id),
-                    RunRow.thread_id == thread_id,
+                scope = ContextEvidenceScope.from_resource(
+                    context.resource_scope,
+                    thread_id,
                 )
-                active_run_id = (
-                    select(RunRow.run_id)
-                    .where(
-                        *private_run_scope,
-                        _context_usage_active_run_predicate(),
-                    )
-                    .order_by(RunRow.created_at.asc(), RunRow.run_id.asc())
-                    .limit(1)
-                    .scalar_subquery()
+                rows = await ContextEvidenceRepository(session).page_heads_after(
+                    scope,
+                    after_projection_seq=after_projection_seq,
+                    limit=100,
                 )
-                latest_run_id = (
-                    select(RunRow.run_id)
-                    .where(
-                        *private_run_scope,
-                        RunRow.status != "deleted",
-                    )
-                    .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
-                    .limit(1)
-                    .scalar_subquery()
-                )
-                active, latest = (
-                    await session.execute(
-                        select(
-                            active_run_id.label("active_run_id"),
-                            latest_run_id.label("latest_run_id"),
-                        )
-                    )
-                ).one()
-                if active is not None:
-                    if not isinstance(active, str) or not active:
-                        raise PrivateWorkUnavailable(context.request_id)
-                    return ContextUsageAuthorityMarker(
-                        cache_marker=f"active:{active}",
-                    )
-                if latest is not None and (not isinstance(latest, str) or not latest):
-                    raise PrivateWorkUnavailable(context.request_id)
-                return ContextUsageAuthorityMarker(
-                    cache_marker=f"idle:{latest or 'none'}",
-                )
+                projections = tuple(ContextProjectionHead.from_safe_mapping(row.projection) for row in rows)
+                if any(projection.thread_id != thread_id or int(projection.projection_seq) != row.projection_seq for projection, row in zip(projections, rows, strict=True)):
+                    raise ValueError("Context Projection replay scope is invalid")
+                return projections
         except PrivateWorkError:
             raise
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
-
-    @staticmethod
-    def _same_context_usage_current_authority(
-        left: _ContextUsageAuthority,
-        right: _ContextUsageAuthority,
-    ) -> bool:
-        """Compare the current request closure, excluding frozen proof fields."""
-
-        return (
-            left.run_id == right.run_id
-            and left.lead_model_ref == right.lead_model_ref
-            and getattr(left, "closure_identity", None) == getattr(right, "closure_identity", None)
-            and getattr(left, "asset_facts", None) == getattr(right, "asset_facts", None)
-        )
-
-    @staticmethod
-    def _idle_provider_request_profile(
-        snapshot: object,
-        *,
-        runtime_config: AppConfig,
-        authority: _ContextUsageAuthority,
-    ) -> Mapping[str, object]:
-        """Reuse the last confirmed profile for an authority-matched idle projection."""
-
-        values = getattr(snapshot, "values", None)
-        profile = values.get(PROVIDER_REQUEST_PROFILE_STATE_KEY) if isinstance(values, Mapping) else None
-        try:
-            policy_identity = provider_request_runtime_policy_identity(
-                runtime_config,
-            )
-            compatibility_identity = provider_request_runtime_policy_compatibility_identity(
-                runtime_config,
-            )
-        except ProviderRequestUsageUnsupported:
-            raise ContextUsageUnsupported("Idle Gauge runtime policy identity is unavailable.") from None
-        if not isinstance(profile, Mapping):
-            raise ContextUsageUnsupported(
-                "Idle Gauge has no valid last-confirmed provider profile for the current projection.",
-            )
-        if getattr(authority, "profile_proof_attempted", False):
-            policy_matches = (
-                authority.profile_runtime_policy_identity is not None
-                and authority.profile_runtime_policy_compatibility_identity is not None
-                and profile.get("runtime_policy_identity") == authority.profile_runtime_policy_identity
-                and compatibility_identity == authority.profile_runtime_policy_compatibility_identity
-            )
-            model_matches = (
-                authority.lead_model_payload_checksum is not None
-                and authority.profile_lead_model_payload_checksum is not None
-                and authority.lead_model_payload_checksum == authority.profile_lead_model_payload_checksum
-                and authority.resolved_lead_model_name is not None
-                and authority.resolved_lead_model_name == authority.profile_lead_model_name
-                and profile.get("model_name") == authority.resolved_lead_model_name
-            )
-        else:
-            policy_matches = profile.get("runtime_policy_identity") == policy_identity
-            model_matches = profile.get("model_name") == authority.lead_model_ref
-        if (
-            authority.closure_identity is None
-            or authority.profile_authority_identity is None
-            or authority.profile_closure_identity is None
-            or authority.asset_facts is None
-            or authority.profile_asset_facts is None
-            or profile.get("authority_identity") != authority.profile_authority_identity
-            or not model_matches
-            or profile.get("closure_identity") != authority.profile_closure_identity
-            or authority.asset_facts != authority.profile_asset_facts
-            or not policy_matches
-            or profile.get("workload_profile") != "interactive"
-            or type(profile.get("mcp_closure_present")) is not bool
-        ):
-            raise ContextUsageUnsupported("Idle Gauge cannot prove that the frozen provider profile is valid for the current projection.")
-        return profile
-
-    async def _materialize_context_usage_config(
-        self,
-        context: PrivateWorkContext,
-        app_config: AppConfig,
-        *,
-        authority: _ContextUsageAuthority,
-        selected_model_name: str | None,
-    ) -> tuple[AppConfig, str, ModelConfig]:
-        """Bind Gauge policy and models to the same authority as the next call."""
-
-        model_materializer = self._model_materializer
-        if model_materializer is None:
-            raise PrivateWorkUnavailable(context.request_id)
-
-        runtime_config = app_config
-        try:
-            if authority.run_id is not None:
-                policy_materializer = self._runtime_policy_materializer
-                if policy_materializer is None:
-                    raise SystemRuntimePolicyUnavailable
-                frozen_policy = await policy_materializer.materialize_run_snapshot_envelope(
-                    project_id=context.project_id,
-                    owner_user_id=str(context.user_id),
-                    run_id=authority.run_id,
-                )
-                runtime_config = app_config.with_runtime_policy(
-                    project_memory_compaction_app_config_policy(
-                        frozen_policy.value,
-                    )
-                )
-                lead_model = await model_materializer.materialize_snapshot(
-                    project_id=context.project_id,
-                    owner_user_id=str(context.user_id),
-                    run_id=authority.run_id,
-                    purpose="lead",
-                )
-            else:
-                lead_model = await model_materializer.materialize_active(
-                    authority.lead_model_ref,
-                )
-
-            if lead_model.name != authority.lead_model_ref and authority.lead_model_ref != "default":
-                raise SystemModelMaterializationUnavailable
-
-            runtime_models = [lead_model]
-            summary_model_ref = runtime_config.summarization.model_name
-            if summary_model_ref is not None and summary_model_ref != lead_model.name:
-                if authority.run_id is not None:
-                    summary_model = await model_materializer.materialize_snapshot(
-                        project_id=context.project_id,
-                        owner_user_id=str(context.user_id),
-                        run_id=authority.run_id,
-                        purpose="summarization",
-                    )
-                else:
-                    summary_model = await model_materializer.materialize_active(
-                        summary_model_ref,
-                    )
-                if summary_model.name != summary_model_ref and summary_model_ref != "default":
-                    raise SystemModelMaterializationUnavailable
-                if summary_model.name == lead_model.name:
-                    if summary_model != lead_model:
-                        raise SystemModelMaterializationUnavailable
-                else:
-                    runtime_models.append(summary_model)
-
-            # A Run with title generation enabled and no explicit title model
-            # freezes the catalog default, then binds that concrete name into
-            # its runtime AppConfig.  Reproduce the same binding for an idle
-            # Gauge; otherwise its policy fingerprint can never match the
-            # immutable provider profile written by the next Run.
-            title_bound_name: str | None = None
-            title_config = getattr(runtime_config, "title", None)
-            if authority.run_id is None and bool(getattr(title_config, "enabled", False)) and getattr(title_config, "model_name", None) is None:
-                title_model = await model_materializer.materialize_active(None)
-                existing = next(
-                    (model for model in runtime_models if model.name == title_model.name),
-                    None,
-                )
-                if existing is not None and existing != title_model:
-                    raise SystemModelMaterializationUnavailable
-                if existing is None:
-                    runtime_models.append(title_model)
-                title_bound_name = title_model.name
-
-            runtime_config = runtime_config.with_runtime_models(
-                tuple(runtime_models),
-            )
-            if title_bound_name is not None:
-                runtime_config = runtime_config.model_copy(
-                    update={
-                        "title": runtime_config.title.model_copy(
-                            update={"model_name": title_bound_name},
-                        ),
-                    },
-                )
-            return (
-                runtime_config,
-                lead_model.name,
-                lead_model,
-            )
-        except SystemRuntimePolicyUnavailable:
+        except (TypeError, ValueError):
             raise PrivateWorkUnavailable(context.request_id) from None
-        except SystemModelMaterializationUnavailable:
-            if authority.run_id is None and selected_model_name is not None:
-                raise PrivateWorkRunModelUnavailable(context.request_id) from None
+        except Exception:
+            logger.exception(
+                "Project Context Projection replay failed: request_id=%s",
+                context.request_id,
+            )
             raise PrivateWorkUnavailable(context.request_id) from None
-
-    async def _prove_idle_provider_profile(
-        self,
-        context: PrivateWorkContext,
-        *,
-        authority: _ContextUsageAuthority,
-        runtime_config: AppConfig,
-        current_lead_model: ModelConfig,
-    ) -> _ContextUsageAuthority:
-        """Prove an idle checkpoint profile against its immutable source Run."""
-
-        run_id = authority.profile_authority_identity
-        run_kwargs = authority.profile_run_kwargs
-        if run_id is None or run_kwargs is None:
-            return replace(authority, profile_proof_attempted=True)
-        policy_materializer = self._runtime_policy_materializer
-        if policy_materializer is None:
-            raise PrivateWorkUnavailable(context.request_id)
-        try:
-            frozen_policy = await policy_materializer.materialize_run_snapshot_envelope(
-                project_id=context.project_id,
-                owner_user_id=str(context.user_id),
-                run_id=run_id,
-            )
-            control_policy = resolve_run_tool_call_control_policy(
-                frozen_policy,
-                run_kwargs,
-            )
-            if control_policy.workload_profile.name != "interactive":
-                return replace(authority, profile_proof_attempted=True)
-            frozen_runtime_config = runtime_config.with_runtime_policy(
-                control_policy.app_config_policy,
-            )
-            frozen_title = frozen_runtime_config.title
-            if frozen_title.enabled and frozen_title.model_name is None and authority.profile_title_model_name is not None:
-                frozen_runtime_config = frozen_runtime_config.model_copy(
-                    update={
-                        "title": frozen_title.model_copy(
-                            update={
-                                "model_name": authority.profile_title_model_name,
-                            },
-                        ),
-                    },
-                )
-            current_provenance = model_execution_provenance(current_lead_model)
-            return replace(
-                authority,
-                profile_proof_attempted=True,
-                profile_runtime_policy_identity=(
-                    provider_request_runtime_policy_identity(
-                        frozen_runtime_config,
-                    )
-                ),
-                profile_runtime_policy_compatibility_identity=(
-                    provider_request_runtime_policy_compatibility_identity(
-                        frozen_runtime_config,
-                    )
-                ),
-                lead_model_payload_checksum=current_provenance.payload_checksum,
-                resolved_lead_model_name=current_lead_model.name,
-            )
-        except SystemRuntimePolicyUnavailable:
-            raise PrivateWorkUnavailable(context.request_id) from None
-        except (ProviderRequestUsageUnsupported, TypeError, ValueError):
-            return replace(authority, profile_proof_attempted=True)
-
-    async def _resolve_context_usage_authority(
-        self,
-        context: PrivateWorkContext,
-        thread_id: str,
-        *,
-        selected_model_name: str | None,
-        profile_authority_identity: str | None = None,
-    ) -> _ContextUsageAuthority:
-        """Resolve active-Run snapshots or the next composer's selected model."""
-
-        try:
-            async with self._session_factory() as session, session.begin():
-                current = await self._revalidator.require(
-                    session,
-                    context,
-                    Capability.PRIVATE_WORK_CREATE,
-                    Capability.SHARED_ASSETS_EXECUTE,
-                    lock=True,
-                )
-                thread = await PrivateThreadRepository(session).get(
-                    scope=context.resource_scope,
-                    thread_id=thread_id,
-                    lock=True,
-                )
-                if thread is None:
-                    raise PrivateWorkNotFound(context.request_id)
-
-                active_run = (
-                    await session.execute(
-                        select(RunRow.run_id, RunRow.model_name)
-                        .where(
-                            RunRow.project_id == context.project_id,
-                            RunRow.owner_user_id == str(context.user_id),
-                            RunRow.thread_id == thread_id,
-                            _context_usage_active_run_predicate(),
-                        )
-                        .order_by(RunRow.created_at.asc(), RunRow.run_id.asc())
-                        .limit(1)
-                    )
-                ).one_or_none()
-                if active_run is not None:
-                    run_id, model_name = active_run
-                    if not isinstance(model_name, str) or not model_name:
-                        raise PrivateWorkUnavailable(context.request_id)
-                    return _ContextUsageAuthority(
-                        run_id=run_id,
-                        lead_model_ref=model_name,
-                    )
-
-                selection = AssetSelection(
-                    AssetKind.AGENT,
-                    thread.agent_asset_id,
-                )
-                lead_agent = await self._resolver.resolve_project_asset_snapshot_in_session(
-                    session,
-                    current,
-                    selection,
-                )
-                current_facts = await self._resolver.resolve_run_asset_facts_in_session(
-                    session,
-                    current,
-                    selection,
-                )
-                if (
-                    type(lead_agent) is not ResolvedAgentSnapshot
-                    or lead_agent.scope.value != thread.agent_scope
-                    or not self._valid_context_usage_asset_facts(current_facts)
-                    or current_facts[0].scope != lead_agent.scope
-                    or current_facts[0].asset_id != lead_agent.asset_id
-                    or current_facts[0].version_id != lead_agent.version_id
-                    or current_facts[0].checksum != lead_agent.checksum
-                ):
-                    raise PrivateWorkAssetStale(context.request_id)
-                lead_model_ref = selected_run_model_ref(
-                    lead_agent.payload.model_ref,
-                    RequestedRunExecutionProfile(
-                        model_name=selected_model_name,
-                    ),
-                )
-                authority = _ContextUsageAuthority(
-                    run_id=None,
-                    lead_model_ref=lead_model_ref,
-                    closure_identity=provider_request_closure_identity(
-                        agent_facts=((str(lead_agent.version_id), lead_agent.checksum),),
-                        catalog_generation=current_facts[0].catalog_generation,
-                    ),
-                    asset_facts=current_facts,
-                )
-                if profile_authority_identity is None:
-                    return authority
-
-                profile_run = (
-                    await session.execute(
-                        select(RunRow.run_id, RunRow.kwargs_json)
-                        .where(
-                            RunRow.project_id == context.project_id,
-                            RunRow.owner_user_id == str(context.user_id),
-                            RunRow.thread_id == thread_id,
-                            RunRow.run_id == profile_authority_identity,
-                            RunRow.status != "deleted",
-                        )
-                        .limit(1)
-                    )
-                ).one_or_none()
-                if profile_run is None:
-                    return authority
-                profile_run_id, profile_run_kwargs = profile_run
-                if not isinstance(profile_run_kwargs, Mapping):
-                    return authority
-                profile_model_rows = (
-                    await session.execute(
-                        select(
-                            RunModelConfigSnapshotRow.purpose,
-                            RunModelConfigSnapshotRow.model_config_id,
-                            RunModelConfigSnapshotRow.payload_checksum,
-                        ).where(
-                            RunModelConfigSnapshotRow.project_id == context.project_id,
-                            RunModelConfigSnapshotRow.owner_user_id == str(context.user_id),
-                            RunModelConfigSnapshotRow.thread_id == thread_id,
-                            RunModelConfigSnapshotRow.run_id == profile_run_id,
-                            RunModelConfigSnapshotRow.purpose.in_(("lead", "title")),
-                        )
-                    )
-                ).all()
-                profile_model_facts = {
-                    purpose: (str(model_config_id), payload_checksum) for purpose, model_config_id, payload_checksum in profile_model_rows if purpose in {"lead", "title"} and isinstance(payload_checksum, str) and len(payload_checksum) == 64
-                }
-                profile_lead_model = profile_model_facts.get("lead")
-                if profile_lead_model is None or len(profile_model_facts) != len(profile_model_rows):
-                    return authority
-                frozen_facts = await self._snapshots.list_asset_facts_in_session(
-                    session,
-                    context,
-                    thread_id,
-                    profile_run_id,
-                )
-                if not self._valid_context_usage_asset_facts(frozen_facts):
-                    return authority
-                frozen_lead = frozen_facts[0]
-                return _ContextUsageAuthority(
-                    run_id=None,
-                    lead_model_ref=lead_model_ref,
-                    closure_identity=authority.closure_identity,
-                    profile_authority_identity=profile_run_id,
-                    profile_closure_identity=provider_request_closure_identity(
-                        agent_facts=(
-                            (
-                                str(frozen_lead.version_id),
-                                frozen_lead.checksum,
-                            ),
-                        ),
-                        catalog_generation=frozen_lead.catalog_generation,
-                    ),
-                    asset_facts=authority.asset_facts,
-                    profile_asset_facts=frozen_facts,
-                    profile_run_kwargs=dict(profile_run_kwargs),
-                    profile_lead_model_name=profile_lead_model[0],
-                    profile_lead_model_payload_checksum=profile_lead_model[1],
-                    profile_title_model_name=(profile_model_facts["title"][0] if "title" in profile_model_facts else None),
-                )
-        except PrivateWorkError:
-            raise
-        except RunModelSelectionLocked:
-            raise PrivateWorkRunModelSelectionLocked(context.request_id) from None
-        except RunExecutionProfileUnsupported:
-            raise PrivateWorkRunExecutionProfileUnsupported(context.request_id) from None
-        except TypeError:
-            raise PrivateWorkRunExecutionProfileUnsupported(context.request_id) from None
-        except (
-            AssetForbidden,
-            AssetValidationFailed,
-            AssetResolutionUnavailable,
-            RunSnapshotAssetStale,
-        ):
-            raise PrivateWorkAssetStale(context.request_id) from None
-        except (AssetStorageUnavailable, DBAPIError):
-            raise PrivateWorkUnavailable(context.request_id) from None
-
-    @staticmethod
-    def _valid_context_usage_asset_facts(
-        facts: tuple[ResolvedRunAssetFact, ...],
-    ) -> bool:
-        if not facts:
-            return False
-        lead = facts[0]
-        generation = lead.catalog_generation
-        return lead.kind is AssetKind.AGENT and lead.dependency_order == 0 and all(type(fact) is ResolvedRunAssetFact and fact.dependency_order == order and fact.catalog_generation == generation for order, fact in enumerate(facts))
 
     async def _materialize_compaction_config(
         self,

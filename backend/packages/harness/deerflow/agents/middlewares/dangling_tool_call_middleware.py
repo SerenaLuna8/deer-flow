@@ -16,13 +16,13 @@ to the end of the message list as before_model + add_messages reducer would do.
 import json
 import logging
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import BaseMessage, ToolMessage
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,11 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
     """
 
     @staticmethod
-    def _message_tool_calls(msg) -> list[dict]:
+    def _message_tool_calls(
+        msg,
+        *,
+        diagnostics: bool = True,
+    ) -> list[dict]:
         """Return normalized tool calls from structured fields or raw provider payloads.
 
         LangChain stores malformed provider function calls in ``invalid_tool_calls``.
@@ -70,7 +74,11 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         tool_calls = getattr(msg, "tool_calls", None) or []
         for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
-                logger.debug("Skipping malformed non-dict tool_call in AIMessage: %r", tool_call)
+                if diagnostics:
+                    logger.debug(
+                        "Skipping malformed non-dict tool_call in AIMessage: %r",
+                        tool_call,
+                    )
                 continue
             original_name = tool_call.get("name")
             normalized_call = dict(tool_call)
@@ -216,7 +224,12 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             return msg
         return msg.model_copy(update=update)
 
-    def _build_patched_messages(self, messages: list) -> list | None:
+    def _build_patched_messages(
+        self,
+        messages: list,
+        *,
+        diagnostics: bool = True,
+    ) -> list | None:
         """Return messages with tool results grouped after their tool-call AIMessage.
 
         This normalizes model-bound causal order before provider serialization while
@@ -230,7 +243,14 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                 tool_messages_by_id[msg.tool_call_id].append(msg)
             if getattr(msg, "type", None) != "ai":
                 continue
-            normalized_tool_calls = self._message_tool_calls(msg)
+            normalized_tool_calls = (
+                self._message_tool_calls(msg)
+                if diagnostics
+                else self._message_tool_calls(
+                    msg,
+                    diagnostics=False,
+                )
+            )
             tool_calls_by_message_index[index] = normalized_tool_calls
             for tc in normalized_tool_calls:
                 tc_id = tc.get("id")
@@ -275,7 +295,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         if patched == messages:
             return None
 
-        if patch_count:
+        if diagnostics and patch_count:
             logger.warning(f"Injecting {patch_count} placeholder ToolMessage(s) for dangling tool calls")
         return patched
 
@@ -300,3 +320,16 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         if patched is not None:
             request = request.override(messages=patched)
         return await handler(request)
+
+
+def project_dangling_tool_call_messages(
+    messages: Sequence[BaseMessage],
+) -> tuple[BaseMessage, ...]:
+    """Project Provider-facing dangling-call repairs without diagnostics."""
+
+    source = list(messages)
+    projected = DanglingToolCallMiddleware()._build_patched_messages(
+        source,
+        diagnostics=False,
+    )
+    return tuple(source if projected is None else projected)

@@ -714,10 +714,9 @@ class DbRunEventStore(RunEventStore):
         ).scalar_one_or_none()
         if terminal is not None:
             if terminal.content != db_content or terminal.event_metadata != metadata:
-                terminal.content = db_content
-                terminal.event_metadata = metadata
-                await session.flush()
-                await self._notify_stream_append(session, run_id)
+                raise StreamWriteAuthorityRequired(
+                    "existing stream terminal disagrees with settled Run state",
+                )
             return self._stream_row(terminal, created=False)
 
         row = RunEventRow(

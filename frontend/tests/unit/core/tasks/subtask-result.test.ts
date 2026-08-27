@@ -1,14 +1,18 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
+import { taskEventToSubtaskUpdate } from "@/core/tasks/lifecycle";
 import {
   SUBAGENT_ERROR_KEY,
   SUBAGENT_STATUS_KEY,
+  SUBAGENT_USAGE_RECEIPT_ID_KEY,
   derivePendingSubtaskStatus,
   isSubtaskRunActive,
   parseSubtaskResult,
   parseSubtaskTerminalEvent,
 } from "@/core/tasks/subtask-result";
+
+const EXECUTION_ID = "44444444-4444-4444-8444-444444444444";
 
 describe("Sub-Agent status authority", () => {
   test("keeps an unknown reconnect state pending instead of inferring failure", () => {
@@ -64,6 +68,44 @@ describe("Sub-Agent status authority", () => {
         [SUBAGENT_ERROR_KEY]: "provider error",
       }),
     ).toEqual({ status: "failed", error: "provider error" });
+  });
+
+  test("projects the server-owned historical usage receipt UUID as the Context Subject", () => {
+    expect(
+      parseSubtaskResult("display text", {
+        [SUBAGENT_STATUS_KEY]: "completed",
+        [SUBAGENT_USAGE_RECEIPT_ID_KEY]: EXECUTION_ID,
+      }),
+    ).toEqual({ status: "completed", executionId: EXECUTION_ID });
+
+    expect(
+      parseSubtaskResult("display text", {
+        [SUBAGENT_STATUS_KEY]: "completed",
+        [SUBAGENT_USAGE_RECEIPT_ID_KEY]: "tool-call-id-is-not-authority",
+      }),
+    ).toEqual({ status: "completed" });
+  });
+
+  test("projects the live lifecycle execution UUID independently from task_id", () => {
+    expect(
+      taskEventToSubtaskUpdate({
+        type: "task_started",
+        task_id: "tool-call-1",
+        execution_id: EXECUTION_ID,
+      }),
+    ).toEqual({ id: "tool-call-1", executionId: EXECUTION_ID });
+
+    expect(
+      parseSubtaskTerminalEvent({
+        type: "task_completed",
+        task_id: "tool-call-1",
+        execution_id: EXECUTION_ID,
+      }),
+    ).toEqual({
+      id: "tool-call-1",
+      status: "completed",
+      executionId: EXECUTION_ID,
+    });
   });
 
   test("accepts failure from an authoritative terminal lifecycle event", () => {

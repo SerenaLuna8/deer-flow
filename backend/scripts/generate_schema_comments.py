@@ -28,8 +28,8 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
-_EXPECTED_TABLE_COUNT = 96
-_EXPECTED_COLUMN_COUNT = 1188
+_EXPECTED_TABLE_COUNT = 99
+_EXPECTED_COLUMN_COUNT = 1229
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -132,6 +132,18 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "scheduled_tasks": ("自动化任务", "保存项目自动化任务定义、计划与并发策略。"),
     "skill_version_files": ("技能版本文件", "保存技能版本归档内文件的路径与内容。"),
     "thread_event_sequences": ("线程事件序列", "保存每个私有线程下一条事件序号的单例状态。"),
+    "context_evidence_sequences": (
+        "上下文证据序列",
+        "保存每个私有线程的上下文证据与投影发布高水位。",
+    ),
+    "context_evidence": (
+        "上下文证据",
+        "保存线程拥有、内容最小化且只追加的上下文计量事实。",
+    ),
+    "context_projection_heads": (
+        "上下文投影头",
+        "保存每个上下文主体最新且可删除重建的上下文占用读模型。",
+    ),
     "artifacts": ("运行制品", "保存运行生成制品的逻辑身份与存储元数据。"),
     "file_chunks": ("文件分块", "保存项目文件的有序二进制分块。"),
     "run_mcp_secret_snapshots": ("运行 MCP 秘密快照", "冻结运行使用 MCP 服务时的秘密 Generation 引用。"),
@@ -330,6 +342,26 @@ _COLUMN_PHRASES: dict[str, str] = {
     "history_from": "本次记忆整理的起始历史序号",
     "history_to": "本次记忆整理的结束历史序号",
     "high_watermark": "已经分配的最大事件序号",
+    "evidence_high_watermark": "已经分配的最大上下文证据序号",
+    "projection_high_watermark": "已经分配的最大上下文投影发布序号",
+    "evidence_seq": "线程内单调递增的上下文证据序号",
+    "projection_seq": "线程内单调递增的上下文投影发布序号",
+    "subject_kind": "上下文主体类型",
+    "subject_id": "上下文主体标识",
+    "context_window_generation": "上下文窗口连续性代次标识",
+    "event_type": "版本化上下文证据类型",
+    "payload_schema_version": "安全载荷结构版本号",
+    "projection_schema_version": "上下文投影结构版本号",
+    "origin_run_id": "产生该事实的来源运行标识（不拥有其生命周期）",
+    "provider_call_id": "外部模型调用的稳定摘要标识",
+    "checkpoint_id": "关联的检查点标识",
+    "payload_digest": "规范化安全载荷摘要",
+    "projector_revision": "生成该读模型的投影器版本",
+    "active_run_id": "当前投影采用的活动运行标识",
+    "basis": "上下文投影的计量依据",
+    "coverage": "上下文投影的计量覆盖程度",
+    "freshness": "上下文投影的新鲜度",
+    "projection_json": "安全裁剪的上下文投影 JSON 数据",
     "schedule_spec": "调度计划表达式",
     "tool_groups": "允许使用的工具分组",
     "tool_overrides": "工具级策略覆盖配置",
@@ -409,6 +441,14 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("memory_documents", "content"): "当前结构化记忆文档正文（属于私有内容）",
     ("memory_document_versions", "content"): "该版本的结构化记忆文档正文（属于私有内容）",
     ("run_memory_context_snapshots", "content"): "运行时冻结的记忆文档正文（属于私有内容）",
+    (
+        "context_evidence",
+        "payload_json",
+    ): "不含提示词、消息正文、工具定义、文件内容或机密值的版本化安全证据 JSON",
+    (
+        "context_projection_heads",
+        "projection_json",
+    ): "可向授权读侧投影且不含原始上下文证据或私有正文的安全 JSON",
     (
         "execution_approval_requests",
         "command_private_json",

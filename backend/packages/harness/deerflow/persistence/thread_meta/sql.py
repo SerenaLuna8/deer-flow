@@ -7,7 +7,6 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete as sql_delete
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -206,9 +205,9 @@ class ThreadMetaRepository:
         *,
         scope: PrivateResourceScope,
     ) -> None:
-        async with self._sf() as session:
-            await session.execute(sql_delete(ThreadMetaRow).where(*self._thread_predicate(thread_id, scope)))
-            await session.commit()
+        """Compatibility name for logical deletion; physical purge is retention-owned."""
+
+        await self.mark_deleted(thread_id, scope=scope)
 
     async def mark_deleted(
         self,

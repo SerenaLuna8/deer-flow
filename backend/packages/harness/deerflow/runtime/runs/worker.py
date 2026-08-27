@@ -43,6 +43,7 @@ from deerflow.config.worker_config import DEFAULT_TEXT_DELTA_FLUSH_MS
 from deerflow.error_codes import (
     ROLLBACK_FAILED_ERROR_CODE,
     RUN_EXECUTION_FAILED_ERROR_CODE,
+    ContextProviderCallAmbiguousError,
     MemoryAuthorityUnavailable,
     PublicRunError,
     PublicRunErrorCode,
@@ -63,6 +64,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_state_schema,
 )
 from deerflow.runtime.context_carrier import RuntimeContextCarrier
+from deerflow.runtime.context_evidence import ContextRebaseReason
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.runtime.events.models import STREAM_TERMINAL_ERROR_CODES
 from deerflow.runtime.events.stream_base import StreamBridge
@@ -145,8 +147,7 @@ _LLM_ERROR_FALLBACK_AUTHORITY_MODES = frozenset({"values"})
 _PRIVATE_OUTPUT_NOT_PRESENTED_ERROR = "Run produced output files but did not present a current-run output"
 _ROLLBACK_SUCCEEDED_ERROR = "Rolled back by user"
 # Keep this streaming policy separate from middleware write-authorization sets.
-_LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
-_LARGE_FILE_TOOL_BATCH_SIZE = 32
+_TOOL_CALL_CHUNK_BATCH_SIZE = 32
 _MESSAGE_TRANSPORT_METADATA_KEYS = frozenset({"model_provider"})
 
 
@@ -186,19 +187,17 @@ class _PublicTokenUsageBridge:
 
 
 @dataclass
-class _LargeFileToolChunkBatcher:
-    """Batch file-body argument deltas to avoid quadratic browser parsing.
+class _ToolCallChunkBatcher:
+    """Batch tool-argument deltas to bound durable rows and browser parsing.
 
-    Normal assistant text and non-file tool calls remain token-streamed. Large
-    file arguments still update progressively, but in bounded batches instead
-    of forcing the browser to reparse the growing JSON on every model token.
+    Assistant text remains token-streamed. Tool arguments still update
+    progressively, but every tool uses bounded batches so a long ``task`` or
+    another non-file argument cannot delay the terminal Run frame behind tens
+    of thousands of individually persisted deltas.
     """
 
-    batch_size: int = _LARGE_FILE_TOOL_BATCH_SIZE
-    tool_names: dict[tuple[str, str, str], str] = field(
-        default_factory=dict,
-    )
-    pending_identity: tuple[str, str, str] | None = None
+    batch_size: int = _TOOL_CALL_CHUNK_BATCH_SIZE
+    pending_identity: tuple[str, str] | None = None
     pending_message: Any | None = None
     pending_metadata: dict[str, Any] = field(default_factory=dict)
     pending_count: int = 0
@@ -211,7 +210,7 @@ class _LargeFileToolChunkBatcher:
             sanitized_additional_kwargs = {key: value for key, value in additional_kwargs.items() if key not in {"function_call", "tool_calls"}}
         response_metadata = getattr(message, "response_metadata", None)
         meaningful_response_metadata = {key: value for key, value in response_metadata.items() if key not in _MESSAGE_TRANSPORT_METADATA_KEYS} if isinstance(response_metadata, dict) else response_metadata
-        has_visible_payload = bool(getattr(message, "content", None) or sanitized_additional_kwargs or getattr(message, "usage_metadata", None) or meaningful_response_metadata)
+        has_visible_payload = bool(getattr(message, "content", None) or sanitized_additional_kwargs or getattr(message, "usage_metadata", None) or meaningful_response_metadata or getattr(message, "chunk_position", None) == "last")
         return sanitized_additional_kwargs, has_visible_payload
 
     def push(self, chunk: Any) -> list[Any]:
@@ -230,39 +229,18 @@ class _LargeFileToolChunkBatcher:
                 "langgraph_checkpoint_ns",
             ) or metadata.get("checkpoint_ns")
         namespace = raw_namespace if isinstance(raw_namespace, str) else ""
-        if len(tool_call_chunks) != 1:
-            if not tool_call_chunks and self.pending_identity is not None and self.pending_identity[:2] == (namespace, message_id):
+        identity = (namespace, message_id)
+        if not tool_call_chunks:
+            if self.pending_identity == identity:
                 _, has_visible_payload = self._visible_payload(message)
+                has_visible_payload = bool(has_visible_payload or getattr(message, "tool_calls", None) or getattr(message, "invalid_tool_calls", None))
                 if not has_visible_payload:
                     # Some providers emit a transport-metadata-only chunk for
                     # every tool-argument token. It is not visible UI data and
-                    # must not flush the pending file batch.
+                    # must not flush the pending tool batch.
                     return []
             return [*self.flush(), chunk]
-
-        tool_chunk = tool_call_chunks[0]
-        if not isinstance(tool_chunk, dict):
-            return [*self.flush(), chunk]
-        index = tool_chunk.get("index")
-        tool_call_id = tool_chunk.get("id")
-        if isinstance(index, int):
-            discriminator = f"index:{index}"
-        elif isinstance(tool_call_id, str) and tool_call_id:
-            discriminator = f"id:{tool_call_id}"
-        else:
-            discriminator = "single"
-        identity = (namespace, message_id, discriminator)
-        name_fragment = tool_chunk.get("name")
-        tool_name = self.tool_names.get(identity, "")
-        if tool_name not in _LARGE_FILE_TOOL_NAMES and isinstance(name_fragment, str) and name_fragment:
-            tool_name += name_fragment
-            if any(candidate.startswith(tool_name) for candidate in _LARGE_FILE_TOOL_NAMES):
-                self.tool_names[identity] = tool_name
-            else:
-                self.tool_names.pop(identity, None)
-        # Batching starts only after the accumulated name matches; split or
-        # incomplete name fragments stream per-chunk until then.
-        if tool_name not in _LARGE_FILE_TOOL_NAMES:
+        if not all(isinstance(tool_chunk, dict) for tool_chunk in tool_call_chunks):
             return [*self.flush(), chunk]
 
         model_copy = getattr(message, "model_copy", None)
@@ -274,20 +252,10 @@ class _LargeFileToolChunkBatcher:
         outputs: list[Any] = []
         if self.pending_identity is not None and self.pending_identity != identity:
             outputs.extend(self.flush())
-        if has_non_tool_payload:
-            visible_message = model_copy(
-                update={
-                    "additional_kwargs": sanitized_additional_kwargs,
-                    "invalid_tool_calls": [],
-                    "tool_call_chunks": [],
-                    "tool_calls": [],
-                }
-            )
-            outputs.append((visible_message, metadata))
-
         tool_only_message = model_copy(
             update={
                 "additional_kwargs": {},
+                "chunk_position": None,
                 "content": "",
                 "invalid_tool_calls": [],
                 "response_metadata": {},
@@ -300,7 +268,20 @@ class _LargeFileToolChunkBatcher:
         if isinstance(metadata, dict):
             self.pending_metadata.update(metadata)
         self.pending_count += 1
-        if self.pending_count >= self.batch_size:
+        if has_non_tool_payload:
+            # Keep all tool bytes ahead of visible content, finish metadata, or
+            # usage receipts from the same provider frame.
+            outputs.extend(self.flush())
+            visible_message = model_copy(
+                update={
+                    "additional_kwargs": sanitized_additional_kwargs,
+                    "invalid_tool_calls": [],
+                    "tool_call_chunks": [],
+                    "tool_calls": [],
+                }
+            )
+            outputs.append((visible_message, metadata))
+        elif self.pending_count >= self.batch_size:
             outputs.extend(self.flush())
         return outputs
 
@@ -315,14 +296,8 @@ class _LargeFileToolChunkBatcher:
         return [chunk]
 
     def finish(self) -> list[Any]:
-        """Flush and release identities at a values/end-of-stream boundary.
-
-        A batch-size or interleaved-mode flush retains identities because
-        continuation chunks commonly omit the tool name.
-        """
-        chunks = self.flush()
-        self.tool_names.clear()
-        return chunks
+        """Flush at a values or end-of-stream boundary."""
+        return self.flush()
 
 
 _TEXT_DELTA_FLUSH_BYTES = 4096
@@ -341,7 +316,7 @@ class _TextDeltaCoalescer:
     byte-identical — only frame boundaries change. Namespaced (subgraph)
     frames and every non-text frame are untouched.
 
-    Flush discipline mirrors ``_LargeFileToolChunkBatcher``: any
+    Flush discipline mirrors ``_ToolCallChunkBatcher``: any
     non-coalescible frame flushes the buffer before passing through, so
     inter-frame order is preserved. Additional bounds: a time window
     (``worker.stream.text_delta_flush_ms``), 4 KiB of accumulated content,
@@ -645,6 +620,7 @@ class RunContext:
     tool_call_control_policy: ResolvedGraphToolCallControlProfile | None = field(
         default=None,
     )
+    context_evidence_observer: object | None = field(default=None)
     max_concurrent_subagents: int | None = field(default=None)
     max_total_subagents: int | None = field(default=None)
 
@@ -744,6 +720,7 @@ async def _call_agent_factory_off_loop(
     tool_call_control_policy: ResolvedGraphToolCallControlProfile | None = None,
     tool_call_control_scope_id: str | None = None,
     tool_call_control_observer: object | None = None,
+    context_evidence_observer: object | None = None,
     resolved_max_concurrent_subagents: int | None = None,
     resolved_max_total_subagents: int | None = None,
 ) -> Any:
@@ -762,6 +739,10 @@ async def _call_agent_factory_off_loop(
         "resolved_max_total_subagents": resolved_max_total_subagents,
     }
 
+    context_evidence_parameters = {
+        "context_evidence_observer": context_evidence_observer,
+    }
+
     def _bind_control_parameters(
         factory: Any,
         kwargs: dict[str, Any],
@@ -778,6 +759,22 @@ async def _call_agent_factory_off_loop(
             )
         kwargs.update(control_parameters)
 
+    def _bind_context_evidence_parameters(
+        factory: Any,
+        kwargs: dict[str, Any],
+    ) -> None:
+        if context_evidence_observer is None:
+            return
+        try:
+            parameters = inspect.signature(factory).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if not set(context_evidence_parameters).issubset(parameters):
+            raise PrivateRuntimeFactoryUnavailable(
+                "Private runtime factory does not accept Context Evidence authority.",
+            )
+        kwargs.update(context_evidence_parameters)
+
     def _build() -> Any:
         if private_runtime is not None:
             private_factory = getattr(agent_factory, "private_runtime_factory", None)
@@ -789,6 +786,10 @@ async def _call_agent_factory_off_loop(
                 if app_config is not None and _agent_factory_supports_app_config(private_factory):
                     private_kwargs["app_config"] = app_config
                 _bind_control_parameters(private_factory, private_kwargs)
+                _bind_context_evidence_parameters(
+                    private_factory,
+                    private_kwargs,
+                )
                 return private_factory(**private_kwargs)
             try:
                 accepts_private_runtime = "private_runtime" in inspect.signature(agent_factory).parameters
@@ -802,6 +803,7 @@ async def _call_agent_factory_off_loop(
         if private_runtime is not None:
             kwargs["private_runtime"] = private_runtime
         _bind_control_parameters(agent_factory, kwargs)
+        _bind_context_evidence_parameters(agent_factory, kwargs)
         return agent_factory(**kwargs)
 
     return await asyncio.to_thread(_build)
@@ -972,6 +974,17 @@ async def run_agent(
     semantic_stop_recorder = RunSemanticStopRecorder()
     local_host_execution_approval_enabled = ctx.host_execution_approval_port is not None and isinstance(ctx.app_config, AppConfig) and resolve_host_bash_execution_mode(ctx.app_config) is HostBashExecutionMode.LOCAL_APPROVAL_REQUIRED
 
+    def _model_output_limit_terminal() -> bool:
+        # Once the output-limit middleware has observed an unrecoverable
+        # Provider terminal, the completed Lead response is already behind
+        # RunJournal's durable barrier. A later ordinary Stop must not rewrite
+        # that fact as interrupted. Explicit rollback and authorization
+        # revocation retain their stronger state/authority semantics.
+        return semantic_stop_recorder.reason == "model_output_limit" and record.abort_action not in {
+            "rollback",
+            "authorization_revoked",
+        }
+
     async def _settle_requested_rollback() -> bool:
         return await _settle_rollback(
             run_manager=run_manager,
@@ -988,6 +1001,7 @@ async def run_agent(
                 pre_run_checkpoint_id=pre_run_checkpoint_id,
                 pre_run_snapshot=legacy_pre_run_snapshot,
                 allow_thread_delete=not private_message_boundary_required,
+                context_evidence_observer=ctx.context_evidence_observer,
             ),
         )
 
@@ -1335,6 +1349,7 @@ async def run_agent(
             tool_call_control_policy=ctx.tool_call_control_policy,
             tool_call_control_scope_id=run_id,
             tool_call_control_observer=tool_call_control_observer,
+            context_evidence_observer=ctx.context_evidence_observer,
             resolved_max_concurrent_subagents=ctx.max_concurrent_subagents,
             resolved_max_total_subagents=ctx.max_total_subagents,
         )
@@ -1511,15 +1526,15 @@ async def run_agent(
             nonlocal suspended_approval_id, llm_error_fallback_message, llm_error_fallback_code
             if suspended_approval_id is not None:
                 return
-            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
+            tool_call_chunk_batcher = _ToolCallChunkBatcher() if "messages" in lg_modes else None
             text_delta_flush_ms = ctx.app_config.worker.stream.text_delta_flush_ms if isinstance(ctx.app_config, AppConfig) else DEFAULT_TEXT_DELTA_FLUSH_MS
             # 0 disables coalescing and restores per-token durable frames.
             text_delta_coalescer = _TextDeltaCoalescer(window_seconds=text_delta_flush_ms / 1000.0) if text_delta_flush_ms > 0 and "messages" in lg_modes else None
             try:
                 if len(lg_modes) == 1 and not stream_subgraphs:
                     # Single mode, no subgraphs: astream yields raw chunks.
-                    # File batching intentionally requires values mode, so this
-                    # path remains ordinary per-frame publication.
+                    # This path has no root messages lane, so tool-argument
+                    # batching is not needed.
                     single_mode = lg_modes[0]
                     stream_kwargs: dict[str, Any] = {
                         "config": stream_config,
@@ -1592,7 +1607,7 @@ async def run_agent(
                         assert text_delta_coalescer is not None
                         pending_frames: list[Any] = []
                         for frame in text_delta_coalescer.flush():
-                            pending_frames.extend(file_tool_chunk_batcher.push(frame) if file_tool_chunk_batcher is not None else [frame])
+                            pending_frames.extend(tool_call_chunk_batcher.push(frame) if tool_call_chunk_batcher is not None else [frame])
                         for publish_chunk in pending_frames:
                             await bridge.publish(
                                 run_id,
@@ -1631,7 +1646,7 @@ async def run_agent(
                             mode=mode,
                             chunk=chunk,
                             namespace=namespace,
-                            file_tool_chunk_batcher=file_tool_chunk_batcher,
+                            tool_call_chunk_batcher=tool_call_chunk_batcher,
                             text_delta_coalescer=text_delta_coalescer,
                             subagent_events=subagent_events,
                         )
@@ -1643,17 +1658,17 @@ async def run_agent(
                         )
             finally:
                 stream_error = sys.exception()
-                if text_delta_coalescer is not None or file_tool_chunk_batcher is not None:
+                if text_delta_coalescer is not None or tool_call_chunk_batcher is not None:
                     try:
                         # Terminal flush: coalesced text first (routed through
-                        # the file batcher so any older tool-argument batch
-                        # keeps its place), then the file batcher itself.
+                        # the tool batcher so any older argument batch keeps
+                        # its place), then the tool batcher itself.
                         pending_frames: list[Any] = []
                         if text_delta_coalescer is not None:
                             for frame in text_delta_coalescer.flush():
-                                pending_frames.extend(file_tool_chunk_batcher.push(frame) if file_tool_chunk_batcher is not None else [frame])
-                        if file_tool_chunk_batcher is not None:
-                            pending_frames.extend(file_tool_chunk_batcher.finish())
+                                pending_frames.extend(tool_call_chunk_batcher.push(frame) if tool_call_chunk_batcher is not None else [frame])
+                        if tool_call_chunk_batcher is not None:
+                            pending_frames.extend(tool_call_chunk_batcher.finish())
                         for publish_chunk in pending_frames:
                             await bridge.publish(
                                 run_id,
@@ -1716,7 +1731,14 @@ async def run_agent(
             await _refresh_host_execution_approval_gate()
 
         # 8. Final status
-        if record.abort_event.is_set():
+        if _model_output_limit_terminal():
+            await private_files.mark_failed()
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error=PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
+            )
+        elif record.abort_event.is_set():
             await run_manager.set_finalizing(run_id, True)
             action = record.abort_action
             if action == "rollback":
@@ -1775,7 +1797,19 @@ async def run_agent(
     except asyncio.CancelledError:
         await run_manager.set_finalizing(run_id, True)
         action = record.abort_action
-        if action == "rollback":
+        model_output_limit_terminal = _model_output_limit_terminal()
+        if model_output_limit_terminal:
+            await private_files.mark_failed()
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error=PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
+            )
+            logger.info(
+                "Run %s preserved observed Provider output-limit terminal across late cancellation",
+                run_id,
+            )
+        elif action == "rollback":
             await private_files.mark_failed()
             rollback_cancellation_pending |= await _settle_requested_rollback()
         else:
@@ -1789,7 +1823,7 @@ async def run_agent(
                 error=(AUTHORIZATION_REVOKED_REASON if action == "authorization_revoked" else None),
             )
             logger.info("Run %s was cancelled", run_id)
-        if private_files.enabled:
+        if private_files.enabled and not model_output_limit_terminal:
             raise
 
     except AuthorizationRevoked:
@@ -1847,7 +1881,8 @@ async def run_agent(
             PublicRunErrorCode.MODEL_OUTPUT_LIMIT,
             PublicRunErrorCode.PROVIDER_REQUEST_USAGE_UNSUPPORTED,
             PublicRunErrorCode.PROVIDER_REQUEST_PROFILE_DRIFT,
-            PublicRunErrorCode.PROVIDER_REQUEST_CAPACITY_EXCEEDED,
+            PublicRunErrorCode.CONTEXT_CAPACITY_EXCEEDED,
+            PublicRunErrorCode.CONTEXT_PROVIDER_CALL_AMBIGUOUS,
         }:
             # Publish the typed terminal immediately after the in-memory Run
             # classification. The durable stream terminal is takeover
@@ -1884,7 +1919,10 @@ async def run_agent(
                 },
             )
 
-    except MemoryAuthorityUnavailable:
+    except (
+        ContextProviderCallAmbiguousError,
+        MemoryAuthorityUnavailable,
+    ):
         # The durable private executor owns retry/dead settlement. Preserve
         # this fatal signal through runtime cleanup instead of publishing a
         # provisional terminal or misclassifying it as revoked authority.
@@ -2955,6 +2993,7 @@ async def _rollback_to_pre_run_checkpoint(
     pre_run_checkpoint_id: str | None = None,
     pre_run_snapshot: dict[str, Any] | None = None,
     allow_thread_delete: bool = True,
+    context_evidence_observer: object | None = None,
 ) -> bool:
     """Restore complete pre-run state without replaying delta sibling writes."""
 
@@ -3021,14 +3060,20 @@ async def _rollback_to_pre_run_checkpoint(
         checkpointer,
         mode=accessor.mode,
     )
-    if accessor.mode == "delta":
-        restore_config: dict[str, Any] = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": "",
-            }
+    current_config: dict[str, Any] = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
         }
-        current = await accessor.aget(restore_config)
+    }
+    current = await accessor.aget(current_config)
+    current_configurable = getattr(current, "config", {}).get(
+        "configurable",
+        {},
+    )
+    source_checkpoint_id = current_configurable.get("checkpoint_id") if isinstance(current_configurable, dict) else None
+    if accessor.mode == "delta":
+        restore_config = current_config
         selected_values = copy.deepcopy(rollback_point.state_values)
         selected_values["messages"] = list(rollback_point.messages)
         replacement_values = mutation_accessor.replacement_values(
@@ -3058,6 +3103,18 @@ async def _rollback_to_pre_run_checkpoint(
         pending_writes=rollback_point.pending_writes,
         run_id=run_id,
     )
+    result_checkpoint_id = restored_configurable.get("checkpoint_id")
+    record_rebased = getattr(
+        context_evidence_observer,
+        "record_window_rebased",
+        None,
+    )
+    if callable(record_rebased) and isinstance(source_checkpoint_id, str) and source_checkpoint_id and isinstance(result_checkpoint_id, str) and result_checkpoint_id and source_checkpoint_id != result_checkpoint_id:
+        await record_rebased(
+            reason=ContextRebaseReason.ROLLBACK,
+            source_checkpoint_id=source_checkpoint_id,
+            result_checkpoint_id=result_checkpoint_id,
+        )
     return True
 
 
@@ -3099,7 +3156,7 @@ async def _publish_stream_item(
     mode: str,
     chunk: Any,
     namespace: tuple[str, ...],
-    file_tool_chunk_batcher: _LargeFileToolChunkBatcher | None,
+    tool_call_chunk_batcher: _ToolCallChunkBatcher | None,
     text_delta_coalescer: _TextDeltaCoalescer | None,
     subagent_events: _SubagentEventBuffer,
 ) -> None:
@@ -3108,7 +3165,7 @@ async def _publish_stream_item(
     Every emitted frame still goes through the injected StreamBridge. Private
     Workers therefore retain the existing lease check, PostgreSQL commit, and
     post-commit notification boundary; batching only reduces how often root
-    file-tool argument deltas and root text deltas cross that boundary.
+    tool-argument deltas and root text deltas cross that boundary.
     """
 
     sse_event = _namespaced_sse_event(mode, namespace)
@@ -3126,13 +3183,13 @@ async def _publish_stream_item(
 
     if mode != "messages":
         # Root mode switch: flush coalesced text first, routed through the
-        # file batcher so an older pending tool-argument batch stays ahead.
+        # tool batcher so an older pending argument batch stays ahead.
         pending_chunks: list[Any] = []
         if text_delta_coalescer is not None:
             for frame in text_delta_coalescer.flush():
-                pending_chunks.extend(file_tool_chunk_batcher.push(frame) if file_tool_chunk_batcher is not None else [frame])
-        if file_tool_chunk_batcher is not None:
-            pending_chunks.extend(file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush())
+                pending_chunks.extend(tool_call_chunk_batcher.push(frame) if tool_call_chunk_batcher is not None else [frame])
+        if tool_call_chunk_batcher is not None:
+            pending_chunks.extend(tool_call_chunk_batcher.finish() if mode == "values" else tool_call_chunk_batcher.flush())
         for publish_chunk in pending_chunks:
             await bridge.publish(
                 run_id,
@@ -3142,7 +3199,7 @@ async def _publish_stream_item(
 
     frames = text_delta_coalescer.push(chunk) if mode == "messages" and text_delta_coalescer is not None else [chunk]
     for frame in frames:
-        chunks_to_publish = file_tool_chunk_batcher.push(frame) if mode == "messages" and file_tool_chunk_batcher is not None else [frame]
+        chunks_to_publish = tool_call_chunk_batcher.push(frame) if mode == "messages" and tool_call_chunk_batcher is not None else [frame]
         for publish_chunk in chunks_to_publish:
             await bridge.publish(
                 run_id,

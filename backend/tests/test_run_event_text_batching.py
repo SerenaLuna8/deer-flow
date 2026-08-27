@@ -29,9 +29,9 @@ from deerflow.config.worker_config import DEFAULT_TEXT_DELTA_FLUSH_MS, WorkerStr
 from deerflow.runtime.runs.worker import (
     _TEXT_DELTA_FLUSH_DUE,
     _iter_with_text_delta_deadline,
-    _LargeFileToolChunkBatcher,
     _publish_stream_item,
     _TextDeltaCoalescer,
+    _ToolCallChunkBatcher,
 )
 
 _WINDOW = 0.075
@@ -354,7 +354,9 @@ def test_non_text_frames_flush_first_and_pass_through_in_order(clock: _Clock) ->
     assert outputs[1] is tool_frame
 
 
-def test_tool_call_chunks_stay_on_the_file_batcher_path(clock: _Clock) -> None:
+def test_tool_call_chunks_stay_on_the_tool_argument_batcher_path(
+    clock: _Clock,
+) -> None:
     coalescer = _TextDeltaCoalescer(window_seconds=60.0)
     tool_delta = (
         AIMessageChunk(
@@ -369,6 +371,191 @@ def test_tool_call_chunks_stay_on_the_file_batcher_path(clock: _Clock) -> None:
 
     assert outputs == [tool_delta]
     assert coalescer.pending_message is None
+
+
+def test_task_tool_argument_chunks_are_batched_with_exact_bytes() -> None:
+    batcher = _ToolCallChunkBatcher(batch_size=4)
+    argument_deltas = [
+        '{"description":"',
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+        '"}',
+    ]
+    outputs: list[tuple[Any, Any]] = []
+
+    for index, argument_delta in enumerate(argument_deltas):
+        outputs.extend(
+            batcher.push(
+                (
+                    AIMessageChunk(
+                        content="",
+                        id="task-message",
+                        tool_call_chunks=[
+                            {
+                                "name": "task" if index == 0 else None,
+                                "args": argument_delta,
+                                "id": "task-call" if index == 0 else None,
+                                "index": 0,
+                                "type": "tool_call_chunk",
+                            }
+                        ],
+                    ),
+                    {"langgraph_checkpoint_ns": ""},
+                )
+            )
+        )
+    outputs.extend(batcher.flush())
+
+    assert len(outputs) == 2
+    assert _merge(outputs).tool_call_chunks[0]["name"] == "task"
+    assert _merge(outputs).tool_call_chunks[0]["args"] == "".join(argument_deltas)
+
+
+def test_parallel_tool_argument_chunks_are_batched_by_index_with_exact_bytes() -> None:
+    batcher = _ToolCallChunkBatcher(batch_size=4)
+    first_argument_deltas = [
+        '{"description":"',
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+        '"}',
+    ]
+    second_argument_deltas = [
+        '{"query":"',
+        "x",
+        "y",
+        "z",
+        "1",
+        "2",
+        "3",
+        '"}',
+    ]
+    outputs: list[tuple[Any, Any]] = []
+
+    for frame_index, (first_delta, second_delta) in enumerate(zip(first_argument_deltas, second_argument_deltas, strict=True)):
+        outputs.extend(
+            batcher.push(
+                (
+                    AIMessageChunk(
+                        content="",
+                        id="parallel-message",
+                        tool_call_chunks=[
+                            {
+                                "name": "task" if frame_index == 0 else None,
+                                "args": first_delta,
+                                "id": "task-call" if frame_index == 0 else None,
+                                "index": 0,
+                                "type": "tool_call_chunk",
+                            },
+                            {
+                                "name": "web_search" if frame_index == 0 else None,
+                                "args": second_delta,
+                                "id": "search-call" if frame_index == 0 else None,
+                                "index": 1,
+                                "type": "tool_call_chunk",
+                            },
+                        ],
+                    ),
+                    {"langgraph_checkpoint_ns": ""},
+                )
+            )
+        )
+    outputs.extend(batcher.flush())
+
+    assert len(outputs) == 2
+    merged = _merge(outputs)
+    assert [chunk["index"] for chunk in merged.tool_call_chunks] == [0, 1]
+    assert [chunk["id"] for chunk in merged.tool_call_chunks] == [
+        "task-call",
+        "search-call",
+    ]
+    assert [chunk["name"] for chunk in merged.tool_call_chunks] == [
+        "task",
+        "web_search",
+    ]
+    assert [chunk["args"] for chunk in merged.tool_call_chunks] == [
+        "".join(first_argument_deltas),
+        "".join(second_argument_deltas),
+    ]
+
+
+def test_tool_argument_batch_flushes_before_visible_terminal_chunk() -> None:
+    batcher = _ToolCallChunkBatcher(batch_size=4)
+    tool_frame = (
+        AIMessageChunk(
+            content="",
+            id="task-message",
+            tool_call_chunks=[
+                {
+                    "name": "task",
+                    "args": '{"description":"work"}',
+                    "id": "task-call",
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+        ),
+        {"langgraph_checkpoint_ns": ""},
+    )
+    terminal_frame = (
+        AIMessageChunk(
+            content="visible tail",
+            id="task-message",
+            response_metadata={"finish_reason": "length"},
+        ),
+        {"langgraph_checkpoint_ns": ""},
+    )
+
+    assert batcher.push(tool_frame) == []
+    outputs = batcher.push(terminal_frame)
+
+    assert len(outputs) == 2
+    assert outputs[0][0].tool_call_chunks[0]["args"] == ('{"description":"work"}')
+    assert outputs[1] is terminal_frame
+    assert outputs[1][0].content == "visible tail"
+    assert outputs[1][0].response_metadata == {"finish_reason": "length"}
+
+
+def test_tool_argument_frame_preserves_its_visible_terminal_payload() -> None:
+    batcher = _ToolCallChunkBatcher(batch_size=4)
+    outputs = batcher.push(
+        (
+            AIMessageChunk(
+                content="visible tail",
+                id="task-message",
+                response_metadata={"finish_reason": "length"},
+                tool_call_chunks=[
+                    {
+                        "name": "task",
+                        "args": '{"description":"work"}',
+                        "id": "task-call",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            ),
+            {"langgraph_checkpoint_ns": ""},
+        )
+    )
+
+    assert len(outputs) == 2
+    assert outputs[0][0].content == ""
+    assert outputs[0][0].tool_call_chunks[0]["args"] == ('{"description":"work"}')
+    assert outputs[1][0].content == "visible tail"
+    assert outputs[1][0].tool_call_chunks == []
+    assert outputs[1][0].response_metadata == {"finish_reason": "length"}
+    merged = _merge(outputs)
+    assert merged.content == "visible tail"
+    assert merged.tool_call_chunks[0]["args"] == '{"description":"work"}'
+    assert merged.response_metadata == {"finish_reason": "length"}
+    assert batcher.flush() == []
 
 
 def test_provider_finish_markers_flush_immediately(clock: _Clock) -> None:
@@ -600,7 +787,7 @@ async def _publish(bridge: _Bridge, coalescer: _TextDeltaCoalescer | None, *, mo
         mode=mode,
         chunk=chunk,
         namespace=namespace,
-        file_tool_chunk_batcher=None,
+        tool_call_chunk_batcher=None,
         text_delta_coalescer=coalescer,
         subagent_events=_subagent_events(),
     )
@@ -642,7 +829,7 @@ async def test_non_text_boundary_preserves_text_then_file_then_values_order(
 
     bridge = _Bridge()
     coalescer = _TextDeltaCoalescer(window_seconds=60.0)
-    file_batcher = _LargeFileToolChunkBatcher()
+    tool_call_batcher = _ToolCallChunkBatcher()
     subagent_events = _subagent_events()
 
     async def publish(mode: str, chunk: Any) -> None:
@@ -652,7 +839,7 @@ async def test_non_text_boundary_preserves_text_then_file_then_values_order(
             mode=mode,
             chunk=chunk,
             namespace=(),
-            file_tool_chunk_batcher=file_batcher,
+            tool_call_chunk_batcher=tool_call_batcher,
             text_delta_coalescer=coalescer,
             subagent_events=subagent_events,
         )

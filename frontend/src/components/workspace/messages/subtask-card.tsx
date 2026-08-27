@@ -33,10 +33,12 @@ import {
   resolveSubtaskModelLabel,
 } from "@/core/tasks/presentation";
 import { stepsForDisplay } from "@/core/tasks/steps";
+import { useThreadContextUsage } from "@/core/threads/hooks";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
+import { ContextWindowIndicator } from "../context-window-indicator";
 import { FlipDisplay } from "../flip-display";
 
 import { MarkdownContent } from "./markdown-content";
@@ -66,6 +68,13 @@ export function SubtaskCard({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(visuallyRunning);
   const updateSubtask = useUpdateSubtask();
   const privateWork = useProjectPrivateWorkScope();
+  const contextUsage = useThreadContextUsage(threadId, {
+    enabled: Boolean(threadId && task.executionId),
+    subject: task.executionId
+      ? { kind: "subagent_task", executionId: task.executionId }
+      : { kind: "lead_thread" },
+    privateWork,
+  });
   const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
   const tokenLabel = tokenUsageEnabled
     ? formatSubtaskTokenUsage(task.usage)
@@ -151,7 +160,7 @@ export function SubtaskCard({
       <div className="bg-background/95 flex w-full min-w-0 flex-col rounded-lg">
         <div className="flex w-full min-w-0 items-center justify-between p-0.5">
           <Button
-            className="w-full min-w-0 items-start justify-start overflow-hidden text-left"
+            className="min-w-0 flex-1 items-start justify-start overflow-hidden text-left"
             variant="ghost"
             onClick={() => setCollapsed(!collapsed)}
           >
@@ -225,6 +234,16 @@ export function SubtaskCard({
               </div>
             </div>
           </Button>
+          {threadId && task.executionId && (
+            <div className="shrink-0" data-subtask-context-usage>
+              <ContextWindowIndicator
+                className="size-8"
+                error={contextUsage.error}
+                isLoading={contextUsage.isLoading}
+                usage={contextUsage.data}
+              />
+            </div>
+          )}
         </div>
         <ChainOfThoughtContent className="px-4 pb-4">
           {task.prompt && (

@@ -107,6 +107,35 @@ class PrivateRunExecutionBoundary:
     ) -> MaterializationAttemptIdentity:
         """Lock only Job, Run, and exact Attempt after a governance prefix."""
 
+        return await self._lock_and_assert_materialization_attempt(
+            session,
+            locked_context,
+            allow_cancel_requested=False,
+        )
+
+    async def lock_and_assert_context_evidence_settlement_in_session(
+        self,
+        session: AsyncSession,
+        locked_context: ProjectContext,
+    ) -> MaterializationAttemptIdentity:
+        """Retain exact lease authority while allowing terminal Context writes."""
+
+        return await self._lock_and_assert_materialization_attempt(
+            session,
+            locked_context,
+            allow_cancel_requested=True,
+        )
+
+    async def _lock_and_assert_materialization_attempt(
+        self,
+        session: AsyncSession,
+        locked_context: ProjectContext,
+        *,
+        allow_cancel_requested: bool,
+    ) -> MaterializationAttemptIdentity:
+        if type(allow_cancel_requested) is not bool:
+            raise TypeError("cancel settlement authority must be explicit")
+
         expected_worker_id = self._expected_worker_id
         try:
             if (
@@ -123,7 +152,7 @@ class PrivateRunExecutionBoundary:
                 attempt_id=uuid.UUID(str(self._claim.attempt_id)),
                 worker_id=uuid.UUID(str(expected_worker_id)),
             )
-            cancel_requested = await PrivateRunRepository(
+            cancel_state = await PrivateRunRepository(
                 session,
             ).assert_materialization_attempt_active(
                 scope=PrivateResourceScope(
@@ -137,9 +166,14 @@ class PrivateRunExecutionBoundary:
                 expected_worker_id=identity.worker_id,
                 lease_token=self._claim.lease_token,
             )
-            if cancel_requested:
+            if cancel_state.authorization_revoked:
+                self._authorization_revoked = True
                 self.request_local_cancel()
                 raise AuthorizationRevoked
+            if cancel_state.cancel_requested:
+                self.request_local_cancel()
+                if not allow_cancel_requested:
+                    raise AuthorizationRevoked
             return identity
         except asyncio.CancelledError:
             raise

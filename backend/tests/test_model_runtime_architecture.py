@@ -16,6 +16,9 @@ _ALLOWED_PROVIDER_IMPORTERS = {
     # Provider-specific serialization/response compatibility adapters.
     Path("packages/harness/deerflow/models/patched_deepseek.py"),
     Path("packages/harness/deerflow/models/patched_openai.py"),
+    # Provider-specific transport outcome proof for retry safety.
+    Path("packages/harness/deerflow/models/provider_outcome.py"),
+    Path("packages/harness/deerflow/models/provider_wire.py"),
     Path("packages/harness/deerflow/models/vllm_provider.py"),
 }
 _PROVIDER_PACKAGES = {

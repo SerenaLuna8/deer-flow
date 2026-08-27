@@ -755,7 +755,15 @@ async def test_private_runtime_agent_keeps_its_own_skill_snapshot(
         runtime_agent_catalog=build_runtime_agent_catalog((runtime_agent,)),
         tool_groups=("lead",),
     )
-    factory = ParentExecutionBindingFactory(profile)
+
+    class _ContextEvidenceObserverFactory:
+        def create_subagent_observer(self, *_args: object) -> object:
+            return object()
+
+    factory = ParentExecutionBindingFactory(
+        profile,
+        context_evidence_observer_factory=_ContextEvidenceObserverFactory(),
+    )
     captured: dict[str, object] = {}
     now = datetime.now(UTC)
 
@@ -805,6 +813,7 @@ async def test_private_runtime_agent_keeps_its_own_skill_snapshot(
     assert type(projection) is DelegatedRuntimeContextProjection
     assert projection.runtime_skills == (delegate_skill,)
     assert projection.agent_prompt_bundle is runtime_agent.prompt_bundle
+    assert callable(captured["context_evidence_observer_factory"])
 
 
 @pytest.mark.asyncio
@@ -967,6 +976,9 @@ async def test_lifecycle_drives_exact_events_lazy_materialization_settlement_and
         "task_running",
         "task_completed",
     ]
+    assert {event["execution_id"] for event in events} == {
+        str(execution_id),
+    }
     assert [event["message_index"] for event in events[1:3]] == [1, 2]
     assert message.additional_kwargs["subagent_status"] == "completed"
     assert message.additional_kwargs["subagent_token_usage"] == {
@@ -1066,7 +1078,10 @@ async def test_timeout_phase_preserves_existing_wire_and_presentation(
         execution_timeout_seconds=120,
     )
 
-    assert events == [
+    assert {event["execution_id"] for event in events} == {
+        str(execution_id),
+    }
+    assert [{key: value for key, value in event.items() if key != "execution_id"} for event in events] == [
         {
             "type": "task_started",
             "task_id": "call-timeout",
@@ -1118,6 +1133,7 @@ async def test_nonquiescent_execution_timeout_preserves_coordination_timeout_wir
     assert events[-1] == {
         "type": "task_timed_out",
         "task_id": outcome.task_id,
+        "execution_id": str(outcome.execution_id),
         "usage": {
             "input_tokens": 2,
             "output_tokens": 3,

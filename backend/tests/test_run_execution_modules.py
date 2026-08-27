@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import inspect
+import uuid
 from types import SimpleNamespace
+
+import pytest
 
 import app.reliability.execution as compatibility
 import app.reliability.run_execution as split
+import app.reliability.run_execution.boundary as boundary_module
+from app.private_work.context import PrivateWorkContext
+from app.private_work.run_repository import PrivateRunMaterializationCancelState
+from app.projects.capabilities import capabilities_for
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
 from app.reliability.run_execution.boundary import (
     PrivateRunExecutionBoundary,
 )
@@ -32,6 +41,7 @@ from app.reliability.run_execution.stream_authority import (
     LeaseAuthorizedRunEventStore,
     LeaseAuthorizedStreamBridge,
 )
+from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 
 def test_legacy_execution_module_reexports_public_contracts() -> None:
@@ -82,3 +92,83 @@ def test_materialization_fence_uses_shared_governance_locks() -> None:
     assert "_revalidator" not in suffix
     assert "_factory" not in suffix
     assert "User" not in suffix
+
+
+def test_context_evidence_terminal_writes_keep_lease_but_allow_user_cancel() -> None:
+    active = inspect.getsource(
+        PrivateRunExecutionBoundary.lock_and_assert_materialization_active_in_session,
+    )
+    settlement = inspect.getsource(
+        PrivateRunExecutionBoundary.lock_and_assert_context_evidence_settlement_in_session,
+    )
+    shared = inspect.getsource(
+        PrivateRunExecutionBoundary._lock_and_assert_materialization_attempt,
+    )
+
+    assert "allow_cancel_requested=False" in active
+    assert "allow_cancel_requested=True" in settlement
+    assert "assert_materialization_attempt_active" in shared
+    assert "if not allow_cancel_requested" in shared
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ordinary_cancel_requested", "authorization_revoked"),
+    [(True, False), (False, True)],
+    ids=["ordinary-stop", "authorization-revoked"],
+)
+async def test_context_evidence_settlement_distinguishes_stop_from_authorization_revocation(
+    monkeypatch: pytest.MonkeyPatch,
+    ordinary_cancel_requested: bool,
+    authorization_revoked: bool,
+) -> None:
+    locked_context = ProjectContext(
+        user_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        membership_id=uuid.uuid4(),
+        role=ProjectRole.ADMIN,
+        capabilities=capabilities_for(ProjectRole.ADMIN),
+        membership_version=1,
+        request_id="context-evidence-cancel-priority-test",
+    )
+    state = PrivateRunMaterializationCancelState(
+        cancel_requested=ordinary_cancel_requested,
+        authorization_revoked=authorization_revoked,
+    )
+
+    class Repository:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def assert_materialization_attempt_active(self, **_kwargs):
+            return state
+
+    monkeypatch.setattr(boundary_module, "PrivateRunRepository", Repository)
+    boundary = object.__new__(PrivateRunExecutionBoundary)
+    boundary._context = PrivateWorkContext.from_project(locked_context)
+    boundary._claim = SimpleNamespace(
+        run_id=str(uuid.uuid4()),
+        job_id=uuid.uuid4(),
+        attempt_id=uuid.uuid4(),
+        lease_token="lease",
+    )
+    boundary._expected_worker_id = uuid.uuid4()
+    boundary._abort_event = None
+    boundary._lease_lost = False
+    boundary._authorization_revoked = False
+    boundary._cancel_requested = False
+
+    if authorization_revoked:
+        with pytest.raises(AuthorizationRevoked):
+            await boundary.lock_and_assert_context_evidence_settlement_in_session(
+                SimpleNamespace(),
+                locked_context,
+            )
+    else:
+        await boundary.lock_and_assert_context_evidence_settlement_in_session(
+            SimpleNamespace(),
+            locked_context,
+        )
+
+    assert boundary.cancel_requested is True
+    assert boundary.authorization_revoked is authorization_revoked

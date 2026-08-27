@@ -656,7 +656,7 @@ async def test_wait_and_state_routes_project_checkpoint_tokens_after_serializati
     async def normalize(body: object, **_kwargs: object) -> object:
         return body
 
-    async def launch(*_args: object) -> object:
+    async def launch(*_args: object, **_kwargs: object) -> object:
         return SimpleNamespace(
             run_id="run-wait",
             on_disconnect=DisconnectMode.cancel,

@@ -131,24 +131,30 @@ function subjectBudgetObservation(
     disposition: "exhaust_subject",
     observation_id: digestCharacter.repeat(64),
   });
-  if (!event) throw new Error(`subject budget fixture rejected: ${budgetScope}`);
+  if (!event)
+    throw new Error(`subject budget fixture rejected: ${budgetScope}`);
   return event;
 }
 
 describe("RunControlProgress", () => {
-  test("distinguishes repeated-call advisory from the hard limit", () => {
-    const html = render(
+  test("hides repeated-call advisories but keeps the hard limit visible", () => {
+    const mixed = render(
       [
         observation("repeated_call_warning", "a"),
         observation("repeated_call_limit", "b"),
       ],
       "en-US",
     );
+    const warningOnly = render(
+      [observation("repeated_call_warning", "c")],
+      "zh-CN",
+    );
 
-    expect(html).toContain("Repeated tool-call pattern detected");
-    expect(html).toContain("Repeated-call limit reached");
-    expect(html).toContain('data-reason-code="repeated_call_warning"');
-    expect(html).toContain('data-reason-code="repeated_call_limit"');
+    expect(mixed).not.toContain("Repeated tool-call pattern detected");
+    expect(mixed).toContain("Repeated-call limit reached");
+    expect(mixed).not.toContain('data-reason-code="repeated_call_warning"');
+    expect(mixed).toContain('data-reason-code="repeated_call_limit"');
+    expect(warningOnly).toBe("");
   });
 
   test("hides tool-budget warnings but keeps exhaustion visible and non-terminal", () => {

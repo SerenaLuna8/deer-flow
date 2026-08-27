@@ -109,6 +109,46 @@ function json(route: Route, body: unknown, status = 200) {
   });
 }
 
+function emptyContextProjection(threadId: string) {
+  return {
+    contract_version: 2,
+    thread_id: threadId,
+    subject: { kind: "lead_thread", thread_id: threadId, execution_id: null },
+    phase: "idle",
+    projection_seq: "0",
+    evidence_seq: "0",
+    context_window_generation: "60000000-0000-4000-8000-000000000001",
+    checkpoint_id: null,
+    projector_revision: "context-projector-v2",
+    model: {
+      identity_digest: "a".repeat(64),
+      context_window_tokens: 100_000,
+    },
+    basis: "empty",
+    coverage: "complete",
+    freshness: "current",
+    totals: {
+      projected_tokens: 0,
+      lower_bound_tokens: 0,
+      safety_upper_bound_tokens: 0,
+      context_window_tokens: 100_000,
+      remaining_tokens: 100_000,
+      progress_percent: 0,
+    },
+    lanes: [],
+    last_provider_observation: null,
+    compaction: {
+      enabled: true,
+      threshold_tokens: 80_000,
+      reached: false,
+      authority: "idle_history",
+      blocked_reason: null,
+    },
+    notices: [],
+    as_of: TIMESTAMP,
+  };
+}
+
 async function mockProjectChat(
   page: Page,
   upload: {
@@ -418,6 +458,37 @@ async function mockProjectChat(
       });
     }
     if (
+      (path === `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}` ||
+        path ===
+          `${privateWorkBase}/threads/${THREAD_ID}/runs/${SECOND_RUN_ID}`) &&
+      method === "GET"
+    ) {
+      const requestedRunId = path.includes(SECOND_RUN_ID)
+        ? SECOND_RUN_ID
+        : RUN_ID;
+      const requestedRunFailed =
+        requestedRunId === RUN_ID && Boolean(upload.firstRunError);
+      return json(route, {
+        run_id: requestedRunId,
+        thread_id: THREAD_ID,
+        assistant_id: AGENT_ID,
+        created_at: TIMESTAMP,
+        updated_at: TIMESTAMP,
+        status: requestedRunFailed ? "error" : "success",
+        metadata: {},
+        multitask_strategy: "reject",
+        error: requestedRunFailed ? upload.firstRunError : null,
+        model_name: MODEL_ID,
+        execution_profile: {
+          model_name: MODEL_ID,
+          thinking_enabled: false,
+          reasoning_effort: null,
+          supports_vision: true,
+        },
+        workload_profile: effectiveWorkloadProfile,
+      });
+    }
+    if (
       upload.gateTerminalHandoff &&
       path ===
         `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/execution-state` &&
@@ -433,6 +504,29 @@ async function mockProjectChat(
         execution_started_at: TIMESTAMP,
         retry_at: null,
         run_status: "success",
+      });
+    }
+    if (
+      (path ===
+        `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/execution-state` ||
+        path ===
+          `${privateWorkBase}/threads/${THREAD_ID}/runs/${SECOND_RUN_ID}/execution-state`) &&
+      method === "GET"
+    ) {
+      executionStateGetCount += 1;
+      const requestedRunId = path.includes(SECOND_RUN_ID)
+        ? SECOND_RUN_ID
+        : RUN_ID;
+      return json(route, {
+        phase: "terminal",
+        observed_at: TIMESTAMP,
+        phase_started_at: TIMESTAMP,
+        execution_started_at: TIMESTAMP,
+        retry_at: null,
+        run_status:
+          requestedRunId === RUN_ID && Boolean(upload.firstRunError)
+            ? "error"
+            : "success",
       });
     }
     if (
@@ -520,26 +614,13 @@ async function mockProjectChat(
       path === `${privateWorkBase}/threads/${THREAD_ID}/context-usage` &&
       method === "GET"
     ) {
-      return json(route, {
-        thread_id: THREAD_ID,
-        enabled: true,
-        estimated_tokens: 0,
-        message_count: 0,
-        summary_present: false,
-        context_window_tokens: 100_000,
-        triggers: [],
-        primary_trigger: null,
-      });
+      return json(route, emptyContextProjection(THREAD_ID));
     }
     if (
-      path ===
-        `${privateWorkBase}/threads/${THREAD_ID}/context-usage/authority` &&
+      path === `${privateWorkBase}/threads/${THREAD_ID}/context-usage/stream` &&
       method === "GET"
     ) {
-      return json(route, {
-        thread_id: THREAD_ID,
-        cache_marker: completedRunId ? `idle:${completedRunId}` : "idle:none",
-      });
+      return route.fulfill({ status: 204 });
     }
     if (
       path ===
@@ -957,25 +1038,13 @@ async function mockActiveSubtaskReconnect(page: Page) {
       return json(route, []);
     }
     if (path === `${otherThreadBase}/context-usage` && method === "GET") {
-      return json(route, {
-        thread_id: OTHER_THREAD_ID,
-        enabled: true,
-        estimated_tokens: 0,
-        message_count: 0,
-        summary_present: false,
-        context_window_tokens: 100_000,
-        triggers: [],
-        primary_trigger: null,
-      });
+      return json(route, emptyContextProjection(OTHER_THREAD_ID));
     }
     if (
-      path === `${otherThreadBase}/context-usage/authority` &&
+      path === `${otherThreadBase}/context-usage/stream` &&
       method === "GET"
     ) {
-      return json(route, {
-        thread_id: OTHER_THREAD_ID,
-        cache_marker: "idle:none",
-      });
+      return route.fulfill({ status: 204 });
     }
     if (
       path === `${otherThreadBase}/execution-approvals/active` &&
@@ -1407,6 +1476,8 @@ test("uses Research for one admitted Run and resets the next send to Interactive
   });
   await expect(research).toHaveAttribute("aria-pressed", "false");
 
+  await expect.poll(requests.executionStateGetCount).toBeGreaterThan(0);
+  await expect(composer).toBeEnabled();
   await composer.fill("Summarize one point.");
   await composer.press("Enter");
   await expect.poll(requests.runPostCount).toBe(2);
@@ -1576,6 +1647,8 @@ test("auto-opens each execution-created file in preview after a prior source vie
   await viewToggles.nth(0).click();
   await expect(viewToggles.nth(0)).toHaveAttribute("data-state", "on");
 
+  await expect.poll(requests.executionStateGetCount).toBeGreaterThan(0);
+  await expect(composer).toBeEnabled();
   await composer.fill(secondPrompt);
   await composer.press("Enter");
   await expect.poll(requests.runPostCount).toBe(2);
@@ -2258,6 +2331,8 @@ test("keeps the one-Run Research choice after a pre-admission failure", async ({
     workload_profile: "research",
   });
   await expect(research).toHaveAttribute("aria-pressed", "true");
+  await expect(composer).toHaveValue("Research Agent history.");
+  await expect(composer).toBeEnabled();
 
   await composer.press("Enter");
   await expect.poll(requests.runPostCount).toBe(2);
@@ -2378,23 +2453,20 @@ test("deduplicates live and durable Run-control progress across refresh", async 
   await expect(progress).toBeVisible();
   await expect(
     progress.locator('[data-reason-code="repeated_call_warning"]'),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
   await expect(
     progress.locator('[data-reason-code="tool_budget_exhausted"]'),
   ).toHaveCount(1);
   await expect(
     progress.locator('[data-reason-code="subagent_total_limit"]'),
   ).toHaveCount(1);
-  await expect(progress).toContainText(
-    /finish with the evidence already collected|基于已有证据完成结果/u,
-  );
   await expect(page.getByTestId("run-failure-alert")).toHaveCount(0);
 
   await page.reload();
   const replayedProgress = page.getByTestId("run-control-progress");
   await expect(
     replayedProgress.locator('[data-reason-code="repeated_call_warning"]'),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
   await expect(
     replayedProgress.locator('[data-reason-code="tool_budget_exhausted"]'),
   ).toHaveCount(1);

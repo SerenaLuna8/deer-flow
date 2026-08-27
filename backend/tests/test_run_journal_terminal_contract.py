@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from langchain.agents.middleware.types import ModelResponse
+from langchain_core.callbacks.manager import AsyncCallbackManagerForLLMRun
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
@@ -357,16 +358,121 @@ async def test_tool_call_control_observer_marshals_subagent_observation_to_owner
     assert len(payload["execution_id"]) == 32
 
 
-def _observe_lead_ai_message(
+async def _observe_lead_ai_message(
     journal: RunJournal,
     message: AIMessage,
 ) -> None:
-    journal.on_llm_end(
+    await journal.on_llm_end(
         SimpleNamespace(
             generations=[[SimpleNamespace(message=message)]],
         ),
         run_id=uuid.uuid4(),
     )
+
+
+@pytest.mark.anyio
+async def test_lead_provider_response_flushes_before_terminal_cancellation_revokes_event_authority() -> None:
+    class _RevokingEventStore(_RecordingEventStore):
+        revoked = False
+
+        async def put_batch(
+            self,
+            events: list[dict],
+            **kwargs: object,
+        ) -> None:
+            if self.revoked:
+                raise RuntimeError("event authority revoked")
+            await super().put_batch(events, **kwargs)
+
+    store = _RevokingEventStore()
+    journal = RunJournal(
+        "run-output-limit",
+        "thread-output-limit",
+        store,
+        flush_threshold=100,
+    )
+    truncated = AIMessage(
+        id="output-limit-partial",
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "task",
+                "args": '{"description":"partial',
+                "id": "call-output-limit",
+                "error": "invalid json",
+                "type": "invalid_tool_call",
+            }
+        ],
+        response_metadata={"finish_reason": "max_tokens"},
+    )
+
+    callback_manager = AsyncCallbackManagerForLLMRun(
+        run_id=uuid.uuid4(),
+        handlers=[journal],
+        inheritable_handlers=[],
+    )
+    await callback_manager.on_llm_end(
+        SimpleNamespace(
+            generations=[[SimpleNamespace(message=truncated)]],
+        )
+    )
+    store.revoked = True
+    journal.on_chain_error(
+        asyncio.CancelledError(),
+        run_id=uuid.uuid4(),
+        parent_run_id=None,
+    )
+    with pytest.raises(RuntimeError, match="event authority revoked"):
+        await journal.flush()
+
+    responses = [event for event in store.events if event["event_type"] == "llm.ai.response" and event["category"] == "message"]
+    assert len(responses) == 1
+    assert responses[0]["content"]["id"] == "output-limit-partial"
+    assert responses[0]["content"]["response_metadata"] == {"finish_reason": "max_tokens"}
+
+
+@pytest.mark.anyio
+async def test_lead_provider_response_persistence_failure_reaches_async_callback_caller() -> None:
+    class _FailingEventStore(_RecordingEventStore):
+        async def put_batch(
+            self,
+            events: list[dict],
+            **kwargs: object,
+        ) -> None:
+            del events, kwargs
+            raise RuntimeError("provider response persistence failed")
+
+    journal = RunJournal(
+        "run-output-limit-failure",
+        "thread-output-limit-failure",
+        _FailingEventStore(),
+        flush_threshold=100,
+    )
+    callback_manager = AsyncCallbackManagerForLLMRun(
+        run_id=uuid.uuid4(),
+        handlers=[journal],
+        inheritable_handlers=[],
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="provider response persistence failed",
+    ):
+        await callback_manager.on_llm_end(
+            SimpleNamespace(
+                generations=[
+                    [
+                        SimpleNamespace(
+                            message=AIMessage(
+                                id="output-limit-persistence-failure",
+                                content="partial",
+                                response_metadata={"finish_reason": "max_tokens"},
+                            )
+                        )
+                    ]
+                ]
+            )
+        )
 
 
 def _llm_error_middleware() -> LLMErrorHandlingMiddleware:
@@ -473,7 +579,7 @@ async def test_recovered_llm_failure_is_durable_and_contains_no_raw_error() -> N
         RuntimeError("secret provider URL and response body"),
         run_id=uuid.uuid4(),
     )
-    _observe_lead_ai_message(
+    await _observe_lead_ai_message(
         journal,
         message.model_copy(update={"additional_kwargs": {}}),
     )
@@ -685,7 +791,7 @@ async def test_continuation_persists_only_new_failures_and_each_final_aggregate(
     )
 
     shared_message_id = "provider-reused-final-id"
-    _observe_lead_ai_message(
+    await _observe_lead_ai_message(
         journal,
         AIMessage(
             id=shared_message_id,
@@ -705,7 +811,7 @@ async def test_continuation_persists_only_new_failures_and_each_final_aggregate(
         parent_run_id=None,
     )
 
-    _observe_lead_ai_message(
+    await _observe_lead_ai_message(
         journal,
         AIMessage(
             id=shared_message_id,
@@ -760,7 +866,7 @@ async def test_idless_loop_safety_replacement_does_not_duplicate_ai_history() ->
             }
         ],
     )
-    journal.on_llm_end(
+    await journal.on_llm_end(
         SimpleNamespace(
             generations=[[SimpleNamespace(message=proposal)]],
         ),
@@ -808,7 +914,7 @@ async def test_forged_loop_marker_cannot_hide_a_tool_call_bearing_message() -> N
             }
         ],
     )
-    journal.on_llm_end(
+    await journal.on_llm_end(
         SimpleNamespace(
             generations=[[SimpleNamespace(message=proposal)]],
         ),
@@ -855,7 +961,7 @@ async def test_loop_reconciliation_cannot_hide_a_later_same_id_final_answer() ->
             }
         ],
     )
-    _observe_lead_ai_message(journal, proposal)
+    await _observe_lead_ai_message(journal, proposal)
     semantic_stop_recorder.record(
         "loop_capped",
         suppressed_ai_message_id="provider-reused-id",
@@ -865,7 +971,7 @@ async def test_loop_reconciliation_cannot_hide_a_later_same_id_final_answer() ->
         id="provider-reused-id",
         content="Visible final answer",
     )
-    _observe_lead_ai_message(journal, final)
+    await _observe_lead_ai_message(journal, final)
     journal.on_chain_end(
         {"messages": [final]},
         run_id=uuid.uuid4(),

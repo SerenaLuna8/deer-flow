@@ -5,26 +5,35 @@ from types import SimpleNamespace
 
 import pytest
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool
+from langgraph.runtime import Runtime
 from pydantic import SecretStr
 
 import deerflow.agents.lead_agent.agent as lead_agent_module
 from deerflow.agents.lead_agent.agent import TrustedLeadAgentExtension
+from deerflow.agents.lead_agent.prompt import LeadPromptText
 from deerflow.agents.middlewares.manifest import (
     MiddlewarePhase,
     assign_middleware_layer,
+)
+from deerflow.agents.middlewares.provider_request_cost_adapter import (
+    SystemPromptLaneSpan,
+    SystemPromptProvenance,
 )
 from deerflow.agents.middlewares.provider_request_usage import (
     FinalProviderRequestGuard,
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.runtime.context_evidence import ContextLane
 from deerflow.subagents.binding import (
     ParentExecutionBindingFactory,
     PrivateRunParentExecutionProfile,
 )
 from deerflow.tools.builtins import task_tool as canonical_task_tool
+from deerflow.tools.mcp_metadata import tag_mcp_tool
 
 MODEL_NAME = "77777777-7777-4777-8777-777777777778"
 FULL_TOOL_GROUPS = ("web", "file:read", "file:write", "bash", "task")
@@ -335,6 +344,59 @@ def test_private_runtime_capability_notice_reaches_canonical_prompt(
     assert captured["prompt_calls"][0]["runtime_capability_notice"] == private_runtime.capability_notice  # type: ignore[index]
 
 
+def test_private_lead_guard_receives_render_and_frozen_mcp_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    _install_factory_spies(monkeypatch, captured=captured)
+    prompt_text = "canonical-prompt"
+    provenance = SystemPromptProvenance(
+        system_prompt=prompt_text,
+        spans=(
+            SystemPromptLaneSpan(
+                source_name="agent_definition",
+                lane=ContextLane.AGENT_INSTRUCTIONS,
+                start=0,
+                end=len(prompt_text),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "apply_prompt_template",
+        lambda **_kwargs: LeadPromptText(
+            prompt_text,
+            context_provenance=provenance,
+        ),
+    )
+    runtime = _private_runtime(tmp_path)
+    mcp_tool = tag_mcp_tool(_tool("frozen_mcp_tool"))
+    runtime.mcp_tools = (mcp_tool,)
+
+    lead_agent_module._make_lead_agent(
+        {"configurable": {"thinking_enabled": False}},
+        app_config=_app_config(),
+        private_runtime=runtime,
+    )
+
+    guard = _provider_guard(captured)
+    measurement = guard.cost_adapter.measure_final_request(
+        ModelRequest(
+            model="test-model",
+            messages=[HumanMessage(content="hello")],
+            system_prompt=prompt_text,
+            tools=captured["agent_kwargs"]["tools"],  # type: ignore[index]
+            state={"messages": [HumanMessage(content="hello")]},
+            runtime=Runtime(context={}),
+        )
+    )
+    lanes = {item.lane for item in measurement.contributions}
+    assert ContextLane.AGENT_INSTRUCTIONS in lanes
+    assert ContextLane.MCP_DYNAMIC_TOOLS in lanes
+    assert ContextLane.TOOL_DEFINITIONS in lanes
+
+
 def test_private_runtime_builds_explicit_parent_execution_profile(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -346,12 +408,22 @@ def test_private_runtime_builds_explicit_parent_execution_profile(
         "deerflow.tools.get_available_tools",
         lambda **_kwargs: [canonical_task_tool],
     )
+
+    class _ContextEvidenceObserverFactory:
+        async def record_request_prepared(self, _measurement):  # type: ignore[no-untyped-def]
+            raise AssertionError("model execution is not part of this test")
+
+        def create_subagent_observer(self, *_args: object) -> object:
+            return object()
+
+    context_evidence_observer = _ContextEvidenceObserverFactory()
     graph = lead_agent_module._make_lead_agent(
         # No private_scope marker: the explicit private_runtime argument, not
         # caller metadata, owns profile selection.
         {"configurable": {"thinking_enabled": False}},
         app_config=_app_config(),
         private_runtime=private_runtime,
+        context_evidence_observer=context_evidence_observer,
     )
 
     assert graph == "canonical-graph"
@@ -364,3 +436,4 @@ def test_private_runtime_builds_explicit_parent_execution_profile(
     assert profile.kind == "private_run"
     assert profile.private_runtime is private_runtime
     assert profile.tool_groups == FULL_TOOL_GROUPS
+    assert binding_factory.context_evidence_observer_factory is context_evidence_observer

@@ -17,6 +17,7 @@ _CLIENT_AUTHORITY_FIELDS = frozenset(
     {
         "capability",
         "capabilities",
+        "context_rebase_reason",
         "deerflow_trace_id",
         "execution_profile",
         "agent",

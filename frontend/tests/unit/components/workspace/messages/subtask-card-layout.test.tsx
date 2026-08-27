@@ -10,6 +10,7 @@ const longDescription =
 
 const task: Subtask = {
   id: "long-subtask",
+  executionId: "44444444-4444-4444-8444-444444444444",
   status: "completed",
   statusSource: "tool_result",
   subagent_type: "general-purpose",
@@ -29,8 +30,10 @@ rs.mock("@/core/models/hooks", () => ({
   }),
 }));
 rs.mock("@/core/private-work/provider", () => ({
+  usePrivateWorkAccess: (explicit: unknown) => explicit,
   useProjectPrivateWorkScope: () => ({
     scope: { accountId: "account-1", projectId: "project-1" },
+    apiBaseURL: "/api/projects/project-1/private-work",
   }),
 }));
 
@@ -38,7 +41,10 @@ describe("SubtaskCard constrained header layout", () => {
   test("keeps a long title and status inside the header without clipping the card effects", () => {
     const html = renderToStaticMarkup(
       <I18nProvider initialLocale="zh-CN">
-        <SubtaskCard taskId={task.id} />
+        <SubtaskCard
+          taskId={task.id}
+          threadId="33333333-3333-4333-8333-333333333333"
+        />
       </I18nProvider>,
     );
 
@@ -58,5 +64,7 @@ describe("SubtaskCard constrained header layout", () => {
     expect(titleClass.split(" ")).toEqual(
       expect.arrayContaining(["min-w-0", "truncate"]),
     );
+    expect(html).toContain('data-subtask-context-usage="true"');
+    expect(html).toContain('data-context-window-state="unavailable"');
   });
 });

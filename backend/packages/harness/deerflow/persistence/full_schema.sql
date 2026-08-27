@@ -1778,6 +1778,89 @@ CREATE TABLE thread_event_sequences (
     CONSTRAINT fk_thread_event_sequences_thread FOREIGN KEY(project_id, owner_user_id, thread_id) REFERENCES threads_meta (project_id, owner_user_id, thread_id) ON DELETE CASCADE
 );
 
+CREATE TABLE context_evidence_sequences (
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    evidence_high_watermark BIGINT DEFAULT 0 NOT NULL,
+    projection_high_watermark BIGINT DEFAULT 0 NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (project_id, owner_user_id, thread_id),
+    CONSTRAINT fk_context_evidence_sequences_thread FOREIGN KEY(project_id, owner_user_id, thread_id) REFERENCES threads_meta (project_id, owner_user_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT ck_context_evidence_sequences_watermarks CHECK (evidence_high_watermark >= 0 AND projection_high_watermark >= 0)
+);
+
+CREATE TABLE context_evidence (
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    evidence_seq BIGINT NOT NULL,
+    subject_kind VARCHAR(24) NOT NULL,
+    subject_id VARCHAR(64) NOT NULL,
+    context_window_generation UUID NOT NULL,
+    event_type VARCHAR(40) NOT NULL,
+    payload_schema_version SMALLINT DEFAULT 1 NOT NULL,
+    origin_run_id VARCHAR(64),
+    provider_call_id CHAR(64),
+    checkpoint_id VARCHAR(128),
+    idempotency_key CHAR(64) NOT NULL,
+    payload_digest CHAR(64) NOT NULL,
+    payload_json JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_context_evidence PRIMARY KEY (project_id, owner_user_id, thread_id, evidence_seq),
+    CONSTRAINT fk_context_evidence_sequence FOREIGN KEY(project_id, owner_user_id, thread_id) REFERENCES context_evidence_sequences (project_id, owner_user_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT uq_context_evidence_idempotency UNIQUE (project_id, owner_user_id, thread_id, idempotency_key),
+    CONSTRAINT ck_context_evidence_event_type CHECK (event_type IN ('context.window.opened.v1', 'request.prepared.v1', 'request.dispatched.v1', 'provider.observed.v1', 'provider.usage_unreported.v1', 'provider.failed.v1', 'provider.ambiguous.v1', 'checkpoint.linked.v1', 'compaction.committed.v1', 'context.window.rebased.v1')),
+    CONSTRAINT ck_context_evidence_subject CHECK ((subject_kind = 'lead_thread' AND subject_id = thread_id) OR (subject_kind = 'subagent_task' AND subject_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')),
+    CONSTRAINT ck_context_evidence_payload_schema CHECK (payload_schema_version = 1),
+    CONSTRAINT ck_context_evidence_digests CHECK (idempotency_key ~ '^[0-9a-f]{64}$' AND payload_digest ~ '^[0-9a-f]{64}$' AND (provider_call_id IS NULL OR provider_call_id ~ '^[0-9a-f]{64}$')),
+    CONSTRAINT ck_context_evidence_checkpoint CHECK (checkpoint_id IS NULL OR checkpoint_id <> ''),
+    CONSTRAINT ck_context_evidence_payload_object CHECK (jsonb_typeof(payload_json) = 'object')
+);
+
+CREATE INDEX ix_context_evidence_subject_seq ON context_evidence (project_id, owner_user_id, thread_id, subject_kind, subject_id, evidence_seq);
+
+CREATE INDEX ix_context_evidence_origin_run ON context_evidence (project_id, owner_user_id, thread_id, origin_run_id, evidence_seq) WHERE origin_run_id IS NOT NULL;
+
+CREATE INDEX ix_context_evidence_provider_call ON context_evidence (project_id, owner_user_id, thread_id, provider_call_id, evidence_seq) WHERE provider_call_id IS NOT NULL;
+
+CREATE TABLE context_projection_heads (
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    subject_kind VARCHAR(24) NOT NULL,
+    subject_id VARCHAR(64) NOT NULL,
+    projection_seq BIGINT NOT NULL,
+    evidence_seq BIGINT NOT NULL,
+    projector_revision VARCHAR(128) NOT NULL,
+    projection_schema_version SMALLINT DEFAULT 2 NOT NULL,
+    context_window_generation UUID NOT NULL,
+    checkpoint_id VARCHAR(128),
+    active_run_id VARCHAR(64),
+    phase VARCHAR(16) NOT NULL,
+    basis VARCHAR(24) NOT NULL,
+    coverage VARCHAR(16) NOT NULL,
+    freshness VARCHAR(16) NOT NULL,
+    payload_digest CHAR(64) NOT NULL,
+    projection_json JSONB NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_context_projection_heads PRIMARY KEY (project_id, owner_user_id, thread_id, subject_kind, subject_id),
+    CONSTRAINT fk_context_projection_heads_sequence FOREIGN KEY(project_id, owner_user_id, thread_id) REFERENCES context_evidence_sequences (project_id, owner_user_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT ck_context_projection_heads_subject CHECK ((subject_kind = 'lead_thread' AND subject_id = thread_id) OR (subject_kind = 'subagent_task' AND subject_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')),
+    CONSTRAINT ck_context_projection_heads_versions CHECK (projection_seq >= 1 AND evidence_seq >= 0 AND projection_schema_version = 2),
+    CONSTRAINT ck_context_projection_heads_projector_revision CHECK (projector_revision ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*-v[1-9][0-9]*$'),
+    CONSTRAINT ck_context_projection_heads_checkpoint CHECK (checkpoint_id IS NULL OR checkpoint_id <> ''),
+    CONSTRAINT ck_context_projection_heads_phase CHECK (phase IN ('idle', 'active', 'settled')),
+    CONSTRAINT ck_context_projection_heads_basis CHECK (basis IN ('provider_confirmed', 'hybrid', 'estimated', 'empty')),
+    CONSTRAINT ck_context_projection_heads_coverage CHECK (coverage IN ('complete', 'partial')),
+    CONSTRAINT ck_context_projection_heads_freshness CHECK (freshness IN ('current', 'stale')),
+    CONSTRAINT ck_context_projection_heads_digest CHECK (payload_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_context_projection_heads_payload_object CHECK (jsonb_typeof(projection_json) = 'object'),
+    CONSTRAINT uq_context_projection_heads_projection_seq UNIQUE (project_id, owner_user_id, thread_id, projection_seq)
+);
+
+CREATE INDEX ix_context_projection_heads_replay ON context_projection_heads (project_id, owner_user_id, thread_id, projection_seq);
+
 CREATE TABLE memory_dream_runs (
     job_id UUID NOT NULL,
     project_id UUID NOT NULL,
@@ -3635,6 +3718,32 @@ CREATE TRIGGER trg_dead_jobs_append_only BEFORE UPDATE OR DELETE ON dead_jobs FO
 CREATE TRIGGER trg_system_runtime_policy_versions_append_only BEFORE UPDATE OR DELETE ON system_runtime_policy_versions FOR EACH ROW EXECUTE FUNCTION reject_schema_v1_append_only_mutation();
 
 
+CREATE OR REPLACE FUNCTION enforce_context_evidence_append_only()
+RETURNS trigger AS $$
+DECLARE
+    retention_authorized boolean := false;
+BEGIN
+    IF TG_OP = 'DELETE'
+       AND to_regclass('pg_temp.context_evidence_retention_authority') IS NOT NULL THEN
+        EXECUTE
+            'SELECT EXISTS ('
+            'SELECT 1 FROM pg_temp.context_evidence_retention_authority '
+            'WHERE project_id = $1 AND owner_user_id = $2 AND thread_id = $3)'
+            INTO retention_authorized
+            USING OLD.project_id, OLD.owner_user_id, OLD.thread_id;
+        IF retention_authorized THEN
+            RETURN OLD;
+        END IF;
+    END IF;
+
+    RAISE EXCEPTION 'Context Evidence is append-only outside exact retention purge'
+        USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_context_evidence_append_only BEFORE UPDATE OR DELETE ON context_evidence FOR EACH ROW EXECUTE FUNCTION enforce_context_evidence_append_only();
+
+
 
 CREATE OR REPLACE FUNCTION enforce_stream_terminal_invariant()
 RETURNS trigger AS $$
@@ -3987,7 +4096,9 @@ CREATE TRIGGER trg_skill_design_operations_updated_at BEFORE UPDATE ON skill_des
 
 CREATE TRIGGER trg_execution_approval_output_delivery_obligations_updated_at BEFORE UPDATE ON execution_approval_output_delivery_obligations FOR EACH ROW EXECUTE FUNCTION set_schema_v1_updated_at();
 
+CREATE TRIGGER trg_context_evidence_sequences_updated_at BEFORE UPDATE ON context_evidence_sequences FOR EACH ROW EXECUTE FUNCTION set_schema_v1_updated_at();
 
+CREATE TRIGGER trg_context_projection_heads_updated_at BEFORE UPDATE ON context_projection_heads FOR EACH ROW EXECUTE FUNCTION set_schema_v1_updated_at();
 
 CREATE OR REPLACE FUNCTION reject_direct_run_model_snapshot_mutation()
 RETURNS TRIGGER AS $$
@@ -4092,7 +4203,7 @@ INSERT INTO alembic_version (version_num) VALUES ('schema_v1');
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 96 static tables and 1188 columns.
+-- Coverage: 99 static tables and 1229 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE project_invitation_rate_limits IS '记录项目邀请码失败尝试的限流窗口。';
@@ -4481,7 +4592,7 @@ COMMENT ON COLUMN agents.payload_checksum IS '项目智能体：载荷内容校�
 COMMENT ON COLUMN agents.agents_instructions IS '项目智能体：项目智能体行为指令。';
 COMMENT ON COLUMN agents.identity IS '项目智能体：身份。';
 COMMENT ON COLUMN agents.user_context IS '项目智能体：智能体使用的用户上下文。';
-COMMENT ON COLUMN agents.payload_schema_version IS '项目智能体：载荷架构版本号。';
+COMMENT ON COLUMN agents.payload_schema_version IS '项目智能体：安全载荷结构版本号。';
 COMMENT ON COLUMN agents.revision IS '项目智能体：配置修订号。';
 COMMENT ON COLUMN agents.source_key IS '项目智能体：来源键。';
 COMMENT ON COLUMN agents.created_by_user_id IS '项目智能体：创建操作的用户标识。';
@@ -4719,7 +4830,7 @@ COMMENT ON COLUMN run_events.id IS '运行事件：主键标识。';
 COMMENT ON COLUMN run_events.thread_id IS '运行事件：线程标识。';
 COMMENT ON COLUMN run_events.run_id IS '运行事件：运行标识。';
 COMMENT ON COLUMN run_events.owner_user_id IS '运行事件：私有数据所有者的用户标识。';
-COMMENT ON COLUMN run_events.event_type IS '运行事件：事件类型。';
+COMMENT ON COLUMN run_events.event_type IS '运行事件：版本化上下文证据类型。';
 COMMENT ON COLUMN run_events.category IS '运行事件：类别。';
 COMMENT ON COLUMN run_events.content IS '运行事件：事件正文文本（可能包含私有消息、轨迹或生命周期内容）。';
 COMMENT ON COLUMN run_events.event_metadata IS '运行事件：事件的结构化非敏感元数据。';
@@ -5025,6 +5136,53 @@ COMMENT ON COLUMN thread_event_sequences.project_id IS '线程事件序列：所
 COMMENT ON COLUMN thread_event_sequences.owner_user_id IS '线程事件序列：私有数据所有者的用户标识。';
 COMMENT ON COLUMN thread_event_sequences.thread_id IS '线程事件序列：线程标识。';
 COMMENT ON COLUMN thread_event_sequences.high_watermark IS '线程事件序列：已经分配的最大事件序号。';
+
+COMMENT ON TABLE context_evidence_sequences IS '保存每个私有线程的上下文证据与投影发布高水位。';
+COMMENT ON COLUMN context_evidence_sequences.project_id IS '上下文证据序列：所属项目标识。';
+COMMENT ON COLUMN context_evidence_sequences.owner_user_id IS '上下文证据序列：私有数据所有者的用户标识。';
+COMMENT ON COLUMN context_evidence_sequences.thread_id IS '上下文证据序列：线程标识。';
+COMMENT ON COLUMN context_evidence_sequences.evidence_high_watermark IS '上下文证据序列：已经分配的最大上下文证据序号。';
+COMMENT ON COLUMN context_evidence_sequences.projection_high_watermark IS '上下文证据序列：已经分配的最大上下文投影发布序号。';
+COMMENT ON COLUMN context_evidence_sequences.updated_at IS '上下文证据序列：记录最近更新时间。';
+
+COMMENT ON TABLE context_evidence IS '保存线程拥有、内容最小化且只追加的上下文计量事实。';
+COMMENT ON COLUMN context_evidence.project_id IS '上下文证据：所属项目标识。';
+COMMENT ON COLUMN context_evidence.owner_user_id IS '上下文证据：私有数据所有者的用户标识。';
+COMMENT ON COLUMN context_evidence.thread_id IS '上下文证据：线程标识。';
+COMMENT ON COLUMN context_evidence.evidence_seq IS '上下文证据：线程内单调递增的上下文证据序号。';
+COMMENT ON COLUMN context_evidence.subject_kind IS '上下文证据：上下文主体类型。';
+COMMENT ON COLUMN context_evidence.subject_id IS '上下文证据：上下文主体标识。';
+COMMENT ON COLUMN context_evidence.context_window_generation IS '上下文证据：上下文窗口连续性代次标识。';
+COMMENT ON COLUMN context_evidence.event_type IS '上下文证据：版本化上下文证据类型。';
+COMMENT ON COLUMN context_evidence.payload_schema_version IS '上下文证据：安全载荷结构版本号。';
+COMMENT ON COLUMN context_evidence.origin_run_id IS '上下文证据：产生该事实的来源运行标识（不拥有其生命周期）。';
+COMMENT ON COLUMN context_evidence.provider_call_id IS '上下文证据：外部模型调用的稳定摘要标识。';
+COMMENT ON COLUMN context_evidence.checkpoint_id IS '上下文证据：关联的检查点标识。';
+COMMENT ON COLUMN context_evidence.idempotency_key IS '上下文证据：幂等操作键。';
+COMMENT ON COLUMN context_evidence.payload_digest IS '上下文证据：规范化安全载荷摘要。';
+COMMENT ON COLUMN context_evidence.payload_json IS '上下文证据：不含提示词、消息正文、工具定义、文件内容或机密值的版本化安全证据 JSON。';
+COMMENT ON COLUMN context_evidence.created_at IS '上下文证据：记录创建时间。';
+
+COMMENT ON TABLE context_projection_heads IS '保存每个上下文主体最新且可删除重建的上下文占用读模型。';
+COMMENT ON COLUMN context_projection_heads.project_id IS '上下文投影头：所属项目标识。';
+COMMENT ON COLUMN context_projection_heads.owner_user_id IS '上下文投影头：私有数据所有者的用户标识。';
+COMMENT ON COLUMN context_projection_heads.thread_id IS '上下文投影头：线程标识。';
+COMMENT ON COLUMN context_projection_heads.subject_kind IS '上下文投影头：上下文主体类型。';
+COMMENT ON COLUMN context_projection_heads.subject_id IS '上下文投影头：上下文主体标识。';
+COMMENT ON COLUMN context_projection_heads.projection_seq IS '上下文投影头：线程内单调递增的上下文投影发布序号。';
+COMMENT ON COLUMN context_projection_heads.evidence_seq IS '上下文投影头：线程内单调递增的上下文证据序号。';
+COMMENT ON COLUMN context_projection_heads.projector_revision IS '上下文投影头：生成该读模型的投影器版本。';
+COMMENT ON COLUMN context_projection_heads.projection_schema_version IS '上下文投影头：上下文投影结构版本号。';
+COMMENT ON COLUMN context_projection_heads.context_window_generation IS '上下文投影头：上下文窗口连续性代次标识。';
+COMMENT ON COLUMN context_projection_heads.checkpoint_id IS '上下文投影头：关联的检查点标识。';
+COMMENT ON COLUMN context_projection_heads.active_run_id IS '上下文投影头：当前投影采用的活动运行标识。';
+COMMENT ON COLUMN context_projection_heads.phase IS '上下文投影头：阶段。';
+COMMENT ON COLUMN context_projection_heads.basis IS '上下文投影头：上下文投影的计量依据。';
+COMMENT ON COLUMN context_projection_heads.coverage IS '上下文投影头：上下文投影的计量覆盖程度。';
+COMMENT ON COLUMN context_projection_heads.freshness IS '上下文投影头：上下文投影的新鲜度。';
+COMMENT ON COLUMN context_projection_heads.payload_digest IS '上下文投影头：规范化安全载荷摘要。';
+COMMENT ON COLUMN context_projection_heads.projection_json IS '上下文投影头：可向授权读侧投影且不含原始上下文证据或私有正文的安全 JSON。';
+COMMENT ON COLUMN context_projection_heads.updated_at IS '上下文投影头：记录最近更新时间。';
 
 COMMENT ON TABLE memory_dream_runs IS '保存一次记忆整理任务的输入范围与结算版本。';
 COMMENT ON COLUMN memory_dream_runs.job_id IS '记忆整理运行：任务标识。';

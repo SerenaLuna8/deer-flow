@@ -31,6 +31,8 @@ from deerflow.agents.thread_state import (
 )
 from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
+from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.runtime.runs.execution_contracts import RunSemanticStopRecorder
 from deerflow.runtime.serialization import serialize_channel_values
 
 
@@ -49,6 +51,7 @@ def _request(
     messages: list[Any] | None = None,
     state: dict[str, Any] | None = None,
     response_format=None,
+    context: dict[str, Any] | None = None,
 ) -> ModelRequest:
     return ModelRequest(
         model=model or _model([AIMessage(content="unused")]),
@@ -57,7 +60,7 @@ def _request(
         tool_choice="auto",
         response_format=response_format,
         state=state or {},
-        runtime=Runtime(context={"run_id": "run-1"}),
+        runtime=Runtime(context=context or {"run_id": "run-1"}),
         model_settings={"temperature": 0.7},
     )
 
@@ -219,6 +222,67 @@ def test_current_truncated_tool_intent_fails_without_recovery() -> None:
             },
             Runtime(context={"run_id": "run-1"}),
         )
+
+
+def test_unsafe_output_limit_records_terminal_receipt_before_after_model() -> None:
+    recorder = RunSemanticStopRecorder()
+    middleware = OutputLimitRecoveryMiddleware(
+        recovery_model=_model([AIMessage(content="unused")]),
+    )
+    result = middleware.wrap_model_call(
+        _request(
+            context={
+                "run_id": "run-1",
+                RuntimeContextKeys.RUN_SEMANTIC_STOP_RECORDER: recorder,
+            }
+        ),
+        lambda _request: ModelResponse(
+            result=[
+                AIMessage(
+                    content="",
+                    invalid_tool_calls=[
+                        {
+                            "name": "task",
+                            "args": '{"description":"partial',
+                            "id": "truncated-task",
+                            "error": "invalid json",
+                            "type": "invalid_tool_call",
+                        }
+                    ],
+                    response_metadata={"finish_reason": "max_tokens"},
+                )
+            ]
+        ),
+    )
+
+    assert isinstance(result, ExtendedModelResponse)
+    assert recorder.reason == "model_output_limit"
+
+
+def test_safe_recoverable_output_limit_does_not_record_terminal_receipt() -> None:
+    recorder = RunSemanticStopRecorder()
+    middleware = OutputLimitRecoveryMiddleware(
+        recovery_model=_model([AIMessage(content="unused")]),
+    )
+    result = middleware.wrap_model_call(
+        _request(
+            context={
+                "run_id": "run-1",
+                RuntimeContextKeys.RUN_SEMANTIC_STOP_RECORDER: recorder,
+            }
+        ),
+        lambda _request: ModelResponse(
+            result=[
+                AIMessage(
+                    content="partial",
+                    response_metadata={"finish_reason": "max_tokens"},
+                )
+            ]
+        ),
+    )
+
+    assert isinstance(result, ExtendedModelResponse)
+    assert recorder.reason is None
 
 
 def test_required_tool_choice_length_fails_without_recovery() -> None:

@@ -401,6 +401,7 @@ export function MessageList({
   terminalDisplayLatched = false,
   activeRunId = null,
   runExecutionState,
+  isRunAdmissionPending = false,
   executionApproval = null,
   observedExecutionApprovalId = null,
   trailingContent,
@@ -445,6 +446,7 @@ export function MessageList({
   terminalDisplayLatched?: boolean;
   activeRunId?: string | null;
   runExecutionState?: RunExecutionState | "unavailable" | null;
+  isRunAdmissionPending?: boolean;
   executionApproval?: ExecutionApprovalProjection | null;
   observedExecutionApprovalId?: string | null;
   trailingContent?: ReactNode;
@@ -1706,15 +1708,17 @@ export function MessageList({
             })();
             return content;
           })}
-          {visualRunIsLoading && runExecutionState !== null && (
-            <div className="w-full">
-              {runExecutionState === undefined ? (
-                <RunActivity startTime={turnStartTime} />
-              ) : (
-                <RunExecutionActivity state={runExecutionState} />
-              )}
-            </div>
-          )}
+          {visualRunIsLoading &&
+            (runExecutionState !== null || isRunAdmissionPending) && (
+              <div className="w-full">
+                {runExecutionState === undefined ||
+                runExecutionState === null ? (
+                  <RunActivity startTime={turnStartTime} />
+                ) : (
+                  <RunExecutionActivity state={runExecutionState} />
+                )}
+              </div>
+            )}
           {trailingContent ? (
             <div className="w-full" data-testid="message-list-trailing-content">
               {trailingContent}

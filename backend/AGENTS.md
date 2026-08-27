@@ -223,6 +223,18 @@ or downgrade an application database.
 - Durable events are committed before notification. PostgreSQL `NOTIFY` is only
   a wake-up hint; correctness comes from scoped reads, monotonic cursors, and one
   durable terminal outcome.
+- A completed Lead Provider response is flushed to the RunJournal while the
+  execution lease can still authorize message writes. Later cancellation or
+  Graph rollback may revoke execution state, but must not erase already
+  observed user-visible process history. Root tool-argument deltas for every
+  tool are published in bounded, byte-equivalent batches so a large or
+  degenerate argument stream cannot indefinitely delay its terminal Run frame.
+  An unrecoverable Provider output-limit receipt becomes authoritative only
+  after that response barrier; its durable error terminal wins over a later
+  ordinary user Stop. Explicit rollback and authorization revocation keep their
+  stronger state and authority precedence. Executor and Job settlement carry
+  this as an explicit durable-terminal fact rather than inferring it from an
+  error-code string.
 - A loop hard-stop owns one private-state, tool-free finalization turn. Its
   Run-scoped semantic recorder, not model message metadata, authorizes durable
   suppression of unexecuted proposals on both graph success and error paths. A
@@ -465,20 +477,30 @@ or downgrade an application database.
   latest turn. Every hierarchical leaf, reduction, and repair prompt stays
   within the admitted trim budget, and permanent planning failures terminate
   with a typed reason. Custom summary prompts never acquire this projection.
-- Context Gauge and automatic compaction share the immutable provider-request
-  profile created after Lead tools and request-shaping middleware are assembled.
-  The profile stores only bounded facts and digests, while the final provider
-  guard records the same estimator's measurement. Idle Gauge reuse requires the
-  same model payload, exact asset facts, runtime-policy compatibility, and
-  interactive workload. MCP presence alone does not invalidate this
-  last-confirmed idle projection; the next Run still performs fresh MCP discovery
-  and freezes its own profile. Every other unprovable case fails with the typed
-  unsupported result rather than using the legacy messages-only estimate.
-- A Run's frozen `token_usage.enabled` value governs every public usage lane:
-  Journal, SSE, Sub-Agent events, settlement, and REST checkpoint projection.
-  Mixed checkpoint history is projected per Human-message `run_id`; missing or
-  stale provenance fails closed. The projection removes only recognized token
-  metadata and preserves business payloads named `usage`.
+- Context Usage v2 reads only the mutable Projection Head rebuilt from a
+  Thread-owned append-only Context Evidence sequence and checkpoint-safe
+  Projection snapshots. The Lead Thread and every Sub-Agent `execution_id` are
+  independent Context Subjects even though their Evidence and Projection
+  publication numbers share one Thread-wide sequence. Browsers never receive
+  raw Evidence.
+- The innermost final Provider guard measures the fully shaped request and
+  positively assigns every model-visible contribution to the closed Context
+  lanes. Its frozen Adapter-specific wire projector excludes application-only
+  message metadata and applies pure projections for request-only middleware
+  transforms before comparing bytes, message count, and capacity. Provider
+  observations remain a separate total and are never spread across estimated
+  lanes. Images without a declared safe cost retain a visible partial
+  lower-bound Projection while Provider capacity admission fails closed.
+- An idle Projection describes the established historical window. Model,
+  Agent, Skill, MCP, or Runtime Policy changes do not invalidate or rewrite it;
+  a newly admitted Run freezes its new closure, compacts its retained history
+  when allowed, and lets the Worker final guard establish the next authority.
+  Whole-history replacement and compaction begin a new Context Window
+  Generation and retain only safe digests and sizes in Evidence.
+- A Run's frozen `token_usage.enabled` value governs cumulative Journal,
+  billing, SSE usage-detail, and diagnostic presentation only. It never disables
+  minimum Context Evidence, Provider capacity protection, Context Projection,
+  or automatic-compaction decisions.
 - Model work runs outside database transactions. Admission freezes its inputs;
   settlement re-locks and rejects stale policy, model, preference, document, Job,
   or lease state before publishing results.
@@ -530,8 +552,8 @@ ambient-key fallbacks.
 
 Every System Model stores a required `max_input_tokens` capability in the
 bounded range `1..2,000,000`. It is frozen with the exact model execution
-payload and supplies the Provider Model profile capacity used by Context Gauge
-and automatic compaction. Keep it distinct from Provider output `max_tokens`
+payload and supplies the Provider Model capacity used by Context Projection,
+the final request guard, and automatic compaction. Keep it distinct from Provider output `max_tokens`
 and Run token-budget policy. Fresh DeepSeek v4 bootstrap rows use `1,000,000`.
 
 The authorable adapter descriptor is also the Model admin form authority. Each

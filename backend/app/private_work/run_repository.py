@@ -96,6 +96,14 @@ class PrivateRunExecutionState:
 
 
 @dataclass(frozen=True, slots=True)
+class PrivateRunMaterializationCancelState:
+    """Cancellation sources observed under the exact Attempt lease locks."""
+
+    cancel_requested: bool
+    authorization_revoked: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PrivateRunSettlement:
     run: PrivateRunRecord
     run_terminal_published: bool
@@ -749,7 +757,7 @@ class PrivateRunRepository:
         expected_worker_id: uuid.UUID,
         lease_token: str,
         now: datetime | None = None,
-    ) -> bool:
+    ) -> PrivateRunMaterializationCancelState:
         """Fence materialization to the exact current Attempt and Worker."""
 
         if type(attempt_id) is not uuid.UUID or type(expected_worker_id) is not uuid.UUID:
@@ -789,13 +797,9 @@ class PrivateRunRepository:
             or run.execution_lease_expires_at <= checked_at
         ):
             raise PrivateRunExecutionLeaseLost
-        return any(
-            value is not None
-            for value in (
-                job.cancel_requested_at,
-                run.cancel_requested_at,
-                run.authorization_cancel_requested_at,
-            )
+        return PrivateRunMaterializationCancelState(
+            cancel_requested=(job.cancel_requested_at is not None or run.cancel_requested_at is not None),
+            authorization_revoked=(run.authorization_cancel_requested_at is not None),
         )
 
     async def stream_cleanup_allowed(
@@ -995,15 +999,9 @@ class PrivateRunRepository:
         ):
             raise PrivateRunExecutionLeaseLost
 
-        cancel_requested = any(
-            value is not None
-            for value in (
-                job.cancel_requested_at,
-                run.cancel_requested_at,
-                run.authorization_cancel_requested_at,
-            )
-        )
-        if cancel_requested and cancel_preempts_outcome:
+        authorization_revoked = run.authorization_cancel_requested_at is not None
+        cancel_requested = job.cancel_requested_at is not None or run.cancel_requested_at is not None
+        if authorization_revoked or (cancel_requested and cancel_preempts_outcome):
             outcome = "cancelled"
             public_error_code = None
 
@@ -1023,7 +1021,7 @@ class PrivateRunRepository:
                 now=settled_at,
             )
             run.status = "interrupted"
-            run.error = run.authorization_cancel_reason or run.cancel_reason
+            run.error = run.authorization_cancel_reason or "authorization_revoked" if authorization_revoked else run.cancel_reason
         else:
             if not public_error_code:
                 raise PrivateRunConflict

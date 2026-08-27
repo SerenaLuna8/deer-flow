@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import pickle
 import threading
+import uuid
 from contextlib import suppress
 from types import MappingProxyType
 from unittest.mock import MagicMock, patch
@@ -30,6 +31,15 @@ from deerflow.agents.middlewares.tool_call_control import (
     ToolCallBudgetObservation,
     ToolCallControlObservation,
     default_graph_tool_call_control_profile,
+)
+from deerflow.runtime.context_evidence import (
+    ContextContribution,
+    ContextLane,
+    ContextSubject,
+    ContextWindowGeneration,
+    FinalRequestMeasurement,
+    ProviderCallIdentity,
+    TokenEstimate,
 )
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.subagents.binding import (
@@ -413,6 +423,7 @@ async def test_graph_owned_control_observer_is_marshaled_to_parent_owner_loop() 
         observation,
     )
     await asyncio.wait_for(binding.barrier.wait_quiescent(), timeout=1)
+    assert binding.barrier.active_operations == 0
 
     assert observed == [(owner_loop, observation)]
 
@@ -467,8 +478,192 @@ async def test_owner_loop_control_observer_failure_is_receipted_and_suppressed()
         observation,
     )
     await asyncio.wait_for(binding.barrier.wait_quiescent(), timeout=1)
-
     assert binding.barrier.active_operations == 0
+
+
+@pytest.mark.asyncio
+async def test_parallel_subagent_context_observers_are_isolated_and_ack_on_owner_loop() -> None:
+    owner_loop = asyncio.get_running_loop()
+    all_settling = asyncio.Event()
+    release_settlement = asyncio.Event()
+    settling_count = 0
+    observed: list[tuple[uuid.UUID, str, asyncio.AbstractEventLoop]] = []
+
+    measurement = FinalRequestMeasurement(
+        request_fingerprint="a" * 64,
+        adapter_revision="subagent-binding-test-v1",
+        contributions=(
+            ContextContribution(
+                contribution_id="b" * 64,
+                source_identity_digest="c" * 64,
+                lane=ContextLane.CONVERSATION,
+                model_visible_bytes=40,
+                token_estimate=TokenEstimate.exact(10),
+            ),
+        ),
+    )
+
+    class _ChildObserver:
+        def __init__(self, execution_id: uuid.UUID) -> None:
+            self.execution_id = execution_id
+
+        async def record_request_prepared(
+            self,
+            current: FinalRequestMeasurement,
+            /,
+        ) -> ProviderCallIdentity:
+            assert asyncio.get_running_loop() is owner_loop
+            assert current is measurement
+            observed.append((self.execution_id, "prepared", owner_loop))
+            return ProviderCallIdentity.derive(
+                subject=ContextSubject.subagent_task(
+                    thread_id="thread-1",
+                    execution_id=self.execution_id,
+                ),
+                generation=ContextWindowGeneration(
+                    generation_id=uuid.UUID(
+                        "44444444-4444-4444-8444-444444444444",
+                    ),
+                ),
+                source_checkpoint_id=f"task-state:{self.execution_id}",
+                graph_step="model",
+                model_call_ordinal=0,
+                request_fingerprint=current.request_fingerprint,
+            )
+
+        async def record_request_dispatched(
+            self,
+            provider_call: ProviderCallIdentity,
+            /,
+        ) -> None:
+            assert asyncio.get_running_loop() is owner_loop
+            assert provider_call.subject.execution_id == str(self.execution_id)
+            observed.append((self.execution_id, "dispatched", owner_loop))
+
+        async def record_provider_usage_unreported(
+            self,
+            provider_call: ProviderCallIdentity,
+            /,
+        ) -> None:
+            assert asyncio.get_running_loop() is owner_loop
+            assert provider_call.subject.execution_id == str(self.execution_id)
+            observed.append((self.execution_id, "usage_unreported", owner_loop))
+
+        async def record_provider_observed(
+            self,
+            provider_call: ProviderCallIdentity,
+            /,
+            *,
+            input_tokens: int,
+        ) -> None:
+            del provider_call, input_tokens
+
+        async def record_provider_failed(
+            self,
+            provider_call: ProviderCallIdentity,
+            /,
+            **_kwargs: object,
+        ) -> None:
+            del provider_call
+
+        async def record_provider_ambiguous(
+            self,
+            provider_call: ProviderCallIdentity,
+            /,
+            **_kwargs: object,
+        ) -> None:
+            del provider_call
+
+        async def record_settled(self) -> None:
+            nonlocal settling_count
+            assert asyncio.get_running_loop() is owner_loop
+            settling_count += 1
+            if settling_count == 2:
+                all_settling.set()
+            await release_settlement.wait()
+            observed.append((self.execution_id, "settled", owner_loop))
+
+    class _LeadObserverFactory:
+        def create_subagent_observer(
+            self,
+            execution_id: uuid.UUID,
+            model_name: str,
+        ) -> _ChildObserver:
+            assert asyncio.get_running_loop() is owner_loop
+            assert model_name == "child-model"
+            return _ChildObserver(execution_id)
+
+    profile = _sdk_binding(owner_loop).profile
+    factory = ParentExecutionBindingFactory(
+        profile,
+        context_evidence_observer_factory=_LeadObserverFactory(),
+    )
+
+    def bind() -> ParentExecutionBinding:
+        return factory.bind(
+            ToolRuntime(
+                state={"messages": []},
+                context={
+                    RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: factory,
+                },
+                config={},
+                stream_writer=lambda _event: None,
+                tool_call_id="public-task-id",
+                store=None,
+            )
+        )
+
+    first_binding = bind()
+    second_binding = bind()
+    first_execution = uuid.uuid4()
+    second_execution = uuid.uuid4()
+
+    async def exercise(
+        binding: ParentExecutionBinding,
+        execution_id: uuid.UUID,
+    ) -> None:
+        observer = await binding.create_subagent_context_evidence_observer(
+            execution_id,
+            "child-model",
+        )
+        assert observer is not None
+        provider_call = await observer.record_request_prepared(measurement)
+        await observer.record_request_dispatched(provider_call)
+        await observer.record_provider_usage_unreported(provider_call)
+        await observer.record_settled()
+
+    first = asyncio.create_task(
+        asyncio.to_thread(
+            lambda: asyncio.run(exercise(first_binding, first_execution)),
+        )
+    )
+    second = asyncio.create_task(
+        asyncio.to_thread(
+            lambda: asyncio.run(exercise(second_binding, second_execution)),
+        )
+    )
+    await asyncio.wait_for(all_settling.wait(), timeout=1)
+
+    assert not first.done()
+    assert not second.done()
+    assert first_binding.barrier.active_operations == 1
+    assert second_binding.barrier.active_operations == 1
+
+    release_settlement.set()
+    await asyncio.gather(first, second)
+
+    assert first_binding.barrier.active_operations == 0
+    assert second_binding.barrier.active_operations == 0
+    assert {(execution_id, phase) for execution_id, phase, loop in observed if loop is owner_loop} == {
+        (first_execution, "prepared"),
+        (first_execution, "dispatched"),
+        (first_execution, "usage_unreported"),
+        (first_execution, "settled"),
+        (second_execution, "prepared"),
+        (second_execution, "dispatched"),
+        (second_execution, "usage_unreported"),
+        (second_execution, "settled"),
+    }
 
 
 @pytest.mark.asyncio

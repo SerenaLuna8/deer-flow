@@ -7,11 +7,16 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from deerflow.agents.middlewares.provider_request_cost_adapter import (
+    SystemPromptLaneSpan,
+    SystemPromptProvenance,
+)
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.config.subagents_config import clamp_subagent_concurrency
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.runtime.context_evidence import ContextLane
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
 from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_section
@@ -49,6 +54,36 @@ class AgentPromptBundle:
             if content
         )
         return f"AgentPromptBundle(payload_schema_version={self.payload_schema_version!r}, configured={configured!r})"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class LeadPromptRender:
+    """Exact prompt plus content-free, process-local source intervals."""
+
+    system_prompt: str
+    provenance: SystemPromptProvenance
+
+    def __repr__(self) -> str:
+        return f"LeadPromptRender(utf8_bytes={len(self.system_prompt.encode('utf-8'))}, sources={tuple(span.source_name for span in self.provenance.spans)!r})"
+
+
+class LeadPromptText(str):
+    """String-compatible prompt carrying non-serializable render provenance."""
+
+    context_provenance: SystemPromptProvenance
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        context_provenance: SystemPromptProvenance,
+    ) -> LeadPromptText:
+        instance = super().__new__(cls, value)
+        instance.context_provenance = context_provenance
+        return instance
+
+    def __repr__(self) -> str:
+        return f"LeadPromptText(utf8_bytes={len(self.encode('utf-8'))}, provenance={self.context_provenance!r})"
 
 
 # LRU cap on the per-(app_config, user_id) enabled-skills cache.
@@ -922,7 +957,76 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
-def apply_prompt_template(
+def _render_prompt_with_lane_provenance(
+    values: dict[str, object],
+    attributed_slots: dict[str, tuple[str, ContextLane]],
+) -> LeadPromptRender:
+    """Render once with private markers, then remove them into exact spans."""
+
+    nonce = 0
+    all_material = tuple(str(value) for value in values.values())
+    while True:
+        marker_root = f"\x00ACTWEAVE_CONTEXT_PROVENANCE_{nonce}_"
+        if marker_root not in SYSTEM_PROMPT_TEMPLATE and all(marker_root not in material for material in all_material):
+            break
+        nonce += 1
+
+    marked_values = dict(values)
+    markers: list[tuple[str, str, str, ContextLane]] = []
+    for index, (slot, (source_name, lane)) in enumerate(attributed_slots.items()):
+        material = marked_values.get(slot)
+        if not isinstance(material, str) or not material:
+            continue
+        start_marker = f"{marker_root}{index}_START\x00"
+        end_marker = f"{marker_root}{index}_END\x00"
+        marked_values[slot] = f"{start_marker}{material}{end_marker}"
+        markers.append((start_marker, end_marker, source_name, lane))
+
+    marked_prompt = SYSTEM_PROMPT_TEMPLATE.format(**marked_values)
+    located: list[tuple[int, str, str, str, ContextLane]] = []
+    for start_marker, end_marker, source_name, lane in markers:
+        if marked_prompt.count(start_marker) != 1 or marked_prompt.count(end_marker) != 1:
+            raise RuntimeError("Context provenance marker was not rendered exactly once")
+        marker_start = marked_prompt.index(start_marker)
+        material_start = marker_start + len(start_marker)
+        material_end = marked_prompt.index(end_marker, material_start)
+        located.append((marker_start, start_marker, end_marker, source_name, lane))
+
+    output: list[str] = []
+    spans: list[SystemPromptLaneSpan] = []
+    marked_cursor = 0
+    visible_cursor = 0
+    for marker_start, start_marker, end_marker, source_name, lane in sorted(located):
+        prefix = marked_prompt[marked_cursor:marker_start]
+        output.append(prefix)
+        visible_cursor += len(prefix)
+        material_start = marker_start + len(start_marker)
+        material_end = marked_prompt.index(end_marker, material_start)
+        material = marked_prompt[material_start:material_end]
+        span_start = visible_cursor
+        output.append(material)
+        visible_cursor += len(material)
+        spans.append(
+            SystemPromptLaneSpan(
+                source_name=source_name,
+                lane=lane,
+                start=span_start,
+                end=visible_cursor,
+            )
+        )
+        marked_cursor = material_end + len(end_marker)
+    output.append(marked_prompt[marked_cursor:])
+    system_prompt = "".join(output)
+    return LeadPromptRender(
+        system_prompt=system_prompt,
+        provenance=SystemPromptProvenance(
+            system_prompt=system_prompt,
+            spans=tuple(spans),
+        ),
+    )
+
+
+def render_prompt_template(
     subagent_enabled: bool = False,
     max_concurrent_subagents: int = 3,
     *,
@@ -940,7 +1044,7 @@ def apply_prompt_template(
     runtime_agent_catalog: RuntimeAgentCatalog | None = None,
     inspect_image_available: bool = False,
     runtime_capability_notice: str = "",
-) -> str:
+) -> LeadPromptRender:
     # Include subagent section only if enabled (from runtime parameter)
     n = clamp_subagent_concurrency(max_concurrent_subagents)
     subagent_section = (
@@ -1035,18 +1139,41 @@ def apply_prompt_template(
         exact_prompt_section = _render_soul(exact_soul) if exact_soul else ""
     else:
         exact_prompt_section = get_agent_soul(agent_name)
-    return SYSTEM_PROMPT_TEMPLATE.format(
-        agent_name=agent_name or "ActWeave",
-        agent_profile=exact_prompt_section,
-        self_update_section="" if exact_soul is not None or exact_agent_prompt is not None else _build_self_update_section(agent_name),
-        vision_bridge_section=vision_bridge_section,
-        skills_section=skills_section,
-        deferred_tools_section=deferred_tools_section,
-        mcp_routing_hints_section=mcp_routing_hints_section,
-        subagent_section=subagent_section,
-        subagent_reminder=subagent_reminder,
-        skill_first_reminder=skill_first_reminder,
-        subagent_thinking=subagent_thinking,
-        acp_section=acp_and_mounts_section,
-        runtime_capability_notice=runtime_capability_notice,
+    values: dict[str, object] = {
+        "agent_name": agent_name or "ActWeave",
+        "agent_profile": exact_prompt_section,
+        "self_update_section": "" if exact_soul is not None or exact_agent_prompt is not None else _build_self_update_section(agent_name),
+        "vision_bridge_section": vision_bridge_section,
+        "skills_section": skills_section,
+        "deferred_tools_section": deferred_tools_section,
+        "mcp_routing_hints_section": mcp_routing_hints_section,
+        "subagent_section": subagent_section,
+        "subagent_reminder": subagent_reminder,
+        "skill_first_reminder": skill_first_reminder,
+        "subagent_thinking": subagent_thinking,
+        "acp_section": acp_and_mounts_section,
+        "runtime_capability_notice": runtime_capability_notice,
+    }
+    return _render_prompt_with_lane_provenance(
+        values,
+        {
+            "agent_profile": ("agent_definition", ContextLane.AGENT_INSTRUCTIONS),
+            "skills_section": ("skill_system", ContextLane.SKILLS),
+            "deferred_tools_section": ("mcp_deferred_tool_index", ContextLane.MCP_DYNAMIC_TOOLS),
+            "mcp_routing_hints_section": ("mcp_routing_hints", ContextLane.MCP_DYNAMIC_TOOLS),
+            "subagent_section": ("subagent_definitions", ContextLane.SUBAGENT_DEFINITIONS),
+            "subagent_reminder": ("subagent_reminder", ContextLane.SUBAGENT_DEFINITIONS),
+            "subagent_thinking": ("subagent_thinking", ContextLane.SUBAGENT_DEFINITIONS),
+            "runtime_capability_notice": ("mcp_capability_notice", ContextLane.MCP_DYNAMIC_TOOLS),
+        },
+    )
+
+
+def apply_prompt_template(*args: Any, **kwargs: Any) -> str:
+    """Backward-compatible text-only facade for non-metering callers."""
+
+    rendered = render_prompt_template(*args, **kwargs)
+    return LeadPromptText(
+        rendered.system_prompt,
+        context_provenance=rendered.provenance,
     )

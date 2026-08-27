@@ -1,5 +1,6 @@
 "use client";
 
+import { XIcon } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -8,10 +9,13 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
-import { Progress } from "@/components/ui/progress";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTokenCount } from "@/core/messages/usage";
-import type { ThreadContextUsageResponse } from "@/core/threads/context-usage";
+import {
+  CONTEXT_PROJECTION_LANES,
+  type ContextProjectionLaneName,
+  type ThreadContextProjection,
+} from "@/core/threads/context-usage";
 import { cn } from "@/lib/utils";
 
 const GAUGE_RADIUS = 8;
@@ -19,34 +23,24 @@ const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS;
 
 type IndicatorState = "ready" | "loading" | "unavailable";
 
-function percent(value: number, locale: string) {
+const LANE_COLORS: Record<ContextProjectionLaneName, string> = {
+  system_prompt: "bg-neutral-500",
+  agent_instructions: "bg-emerald-700",
+  tool_definitions: "bg-violet-600",
+  skills: "bg-amber-600",
+  mcp_dynamic_tools: "bg-fuchsia-700",
+  subagent_definitions: "bg-blue-600",
+  summarized_conversation: "bg-rose-600",
+  conversation: "bg-orange-600",
+  visual_media: "bg-cyan-600",
+  provider_overhead: "bg-slate-600",
+};
+
+function percent(value: number, locale: string, maximumFractionDigits = 1) {
   return new Intl.NumberFormat(locale, {
     style: "percent",
-    maximumFractionDigits: 1,
+    maximumFractionDigits,
   }).format(value);
-}
-
-function compressionTriggerValue(
-  usage: ThreadContextUsageResponse,
-  messages: (count: number) => string,
-  disabled: string,
-  notConfigured: string,
-) {
-  if (!usage.enabled) return disabled;
-  const trigger = usage.primary_trigger;
-  if (!trigger) return notConfigured;
-  if (trigger.type === "messages") {
-    return messages(trigger.threshold_value);
-  }
-  return formatTokenCount(trigger.threshold_tokens);
-}
-
-function contextWindowProgress(usage: ThreadContextUsageResponse) {
-  if (usage.context_window_tokens === null) return null;
-  const percentage =
-    (usage.estimated_tokens / usage.context_window_tokens) * 100;
-  const clamped = Math.max(0, Math.min(100, percentage));
-  return Math.round(clamped * 100) / 100;
 }
 
 function ContextGauge({
@@ -91,65 +85,182 @@ function ContextGauge({
   );
 }
 
+function projectionProgress(usage: ThreadContextProjection) {
+  return usage.totals.progress_percent;
+}
+
 export function ContextWindowDetails({
   usage,
+  onClose,
 }: {
-  usage: ThreadContextUsageResponse;
+  usage: ThreadContextProjection;
+  onClose?: () => void;
 }) {
-  const { t } = useI18n();
-  const progress = contextWindowProgress(usage);
-  const trigger = compressionTriggerValue(
-    usage,
-    t.contextWindow.messages,
-    t.contextWindow.disabled,
-    t.contextWindow.notConfigured,
+  const { locale, t } = useI18n();
+  const progress = projectionProgress(usage);
+  const capacity = usage.totals.context_window_tokens;
+  const lowerBound = usage.coverage === "partial";
+  const visibleLanes = CONTEXT_PROJECTION_LANES.flatMap((laneName) => {
+    const lane = usage.lanes.find((candidate) => candidate.lane === laneName);
+    return lane && lane.projected_tokens > 0 ? [lane] : [];
+  });
+  const displayDenominator = Math.max(
+    capacity ?? usage.totals.projected_tokens,
+    usage.totals.projected_tokens,
+    1,
+  );
+  const totalPrefix = lowerBound ? "≥" : "~";
+  const total = `${totalPrefix}${formatTokenCount(usage.totals.projected_tokens)}`;
+  const totalWithCapacity = capacity
+    ? `${total} / ${formatTokenCount(capacity)} Tokens`
+    : `${total} Tokens`;
+  const totalWithFreshness =
+    usage.freshness === "stale"
+      ? `${totalWithCapacity} · ${t.contextWindow.stale}`
+      : totalWithCapacity;
+  const visualNotice = usage.notices.find(
+    (notice) => notice.code === "VISUAL_COST_UNMEASURED",
   );
 
   return (
-    <div className="w-72 text-xs" data-context-window-details>
-      <div className="space-y-3 p-3">
-        <div className="font-medium">{t.contextWindow.title}</div>
-        <Progress
-          aria-disabled={progress === null ? true : undefined}
-          aria-label={
-            progress === null
-              ? t.contextWindow.capacityUnavailable
-              : t.contextWindow.usage
-          }
-          aria-valuemax={progress === null ? undefined : 100}
-          aria-valuemin={progress === null ? undefined : 0}
-          aria-valuenow={progress ?? undefined}
-          aria-valuetext={
-            progress === null ? t.contextWindow.capacityUnavailable : undefined
-          }
-          className={cn(
-            "h-1.5",
-            progress === null &&
-              "bg-muted [&_[data-slot=progress-indicator]]:hidden",
+    <div
+      className="w-[min(38rem,calc(100vw-2rem))] text-sm"
+      data-context-window-details
+    >
+      <div className="space-y-4 p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="text-base font-medium">{t.contextWindow.title}</div>
+          {onClose && (
+            <Button
+              aria-label={t.contextWindow.close}
+              className="text-muted-foreground -mr-2"
+              size="icon-sm"
+              type="button"
+              variant="ghost"
+              onClick={onClose}
+            >
+              <XIcon className="size-4" />
+            </Button>
           )}
-          data-context-progress-state={
-            progress === null ? "unavailable" : "ready"
-          }
-          value={progress ?? 0}
-        />
-        <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1.5">
-          <dt className="text-muted-foreground">
-            {t.contextWindow.estimatedContext}
-          </dt>
-          <dd className="font-mono">
-            {formatTokenCount(usage.estimated_tokens)}
-          </dd>
-          <dt className="text-muted-foreground">{t.contextWindow.triggerAt}</dt>
-          <dd className="font-mono">{trigger}</dd>
-          <dt className="text-muted-foreground">
-            {t.contextWindow.contextWindowLimit}
-          </dt>
-          <dd className="font-mono">
-            {usage.context_window_tokens === null
-              ? t.contextWindow.notConfigured
-              : formatTokenCount(usage.context_window_tokens)}
-          </dd>
-        </dl>
+        </div>
+
+        <div className="flex items-end justify-between gap-4">
+          {progress === null ? (
+            <span className="text-muted-foreground">
+              {t.contextWindow.capacityUnknown}
+            </span>
+          ) : (
+            <span className="text-base">
+              {t.contextWindow.full(percent(progress / 100, locale, 0))}
+            </span>
+          )}
+          <span
+            className="font-mono text-base"
+            data-context-total-bound={lowerBound ? "lower" : "approximate"}
+          >
+            {totalWithFreshness}
+          </span>
+        </div>
+
+        {progress !== null && capacity !== null && (
+          <div
+            aria-label={t.contextWindow.usage}
+            aria-valuemax={100}
+            aria-valuemin={0}
+            aria-valuenow={progress}
+            className="bg-muted relative flex h-2 w-full gap-px overflow-hidden rounded-full"
+            role="progressbar"
+          >
+            {visibleLanes.map((lane) => (
+              <div
+                aria-hidden="true"
+                className={cn("h-full min-w-px", LANE_COLORS[lane.lane])}
+                data-context-lane-segment={lane.lane}
+                key={lane.lane}
+                style={{
+                  width: `${(lane.projected_tokens / displayDenominator) * 100}%`,
+                }}
+              />
+            ))}
+            {usage.totals.projected_tokens < capacity && (
+              <div aria-hidden="true" className="bg-muted h-full flex-1" />
+            )}
+            {usage.compaction.threshold_tokens !== null && (
+              <div
+                aria-hidden="true"
+                className="bg-foreground/50 absolute inset-y-0 w-px"
+                data-context-compaction-marker
+                style={{
+                  left: `${Math.min(
+                    100,
+                    (usage.compaction.threshold_tokens / capacity) * 100,
+                  )}%`,
+                }}
+              />
+            )}
+          </div>
+        )}
+
+        <div className="space-y-2">
+          {visibleLanes.map((lane) => (
+            <div
+              className="grid grid-cols-[auto_1fr_auto] items-center gap-3"
+              data-context-lane={lane.lane}
+              key={lane.lane}
+            >
+              <span
+                aria-hidden="true"
+                className={cn("size-3 rounded-sm", LANE_COLORS[lane.lane])}
+              />
+              <span>{t.contextWindow.lanes[lane.lane]}</span>
+              <span className="font-mono">
+                {formatTokenCount(lane.projected_tokens)}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="border-border/70 text-muted-foreground grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 border-t pt-3 text-xs">
+          {usage.last_provider_observation && (
+            <>
+              <span>{t.contextWindow.previousProviderInput}</span>
+              <span className="font-mono">
+                {formatTokenCount(usage.last_provider_observation.input_tokens)}
+              </span>
+            </>
+          )}
+          {usage.totals.safety_upper_bound_tokens !== null && (
+            <>
+              <span>{t.contextWindow.safetyBound}</span>
+              <span className="font-mono">
+                {formatTokenCount(usage.totals.safety_upper_bound_tokens)}
+              </span>
+            </>
+          )}
+          {usage.compaction.enabled &&
+            usage.compaction.threshold_tokens !== null && (
+              <>
+                <span>{t.contextWindow.compactionThreshold}</span>
+                <span className="font-mono">
+                  {formatTokenCount(usage.compaction.threshold_tokens)}
+                </span>
+              </>
+            )}
+        </div>
+
+        {(visualNotice !== undefined ||
+          usage.freshness === "stale" ||
+          capacity === null) && (
+          <div className="space-y-1 text-xs text-amber-700 dark:text-amber-400">
+            {visualNotice && (
+              <div>
+                {t.contextWindow.unmeasuredVisuals(visualNotice.count ?? 0)}
+              </div>
+            )}
+            {usage.freshness === "stale" && <div>{t.contextWindow.stale}</div>}
+            {capacity === null && <div>{t.contextWindow.capacityUnknown}</div>}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -161,7 +272,7 @@ export function ContextWindowIndicator({
   error,
   className,
 }: {
-  usage?: ThreadContextUsageResponse | null;
+  usage?: ThreadContextProjection | null;
   isLoading?: boolean;
   error?: unknown;
   className?: string;
@@ -175,20 +286,27 @@ export function ContextWindowIndicator({
       ? "unavailable"
       : "ready";
   const progress =
-    state === "ready" && usage ? contextWindowProgress(usage) : null;
-  const renderedProgress =
-    progress === null ? null : percent(progress / 100, locale);
+    state === "ready" && usage ? projectionProgress(usage) : null;
   const label =
     state === "loading"
       ? t.contextWindow.loading
       : state === "unavailable" || !usage
         ? t.contextWindow.unavailable
-        : renderedProgress === null
-          ? t.contextWindow.usageWithoutCapacity(
-              formatTokenCount(usage.estimated_tokens),
+        : usage.coverage === "partial"
+          ? t.contextWindow.lowerBoundUsage(
+              formatTokenCount(usage.totals.lower_bound_tokens),
             )
-          : t.contextWindow.progressLabel(renderedProgress);
+          : progress === null
+            ? t.contextWindow.usageWithoutCapacity(
+                formatTokenCount(usage.totals.projected_tokens),
+              )
+            : t.contextWindow.progressLabel(percent(progress / 100, locale));
   const open = hoverOpen || pinned;
+
+  const close = () => {
+    setPinned(false);
+    setHoverOpen(false);
+  };
 
   return (
     <HoverCard
@@ -209,12 +327,8 @@ export function ContextWindowIndicator({
           type="button"
           variant="ghost"
           onClick={() => {
-            if (pinned) {
-              setPinned(false);
-              setHoverOpen(false);
-            } else {
-              setPinned(true);
-            }
+            if (pinned) close();
+            else setPinned(true);
           }}
         >
           <ContextGauge progress={progress} loading={state === "loading"} />
@@ -227,17 +341,11 @@ export function ContextWindowIndicator({
         role="dialog"
         side="top"
         sideOffset={8}
-        onEscapeKeyDown={() => {
-          setPinned(false);
-          setHoverOpen(false);
-        }}
-        onPointerDownOutside={() => {
-          setPinned(false);
-          setHoverOpen(false);
-        }}
+        onEscapeKeyDown={close}
+        onPointerDownOutside={close}
       >
         {state === "ready" && usage ? (
-          <ContextWindowDetails usage={usage} />
+          <ContextWindowDetails usage={usage} onClose={close} />
         ) : (
           <div className="text-muted-foreground w-64 p-3 text-xs">{label}</div>
         )}

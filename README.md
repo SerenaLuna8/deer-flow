@@ -109,12 +109,14 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   Lead/Sub-Agent 全 Run 共享上限，不会在执行中改变语义。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。超大的完整
   工具 turn 通过有界分层 SNIP 逐 turn 压缩，receipt 仍绑定原始 checkpoint source；
-  Dream 模型不可用会显示明确失败，不会伪装成“没有待整理 Memory”。上下文用量与
-  自动压缩共用冻结的 provider-request 估算口径，计入系统提示、完整工具 schema 和
-  Durable Context；会话结束后，在当前模型、Agent closure、资源事实与策略仍匹配时，
-  Gauge 沿用最近一次确认的 Profile 做 idle 投影，不会再仅因包含 MCP 而拒绝计量；下一
-  次 Run 仍会重新发现 MCP 工具并冻结自己的 Profile。其他无法证明的情况继续明确显示
-  暂不支持计量，不回退到偏低的旧估算。
+  Dream 模型不可用会显示明确失败，不会伪装成“没有待整理 Memory”。上下文用量由
+  Thread 自己的只追加 Context Evidence 和可重建 Projection Head 提供：主 Agent 与每个
+  Sub-Agent Task 独立计量，系统提示、Agent 指令、工具、Skill、MCP、摘要、对话、图片和
+  Provider framing 按固定分类显示。切换下一次 Run 的模型、Agent、Skill、MCP 或策略不会
+  改写已有 idle 读数；新 Run 由 Worker 对冻结后的真实请求做最终容量保护，必要时先压缩
+  再重新计算。尚无视觉 Token 上界时仍显示含图片数量的上下文下界，但不会绕过 Provider
+  容量保护。Token 用量展示开关只影响累计明细和诊断展示，不关闭 Context Evidence、
+  Projection、自动压缩或最终容量判断。
 - Sub-Agent、Guardrail、Tool Search、ToolCallControl 和可扩展工具链。每个
   Sub-Agent Task 直接写入的输出先进入各自的隔离草稿，只有 Lead 明确复制并调用
   `present_files` 后才作为主会话文件交付；文件变更的校验与持久化仍由后端执行，无法
@@ -223,6 +225,10 @@ make check-db
 - 初始化会为应用表、Schema V1 标记表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
 - 非空旧库、未知 marker 或 catalog drift 都会安全失败；开发阶段请重建数据库。
+- Context Evidence / Projection v2 是 Schema V1 的直接切换，没有旧 authority API、Profile
+  证明或数据库兼容 Adapter。升级该版本时必须先停止全部 Gateway、Frontend、Worker 和
+  Scheduler，确认精确 `DATABASE_URL` 后执行 `make reset-db`，再同批部署同一版本；该操作
+  会永久清空 Thread、Run、Checkpoint、Evidence 及其他应用历史，不支持新后端搭配旧前端。
 - Gateway、Worker 和 Scheduler 从不自动创建或修复 schema。
 - 升级打包 System Agent/Skill 时，先停止运行服务，在维护窗口执行
   `make upgrade-system-assets`；该命令从标准运行环境读取 `DATABASE_URL`，以相同确定性

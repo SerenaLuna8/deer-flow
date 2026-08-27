@@ -5,17 +5,21 @@ from typing import Any, TypedDict
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from deerflow.agents.memory.snip import MEMORY_ARCHIVE_CONTEXT_KEY
+from deerflow.agents.middlewares.provider_request_usage import (
+    ProviderDispatchOutcomeAmbiguous,
+)
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
 from deerflow.runtime.checkpoint_state import (
     CheckpointStateAccessor,
     build_state_mutation_graph,
 )
+from deerflow.runtime.context_evidence import ContextRebaseReason
 from deerflow.runtime.context_keys import (
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     RuntimeContextKeys,
@@ -27,6 +31,7 @@ from deerflow.runtime.recovered_llm_failures import (
 from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
+    RollbackPoint,
     RunContext,
     _agent_factory_supports_app_config,
     _build_runtime_context,
@@ -73,7 +78,8 @@ def test_public_run_error_codes_have_closed_stable_payloads() -> None:
         PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED: ("Local private runtime cannot enforce read-only mounts when host bash is enabled"),
         PublicRunErrorCode.PROVIDER_REQUEST_USAGE_UNSUPPORTED: ("Provider request usage cannot be measured safely for this request"),
         PublicRunErrorCode.PROVIDER_REQUEST_PROFILE_DRIFT: ("The final provider request no longer matches its frozen usage profile"),
-        PublicRunErrorCode.PROVIDER_REQUEST_CAPACITY_EXCEEDED: ("The provider request safety value exceeds the selected model input capacity"),
+        PublicRunErrorCode.CONTEXT_CAPACITY_EXCEEDED: ("The final context request exceeds the selected model input capacity"),
+        PublicRunErrorCode.CONTEXT_PROVIDER_CALL_AMBIGUOUS: ("The Provider call outcome is unknown and cannot be repeated safely"),
     }
 
     assert set(PublicRunErrorCode) == set(expected_messages)
@@ -609,6 +615,209 @@ async def test_model_output_limit_publishes_terminal_before_job_settlement() -> 
     assert record.error == "MODEL_OUTPUT_LIMIT"
     assert not [call for call in bridge.publish.await_args_list if call.args[1] == "error"]
     bridge.publish_end.assert_awaited_once_with("output-limit-run")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "stream_modes",
+    [
+        ["messages", "values"],
+        ["messages"],
+    ],
+)
+async def test_model_output_limit_terminal_is_not_delayed_by_task_argument_deltas(
+    stream_modes: list[str],
+) -> None:
+    run_manager = RunManager()
+    record = await run_manager.create("output-limit-thread")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class _Graph:
+        async def astream(self, *args, **kwargs):
+            del args, kwargs
+            for index in range(64):
+                yield (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            id="task-message",
+                            tool_call_chunks=[
+                                {
+                                    "name": "task" if index == 0 else None,
+                                    "args": "验",
+                                    "id": "task-call" if index == 0 else None,
+                                    "index": 0,
+                                    "type": "tool_call_chunk",
+                                }
+                            ],
+                        ),
+                        {"langgraph_checkpoint_ns": ""},
+                    ),
+                )
+            raise PublicRunError(PublicRunErrorCode.MODEL_OUTPUT_LIMIT)
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: _Graph(),
+        graph_input={"messages": []},
+        config={},
+        stream_modes=stream_modes,
+    )
+
+    message_frames = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "messages"]
+    assert len(message_frames) == 2
+    assert record.status is RunStatus.error
+    assert record.error == "MODEL_OUTPUT_LIMIT"
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "cancel_style",
+    ["abort_event", "cancelled_error"],
+)
+async def test_observed_output_limit_terminal_wins_over_late_user_cancel(
+    cancel_style: str,
+) -> None:
+    run_manager = RunManager()
+    record = await run_manager.create("output-limit-cancel-thread")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class _Graph:
+        async def astream(self, *args, **kwargs):
+            del args
+            runtime = kwargs["config"]["configurable"]["__pregel_runtime"]
+            recorder = runtime.context[RuntimeContextKeys.RUN_SEMANTIC_STOP_RECORDER]
+            recorder.record("model_output_limit")
+            record.abort_event.set()
+            if cancel_style == "cancelled_error":
+                raise asyncio.CancelledError
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(content="", id="output-limit-terminal"),
+                    {"langgraph_checkpoint_ns": ""},
+                ),
+            )
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: _Graph(),
+        graph_input={"messages": []},
+        config={},
+        stream_modes=["messages", "values"],
+    )
+
+    assert record.status is RunStatus.error
+    assert record.error == "MODEL_OUTPUT_LIMIT"
+    assert not [call for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        PublicRunErrorCode.CONTEXT_CAPACITY_EXCEEDED,
+        PublicRunErrorCode.CONTEXT_PROVIDER_CALL_AMBIGUOUS,
+    ],
+)
+async def test_context_failures_publish_typed_terminal_before_job_settlement(
+    error_code: PublicRunErrorCode,
+) -> None:
+    run_manager = RunManager()
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    record = await run_manager.register_persisted(
+        run_id="context-terminal-run",
+        thread_id="context-terminal-thread",
+        assistant_id="project-agent",
+        model_name=SAFE_MODEL_REF,
+        scope=scope,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    checkpointer = SimpleNamespace(aget_tuple=AsyncMock(return_value=None))
+
+    class _Graph:
+        async def astream(self, *args, **kwargs):
+            del args, kwargs
+            raise PublicRunError(error_code)
+            yield  # pragma: no cover
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, private_scope=scope),
+        agent_factory=lambda **_kwargs: _Graph(),
+        graph_input={"messages": []},
+        config={},
+    )
+
+    assert record.status is RunStatus.error
+    assert record.error == error_code.value
+    assert [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "error"] == [
+        {
+            "message": PublicRunError(error_code).public_message,
+            "name": error_code.value,
+        }
+    ]
+    bridge.publish_end.assert_awaited_once_with("context-terminal-run")
+
+
+@pytest.mark.anyio
+async def test_worker_preserves_provider_dispatch_ambiguity_for_durable_executor() -> None:
+    run_manager = RunManager()
+    record = await run_manager.create("thread-provider-ambiguity")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class _Graph:
+        async def astream(self, *args, **kwargs):
+            del args, kwargs
+            raise ProviderDispatchOutcomeAmbiguous()
+            yield  # pragma: no cover
+
+    with pytest.raises(ProviderDispatchOutcomeAmbiguous):
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: _Graph(),
+            graph_input={},
+            config={},
+        )
+
+    assert record.status is RunStatus.running
+    assert record.error is None
+    assert not [call for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    bridge.publish_end.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -1456,6 +1665,57 @@ async def test_rollback_restored_checkpoint_becomes_latest_with_real_checkpointe
     assert latest.checkpoint["channel_values"] == {"messages": ["before"]}
     assert latest.pending_writes == [("task-before", "messages", "pending-before")]
     assert ("task-after", "messages", "pending-after") not in latest.pending_writes
+
+
+@pytest.mark.anyio
+async def test_graph_rollback_records_new_context_window_generation() -> None:
+    checkpointer = InMemorySaver()
+    graph = build_state_mutation_graph("rollback-test", "full")
+    accessor = CheckpointStateAccessor.bind(
+        graph,
+        checkpointer,
+        mode="full",
+    )
+    head = {
+        "configurable": {
+            "thread_id": "thread-context-rollback",
+            "checkpoint_ns": "",
+        }
+    }
+    before_config = await accessor.aupdate(
+        head,
+        {"messages": [HumanMessage(id="before", content="before")]},
+        as_node="rollback-test",
+    )
+    before = await accessor.aget(before_config)
+    after_config = await accessor.aupdate(
+        before_config,
+        {"messages": [HumanMessage(id="after", content="after")]},
+        as_node="rollback-test",
+    )
+    observer = SimpleNamespace(record_window_rebased=AsyncMock())
+
+    restored = await _rollback_to_pre_run_checkpoint(
+        checkpointer=checkpointer,
+        accessor=accessor,
+        thread_id="thread-context-rollback",
+        run_id="run-context-rollback",
+        rollback_point=RollbackPoint(
+            config=dict(before.config),
+            state_values=dict(before.values),
+            messages=tuple(before.values["messages"]),
+            metadata=dict(before.metadata),
+            pending_writes=(),
+        ),
+        snapshot_capture_failed=False,
+        context_evidence_observer=observer,
+    )
+
+    assert restored is True
+    call_kwargs = observer.record_window_rebased.await_args.kwargs
+    assert call_kwargs["reason"] is ContextRebaseReason.ROLLBACK
+    assert call_kwargs["source_checkpoint_id"] == (after_config["configurable"]["checkpoint_id"])
+    assert call_kwargs["result_checkpoint_id"] != (after_config["configurable"]["checkpoint_id"])
 
 
 @pytest.mark.anyio

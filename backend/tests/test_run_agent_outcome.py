@@ -177,7 +177,7 @@ async def test_run_agent_disabled_token_tracking_excludes_provider_usage_from_se
                 },
             )
             original_messages.append(message)
-            journal.on_llm_end(
+            await journal.on_llm_end(
                 SimpleNamespace(
                     generations=[[SimpleNamespace(message=message)]],
                 ),

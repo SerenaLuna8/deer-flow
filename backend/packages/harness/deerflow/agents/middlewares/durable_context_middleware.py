@@ -21,6 +21,11 @@ from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
+from deerflow.agents.middlewares.provider_request_cost_adapter import (
+    MessageLaneProvenance,
+    SystemPromptLaneSpan,
+    attach_message_lane_provenance,
+)
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
 from deerflow.agents.thread_state import (
     _DELEGATION_LEDGER_MAX_ENTRIES,
@@ -30,6 +35,7 @@ from deerflow.agents.thread_state import (
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.private_scope import PrivateResourceScope
+from deerflow.runtime.context_evidence import ContextLane
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 
 _DURABLE_CONTEXT_DATA_KEY = "durable_context_data"
@@ -91,22 +97,86 @@ def render_durable_context_data(summary_text: str | None, ledger: list, skills: 
     provider request.
     """
 
-    data_parts: list[str] = []
+    rendered = _render_durable_context_data_with_provenance(
+        summary_text,
+        ledger,
+        skills,
+    )
+    return rendered[0] if rendered is not None else ""
+
+
+def _render_durable_context_data_with_provenance(
+    summary_text: str | None,
+    ledger: list,
+    skills: list,
+) -> tuple[str, MessageLaneProvenance] | None:
+    data_parts: list[tuple[str, str, ContextLane, int, int]] = []
     if summary_text:
         bounded_summary = _bound_text(str(summary_text), _SUMMARY_RENDER_CHAR_BUDGET)
-        data_parts.append(f"## Conversation summary so far\n{escape(bounded_summary, quote=False)}")
+        escaped_summary = escape(bounded_summary, quote=False)
+        summary_prefix = "## Conversation summary so far\n"
+        data_parts.append(
+            (
+                "summary",
+                f"{summary_prefix}{escaped_summary}",
+                ContextLane.SUMMARIZED_CONVERSATION,
+                len(summary_prefix),
+                len(summary_prefix) + len(escaped_summary),
+            )
+        )
 
     ledger_block = render_delegation_ledger(ledger or [])
     if ledger_block:
-        data_parts.append(ledger_block)
+        data_parts.append(
+            (
+                "delegation_ledger",
+                ledger_block,
+                ContextLane.CONVERSATION,
+                0,
+                len(ledger_block),
+            )
+        )
 
     skill_block = render_skill_context(skills or [])
     if skill_block:
-        data_parts.append(skill_block)
+        data_parts.append(
+            (
+                "skill_context",
+                skill_block,
+                ContextLane.SKILLS,
+                0,
+                len(skill_block),
+            )
+        )
 
     if not data_parts:
-        return ""
-    return "<durable_context_data>\n" + "\n\n".join(data_parts) + "\n</durable_context_data>"
+        return None
+
+    output = ["<durable_context_data>\n"]
+    cursor = len(output[0])
+    spans: list[SystemPromptLaneSpan] = []
+    for index, (source_name, block, lane, attributed_start, attributed_end) in enumerate(data_parts):
+        if index:
+            separator = "\n\n"
+            output.append(separator)
+            cursor += len(separator)
+        output.append(block)
+        if attributed_end > attributed_start:
+            spans.append(
+                SystemPromptLaneSpan(
+                    source_name=source_name,
+                    lane=lane,
+                    start=cursor + attributed_start,
+                    end=cursor + attributed_end,
+                )
+            )
+        cursor += len(block)
+    output.append("\n</durable_context_data>")
+    content = "".join(output)
+    return content, MessageLaneProvenance(
+        exact_content=content,
+        spans=tuple(spans),
+    )
 
 
 def render_durable_context_messages(
@@ -116,18 +186,25 @@ def render_durable_context_messages(
 ) -> tuple[SystemMessage, HumanMessage] | ():
     """Return the exact hidden message pair injected for Durable Context."""
 
-    data_block = render_durable_context_data(summary_text, ledger, skills)
-    if not data_block:
+    rendered = _render_durable_context_data_with_provenance(
+        summary_text,
+        ledger,
+        skills,
+    )
+    if rendered is None:
         return ()
+    data_block, provenance = rendered
+    data_message = HumanMessage(
+        content=data_block,
+        additional_kwargs={
+            "hide_from_ui": True,
+            _DURABLE_CONTEXT_DATA_KEY: True,
+        },
+    )
+    attach_message_lane_provenance(data_message, provenance)
     return (
         SystemMessage(content=_AUTHORITY_CONTRACT),
-        HumanMessage(
-            content=data_block,
-            additional_kwargs={
-                "hide_from_ui": True,
-                _DURABLE_CONTEXT_DATA_KEY: True,
-            },
-        ),
+        data_message,
     )
 
 

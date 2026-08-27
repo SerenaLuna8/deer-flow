@@ -2151,6 +2151,10 @@ export interface Translations {
     toolExecutionFailedDescription: string;
     runPolicyStaleTitle: string;
     runPolicyStaleDescription: string;
+    contextCapacityExceededTitle: string;
+    contextCapacityExceededDescription: string;
+    contextProviderCallAmbiguousTitle: string;
+    contextProviderCallAmbiguousDescription: string;
     toolCallControlStateInvalidTitle: string;
     toolCallControlStateInvalidDescription: string;
     toolCallControl: {
@@ -2411,17 +2415,36 @@ export interface Translations {
   // Context Window
   contextWindow: {
     title: string;
+    close: string;
+    full: (percent: string) => string;
     usage: string;
     loading: string;
     unavailable: string;
     disabled: string;
     progressLabel: (percent: string) => string;
     usageWithoutCapacity: (estimated: string) => string;
+    lowerBoundUsage: (lowerBound: string) => string;
     capacityUnavailable: string;
+    capacityUnknown: string;
     contextWindowLimit: string;
     notConfigured: string;
     safetyBound: string;
     previousProviderInput: string;
+    compactionThreshold: string;
+    stale: string;
+    unmeasuredVisuals: (count: number) => string;
+    lanes: {
+      system_prompt: string;
+      agent_instructions: string;
+      tool_definitions: string;
+      skills: string;
+      mcp_dynamic_tools: string;
+      subagent_definitions: string;
+      summarized_conversation: string;
+      conversation: string;
+      visual_media: string;
+      provider_overhead: string;
+    };
     compressionConditions: string;
     noCompressionConditions: string;
     current: string;

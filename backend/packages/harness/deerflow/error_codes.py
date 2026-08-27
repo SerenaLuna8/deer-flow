@@ -49,7 +49,8 @@ class PublicRunErrorCode(StrEnum):
     LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED = "LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED"
     PROVIDER_REQUEST_USAGE_UNSUPPORTED = "PROVIDER_REQUEST_USAGE_UNSUPPORTED"
     PROVIDER_REQUEST_PROFILE_DRIFT = "PROVIDER_REQUEST_PROFILE_DRIFT"
-    PROVIDER_REQUEST_CAPACITY_EXCEEDED = "PROVIDER_REQUEST_CAPACITY_EXCEEDED"
+    CONTEXT_CAPACITY_EXCEEDED = "CONTEXT_CAPACITY_EXCEEDED"
+    CONTEXT_PROVIDER_CALL_AMBIGUOUS = "CONTEXT_PROVIDER_CALL_AMBIGUOUS"
 
 
 _PUBLIC_RUN_ERROR_MESSAGE_BY_CODE: Final[Mapping[PublicRunErrorCode, str]] = MappingProxyType(
@@ -65,7 +66,8 @@ _PUBLIC_RUN_ERROR_MESSAGE_BY_CODE: Final[Mapping[PublicRunErrorCode, str]] = Map
         PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED: ("Local private runtime cannot enforce read-only mounts when host bash is enabled"),
         PublicRunErrorCode.PROVIDER_REQUEST_USAGE_UNSUPPORTED: ("Provider request usage cannot be measured safely for this request"),
         PublicRunErrorCode.PROVIDER_REQUEST_PROFILE_DRIFT: ("The final provider request no longer matches its frozen usage profile"),
-        PublicRunErrorCode.PROVIDER_REQUEST_CAPACITY_EXCEEDED: ("The provider request safety value exceeds the selected model input capacity"),
+        PublicRunErrorCode.CONTEXT_CAPACITY_EXCEEDED: ("The final context request exceeds the selected model input capacity"),
+        PublicRunErrorCode.CONTEXT_PROVIDER_CALL_AMBIGUOUS: ("The Provider call outcome is unknown and cannot be repeated safely"),
     }
 )
 
@@ -79,3 +81,12 @@ class PublicRunError(RuntimeError):
         self.code = code
         self.public_message = _PUBLIC_RUN_ERROR_MESSAGE_BY_CODE[code]
         super().__init__(self.public_message)
+
+
+class ContextProviderCallAmbiguousError(GraphBubbleUp):
+    """Fatal signal that a dispatched Provider call cannot be repeated safely."""
+
+    public_error_code: Final = PublicRunErrorCode.CONTEXT_PROVIDER_CALL_AMBIGUOUS
+
+    def __init__(self, message: str = "Provider dispatch outcome is ambiguous") -> None:
+        super().__init__(message)

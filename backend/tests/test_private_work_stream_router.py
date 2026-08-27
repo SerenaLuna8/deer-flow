@@ -239,7 +239,15 @@ async def test_stream_run_uses_private_launcher_and_durable_sse_consumer_once(
     launch_calls: list[tuple[object, str, object, object]] = []
     consumer_calls: list[dict[str, object]] = []
 
-    async def launcher(body, selected_thread_id, request, trusted_context):
+    async def launcher(
+        body,
+        selected_thread_id,
+        request,
+        trusted_context,
+        *,
+        context_rebase_reason,
+    ):
+        assert context_rebase_reason is None
         launch_calls.append((body, selected_thread_id, request, trusted_context))
         return record
 
@@ -431,14 +439,8 @@ async def test_durable_consumer_drains_next_page_before_terminal_fallback() -> N
         limit=100,
         run_id=run_id,
     )
-    service.get.assert_awaited_once_with(context, thread_id, run_id)
-    bridge.ensure_settled_terminal.assert_awaited_once_with(
-        context.resource_scope,
-        thread_id,
-        run_id,
-        status="completed",
-        error_code=None,
-    )
+    service.get.assert_not_awaited()
+    bridge.ensure_settled_terminal.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -495,9 +497,7 @@ async def test_durable_consumer_preserves_model_output_limit_terminal_code() -> 
 
 
 @pytest.mark.asyncio
-async def test_durable_consumer_waits_for_settlement_and_corrects_terminal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_durable_consumer_preserves_first_persisted_terminal() -> None:
     thread_id = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
     provisional = StoredStreamFrame(
@@ -508,18 +508,9 @@ async def test_durable_consumer_waits_for_settlement_and_corrects_terminal(
         data={"status": "success"},
         terminal=True,
     )
-    corrected = StoredStreamFrame(
-        id="7",
-        thread_id=thread_id,
-        run_id=run_id,
-        event="end",
-        data={"status": "interrupted"},
-        terminal=True,
-        created=False,
-    )
     bridge = SimpleNamespace(
         read_after=AsyncMock(),
-        ensure_settled_terminal=AsyncMock(return_value=corrected),
+        ensure_settled_terminal=AsyncMock(),
     )
     service = SimpleNamespace(
         get=AsyncMock(
@@ -531,7 +522,6 @@ async def test_durable_consumer_waits_for_settlement_and_corrects_terminal(
     )
     context = SimpleNamespace(request_id="terminal-race", resource_scope=object())
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-    monkeypatch.setattr(private_work_router, "_PRIVATE_STREAM_POLL_SECONDS", 0)
 
     chunks = [
         chunk
@@ -549,16 +539,10 @@ async def test_durable_consumer_waits_for_settlement_and_corrects_terminal(
     ]
 
     assert len(chunks) == 1
-    assert 'data: {"status":"interrupted"}' in chunks[0]
-    assert 'data: {"status":"success"}' not in chunks[0]
+    assert 'data: {"status":"success"}' in chunks[0]
     bridge.read_after.assert_not_awaited()
-    bridge.ensure_settled_terminal.assert_awaited_once_with(
-        context.resource_scope,
-        thread_id,
-        run_id,
-        status="interrupted",
-        error_code=None,
-    )
+    service.get.assert_not_awaited()
+    bridge.ensure_settled_terminal.assert_not_awaited()
 
 
 @pytest.mark.asyncio

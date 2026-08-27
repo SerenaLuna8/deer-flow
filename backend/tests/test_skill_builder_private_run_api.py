@@ -381,7 +381,10 @@ async def test_generic_browser_run_controls_reject_skill_builder_threads_before_
             selected_thread_id: str,
             _request: object,
             _context: object,
+            *,
+            context_rebase_reason: object,
         ) -> SimpleNamespace:
+            assert context_rebase_reason is None
             launched_thread_ids.append(selected_thread_id)
             return SimpleNamespace(
                 run_id=chat_run_id,

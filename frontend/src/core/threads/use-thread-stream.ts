@@ -3120,6 +3120,11 @@ export function useThreadStream({
         threadId,
       )
     : { activeRunId: null, resolverGeneration: null };
+  const pendingMessageAdmission = pendingMessageAdmissionRef.current;
+  const isRunAdmissionPending =
+    pendingMessageAdmission?.threadId === currentViewThreadId &&
+    pendingMessageAdmission.uploadStatusScopeKey === uploadScopeKey &&
+    pendingMessageAdmission.serverAdmission.isPending();
   const visibleTerminalReconciliationError =
     selectExactTerminalReconciliationError(
       terminalReconciliationFailure,
@@ -3132,6 +3137,7 @@ export function useThreadStream({
     terminalDisplayLatched,
     activeRunId: exactActiveRunOwner.activeRunId,
     activeRunResolverGeneration: exactActiveRunOwner.resolverGeneration,
+    isRunAdmissionPending,
     pendingUsageMessages,
     attachRun,
     reconcileTerminalRun,

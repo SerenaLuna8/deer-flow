@@ -124,6 +124,7 @@ function subtaskChanged(previous: Subtask | undefined, next: Subtask): boolean {
   return (
     previous.status !== next.status ||
     previous.statusSource !== next.statusSource ||
+    previous.executionId !== next.executionId ||
     !executionApprovalEquals(
       previous.executionApproval,
       next.executionApproval,

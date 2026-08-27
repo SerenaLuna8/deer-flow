@@ -30,6 +30,15 @@ from app.private_work.context import (
     require_issued_private_work_context,
     strip_private_client_fields,
 )
+from app.private_work.context_projection import (
+    ContextProjectionTransaction,
+    context_evidence_record_to_core,
+)
+from app.private_work.context_replacement import (
+    idle_checkpoint_projection_source,
+    idle_compaction_projection_source,
+    source_from_checkpoint_snapshot,
+)
 from app.private_work.errors import (
     PrivateWorkConflict,
     PrivateWorkError,
@@ -60,7 +69,18 @@ from deerflow.agents.memory.snip import (
     MEMORY_ARCHIVE_RECEIPT_VERSION,
     SNIP_ARCHIVE_PROMPT_VERSION,
 )
+from deerflow.agents.provider_request_contract import (
+    CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
+    CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
+    provider_response_digest,
+)
 from deerflow.config.model_execution import SystemModelExecutionProvenance
+from deerflow.error_codes import ContextProviderCallAmbiguousError
+from deerflow.persistence.context_evidence import (
+    ContextEvidenceRepository,
+    ContextEvidenceScope,
+    ContextSubjectRef,
+)
 from deerflow.persistence.execution_approvals import (
     EXECUTION_APPROVAL_ACTIVE_STATUSES,
     ExecutionApprovalRequestRow,
@@ -77,6 +97,18 @@ from deerflow.persistence.private_work.model import (
     PrivateFileRow,
 )
 from deerflow.persistence.run.model import RunRow
+from deerflow.runtime.context_evidence import (
+    CheckpointLinkedV1,
+    CompactionCommittedV1,
+    ContextCheckpointProjectionSnapshot,
+    ContextCompactionCheckpointReceipt,
+    ContextProjectionHead,
+    ContextSubject,
+    ProjectionPhase,
+    ProviderCallDisposition,
+    RequestPreparedV1,
+    resolve_provider_call,
+)
 from deerflow.runtime.events.models import STREAM_TERMINAL_ERROR_CODES
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
@@ -247,9 +279,13 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         self._thread_kind = thread_kind
         self._revalidator = PrivateWorkRevalidator()
         self._authorization_boundary: object | None = None
+        self._context_evidence_observer: object | None = None
 
     def set_authorization_boundary(self, boundary: object) -> None:
         self._authorization_boundary = boundary
+
+    def set_context_evidence_observer(self, observer: object) -> None:
+        self._context_evidence_observer = observer
 
     def already_authorized(
         self,
@@ -408,6 +444,294 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             return
         await MemoryDocumentRepository(session).activate_history(activation)
 
+    def _context_compaction_activation(
+        self,
+        item: CheckpointTuple,
+        *,
+        thread_id: str,
+    ) -> tuple[str, ContextCompactionCheckpointReceipt] | None:
+        checkpoint = item.checkpoint
+        if not isinstance(checkpoint, Mapping):
+            raise ValueError("Checkpoint payload is invalid")
+        channel_values = checkpoint.get("channel_values")
+        if not isinstance(channel_values, Mapping):
+            return None
+        raw_receipt = channel_values.get(CONTEXT_COMPACTION_RECEIPT_STATE_KEY)
+        if raw_receipt is None:
+            return None
+        raw_projection = channel_values.get(CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY)
+        if not isinstance(raw_receipt, Mapping) or not isinstance(
+            raw_projection,
+            Mapping,
+        ):
+            raise ValueError("Checkpoint Context compaction receipt is invalid")
+        receipt = ContextCompactionCheckpointReceipt.from_safe_mapping(
+            raw_receipt,
+        )
+        projection = ContextCheckpointProjectionSnapshot.from_safe_mapping(
+            raw_projection,
+        )
+        if receipt.projection_snapshot != projection:
+            # A Provider response clears this receipt. Treat any retained older
+            # receipt beside a newer safe snapshot as stale derived state.
+            return None
+        committed_checkpoint_id = self._checkpoint_id(item.config)
+        if committed_checkpoint_id is None:
+            raise ValueError("Checkpoint Context compaction commit is invalid")
+        if thread_id != self._thread_id(item.config):
+            raise ValueError("Checkpoint Context compaction Thread is invalid")
+        return committed_checkpoint_id, receipt
+
+    async def _repair_context_compaction_receipt(
+        self,
+        session: AsyncSession,
+        item: CheckpointTuple,
+        *,
+        thread_id: str,
+    ) -> None:
+        activation = self._context_compaction_activation(
+            item,
+            thread_id=thread_id,
+        )
+        if activation is None:
+            return
+        checkpoint_id, receipt = activation
+        context = require_issued_private_work_context(self._context)
+        scope = ContextEvidenceScope.from_resource(
+            context.resource_scope,
+            thread_id,
+        )
+        repository = ContextEvidenceRepository(session)
+        subject = ContextSubjectRef.lead_thread(thread_id)
+        current = await repository.read_head(scope, subject, lock=True)
+        if current is not None and current.checkpoint_id == checkpoint_id and str(current.context_window_generation) == receipt.result_generation.generation_id:
+            try:
+                ContextProjectionHead.from_safe_mapping(current.projection)
+            except (TypeError, ValueError):
+                await repository.delete_head(scope, subject)
+            else:
+                return
+        source = idle_compaction_projection_source(
+            receipt,
+            thread_id=thread_id,
+            result_checkpoint_id=checkpoint_id,
+        )
+        await ContextProjectionTransaction(repository).append_and_project(
+            scope=scope,
+            source=source,
+            payloads=(
+                CompactionCommittedV1(
+                    receipt_id=receipt.receipt_id,
+                    source_checkpoint_id=receipt.source_checkpoint_id,
+                    result_checkpoint_id=checkpoint_id,
+                    source_generation=receipt.source_generation,
+                    result_generation=receipt.result_generation,
+                    source_tokens=receipt.source_tokens,
+                    result_tokens=receipt.result_tokens,
+                    summary_digest=receipt.summary_digest,
+                ),
+            ),
+            origin_run_id=receipt.origin_run_id,
+            active_run_id=(receipt.origin_run_id if receipt.phase.value == "active" else None),
+        )
+
+    def _context_provider_checkpoint_activation(
+        self,
+        item: CheckpointTuple,
+        *,
+        thread_id: str,
+    ) -> tuple[str, ContextCheckpointProjectionSnapshot] | None:
+        checkpoint = item.checkpoint
+        if not isinstance(checkpoint, Mapping):
+            raise ValueError("Checkpoint payload is invalid")
+        channel_values = checkpoint.get("channel_values")
+        if not isinstance(channel_values, Mapping):
+            return None
+        raw_projection = channel_values.get(
+            CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
+        )
+        if not isinstance(raw_projection, Mapping):
+            return None
+        provider_authority_fields = (
+            "provider_call_id",
+            "provider_subject",
+            "origin_run_id",
+            "provider_response_message_start",
+            "provider_response_message_count",
+            "provider_response_digest",
+        )
+        if not any(raw_projection.get(field) is not None for field in provider_authority_fields):
+            return None
+        try:
+            snapshot = ContextCheckpointProjectionSnapshot.from_safe_mapping(
+                raw_projection,
+            )
+        except (TypeError, ValueError):
+            raise ContextProviderCallAmbiguousError(
+                "Checkpoint Provider response authority is invalid",
+            ) from None
+        if snapshot.provider_call_id is None or snapshot.provider_subject is None or snapshot.provider_subject != ContextSubject.lead_thread(thread_id=thread_id):
+            raise ContextProviderCallAmbiguousError(
+                "Checkpoint Provider response subject is invalid",
+            )
+        checkpoint_id = self._checkpoint_id(item.config)
+        if checkpoint_id is None or thread_id != self._thread_id(item.config):
+            raise ContextProviderCallAmbiguousError(
+                "Checkpoint Provider response identity is invalid",
+            )
+        return checkpoint_id, snapshot
+
+    @staticmethod
+    def _validate_context_provider_checkpoint_response(
+        item: CheckpointTuple,
+        snapshot: ContextCheckpointProjectionSnapshot,
+    ) -> None:
+        checkpoint = item.checkpoint
+        if not isinstance(checkpoint, Mapping):
+            raise ValueError("Checkpoint payload is invalid")
+        channel_values = checkpoint.get("channel_values")
+        if not isinstance(channel_values, Mapping):
+            raise ContextProviderCallAmbiguousError(
+                "Checkpoint does not prove the Provider response",
+            )
+        messages = channel_values.get("messages")
+        start = snapshot.provider_response_message_start
+        count = snapshot.provider_response_message_count
+        if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)) or start is None or count is None or start + count > len(messages):
+            raise ContextProviderCallAmbiguousError(
+                "Checkpoint does not prove the Provider response",
+            )
+        try:
+            digest = provider_response_digest(
+                tuple(messages[start : start + count]),
+            )
+        except (TypeError, ValueError):
+            raise ContextProviderCallAmbiguousError(
+                "Checkpoint Provider response proof is invalid",
+            ) from None
+        if digest != snapshot.provider_response_digest:
+            raise ContextProviderCallAmbiguousError(
+                "Checkpoint does not contain the bound Provider response",
+            )
+
+    async def _repair_context_provider_checkpoint(
+        self,
+        session: AsyncSession,
+        item: CheckpointTuple,
+        *,
+        thread_id: str,
+    ) -> str | None:
+        """Converge one observed response to Checkpoint Evidence and its Head."""
+
+        activation = self._context_provider_checkpoint_activation(
+            item,
+            thread_id=thread_id,
+        )
+        if activation is None:
+            return None
+        checkpoint_id, snapshot = activation
+        context = require_issued_private_work_context(self._context)
+        scope = ContextEvidenceScope.from_resource(
+            context.resource_scope,
+            thread_id,
+        )
+        repository = ContextEvidenceRepository(session)
+        provider_call_id = snapshot.provider_call_id
+        if provider_call_id is None:  # pragma: no cover - activation invariant
+            return None
+        records = []
+        cursor = 0
+        while True:
+            page = await repository.page_provider_call_evidence(
+                scope,
+                ContextSubjectRef.lead_thread(thread_id),
+                provider_call_id,
+                after_seq=cursor,
+                limit=1000,
+            )
+            records.extend(page)
+            if len(page) < 1000:
+                break
+            cursor = page[-1].evidence_seq
+        evidence = tuple(context_evidence_record_to_core(record) for record in records)
+        try:
+            plan = resolve_provider_call(evidence, provider_call_id)
+        except (TypeError, ValueError):
+            raise ContextProviderCallAmbiguousError(
+                "Provider lifecycle Evidence is invalid",
+            ) from None
+        prepared = next(
+            (item for item in reversed(evidence) if isinstance(item.payload, RequestPreparedV1) and item.payload.provider_call.provider_call_id == provider_call_id),
+            None,
+        )
+        if prepared is None or not isinstance(
+            prepared.payload,
+            RequestPreparedV1,
+        ):
+            raise ContextProviderCallAmbiguousError(
+                "Checkpoint Provider response has no prepared Evidence",
+            )
+        provider_call = prepared.payload.provider_call
+        if (
+            provider_call.subject != snapshot.provider_subject
+            or provider_call.generation != snapshot.generation
+            or provider_call.request_fingerprint != snapshot.measurement.request_fingerprint
+            or prepared.payload.measurement != snapshot.measurement
+            or prepared.origin_run_id != snapshot.origin_run_id
+        ):
+            raise ContextProviderCallAmbiguousError(
+                "Checkpoint Provider response disagrees with Evidence",
+            )
+        if plan.disposition is ProviderCallDisposition.REUSE_RESULT:
+            return provider_call_id
+        phase = ProjectionPhase.IDLE
+        active_run_id = None
+        observer_run_id = getattr(
+            getattr(self, "_context_evidence_observer", None),
+            "run_id",
+            None,
+        )
+        if observer_run_id == prepared.origin_run_id:
+            phase = ProjectionPhase.ACTIVE
+            active_run_id = prepared.origin_run_id
+        if phase is ProjectionPhase.IDLE:
+            source = idle_checkpoint_projection_source(
+                snapshot,
+                thread_id=thread_id,
+                checkpoint_id=checkpoint_id,
+            )
+        else:
+            source = source_from_checkpoint_snapshot(
+                snapshot,
+                subject=provider_call.subject,
+                checkpoint_id=checkpoint_id,
+                phase=phase,
+            )
+        source = source.model_copy(
+            update={"current_provider_call_id": provider_call_id},
+        )
+        if plan.disposition is not ProviderCallDisposition.REPAIR_CHECKPOINT_LINK:
+            raise ContextProviderCallAmbiguousError(
+                "Provider call cannot be replayed safely",
+            )
+        self._validate_context_provider_checkpoint_response(
+            item,
+            snapshot,
+        )
+        await ContextProjectionTransaction(repository).append_and_project(
+            scope=scope,
+            source=source,
+            payloads=(
+                CheckpointLinkedV1(
+                    provider_call_id=provider_call_id,
+                    checkpoint_id=checkpoint_id,
+                ),
+            ),
+            origin_run_id=prepared.origin_run_id,
+            active_run_id=active_run_id,
+        )
+        return provider_call_id
+
     @asynccontextmanager
     async def _locked_active(
         self,
@@ -457,8 +781,20 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                         item,
                         thread_id=thread_id,
                     )
+                    await self._repair_context_compaction_receipt(
+                        session,
+                        item,
+                        thread_id=thread_id,
+                    )
+                    await self._repair_context_provider_checkpoint(
+                        session,
+                        item,
+                        thread_id=thread_id,
+                    )
                 return item
             except PrivateWorkError:
+                raise
+            except ContextProviderCallAmbiguousError:
                 raise
             except Exception:
                 raise PrivateWorkUnavailable(self._context.request_id) from None
@@ -484,8 +820,20 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                     item,
                     thread_id=thread_id,
                 )
+                await self._repair_context_compaction_receipt(
+                    session,
+                    item,
+                    thread_id=thread_id,
+                )
+                await self._repair_context_provider_checkpoint(
+                    session,
+                    item,
+                    thread_id=thread_id,
+                )
             return item
         except PrivateWorkError:
+            raise
+        except ContextProviderCallAmbiguousError:
             raise
         except Exception:
             raise PrivateWorkUnavailable(self._context.request_id) from None
@@ -577,6 +925,8 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         thread_id = self._thread_id(config)
+        written_config: RunnableConfig | None = None
+        repaired_provider_call_id: str | None = None
         async with self._locked_active(
             thread_id,
             Capability.PRIVATE_WORK_CREATE,
@@ -591,6 +941,16 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 if source is not None:
                     self._validate_marker(source, thread_id=thread_id)
                     await self._repair_memory_archive_receipt(
+                        session,
+                        source,
+                        thread_id=thread_id,
+                    )
+                    await self._repair_context_compaction_receipt(
+                        session,
+                        source,
+                        thread_id=thread_id,
+                    )
+                    repaired_provider_call_id = await self._repair_context_provider_checkpoint(
                         session,
                         source,
                         thread_id=thread_id,
@@ -610,11 +970,39 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                     item,
                     thread_id=thread_id,
                 )
-                return written_config
+                await self._repair_context_compaction_receipt(
+                    session,
+                    item,
+                    thread_id=thread_id,
+                )
+                repaired_provider_call_id = (
+                    await self._repair_context_provider_checkpoint(
+                        session,
+                        item,
+                        thread_id=thread_id,
+                    )
+                    or repaired_provider_call_id
+                )
             except PrivateWorkError:
+                raise
+            except ContextProviderCallAmbiguousError:
                 raise
             except Exception:
                 raise PrivateWorkUnavailable(self._context.request_id) from None
+        if written_config is None:
+            raise PrivateWorkUnavailable(self._context.request_id)
+        checkpoint_id = self._checkpoint_id(written_config)
+        accept_checkpoint = getattr(
+            self._context_evidence_observer,
+            "accept_checkpoint_linked",
+            None,
+        )
+        if checkpoint_id is not None and repaired_provider_call_id is not None and callable(accept_checkpoint):
+            accept_checkpoint(
+                provider_call_id=repaired_provider_call_id,
+                checkpoint_id=checkpoint_id,
+            )
+        return written_config
 
     async def aput_already_authorized(
         self,
@@ -664,6 +1052,16 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                     source,
                     thread_id=thread_id,
                 )
+                await self._repair_context_compaction_receipt(
+                    session,
+                    source,
+                    thread_id=thread_id,
+                )
+                await self._repair_context_provider_checkpoint(
+                    session,
+                    source,
+                    thread_id=thread_id,
+                )
             written_config = await self._raw.aput(
                 clean_config,
                 checkpoint,
@@ -679,8 +1077,20 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 item,
                 thread_id=thread_id,
             )
+            await self._repair_context_compaction_receipt(
+                session,
+                item,
+                thread_id=thread_id,
+            )
+            await self._repair_context_provider_checkpoint(
+                session,
+                item,
+                thread_id=thread_id,
+            )
             return written_config
         except PrivateWorkError:
+            raise
+        except ContextProviderCallAmbiguousError:
             raise
         except Exception:
             raise PrivateWorkUnavailable(self._context.request_id) from None

@@ -8,6 +8,7 @@ export type SubtaskStatus = Subtask["status"];
 
 export interface SubtaskResultUpdate {
   status: SubtaskStatus;
+  executionId?: string;
   result?: string;
   error?: string;
   modelName?: string;
@@ -42,6 +43,7 @@ export const SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief";
 export const SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256";
 export const SUBAGENT_MODEL_NAME_KEY = "subagent_model_name";
 export const SUBAGENT_TOKEN_USAGE_KEY = "subagent_token_usage";
+export const SUBAGENT_USAGE_RECEIPT_ID_KEY = "subagent_usage_receipt_id";
 /**
  * Why a guardrail cap ended a subagent run early (#3875 Phase 2). Mirrors the
  * Python ``SUBAGENT_STOP_REASON_VALUES``. The field is optional/additive —
@@ -61,7 +63,11 @@ const STRUCTURED_SUBAGENT_KEYS = [
   SUBAGENT_RESULT_SHA256_KEY,
   SUBAGENT_MODEL_NAME_KEY,
   SUBAGENT_TOKEN_USAGE_KEY,
+  SUBAGENT_USAGE_RECEIPT_ID_KEY,
 ];
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 const SUCCESS_PREFIX = "Task Succeeded. Result:";
 
@@ -136,6 +142,12 @@ export function parseSubtaskResult(
   const usage = readStructuredTokenUsage(additionalKwargs);
   if (usage) {
     update.usage = usage;
+  }
+  const executionId = readExecutionId(
+    additionalKwargs?.[SUBAGENT_USAGE_RECEIPT_ID_KEY],
+  );
+  if (executionId) {
+    update.executionId = executionId;
   }
   return update;
 }
@@ -311,12 +323,20 @@ function readStructuredTokenUsage(
   return normalizeTokenUsage(additionalKwargs?.[SUBAGENT_TOKEN_USAGE_KEY]);
 }
 
+function readExecutionId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return UUID_PATTERN.test(normalized) ? normalized : undefined;
+}
+
 function readEventRuntimeMetadata(
   event: object,
-): Pick<Subtask, "modelName" | "usage"> {
+): Pick<Subtask, "executionId" | "modelName" | "usage"> {
+  const executionId = readExecutionId(Reflect.get(event, "execution_id"));
   const modelName = Reflect.get(event, "model_name");
   const usage = normalizeTokenUsage(Reflect.get(event, "usage"));
   return {
+    ...(executionId ? { executionId } : {}),
     ...(typeof modelName === "string" && modelName.trim()
       ? { modelName: modelName.trim() }
       : {}),

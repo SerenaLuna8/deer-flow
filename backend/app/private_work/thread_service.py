@@ -22,6 +22,14 @@ from app.private_work.context import (
     require_issued_private_work_context,
     strip_private_client_fields,
 )
+from app.private_work.context_projection import ContextProjectionTransaction
+from app.private_work.context_replacement import (
+    bootstrap_checkpoint_projection_snapshot,
+    branch_projection_source,
+    deterministic_generation_id,
+    history_digest,
+    remeasure_replacement_checkpoint,
+)
 from app.private_work.errors import (
     PrivateWorkConflict,
     PrivateWorkDefaultAgentUnavailable,
@@ -52,13 +60,25 @@ from deerflow.agents.middlewares.token_budget_middleware import (
     TOKEN_BUDGET_USAGE_STATE_KEY,
 )
 from deerflow.agents.provider_request_contract import (
+    CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
+    CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
     PROVIDER_REQUEST_MEASUREMENT_STATE_KEY,
     PROVIDER_REQUEST_PROFILE_STATE_KEY,
 )
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.persistence.context_evidence import (
+    ContextEvidenceRepository,
+    ContextEvidenceScope,
+)
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import AgentRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.context_evidence import (
+    ContextCheckpointProjectionSnapshot,
+    ContextRebaseReason,
+    ContextWindowGeneration,
+    WindowRebasedV1,
+)
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 _BUILTIN_MAIN_AGENT_SOURCE_KEY = "builtin:agent:project-assistant"
@@ -66,6 +86,8 @@ _BRANCH_EXCLUDED_STATE_KEYS = frozenset(
     {
         "sandbox",
         "thread_data",
+        CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
+        CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
         MEMORY_ARCHIVE_RECEIPT_KEY,
         PROVIDER_REQUEST_MEASUREMENT_STATE_KEY,
         PROVIDER_REQUEST_PROFILE_STATE_KEY,
@@ -484,6 +506,33 @@ class PrivateThreadService:
             selected_values = _copyable_branch_state_values(
                 source_snapshot.values,
             )
+            generation = ContextWindowGeneration(
+                generation_id=deterministic_generation_id(
+                    thread_id=target_thread_id,
+                    operation=ContextRebaseReason.BRANCH.value,
+                    source_checkpoint_id=checkpoint_id,
+                    result_checkpoint_id=target_thread_id,
+                )
+            )
+            raw_context_snapshot = (source_snapshot.values or {}).get(
+                CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
+            )
+            if raw_context_snapshot is None:
+                target_context_snapshot = bootstrap_checkpoint_projection_snapshot(
+                    generation=generation,
+                    checkpoint_values=selected_values,
+                )
+            elif isinstance(raw_context_snapshot, Mapping):
+                source_context_snapshot = ContextCheckpointProjectionSnapshot.from_safe_mapping(
+                    raw_context_snapshot,
+                )
+                target_context_snapshot = remeasure_replacement_checkpoint(
+                    source_context_snapshot.without_provider_response_authority(),
+                    generation=generation,
+                    checkpoint_values=selected_values,
+                )
+            else:
+                raise PrivateWorkUnavailable(context.request_id)
             await target_state.aupdate(
                 checkpoint_config(target_thread_id),
                 target_state.replacement_values(
@@ -492,13 +541,37 @@ class PrivateThreadService:
                 ),
                 as_node="branch",
             )
-            await target_state.aupdate(
+            selected_config = await target_state.aupdate(
                 checkpoint_config(target_thread_id),
                 target_state.replacement_values(
                     selected_values,
                     current_values=base_values,
                 ),
                 as_node="branch",
+            )
+            selected_checkpoint_id = self._config_checkpoint_id(
+                selected_config,
+            )
+            if selected_checkpoint_id is None:
+                raise PrivateWorkUnavailable(context.request_id)
+            final_config = await target_state.aupdate(
+                selected_config,
+                {
+                    CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY: (target_context_snapshot.to_safe_mapping()),
+                },
+                as_node="branch",
+            )
+            result_checkpoint_id = self._config_checkpoint_id(final_config)
+            if result_checkpoint_id is None:
+                raise PrivateWorkUnavailable(context.request_id)
+            await self._record_branch_context_projection(
+                context,
+                source_thread_id=source_thread_id,
+                target_thread_id=target_thread_id,
+                source_checkpoint_id=checkpoint_id,
+                result_checkpoint_id=result_checkpoint_id,
+                checkpoint_values=selected_values,
+                snapshot=target_context_snapshot,
             )
         except Exception as exc:
             await self._compensate_create(
@@ -511,6 +584,87 @@ class PrivateThreadService:
                 raise
             raise PrivateWorkUnavailable(context.request_id) from None
         return record
+
+    @staticmethod
+    def _config_checkpoint_id(config: object) -> str | None:
+        if not isinstance(config, Mapping):
+            return None
+        configurable = config.get("configurable")
+        if not isinstance(configurable, Mapping):
+            return None
+        value = configurable.get("checkpoint_id")
+        return value if isinstance(value, str) and value else None
+
+    async def _record_branch_context_projection(
+        self,
+        context: PrivateWorkContext,
+        *,
+        source_thread_id: str,
+        target_thread_id: str,
+        source_checkpoint_id: str,
+        result_checkpoint_id: str,
+        checkpoint_values: Mapping[str, object],
+        snapshot: ContextCheckpointProjectionSnapshot,
+    ) -> None:
+        generation = ContextWindowGeneration(
+            generation_id=deterministic_generation_id(
+                thread_id=target_thread_id,
+                operation=ContextRebaseReason.BRANCH.value,
+                source_checkpoint_id=source_checkpoint_id,
+                result_checkpoint_id=target_thread_id,
+            )
+        )
+        if snapshot.generation != generation:
+            snapshot = snapshot.without_provider_response_authority().model_copy(
+                update={"generation": generation},
+            )
+        source = branch_projection_source(
+            snapshot,
+            target_thread_id=target_thread_id,
+            result_checkpoint_id=result_checkpoint_id,
+            generation=generation,
+        )
+        async with self._session_factory() as session, session.begin():
+            await self._revalidator.require(
+                session,
+                context,
+                Capability.PRIVATE_WORK_CREATE,
+                lock=True,
+            )
+            target = await PrivateThreadRepository(session).get(
+                scope=context.resource_scope,
+                thread_id=target_thread_id,
+                lock=True,
+            )
+            if target is None:
+                raise PrivateWorkNotFound(context.request_id)
+            scope = ContextEvidenceScope.from_resource(
+                context.resource_scope,
+                target_thread_id,
+            )
+            await ContextProjectionTransaction(
+                ContextEvidenceRepository(session),
+            ).append_and_project(
+                scope=scope,
+                source=source,
+                payloads=(
+                    WindowRebasedV1(
+                        reason=ContextRebaseReason.BRANCH,
+                        source_thread_id=source_thread_id,
+                        source_checkpoint_id=source_checkpoint_id,
+                        result_checkpoint_id=result_checkpoint_id,
+                        result_generation=generation,
+                        history_digest=history_digest(
+                            source_thread_id=source_thread_id,
+                            source_checkpoint_id=source_checkpoint_id,
+                            result_checkpoint_id=result_checkpoint_id,
+                            checkpoint_values=checkpoint_values,
+                        ),
+                    ),
+                ),
+                origin_run_id=None,
+                active_run_id=None,
+            )
 
     @staticmethod
     async def _raise_if_branch_target_exists(

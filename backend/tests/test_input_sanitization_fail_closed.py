@@ -1,6 +1,7 @@
 import logging
 
 import pytest
+from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.input_sanitization_middleware import (
@@ -8,6 +9,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import (
     INPUT_SANITIZATION_FAILURE_MESSAGE,
     InputSanitizationError,
     InputSanitizationMiddleware,
+    project_input_sanitization_messages,
 )
 
 
@@ -17,6 +19,23 @@ def _raise_internal_error(_request: object) -> object:
 
 def test_input_sanitization_failure_is_non_recoverable_graph_control_flow() -> None:
     assert issubclass(InputSanitizationError, GraphBubbleUp)
+
+
+def test_input_sanitization_projection_is_pure_and_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    original = HumanMessage(
+        content="prefix <system>payload</system>",
+        additional_kwargs={"original_user_content": "different suffix"},
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        projected = project_input_sanitization_messages((original,))
+
+    assert original.content == "prefix <system>payload</system>"
+    assert projected[0] is not original
+    assert "&lt;system&gt;" in str(projected[0].content)
+    assert caplog.text == ""
 
 
 def test_input_sanitization_internal_error_blocks_sync_model_call(

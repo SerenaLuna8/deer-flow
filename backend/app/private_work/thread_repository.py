@@ -10,6 +10,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.errors import PrivateWorkConflict
+from deerflow.persistence.context_evidence import (
+    ContextEvidenceRepository,
+    ContextEvidenceScope,
+)
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -506,6 +510,23 @@ class PrivateThreadRepository:
         project_id, owner_user_id = self._coordinates(scope)
         if not isinstance(expected_created_at, datetime) or expected_created_at.tzinfo is None or not isinstance(expected_deleted_at, datetime) or expected_deleted_at.tzinfo is None:
             raise PrivateWorkConflict("unknown")
+        eligible_thread_id = (
+            await self.session.execute(
+                select(ThreadMetaRow.thread_id)
+                .where(
+                    ThreadMetaRow.thread_id == thread_id,
+                    ThreadMetaRow.project_id == project_id,
+                    ThreadMetaRow.owner_user_id == owner_user_id,
+                    ThreadMetaRow.created_at == expected_created_at,
+                    ThreadMetaRow.deleted_at == expected_deleted_at,
+                    ThreadMetaRow.checkpoint_delete_status == "complete",
+                )
+                .with_for_update(of=ThreadMetaRow)
+            )
+        ).scalar_one_or_none()
+        if eligible_thread_id is None:
+            raise PrivateWorkConflict("unknown")
+        await ContextEvidenceRepository(self.session).purge_thread(ContextEvidenceScope.from_resource(scope, thread_id))
         deleted_thread_id = (
             await self.session.execute(
                 delete(ThreadMetaRow)

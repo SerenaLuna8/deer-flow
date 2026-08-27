@@ -15,8 +15,10 @@ rs.mock("@/core/models/hooks", () => ({
   useModels: () => ({ models: [], tokenUsageEnabled: false }),
 }));
 rs.mock("@/core/private-work/provider", () => ({
+  usePrivateWorkAccess: (explicit: unknown) => explicit,
   useProjectPrivateWorkScope: () => ({
     scope: { accountId: "account-1", projectId: "project-1" },
+    apiBaseURL: "/api/projects/project-1/private-work",
   }),
 }));
 

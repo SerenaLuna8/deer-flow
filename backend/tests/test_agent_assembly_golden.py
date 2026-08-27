@@ -19,6 +19,7 @@ from pydantic import SecretStr
 
 import deerflow.agents.factory as factory_module
 import deerflow.agents.lead_agent.agent as lead_agent_module
+import deerflow.agents.middlewares.summarization_middleware as summarization_module
 from deerflow.agents.factory import _assemble_from_features
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.lead_agent.agent import (
@@ -43,6 +44,7 @@ from deerflow.agents.middlewares.tool_call_control import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.summarization_config import ContextSize
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 
 GOLDEN_MODEL = "golden-model"
@@ -454,11 +456,21 @@ def _control(*, role: ToolCallControlRole = "lead") -> ToolCallControl:
 
 
 def _build_subagent_chain() -> list[AgentMiddleware]:
-    return build_subagent_runtime_middlewares(
-        app_config=_full_feature_app_config(),
-        model_name=GOLDEN_MODEL,
-        tool_call_control=_control(role="subagent"),
-    )
+    context_model = MagicMock()
+    context_model.profile = {"max_input_tokens": 64_000}
+    summary_model = MagicMock()
+    summary_model.profile = {"max_input_tokens": 64_000}
+    with patch.object(
+        summarization_module.ModelRuntime,
+        "build_chat_model",
+        return_value=summary_model,
+    ):
+        return build_subagent_runtime_middlewares(
+            app_config=_full_feature_app_config(),
+            model_name=GOLDEN_MODEL,
+            context_model=context_model,
+            tool_call_control=_control(role="subagent"),
+        )
 
 
 EMBEDDED_GOLDEN_CHAIN = [name for name in NON_PRIVATE_LEAD_GOLDEN_CHAIN if name != "FinalProviderRequestGuard"]
@@ -496,6 +508,82 @@ def test_lead_middleware_builder_binds_summarization_to_the_lead_context_model()
 
     summarization = next(middleware for middleware in chain if type(middleware).__name__ == "DeerFlowSummarizationMiddleware")
     assert summarization._context_model is lead_model
+
+
+def test_subagent_middleware_builder_inherits_frozen_summarization_and_uses_its_own_context_model() -> None:
+    app_config = _full_feature_app_config()
+    app_config.summarization.trigger = ContextSize(
+        type="fraction",
+        value=0.75,
+    )
+    app_config.summarization.keep = ContextSize(type="messages", value=7)
+    app_config.summarization.summary_prompt = "Frozen summary: {messages}"
+    app_config.summarization.trim_tokens_to_summarize = 1_234
+    context_model = MagicMock(name="subagent-context-model")
+    context_model.profile = {"max_input_tokens": 32_000}
+    summary_model = MagicMock(name="frozen-summary-model")
+    summary_model.profile = {"max_input_tokens": 64_000}
+
+    with patch.object(
+        summarization_module.ModelRuntime,
+        "build_chat_model",
+        return_value=summary_model,
+    ) as build_summary_model:
+        chain = build_subagent_runtime_middlewares(
+            app_config=app_config,
+            model_name=GOLDEN_MODEL,
+            context_model=context_model,
+        )
+
+    summarization = next(middleware for middleware in chain if type(middleware).__name__ == "DeerFlowSummarizationMiddleware")
+    build_summary_model.assert_called_once_with(
+        profile=summarization_module.ModelRuntimeProfile.AGENT_GRAPH,
+        model_name=GOLDEN_MODEL,
+        thinking_enabled=False,
+    )
+    assert summarization._context_model is context_model
+    assert summarization._get_profile_limits() == 32_000
+    assert summarization.trigger == ("fraction", 0.75)
+    assert summarization.keep == ("messages", 7)
+    assert summarization.summary_prompt == "Frozen summary: {messages}"
+    assert summarization.trim_tokens_to_summarize == 1_234
+    names = _names(chain)
+    assert names.index("DurableContextMiddleware") < names.index(
+        "DeerFlowSummarizationMiddleware",
+    )
+    assert names.index("DeerFlowSummarizationMiddleware") < names.index(
+        "ViewImageMiddleware",
+    )
+
+
+def test_subagent_middleware_builder_does_not_enable_disabled_frozen_summarization() -> None:
+    app_config = _full_feature_app_config()
+    app_config.summarization.enabled = False
+    context_model = MagicMock(name="subagent-context-model")
+
+    with patch.object(
+        summarization_module.ModelRuntime,
+        "build_chat_model",
+        side_effect=AssertionError("disabled summarization must not build a model"),
+    ):
+        chain = build_subagent_runtime_middlewares(
+            app_config=app_config,
+            model_name=GOLDEN_MODEL,
+            context_model=context_model,
+        )
+
+    assert "DeerFlowSummarizationMiddleware" not in _names(chain)
+
+
+def test_enabled_subagent_summarization_requires_the_exact_context_model() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Sub-Agent summarization requires its exact context model",
+    ):
+        build_subagent_runtime_middlewares(
+            app_config=_full_feature_app_config(),
+            model_name=GOLDEN_MODEL,
+        )
 
 
 @pytest.mark.parametrize(
@@ -766,12 +854,17 @@ def test_subagent_runtime_chain_is_the_lead_runtime_minus_uploads() -> None:
         build_subagent_runtime_middlewares(
             app_config=app_config,
             model_name=GOLDEN_MODEL,
+            context_model=MagicMock(
+                profile={"max_input_tokens": 64_000},
+            ),
         )
     )
 
     expected_base = [name for name in lead_base if name != "UploadsMiddleware"]
     assert subagent[: len(expected_base)] == expected_base
     assert subagent[len(expected_base) :] == [
+        "DurableContextMiddleware",
+        "DeerFlowSummarizationMiddleware",
         "ViewImageMiddleware",
         "TokenBudgetMiddleware",
         "SafetyFinishReasonMiddleware",

@@ -28,6 +28,7 @@ const thread = {
 function render(
   state: typeof executionState | "unavailable" | null,
   historyError?: Error,
+  isRunAdmissionPending = false,
 ): string {
   return renderToStaticMarkup(
     <I18nProvider initialLocale="en-US">
@@ -36,6 +37,7 @@ function render(
           thread={thread}
           threadId="33333333-3333-4333-8333-333333333333"
           runExecutionState={state}
+          isRunAdmissionPending={isRunAdmissionPending}
           historyError={historyError}
         />
       </StandaloneArtifactsProvider>
@@ -66,6 +68,13 @@ describe("MessageList Run execution state", () => {
 
     expect(html).not.toContain('data-testid="run-execution-activity"');
     expect(html).not.toContain('data-testid="run-activity"');
+  });
+
+  test("renders local activity only while Run admission is pending", () => {
+    const html = render(null, undefined, true);
+
+    expect(html).toContain('data-testid="run-activity"');
+    expect(html).not.toContain('data-testid="run-execution-activity"');
   });
 
   test("keeps a terminal reconciliation history failure visible", () => {

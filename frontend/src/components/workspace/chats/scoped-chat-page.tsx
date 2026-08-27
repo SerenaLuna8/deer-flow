@@ -261,6 +261,7 @@ export function ScopedChatPage({
     terminalDisplayLatched,
     activeRunId,
     activeRunResolverGeneration,
+    isRunAdmissionPending,
     reconcileTerminalRun,
     pendingUsageMessages,
     attachRun,
@@ -886,6 +887,7 @@ export function ScopedChatPage({
                   thread={thread}
                   activeRunId={activeRunId}
                   runExecutionState={runExecutionState}
+                  isRunAdmissionPending={isRunAdmissionPending}
                   terminalDisplayLatched={terminalDisplayLatched}
                   initialScroll="instant"
                   resizeScroll={thread.isLoading ? "smooth" : "instant"}

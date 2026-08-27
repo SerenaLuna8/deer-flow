@@ -22,11 +22,18 @@ class AgentExecutionResult:
     retryable: bool = False
     attempt_usage: PrivateRunUsageSnapshot | None = None
     suspended_approval_id: str | None = None
+    durable_terminal: bool = False
 
     def __post_init__(self) -> None:
         JobOutcome(self.status, self.public_error_code)
         if type(self.retryable) is not bool:
             raise TypeError("retryable must be a boolean")
+        if type(self.durable_terminal) is not bool:
+            raise TypeError("durable_terminal must be a boolean")
+        if self.status != "failed" and self.durable_terminal:
+            raise ValueError(
+                "only failed execution may carry a durable terminal",
+            )
         if self.status != "failed" and self.retryable:
             raise ValueError("terminal success/cancel outcomes cannot be retryable")
         if self.attempt_usage is not None and type(self.attempt_usage) is not PrivateRunUsageSnapshot:
@@ -69,12 +76,14 @@ class AgentExecutionResult:
         *,
         retryable: bool = True,
         attempt_usage: PrivateRunUsageSnapshot | None = None,
+        durable_terminal: bool = False,
     ) -> AgentExecutionResult:
         return cls(
-            "failed",
-            public_error_code,
-            retryable,
-            attempt_usage,
+            status="failed",
+            public_error_code=public_error_code,
+            retryable=retryable,
+            attempt_usage=attempt_usage,
+            durable_terminal=durable_terminal,
         )
 
 

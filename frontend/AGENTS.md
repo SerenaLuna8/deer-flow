@@ -78,11 +78,13 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Every project query key starts under that account/project root; never key by
   slug. Add a new domain root to `transitionPrivateWorkScope` so scope changes
   cancel and remove it.
-- Context-usage keys also include the selected composer model. Cancel pending
-  reads before exact Thread invalidation so first-load responses cannot restore
-  stale authority; local Run admission/terminal, Automation admission, and
-  account-scoped runtime-policy freshness hints invalidate all model variants
-  for that Thread without fabricating remote Run state.
+- Context Usage consumes the strict Context Projection v2 contract. One
+  Thread-owned stream and initial REST reads feed a monotonic read model keyed
+  by Lead or the server-issued Sub-Agent `execution_id`; a late REST snapshot
+  never replaces a newer SSE projection. The idle Lead projection is established
+  history, so the composer model is neither a request parameter nor cache
+  identity. Context Usage is readable independently from manual-compaction
+  capability.
 - On account/project transition: abort in-flight work, invalidate the old
   generation, remove old queries/mutations/reconnect state/clients, then create
   the new client only after both UUIDs are known.
@@ -110,6 +112,11 @@ generator. A necessary local patch needs focused coverage and an explanation.
   message content, and delegated-subgraph payloads never enter that UI state.
 - Activity replay and live SSE frames merge monotonically by decimal `seq`;
   initial or later REST snapshots must never replace newer cached SSE frames.
+- Context Projection REST and `context.projection.updated.v2` frames merge by
+  decimal-string `projection_seq` without JavaScript-number conversion. The
+  browser sees only the safe Projection Head, never raw Context Evidence. Lead
+  and all Sub-Agent subjects share one Thread stream while retaining independent
+  snapshots, and scope or exact-Thread disposal blocks late writes.
 - Drop duplicate or non-advancing frames. A newly mounted projection joins an
   active Run from cursor `0` because an old hidden consumer's cursor does not
   prove that the new UI rendered those frames.
@@ -300,7 +307,9 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Every `task` tool call remains visible as its own Sub-Agent card in canonical
   message order alongside reasoning and other tools. Card metadata is a single
   bounded row whose flexible text truncates before fixed status and disclosure
-  controls.
+  controls. A card exposes independent live or settled Context Usage only when
+  lifecycle events or terminal ToolMessage metadata provide a valid server-owned
+  execution UUID; the Tool Call ID is never substituted as Context authority.
 
 ### Admin and Automation
 

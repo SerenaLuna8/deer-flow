@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import copy
+import uuid
 from collections.abc import Mapping
-from typing import Annotated, Literal
+from typing import Literal
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
@@ -213,81 +214,19 @@ class PrivateThreadTokenUsageResponse(StrictPrivateWorkResponse):
     )
 
 
-class PrivateThreadContextTokenTriggerResponse(StrictPrivateWorkResponse):
-    type: Literal["tokens"]
-    configured_value: int = Field(ge=1)
-    current_value: int = Field(ge=0)
-    threshold_value: int = Field(ge=1)
-    remaining_value: int = Field(ge=0)
-    progress_percent: float = Field(ge=0, le=100)
-    reached: bool
-    threshold_tokens: int = Field(ge=1)
+class PrivateThreadContextUsageQuery(StrictPrivateWorkRequest):
+    """Select the Lead projection or one lifecycle-owned Sub-Agent execution."""
 
+    subject_kind: Literal["lead_thread", "subagent_task"] = "lead_thread"
+    subject_id: uuid.UUID | None = None
 
-class PrivateThreadContextFractionTriggerResponse(StrictPrivateWorkResponse):
-    type: Literal["fraction"]
-    configured_value: float = Field(gt=0, le=1)
-    current_value: float = Field(ge=0)
-    threshold_value: float = Field(gt=0, le=1)
-    remaining_value: float = Field(ge=0)
-    progress_percent: float = Field(ge=0, le=100)
-    reached: bool
-    context_window_tokens: int = Field(ge=1)
-    threshold_tokens: int = Field(ge=1)
-
-
-class PrivateThreadContextMessageTriggerResponse(StrictPrivateWorkResponse):
-    type: Literal["messages"]
-    configured_value: int = Field(ge=1)
-    current_value: int = Field(ge=0)
-    threshold_value: int = Field(ge=1)
-    remaining_value: int = Field(ge=0)
-    progress_percent: float = Field(ge=0, le=100)
-    reached: bool
-
-
-PrivateThreadContextTriggerResponse = Annotated[
-    PrivateThreadContextTokenTriggerResponse | PrivateThreadContextFractionTriggerResponse | PrivateThreadContextMessageTriggerResponse,
-    Field(discriminator="type"),
-]
-
-
-class PrivateThreadContextUsageComponentResponse(StrictPrivateWorkResponse):
-    estimated_tokens: int = Field(ge=0)
-    error_allowance_tokens: int = Field(ge=0)
-    safety_bound_tokens: int = Field(ge=0)
-
-
-class PrivateThreadContextUsageComponentsResponse(StrictPrivateWorkResponse):
-    compressible: PrivateThreadContextUsageComponentResponse
-    fixed: PrivateThreadContextUsageComponentResponse
-    ephemeral: PrivateThreadContextUsageComponentResponse
-
-
-class PrivateThreadContextUsageResponse(StrictPrivateWorkResponse):
-    thread_id: str
-    enabled: bool
-    estimated_tokens: int = Field(ge=0)
-    error_allowance_tokens: int = Field(ge=0)
-    safety_bound_tokens: int = Field(ge=0)
-    provider_input_tokens: int | None = Field(default=None, ge=0)
-    estimator_revision: str | None = Field(default=None, min_length=1, max_length=128)
-    error_contract: str | None = Field(default=None, min_length=1, max_length=512)
-    components: PrivateThreadContextUsageComponentsResponse
-    fixed_over_trigger: bool
-    message_count: int = Field(ge=0)
-    summary_present: bool
-    context_window_tokens: int | None = Field(default=None, ge=1)
-    triggers: list[PrivateThreadContextTriggerResponse] = Field(
-        default_factory=list,
-        max_length=8,
-    )
-    primary_trigger: PrivateThreadContextTriggerResponse | None = None
-
-
-class PrivateThreadContextAuthorityResponse(StrictPrivateWorkResponse):
-    thread_id: str
-    cache_marker: str = Field(min_length=6, max_length=71)
+    @model_validator(mode="after")
+    def validate_subject(self) -> PrivateThreadContextUsageQuery:
+        if self.subject_kind == "lead_thread" and self.subject_id is not None:
+            raise ValueError("Lead context usage does not accept a subject_id")
+        if self.subject_kind == "subagent_task" and self.subject_id is None:
+            raise ValueError("Sub-Agent context usage requires a subject_id")
+        return self
 
 
 class PrivateWorkRoute(APIRoute):
@@ -318,8 +257,7 @@ __all__ = [
     "PrivateRunCheckpoint",
     "PrivateRunCreateRequest",
     "PrivateRunExecutionProfileRequest",
-    "PrivateThreadContextAuthorityResponse",
-    "PrivateThreadContextUsageResponse",
+    "PrivateThreadContextUsageQuery",
     "PrivateThreadTokenUsageResponse",
     "PrivateWorkRoute",
     "StrictPrivateWorkModel",

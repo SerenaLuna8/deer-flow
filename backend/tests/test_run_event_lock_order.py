@@ -19,6 +19,7 @@ from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.runtime.events.models import (
     StreamFrame,
     StreamLeaseProof,
+    StreamWriteAuthorityRequired,
     StreamWriteAuthorizationRevoked,
 )
 from deerflow.runtime.events.store.db import DbRunEventStore
@@ -333,6 +334,70 @@ async def test_terminal_repair_locks_governance_job_run_before_sequence(
         "sequence",
         "terminal-recheck",
     ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_repair_rejects_mismatch_without_rewriting_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = DbRunEventStore(AsyncMock(), run_event_notify_enabled=False)
+    job_id = uuid.uuid4()
+    job = SimpleNamespace(status="dead")
+    run = SimpleNamespace(
+        job_id=job_id,
+        status="error",
+        error="CONTEXT_PROVIDER_CALL_AMBIGUOUS",
+    )
+    terminal = SimpleNamespace(
+        content='{"status": "timeout"}',
+        event_metadata={
+            "stream_terminal": True,
+            "content_is_json": True,
+            "content_is_dict": True,
+        },
+        seq=17,
+    )
+
+    class _RepairSession(_Session):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self._execute_values = iter((job, run, terminal))
+
+        async def scalar(self, _statement):
+            return job_id
+
+        async def execute(self, _statement, _params=None):
+            return _StatementResult(next(self._execute_values))
+
+    monkeypatch.setattr(store, "_lock_stream_governance", AsyncMock())
+    monkeypatch.setattr(
+        store,
+        "_lock_event_sequence",
+        AsyncMock(return_value=SimpleNamespace(high_watermark=17)),
+    )
+    monkeypatch.setattr(store, "_stream_row", lambda *_args, **_kwargs: object())
+    notify = AsyncMock()
+    monkeypatch.setattr(store, "_notify_stream_append", notify)
+    session = _RepairSession()
+    session.flush = AsyncMock()  # type: ignore[attr-defined]
+
+    with pytest.raises(
+        StreamWriteAuthorityRequired,
+        match="existing stream terminal",
+    ):
+        await store.ensure_settled_stream_terminal(
+            session,  # type: ignore[arg-type]
+            scope=_scope(),
+            thread_id="thread-1",
+            run_id="run-1",
+            status="error",
+            error_code="CONTEXT_PROVIDER_CALL_AMBIGUOUS",
+        )
+
+    assert terminal.content == '{"status": "timeout"}'
+    assert terminal.seq == 17
+    session.flush.assert_not_awaited()  # type: ignore[attr-defined]
+    notify.assert_not_awaited()
 
 
 async def _seed_active_job_run(seed, *, label: str):

@@ -9,6 +9,8 @@ import {
 } from "@/components/workspace/run-failure-alert";
 import { I18nProvider } from "@/core/i18n/context";
 import {
+  CONTEXT_CAPACITY_EXCEEDED,
+  CONTEXT_PROVIDER_CALL_AMBIGUOUS,
   CURRENT_UPLOAD_UNAVAILABLE,
   LLM_AUTHENTICATION_FAILED,
   LLM_CIRCUIT_OPEN,
@@ -141,8 +143,26 @@ describe("RunFailureAlert", () => {
   test("blocks message replay when durable side effects may already exist", () => {
     expect(canReplayRunFailure(SIDE_EFFECT_STATE_UNKNOWN)).toBe(false);
     expect(canReplayRunFailure(OUTPUT_DELIVERY_INCOMPLETE)).toBe(false);
+    expect(canReplayRunFailure(CONTEXT_PROVIDER_CALL_AMBIGUOUS)).toBe(false);
     expect(canReplayRunFailure(MODEL_OUTPUT_LIMIT)).toBe(true);
     expect(canReplayRunFailure(null)).toBe(true);
+  });
+
+  test("renders explicit Context capacity and Provider ambiguity failures", () => {
+    const capacity = render(CONTEXT_CAPACITY_EXCEEDED, "zh-CN", false, true);
+    const ambiguous = render(
+      CONTEXT_PROVIDER_CALL_AMBIGUOUS,
+      "en-US",
+      false,
+      true,
+    );
+
+    expect(capacity).toContain("上下文超过模型容量");
+    expect(capacity).toContain("自动压缩后仍无法容纳");
+    expect(capacity).toContain("恢复到输入框");
+    expect(ambiguous).toContain("Provider call outcome could not be confirmed");
+    expect(ambiguous).toContain("must not be replayed automatically");
+    expect(ambiguous).not.toContain("Restore to composer");
   });
 
   test("renders a diagnosable current-upload failure with input recovery", () => {

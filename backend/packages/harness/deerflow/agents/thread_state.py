@@ -432,6 +432,8 @@ class ThreadState(AgentState):
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
     memory_archive_receipt: NotRequired[MemoryArchiveReceipt | None]
+    context_projection_snapshot: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
+    context_compaction_receipt: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
     provider_request_profile: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
     provider_request_measurement: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
 

@@ -16,11 +16,15 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+    DanglingToolCallMiddleware,
+    project_dangling_tool_call_messages,
+)
 from deerflow.agents.middlewares.provider_request_usage import (
     PROVIDER_REQUEST_MEASUREMENT_STATE_KEY,
     PROVIDER_REQUEST_PROFILE_STATE_KEY,
+    ContextCapacityExceeded,
     FinalProviderRequestGuard,
-    ProviderRequestCapacityExceeded,
     ProviderRequestProfileDrift,
     ProviderRequestUsageUnsupported,
     build_provider_request_profile,
@@ -231,7 +235,63 @@ def test_full_catalog_profile_covers_initial_filter_and_later_promotion() -> Non
     assert promoted.safety_bound_tokens <= allowed.safety_bound_tokens
 
 
-def test_final_guard_rejects_same_byte_request_with_more_message_overhead() -> None:
+@pytest.mark.parametrize(
+    "source",
+    [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "default_tool",
+                    "args": {},
+                    "id": f"call-{index}",
+                    "type": "tool_call",
+                }
+                for index in range(7)
+            ],
+        ),
+        AIMessage(
+            content="",
+            invalid_tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": "{invalid",
+                    "id": "call-invalid",
+                    "error": "x" * 500,
+                    "type": "invalid_tool_call",
+                },
+            ],
+        ),
+    ],
+)
+def test_final_guard_profile_covers_dangling_tool_call_projection(
+    source: AIMessage,
+) -> None:
+    profile = _profile()
+    request = _request(profile, messages=[source])
+    request.state["summary_text"] = ""
+    projected = project_dangling_tool_call_messages(request.messages)
+    runtime_projected = DanglingToolCallMiddleware()._build_patched_messages(
+        request.messages,
+        diagnostics=False,
+    )
+    assert runtime_projected == list(projected)
+    called = False
+
+    def handler(_request: ModelRequest) -> ModelResponse:
+        nonlocal called
+        called = True
+        return ModelResponse(result=[AIMessage(content="recovered")])
+
+    FinalProviderRequestGuard(profile).wrap_model_call(
+        request.override(messages=list(projected)),
+        handler,
+    )
+
+    assert called is True
+
+
+def test_final_guard_rejects_smaller_request_with_more_message_overhead() -> None:
     profile = _profile()
     actual_messages = [HumanMessage(content="x" * 20) for _ in range(20)]
     request = _request(
@@ -247,7 +307,8 @@ def test_final_guard_rejects_same_byte_request_with_more_message_overhead() -> N
         called = True
         return ModelResponse(result=[AIMessage(content="must not run")])
 
-    assert actual.material_utf8_bytes == allowed.material_utf8_bytes
+    assert actual.material_utf8_bytes < allowed.material_utf8_bytes
+    assert actual.message_count > allowed.message_count
     assert actual.safety_bound_tokens > allowed.safety_bound_tokens
     with pytest.raises(ProviderRequestProfileDrift):
         FinalProviderRequestGuard(profile).wrap_model_call(request, handler)
@@ -311,7 +372,7 @@ def test_final_guard_fails_before_provider_when_actual_request_exceeds_capacity(
         called = True
         return ModelResponse(result=[AIMessage(content="must not run")])
 
-    with pytest.raises(ProviderRequestCapacityExceeded):
+    with pytest.raises(ContextCapacityExceeded):
         guard.wrap_model_call(_request(profile), handler)
 
     assert called is False
@@ -354,7 +415,7 @@ def test_capacity_guard_blocks_when_allowance_crosses_window() -> None:
 
     assert measured.estimated_tokens < 100_000
     assert measured.safety_bound_tokens > 100_000
-    with pytest.raises(ProviderRequestCapacityExceeded):
+    with pytest.raises(ContextCapacityExceeded):
         FinalProviderRequestGuard(profile).wrap_model_call(request, handler)
     assert called is False
 
@@ -528,7 +589,7 @@ def test_final_guard_rejects_undeclared_visual_material() -> None:
             request,
             lambda _request: ModelResponse(result=[AIMessage(content="no")]),
         )
-    assert "vision" in (caught.value.internal_detail or "")
+    assert caught.value.internal_detail == "VISUAL_TOKEN_UPPER_BOUND_UNAVAILABLE:1"
 
 
 def test_profile_snapshot_does_not_persist_prompt_or_tool_schema_plaintext() -> None:

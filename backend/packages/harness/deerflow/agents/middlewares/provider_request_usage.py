@@ -7,12 +7,13 @@ retained state against one immutable profile and verifies the final shaped
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, NotRequired, TypedDict, override
+from typing import Any, NotRequired, Protocol, TypedDict, override, runtime_checkable
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import (
@@ -26,25 +27,57 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
-    message_to_dict,
 )
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+    project_dangling_tool_call_messages,
+)
 from deerflow.agents.middlewares.durable_context_middleware import (
     render_durable_context_messages,
 )
+from deerflow.agents.middlewares.input_sanitization_middleware import (
+    project_input_sanitization_messages,
+)
 from deerflow.agents.middlewares.manifest import MiddlewareHook, middleware_hooks
+from deerflow.agents.middlewares.provider_request_cost_adapter import (
+    ProviderModelRequestCostAdapter,
+    provider_visible_message_payload,
+    provider_visible_messages_payload,
+)
 from deerflow.agents.provider_request_contract import (
+    CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
+    CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
     PROVIDER_REQUEST_MEASUREMENT_STATE_KEY,
     PROVIDER_REQUEST_PROFILE_STATE_KEY,
+    provider_response_digest,
 )
-from deerflow.error_codes import PublicRunError, PublicRunErrorCode
+from deerflow.error_codes import (
+    ContextProviderCallAmbiguousError,
+    PublicRunError,
+    PublicRunErrorCode,
+)
+from deerflow.models.provider_outcome import (
+    ProviderNoResponseProvenError,
+    classify_provider_no_response,
+)
+from deerflow.runtime.context_evidence import (
+    ContextCheckpointEstimator,
+    ContextCheckpointProjectionSnapshot,
+    ContextTokenCostContractError,
+    FinalRequestMeasurement,
+    FinalShapedRequestCostAdapter,
+    ProviderAmbiguityReason,
+    ProviderCallIdentity,
+    ProviderRetrySafety,
+    VisualTokenCostContractError,
+)
 from deerflow.runtime.context_keys import RuntimeContextKeys
 
-PROVIDER_REQUEST_ESTIMATOR_REVISION = "provider-request-engineering-v1"
+PROVIDER_REQUEST_ESTIMATOR_REVISION = "provider-wire-engineering-v5"
 PROVIDER_REQUEST_ERROR_CONTRACT = "versioned_engineering_allowance_for_app_owned_serialized_material_plus_declared_provider_overhead"
 _SERIALIZATION_FRAMING_UTF8_BYTES = 1_024
 
@@ -56,16 +89,20 @@ _PROVIDER_OVERHEAD: dict[str, tuple[int, int, int]] = {
     "anthropic": (256, 32, 96),
     "deepseek": (256, 32, 96),
     "openai": (256, 32, 96),
+    "openai_responses": (256, 32, 96),
     "patched_deepseek": (256, 32, 96),
     "patched_openai": (256, 32, 96),
+    "patched_openai_responses": (256, 32, 96),
     "vllm": (256, 32, 96),
 }
 _PROVIDER_ERROR_ALLOWANCE_RATIO: dict[str, float] = {
     "anthropic": 0.25,
     "deepseek": 0.20,
     "openai": 0.20,
+    "openai_responses": 0.20,
     "patched_deepseek": 0.20,
     "patched_openai": 0.20,
+    "patched_openai_responses": 0.20,
     "vllm": 0.25,
 }
 _PROVIDER_CLASS_TO_ADAPTER = {
@@ -94,12 +131,130 @@ class ProviderRequestProfileDrift(PublicRunError):
         super().__init__(PublicRunErrorCode.PROVIDER_REQUEST_PROFILE_DRIFT)
 
 
-class ProviderRequestCapacityExceeded(PublicRunError):
-    """Raised before provider invocation when the safety value exceeds capacity."""
+class ContextCapacityExceeded(PublicRunError):
+    """Raised before Provider invocation when final Context exceeds capacity."""
 
     def __init__(self, detail: str | None = None) -> None:
         self.internal_detail = detail
-        super().__init__(PublicRunErrorCode.PROVIDER_REQUEST_CAPACITY_EXCEEDED)
+        super().__init__(PublicRunErrorCode.CONTEXT_CAPACITY_EXCEEDED)
+
+
+class ProviderDispatchOutcomeAmbiguous(ContextProviderCallAmbiguousError):
+    """A dispatched Provider call has no outcome that is safe to retry."""
+
+    def __init__(self) -> None:
+        super().__init__("Provider dispatch outcome is ambiguous")
+
+
+@runtime_checkable
+class ProviderRequestEvidenceObserver(Protocol):
+    """Durable, execution-bound sink for one final Provider-call lifecycle.
+
+    Implementations bind Subject, Context Window Generation, source Checkpoint,
+    graph step, ordinal, Run/lease authority, and storage.  The Guard supplies
+    only content-free measurement/outcome facts and awaits every transition.
+    """
+
+    async def record_request_prepared(
+        self,
+        measurement: FinalRequestMeasurement,
+        /,
+    ) -> ProviderCallIdentity: ...
+
+    async def record_request_dispatched(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+    ) -> None: ...
+    async def record_provider_observed(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+        *,
+        input_tokens: int,
+    ) -> None: ...
+
+    async def record_provider_usage_unreported(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+    ) -> None: ...
+
+    async def record_provider_failed(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+        *,
+        failure_code: str,
+        retry_safety: ProviderRetrySafety,
+    ) -> None: ...
+
+    async def record_provider_ambiguous(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+        *,
+        reason: ProviderAmbiguityReason,
+    ) -> None: ...
+
+
+async def _join_durable_observer_transition(
+    transition: Awaitable[None],
+) -> asyncio.CancelledError | None:
+    """Join one Evidence transition and defer repeated caller cancellation."""
+
+    task = asyncio.create_task(transition)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if task.cancelled():
+                break
+            cancellation = cancellation or error
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+        except Exception:
+            break
+    task.result()
+    return cancellation
+
+
+async def _record_ambiguity_despite_cancellation(
+    observer: ProviderRequestEvidenceObserver,
+    provider_call: ProviderCallIdentity,
+) -> None:
+    """Join the durable ambiguous terminal before propagating cancellation."""
+
+    await _join_durable_observer_transition(
+        observer.record_provider_ambiguous(
+            provider_call,
+            reason=ProviderAmbiguityReason.DISPATCH_OUTCOME_UNKNOWN,
+        )
+    )
+
+
+async def _record_proven_no_response_failure(
+    observer: ProviderRequestEvidenceObserver,
+    provider_call: ProviderCallIdentity,
+    *,
+    failure_code: str,
+) -> None:
+    """Persist retry authority or fail closed as an ambiguous dispatch."""
+
+    try:
+        cancellation = await _join_durable_observer_transition(
+            observer.record_provider_failed(
+                provider_call,
+                failure_code=failure_code,
+                retry_safety=ProviderRetrySafety.NO_RESPONSE_PROVEN,
+            )
+        )
+    except (Exception, asyncio.CancelledError) as persistence_error:
+        raise ProviderDispatchOutcomeAmbiguous() from persistence_error
+    if cancellation is not None:
+        raise cancellation
 
 
 class ProviderRequestComponentSnapshot(TypedDict):
@@ -210,13 +365,29 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _message_payload(message: BaseMessage) -> dict[str, object]:
-    return message_to_dict(message)
+def _message_payload(
+    message: BaseMessage,
+    *,
+    provider_adapter: str,
+) -> dict[str, object]:
+    return provider_visible_message_payload(
+        message,
+        provider_adapter=provider_adapter,
+    )
 
 
-def _material_bytes(value: object) -> bytes:
+def _material_bytes(
+    value: object,
+    *,
+    provider_adapter: str,
+) -> bytes:
     if isinstance(value, BaseMessage):
-        return _canonical_json(_message_payload(value))
+        return _canonical_json(
+            _message_payload(
+                value,
+                provider_adapter=provider_adapter,
+            )
+        )
     if isinstance(value, bytes):
         return value
     if isinstance(value, str):
@@ -484,7 +655,16 @@ class ProviderRequestProfile:
         frozen_facts = {fact["name"]: fact for fact in self.full_tool_schema_facts}
         if any(frozen_facts.get(fact["name"]) != fact for fact in actual_facts):
             raise ProviderRequestProfileDrift("provider_request_profile_drift: final tool schema is outside frozen profile")
-        message_payloads = [_message_payload(message) for message in messages]
+        if self.provider_adapter is None:
+            raise ProviderRequestUsageUnsupported(
+                "provider_request_usage_unsupported: provider adapter is unavailable",
+            )
+        message_payloads = list(
+            provider_visible_messages_payload(
+                messages,
+                provider_adapter=self.provider_adapter,
+            )
+        )
         tool_payloads = [_tool_payload(tool) for tool in tools]
         material = _canonical_json({"messages": message_payloads, "tools": tool_payloads})
         overhead = self.provider_fixed_overhead_tokens + len(messages) * self.provider_per_message_overhead_tokens + len(tools) * self.provider_per_tool_overhead_tokens
@@ -495,7 +675,7 @@ class ProviderRequestProfile:
             error_allowance_tokens=allowance,
             safety_bound_tokens=estimate + allowance,
             material_utf8_bytes=len(material),
-            message_count=len(messages),
+            message_count=len(message_payloads),
             tool_count=len(tools),
             request_fingerprint=hashlib.sha256(material).hexdigest(),
         )
@@ -504,10 +684,13 @@ class ProviderRequestProfile:
 def resolve_provider_adapter(
     provider_adapter: str | None,
     provider_class_path: str | None = None,
+    *,
+    model: object | None = None,
 ) -> str | None:
-    if provider_adapter in _PROVIDER_OVERHEAD:
-        return provider_adapter
-    return _PROVIDER_CLASS_TO_ADAPTER.get(provider_class_path or "")
+    resolved = provider_adapter if provider_adapter in _PROVIDER_OVERHEAD else _PROVIDER_CLASS_TO_ADAPTER.get(provider_class_path or "")
+    if getattr(model, "use_responses_api", None) is True and resolved in {"openai", "patched_openai"}:
+        return f"{resolved}_responses"
+    return resolved
 
 
 def provider_request_closure_identity(
@@ -682,7 +865,11 @@ def build_provider_request_profile_snapshot_from_facts(
 ) -> ProviderRequestProfileSnapshot:
     """Build the same immutable profile from secret-free schema facts."""
 
-    resolved_adapter = resolve_provider_adapter(provider_adapter, provider_class_path)
+    resolved_adapter = resolve_provider_adapter(
+        provider_adapter,
+        provider_class_path,
+        model=model,
+    )
     reason = unsupported_reason
     if resolved_adapter is None and reason is None:
         reason = "provider_request_usage_unsupported: provider overhead is undeclared"
@@ -701,7 +888,17 @@ def build_provider_request_profile_snapshot_from_facts(
     try:
         effective_facts = _canonicalize_tool_schema_facts(tool_schema_facts)
         effective_middleware_prompts = tuple(prompt for prompt in middleware_system_prompts if isinstance(prompt, str) and prompt)
-        system_bytes = sum(len(_material_bytes(SystemMessage(content=prompt))) for prompt in (system_prompt, *effective_middleware_prompts))
+        if resolved_adapter is None:
+            raise ValueError("provider adapter is unavailable")
+        system_bytes = sum(
+            len(
+                _material_bytes(
+                    SystemMessage(content=prompt),
+                    provider_adapter=resolved_adapter,
+                )
+            )
+            for prompt in (system_prompt, *effective_middleware_prompts)
+        )
         tool_bytes = _tool_schema_list_utf8_bytes(effective_facts)
         if (
             not isinstance(bounded_overlay_utf8_bytes, int)
@@ -712,7 +909,15 @@ def build_provider_request_profile_snapshot_from_facts(
             or bounded_overlay_message_count < 0
         ):
             raise ValueError("bounded overlay contract is invalid")
-        overlay_bytes = bounded_overlay_utf8_bytes + sum(len(_material_bytes(item)) for item in bounded_overlay_material)
+        overlay_bytes = bounded_overlay_utf8_bytes + sum(
+            len(
+                _material_bytes(
+                    item,
+                    provider_adapter=resolved_adapter,
+                )
+            )
+            for item in bounded_overlay_material
+        )
     except (TypeError, ValueError, json.JSONDecodeError):
         effective_facts = ()
         effective_middleware_prompts = ()
@@ -829,6 +1034,11 @@ def measure_profile_snapshot_context(
     if snapshot.get("supported") is not True:
         reason = snapshot.get("unsupported_reason")
         raise ProviderRequestUsageUnsupported(reason if isinstance(reason, str) else "provider request profile is unsupported")
+    provider_adapter = snapshot.get("provider_adapter")
+    if not isinstance(provider_adapter, str) or not provider_adapter:
+        raise ProviderRequestUsageUnsupported(
+            "provider_request_usage_unsupported: provider adapter is unavailable",
+        )
     integer_fields = (
         "static_system_utf8_bytes",
         "full_tool_schema_utf8_bytes",
@@ -865,18 +1075,53 @@ def measure_profile_snapshot_context(
     durable_messages = _state_ephemeral_material(current)
     todo_messages = _todo_ephemeral_material(current)
     slash_messages = _slash_request_ephemeral_material(messages)
-    compressible_bytes = len(_canonical_json([_message_payload(message) for message in messages]))
+    # InputSanitization is a temporary outer request transform, so checkpoint
+    # state retains the original HumanMessages. Project that exact transform
+    # for profile capacity/drift accounting while leaving Slash Skill and other
+    # state-derived overlays anchored to the original state above.
+    provider_messages = project_dangling_tool_call_messages(
+        project_input_sanitization_messages(messages),
+    )
+    provider_message_payloads = provider_visible_messages_payload(
+        provider_messages,
+        provider_adapter=provider_adapter,
+    )
+    compressible_bytes = len(_canonical_json(provider_message_payloads))
     fixed_bytes = int(snapshot["static_system_utf8_bytes"]) + int(snapshot["full_tool_schema_utf8_bytes"]) + _SERIALIZATION_FRAMING_UTF8_BYTES
     ephemeral_bytes = (
         int(snapshot["bounded_overlay_utf8_bytes"])
-        + sum(len(_material_bytes(message)) for message in durable_messages)
-        + sum(len(_material_bytes(message)) for message in todo_messages)
-        + sum(len(_material_bytes(message)) for message in slash_messages)
+        + sum(
+            len(
+                _material_bytes(
+                    message,
+                    provider_adapter=provider_adapter,
+                )
+            )
+            for message in durable_messages
+        )
+        + sum(
+            len(
+                _material_bytes(
+                    message,
+                    provider_adapter=provider_adapter,
+                )
+            )
+            for message in todo_messages
+        )
+        + sum(
+            len(
+                _material_bytes(
+                    message,
+                    provider_adapter=provider_adapter,
+                )
+            )
+            for message in slash_messages
+        )
     )
     compressible = _component(
         material_bytes=compressible_bytes,
         error_allowance_ratio=float(allowance_ratio),
-        overhead_tokens=(len(messages) * int(snapshot["provider_per_message_overhead_tokens"])),
+        overhead_tokens=(len(provider_message_payloads) * int(snapshot["provider_per_message_overhead_tokens"])),
     )
     fixed = _component(
         material_bytes=fixed_bytes,
@@ -898,7 +1143,7 @@ def measure_profile_snapshot_context(
         error_allowance_tokens=sum(item.error_allowance_tokens for item in components.values()),
         safety_bound_tokens=sum(item.safety_bound_tokens for item in components.values()),
         material_utf8_bytes=compressible_bytes + fixed_bytes + ephemeral_bytes,
-        message_count=(len(messages) + len(durable_messages) + len(todo_messages) + len(slash_messages) + int(snapshot["bounded_overlay_message_count"]) + 1),
+        message_count=(len(provider_message_payloads) + len(durable_messages) + len(todo_messages) + len(slash_messages) + int(snapshot["bounded_overlay_message_count"]) + 1),
         full_tool_count=int(snapshot["full_tool_count"]),
         components=components,
     )
@@ -949,9 +1194,14 @@ def _runtime_token_usage_tracking_enabled(runtime: Runtime | None) -> bool:
 def _attach_measurement(
     result: ModelCallResult,
     measurement: ProviderRequestMeasurementSnapshot,
+    *,
+    context_projection_snapshot: ContextCheckpointProjectionSnapshot | None = None,
 ) -> ExtendedModelResponse:
     response = _model_response(result)
     update = {PROVIDER_REQUEST_MEASUREMENT_STATE_KEY: measurement}
+    if context_projection_snapshot is not None:
+        update[CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY] = context_projection_snapshot.to_safe_mapping()
+        update[CONTEXT_COMPACTION_RECEIPT_STATE_KEY] = None
     if not isinstance(result, ExtendedModelResponse) or result.command is None:
         return ExtendedModelResponse(response, Command(update=update))
     existing = result.command
@@ -966,8 +1216,16 @@ def _attach_measurement(
 class FinalProviderRequestGuard(AgentMiddleware):
     """Innermost read-only meter/guard for the final shaped Lead request."""
 
-    def __init__(self, profile: ProviderRequestProfile) -> None:
+    def __init__(
+        self,
+        profile: ProviderRequestProfile,
+        *,
+        cost_adapter: FinalShapedRequestCostAdapter[ModelRequest] | None = None,
+        evidence_observer: ProviderRequestEvidenceObserver | None = None,
+    ) -> None:
         self.profile = profile
+        self.cost_adapter = cost_adapter or ProviderModelRequestCostAdapter.from_profile(profile)
+        self.evidence_observer = evidence_observer
 
     @override
     def before_agent(self, state: dict[str, Any], runtime: Runtime) -> dict[str, Any]:
@@ -977,16 +1235,36 @@ class FinalProviderRequestGuard(AgentMiddleware):
     async def abefore_agent(self, state: dict[str, Any], runtime: Runtime) -> dict[str, Any]:
         return self.before_agent(state, runtime)
 
-    def _measure_and_validate(
+    def _measure_evidence(
         self,
         request: ModelRequest,
-    ) -> tuple[ProviderRequestMaterialMeasurement, ProviderRequestContextMeasurement]:
+    ) -> FinalRequestMeasurement:
+        """Measure the real shaped request after validating Run authority."""
+
+        self.profile._require_supported()
         stored = (request.state or {}).get(PROVIDER_REQUEST_PROFILE_STATE_KEY)
         if isinstance(stored, Mapping) and stored.get("profile_fingerprint") != self.profile.profile_fingerprint:
             raise ProviderRequestProfileDrift("provider_request_profile_drift: checkpoint profile changed")
         runtime_run_id = _runtime_run_id(request.runtime)
         if self.profile.authority_identity is not None and runtime_run_id != self.profile.authority_identity:
             raise ProviderRequestProfileDrift("provider_request_profile_drift: Run authority changed")
+        return self.cost_adapter.measure_final_request(request)
+
+    def _validate_final_request(
+        self,
+        request: ModelRequest,
+        evidence_measurement: FinalRequestMeasurement,
+    ) -> tuple[
+        ProviderRequestMaterialMeasurement,
+        ProviderRequestContextMeasurement,
+    ]:
+        try:
+            evidence_safety_upper_bound = evidence_measurement.require_safety_upper_bound()
+        except (
+            ContextTokenCostContractError,
+            VisualTokenCostContractError,
+        ) as error:
+            raise ProviderRequestUsageUnsupported(f"{error.code}:{error.unmeasured_items}") from None
         allowed = measure_profile_context(self.profile, request.state or {})
         actual = self.profile.measure_request(request)
         if actual.material_utf8_bytes > allowed.material_utf8_bytes:
@@ -1001,9 +1279,24 @@ class FinalProviderRequestGuard(AgentMiddleware):
         if actual.tool_count > allowed.full_tool_count:
             raise ProviderRequestProfileDrift("provider_request_profile_drift: final request tool facts exceeded frozen profile")
         capacity = self.profile.max_input_tokens
-        if capacity is not None and actual.safety_bound_tokens > capacity:
-            raise ProviderRequestCapacityExceeded("provider_request_capacity_exceeded: final request safety value exceeds model capacity")
+        if capacity is not None and evidence_safety_upper_bound > capacity:
+            raise ContextCapacityExceeded("context_capacity_exceeded: final request safety value exceeds model capacity")
         return actual, allowed
+
+    def _measure_and_validate(
+        self,
+        request: ModelRequest,
+    ) -> tuple[
+        ProviderRequestMaterialMeasurement,
+        ProviderRequestContextMeasurement,
+        FinalRequestMeasurement,
+    ]:
+        evidence_measurement = self._measure_evidence(request)
+        actual, allowed = self._validate_final_request(
+            request,
+            evidence_measurement,
+        )
+        return actual, allowed, evidence_measurement
 
     @staticmethod
     def _validated_provider_input_tokens(
@@ -1050,7 +1343,9 @@ class FinalProviderRequestGuard(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelCallResult],
     ) -> ModelCallResult:
-        actual, allowed = self._measure_and_validate(request)
+        if self.evidence_observer is not None:
+            raise RuntimeError("ProviderRequestEvidenceObserver requires awrap_model_call")
+        actual, allowed, _evidence_measurement = self._measure_and_validate(request)
         result = handler(request)
         response = _model_response(result)
         provider_input_tokens = self._validated_provider_input_tokens(response, actual)
@@ -1065,14 +1360,165 @@ class FinalProviderRequestGuard(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelCallResult]],
     ) -> ModelCallResult:
-        actual, allowed = self._measure_and_validate(request)
-        result = await handler(request)
-        response = _model_response(result)
-        provider_input_tokens = self._validated_provider_input_tokens(response, actual)
-        return _attach_measurement(
-            result,
-            self._snapshot(request, actual, allowed, provider_input_tokens),
+        evidence_measurement = self._measure_evidence(request)
+        observer = self.evidence_observer
+        provider_call: ProviderCallIdentity | None = None
+        if observer is not None:
+            provider_call = await observer.record_request_prepared(evidence_measurement)
+            if provider_call.request_fingerprint != evidence_measurement.request_fingerprint:
+                raise RuntimeError("ProviderRequestEvidenceObserver returned a mismatched request identity")
+        actual, allowed = self._validate_final_request(
+            request,
+            evidence_measurement,
         )
+        if observer is not None and provider_call is not None:
+            await observer.record_request_dispatched(provider_call)
+        try:
+            result = await handler(request)
+        except asyncio.CancelledError as cancellation:
+            if observer is not None and provider_call is not None:
+                try:
+                    await _record_ambiguity_despite_cancellation(
+                        observer,
+                        provider_call,
+                    )
+                except (Exception, asyncio.CancelledError) as persistence_error:
+                    raise ProviderDispatchOutcomeAmbiguous() from persistence_error
+            raise cancellation
+        except ProviderNoResponseProvenError as error:
+            if observer is not None and provider_call is not None:
+                await _record_proven_no_response_failure(
+                    observer,
+                    provider_call,
+                    failure_code=error.failure_code,
+                )
+            raise
+        except Exception as error:
+            no_response_proof = classify_provider_no_response(
+                provider_adapter=self.profile.provider_adapter,
+                error=error,
+            )
+            if no_response_proof is not None:
+                proven_error = ProviderNoResponseProvenError(
+                    failure_code=no_response_proof.failure_code,
+                )
+                if observer is not None and provider_call is not None:
+                    await _record_proven_no_response_failure(
+                        observer,
+                        provider_call,
+                        failure_code=proven_error.failure_code,
+                    )
+                raise proven_error from error
+            if observer is not None and provider_call is not None:
+                try:
+                    await _record_ambiguity_despite_cancellation(
+                        observer,
+                        provider_call,
+                    )
+                except (Exception, asyncio.CancelledError) as persistence_error:
+                    raise ProviderDispatchOutcomeAmbiguous() from persistence_error
+                raise ProviderDispatchOutcomeAmbiguous() from error
+            raise
+        response = _model_response(result)
+        raw_provider_input_tokens = _provider_input_tokens(response)
+        deferred_cancellation: asyncio.CancelledError | None = None
+        if observer is not None and provider_call is not None:
+            try:
+                if raw_provider_input_tokens is None:
+                    deferred_cancellation = await _join_durable_observer_transition(observer.record_provider_usage_unreported(provider_call))
+                else:
+                    deferred_cancellation = await _join_durable_observer_transition(
+                        observer.record_provider_observed(
+                            provider_call,
+                            input_tokens=raw_provider_input_tokens,
+                        )
+                    )
+            except (Exception, asyncio.CancelledError) as error:
+                try:
+                    await _join_durable_observer_transition(
+                        observer.record_provider_ambiguous(
+                            provider_call,
+                            reason=(ProviderAmbiguityReason.OBSERVATION_PERSISTENCE_UNKNOWN),
+                        )
+                    )
+                except (Exception, asyncio.CancelledError):
+                    pass
+                raise ProviderDispatchOutcomeAmbiguous() from error
+        if deferred_cancellation is not None:
+            raise deferred_cancellation
+        provider_input_tokens = self._validated_provider_input_tokens(
+            response,
+            actual,
+        )
+        context_projection_snapshot = None
+        snapshot_factory = getattr(
+            observer,
+            "checkpoint_projection_snapshot",
+            None,
+        )
+        if callable(snapshot_factory):
+            try:
+                state_messages = (request.state or {}).get("messages")
+                state_message_count = len(state_messages) if isinstance(state_messages, list) else 0
+                origin_run_id = _runtime_run_id(request.runtime)
+                if provider_call is None or origin_run_id is None:
+                    raise RuntimeError(
+                        "Context checkpoint snapshot requires Provider call authority",
+                    )
+                response_messages = tuple(response.result)
+                summary_present = bool(
+                    isinstance(
+                        (request.state or {}).get("summary_text"),
+                        str,
+                    )
+                    and (request.state or {}).get("summary_text")
+                )
+                fixed_message_count = max(
+                    actual.message_count - state_message_count - (1 if summary_present else 0),
+                    0,
+                )
+                candidate = snapshot_factory(
+                    estimator=ContextCheckpointEstimator(
+                        error_allowance_ratio=self.profile.error_allowance_ratio,
+                        provider_fixed_overhead_tokens=(self.profile.provider_fixed_overhead_tokens),
+                        provider_per_message_overhead_tokens=(self.profile.provider_per_message_overhead_tokens),
+                        provider_per_tool_overhead_tokens=(self.profile.provider_per_tool_overhead_tokens),
+                        fixed_message_count=fixed_message_count,
+                        tool_count=actual.tool_count,
+                    ),
+                    provider_call=provider_call,
+                    origin_run_id=origin_run_id,
+                    provider_response_message_start=state_message_count,
+                    provider_response_message_count=len(response_messages),
+                    provider_response_digest=provider_response_digest(
+                        response_messages,
+                    ),
+                )
+                if not isinstance(
+                    candidate,
+                    ContextCheckpointProjectionSnapshot,
+                ):
+                    raise RuntimeError(
+                        "Context Evidence observer returned an invalid checkpoint snapshot",
+                    )
+            except Exception as error:
+                raise ProviderDispatchOutcomeAmbiguous() from error
+            context_projection_snapshot = candidate
+        try:
+            return _attach_measurement(
+                result,
+                self._snapshot(
+                    request,
+                    actual,
+                    allowed,
+                    provider_input_tokens,
+                ),
+                context_projection_snapshot=context_projection_snapshot,
+            )
+        except Exception as error:
+            if observer is not None and provider_call is not None:
+                raise ProviderDispatchOutcomeAmbiguous() from error
+            raise
 
 
 __all__ = [
@@ -1080,8 +1526,11 @@ __all__ = [
     "PROVIDER_REQUEST_ESTIMATOR_REVISION",
     "PROVIDER_REQUEST_MEASUREMENT_STATE_KEY",
     "PROVIDER_REQUEST_PROFILE_STATE_KEY",
+    "ContextCapacityExceeded",
     "FinalProviderRequestGuard",
-    "ProviderRequestCapacityExceeded",
+    "ProviderDispatchOutcomeAmbiguous",
+    "ProviderNoResponseProvenError",
+    "ProviderRequestEvidenceObserver",
     "ProviderRequestComponent",
     "ProviderRequestContextMeasurement",
     "ProviderRequestMaterialMeasurement",

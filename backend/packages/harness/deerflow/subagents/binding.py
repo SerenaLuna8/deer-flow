@@ -17,10 +17,11 @@ import asyncio
 import inspect
 import logging
 import threading
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, cast
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools import InjectedToolCallId
@@ -32,10 +33,19 @@ from deerflow.runtime.context_keys import RuntimeContextKeys
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from deerflow.agents.middlewares.provider_request_usage import (
+        ProviderRequestEvidenceObserver,
+    )
     from deerflow.agents.middlewares.tool_call_control import (
         GraphToolCallControlTopology,
         ToolCallControlObservation,
         ToolCallControlObserver,
+    )
+    from deerflow.runtime.context_evidence import (
+        FinalRequestMeasurement,
+        ProviderAmbiguityReason,
+        ProviderCallIdentity,
+        ProviderRetrySafety,
     )
     from deerflow.subagents.lifecycle import (
         SubagentExecutionBinding,
@@ -62,6 +72,31 @@ def _validate_tool_call_control_topology(value: object | None) -> None:
     if type(value) is not GraphToolCallControlTopology:
         raise TypeError(
             "tool_call_control_topology must be GraphToolCallControlTopology or None",
+        )
+
+
+def _validate_context_evidence_observer_factory(value: object | None) -> None:
+    if value is None:
+        return
+    if not callable(getattr(value, "create_subagent_observer", None)):
+        raise TypeError(
+            "context_evidence_observer_factory must implement create_subagent_observer()",
+        )
+
+
+def _validate_subagent_context_evidence_observer(value: object) -> None:
+    required = (
+        "record_request_prepared",
+        "record_request_dispatched",
+        "record_provider_observed",
+        "record_provider_usage_unreported",
+        "record_provider_failed",
+        "record_provider_ambiguous",
+        "record_settled",
+    )
+    if any(not callable(getattr(value, name, None)) for name in required):
+        raise TypeError(
+            "Sub-Agent Context Evidence observer is incomplete",
         )
 
 
@@ -203,6 +238,16 @@ class PrivateRunParentExecutionProfile(_OpaqueExecutionObject):
 
 
 ParentExecutionProfile = SdkParentExecutionProfile | EmbeddedParentExecutionProfile | ConfiguredLeadParentExecutionProfile | PrivateRunParentExecutionProfile
+
+
+class SubagentContextEvidenceObserverFactory(Protocol):
+    """Lead observer seam that creates one Task execution-owned observer."""
+
+    def create_subagent_observer(
+        self,
+        execution_id: uuid.UUID,
+        model_name: str,
+    ) -> ProviderRequestEvidenceObserver: ...
 
 
 def _complete_waiter(future: asyncio.Future[None]) -> None:
@@ -381,6 +426,7 @@ class ParentExecutionBinding(_OpaqueExecutionObject):
     barrier: ParentExecutionBarrier
     tool_call_control_topology: GraphToolCallControlTopology | None = None
     tool_call_control_observer: ToolCallControlObserver | None = None
+    context_evidence_observer_factory: SubagentContextEvidenceObserverFactory | None = None
 
     def __post_init__(self) -> None:
         _validate_tool_call_control_topology(self.tool_call_control_topology)
@@ -394,6 +440,38 @@ class ParentExecutionBinding(_OpaqueExecutionObject):
             raise ValueError(
                 "tool_call_control_observer requires a control topology",
             )
+        _validate_context_evidence_observer_factory(
+            self.context_evidence_observer_factory,
+        )
+
+    async def create_subagent_context_evidence_observer(
+        self,
+        execution_id: uuid.UUID,
+        model_name: str,
+    ) -> ProviderRequestEvidenceObserver | None:
+        """Create one execution-owned observer on the parent Worker loop."""
+
+        if not isinstance(execution_id, uuid.UUID):
+            raise TypeError("Sub-Agent execution identity must be a UUID")
+        if not isinstance(model_name, str) or not model_name:
+            raise ValueError("Sub-Agent model name is required")
+        factory = self.context_evidence_observer_factory
+        if factory is None:
+            return None
+        target = await invoke_parent_operation_on_owner_loop(
+            self,
+            getattr(factory, "create_subagent_observer"),
+            execution_id,
+            model_name,
+        )
+        _validate_subagent_context_evidence_observer(target)
+        return cast(
+            "ProviderRequestEvidenceObserver",
+            _ParentOwnerLoopContextEvidenceObserver(
+                target=target,
+                binding=self,
+            ),
+        )
 
     def to_lifecycle_binding(
         self,
@@ -432,6 +510,7 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
     profile: ParentExecutionProfile
     tool_call_control_topology: GraphToolCallControlTopology | None = None
     tool_call_control_observer: ToolCallControlObserver | None = None
+    context_evidence_observer_factory: SubagentContextEvidenceObserverFactory | None = None
 
     def __post_init__(self) -> None:
         if type(self.profile) not in {
@@ -452,6 +531,9 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
             raise ValueError(
                 "tool_call_control_observer requires a control topology",
             )
+        _validate_context_evidence_observer_factory(
+            self.context_evidence_observer_factory,
+        )
 
     def bind(self, runtime: Runtime) -> ParentExecutionBinding:
         """Capture one invocation without materializing a subagent runner."""
@@ -488,6 +570,7 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
             barrier=barrier,
             tool_call_control_topology=topology,
             tool_call_control_observer=observer,
+            context_evidence_observer_factory=(self.context_evidence_observer_factory),
         )
 
 
@@ -533,6 +616,132 @@ async def invoke_parent_operation_on_owner_loop(
     except asyncio.CancelledError:
         future.cancel()
         raise
+
+
+class _ParentOwnerLoopContextEvidenceObserver(_OpaqueExecutionObject):
+    """Await durable Context Evidence transitions on the parent Worker loop."""
+
+    __slots__ = ("_binding", "_target")
+
+    def __init__(
+        self,
+        *,
+        target: object,
+        binding: ParentExecutionBinding,
+    ) -> None:
+        _validate_subagent_context_evidence_observer(target)
+        self._target = target
+        self._binding = binding
+
+    async def record_request_prepared(
+        self,
+        measurement: FinalRequestMeasurement,
+        /,
+    ) -> ProviderCallIdentity:
+        return cast(
+            "ProviderCallIdentity",
+            await invoke_parent_operation_on_owner_loop(
+                self._binding,
+                getattr(self._target, "record_request_prepared"),
+                measurement,
+            ),
+        )
+
+    async def record_request_dispatched(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+    ) -> None:
+        await invoke_parent_operation_on_owner_loop(
+            self._binding,
+            getattr(self._target, "record_request_dispatched"),
+            provider_call,
+        )
+
+    async def record_provider_observed(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+        *,
+        input_tokens: int,
+    ) -> None:
+        await invoke_parent_operation_on_owner_loop(
+            self._binding,
+            getattr(self._target, "record_provider_observed"),
+            provider_call,
+            input_tokens=input_tokens,
+        )
+
+    async def record_provider_usage_unreported(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+    ) -> None:
+        await invoke_parent_operation_on_owner_loop(
+            self._binding,
+            getattr(self._target, "record_provider_usage_unreported"),
+            provider_call,
+        )
+
+    async def record_provider_failed(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+        *,
+        failure_code: str,
+        retry_safety: ProviderRetrySafety,
+    ) -> None:
+        await invoke_parent_operation_on_owner_loop(
+            self._binding,
+            getattr(self._target, "record_provider_failed"),
+            provider_call,
+            failure_code=failure_code,
+            retry_safety=retry_safety,
+        )
+
+    async def record_provider_ambiguous(
+        self,
+        provider_call: ProviderCallIdentity,
+        /,
+        *,
+        reason: ProviderAmbiguityReason,
+    ) -> None:
+        await invoke_parent_operation_on_owner_loop(
+            self._binding,
+            getattr(self._target, "record_provider_ambiguous"),
+            provider_call,
+            reason=reason,
+        )
+
+    async def record_ephemeral_compaction_committed(
+        self,
+        *,
+        source_state_digest: str,
+        result_state_digest: str,
+        source_tokens: int,
+        result_tokens: int,
+        summary_tokens: int,
+        summary_digest: str,
+    ) -> None:
+        await invoke_parent_operation_on_owner_loop(
+            self._binding,
+            getattr(
+                self._target,
+                "record_ephemeral_compaction_committed",
+            ),
+            source_state_digest=source_state_digest,
+            result_state_digest=result_state_digest,
+            source_tokens=source_tokens,
+            result_tokens=result_tokens,
+            summary_tokens=summary_tokens,
+            summary_digest=summary_digest,
+        )
+
+    async def record_settled(self) -> None:
+        await invoke_parent_operation_on_owner_loop(
+            self._binding,
+            getattr(self._target, "record_settled"),
+        )
 
 
 def build_task_tool(
@@ -618,6 +827,7 @@ __all__ = [
     "PrivateRunParentExecutionProfile",
     "SdkFeatureSnapshot",
     "SdkParentExecutionProfile",
+    "SubagentContextEvidenceObserverFactory",
     "bind_task_tool_in_tools",
     "build_task_tool",
     "invoke_parent_operation_on_owner_loop",

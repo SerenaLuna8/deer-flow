@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -20,6 +21,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
 
+from deerflow.agents.middlewares.provider_request_cost_adapter import (
+    ProviderModelRequestCostAdapter,
+    SystemPromptLaneSpan,
+    SystemPromptProvenance,
+)
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.config import get_app_config
 from deerflow.config.agents_config import AgentModelSettings
@@ -32,6 +38,7 @@ from deerflow.error_codes import (
 )
 from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.public_error_codes import llm_error_code_for_reason
+from deerflow.runtime.context_evidence import ContextLane
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.skills.tool_policy import (
     ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES,
@@ -49,6 +56,9 @@ from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
+    from deerflow.agents.middlewares.provider_request_usage import (
+        ProviderRequestEvidenceObserver,
+    )
     from deerflow.agents.middlewares.tool_call_control import (
         GraphToolCallControlTopology,
         ToolCallControlObserver,
@@ -198,6 +208,51 @@ def _render_inherited_agent_prompt_bundle(bundle: object) -> str:
     if not isinstance(bundle, AgentPromptBundle):
         return ""
     return render_agent_prompt_bundle(bundle)
+
+
+def _render_subagent_system_prompt(
+    parts: list[tuple[str, ContextLane, str]],
+) -> tuple[str, SystemPromptProvenance]:
+    """Join one SystemMessage while retaining exact process-local ownership."""
+
+    output: list[str] = []
+    spans: list[SystemPromptLaneSpan] = []
+    cursor = 0
+    for index, (source_name, lane, material) in enumerate(parts):
+        if not material:
+            continue
+        if output:
+            separator = "\n\n"
+            output.append(separator)
+            cursor += len(separator)
+        start = cursor
+        output.append(material)
+        cursor += len(material)
+        spans.append(
+            SystemPromptLaneSpan(
+                source_name=f"{source_name}:{index}",
+                lane=lane,
+                start=start,
+                end=cursor,
+            )
+        )
+    system_prompt = "".join(output)
+    return system_prompt, SystemPromptProvenance(
+        system_prompt=system_prompt,
+        spans=tuple(spans),
+    )
+
+
+def _is_frozen_mcp_tool(tool: BaseTool) -> bool:
+    """Classify only canonical MCP metadata after executor initialization."""
+
+    # Importing a tools submodule executes tools/__init__.py, whose built-ins
+    # include task_tool and therefore this executor. Keep the canonical
+    # predicate lazy: callers still use the single deerflow_mcp contract, while
+    # importing executor remains a leaf-safe operation.
+    from deerflow.tools.mcp_metadata import is_mcp_tool
+
+    return is_mcp_tool(tool)
 
 
 class _SubagentGraphStatus(Enum):
@@ -504,6 +559,11 @@ class _SubagentGraphRunner:
         tool_search_enabled: bool | None = None,
         tool_call_control_topology: GraphToolCallControlTopology | None = None,
         tool_call_control_observer: ToolCallControlObserver | None = None,
+        context_evidence_observer_factory: Callable[
+            [uuid.UUID, str],
+            Awaitable[ProviderRequestEvidenceObserver | None],
+        ]
+        | None = None,
     ):
         """Initialize one lifecycle-owned graph runner.
 
@@ -532,6 +592,9 @@ class _SubagentGraphRunner:
                 ID to either a parent-shared or Task-private counter.
             tool_call_control_observer: Optional parent-owner-loop observation
                 Adapter already bound by :mod:`deerflow.subagents.binding`.
+            context_evidence_observer_factory: Owner-loop Adapter that creates
+                one durable Context Evidence observer for the lifecycle-owned
+                execution UUID. It is absent outside an authorized private Run.
         """
         if type(delegated_context) is not DelegatedRuntimeContextProjection:
             raise TypeError(
@@ -594,12 +657,22 @@ class _SubagentGraphRunner:
             raise ValueError(
                 "tool_call_control_observer requires a control topology",
             )
+        if context_evidence_observer_factory is not None and not callable(
+            context_evidence_observer_factory,
+        ):
+            raise TypeError(
+                "context_evidence_observer_factory must be callable",
+            )
         self._model_override = model_override
         self._middleware_override = middleware_override
         self._sdk_feature_snapshot = sdk_feature_snapshot
         self._tool_search_enabled = tool_search_enabled
         self._tool_call_control_topology = tool_call_control_topology
         self._tool_call_control_observer = tool_call_control_observer
+        self._context_evidence_observer_factory = context_evidence_observer_factory
+        self._context_evidence_observer: ProviderRequestEvidenceObserver | None = None
+        self._system_prompt_provenance: SystemPromptProvenance | None = None
+        self._frozen_mcp_dynamic_tools: tuple[BaseTool, ...] = ()
 
         self._base_tools = _filter_tools(
             tools,
@@ -627,6 +700,7 @@ class _SubagentGraphRunner:
         *,
         deferred_setup: DeferredToolSetup | None = None,
         execution_id: uuid.UUID | None = None,
+        context_evidence_observer: ProviderRequestEvidenceObserver | None = None,
     ):
         """Create the agent instance.
 
@@ -728,14 +802,64 @@ class _SubagentGraphRunner:
             middleware_kwargs = {
                 "app_config": app_config,
                 "model_name": self.model_name,
+                "context_model": model,
                 "lazy_init": True,
                 "deferred_setup": deferred_setup,
                 "agent_name": self.config.name,
                 "tool_call_control": tool_call_control,
+                "context_compaction_observer": context_evidence_observer,
             }
             if mcp_routing_middleware is not None:
                 middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
             middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+            from deerflow.agents.middlewares.assembly import (
+                append_final_provider_request_guard,
+            )
+            from deerflow.agents.middlewares.provider_request_usage import (
+                FinalProviderRequestGuard,
+                build_provider_request_profile,
+                collect_middleware_system_prompts,
+                collect_middleware_tools,
+                provider_request_runtime_policy_identity,
+            )
+
+            model_config = app_config.get_model_config(self.model_name)
+            if model_config is None:
+                raise RuntimeError("Sub-Agent model configuration is unavailable")
+            final_tools = tools if tools is not None else self.tools
+            provider_request_profile = build_provider_request_profile(
+                model=model,
+                model_name=self.model_name,
+                provider_adapter=model_config.system_provider_adapter,
+                provider_class_path=model_config.use,
+                system_prompt="",
+                tools=(
+                    *collect_middleware_tools(middlewares),
+                    *final_tools,
+                ),
+                middleware_system_prompts=collect_middleware_system_prompts(
+                    middlewares,
+                ),
+                supports_vision=model_config.supports_vision,
+                authority_identity=self.run_id,
+                capture_provider_input_tokens=(self._token_usage_tracking_enabled),
+                runtime_policy_identity=provider_request_runtime_policy_identity(
+                    app_config,
+                ),
+                workload_profile=(self._tool_call_control_topology.profile.workload_profile if self._tool_call_control_topology is not None else "interactive"),
+            )
+            middlewares = append_final_provider_request_guard(
+                middlewares,
+                FinalProviderRequestGuard(
+                    provider_request_profile,
+                    cost_adapter=ProviderModelRequestCostAdapter.from_profile(
+                        provider_request_profile,
+                        system_prompt_provenance=(self._system_prompt_provenance),
+                        mcp_dynamic_tools=self._frozen_mcp_dynamic_tools,
+                    ),
+                    evidence_observer=context_evidence_observer,
+                ),
+            )
         self._legacy_stop_reason_middlewares = [middleware for middleware in middlewares if middleware is not tool_call_control and hasattr(middleware, "consume_stop_reason")]
 
         # system_prompt is included in initial state messages (see _build_initial_state)
@@ -869,6 +993,7 @@ class _SubagentGraphRunner:
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
         filtered_tools = self._apply_skill_allowed_tools(skills)
+        self._frozen_mcp_dynamic_tools = tuple(candidate for candidate in filtered_tools if _is_frozen_mcp_tool(candidate))
         # Assemble deferred tool_search AFTER policy filtering (fail-closed),
         # mirroring the lead path so subagents stop binding full MCP schemas.
         # The generated tool_search helper is intentionally not subject to the
@@ -884,36 +1009,92 @@ class _SubagentGraphRunner:
         # Combine system_prompt and skills into a single SystemMessage.
         # Some LLM APIs reject multiple SystemMessages with
         # "System message must be at the beginning."
-        system_parts: list[str] = [SUBAGENT_SYSTEM_CONFIDENTIALITY_GUARD]
+        system_parts: list[tuple[str, ContextLane, str]] = [
+            (
+                "platform_confidentiality_guard",
+                ContextLane.SYSTEM_PROMPT,
+                SUBAGENT_SYSTEM_CONFIDENTIALITY_GUARD,
+            )
+        ]
         if self.config.system_prompt:
-            system_parts.append(self.config.system_prompt)
-        for skill_msg in skill_messages:
-            system_parts.append(skill_msg.content)
+            system_parts.append(
+                (
+                    "subagent_config",
+                    ContextLane.AGENT_INSTRUCTIONS,
+                    self.config.system_prompt,
+                )
+            )
+        for skill_index, skill_msg in enumerate(skill_messages):
+            system_parts.append(
+                (
+                    f"skill_body_{skill_index}",
+                    ContextLane.SKILLS,
+                    str(skill_msg.content),
+                )
+            )
         # Name the deferred MCP tools in the prompt; their schemas stay withheld
         # until tool_search promotes them. Empty set -> "" -> appends nothing.
         deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
         if deferred_section:
-            system_parts.append(deferred_section)
+            system_parts.append(
+                (
+                    "mcp_deferred_tool_index",
+                    ContextLane.MCP_DYNAMIC_TOOLS,
+                    deferred_section,
+                )
+            )
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(filtered_tools, deferred_names=deferred_setup.deferred_names)
         if mcp_routing_hints_section:
-            system_parts.append(mcp_routing_hints_section)
+            system_parts.append(
+                (
+                    "mcp_routing_hints",
+                    ContextLane.MCP_DYNAMIC_TOOLS,
+                    mcp_routing_hints_section,
+                )
+            )
         if self._agent_prompt_bundle is not None:
             agent_prompt_section = _render_inherited_agent_prompt_bundle(self._agent_prompt_bundle)
             if agent_prompt_section:
-                system_parts.append(agent_prompt_section)
+                system_parts.append(
+                    (
+                        "inherited_agent_definition",
+                        ContextLane.AGENT_INSTRUCTIONS,
+                        agent_prompt_section,
+                    )
+                )
         normalized_name = self.config.name.strip().lower().replace("_", "-")
         if normalized_name == "general-purpose" and not any(getattr(tool, "name", None) == "bash" for tool in final_tools):
-            system_parts.append(SUBAGENT_NO_COMMAND_EXECUTION_GUARD)
-        system_parts.append(SUBAGENT_FILE_HANDOFF_GUARD)
+            system_parts.append(
+                (
+                    "platform_command_guard",
+                    ContextLane.SYSTEM_PROMPT,
+                    SUBAGENT_NO_COMMAND_EXECUTION_GUARD,
+                )
+            )
+        system_parts.append(
+            (
+                "platform_file_handoff_guard",
+                ContextLane.SYSTEM_PROMPT,
+                SUBAGENT_FILE_HANDOFF_GUARD,
+            )
+        )
         # Project-authored Agent/Skill content intentionally occupies the
         # highest configurable tier, but a final platform reminder must follow
         # it so later same-role text cannot appear to supersede security and
         # confidentiality boundaries.
-        system_parts.append(SUBAGENT_FINAL_PLATFORM_GUARD)
+        system_parts.append(
+            (
+                "platform_final_guard",
+                ContextLane.SYSTEM_PROMPT,
+                SUBAGENT_FINAL_PLATFORM_GUARD,
+            )
+        )
 
         messages: list[Any] = []
         if system_parts:
-            messages.append(SystemMessage(content="\n\n".join(system_parts)))
+            system_prompt, provenance = _render_subagent_system_prompt(system_parts)
+            self._system_prompt_provenance = provenance
+            messages.append(SystemMessage(content=system_prompt))
 
         # Then the actual task
         messages.append(HumanMessage(content=task))
@@ -955,8 +1136,61 @@ class _SubagentGraphRunner:
         result_holder: _SubagentGraphResult,
     ) -> _SubagentGraphResult:
         """Run only the Agent Graph; lifecycle ownership lives elsewhere."""
+        factory = getattr(
+            self,
+            "_context_evidence_observer_factory",
+            None,
+        )
+        observer: ProviderRequestEvidenceObserver | None = None
+        if factory is not None:
+            model_name = self.model_name
+            if model_name is None:
+                app_config = self.app_config
+                if app_config is None:
+                    raise RuntimeError(
+                        "frozen Sub-Agent model is unavailable for Context Evidence",
+                    )
+                model_name = resolve_subagent_model_name(
+                    self.config,
+                    self.parent_model,
+                    app_config=app_config,
+                )
+                self.model_name = model_name
+            observer = await factory(
+                result_holder.execution_id,
+                model_name,
+            )
+            self._context_evidence_observer = observer
+        try:
+            return await self._aexecute(prompt, result_holder)
+        finally:
+            if observer is not None:
+                await self._record_context_evidence_settled(observer)
 
-        return await self._aexecute(prompt, result_holder)
+    @staticmethod
+    async def _record_context_evidence_settled(
+        observer: ProviderRequestEvidenceObserver,
+    ) -> None:
+        """Join durable Task settlement despite repeated caller cancellation."""
+
+        record_settled = getattr(observer, "record_settled", None)
+        if not callable(record_settled):
+            raise TypeError(
+                "Sub-Agent Context Evidence observer must implement record_settled()",
+            )
+        settlement = asyncio.create_task(record_settled())
+        cancellation: asyncio.CancelledError | None = None
+        while not settlement.done():
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        await settlement
+        if cancellation is not None:
+            raise cancellation
 
     async def _aexecute(
         self,
@@ -1006,6 +1240,7 @@ class _SubagentGraphRunner:
                 final_tools,
                 deferred_setup=deferred_setup,
                 execution_id=result.execution_id,
+                context_evidence_observer=(self._context_evidence_observer),
             )
 
             # The parent Run freezes this public-tracking decision at

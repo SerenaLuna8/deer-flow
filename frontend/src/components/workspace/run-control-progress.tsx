@@ -21,7 +21,9 @@ export function RunControlProgress({
 }) {
   const { t } = useI18n();
   const visibleObservations = observations.filter(
-    (observation) => observation.reason_code !== "tool_budget_warning",
+    (observation) =>
+      observation.reason_code !== "repeated_call_warning" &&
+      observation.reason_code !== "tool_budget_warning",
   );
   if (visibleObservations.length === 0) {
     return null;

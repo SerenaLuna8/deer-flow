@@ -21,6 +21,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
     get_buffer_string,
+    message_to_dict,
 )
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.config import get_config
@@ -46,12 +47,19 @@ from deerflow.agents.middlewares.provider_request_usage import (
     measure_profile_snapshot_context,
 )
 from deerflow.agents.provider_request_contract import (
+    CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
+    CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
     PROVIDER_REQUEST_PROFILE_STATE_KEY,
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import validate_summary_prompt_template
 from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.models.runtime import AsyncAbortEvent
+from deerflow.runtime.context_evidence import (
+    ContextCheckpointEstimator,
+    ContextCheckpointProjectionSnapshot,
+    ContextCompactionCheckpointReceipt,
+)
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
 from deerflow.utils.messages import SUMMARY_MESSAGE_NAME, is_real_user_message
@@ -231,6 +239,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         *args,
         compact_all_complete_turns: bool = False,
         context_model: Any | None = None,
+        context_compaction_observer: object | None = None,
         dual_output_contract: bool | None = None,
         **kwargs,
     ) -> None:
@@ -238,6 +247,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # retained-context reporting must use the Lead model that will receive
         # the provider request.
         self._context_model = context_model
+        self._context_compaction_observer = context_compaction_observer
         requested_token_counter = kwargs.get(
             "token_counter",
             count_tokens_approximately,
@@ -1666,6 +1676,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             ],
             "summary_text": result.summary_text,
             "memory_archive_receipt": result.memory_archive_receipt,
+            **self._context_compaction_update(state, result, runtime),
         }
 
     async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -1679,7 +1690,179 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             ],
             "summary_text": result.summary_text,
             "memory_archive_receipt": result.memory_archive_receipt,
+            **(
+                await self._acontext_compaction_update(
+                    state,
+                    result,
+                    runtime,
+                )
+            ),
         }
+
+    def _context_compaction_update(
+        self,
+        state: AgentState,
+        result: ContextCompactionResult,
+        runtime: Runtime,
+    ) -> dict[str, object]:
+        observer = self._context_compaction_observer
+        if observer is None:
+            return {}
+        prepare_receipt = getattr(
+            observer,
+            "prepare_compaction_checkpoint_receipt",
+            None,
+        )
+        if not callable(prepare_receipt):
+            if callable(
+                getattr(
+                    observer,
+                    "record_ephemeral_compaction_committed",
+                    None,
+                )
+            ):
+                raise SnipCompactionFailed(
+                    "Ephemeral Context compaction requires the async hook",
+                )
+            raise SnipCompactionFailed(
+                "Context compaction observer has no checkpoint receipt API",
+            )
+        source_messages = state.get("messages")
+        if not isinstance(source_messages, list):
+            raise SnipCompactionFailed(
+                "Context compaction source messages are invalid",
+            )
+        source_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
+        source_state_digest = self._context_state_digest(
+            source_messages,
+            source_summary,
+        )
+        raw_source_snapshot = state.get(CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY)
+        source_snapshot = raw_source_snapshot if isinstance(raw_source_snapshot, Mapping) else None
+        if source_snapshot is not None:
+            try:
+                estimator = ContextCheckpointProjectionSnapshot.from_safe_mapping(
+                    source_snapshot,
+                ).estimator
+            except (TypeError, ValueError):
+                raise SnipCompactionFailed(
+                    "Context compaction source snapshot is invalid",
+                ) from None
+        else:
+            profile = state.get(PROVIDER_REQUEST_PROFILE_STATE_KEY)
+            if not isinstance(profile, Mapping):
+                raise SnipCompactionFailed(
+                    "Context compaction estimator is unavailable",
+                )
+            try:
+                estimator = ContextCheckpointEstimator(
+                    error_allowance_ratio=float(profile["error_allowance_ratio"]),
+                    provider_fixed_overhead_tokens=int(profile["provider_fixed_overhead_tokens"]),
+                    provider_per_message_overhead_tokens=int(profile["provider_per_message_overhead_tokens"]),
+                    provider_per_tool_overhead_tokens=int(profile["provider_per_tool_overhead_tokens"]),
+                    fixed_message_count=(int(profile["bounded_overlay_message_count"]) + 1),
+                    tool_count=int(profile["full_tool_count"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                raise SnipCompactionFailed(
+                    "Context compaction estimator is invalid",
+                ) from None
+        source_checkpoint_id = self._source_checkpoint_id(
+            runtime,
+            self._archive_context(runtime),
+        )
+        if source_checkpoint_id is None:
+            raise SnipCompactionFailed(
+                "Context compaction source snapshot is unavailable",
+            )
+        receipt = prepare_receipt(
+            source_checkpoint_id=source_checkpoint_id,
+            source_snapshot=source_snapshot,
+            estimator=estimator,
+            source_state_digest=source_state_digest,
+            source_tokens=result.total_tokens,
+            result_values={
+                "messages": list(result.preserved_messages),
+                "summary_text": result.summary_text,
+            },
+        )
+        if not isinstance(receipt, ContextCompactionCheckpointReceipt):
+            raise SnipCompactionFailed(
+                "Context compaction observer returned an invalid receipt",
+            )
+        return {
+            CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY: (receipt.projection_snapshot.to_safe_mapping()),
+            CONTEXT_COMPACTION_RECEIPT_STATE_KEY: receipt.to_safe_mapping(),
+        }
+
+    async def _acontext_compaction_update(
+        self,
+        state: AgentState,
+        result: ContextCompactionResult,
+        runtime: Runtime,
+    ) -> dict[str, object]:
+        observer = self._context_compaction_observer
+        if observer is None or callable(getattr(observer, "prepare_compaction_checkpoint_receipt", None)):
+            return self._context_compaction_update(state, result, runtime)
+        record_ephemeral = getattr(
+            observer,
+            "record_ephemeral_compaction_committed",
+            None,
+        )
+        if not callable(record_ephemeral):
+            raise SnipCompactionFailed(
+                "Context compaction observer has no commit API",
+            )
+        source_messages = state.get("messages")
+        if not isinstance(source_messages, list):
+            raise SnipCompactionFailed(
+                "Ephemeral Context compaction source is invalid",
+            )
+        source_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
+        summary_tokens = self.token_counter([self._summary_count_message(result.summary_text)])
+        result_tokens = self.token_counter(
+            self._messages_for_trigger_count(
+                list(result.preserved_messages),
+                result.summary_text,
+            )
+        )
+        if result_tokens > result.total_tokens:
+            raise SnipCompactionFailed(
+                "Ephemeral Context compaction did not reduce retained state",
+            )
+
+        await record_ephemeral(
+            source_state_digest=self._context_state_digest(
+                source_messages,
+                source_summary,
+            ),
+            result_state_digest=self._context_state_digest(
+                list(result.preserved_messages),
+                result.summary_text,
+            ),
+            source_tokens=result.total_tokens,
+            result_tokens=result_tokens,
+            summary_tokens=min(summary_tokens, result_tokens),
+            summary_digest=hashlib.sha256(result.summary_text.encode("utf-8")).hexdigest(),
+        )
+        return {}
+
+    @staticmethod
+    def _context_state_digest(
+        messages: list[AnyMessage],
+        summary: str | None,
+    ) -> str:
+        material = json.dumps(
+            {
+                "messages": [message_to_dict(message) for message in messages],
+                "summary": summary,
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
 
 
 def create_summarization_middleware(
@@ -1687,6 +1870,7 @@ def create_summarization_middleware(
     app_config: Any | None = None,
     context_model: Any | None = None,
     keep: tuple[str, int | float] | None = None,
+    context_compaction_observer: object | None = None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
 
@@ -1724,6 +1908,7 @@ def create_summarization_middleware(
     kwargs: dict[str, Any] = {
         "model": model,
         "context_model": context_model,
+        "context_compaction_observer": context_compaction_observer,
         "trigger": trigger,
         "keep": effective_keep,
         "compact_all_complete_turns": compact_all_complete_turns,

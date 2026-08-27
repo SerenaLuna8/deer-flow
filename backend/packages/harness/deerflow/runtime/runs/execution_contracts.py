@@ -10,7 +10,7 @@ from typing import Literal
 
 from deerflow.token_budget_usage import TokenBudgetUsageSnapshot
 
-RunSemanticStopReason = Literal["loop_capped"]
+RunSemanticStopReason = Literal["loop_capped", "model_output_limit"]
 
 
 class RunSemanticStopRecorder:
@@ -46,8 +46,12 @@ class RunSemanticStopRecorder:
         *,
         suppressed_ai_message_id: str | None = None,
     ) -> None:
-        if reason != "loop_capped":
+        if reason not in {"loop_capped", "model_output_limit"}:
             raise ValueError("unsupported Run semantic stop reason")
+        if reason != "loop_capped" and suppressed_ai_message_id is not None:
+            raise ValueError(
+                "only loop_capped may suppress an AI message",
+            )
         if suppressed_ai_message_id is not None and (not isinstance(suppressed_ai_message_id, str) or not suppressed_ai_message_id.strip()):
             raise ValueError(
                 "suppressed_ai_message_id must be a non-empty string",

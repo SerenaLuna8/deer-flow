@@ -6,6 +6,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 
 import {
   clearProjectThreadRuntimeState,
@@ -17,15 +18,9 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 
 import { branchThreadFromTurn, fetchThreadTokenUsage } from "./api";
 import {
-  ACTIVE_CONTEXT_USAGE_RETRY_DELAY_MS,
-  CONTEXT_AUTHORITY_REFETCH_INTERVAL_MS,
-  fetchThreadContextAuthority,
-  fetchThreadContextUsage,
-  shouldRetryActiveContextUsage,
-  threadContextAuthorityQueryKey,
-  threadContextUsageReadingQueryKey,
-  type ThreadContextAuthorityResponse,
-  type ThreadContextUsageResponse,
+  getThreadContextProjectionReadModel,
+  type ContextProjectionReadState,
+  type ContextProjectionSubjectRequest,
 } from "./context-usage";
 import { removeDeletedThreadCaches } from "./thread-cache";
 import {
@@ -36,6 +31,9 @@ import {
 import { scopedThreadQueryKey } from "./thread-query-key";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type { AgentThread, ThreadTokenUsageResponse } from "./types";
+
+const DISABLED_CONTEXT_PROJECTION_READ_STATE: ContextProjectionReadState =
+  Object.freeze({ error: null, isLoading: false });
 
 type ThreadSidecarSearchClient = {
   threads: {
@@ -207,65 +205,46 @@ export function useThreadContextUsage(
   threadId?: string | null,
   {
     enabled = true,
-    modelName,
+    subject = { kind: "lead_thread" },
     privateWork: explicitPrivateWork,
   }: {
     enabled?: boolean;
-    modelName?: string | null;
+    subject?: ContextProjectionSubjectRequest;
     privateWork?: ProjectPrivateWorkScope;
   } = {},
-) {
+): ContextProjectionReadState {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
-  const authority = useQuery<ThreadContextAuthorityResponse | null>({
-    queryKey: scopedThreadQueryKey(
-      privateWork.scope,
-      ...threadContextAuthorityQueryKey(threadId),
-    ),
-    queryFn: async ({ signal }) => {
-      if (!threadId) {
-        return null;
-      }
-      return fetchThreadContextAuthority(threadId, {
-        apiBaseURL: privateWork.apiBaseURL,
-        signal,
-      });
+  const subjectExecutionId =
+    subject.kind === "subagent_task" ? subject.executionId : null;
+  const stableSubject = useMemo<ContextProjectionSubjectRequest>(
+    () =>
+      subject.kind === "lead_thread"
+        ? { kind: "lead_thread" }
+        : { kind: "subagent_task", executionId: subjectExecutionId! },
+    [subject.kind, subjectExecutionId],
+  );
+  const readModel = useMemo(
+    () =>
+      threadId && typeof window !== "undefined"
+        ? getThreadContextProjectionReadModel(privateWork, threadId)
+        : null,
+    [privateWork, threadId],
+  );
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      if (!enabled || !readModel) return () => undefined;
+      return readModel.subscribe(stableSubject, onStoreChange);
     },
-    enabled: enabled && Boolean(threadId),
-    retry: false,
-    refetchInterval: CONTEXT_AUTHORITY_REFETCH_INTERVAL_MS,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
-  });
-  const cacheMarker = authority.data?.cache_marker;
-  const usage = useQuery<ThreadContextUsageResponse | null>({
-    queryKey: scopedThreadQueryKey(
-      privateWork.scope,
-      ...threadContextUsageReadingQueryKey(threadId, modelName, cacheMarker),
-    ),
-    queryFn: async ({ signal }) => {
-      if (!threadId) {
-        return null;
-      }
-      return fetchThreadContextUsage(threadId, {
-        apiBaseURL: privateWork.apiBaseURL,
-        modelName,
-        signal,
-      });
-    },
-    enabled: enabled && Boolean(threadId) && Boolean(cacheMarker),
-    retry: (failureCount, error) =>
-      shouldRetryActiveContextUsage(failureCount, error, cacheMarker),
-    retryDelay: ACTIVE_CONTEXT_USAGE_RETRY_DELAY_MS,
-    refetchOnWindowFocus: false,
-  });
-  return {
-    ...usage,
-    data: authority.data === null ? null : usage.data,
-    error: authority.error ?? usage.error,
-    isError: authority.isError || usage.isError,
-    isFetching: authority.isFetching || usage.isFetching,
-    isLoading: authority.isLoading || (Boolean(cacheMarker) && usage.isLoading),
-  };
+    [enabled, readModel, stableSubject],
+  );
+  const getSnapshot = useCallback(
+    () =>
+      enabled && readModel
+        ? readModel.getSnapshot(stableSubject)
+        : DISABLED_CONTEXT_PROJECTION_READ_STATE,
+    [enabled, readModel, stableSubject],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 export function useBranchThread(explicitPrivateWork?: ProjectPrivateWorkScope) {

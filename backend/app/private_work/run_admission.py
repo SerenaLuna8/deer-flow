@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -107,6 +107,10 @@ from app.shared_assets.models import (
 from app.shared_assets.resolver import ProjectAssetResolver
 from app.system_settings.model_refs import ModelRefResolver
 from deerflow.agents.memory.snip import MEMORY_ARCHIVE_RECEIPT_KEY
+from deerflow.agents.provider_request_contract import (
+    CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
+    CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
+)
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRow,
@@ -178,10 +182,23 @@ class PrivateRunAdmissionServerContext:
     host_execution_decision_digest: str | None = None
     host_execution_domain_affinity: str | None = None
     channel_user_id: str | None = None
+    context_rebase_reason: (
+        Literal[
+            "regeneration",
+            "message_edit",
+        ]
+        | None
+    ) = None
 
     def __post_init__(self) -> None:
         if type(self.non_interactive) is not bool:
             raise TypeError("non_interactive must be a boolean")
+        if self.context_rebase_reason not in {
+            None,
+            "regeneration",
+            "message_edit",
+        }:
+            raise TypeError("context_rebase_reason is invalid")
         if self.inbound_authority is not None and type(self.inbound_authority) is not PrivateRunInboundAuthority:
             raise TypeError("inbound_authority must be PrivateRunInboundAuthority")
         if self.inbound_delivery is not None and type(self.inbound_delivery) is not PrivateRunInboundDelivery:
@@ -379,12 +396,19 @@ def _strip_client_memory_archive_receipt(
     cloned = copy.deepcopy(payload)
     if not isinstance(cloned, dict):
         return cloned
-    cloned.pop(MEMORY_ARCHIVE_RECEIPT_KEY, None)
+    private_state_keys = (
+        MEMORY_ARCHIVE_RECEIPT_KEY,
+        CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
+        CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
+    )
+    for key in private_state_keys:
+        cloned.pop(key, None)
     if command:
         update = cloned.get("update")
         if isinstance(update, Mapping):
             clean_update = dict(update)
-            clean_update.pop(MEMORY_ARCHIVE_RECEIPT_KEY, None)
+            for key in private_state_keys:
+                clean_update.pop(key, None)
             cloned["update"] = clean_update
     return cloned
 
@@ -694,6 +718,7 @@ class PrivateRunAdmissionService:
                 raise TypeError("channel_user_id conflicts with inbound authority")
             channel_user_id = inbound_authority.external_account_id
         runtime_context["channel_user_id"] = channel_user_id
+        runtime_context["context_rebase_reason"] = server_context.context_rebase_reason if server_context is not None else None
         config["context"] = runtime_context
         result["config"] = config
 

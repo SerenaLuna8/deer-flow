@@ -318,11 +318,13 @@ class _TaskLifecycleEventAdapter:
         self._message_count = 0
 
     async def __call__(self, event: SubagentTaskEvent) -> None:
+        execution_id = str(event.execution_id)
         if not self._started:
             self._writer(
                 {
                     "type": "task_started",
                     "task_id": self._task_id,
+                    "execution_id": execution_id,
                     "description": self._description,
                     "model_name": self._model_name,
                 }
@@ -336,6 +338,7 @@ class _TaskLifecycleEventAdapter:
                 {
                     "type": "task_running",
                     "task_id": self._task_id,
+                    "execution_id": execution_id,
                     "message": _plain_event_value(event.ai_messages[index]),
                     "message_index": index + 1,
                     "total_messages": current_message_count,
@@ -351,6 +354,7 @@ class _TaskLifecycleEventAdapter:
                 {
                     "type": "task_completed",
                     "task_id": self._task_id,
+                    "execution_id": execution_id,
                     "result": event.result,
                     "usage": usage,
                     "usage_completeness": event.usage_completeness.value,
@@ -362,6 +366,7 @@ class _TaskLifecycleEventAdapter:
                 {
                     "type": "task_failed",
                     "task_id": self._task_id,
+                    "execution_id": execution_id,
                     "error": _failure_presentation(event),
                     "usage": usage,
                     "usage_completeness": event.usage_completeness.value,
@@ -373,6 +378,7 @@ class _TaskLifecycleEventAdapter:
                 {
                     "type": "task_cancelled",
                     "task_id": self._task_id,
+                    "execution_id": execution_id,
                     "error": _cancellation_presentation(event),
                     "usage": usage,
                     "usage_completeness": event.usage_completeness.value,
@@ -383,6 +389,7 @@ class _TaskLifecycleEventAdapter:
             payload = {
                 "type": "task_timed_out",
                 "task_id": self._task_id,
+                "execution_id": execution_id,
                 "usage": usage,
                 "usage_completeness": event.usage_completeness.value,
                 "model_name": self._model_name,
@@ -903,6 +910,8 @@ async def _run_task_through_lifecycle(
             "tool_call_control_topology": parent_binding.tool_call_control_topology,
             "tool_call_control_observer": parent_binding.tool_call_control_observer,
         }
+        if parent_binding.context_evidence_observer_factory is not None:
+            executor_kwargs["context_evidence_observer_factory"] = parent_binding.create_subagent_context_evidence_observer
         if runtime_agent_profile is not None:
             executor_kwargs["agent_model_settings"] = runtime_agent_profile.model_settings
         if type(profile) is SdkParentExecutionProfile:

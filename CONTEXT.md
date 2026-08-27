@@ -240,6 +240,30 @@ _Avoid_: Checkpoint
 A durable snapshot of materialized Agent Graph state used for continuity, resume, and rollback.
 _Avoid_: Run Event, audit log
 
+**Context Subject**:
+The Lead Thread or one Sub-Agent Task execution whose model-visible context is measured independently. Sibling Sub-Agent Tasks never share one Context Subject.
+_Avoid_: Agent, Run-wide Token total
+
+**Context Window**:
+The model-visible retained context for one Context Subject at a point in its execution continuity. It is distinct from cumulative Run usage and billing.
+_Avoid_: Token usage, Run total
+
+**Context Window Generation**:
+One continuity generation of a Context Window between whole-history replacements. Compaction, rollback, branching, or another replacement begins a new generation without erasing prior measurement facts.
+_Avoid_: Run, Session
+
+**Context Evidence**:
+An immutable, safely minimized fact about request admission, Provider observation, or compaction for one Context Window Generation. It records measurement provenance without containing conversation content.
+_Avoid_: Run Event, Checkpoint, raw Prompt
+
+**Context Projection**:
+A rebuildable reading of current context occupancy, quality, capacity, and compaction state for one Context Subject. It may combine exact and estimated Context Evidence and never grants execution authority.
+_Avoid_: Context Evidence, Provider receipt, execution guard
+
+**Context Contribution**:
+One uniquely owned piece of model-visible material assigned to exactly one stable Context Projection lane. Runtime settings that do not shape a model request are not Context Contributions.
+_Avoid_: Runtime Policy, duplicated Token category
+
 **Host Execution Suspension**:
 A checkpoint-safe boundary created when a host command requires approval. The source Run terminates with a sealed suspension, and an approved command is handled by a linked Continuation Run.
 _Avoid_: Paused Job Attempt

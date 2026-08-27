@@ -265,12 +265,7 @@ export function InputBox({
   const contextUsage = useThreadContextUsage(
     threadExists && !isMock ? threadId : undefined,
     {
-      enabled:
-        compactCommandEnabled &&
-        threadExists &&
-        !isMock &&
-        Boolean(resolvedModelName),
-      modelName: resolvedModelName,
+      enabled: threadExists && !isMock,
       privateWork,
     },
   );
@@ -2224,7 +2219,7 @@ export function InputBox({
             />
           </PromptInputTools>
           <PromptInputTools className="min-w-0 justify-end">
-            {threadExists && compactCommandEnabled && !isMock && (
+            {threadExists && !isMock && (
               <ContextWindowIndicator
                 error={contextUsage.error}
                 isLoading={contextUsage.isLoading}

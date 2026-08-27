@@ -18,6 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.checkpointer import ProjectScopedCheckpointer
+from app.private_work.context_evidence_observer import (
+    PrivateRunContextEvidenceObserver,
+)
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkMcpQuotaExceeded
 from app.private_work.execution_approval import (
     HostExecutionProviderPolicySnapshot,
@@ -119,6 +122,7 @@ from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.error_codes import (
     PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
+    ContextProviderCallAmbiguousError,
     MemoryAuthorityUnavailable,
     PublicRunError,
     PublicRunErrorCode,
@@ -138,6 +142,7 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError
+from deerflow.runtime.context_evidence import ContextRebaseReason, ContextSubject
 from deerflow.runtime.events.models import STREAM_TERMINAL_ERROR_CODES
 from deerflow.runtime.host_execution_approval import (
     HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH,
@@ -165,6 +170,25 @@ from deerflow.trace_context import normalize_trace_id, request_trace_context
 logger = logging.getLogger("app.reliability.execution")
 
 
+def _context_compaction_threshold_tokens(
+    app_config: object,
+    *,
+    context_window_tokens: int,
+) -> int | None:
+    summarization = getattr(app_config, "summarization", None)
+    trigger = getattr(summarization, "trigger", None)
+    candidates = tuple(trigger) if isinstance(trigger, list) else (() if trigger is None else (trigger,))
+    thresholds: list[int] = []
+    for candidate in candidates:
+        trigger_type = getattr(candidate, "type", None)
+        value = getattr(candidate, "value", None)
+        if trigger_type == "tokens" and isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            thresholds.append(value)
+        elif trigger_type == "fraction" and isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1:
+            thresholds.append(max(1, int(context_window_tokens * float(value))))
+    return min(thresholds) if thresholds else None
+
+
 def _persisted_channel_user_id(
     kwargs: Mapping[str, object],
 ) -> str | None:
@@ -182,6 +206,32 @@ def _persisted_channel_user_id(
     if not isinstance(value, str) or not value or len(value) > HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH:
         raise ValueError("persisted channel identity is invalid")
     return value
+
+
+def _persisted_context_rebase_reason(
+    kwargs: Mapping[str, object],
+) -> ContextRebaseReason | None:
+    """Read only the Gateway-issued closed history-replacement reason."""
+
+    config = kwargs.get("config")
+    if not isinstance(config, Mapping):
+        return None
+    context = config.get("context")
+    if not isinstance(context, Mapping):
+        return None
+    value = context.get("context_rebase_reason")
+    if value is None:
+        return None
+    try:
+        reason = ContextRebaseReason(value)
+    except (TypeError, ValueError):
+        raise ValueError("persisted Context rebase reason is invalid") from None
+    if reason not in {
+        ContextRebaseReason.REGENERATION,
+        ContextRebaseReason.MESSAGE_EDIT,
+    }:
+        raise ValueError("persisted Context rebase reason is not Run-admissible")
+    return reason
 
 
 class _PrivateRunThreadMetadataStore:
@@ -351,6 +401,7 @@ class RunAgentPrivateExecutor:
             public_error_code,
             retryable=False,
             attempt_usage=attempt_usage,
+            durable_terminal=True,
         )
 
     @classmethod
@@ -573,6 +624,7 @@ class RunAgentPrivateExecutor:
         private_runtime = None
         file_authority = None
         record: RunRecord | None = None
+        context_evidence_observer: PrivateRunContextEvidenceObserver | None = None
         resource_ownership = RunAgentResourceOwnership()
         runtime_config_pushed = False
         token_budget_usage_recorder: TokenBudgetUsageRecorder | None = None
@@ -847,6 +899,77 @@ class RunAgentPrivateExecutor:
             )
             if callable(set_boundary):
                 set_boundary(boundary)
+            if execution.runtime_kind == "chat":
+                context_model = runtime_app_config.get_model_config(
+                    exact_model_name,
+                )
+                if not isinstance(context_model, ModelConfig):
+                    raise PermanentExecutionError("RUN_ASSET_STALE")
+                try:
+                    model_identity_digest = model_execution_provenance(
+                        context_model,
+                    ).payload_checksum
+                except ValueError:
+                    raise PermanentExecutionError("RUN_ASSET_STALE") from None
+                subagent_model_context: dict[
+                    str,
+                    tuple[str, int, int | None],
+                ] = {}
+                for frozen_model in runtime_app_config.models:
+                    try:
+                        frozen_digest = model_execution_provenance(
+                            frozen_model,
+                        ).payload_checksum
+                    except ValueError:
+                        raise PermanentExecutionError("RUN_ASSET_STALE") from None
+                    subagent_model_context[frozen_model.name] = (
+                        frozen_digest,
+                        frozen_model.max_input_tokens,
+                        _context_compaction_threshold_tokens(
+                            runtime_app_config,
+                            context_window_tokens=frozen_model.max_input_tokens,
+                        ),
+                    )
+                configurable = execution.config.get("configurable")
+                source_checkpoint_id = configurable.get("checkpoint_id") if isinstance(configurable, Mapping) and isinstance(configurable.get("checkpoint_id"), str) else None
+                try:
+                    context_rebase_reason = _persisted_context_rebase_reason(
+                        execution.run.kwargs,
+                    )
+                except ValueError:
+                    raise PermanentExecutionError("RUN_ASSET_STALE") from None
+                context_evidence_observer = PrivateRunContextEvidenceObserver(
+                    self._factory,
+                    context=execution.context,
+                    boundary=boundary,
+                    thread_id=execution.run.thread_id,
+                    run_id=execution.run.run_id,
+                    subject=ContextSubject.lead_thread(
+                        thread_id=execution.run.thread_id,
+                    ),
+                    model_identity_digest=model_identity_digest,
+                    context_window_tokens=context_model.max_input_tokens,
+                    compaction_enabled=bool(
+                        runtime_app_config.summarization.enabled,
+                    ),
+                    compaction_threshold_tokens=(
+                        _context_compaction_threshold_tokens(
+                            runtime_app_config,
+                            context_window_tokens=context_model.max_input_tokens,
+                        )
+                    ),
+                    source_checkpoint_id=source_checkpoint_id,
+                    rebase_reason=context_rebase_reason,
+                    subagent_model_context=subagent_model_context,
+                )
+                set_context_evidence_observer = getattr(
+                    checkpointer,
+                    "set_context_evidence_observer",
+                    None,
+                )
+                if not callable(set_context_evidence_observer):
+                    raise PermanentExecutionError("RUN_ASSET_STALE")
+                set_context_evidence_observer(context_evidence_observer)
             memory_authority = (
                 PrivateRunMemoryAuthority(
                     self._factory,
@@ -901,6 +1024,7 @@ class RunAgentPrivateExecutor:
                 token_budget_usage_recorder=token_budget_usage_recorder,
                 resource_ownership=resource_ownership,
                 tool_call_control_policy=(tool_call_control_policy.graph_profile if tool_call_control_policy is not None else None),
+                context_evidence_observer=context_evidence_observer,
                 max_concurrent_subagents=(tool_call_control_policy.max_concurrent_subagents if tool_call_control_policy is not None else None),
                 max_total_subagents=(tool_call_control_policy.max_total_subagents if tool_call_control_policy is not None else None),
             )
@@ -972,7 +1096,30 @@ class RunAgentPrivateExecutor:
                 outcome.usage,
                 token_budget_usage_recorder,
             )
-            if boundary.cancel_requested or boundary.authorization_revoked:
+            if context_evidence_observer is not None and not boundary.authorization_revoked:
+                await context_evidence_observer.record_settled()
+            if boundary.authorization_revoked:
+                return AgentExecutionResult.cancelled(
+                    attempt_usage=attempt_usage,
+                )
+            if outcome.status == "failed":
+                error_code = outcome.public_error_code
+                if error_code is None:
+                    raise RuntimeError("failed Run Agent outcome has no error code")
+                if error_code in STREAM_TERMINAL_ERROR_CODES:
+                    return self._terminal_failure_result(
+                        error_code,
+                        attempt_usage=attempt_usage,
+                    )
+                if boundary.ambiguous_side_effect:
+                    raise AmbiguousExternalSideEffect(
+                        attempt_usage=attempt_usage,
+                    )
+                return self._terminal_failure_result(
+                    error_code,
+                    attempt_usage=attempt_usage,
+                )
+            if boundary.cancel_requested:
                 return AgentExecutionResult.cancelled(
                     attempt_usage=attempt_usage,
                 )
@@ -985,24 +1132,68 @@ class RunAgentPrivateExecutor:
                 return AgentExecutionResult.cancelled(
                     attempt_usage=attempt_usage,
                 )
-            error_code = outcome.public_error_code
-            if error_code is None:
-                raise RuntimeError("failed Run Agent outcome has no error code")
-            if error_code in STREAM_TERMINAL_ERROR_CODES:
-                return self._terminal_failure_result(
-                    error_code,
-                    attempt_usage=attempt_usage,
-                )
-            if boundary.ambiguous_side_effect:
-                raise AmbiguousExternalSideEffect(
-                    attempt_usage=attempt_usage,
-                )
-            return self._terminal_failure_result(
-                error_code,
-                attempt_usage=attempt_usage,
-            )
+            raise RuntimeError("Run Agent returned an unsupported outcome")
         except asyncio.CancelledError:
             raise
+        except ContextProviderCallAmbiguousError as error:
+            if boundary.lease_lost:
+                raise TransientExecutionError(
+                    "EXECUTION_AUTHORITY_UNAVAILABLE",
+                ) from error
+            if boundary.authorization_revoked:
+                return AgentExecutionResult.cancelled(
+                    attempt_usage=(
+                        self._usage_snapshot(
+                            record,
+                            token_budget_usage_recorder,
+                        )
+                        if record is not None
+                        else None
+                    ),
+                )
+            if context_evidence_observer is not None:
+                try:
+                    await context_evidence_observer.record_settled()
+                except asyncio.CancelledError:
+                    raise
+                except AuthorizationRevoked:
+                    if boundary.lease_lost:
+                        raise TransientExecutionError(
+                            "EXECUTION_AUTHORITY_UNAVAILABLE",
+                        ) from error
+                    return AgentExecutionResult.cancelled(
+                        attempt_usage=(
+                            self._usage_snapshot(
+                                record,
+                                token_budget_usage_recorder,
+                            )
+                            if record is not None
+                            else None
+                        ),
+                    )
+                except Exception as settlement_error:
+                    raise TransientExecutionError(
+                        PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
+                        attempt_usage=(
+                            self._usage_snapshot(
+                                record,
+                                token_budget_usage_recorder,
+                            )
+                            if record is not None
+                            else None
+                        ),
+                    ) from settlement_error
+            if record is None:
+                raise RuntimeError(
+                    "Context Provider ambiguity has no registered Run",
+                ) from error
+            return self._terminal_failure_result(
+                PublicRunErrorCode.CONTEXT_PROVIDER_CALL_AMBIGUOUS.value,
+                attempt_usage=self._usage_snapshot(
+                    record,
+                    token_budget_usage_recorder,
+                ),
+            )
         except CheckpointModeMismatchError as error:
             raise PermanentExecutionError(
                 "CHECKPOINT_MODE_MISMATCH",

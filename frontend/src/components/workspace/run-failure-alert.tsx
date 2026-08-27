@@ -6,6 +6,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  CONTEXT_PROVIDER_CALL_AMBIGUOUS,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   SIDE_EFFECT_STATE_UNKNOWN,
@@ -40,7 +41,8 @@ export function canReplayRunFailure(
 ): boolean {
   return (
     failureCode !== OUTPUT_DELIVERY_INCOMPLETE &&
-    failureCode !== SIDE_EFFECT_STATE_UNKNOWN
+    failureCode !== SIDE_EFFECT_STATE_UNKNOWN &&
+    failureCode !== CONTEXT_PROVIDER_CALL_AMBIGUOUS
   );
 }
 

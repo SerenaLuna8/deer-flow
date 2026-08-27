@@ -673,10 +673,12 @@ class PrivateRunJobHandler:
                 return AgentExecutionResult.failed(
                     str(terminal.data["error_code"]),
                     retryable=False,
+                    durable_terminal=True,
                 )
             return AgentExecutionResult.failed(
                 "AGENT_EXECUTION_FAILED",
                 retryable=False,
+                durable_terminal=True,
             )
         return AgentExecutionResult.failed("DURABLE_STREAM_TERMINAL_INVALID")
 
@@ -706,6 +708,8 @@ class PrivateRunJobHandler:
         durable_terminal: bool = False,
         ensure_stream_terminal: bool = False,
     ) -> JobSettlement:
+        durable_terminal = durable_terminal or result.durable_terminal
+        ensure_failed_stream_terminal = durable_terminal and result.status == "failed" and result.public_error_code == "CONTEXT_PROVIDER_CALL_AMBIGUOUS"
         if ensure_stream_terminal and (not durable_terminal or result.status != "succeeded"):
             raise ValueError(
                 "stream terminal repair requires a durable successful result",
@@ -795,6 +799,23 @@ class PrivateRunJobHandler:
                             thread_id=settled_run.thread_id,
                             run_id=settled_run.run_id,
                             status="completed",
+                        )
+                    elif ensure_failed_stream_terminal:
+                        if settled_run.status == "error":
+                            stream_status = "error"
+                            stream_error_code = settled_run.error if settled_run.error in STREAM_TERMINAL_ERROR_CODES else None
+                        elif settled_run.status == "interrupted" and settled_run.error is not None:
+                            stream_status = "interrupted"
+                            stream_error_code = None
+                        else:
+                            raise PrivateRunExecutionLeaseLost
+                        await self._events.ensure_settled_stream_terminal(
+                            session,
+                            scope=locked_scope,
+                            thread_id=settled_run.thread_id,
+                            run_id=settled_run.run_id,
+                            status=stream_status,
+                            error_code=stream_error_code,
                         )
                     if not settlement.run_terminal_published and settled_run.status in {
                         "success",
@@ -964,7 +985,7 @@ class PrivateRunJobHandler:
                     durable_terminal=True,
                     ensure_stream_terminal=True,
                 )
-        if authority.cancel_requested:
+        if authority.cancel_requested and not result.durable_terminal:
             result = AgentExecutionResult.cancelled(
                 attempt_usage=result.attempt_usage,
             )
@@ -973,6 +994,7 @@ class PrivateRunJobHandler:
             result,
             scope=execution.context.resource_scope,
             ambiguous_side_effect=ambiguous_side_effect,
+            durable_terminal=result.durable_terminal,
         )
 
 

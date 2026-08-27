@@ -953,6 +953,59 @@ async def _purge_execution_approvals(
     )
 
 
+async def _purge_context_evidence_scope(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    owner_user_id: str | None,
+) -> None:
+    """Delete exact Thread-owned Context state under transaction-local authority."""
+
+    parameters: dict[str, object] = {"project_id": project_id}
+    owner_clause = ""
+    if owner_user_id is not None:
+        parameters["owner_user_id"] = owner_user_id
+        owner_clause = " AND thread.owner_user_id=:owner_user_id"
+
+    await session.execute(
+        text(
+            """CREATE TEMPORARY TABLE IF NOT EXISTS
+               context_evidence_retention_authority (
+                   project_id UUID NOT NULL,
+                   owner_user_id VARCHAR(36) NOT NULL,
+                   thread_id VARCHAR(64) NOT NULL,
+                   PRIMARY KEY (project_id, owner_user_id, thread_id)
+               ) ON COMMIT DELETE ROWS"""
+        )
+    )
+    await session.execute(text("DELETE FROM pg_temp.context_evidence_retention_authority"))
+    await session.execute(
+        text(
+            f"""INSERT INTO pg_temp.context_evidence_retention_authority
+                    (project_id, owner_user_id, thread_id)
+                 SELECT thread.project_id, thread.owner_user_id, thread.thread_id
+                   FROM threads_meta AS thread
+                  WHERE thread.project_id=:project_id{owner_clause}
+                 ON CONFLICT DO NOTHING"""
+        ),
+        parameters,
+    )
+    for table_name, alias in (
+        ("context_evidence", "evidence"),
+        ("context_projection_heads", "head"),
+        ("context_evidence_sequences", "sequence"),
+    ):
+        await session.execute(
+            text(
+                f"""DELETE FROM {table_name} AS {alias}
+                       USING pg_temp.context_evidence_retention_authority AS authority
+                       WHERE {alias}.project_id=authority.project_id
+                         AND {alias}.owner_user_id=authority.owner_user_id
+                         AND {alias}.thread_id=authority.thread_id"""
+            )
+        )
+
+
 async def purge_private_scope(
     session: AsyncSession,
     *,
@@ -1120,6 +1173,16 @@ async def purge_private_scope(
             PrivateFileRow.project_id == project_id,
             *(() if owner_user_id is None else (PrivateFileRow.owner_user_id == owner_user_id,)),
         )
+    )
+
+    # Context Evidence survives ordinary logical Thread/Run deletion. Only this
+    # physical retention boundary installs the exact Thread scope accepted by
+    # its append-only trigger, then removes Evidence and both rebuildable state
+    # tables before any Thread metadata can disappear.
+    await _purge_context_evidence_scope(
+        session,
+        project_id=project_id,
+        owner_user_id=owner_user_id,
     )
 
     # Checkpoint tables are LangGraph-owned and intentionally addressed only by

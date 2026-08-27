@@ -26,6 +26,8 @@ export interface SubtaskExecutionApprovalState {
 
 export interface Subtask {
   id: string;
+  /** Server-owned Context Subject identity; never derived from the tool call id. */
+  executionId?: string;
   status: "unknown" | "in_progress" | "completed" | "failed";
   /**
    * Where the current status came from. Pending card inference is weaker than

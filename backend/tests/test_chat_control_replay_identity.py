@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage, RemoveMessage
 from app.gateway.private_work_schemas import PrivateRunCreateRequest
 from app.gateway.routers.private_work import _normalize_prepared_edit_replay
 from app.private_work.chat_controls import ProjectChatControlService
+from app.private_work.errors import PrivateWorkConflict
 from app.reliability.run_execution.executor import RunAgentPrivateExecutor
 
 
@@ -144,6 +145,80 @@ async def test_run_ingress_restores_server_validated_edit_remove_message() -> No
         replacement_base_id="edit-2",
         app_config=ANY,
     )
+
+
+@pytest.mark.anyio
+async def test_run_ingress_revalidates_regeneration_before_issuing_rebase_reason() -> None:
+    metadata = {
+        "regenerate_from_message_id": "ai-2",
+        "regenerate_from_run_id": "run-2",
+        "regenerate_checkpoint_id": "checkpoint-2",
+    }
+    trusted_input = {
+        "messages": [
+            {
+                "type": "human",
+                "id": "human-2",
+                "content": "again",
+            }
+        ]
+    }
+    service = SimpleNamespace(
+        prepare_regenerate=AsyncMock(
+            return_value={
+                "input": trusted_input,
+                "checkpoint": {
+                    "checkpoint_ns": "",
+                    "checkpoint_id": "checkpoint-2",
+                    "checkpoint_map": None,
+                },
+                "metadata": metadata,
+                "target_run_id": "run-2",
+            }
+        )
+    )
+    body = PrivateRunCreateRequest(
+        input=trusted_input,
+        checkpoint={
+            "checkpoint_ns": "",
+            "checkpoint_id": "checkpoint-2",
+            "checkpoint_map": None,
+        },
+        metadata=metadata,
+    )
+
+    normalized = await _normalize_prepared_edit_replay(
+        body,
+        thread_id="thread-2",
+        context=SimpleNamespace(request_id="request-2"),
+        service=service,
+        app_config=object(),
+    )
+
+    assert normalized.input == trusted_input
+    service.prepare_regenerate.assert_awaited_once_with(
+        ANY,
+        "thread-2",
+        message_id="ai-2",
+        app_config=ANY,
+    )
+
+    forged = body.model_copy(
+        update={
+            "metadata": {
+                **metadata,
+                "regenerate_checkpoint_id": "checkpoint-forged",
+            }
+        }
+    )
+    with pytest.raises(PrivateWorkConflict):
+        await _normalize_prepared_edit_replay(
+            forged,
+            thread_id="thread-2",
+            context=SimpleNamespace(request_id="request-2"),
+            service=service,
+            app_config=object(),
+        )
 
 
 def test_worker_decodes_server_validated_remove_message() -> None:

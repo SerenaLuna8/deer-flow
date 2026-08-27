@@ -474,7 +474,6 @@ async def gateway_platform_runtime(
             app.state.private_run_event_store,
             endpoint_policy=mcp_endpoint_policy,
             model_materializer=model_materializer,
-            runtime_policy_materializer=(app.state.system_runtime_policy_materializer),
         )
         app.state.project_memory_service = PrivateMemoryDocumentService(
             sf,

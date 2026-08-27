@@ -40,8 +40,13 @@ from deerflow.agents.middlewares.assembly import (
     build_lead_runtime_middlewares,
 )
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.provider_request_cost_adapter import (
+    ProviderModelRequestCostAdapter,
+    SystemPromptProvenance,
+)
 from deerflow.agents.middlewares.provider_request_usage import (
     FinalProviderRequestGuard,
+    ProviderRequestEvidenceObserver,
     build_provider_request_profile,
     collect_custom_middleware_request_contract,
     collect_middleware_system_prompts,
@@ -88,6 +93,7 @@ from deerflow.subagents.binding import (
     bind_task_tool_in_tools,
 )
 from deerflow.subagents.runtime_catalog import trusted_runtime_agent_catalog
+from deerflow.tools.mcp_metadata import is_mcp_tool
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
@@ -202,11 +208,13 @@ def _create_summarization_middleware(
     *,
     app_config: AppConfig | None = None,
     context_model: BaseChatModel | None = None,
+    context_compaction_observer: object | None = None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
     return create_summarization_middleware(
         app_config=app_config,
         context_model=context_model,
+        context_compaction_observer=context_compaction_observer,
     )
 
 
@@ -367,6 +375,7 @@ def build_middlewares(
     tool_call_control: AgentMiddleware | None = None,
     output_limit_recovery_model: BaseChatModel | None = None,
     output_limit_recovery_override: AgentMiddleware | None = None,
+    context_evidence_observer: ProviderRequestEvidenceObserver | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -475,6 +484,7 @@ def build_middlewares(
     summarization_middleware = _create_summarization_middleware(
         app_config=resolved_app_config,
         context_model=context_model,
+        context_compaction_observer=context_evidence_observer,
     )
 
     cfg = _get_runtime_config(config)
@@ -663,6 +673,7 @@ def _make_lead_agent(
     tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None,
     tool_call_control_scope_id: str | None = None,
     tool_call_control_observer: ToolCallControlObserver | None = None,
+    context_evidence_observer: ProviderRequestEvidenceObserver | None = None,
     resolved_max_concurrent_subagents: int | None = None,
     resolved_max_total_subagents: int | None = None,
 ):
@@ -902,6 +913,7 @@ def _make_lead_agent(
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
         if requires_host_bash_approval(resolved_app_config):
             configured_tools = [tool for tool in configured_tools if tool.name != "bash"]
+    frozen_mcp_dynamic_tools = tuple(tool for tool in configured_tools if is_mcp_tool(tool))
     final_tools, setup = assemble_deferred_tools(
         configured_tools,
         enabled=resolved_app_config.tool_search.enabled,
@@ -993,6 +1005,7 @@ def _make_lead_agent(
             output_limit_recovery_model=output_limit_recovery_model,
             output_limit_recovery_override=(extension.output_limit_recovery_override),
             custom_middlewares=list(extension.custom_middlewares),
+            context_evidence_observer=context_evidence_observer,
         ),
         mode,
         snapshot_frequency,
@@ -1019,6 +1032,9 @@ def _make_lead_agent(
             runtime_capability_notice=runtime_capability_notice,
         )
     )
+    prompt_provenance = getattr(system_prompt, "context_provenance", None)
+    if not isinstance(prompt_provenance, SystemPromptProvenance):
+        prompt_provenance = None
     state_schema = get_thread_state_schema(mode, snapshot_frequency)
     graph_inputs = AgentGraphExecutionInputs(
         model=lead_model,
@@ -1061,6 +1077,17 @@ def _make_lead_agent(
             parent_profile,
             tool_call_control_topology=tool_call_control_topology,
             tool_call_control_observer=tool_call_control_observer,
+            context_evidence_observer_factory=(
+                context_evidence_observer
+                if callable(
+                    getattr(
+                        context_evidence_observer,
+                        "create_subagent_observer",
+                        None,
+                    )
+                )
+                else None
+            ),
         ),
     )
     configured_run_id = cfg.get("run_id")
@@ -1100,7 +1127,15 @@ def _make_lead_agent(
     )
     effective_middleware = append_final_provider_request_guard(
         effective_middleware,
-        FinalProviderRequestGuard(provider_request_profile),
+        FinalProviderRequestGuard(
+            provider_request_profile,
+            cost_adapter=ProviderModelRequestCostAdapter.from_profile(
+                provider_request_profile,
+                system_prompt_provenance=prompt_provenance,
+                mcp_dynamic_tools=frozen_mcp_dynamic_tools,
+            ),
+            evidence_observer=context_evidence_observer,
+        ),
     )
     return create_agent(
         model=lead_model,
@@ -1120,6 +1155,7 @@ def _make_lead_agent_with_private_runtime(
     tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None,
     tool_call_control_scope_id: str | None = None,
     tool_call_control_observer: ToolCallControlObserver | None = None,
+    context_evidence_observer: ProviderRequestEvidenceObserver | None = None,
     resolved_max_concurrent_subagents: int | None = None,
     resolved_max_total_subagents: int | None = None,
 ):
@@ -1133,6 +1169,7 @@ def _make_lead_agent_with_private_runtime(
         tool_call_control_profile=tool_call_control_profile,
         tool_call_control_scope_id=tool_call_control_scope_id,
         tool_call_control_observer=tool_call_control_observer,
+        context_evidence_observer=context_evidence_observer,
         resolved_max_concurrent_subagents=resolved_max_concurrent_subagents,
         resolved_max_total_subagents=resolved_max_total_subagents,
     )

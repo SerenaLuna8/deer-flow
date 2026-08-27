@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Final, override
 
 from langchain.agents import AgentState
@@ -28,7 +28,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.human_input import read_human_input_response
@@ -280,18 +280,23 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         result.extend(original_content[last + 1 :])
         return result
 
-    def _process_request(self, request: ModelRequest) -> ModelRequest:
-        """Return a request with every genuine user message sanitized.
+    def _process_messages(
+        self,
+        source: Sequence[BaseMessage],
+        *,
+        diagnostics: bool = True,
+    ) -> tuple[list[BaseMessage], bool]:
+        """Return sanitized request messages and whether any message changed.
 
         Blocked tags are HTML-escaped (not rejected) so the user's intent is
         preserved while the tags lose their semantic significance. Transformation
         is temporary — the original request is never mutated.
         """
-        messages = list(request.messages)
+        messages = list(source)
         changed = False
         for i, msg in enumerate(messages):
             if not _is_genuine_user_message(msg):
-                if isinstance(msg, HumanMessage):
+                if diagnostics and isinstance(msg, HumanMessage):
                     logger.debug(
                         "Input guardrail skipped non-genuine HumanMessage position=%d has_name=%s hidden=%s",
                         i,
@@ -300,17 +305,21 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                     )
                 continue
             content = msg.content
-            logger.debug(
-                "Input guardrail found genuine user message position=%d content_type=%s",
-                i,
-                type(content).__name__,
-            )
+            if diagnostics:
+                logger.debug(
+                    "Input guardrail found genuine user message position=%d content_type=%s",
+                    i,
+                    type(content).__name__,
+                )
 
             text_content, text_positions = self._extract_text_from_content(content)
 
             # No text at all (e.g. image-only message) — pass through
             if not text_content and not isinstance(content, str):
-                logger.debug("_process_request: no text content in message — passing through")
+                if diagnostics:
+                    logger.debug(
+                        "_process_request: no text content in message — passing through",
+                    )
                 continue
 
             preserved_kwargs = dict(msg.additional_kwargs or {})
@@ -331,7 +340,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                     # A malformed marker must never create a trusted prefix.
                     # Full-content sanitization may degrade the upload wrapper,
                     # but remains fail-safe.
-                    logger.warning("security_event=input_guardrail_marker_mismatch disposition=sanitize_full_content")
+                    if diagnostics:
+                        logger.warning(
+                            "security_event=input_guardrail_marker_mismatch disposition=sanitize_full_content",
+                        )
                     processed = _check_user_content(text_content)
             else:
                 processed = _check_user_content(text_content)
@@ -351,10 +363,11 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             # value (e.g. set by UploadsMiddleware or an IM channel) authoritative.
             if not isinstance(original_user_content, str):
                 if ORIGINAL_USER_CONTENT_KEY in preserved_kwargs:
-                    logger.warning(
-                        "security_event=input_guardrail_marker_repaired marker_type=%s",
-                        type(original_user_content).__name__,
-                    )
+                    if diagnostics:
+                        logger.warning(
+                            "security_event=input_guardrail_marker_repaired marker_type=%s",
+                            type(original_user_content).__name__,
+                        )
                 preserved_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(content)
             messages[i] = msg.model_copy(
                 update={
@@ -363,11 +376,16 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                 }
             )
             changed = True
-            logger.debug(
-                "Input guardrail sanitized user message position=%d content_type=%s",
-                i,
-                type(content).__name__,
-            )
+            if diagnostics:
+                logger.debug(
+                    "Input guardrail sanitized user message position=%d content_type=%s",
+                    i,
+                    type(content).__name__,
+                )
+        return messages, changed
+
+    def _process_request(self, request: ModelRequest) -> ModelRequest:
+        messages, changed = self._process_messages(request.messages)
         return request.override(messages=messages) if changed else request
 
     def _try_process(self, request: ModelRequest) -> ModelRequest:
@@ -402,3 +420,15 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         return await handler(self._try_process(request))
+
+
+def project_input_sanitization_messages(
+    messages: Sequence[BaseMessage],
+) -> tuple[BaseMessage, ...]:
+    """Project the temporary Provider-facing messages without diagnostics."""
+
+    projected, _changed = InputSanitizationMiddleware()._process_messages(
+        messages,
+        diagnostics=False,
+    )
+    return tuple(projected)

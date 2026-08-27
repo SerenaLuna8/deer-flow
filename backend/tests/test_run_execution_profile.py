@@ -154,6 +154,7 @@ def test_private_run_server_context_owns_channel_identity() -> None:
         "config": {
             "context": {
                 "channel_user_id": "forged-browser-identity",
+                "context_rebase_reason": "message_edit",
                 "safe": "value",
             },
         },
@@ -166,6 +167,7 @@ def test_private_run_server_context_owns_channel_identity() -> None:
         caller_kwargs,
         PrivateRunAdmissionServerContext(
             channel_user_id="frozen-channel-user",
+            context_rebase_reason="regeneration",
         ),
     )
     inbound = PrivateRunAdmissionService._server_kwargs(
@@ -185,10 +187,13 @@ def test_private_run_server_context_owns_channel_identity() -> None:
 
     assert ordinary["config"]["context"] == {
         "channel_user_id": None,
+        "context_rebase_reason": None,
         "safe": "value",
     }
     assert continuation["config"]["context"]["channel_user_id"] == ("frozen-channel-user")
     assert inbound["config"]["context"]["channel_user_id"] == ("verified-inbound-user")
+    assert continuation["config"]["context"]["context_rebase_reason"] == ("regeneration")
+    assert inbound["config"]["context"]["context_rebase_reason"] is None
 
 
 def test_default_agent_selection_and_effective_profile_are_fail_closed() -> None:
@@ -668,6 +673,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         supports_vision=False,
     )
     lead_model._system_model_config_id = uuid.uuid4()
+    lead_model._system_model_payload_checksum = "a" * 64
     lead_model._system_provider_adapter = "openai"
     vision_model = ModelConfig(
         name=vision_model_ref,
@@ -680,6 +686,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         **provider_settings,
     )
     vision_model._system_model_config_id = uuid.uuid4()
+    vision_model._system_model_payload_checksum = "b" * 64
     vision_model._system_provider_adapter = provider_adapter
     app_config = AppConfig(
         models=[lead_model, vision_model],
@@ -725,6 +732,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
             assert thread_kind == runtime_kind
             return SimpleNamespace(
                 set_authorization_boundary=lambda _boundary: None,
+                set_context_evidence_observer=lambda _observer: None,
             )
 
     observed: dict[str, object] = {}
@@ -739,6 +747,18 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
 
     async def activity_emitter_factory(*_args):
         return SimpleNamespace()
+
+    class ContextEvidenceObserver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def record_settled(self) -> None:
+            observed["context_settled"] = True
+
+    monkeypatch.setattr(
+        "app.reliability.run_execution.executor.PrivateRunContextEvidenceObserver",
+        ContextEvidenceObserver,
+    )
 
     executor = RunAgentPrivateExecutor(
         lambda: None,
@@ -837,6 +857,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
     assert observed["tool_control_policy"].subagent.internal_tool_call_limit == 50
     assert observed["max_concurrent_subagents"] == 3
     assert observed["max_total_subagents"] == 6
+    assert ("context_settled" in observed) is (runtime_kind == "chat")
 
 
 def test_run_response_echoes_the_effective_execution_profile() -> None:

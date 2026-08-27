@@ -35,6 +35,11 @@ from deerflow.persistence.channel_connections.model import (
     ProjectChannelSecretStateRow,
     ProjectChannelSecretTombstoneRow,
 )
+from deerflow.persistence.context_evidence import (
+    ContextEvidenceRow,
+    ContextEvidenceSequenceRow,
+    ContextProjectionHeadRow,
+)
 from deerflow.persistence.execution_approvals import (
     ExecutionApprovalOutputDeliveryCandidateRow,
     ExecutionApprovalOutputDeliveryObligationRow,
@@ -133,6 +138,9 @@ __all__ = [
     "ChannelExternalPrincipalRow",
     "ChannelInboundDeliveryRow",
     "ChannelOAuthStateRow",
+    "ContextEvidenceRow",
+    "ContextEvidenceSequenceRow",
+    "ContextProjectionHeadRow",
     "ProjectChannelSecretGenerationRow",
     "ProjectChannelSecretStateRow",
     "ProjectChannelSecretTombstoneRow",

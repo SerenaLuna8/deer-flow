@@ -36,7 +36,7 @@ export function SlashSkillSuggestionsListbox({
               key={`${suggestion.kind}:${suggestion.name}`}
               onClick={() => onApply(suggestion)}
               onMouseDown={(event) => event.preventDefault()}
-              onMouseEnter={() => onHighlight(index)}
+              onMouseMove={() => onHighlight(index)}
               role="option"
               type="button"
             >

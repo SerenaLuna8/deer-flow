@@ -19,6 +19,10 @@ from deerflow.agents.memory.snip import (
     SNIP_ARCHIVE_PROMPT_VERSION,
     compute_snip_content_digest,
 )
+from deerflow.agents.provider_request_contract import (
+    CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
+    CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.model_execution import SystemModelExecutionProvenance
@@ -172,6 +176,8 @@ def test_public_serialization_recursively_redacts_archive_receipts() -> None:
     receipt = {"tagged_text": "private history"}
     payload = {
         MEMORY_ARCHIVE_RECEIPT_KEY: receipt,
+        CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY: {"safe": "internal"},
+        CONTEXT_COMPACTION_RECEIPT_STATE_KEY: {"safe": "internal"},
         "messages": [
             {
                 "content": "visible",
@@ -193,15 +199,23 @@ def test_public_serialization_recursively_redacts_archive_receipts() -> None:
     rest = serialize_channel_values_for_api(payload)
 
     assert MEMORY_ARCHIVE_RECEIPT_KEY not in values
+    assert CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY not in values
+    assert CONTEXT_COMPACTION_RECEIPT_STATE_KEY not in values
     assert MEMORY_ARCHIVE_RECEIPT_KEY not in values["messages"][0]["additional_kwargs"]
     assert MEMORY_ARCHIVE_RECEIPT_KEY not in values["nested"]["updates"]
     assert MEMORY_ARCHIVE_RECEIPT_KEY not in updates["checkpoint"]
+    assert CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY not in updates["checkpoint"]
+    assert CONTEXT_COMPACTION_RECEIPT_STATE_KEY not in updates["checkpoint"]
     assert MEMORY_ARCHIVE_RECEIPT_KEY not in rest
+    assert CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY not in rest
+    assert CONTEXT_COMPACTION_RECEIPT_STATE_KEY not in rest
 
 
 def test_client_receipt_strip_preserves_message_and_tool_data() -> None:
     input_payload = {
         MEMORY_ARCHIVE_RECEIPT_KEY: {"forged": True},
+        CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY: {"forged": True},
+        CONTEXT_COMPACTION_RECEIPT_STATE_KEY: {"forged": True},
         "messages": [
             {
                 "content": "hello",
@@ -215,6 +229,8 @@ def test_client_receipt_strip_preserves_message_and_tool_data() -> None:
         "resume": "continue",
         "update": {
             MEMORY_ARCHIVE_RECEIPT_KEY: {"forged": True},
+            CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY: {"forged": True},
+            CONTEXT_COMPACTION_RECEIPT_STATE_KEY: {"forged": True},
             "messages": input_payload["messages"],
         },
     }
@@ -230,9 +246,13 @@ def test_client_receipt_strip_preserves_message_and_tool_data() -> None:
 
     assert isinstance(clean_input, dict)
     assert MEMORY_ARCHIVE_RECEIPT_KEY not in clean_input
+    assert CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY not in clean_input
+    assert CONTEXT_COMPACTION_RECEIPT_STATE_KEY not in clean_input
     assert clean_input["messages"][0]["additional_kwargs"][MEMORY_ARCHIVE_RECEIPT_KEY] == "ordinary message data"
     assert isinstance(clean_command, dict)
     assert MEMORY_ARCHIVE_RECEIPT_KEY not in clean_command["update"]
+    assert CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY not in clean_command["update"]
+    assert CONTEXT_COMPACTION_RECEIPT_STATE_KEY not in clean_command["update"]
     assert clean_command["update"]["messages"] == input_payload["messages"]
 
 
