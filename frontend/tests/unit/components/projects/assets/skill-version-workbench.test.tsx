@@ -38,19 +38,6 @@ describe("Skill version conflict recovery", () => {
     expect(errorAlert).toBeLessThan(filesPanel);
   });
 
-  test("omits redundant declaration and draft-secret instructions", () => {
-    const declarationEditor = source(
-      "components/projects/assets/skill-secret-declarations-editor.tsx",
-    );
-    const versionWorkbench = source(
-      "components/projects/assets/skill-version-workbench.tsx",
-    );
-
-    expect(declarationEditor).toContain("showEmptyDescription");
-    expect(versionWorkbench).toContain("showEmptyDescription={false}");
-    expect(versionWorkbench).not.toContain("当前正在编辑 SKILL.md");
-  });
-
   test("focuses Runtime secrets after saving a Candidate with declarations", () => {
     const events: unknown[][] = [];
     notifySkillCandidateVersionCreated((...args) => events.push(args), {

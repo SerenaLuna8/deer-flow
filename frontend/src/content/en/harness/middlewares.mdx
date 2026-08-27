@@ -32,7 +32,7 @@ The middleware chain is built once per agent invocation, based on the current co
 9. `ViewImageMiddleware` — image details injection (if model supports vision)
 10. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
 11. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
-12. `ToolCallControl` — arbitrates repeated calls and the Run internal tool-call hard limit
+12. `ToolCallControl` — arbitrates repeated calls and Run/Task internal tool-call hard limits
 13. `HostExecutionBatchBarrierMiddleware` — isolates Local host-execution approval batches (Local approval profile only)
 14. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
 15. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
@@ -54,11 +54,11 @@ Intercepts clarification tool calls and converts them into proper user-facing re
 
 ### ToolCallControl
 
-Arbitrates the complete tool-call batch before ToolNode execution. It keeps repeated-call detection separate from one internal tool-call hard limit and admits only the deterministic executable prefix. Every internal tool occurrence counts uniformly; the Lead and all Sub-Agents share one count within a Run, while different Runs remain isolated.
+Arbitrates the complete tool-call batch before ToolNode execution. It keeps repeated-call detection separate from internal tool-call hard limits and admits only the deterministic executable prefix.
 
-Replaying the same checkpoint receipt does not consume the limit again. Once the shared hard limit is reached, no new internal tool calls are admitted for that Run.
+System Runtime Policy v6 uses separate count bindings for the Lead Agent and Sub-Agent Tasks. The Lead count persists throughout one Run, and the `task` delegation call itself counts against the Lead. Every Sub-Agent Task starts with a count bound to its own execution identity, so parallel Tasks never consume one another's allowance and there is no additional Run-wide aggregate. Replaying the same checkpoint receipt does not consume allowance again in its exact binding. Reaching a limit blocks later internal tool calls only in that binding.
 
-**Configuration**: the single internal tool-call hard limit in System Runtime Policy at `/admin/settings/system`, frozen for each admitted Run.
+**Configuration**: `internal_tool_call_limits.lead_per_run` and `internal_tool_call_limits.subagent_per_task` in System Runtime Policy at `/admin/settings/system`; their defaults are `200` and `50`, respectively, and they are frozen for newly admitted Runs. Already admitted Runs and retained v2–v5 policies keep their frozen legacy limit shared by the Lead and all Sub-Agents; they are not converted to v6 counting.
 
 ---
 

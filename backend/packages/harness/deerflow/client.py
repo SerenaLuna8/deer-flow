@@ -38,11 +38,9 @@ from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.tool_call_control import (
     TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY,
+    GraphToolCallControlTopology,
     PerInvocationToolCallControlScope,
-    RunToolCallLimitAuthority,
-    ToolCallControlBinding,
     ToolCallControlWorkloadProfile,
-    build_tool_call_control,
     default_graph_tool_call_control_profile,
 )
 from deerflow.agents.thread_state import (
@@ -320,20 +318,11 @@ class DeerFlowClient:
         tool_call_control_profile = default_graph_tool_call_control_profile(
             workload_profile,
         )
-        tool_call_limit_scope = PerInvocationToolCallControlScope()
-        tool_call_limit_authority = RunToolCallLimitAuthority(
-            hard_limit=tool_call_control_profile.policy.internal_tool_call_limit,
+        tool_call_control_topology = GraphToolCallControlTopology(
+            profile=tool_call_control_profile,
+            lead_scope=PerInvocationToolCallControlScope(),
         )
-        tool_call_control = build_tool_call_control(
-            tool_call_control_profile.lead,
-            ToolCallControlBinding(
-                role="lead",
-                scope=tool_call_limit_scope,
-                workload_profile=workload_profile,
-                limit_authority=tool_call_limit_authority,
-                limit_scope=tool_call_limit_scope,
-            ),
-        )
+        tool_call_control = tool_call_control_topology.build_lead()
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
@@ -417,9 +406,7 @@ class DeerFlowClient:
                 agent_name=self._agent_name,
                 available_skills=(tuple(sorted(self._available_skills)) if self._available_skills is not None else None),
             ),
-            tool_call_control_profile=tool_call_control_profile,
-            tool_call_limit_authority=tool_call_limit_authority,
-            tool_call_limit_scope=tool_call_limit_scope,
+            tool_call_control_topology=tool_call_control_topology,
         )
         final_tools = bind_task_tool_in_tools(final_tools, binding_factory)
         kwargs: dict[str, Any] = {
@@ -843,7 +830,9 @@ class DeerFlowClient:
         consumer of the same ``create_agent()`` factory — not a wrapper
         around Gateway.  The two paths **should** stay in sync on which
         LangGraph stream modes they subscribe to; that invariant is
-        enforced by ``tests/test_client.py::test_messages_mode_emits_token_deltas``
+        enforced by the exact mode assertion in
+        ``tests/test_client.py::test_custom_events_are_forwarded`` and the
+        golden event sequence in ``test_messages_mode_golden_event_sequence``
         rather than by a shared constant, because the three layers
         (Graph, Platform SDK, HTTP) each use their own naming
         (``messages`` vs ``messages-tuple``) and cannot literally share

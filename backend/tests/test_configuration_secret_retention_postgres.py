@@ -39,7 +39,6 @@ from app.shared_assets.errors import AssetConflict
 from app.shared_assets.mcp_repository import McpRepository
 from app.shared_assets.mcp_secret_store import McpSecretStore
 from app.shared_assets.models import AgentPayload, AssetScope, SkillAssetRef
-from app.shared_assets.skill_deletion import ArchivedSkillPurger
 from app.shared_assets.skill_secret_store import SkillSecretStore
 from app.shared_assets.skill_service import SkillService
 from app.system_settings.secrets import (
@@ -459,11 +458,6 @@ class _RetentionApprovalAudit(NoopHostExecutionApprovalAudit):
         del args, kwargs
 
 
-class _ArchivedSkillPurgeAudit:
-    async def archived_skill_purged(self, *args, **kwargs) -> None:
-        del args, kwargs
-
-
 @pytest.mark.asyncio
 async def test_project_pending_deletion_restore_and_final_purge_secret_ownership(
     migrated_postgres_database_url: str,
@@ -654,7 +648,7 @@ async def test_project_pending_deletion_restore_and_final_purge_secret_ownership
 
 
 @pytest.mark.asyncio
-async def test_skill_archive_destroys_secrets_while_mcp_delete_keeps_reference_gate(
+async def test_skill_archive_retains_secrets_while_mcp_delete_keeps_reference_gate(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -770,17 +764,26 @@ async def test_skill_archive_destroys_secrets_while_mcp_delete_keeps_reference_g
                         ProjectSkillSecretGenerationRow.skill_id == referenced_skill.id,
                     )
                 )
-                == 0
+                == 1
             )
-            assert (
-                await session.scalar(
-                    select(func.count())
-                    .select_from(ProjectSkillSecretTombstoneRow)
-                    .where(
-                        ProjectSkillSecretTombstoneRow.skill_id == referenced_skill.id,
-                    )
+            skill_store = SkillSecretStore(session)
+            secret_material = (
+                await skill_store.load_materials(
+                    project_id=context.project_id,
+                    skill_id=referenced_skill.id,
+                    skill_version_id=referenced_skill_version.id,
+                    requirements=(("provider_key", False),),
+                    require_required=True,
+                    for_update=False,
+                    request_id=context.request_id,
                 )
-                >= 1
+            )[0]
+            assert (
+                skill_store.materialize(
+                    secret_material,
+                    request_id=context.request_id,
+                )
+                == "skill-secret-two"
             )
 
         async with seed.factory() as session, session.begin():
@@ -798,22 +801,6 @@ async def test_skill_archive_destroys_secrets_while_mcp_delete_keeps_reference_g
             deletable_skill.id,
             expected_asset_version=1,
         )
-
-        keyring = AuditHmacKeyring(
-            "archived-skill-test",
-            {"archived-skill-test": b"p" * 32},
-        )
-        await ArchivedSkillPurger(
-            seed.factory,
-            quota=ProjectQuotaEnforcer(
-                QuotaService(
-                    seed.factory,
-                    QuotaConfig(),
-                    source_ref_hasher=keyring,
-                )
-            ),
-            audit=_ArchivedSkillPurgeAudit(),
-        ).purge_project(context.project_id)
 
         async with seed.factory() as session, session.begin():
             mcp_repository = McpRepository(session)
@@ -839,17 +826,11 @@ async def test_skill_archive_destroys_secrets_while_mcp_delete_keeps_reference_g
             )
             assert deleted_skill_tombstone is not None
             assert deleted_skill_tombstone.status == "archived"
-            assert deleted_skill_tombstone.current_version_id is None
-            assert await session.get(SkillVersionRow, deletable_skill_version.id) is None
+            assert deleted_skill_tombstone.current_version_id == deletable_skill_version.id
+            assert await session.get(SkillVersionRow, deletable_skill_version.id) is not None
             assert await session.get(McpServerRow, deletable_mcp.id) is None
             assert await session.get(McpServerVersionRow, deletable_mcp_version.id) is None
             for row_type, asset_column, asset_id in (
-                (ProjectSkillSecretStateRow, ProjectSkillSecretStateRow.skill_id, deletable_skill.id),
-                (
-                    ProjectSkillSecretGenerationRow,
-                    ProjectSkillSecretGenerationRow.skill_id,
-                    deletable_skill.id,
-                ),
                 (
                     ProjectMcpSecretStateRow,
                     ProjectMcpSecretStateRow.mcp_server_id,
@@ -875,20 +856,50 @@ async def test_skill_archive_destroys_secrets_while_mcp_delete_keeps_reference_g
                     SkillVersionRow,
                     referenced_skill_version.id,
                 )
-                is None
+                is not None
             )
-            assert (
-                await session.scalar(
-                    select(func.count())
-                    .select_from(ProjectSkillSecretTombstoneRow)
-                    .where(
-                        ProjectSkillSecretTombstoneRow.skill_id.in_(
-                            (referenced_skill.id, deletable_skill.id),
+            for skill, version in (
+                (referenced_skill, referenced_skill_version),
+                (deletable_skill, deletable_skill_version),
+            ):
+                state_count = await session.scalar(select(func.count()).select_from(ProjectSkillSecretStateRow).where(ProjectSkillSecretStateRow.skill_id == skill.id))
+                generation_count = await session.scalar(select(func.count()).select_from(ProjectSkillSecretGenerationRow).where(ProjectSkillSecretGenerationRow.skill_id == skill.id))
+                assert state_count == 1
+                assert generation_count == 1
+                skill_store = SkillSecretStore(session)
+                material = (
+                    await skill_store.load_materials(
+                        project_id=context.project_id,
+                        skill_id=skill.id,
+                        skill_version_id=version.id,
+                        requirements=(("provider_key", False),),
+                        require_required=True,
+                        for_update=False,
+                        request_id=context.request_id,
+                    )
+                )[0]
+                assert (
+                    skill_store.materialize(
+                        material,
+                        request_id=context.request_id,
+                    )
+                    == "skill-secret-two"
+                )
+            tombstone_reasons = tuple(
+                (
+                    await session.execute(
+                        select(ProjectSkillSecretTombstoneRow.reason).where(
+                            ProjectSkillSecretTombstoneRow.skill_id.in_(
+                                (referenced_skill.id, deletable_skill.id),
+                            )
                         )
                     )
                 )
-                >= 2
+                .scalars()
+                .all()
             )
+            assert tombstone_reasons
+            assert set(tombstone_reasons) == {"replace"}
             assert await session.get(McpServerRow, referenced_mcp.id) is not None
             assert (
                 await session.get(

@@ -26,7 +26,7 @@ export interface SubtaskExecutionApprovalState {
 
 export interface Subtask {
   id: string;
-  status: "in_progress" | "completed" | "failed";
+  status: "unknown" | "in_progress" | "completed" | "failed";
   /**
    * Where the current status came from. Pending card inference is weaker than
    * the streamed lifecycle event, while the structured ToolMessage remains the

@@ -7,18 +7,22 @@ import {
   listProjectMemoryEpisodes,
   listProjectMemoryPending,
   listProjectMemoryVersions,
+  restoreProjectMemoryVersion,
+} from "@/core/private-work/memory/api";
+import { projectMemoryPermissions } from "@/core/private-work/memory/permissions";
+import {
+  projectMemoryEpisodesQueryKey,
+  projectMemoryPendingQueryKey,
+  projectMemoryVersionsQueryKey,
+} from "@/core/private-work/memory/query-keys";
+import {
   memoryDocumentSchema,
   memoryDreamResultSchema,
   memoryEpisodeSchema,
   memoryPendingEntrySchema,
   memoryVersionDetailSchema,
   memoryVersionSummarySchema,
-  projectMemoryEpisodesQueryKey,
-  projectMemoryPendingQueryKey,
-  projectMemoryPermissions,
-  projectMemoryVersionsQueryKey,
-  restoreProjectMemoryVersion,
-} from "@/core/private-work/memory";
+} from "@/core/private-work/memory/schemas";
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
 const PROJECT_ID = "22222222-2222-4222-8222-222222222222";

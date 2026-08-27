@@ -69,7 +69,7 @@ async def test_delete_scope_locks_project_then_exact_membership() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_coordinates_project_asset_agents_secrets_then_archive(
+async def test_delete_coordinates_project_skill_agents_then_archive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context()
@@ -93,15 +93,8 @@ async def test_delete_coordinates_project_asset_agents_secrets_then_archive(
         for_update: bool = False,
     ):
         assert for_update is True
-        events.append("asset")
+        events.append("skill")
         return asset
-
-    async def destroy_project_asset_secrets(
-        _actor: ProjectContext,
-        _asset: object,
-    ) -> int:
-        events.append("secrets")
-        return 0
 
     async def archive_project_asset(
         _actor: ProjectContext,
@@ -114,7 +107,6 @@ async def test_delete_coordinates_project_asset_agents_secrets_then_archive(
     repository = SimpleNamespace(
         lock_project_delete_scope=lock_project_delete_scope,
         get_project_asset=get_project_asset,
-        destroy_project_asset_secrets=destroy_project_asset_secrets,
         archive_project_asset=archive_project_asset,
     )
     monkeypatch.setattr(
@@ -143,4 +135,4 @@ async def test_delete_coordinates_project_asset_agents_secrets_then_archive(
     )
 
     assert result == SkillDeleteResult(affected_agent_count=2)
-    assert events == ["project", "asset", "agents", "secrets", "archive"]
+    assert events == ["project", "skill", "agents", "archive"]

@@ -18,14 +18,13 @@ describe("Skill secret declaration editor product states", () => {
     expect(
       resolveSkillSecretEditorAccess({
         editable: false,
-        canEdit: true,
         canBeginEdit: true,
       }),
     ).toEqual({ editable: false, canBeginEdit: true });
 
     expect(
       resolveSkillSecretEditorAccess({
-        canEdit: true,
+        editable: true,
         canBeginEdit: true,
       }),
     ).toEqual({ editable: true, canBeginEdit: false });

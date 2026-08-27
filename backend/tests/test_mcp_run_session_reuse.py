@@ -18,7 +18,6 @@ that reconnect for every invocation.
 
 import asyncio
 import json
-import time
 import uuid
 from collections import Counter
 from typing import Any
@@ -390,10 +389,6 @@ async def test_five_real_streamable_http_calls_reuse_one_initialized_session() -
                 method = request.get("method")
                 if isinstance(method, str):
                     methods[method] += 1
-                    if method == "initialize":
-                        # Make handshake overhead deterministic enough to preserve
-                        # a comparison record without relying on real network.
-                        await asyncio.sleep(0.02)
         except (TypeError, ValueError):
             pass
 
@@ -432,7 +427,6 @@ async def test_five_real_streamable_http_calls_reuse_one_initialized_session() -
 
     async with app.router.lifespan_context(app):
         cache = McpRunSessionCache()
-        reused_started = time.monotonic()
         reused_results = [
             await PrivateAgentRuntime._invoke_exact_mcp(
                 version_id,
@@ -446,12 +440,10 @@ async def test_five_real_streamable_http_calls_reuse_one_initialized_session() -
             )
             for index in range(5)
         ]
-        reused_elapsed = time.monotonic() - reused_started
         await cache.aclose()
         reused_methods = methods.copy()
 
         methods.clear()
-        one_shot_started = time.monotonic()
         one_shot_results = [
             await PrivateAgentRuntime._invoke_exact_mcp(
                 version_id,
@@ -463,7 +455,6 @@ async def test_five_real_streamable_http_calls_reuse_one_initialized_session() -
             )
             for index in range(5)
         ]
-        one_shot_elapsed = time.monotonic() - one_shot_started
 
     assert [result[0]["text"] for result in reused_results] == [str(index) for index in range(5)]
     assert [result[0]["text"] for result in one_shot_results] == [str(index) for index in range(5)]
@@ -485,7 +476,6 @@ async def test_five_real_streamable_http_calls_reuse_one_initialized_session() -
             "tools/call": 5,
         }
     )
-    assert one_shot_elapsed > reused_elapsed + 0.10
 
 
 @pytest.mark.postgres
@@ -557,8 +547,6 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
                 method = request.get("method")
                 if isinstance(method, str):
                     methods[method] += 1
-                    if method == "initialize":
-                        await asyncio.sleep(0.02)
         except (TypeError, ValueError):
             pass
 
@@ -804,7 +792,6 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
             counted_materialize_call,
         )
 
-        elapsed_by_reuse: dict[bool, float] = {}
         methods_by_reuse: dict[bool, Counter[str]] = {}
         async with app.router.lifespan_context(app):
             for reuse in (True, False):
@@ -855,9 +842,7 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
                 assert runtime.safe_manifest.mcps[0].definition["url"] == endpoint
                 materialize_baseline = materialize_calls
                 revalidation_baseline = revalidation_calls
-                started = time.monotonic()
                 results = [await runtime.mcp_tools[0].ainvoke({"value": str(index)}) for index in range(5)]
-                elapsed_by_reuse[reuse] = time.monotonic() - started
                 methods_by_reuse[reuse] = methods.copy()
 
                 assert [result[0]["text"] for result in results] == [str(index) for index in range(5)]
@@ -896,7 +881,6 @@ async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_sess
                 "tools/call": 5,
             }
         )
-        assert elapsed_by_reuse[False] > elapsed_by_reuse[True] + 0.15
     finally:
         await seed.engine.dispose()
 

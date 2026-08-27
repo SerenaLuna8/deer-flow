@@ -9,14 +9,18 @@ import {
 } from "@/components/projects/assets/project-skill-delete-dialog";
 import { SharedAssetApiError } from "@/core/shared-assets";
 
-test("describes irreversible Skill archival, automatic Agent unbinding, and secret loss", () => {
+test("describes irreversible Skill archival, automatic Agent unbinding, and retained content", () => {
   const description = projectAssetDeleteDescription("Skill", "ppt-master");
 
   expect(description).toContain("从所有 Agent 中移除");
   expect(description).toContain("保持各自当前状态");
   expect(description).toContain("不会被自动停用");
-  expect(description).toContain("秘密会立即销毁");
-  expect(description).toContain("尚未物化秘密或后续重试的运行可能失败");
+  expect(description).toContain("全部版本文件");
+  expect(description).toContain("秘密密文");
+  expect(description).toContain("删除不会释放存储空间");
+  expect(description).toContain("只有整个项目被最终删除");
+  expect(description).not.toContain("秘密会立即销毁");
+  expect(description).not.toContain("运行可能失败");
   expect(description).not.toContain("永久删除整个 Skill 包");
   expect(description).not.toContain("解除 Agent 引用");
 });

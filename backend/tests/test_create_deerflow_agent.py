@@ -1074,11 +1074,12 @@ def test_research_profile_is_bound_for_delegated_sdk_execution(
 
     bound_task = next(tool for tool in mock_create_agent.call_args.kwargs["tools"] if tool.name == "task")
     binding_factory = next(cell.cell_contents for cell in bound_task.coroutine.__closure__ or () if type(cell.cell_contents) is ParentExecutionBindingFactory)
-    profile = binding_factory.tool_call_control_profile
+    profile = binding_factory.tool_call_control_topology.profile
 
     assert profile.workload_profile == "research"
-    assert profile.policy.internal_tool_call_limit == 200
-    assert profile.lead is profile.subagent
+    assert profile.accounting_mode == "lead_run_subagent_task"
+    assert profile.lead.internal_tool_call_limit == 200
+    assert profile.subagent.internal_tool_call_limit == 50
 
 
 # ---------------------------------------------------------------------------

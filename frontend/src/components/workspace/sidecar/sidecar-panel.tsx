@@ -252,6 +252,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   const {
     thread,
     boundThreadId,
+    activeRunId,
     sendMessage,
     isUploading,
     isHistoryLoading,
@@ -846,6 +847,7 @@ export function SidecarPanel({ className }: { className?: string }) {
             testId="sidecar-message-list"
             threadId={sidecar.sidecarThreadId}
             thread={thread}
+            activeRunId={activeRunId}
             paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM / 2}
             hasMoreHistory={hasMoreHistory}
             loadMoreHistory={loadMoreHistory}

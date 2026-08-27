@@ -5,17 +5,26 @@ import uuid
 
 import pytest
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from support.private_thread_seed import seed_private_thread_database
+from support.run_closure import add_sealed_test_run
 
 from app.private_work.checkpoint_delete_recovery import (
     CheckpointDeleteReconciler,
 )
+from app.private_work.checkpoint_state import checkpoint_config
 from app.private_work.checkpointer import ProjectScopedCheckpointer
-from app.private_work.errors import PrivateWorkConflict, PrivateWorkNotFound
+from app.private_work.errors import (
+    PrivateWorkConflict,
+    PrivateWorkNotFound,
+    PrivateWorkUnavailable,
+)
 from app.private_work.thread_repository import (
     PrivateThreadRepository,
     ThreadAgentRef,
 )
+from app.private_work.thread_service import PrivateThreadService
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 
@@ -43,6 +52,45 @@ class _RawCheckpointSaver(BaseCheckpointSaver):
             raise RuntimeError("raw checkpoint cleanup failed")
 
 
+class _FailAfterPersistSaver(InMemorySaver):
+    async def aput(self, config, checkpoint, metadata, new_versions):
+        await super().aput(
+            config,
+            checkpoint,
+            metadata,
+            new_versions,
+        )
+        raise RuntimeError("checkpoint write failed after persistence")
+
+
+class _FailTargetUpdateSaver(InMemorySaver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_thread_id: str | None = None
+
+    async def aput(self, config, checkpoint, metadata, new_versions):
+        persisted = await super().aput(
+            config,
+            checkpoint,
+            metadata,
+            new_versions,
+        )
+        configurable = config.get("configurable", {})
+        if configurable.get("thread_id") == self.fail_thread_id:
+            self.fail_thread_id = None
+            raise RuntimeError("target checkpoint failed after persistence")
+        return persisted
+
+
+class _FailingBranchRollbackHook:
+    async def copy_branch_authority(self, *args, **kwargs) -> None:
+        del args, kwargs
+
+    async def rollback_branch_authority(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("branch authority rollback failed")
+
+
 async def _add_thread(seed, thread_id: str) -> None:
     async with seed.factory() as session, session.begin():
         await PrivateThreadRepository(session).create(
@@ -61,27 +109,232 @@ async def _delete_status(seed, thread_id: str) -> str:
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_delete_commits_tombstone_when_raw_cleanup_fails_and_repeat_recovers(
+async def test_user_delete_retains_checkpoint_and_never_enqueues_cleanup(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
     thread_id = str(uuid.uuid4())
-    raw = _RawCheckpointSaver(failures={thread_id})
+    raw = InMemorySaver()
     try:
-        await _add_thread(seed, thread_id)
-        saver = ProjectScopedCheckpointer(raw, seed.factory).for_context(seed.owner_a)
+        scoped = ProjectScopedCheckpointer(raw, seed.factory)
+        service = PrivateThreadService(
+            seed.factory,
+            scoped,
+        )
+        created = await service.create(
+            seed.owner_a,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+        assert await raw.aget_tuple(checkpoint_config(thread_id)) is not None
 
-        # The tombstone transaction is the public success boundary. A failed
-        # physical checkpoint cleanup is durable retry work, not a false 503.
-        await saver.adelete_thread(thread_id, expected_version=1)
-        assert await _delete_status(seed, thread_id) == "retry_required"
+        await service.delete(
+            seed.owner_a,
+            thread_id,
+            expected_version=created.version,
+        )
+        await service.delete(
+            seed.owner_a,
+            thread_id,
+            expected_version=created.version,
+        )
 
-        raw.failures.clear()
-        # The browser retries the version it confirmed before the first call;
-        # the scoped tombstone is idempotent even though its version advanced.
-        await saver.adelete_thread(thread_id, expected_version=1)
-        assert raw.calls == [thread_id, thread_id]
-        assert await _delete_status(seed, thread_id) == "complete"
+        assert await raw.aget_tuple(checkpoint_config(thread_id)) is not None
+        assert await service.get(seed.owner_a, thread_id) is None
+        assert all(item.thread_id != thread_id for item in await service.search(seed.owner_a))
+        with pytest.raises(PrivateWorkNotFound):
+            await scoped.for_context(seed.owner_a).aget_tuple(
+                checkpoint_config(thread_id),
+            )
+        assert await _delete_status(seed, thread_id) == "not_requested"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_failed_thread_create_physically_compensates_persisted_checkpoint(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    thread_id = str(uuid.uuid4())
+    raw = _FailAfterPersistSaver()
+    try:
+        service = PrivateThreadService(
+            seed.factory,
+            ProjectScopedCheckpointer(raw, seed.factory),
+        )
+        with pytest.raises(PrivateWorkUnavailable):
+            await service.create(
+                seed.owner_a,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+
+        assert await raw.aget_tuple(checkpoint_config(thread_id)) is None
+        async with seed.factory() as session:
+            assert await session.get(ThreadMetaRow, thread_id) is None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_failed_create_compensation_revokes_run_admitted_before_its_lock(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    raw = InMemorySaver()
+    try:
+        scoped = ProjectScopedCheckpointer(raw, seed.factory)
+        created = await PrivateThreadService(seed.factory, scoped).create(
+            seed.owner_a,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+        async with seed.factory() as session, session.begin():
+            await add_sealed_test_run(
+                session,
+                RunRow(
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    assistant_id=str(seed.project_agent_id),
+                    owner_user_id=str(seed.owner_a.user_id),
+                    status="running",
+                    metadata_json={},
+                    kwargs_json={},
+                    project_id=seed.owner_a.project_id,
+                ),
+            )
+
+        compensator = scoped.for_context(seed.owner_a)
+        tombstone = await compensator.atombstone_compensated_create(
+            thread_id,
+            expected_version=created.version,
+            expected_created_at=created.created_at,
+        )
+        assert tombstone.deleted_at is not None
+        cleaned = await compensator.acleanup_compensated_create(
+            thread_id,
+            expected_created_at=created.created_at,
+            expected_deleted_at=tombstone.deleted_at,
+        )
+
+        assert cleaned
+        assert await raw.aget_tuple(checkpoint_config(thread_id)) is None
+        async with seed.factory() as session:
+            run = await session.get(RunRow, run_id)
+            tombstone = await session.get(ThreadMetaRow, thread_id)
+            assert run is not None
+            assert run.status == "interrupted"
+            assert tombstone is not None
+            assert tombstone.checkpoint_delete_status == "complete"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_branch_rollback_failure_retains_hidden_target_checkpoint(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    source_thread_id = str(uuid.uuid4())
+    target_thread_id = str(uuid.uuid4())
+    raw = _FailTargetUpdateSaver()
+    try:
+        scoped = ProjectScopedCheckpointer(raw, seed.factory)
+        service = PrivateThreadService(
+            seed.factory,
+            scoped,
+            branch_copy_hook=_FailingBranchRollbackHook(),
+        )
+        source = await service.create(
+            seed.owner_a,
+            thread_id=source_thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+        source_checkpoint = await raw.aget_tuple(
+            checkpoint_config(source_thread_id),
+        )
+        assert source_checkpoint is not None
+        checkpoint_id = source_checkpoint.config["configurable"]["checkpoint_id"]
+        raw.fail_thread_id = target_thread_id
+
+        with pytest.raises(PrivateWorkUnavailable):
+            await service.branch(
+                seed.owner_a,
+                source_thread_id=source_thread_id,
+                target_thread_id=target_thread_id,
+                checkpoint_id=checkpoint_id,
+                replay_base_checkpoint_id=checkpoint_id,
+                expected_source_version=source.version,
+            )
+
+        assert await raw.aget_tuple(checkpoint_config(target_thread_id)) is not None
+        async with seed.factory() as session:
+            target = await session.get(ThreadMetaRow, target_thread_id)
+            assert target is not None
+            assert target.deleted_at is not None
+            assert target.checkpoint_delete_status == "not_requested"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_stale_failed_create_compensation_cannot_tombstone_recreated_thread(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    thread_id = str(uuid.uuid4())
+    raw = InMemorySaver()
+    try:
+        scoped = ProjectScopedCheckpointer(raw, seed.factory)
+        service = PrivateThreadService(seed.factory, scoped)
+        original = await service.create(
+            seed.owner_a,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+        compensator = scoped.for_context(seed.owner_a)
+        tombstone = await compensator.atombstone_compensated_create(
+            thread_id,
+            expected_version=original.version,
+            expected_created_at=original.created_at,
+        )
+        assert tombstone.deleted_at is not None
+        assert await compensator.acleanup_compensated_create(
+            thread_id,
+            expected_created_at=original.created_at,
+            expected_deleted_at=tombstone.deleted_at,
+        )
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).purge_compensated_create(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                expected_created_at=original.created_at,
+                expected_deleted_at=tombstone.deleted_at,
+            )
+
+        replacement = await service.create(
+            seed.owner_a,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+        with pytest.raises(PrivateWorkConflict):
+            await compensator.atombstone_compensated_create(
+                thread_id,
+                expected_version=replacement.version,
+                expected_created_at=original.created_at,
+            )
+
+        assert await raw.aget_tuple(checkpoint_config(thread_id)) is not None
+        current = await service.get(seed.owner_a, thread_id)
+        assert current is not None
+        assert current.created_at == replacement.created_at
     finally:
         await seed.engine.dispose()
 
@@ -115,7 +368,7 @@ async def test_repeat_delete_is_scoped_but_active_stale_version_still_conflicts(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_delete_status_write_failure_does_not_change_public_success(
+async def test_user_delete_does_not_depend_on_checkpoint_cleanup_status_writer(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -137,8 +390,8 @@ async def test_delete_status_write_failure_does_not_change_public_success(
         saver = ProjectScopedCheckpointer(raw, seed.factory).for_context(seed.owner_a)
         await saver.adelete_thread(thread_id, expected_version=1)
 
-        assert raw.calls == [thread_id]
-        assert await _delete_status(seed, thread_id) == "pending"
+        assert raw.calls == []
+        assert await _delete_status(seed, thread_id) == "not_requested"
     finally:
         await seed.engine.dispose()
 
@@ -154,10 +407,17 @@ async def test_checkpoint_delete_status_transition_is_monotonic(
         await _add_thread(seed, thread_id)
         async with seed.factory() as session, session.begin():
             repository = PrivateThreadRepository(session)
-            await repository.mark_deleted(
+            tombstone = await repository.mark_deleted(
                 scope=seed.owner_a.resource_scope,
                 thread_id=thread_id,
                 expected_version=1,
+            )
+            assert tombstone.deleted_at is not None
+            await repository.request_checkpoint_delete_for_compensation(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                expected_created_at=tombstone.created_at,
+                expected_deleted_at=tombstone.deleted_at,
             )
             assert await repository.set_checkpoint_delete_status(
                 scope=seed.owner_a.resource_scope,
@@ -193,10 +453,19 @@ async def test_reconciler_continues_after_one_bad_item(
         for thread_id in (bad_thread_id, good_thread_id):
             await _add_thread(seed, thread_id)
             async with seed.factory() as session, session.begin():
-                await PrivateThreadRepository(session).mark_deleted(
+                tombstone = await PrivateThreadRepository(session).mark_deleted(
                     scope=seed.owner_a.resource_scope,
                     thread_id=thread_id,
                     expected_version=1,
+                )
+                assert tombstone.deleted_at is not None
+                await PrivateThreadRepository(
+                    session,
+                ).request_checkpoint_delete_for_compensation(
+                    scope=seed.owner_a.resource_scope,
+                    thread_id=thread_id,
+                    expected_created_at=tombstone.created_at,
+                    expected_deleted_at=tombstone.deleted_at,
                 )
 
         reconciler = CheckpointDeleteReconciler(
@@ -230,10 +499,19 @@ async def test_concurrent_reconcilers_serialize_under_exact_tombstone_fence(
     try:
         await _add_thread(seed, thread_id)
         async with seed.factory() as session, session.begin():
-            await PrivateThreadRepository(session).mark_deleted(
+            tombstone = await PrivateThreadRepository(session).mark_deleted(
                 scope=seed.owner_a.resource_scope,
                 thread_id=thread_id,
                 expected_version=1,
+            )
+            assert tombstone.deleted_at is not None
+            await PrivateThreadRepository(
+                session,
+            ).request_checkpoint_delete_for_compensation(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                expected_created_at=tombstone.created_at,
+                expected_deleted_at=tombstone.deleted_at,
             )
 
         first = CheckpointDeleteReconciler(raw, seed.factory)
@@ -265,10 +543,17 @@ async def test_stale_candidate_does_not_delete_recreated_active_thread_checkpoin
         await _add_thread(seed, thread_id)
         async with seed.factory() as session, session.begin():
             repository = PrivateThreadRepository(session)
-            await repository.mark_deleted(
+            tombstone = await repository.mark_deleted(
                 scope=seed.owner_a.resource_scope,
                 thread_id=thread_id,
                 expected_version=1,
+            )
+            assert tombstone.deleted_at is not None
+            await repository.request_checkpoint_delete_for_compensation(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                expected_created_at=tombstone.created_at,
+                expected_deleted_at=tombstone.deleted_at,
             )
             stale_candidate = (await repository.list_checkpoint_delete_candidates(limit=10))[0]
             await repository.set_checkpoint_delete_status(
@@ -279,6 +564,8 @@ async def test_stale_candidate_does_not_delete_recreated_active_thread_checkpoin
             await repository.purge_compensated_create(
                 scope=seed.owner_a.resource_scope,
                 thread_id=thread_id,
+                expected_created_at=stale_candidate.created_at,
+                expected_deleted_at=stale_candidate.deleted_at,
             )
 
         await _add_thread(seed, thread_id)

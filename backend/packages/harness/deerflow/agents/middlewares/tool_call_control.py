@@ -1,8 +1,9 @@
-"""Harness control for repeated calls and one shared per-Run tool-call limit.
+"""Harness control for repeated calls and scoped tool-call accounting.
 
-The public construction seam is :func:`build_tool_call_control`.  Callers bind
-one already-resolved immutable policy to one exact Harness execution scope;
-the middleware owns proposal accounting and batch rewriting inside that scope.
+The graph construction seam is :class:`GraphToolCallControlTopology`. It hides
+whether Lead and delegated graphs share one legacy Run counter or use separate
+Lead-Run and Sub-Agent-Task counters. :func:`build_tool_call_control` remains
+the low-level single-middleware seam for focused callers and tests.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Annotated, Literal, NotRequired, Protocol, TypedDict, override
+from uuid import UUID
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -55,6 +57,16 @@ logger = logging.getLogger(__name__)
 
 ToolCallControlRole = Literal["lead", "subagent"]
 ToolCallControlWorkloadProfile = Literal["interactive", "research"]
+ToolCallControlAccountingMode = Literal[
+    "shared_run",
+    "lead_run_subagent_task",
+]
+ToolCallBudgetScope = Literal["run", "lead", "subagent_task"]
+ToolCallBudgetDisposition = Literal[
+    "truncate_tool_calls",
+    "exhaust_run",
+    "exhaust_subject",
+]
 ToolCallControlReasonCode = Literal[
     "repeated_call_warning",
     "repeated_call_limit",
@@ -237,7 +249,7 @@ class RepeatedCallPolicy:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedToolCallControlPolicy:
-    """One immutable policy shared by the Lead and every Sub-Agent."""
+    """One immutable policy for one ToolCallControl accounting subject."""
 
     repeated_calls: RepeatedCallPolicy
     internal_tool_call_limit: int = 200
@@ -253,26 +265,33 @@ class ResolvedToolCallControlPolicy:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedGraphToolCallControlProfile:
-    """Harness policy plus the independently selected Run workload."""
+    """Resolved Lead/Sub-Agent policies and their accounting topology."""
 
     workload_profile: ToolCallControlWorkloadProfile
-    policy: ResolvedToolCallControlPolicy
+    accounting_mode: ToolCallControlAccountingMode
+    lead: ResolvedToolCallControlPolicy
+    subagent: ResolvedToolCallControlPolicy
 
     def __post_init__(self) -> None:
         if self.workload_profile not in {"interactive", "research"}:
             raise ValueError(
                 "workload_profile must be 'interactive' or 'research'",
             )
-        if not isinstance(self.policy, ResolvedToolCallControlPolicy):
-            raise TypeError("policy must be a ResolvedToolCallControlPolicy")
-
-    @property
-    def lead(self) -> ResolvedToolCallControlPolicy:
-        return self.policy
-
-    @property
-    def subagent(self) -> ResolvedToolCallControlPolicy:
-        return self.policy
+        if self.accounting_mode not in {
+            "shared_run",
+            "lead_run_subagent_task",
+        }:
+            raise ValueError(
+                "accounting_mode must be 'shared_run' or 'lead_run_subagent_task'",
+            )
+        if not isinstance(self.lead, ResolvedToolCallControlPolicy):
+            raise TypeError("lead must be a ResolvedToolCallControlPolicy")
+        if not isinstance(self.subagent, ResolvedToolCallControlPolicy):
+            raise TypeError("subagent must be a ResolvedToolCallControlPolicy")
+        if self.accounting_mode == "shared_run" and self.lead != self.subagent:
+            raise ValueError(
+                "shared_run requires identical Lead and Sub-Agent policies",
+            )
 
 
 def default_graph_tool_call_control_profile(
@@ -280,7 +299,7 @@ def default_graph_tool_call_control_profile(
     *,
     repeated_calls_enabled: bool = True,
 ) -> ResolvedGraphToolCallControlProfile:
-    """Return the caller-owned Harness defaults matching Runtime Policy v5.
+    """Return caller-owned SDK/Embedded defaults for new invocations.
 
     This helper does not select a Private Run workload and does not read
     ``AppConfig``.  Server-admitted Runs must pass their already materialized
@@ -298,9 +317,14 @@ def default_graph_tool_call_control_profile(
 
     return ResolvedGraphToolCallControlProfile(
         workload_profile=workload_profile,
-        policy=ResolvedToolCallControlPolicy(
+        accounting_mode="lead_run_subagent_task",
+        lead=ResolvedToolCallControlPolicy(
             repeated_calls=repeated_calls,
             internal_tool_call_limit=200,
+        ),
+        subagent=ResolvedToolCallControlPolicy(
+            repeated_calls=repeated_calls,
+            internal_tool_call_limit=50,
         ),
     )
 
@@ -313,7 +337,7 @@ class ToolCallControlObserver(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RunToolCallLimitReservation:
-    """One atomic prefix decision from a Run-shared tool-call counter."""
+    """One atomic prefix decision from a scoped tool-call counter."""
 
     count_before: int
     proposed: int
@@ -413,6 +437,7 @@ class ToolCallControlBinding:
     observer: ToolCallControlObserver | None = None
     limit_authority: RunToolCallLimitAuthority | None = None
     limit_scope: ToolCallControlScope | None = None
+    budget_scope: ToolCallBudgetScope = "run"
 
     def __post_init__(self) -> None:
         if self.role not in {"lead", "subagent"}:
@@ -434,6 +459,16 @@ class ToolCallControlBinding:
             (FixedToolCallControlScope, PerInvocationToolCallControlScope),
         ):
             raise TypeError("limit_scope must be an explicit scope strategy")
+        if self.budget_scope not in {"run", "lead", "subagent_task"}:
+            raise ValueError(
+                "budget_scope must be 'run', 'lead', or 'subagent_task'",
+            )
+        if self.budget_scope == "lead" and self.role != "lead":
+            raise ValueError("lead budget scope requires the Lead role")
+        if self.budget_scope == "subagent_task" and self.role != "subagent":
+            raise ValueError(
+                "subagent_task budget scope requires the Sub-Agent role",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,11 +492,12 @@ class RepeatedCallObservation:
 
 @dataclass(frozen=True, slots=True)
 class ToolCallBudgetObservation:
-    """Argument-free fact emitted when the shared Run limit is reached."""
+    """Argument-free fact emitted when one accounting limit is reached."""
 
     reason_code: ToolCallBudgetReasonCode
     role: ToolCallControlRole
     scope_id: str
+    budget_scope: ToolCallBudgetScope
     workload_profile: str
     count_before: int
     proposed: int
@@ -469,7 +505,7 @@ class ToolCallBudgetObservation:
     rejected: int
     count_after: int
     hard_limit: int
-    disposition: str
+    disposition: ToolCallBudgetDisposition
     observation_id: str
 
 
@@ -531,6 +567,11 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
             },
             "internal_tool_call_limit": policy.internal_tool_call_limit,
         }
+        # Runtime Policy v2-v5 checkpoints were fingerprinted before
+        # ``budget_scope`` existed.  Preserve their exact shared-Run contract
+        # bytes; only the new subject-accounting bindings extend the contract.
+        if binding.budget_scope != "run":
+            contract["budget_scope"] = binding.budget_scope
         self._contract_fingerprint = hashlib.sha256(
             json.dumps(
                 contract,
@@ -825,8 +866,27 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
             )
         return ToolCallBudgetObservation(
             reason_code=reason_code,
+            budget_scope=self._binding.budget_scope,
             **common,
         )
+
+    def _budget_limit_notice(self, admitted_count: int) -> str:
+        if self._binding.budget_scope == "lead":
+            return f"[LEAD TOOL CALL LIMIT] The Lead Agent internal tool-call limit for this Run is exhausted at {admitted_count} admitted calls. Finish with the evidence already collected."
+        if self._binding.budget_scope == "subagent_task":
+            return f"[SUB-AGENT TASK TOOL CALL LIMIT] The internal tool-call limit for this Sub-Agent Task is exhausted at {admitted_count} admitted calls. Finish with the evidence already collected."
+        return f"[RUN TOOL CALL LIMIT] The shared internal tool-call limit for this Run is exhausted at {admitted_count} admitted calls. Finish with the evidence already collected."
+
+    def _budget_disposition(
+        self,
+        *,
+        rejected: int,
+    ) -> ToolCallBudgetDisposition:
+        if rejected:
+            return "truncate_tool_calls"
+        if self._binding.budget_scope == "run":
+            return "exhaust_run"
+        return "exhaust_subject"
 
     def _observe(self, observation: ToolCallControlObservation) -> None:
         observer = self._binding.observer
@@ -861,12 +921,12 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
             return None
         facts = self._facts(state, scope_id=scope_id)
         limit_scope_id = self._limit_scope.resolve(runtime)
-        shared_count = self._limit_authority.count(
+        budget_count = self._limit_authority.count(
             scope_id=limit_scope_id,
             baseline=facts["admitted_count"],
         )
-        facts["admitted_count"] = shared_count
-        facts["limit_exhausted"] = shared_count >= self._policy.internal_tool_call_limit
+        facts["admitted_count"] = budget_count
+        facts["limit_exhausted"] = budget_count >= self._policy.internal_tool_call_limit
         signature = self._proposal_signature(
             message,
             scope_id=scope_id,
@@ -1052,7 +1112,9 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
         )
         kept_indices = list(reservation.admitted_indices)
         if reservation.first_exhaustion or reservation.rejected:
-            pending_notices.append(f"[RUN TOOL CALL LIMIT] The shared internal tool-call limit for this Run is exhausted at {reservation.count_after} admitted calls. Finish with the evidence already collected.")
+            pending_notices.append(
+                self._budget_limit_notice(reservation.count_after),
+            )
             if self._binding.role == "subagent":
                 self._record_stop_reason(scope_id, "tool_budget_capped")
             observations.append(
@@ -1067,7 +1129,9 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                         warn_threshold=self._policy.internal_tool_call_limit,
                         hard_limit=self._policy.internal_tool_call_limit,
                     ),
-                    disposition=("truncate_tool_calls" if reservation.rejected else "exhaust_run"),
+                    disposition=self._budget_disposition(
+                        rejected=reservation.rejected,
+                    ),
                     proposal_receipt=receipt,
                     scope_id=scope_id,
                 )
@@ -1119,7 +1183,7 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
         scope_id = self._binding.scope.resolve(request.runtime)
         facts = self._facts(request.state or {}, scope_id=scope_id)
         limit_scope_id = self._limit_scope.resolve(request.runtime)
-        shared_count = self._limit_authority.count(
+        budget_count = self._limit_authority.count(
             scope_id=limit_scope_id,
             baseline=facts["admitted_count"],
         )
@@ -1138,12 +1202,12 @@ class ToolCallControl(AgentMiddleware[ToolCallControlState]):
                 tool_choice=None,
                 response_format=None,
             )
-        tools = [] if shared_count >= self._policy.internal_tool_call_limit else list(request.tools)
+        tools = [] if budget_count >= self._policy.internal_tool_call_limit else list(request.tools)
         messages = list(request.messages)
-        if shared_count >= self._policy.internal_tool_call_limit and not facts["limit_exhausted"]:
+        if budget_count >= self._policy.internal_tool_call_limit and not facts["limit_exhausted"]:
             messages.append(
                 HumanMessage(
-                    content=(f"[RUN TOOL CALL LIMIT] The shared internal tool-call limit for this Run is exhausted at {shared_count} admitted calls. Finish with the evidence already collected."),
+                    content=self._budget_limit_notice(budget_count),
                     name="tool_call_control_advisory",
                 )
             )
@@ -1246,12 +1310,136 @@ def build_tool_call_control(
     return ToolCallControl(policy, binding)
 
 
+class GraphToolCallControlTopology:
+    """Resolve Lead and Sub-Agent Task accounting behind one small interface.
+
+    Callers supply only the frozen graph profile and the top-level Run or SDK
+    invocation scope.  This Module owns authority construction and chooses
+    whether a delegated Task reuses the parent authority/scope or receives an
+    execution-ID-scoped counter.  Lead and delegated graph builders therefore
+    cannot accidentally implement different accounting topology rules.
+    """
+
+    __slots__ = (
+        "_lead_authority",
+        "_lead_scope",
+        "_profile",
+        "_subagent_authority",
+    )
+
+    def __init__(
+        self,
+        *,
+        profile: ResolvedGraphToolCallControlProfile,
+        lead_scope: ToolCallControlScope,
+    ) -> None:
+        if type(profile) is not ResolvedGraphToolCallControlProfile:
+            raise TypeError(
+                "profile must be a ResolvedGraphToolCallControlProfile",
+            )
+        if not isinstance(
+            lead_scope,
+            (FixedToolCallControlScope, PerInvocationToolCallControlScope),
+        ):
+            raise TypeError("lead_scope must be an explicit scope strategy")
+        self._profile = profile
+        self._lead_scope = lead_scope
+        self._lead_authority = RunToolCallLimitAuthority(
+            hard_limit=profile.lead.internal_tool_call_limit,
+        )
+        self._subagent_authority = (
+            self._lead_authority
+            if profile.accounting_mode == "shared_run"
+            else RunToolCallLimitAuthority(
+                hard_limit=profile.subagent.internal_tool_call_limit,
+            )
+        )
+
+    @property
+    def profile(self) -> ResolvedGraphToolCallControlProfile:
+        """Return the immutable policy profile used by both graph roles."""
+
+        return self._profile
+
+    def build_lead(
+        self,
+        *,
+        observer: ToolCallControlObserver | None = None,
+    ) -> AgentMiddleware:
+        """Build the sole control middleware for the Lead graph."""
+
+        budget_scope: ToolCallBudgetScope = "run" if self._profile.accounting_mode == "shared_run" else "lead"
+        return build_tool_call_control(
+            self._profile.lead,
+            ToolCallControlBinding(
+                role="lead",
+                scope=self._lead_scope,
+                workload_profile=self._profile.workload_profile,
+                observer=observer,
+                limit_authority=self._lead_authority,
+                limit_scope=self._lead_scope,
+                budget_scope=budget_scope,
+            ),
+        )
+
+    def bind_parent_scope(
+        self,
+        runtime: Runtime,
+    ) -> GraphToolCallControlTopology:
+        """Freeze the parent scope while retaining the same authorities.
+
+        A delegated graph runs with a projected child context, so a dynamic
+        SDK/Embedded invocation key must be resolved at the graph-local task
+        Adapter seam.  The returned topology keeps both authority objects;
+        legacy shared accounting therefore observes Lead reservations while
+        the new mode continues to isolate each Task by execution ID.
+        """
+
+        resolved_scope = FixedToolCallControlScope(
+            self._lead_scope.resolve(runtime),
+        )
+        bound = object.__new__(GraphToolCallControlTopology)
+        bound._profile = self._profile
+        bound._lead_scope = resolved_scope
+        bound._lead_authority = self._lead_authority
+        bound._subagent_authority = self._subagent_authority
+        return bound
+
+    def build_subagent_task(
+        self,
+        execution_id: UUID,
+        *,
+        observer: ToolCallControlObserver | None = None,
+    ) -> AgentMiddleware:
+        """Build one Task control keyed by its lifecycle-owned execution ID."""
+
+        if not isinstance(execution_id, UUID):
+            raise TypeError(
+                "execution_id must be the lifecycle-owned UUID",
+            )
+        execution_scope = FixedToolCallControlScope(str(execution_id))
+        shared_run = self._profile.accounting_mode == "shared_run"
+        return build_tool_call_control(
+            self._profile.subagent,
+            ToolCallControlBinding(
+                role="subagent",
+                scope=execution_scope,
+                workload_profile=self._profile.workload_profile,
+                observer=observer,
+                limit_authority=self._subagent_authority,
+                limit_scope=(self._lead_scope if shared_run else execution_scope),
+                budget_scope=("run" if shared_run else "subagent_task"),
+            ),
+        )
+
+
 __all__ = [
     "TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY",
     "TOOL_CALL_CONTROL_LOOP_REPLACEMENT_KEY",
     "TOOL_CALL_CONTROL_RECEIPT_KEY",
     "TOOL_CALL_CONTROL_STATE_KEY",
     "FixedToolCallControlScope",
+    "GraphToolCallControlTopology",
     "PerInvocationToolCallControlScope",
     "RepeatedCallObservation",
     "RepeatedCallReasonCode",
@@ -1271,7 +1459,10 @@ __all__ = [
     "ToolCallControlStopReason",
     "ToolCallControlWorkloadProfile",
     "ToolCallBudgetObservation",
+    "ToolCallBudgetDisposition",
     "ToolCallBudgetReasonCode",
+    "ToolCallBudgetScope",
+    "ToolCallControlAccountingMode",
     "ToolCallLimit",
     "build_tool_call_control",
     "default_graph_tool_call_control_profile",

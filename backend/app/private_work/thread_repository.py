@@ -341,13 +341,52 @@ class PrivateThreadRepository:
             )
             .values(
                 deleted_at=now,
-                checkpoint_delete_status="pending",
+                checkpoint_delete_status="not_requested",
                 updated_at=now,
                 version=ThreadMetaRow.version + 1,
             )
             .returning(ThreadMetaRow)
         )
         row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise PrivateWorkConflict("unknown")
+        return self._record(row)
+
+    async def request_checkpoint_delete_for_compensation(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        expected_created_at: datetime,
+        expected_deleted_at: datetime,
+        thread_kind: str = "chat",
+    ) -> PrivateThreadRecord:
+        """Queue raw cleanup only for a trusted failed-create compensation."""
+
+        project_id, owner_user_id = self._coordinates(scope)
+        if not isinstance(expected_created_at, datetime) or expected_created_at.tzinfo is None or not isinstance(expected_deleted_at, datetime) or expected_deleted_at.tzinfo is None:
+            raise PrivateWorkConflict("unknown")
+        if thread_kind not in {"chat", "skill_builder"}:
+            raise PrivateWorkConflict("unknown")
+        row = (
+            await self.session.execute(
+                update(ThreadMetaRow)
+                .where(
+                    ThreadMetaRow.thread_id == thread_id,
+                    ThreadMetaRow.project_id == project_id,
+                    ThreadMetaRow.owner_user_id == owner_user_id,
+                    ThreadMetaRow.thread_kind == thread_kind,
+                    ThreadMetaRow.created_at == expected_created_at,
+                    ThreadMetaRow.deleted_at == expected_deleted_at,
+                    ThreadMetaRow.checkpoint_delete_status == "not_requested",
+                )
+                .values(
+                    checkpoint_delete_status="pending",
+                    updated_at=func.clock_timestamp(),
+                )
+                .returning(ThreadMetaRow)
+            )
+        ).scalar_one_or_none()
         if row is None:
             raise PrivateWorkConflict("unknown")
         return self._record(row)
@@ -461,14 +500,25 @@ class PrivateThreadRepository:
         *,
         scope: PrivateResourceScope,
         thread_id: str,
+        expected_created_at: datetime,
+        expected_deleted_at: datetime,
     ) -> None:
         project_id, owner_user_id = self._coordinates(scope)
-        await self.session.execute(
-            delete(ThreadMetaRow).where(
-                ThreadMetaRow.thread_id == thread_id,
-                ThreadMetaRow.project_id == project_id,
-                ThreadMetaRow.owner_user_id == owner_user_id,
-                ThreadMetaRow.deleted_at.is_not(None),
-                ThreadMetaRow.checkpoint_delete_status == "complete",
+        if not isinstance(expected_created_at, datetime) or expected_created_at.tzinfo is None or not isinstance(expected_deleted_at, datetime) or expected_deleted_at.tzinfo is None:
+            raise PrivateWorkConflict("unknown")
+        deleted_thread_id = (
+            await self.session.execute(
+                delete(ThreadMetaRow)
+                .where(
+                    ThreadMetaRow.thread_id == thread_id,
+                    ThreadMetaRow.project_id == project_id,
+                    ThreadMetaRow.owner_user_id == owner_user_id,
+                    ThreadMetaRow.created_at == expected_created_at,
+                    ThreadMetaRow.deleted_at == expected_deleted_at,
+                    ThreadMetaRow.checkpoint_delete_status == "complete",
+                )
+                .returning(ThreadMetaRow.thread_id)
             )
-        )
+        ).scalar_one_or_none()
+        if deleted_thread_id is None:
+            raise PrivateWorkConflict("unknown")

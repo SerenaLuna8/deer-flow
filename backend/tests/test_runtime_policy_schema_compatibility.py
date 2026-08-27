@@ -1,4 +1,4 @@
-"""Exact Runtime Policy schema compatibility and v5 contracts."""
+"""Exact Runtime Policy schema compatibility and v6 contracts."""
 
 from __future__ import annotations
 
@@ -160,6 +160,10 @@ _V4_AGENT_RUNTIME_VALUE["vision_bridge"] = {
     "contract_version": "vision.bridge.v1",
 }
 _V4_AGENT_RUNTIME_CHECKSUM = "06fc1c841ba2fe4c7d8ad318326b095050f2e9d78d9b2f319d88f4fa018b19f5"
+_V5_AGENT_RUNTIME_VALUE = AgentRuntimePolicyValue().model_dump(mode="python")
+_V5_AGENT_RUNTIME_VALUE.pop("internal_tool_call_limits")
+_V5_AGENT_RUNTIME_VALUE["internal_tool_call_limit"] = 200
+_V5_AGENT_RUNTIME_CHECKSUM = "06bfbdb213ac0c3544df378e00c59e2a33a36900bbddab319713c65d36ae5f85"
 _LEGACY_OTHER_SECTION_CASES = (
     (
         RuntimePolicySection.AUTH,
@@ -257,14 +261,14 @@ async def test_gateway_projects_decoded_v3_policy_before_app_config_overlay() ->
     assert runtime.subagents.max_total_per_run == 6
 
 
-def test_schema_v3_agent_runtime_fixture_remains_exact_when_v5_is_current() -> None:
+def test_schema_v3_agent_runtime_fixture_remains_exact_when_v6_is_current() -> None:
     canonical = canonical_policy_payload_for_schema(
         RuntimePolicySection.AGENT_RUNTIME,
         _V3_AGENT_RUNTIME_VALUE,
         schema_version=3,
     )
 
-    assert RUNTIME_POLICY_SCHEMA_VERSION == 5
+    assert RUNTIME_POLICY_SCHEMA_VERSION == 6
     assert canonical.schema_version == 3
     assert canonical.value == _V3_AGENT_RUNTIME_VALUE
     assert canonical.checksum == _V3_AGENT_RUNTIME_CHECKSUM
@@ -306,10 +310,20 @@ def test_schema_v2_uses_its_own_exact_codec_without_v3_bridge_defaults() -> None
 
 
 def test_schema_v5_agent_runtime_has_one_internal_tool_call_limit() -> None:
-    value = AgentRuntimePolicyValue()
-    canonical = canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
+    canonical = canonical_policy_payload_for_schema(
+        RuntimePolicySection.AGENT_RUNTIME,
+        _V5_AGENT_RUNTIME_VALUE,
+        schema_version=5,
+    )
+    defaults = canonical_policy_payload_for_schema(
+        RuntimePolicySection.AGENT_RUNTIME,
+        {},
+        schema_version=5,
+    )
 
     assert canonical.schema_version == 5
+    assert canonical.checksum == _V5_AGENT_RUNTIME_CHECKSUM
+    assert defaults == canonical
     assert "agent_runtime" not in canonical.value
     assert canonical.value["internal_tool_call_limit"] == 200
     assert "tool_call_budget" not in canonical.value
@@ -330,7 +344,80 @@ def test_schema_v5_agent_runtime_has_one_internal_tool_call_limit() -> None:
     }
 
 
-def test_schema_v4_agent_runtime_fixture_remains_exact_when_v5_is_current() -> None:
+def test_schema_v6_agent_runtime_has_independent_internal_tool_call_limits() -> None:
+    canonical = canonical_policy_payload(
+        RuntimePolicySection.AGENT_RUNTIME,
+        AgentRuntimePolicyValue(),
+    )
+
+    assert canonical.schema_version == 6
+    assert canonical.value["internal_tool_call_limits"] == {
+        "lead_per_run": 200,
+        "subagent_per_task": 50,
+    }
+    assert "internal_tool_call_limit" not in canonical.value
+
+
+def test_schema_v5_single_limit_decodes_to_equal_current_role_limits() -> None:
+    decoded = decode_policy_value_for_schema(
+        RuntimePolicySection.AGENT_RUNTIME,
+        _V5_AGENT_RUNTIME_VALUE,
+        schema_version=5,
+    )
+
+    assert isinstance(decoded, AgentRuntimePolicyValue)
+    assert decoded.internal_tool_call_limits.lead_per_run == 200
+    assert decoded.internal_tool_call_limits.subagent_per_task == 200
+
+
+def test_schema_v5_materialization_preserves_legacy_schema_envelope() -> None:
+    materialized = materialize_agent_runtime_policy(
+        schema_version=5,
+        value=_V5_AGENT_RUNTIME_VALUE,
+        checksum=_V5_AGENT_RUNTIME_CHECKSUM,
+    )
+
+    assert materialized.schema_version == 5
+    assert materialized.value.internal_tool_call_limits.lead_per_run == 200
+    assert materialized.value.internal_tool_call_limits.subagent_per_task == 200
+
+
+def test_schema_v5_preserves_its_repeat_window_validation() -> None:
+    value = deepcopy(_V5_AGENT_RUNTIME_VALUE)
+    value["loop_detection"]["identical_calls"]["window_size"] = 4
+
+    with pytest.raises(RuntimePolicyInvalid):
+        canonical_policy_payload_for_schema(
+            RuntimePolicySection.AGENT_RUNTIME,
+            value,
+            schema_version=5,
+        )
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "value"),
+    [
+        (2, _V2_AGENT_RUNTIME_VALUE),
+        (3, _V3_AGENT_RUNTIME_VALUE),
+        (4, _V4_AGENT_RUNTIME_VALUE),
+    ],
+)
+def test_schemas_v2_through_v4_decode_to_equal_current_role_limits(
+    schema_version: int,
+    value: dict[str, object],
+) -> None:
+    decoded = decode_policy_value_for_schema(
+        RuntimePolicySection.AGENT_RUNTIME,
+        value,
+        schema_version=schema_version,
+    )
+
+    assert isinstance(decoded, AgentRuntimePolicyValue)
+    assert decoded.internal_tool_call_limits.lead_per_run == 50
+    assert decoded.internal_tool_call_limits.subagent_per_task == 50
+
+
+def test_schema_v4_agent_runtime_fixture_remains_exact_when_v6_is_current() -> None:
     assert (
         canonical_policy_value_v4(
             RuntimePolicySection.AGENT_RUNTIME,
@@ -357,7 +444,7 @@ def test_schema_v4_agent_runtime_fixture_remains_exact_when_v5_is_current() -> N
         )
 
 
-def test_schema_v4_agent_runtime_decodes_max_hard_limit_into_single_v5_limit() -> None:
+def test_schema_v4_agent_runtime_decodes_max_hard_limit_into_equal_role_limits() -> None:
     legacy = deepcopy(_V4_AGENT_RUNTIME_VALUE)
     legacy["tool_call_budget"]["profiles"]["research"]["subagent"]["tools"]["web_fetch"] = {"warn": 12, "hard_limit": 87}
 
@@ -368,11 +455,12 @@ def test_schema_v4_agent_runtime_decodes_max_hard_limit_into_single_v5_limit() -
     )
 
     assert isinstance(decoded, AgentRuntimePolicyValue)
-    assert decoded.internal_tool_call_limit == 87
+    assert decoded.internal_tool_call_limits.lead_per_run == 87
+    assert decoded.internal_tool_call_limits.subagent_per_task == 87
     assert "tool_call_budget" not in decoded.model_dump(mode="json")
 
 
-def test_schema_v3_agent_runtime_decodes_frequency_into_single_v5_limit() -> None:
+def test_schema_v3_agent_runtime_decodes_frequency_into_equal_role_limits() -> None:
     legacy = deepcopy(_V3_AGENT_RUNTIME_VALUE)
     legacy["loop_detection"] = {
         "enabled": True,
@@ -404,7 +492,8 @@ def test_schema_v3_agent_runtime_decodes_frequency_into_single_v5_limit() -> Non
             "window_size": 15,
         },
     }
-    assert decoded.internal_tool_call_limit == 23
+    assert decoded.internal_tool_call_limits.lead_per_run == 23
+    assert decoded.internal_tool_call_limits.subagent_per_task == 23
     assert "tool_call_budget" not in decoded.model_dump(mode="json")
     assert decoded.subagents.max_concurrent == 3
     assert decoded.subagents.max_total_per_run_by_workload.interactive == 8
@@ -467,7 +556,7 @@ def test_legacy_repeat_window_below_hard_limit_materializes_and_resolves_exactly
     assert resolved.lead.repeated_calls.window_size == 4
 
 
-def test_schema_v3_task_frequency_remains_exact_and_contributes_to_v5_limit() -> None:
+def test_schema_v3_task_frequency_remains_exact_and_contributes_to_role_limits() -> None:
     legacy = deepcopy(_V3_AGENT_RUNTIME_VALUE)
     legacy["loop_detection"]["tool_freq_overrides"]["task"] = {
         "warn": 55,
@@ -490,7 +579,8 @@ def test_schema_v3_task_frequency_remains_exact_and_contributes_to_v5_limit() ->
         "hard_limit": 60,
     }
     assert isinstance(decoded, AgentRuntimePolicyValue)
-    assert decoded.internal_tool_call_limit == 60
+    assert decoded.internal_tool_call_limits.lead_per_run == 60
+    assert decoded.internal_tool_call_limits.subagent_per_task == 60
 
 
 @pytest.mark.parametrize(
@@ -514,7 +604,8 @@ def test_materializer_verifies_legacy_checksum_then_returns_current_policy(
     )
 
     assert isinstance(materialized, AgentRuntimePolicyValue)
-    assert materialized.internal_tool_call_limit == 50
+    assert materialized.internal_tool_call_limits.lead_per_run == 50
+    assert materialized.internal_tool_call_limits.subagent_per_task == 50
 
 
 def test_agent_runtime_materialization_preserves_frozen_schema_in_envelope() -> None:
@@ -527,10 +618,11 @@ def test_agent_runtime_materialization_preserves_frozen_schema_in_envelope() -> 
     assert isinstance(materialized, MaterializedAgentRuntimePolicy)
     assert materialized.schema_version == 3
     assert isinstance(materialized.value, AgentRuntimePolicyValue)
-    assert materialized.value.internal_tool_call_limit == 50
+    assert materialized.value.internal_tool_call_limits.lead_per_run == 50
+    assert materialized.value.internal_tool_call_limits.subagent_per_task == 50
 
 
-@pytest.mark.parametrize("schema_version", [2, 3, 4])
+@pytest.mark.parametrize("schema_version", [2, 3, 4, 5])
 @pytest.mark.parametrize(
     ("section", "value", "checksum"),
     _LEGACY_OTHER_SECTION_CASES,
@@ -556,23 +648,25 @@ def test_other_runtime_policy_sections_keep_exact_legacy_values_and_checksums(
     assert canonical.value == value
     assert canonical.checksum == checksum
     assert decoded.model_dump(mode="json") == value
-    assert current.schema_version == 5
+    assert current.schema_version == 6
     assert current.value == value
     assert current.checksum == checksum
 
 
-@pytest.mark.parametrize("internal_tool_call_limit", [0, 100_001])
-def test_schema_v5_rejects_out_of_range_internal_tool_call_limit(
-    internal_tool_call_limit: int,
+@pytest.mark.parametrize("field", ["lead_per_run", "subagent_per_task"])
+@pytest.mark.parametrize("limit", [0, 100_001])
+def test_schema_v6_rejects_out_of_range_internal_tool_call_limit(
+    field: str,
+    limit: int,
 ) -> None:
     value = AgentRuntimePolicyValue().model_dump(mode="python")
-    value["internal_tool_call_limit"] = internal_tool_call_limit
+    value["internal_tool_call_limits"][field] = limit
 
     with pytest.raises(RuntimePolicyInvalid):
         canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
 
 
-def test_schema_v5_rejects_v4_tool_budget_and_agent_runtime_wrapper() -> None:
+def test_schema_v6_rejects_legacy_tool_budget_and_agent_runtime_wrapper() -> None:
     legacy_budget = AgentRuntimePolicyValue().model_dump(mode="python")
     legacy_budget["tool_call_budget"] = deepcopy(
         _V4_AGENT_RUNTIME_VALUE["tool_call_budget"],

@@ -118,7 +118,10 @@ generator. A necessary local patch needs focused coverage and an explanation.
   signal. While active, render the strict six-field execution-state projection.
   When REST/history proves terminal, stop and forget that exact Run reconnect
   even if its SSE source never closes; late SSE must not overwrite the canonical
-  terminal history or cause a second Run/cancel request.
+  terminal history or cause a second Run/cancel request. Preserve the exact
+  visible conversation projection across any SDK/history detach, then replace it
+  atomically with canonical history so terminal reconciliation never paints an
+  empty or reordered handoff frame.
 - Scope disposal aborts the stream and prevents late state writes. Compare-and-
   remove reconnect metadata so an old consumer cannot erase a newer Run.
 - A successful Thread DELETE immediately tears down only that exact
@@ -158,8 +161,10 @@ generator. A necessary local patch needs focused coverage and an explanation.
   event contracts. Merge live custom frames with durable Run Event replay by
   deterministic `observation_id`; refresh, reconnect, or duplicated middleware
   execution must not double-render them. Hard-limit exhaustion stays visible and
-  means that the Lead and all Sub-Agents in that Run receive no further internal
-  tool-call admission; another Run has an independent count.
+  keeps its frozen policy scope: under v6, a Lead limit blocks later Lead tools
+  (including new `task` calls), while one Sub-Agent Task limit blocks only that
+  Task and parallel Tasks keep independent counts. Retained v2–v5 events preserve
+  their legacy meaning that the Lead and every Sub-Agent share one Run count.
 
 ### Governed assets and runtime state
 
@@ -220,11 +225,15 @@ generator. A necessary local patch needs focused coverage and an explanation.
   chooses or sees a secret value.
 - Project Skill deletion is a terminal archive action. The confirmation explains
   that the Skill is hidden, removed from every Agent without suspending those
-  Agents, and immediately loses its Secret ciphertext; queued or retried Runs
-  that still require an unmaterialized secret may fail. On success, remove the
-  Skill query subtree, invalidate Agent Definition/catalog/runtime and Builder
-  caches, and show the server-returned affected Agent count. Do not show
-  `ASSET_IN_USE`, physical-delete, or manual-unbind guidance for this action.
+  Agents, while its Current Version pointer, every Version and file, quota
+  reservation, Secret state, Generations, and ciphertext remain Project-owned.
+  Deleting a Run or Thread and former-member or account-private retention never
+  clears that content; only final deletion of the whole Project destroys it and
+  releases storage. On success, remove the Skill query subtree, invalidate
+  Agent Definition/catalog/runtime and Builder caches, and show the
+  server-returned affected Agent count. Do not show `ASSET_IN_USE`,
+  physical-delete, manual-unbind, secret-loss, or storage-reclamation guidance
+  for this action.
 - System asset definitions are read-only in global admin views. Project binding
   and domain-secret operations are separate, narrow mutations.
 - System Agent definitions are read-only single Definitions; System Skills are

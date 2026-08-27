@@ -16,7 +16,8 @@ from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.tool_call_control import (
     TOOL_CALL_CONTROL_STATE_KEY,
-    RunToolCallLimitAuthority,
+    FixedToolCallControlScope,
+    GraphToolCallControlTopology,
     ToolCallControlLoopFinalizationFailed,
     ToolCallControlStateInvalid,
     default_graph_tool_call_control_profile,
@@ -398,7 +399,7 @@ def test_sdk_feature_profile_preserves_explicit_extra_middleware_once_for_delega
     profile = binding_factory.profile
     assert type(profile) is SdkParentExecutionProfile
     assert profile.features is not None
-    assert binding_factory.tool_call_control_profile is not None
+    assert binding_factory.tool_call_control_topology is not None
 
     delegated_graph_inputs: dict[str, object] = {}
 
@@ -414,9 +415,7 @@ def test_sdk_feature_profile_preserves_explicit_extra_middleware_once_for_delega
         model_override=profile.graph.model,
         sdk_feature_snapshot=profile.features,
         tool_search_enabled=False,
-        tool_call_control_profile=binding_factory.tool_call_control_profile,
-        tool_call_limit_authority=binding_factory.tool_call_limit_authority,
-        tool_call_limit_scope_id="sdk-invocation",
+        tool_call_control_topology=binding_factory.tool_call_control_topology,
     )
 
     runner._create_agent([], execution_id=uuid.uuid4())
@@ -500,6 +499,10 @@ def test_configured_subagent_control_uses_lifecycle_internal_execution_id(
     )
     execution_id = uuid.uuid4()
     control_profile = default_graph_tool_call_control_profile("research")
+    topology = GraphToolCallControlTopology(
+        profile=control_profile,
+        lead_scope=FixedToolCallControlScope("parent-run-id"),
+    )
     runner = _SubagentGraphRunner(
         config=_config(),
         tools=[],
@@ -508,9 +511,7 @@ def test_configured_subagent_control_uses_lifecycle_internal_execution_id(
             run_id="parent-run-id",
         ),
         parent_model="parent-model",
-        tool_call_control_profile=control_profile,
-        tool_call_limit_authority=RunToolCallLimitAuthority(hard_limit=200),
-        tool_call_limit_scope_id="parent-run-id",
+        tool_call_control_topology=topology,
     )
 
     runner._create_agent([], execution_id=execution_id)

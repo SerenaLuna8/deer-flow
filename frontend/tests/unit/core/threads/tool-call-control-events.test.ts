@@ -56,6 +56,23 @@ function toolBudgetEvent(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function subjectToolBudgetEvent(
+  budgetScope: "lead" | "subagent_task",
+  overrides: Record<string, unknown> = {},
+) {
+  const subagentTask = budgetScope === "subagent_task";
+  return toolBudgetEvent({
+    schema_version: 3,
+    budget_scope: budgetScope,
+    role: subagentTask ? "subagent" : "lead",
+    execution_id: subagentTask ? "d".repeat(32) : null,
+    count_before: subagentTask ? 49 : 199,
+    count_after: subagentTask ? 50 : 200,
+    hard_limit: subagentTask ? 50 : 200,
+    ...overrides,
+  });
+}
+
 function legacyToolBudgetEvent(overrides: Record<string, unknown> = {}) {
   return {
     ...toolBudgetEvent(),
@@ -129,6 +146,28 @@ describe("Run-control event contracts", () => {
     ).toBeNull();
     expect(
       parseToolCallBudgetEvent(toolBudgetEvent({ tool_name: "web_search" })),
+    ).toBeNull();
+  });
+
+  test("accepts subject-scoped v3 tool budgets and rejects mismatched subjects", () => {
+    expect(parseToolCallBudgetEvent(subjectToolBudgetEvent("lead"))).toEqual(
+      subjectToolBudgetEvent("lead"),
+    );
+    expect(
+      parseToolCallBudgetEvent(subjectToolBudgetEvent("subagent_task")),
+    ).toEqual(subjectToolBudgetEvent("subagent_task"));
+    expect(
+      parseToolCallBudgetEvent(
+        subjectToolBudgetEvent("subagent_task", {
+          role: "lead",
+          execution_id: null,
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      parseToolCallBudgetEvent(
+        subjectToolBudgetEvent("lead", { budget_scope: undefined }),
+      ),
     ).toBeNull();
   });
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -35,7 +34,6 @@ from app.shared_assets.models import (
     SkillAssetRef,
 )
 from app.shared_assets.run_snapshot_codec import encode_run_skill_version_manifest
-from app.shared_assets.skill_deletion import ArchivedSkillPurger
 from app.shared_assets.skill_design_repository import SkillDesignRepository
 from app.shared_assets.skill_service import SkillService
 from deerflow.persistence.bootstrap import _install_full_schema
@@ -314,61 +312,6 @@ async def _seed_logical_delete_scope(session) -> _LogicalDeleteSeed:
     )
 
 
-class _Quota:
-    def __init__(self) -> None:
-        self.released: list[tuple[uuid.UUID, uuid.UUID, int]] = []
-        self.reconciled: list[uuid.UUID] = []
-
-    async def release_skill_version_if_reserved(
-        self,
-        _session,
-        project_id: uuid.UUID,
-        *,
-        version_id: uuid.UUID,
-        size: int,
-    ) -> bool:
-        self.released.append((project_id, version_id, size))
-        return True
-
-    async def reconcile_project_storage(
-        self,
-        _session,
-        project_id: uuid.UUID,
-    ) -> None:
-        self.reconciled.append(project_id)
-
-
-class _PurgeAudit:
-    def __init__(self) -> None:
-        self.events: list[tuple[uuid.UUID, uuid.UUID, int, str]] = []
-
-    async def archived_skill_purged(
-        self,
-        _session,
-        *,
-        project_id: uuid.UUID,
-        skill_id: uuid.UUID,
-        version_count: int,
-        request_id: str,
-    ) -> None:
-        self.events.append((project_id, skill_id, version_count, request_id))
-
-
-class _FailingPurger:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def purge_project(
-        self,
-        _project_id: uuid.UUID,
-        *,
-        request_id: str,
-    ) -> None:
-        del request_id
-        self.calls += 1
-        raise RuntimeError("temporary archived Skill purge failure")
-
-
 class _RawCheckpointSaver(BaseCheckpointSaver):
     def __init__(self) -> None:
         super().__init__()
@@ -538,7 +481,7 @@ async def test_archived_skill_name_is_available_to_builder_preflight_and_recreat
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_skill_delete_archives_unbinds_hides_and_destroys_secret_ciphertext(
+async def test_skill_delete_archives_unbinds_hides_and_retains_secret_ciphertext(
     postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(postgres_database_url)
@@ -603,13 +546,14 @@ async def test_skill_delete_archives_unbinds_hides_and_destroys_secret_ciphertex
                 )
                 == 1
             )
-            assert (
-                await session.get(
-                    ProjectSkillSecretGenerationRow,
-                    seeded.secret_generation_id,
-                )
-                is None
+            generation = await session.get(
+                ProjectSkillSecretGenerationRow,
+                seeded.secret_generation_id,
             )
+            assert generation is not None
+            assert generation.nonce == b"n" * 12
+            assert generation.ciphertext == b"c" * 16
+            assert generation.envelope_digest == "d" * 64
             state = await session.get(
                 ProjectSkillSecretStateRow,
                 (
@@ -620,8 +564,8 @@ async def test_skill_delete_archives_unbinds_hides_and_destroys_secret_ciphertex
                 ),
             )
             assert state is not None
-            assert state.current_generation_id is None
-            assert state.revision == 2
+            assert state.current_generation_id == seeded.secret_generation_id
+            assert state.revision == 1
             tombstones = tuple(
                 (
                     await session.execute(
@@ -634,8 +578,7 @@ async def test_skill_delete_archives_unbinds_hides_and_destroys_secret_ciphertex
                 .scalars()
                 .all()
             )
-            assert len(tombstones) == 1
-            assert tombstones[0].reason == "skill_delete"
+            assert tombstones == ()
 
             session.add(
                 SkillRow(
@@ -792,145 +735,15 @@ async def test_skill_delete_rolls_back_every_mutation_when_audit_fails(
         await engine.dispose()
 
 
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_archived_skill_purge_removes_package_and_keeps_tombstones(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    quota = _Quota()
-    audit = _PurgeAudit()
-    try:
-        await _install_full_schema(engine)
-        async with factory() as session, session.begin():
-            seeded = await _seed_logical_delete_scope(session)
-        await SkillService(factory).delete(
-            seeded.context,
-            seeded.skill_id,
-            expected_asset_version=4,
-        )
-
-        report = await ArchivedSkillPurger(
-            factory,
-            quota=quota,
-            audit=audit,
-        ).purge_project(seeded.context.project_id)
-
-        assert report.skills_examined == 1
-        assert report.skills_purged == 1
-        assert report.versions_purged == 1
-        assert report.released_bytes == seeded.content_size_bytes
-        assert quota.released == [
-            (
-                seeded.context.project_id,
-                seeded.skill_version_id,
-                seeded.content_size_bytes,
-            )
-        ]
-        assert quota.reconciled == [seeded.context.project_id]
-        assert audit.events == [
-            (
-                seeded.context.project_id,
-                seeded.skill_id,
-                1,
-                "archived-skill-purge",
-            )
-        ]
-
-        async with factory() as session:
-            tombstone = await session.get(SkillRow, seeded.skill_id)
-            assert tombstone is not None
-            assert tombstone.status == "archived"
-            assert tombstone.current_version_id is None
-            assert await session.get(SkillVersionRow, seeded.skill_version_id) is None
-            assert (
-                await session.scalar(
-                    select(func.count())
-                    .select_from(ProjectSkillSecretTombstoneRow)
-                    .where(
-                        ProjectSkillSecretTombstoneRow.skill_id == seeded.skill_id,
-                    )
-                )
-                == 1
-            )
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_low_frequency_sweep_skips_project_before_retention_is_due(
-    postgres_database_url: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    quota = _Quota()
-    audit = _PurgeAudit()
-    try:
-        await _install_full_schema(engine)
-        async with factory() as session, session.begin():
-            seeded = await _seed_logical_delete_scope(session)
-        await SkillService(factory).delete(
-            seeded.context,
-            seeded.skill_id,
-            expected_asset_version=4,
-        )
-        async with factory() as session, session.begin():
-            project = await session.get(ProjectRow, seeded.context.project_id)
-            assert project is not None
-            requested_at = datetime.now(UTC)
-            project.status = "pending_deletion"
-            project.deletion_requested_at = requested_at
-            project.deletion_effective_at = requested_at + timedelta(days=7)
-            project.deletion_requested_by_user_id = str(seeded.context.user_id)
-
-        purger = ArchivedSkillPurger(
-            factory,
-            quota=quota,
-            audit=audit,
-        )
-        with pytest.raises(AssetNotFound):
-            await purger.purge_project(seeded.context.project_id)
-
-        async def unexpected_project_purge(*_args: object, **_kwargs: object):
-            raise AssertionError("not-yet-due Project entered the sweep batch")
-
-        monkeypatch.setattr(purger, "purge_project", unexpected_project_purge)
-        report = await purger.sweep()
-
-        assert (
-            report.projects_scanned,
-            report.skills_examined,
-            report.skills_purged,
-            report.versions_purged,
-            report.released_bytes,
-        ) == (0, 0, 0, 0, 0)
-        assert quota.released == []
-        assert audit.events == []
-        async with factory() as session:
-            archived = await session.get(SkillRow, seeded.skill_id)
-            assert archived is not None
-            assert archived.status == "archived"
-            assert archived.current_version_id == seeded.skill_version_id
-            assert await session.get(SkillVersionRow, seeded.skill_version_id) is not None
-    finally:
-        await engine.dispose()
-
-
 @pytest.mark.parametrize("schema_version", (3, 4), ids=("legacy-v3", "reference-v4"))
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_retained_run_blocks_purge_until_single_run_delete_releases_it(
+async def test_run_delete_releases_run_refs_but_retains_archived_skill_content(
     postgres_database_url: str,
     schema_version: int,
 ) -> None:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    quota = _Quota()
-    audit = _PurgeAudit()
-    purger = ArchivedSkillPurger(factory, quota=quota, audit=audit)
     try:
         await _install_full_schema(engine)
         async with factory() as session, session.begin():
@@ -946,137 +759,12 @@ async def test_retained_run_blocks_purge_until_single_run_delete_releases_it(
             expected_asset_version=4,
         )
 
-        swept = await purger.sweep(limit=1)
-        assert swept.projects_scanned == 0
-        assert swept.skills_examined == 0
-        blocked = await purger.purge_project(seeded.context.project_id)
-        assert blocked.skills_examined == 0
-        assert blocked.skills_purged == 0
-        assert quota.released == []
-        assert audit.events == []
-
-        await PrivateRunService(
-            factory,
-            archived_skill_purger=purger,
-        ).delete(
+        await PrivateRunService(factory).delete(
             PrivateWorkContext.from_project(seeded.context),
             thread_id,
             run_id,
         )
 
-        async with factory() as session:
-            assert await session.get(SkillVersionRow, seeded.skill_version_id) is None
-            tombstone = await session.get(SkillRow, seeded.skill_id)
-            assert tombstone is not None
-            assert tombstone.current_version_id is None
-        assert quota.released == [
-            (
-                seeded.context.project_id,
-                seeded.skill_version_id,
-                seeded.content_size_bytes,
-            )
-        ]
-        assert len(audit.events) == 1
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_thread_delete_keeps_run_reference_and_does_not_release_skill_package(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    quota = _Quota()
-    audit = _PurgeAudit()
-    purger = ArchivedSkillPurger(factory, quota=quota, audit=audit)
-    raw = _RawCheckpointSaver()
-    try:
-        await _install_full_schema(engine)
-        async with factory() as session, session.begin():
-            seeded = await _seed_logical_delete_scope(session)
-            thread_id, run_id = await _add_retained_run(
-                session,
-                seeded,
-                schema_version=4,
-            )
-        await SkillService(factory).delete(
-            seeded.context,
-            seeded.skill_id,
-            expected_asset_version=4,
-        )
-
-        await (
-            ProjectScopedCheckpointer(raw, factory)
-            .for_context(PrivateWorkContext.from_project(seeded.context))
-            .adelete_thread(
-                thread_id,
-                expected_version=1,
-            )
-        )
-        report = await purger.purge_project(seeded.context.project_id)
-
-        assert raw.deleted_threads == [thread_id]
-        assert report.skills_examined == 0
-        assert report.skills_purged == 0
-        assert quota.released == []
-        assert audit.events == []
-        async with factory() as session:
-            thread = await session.get(ThreadMetaRow, thread_id)
-            assert thread is not None
-            assert thread.deleted_at is not None
-            assert (
-                await session.scalar(
-                    select(func.count())
-                    .select_from(RunSkillVersionRefRow)
-                    .where(
-                        RunSkillVersionRefRow.project_id == seeded.context.project_id,
-                        RunSkillVersionRefRow.owner_user_id == str(seeded.context.user_id),
-                        RunSkillVersionRefRow.thread_id == thread_id,
-                        RunSkillVersionRefRow.run_id == run_id,
-                    )
-                )
-                == 1
-            )
-            assert await session.get(SkillVersionRow, seeded.skill_version_id) is not None
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_failed_post_commit_purge_does_not_roll_back_single_run_delete(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    failing_purger = _FailingPurger()
-    try:
-        await _install_full_schema(engine)
-        async with factory() as session, session.begin():
-            seeded = await _seed_logical_delete_scope(session)
-            thread_id, run_id = await _add_retained_run(
-                session,
-                seeded,
-                schema_version=4,
-            )
-        await SkillService(factory).delete(
-            seeded.context,
-            seeded.skill_id,
-            expected_asset_version=4,
-        )
-
-        await PrivateRunService(
-            factory,
-            archived_skill_purger=failing_purger,  # type: ignore[arg-type]
-        ).delete(
-            PrivateWorkContext.from_project(seeded.context),
-            thread_id,
-            run_id,
-        )
-
-        assert failing_purger.calls == 1
         async with factory() as session:
             deleted_run = await session.scalar(
                 select(RunRow).where(
@@ -1101,6 +789,94 @@ async def test_failed_post_commit_purge_does_not_roll_back_single_run_delete(
                     )
                 )
                 == 0
+            )
+            archived = await session.get(SkillRow, seeded.skill_id)
+            assert archived is not None
+            assert archived.status == "archived"
+            assert archived.current_version_id == seeded.skill_version_id
+            assert await session.get(SkillVersionRow, seeded.skill_version_id) is not None
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(SkillVersionFileRow)
+                    .where(
+                        SkillVersionFileRow.skill_version_id == seeded.skill_version_id,
+                    )
+                )
+                == 1
+            )
+            assert (
+                await session.get(
+                    ProjectSkillSecretGenerationRow,
+                    seeded.secret_generation_id,
+                )
+                is not None
+            )
+            state = await session.get(
+                ProjectSkillSecretStateRow,
+                (
+                    seeded.context.project_id,
+                    seeded.skill_id,
+                    seeded.skill_version_id,
+                    "API_KEY",
+                ),
+            )
+            assert state is not None
+            assert state.current_generation_id == seeded.secret_generation_id
+            assert await session.scalar(select(func.count()).select_from(ProjectSkillSecretTombstoneRow).where(ProjectSkillSecretTombstoneRow.skill_id == seeded.skill_id)) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_keeps_run_reference_and_does_not_release_skill_package(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    raw = _RawCheckpointSaver()
+    try:
+        await _install_full_schema(engine)
+        async with factory() as session, session.begin():
+            seeded = await _seed_logical_delete_scope(session)
+            thread_id, run_id = await _add_retained_run(
+                session,
+                seeded,
+                schema_version=4,
+            )
+        await SkillService(factory).delete(
+            seeded.context,
+            seeded.skill_id,
+            expected_asset_version=4,
+        )
+
+        await (
+            ProjectScopedCheckpointer(raw, factory)
+            .for_context(PrivateWorkContext.from_project(seeded.context))
+            .adelete_thread(
+                thread_id,
+                expected_version=1,
+            )
+        )
+
+        assert raw.deleted_threads == []
+        async with factory() as session:
+            thread = await session.get(ThreadMetaRow, thread_id)
+            assert thread is not None
+            assert thread.deleted_at is not None
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(RunSkillVersionRefRow)
+                    .where(
+                        RunSkillVersionRefRow.project_id == seeded.context.project_id,
+                        RunSkillVersionRefRow.owner_user_id == str(seeded.context.user_id),
+                        RunSkillVersionRefRow.thread_id == thread_id,
+                        RunSkillVersionRefRow.run_id == run_id,
+                    )
+                )
+                == 1
             )
             assert await session.get(SkillVersionRow, seeded.skill_version_id) is not None
     finally:

@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 import { describe, expect, rs, test } from "@rstest/core";
 import {
   Children,
@@ -36,10 +33,6 @@ function textContent(node: ReactNode): string {
     : "";
 }
 
-function source(path: string): string {
-  return readFileSync(resolve(process.cwd(), "src", path), "utf8");
-}
-
 describe("Project Skill creation paths", () => {
   test("renders exactly AI Builder and archive upload choices", () => {
     const onImport = rs.fn();
@@ -60,63 +53,6 @@ describe("Project Skill creation paths", () => {
     expect(uploadSelect).toBeTypeOf("function");
     if (typeof uploadSelect === "function") uploadSelect();
     expect(onImport).toHaveBeenCalledTimes(1);
-  });
-
-  test("removes the manual-create component and client contract while preserving version authoring", () => {
-    const adminPage = source(
-      "components/admin/assets/admin-project-asset-page.tsx",
-    );
-    const adminDialogs = source(
-      "components/admin/assets/admin-asset-dialogs.tsx",
-    );
-    const api = source("core/shared-assets/api.ts");
-    const hooks = source("core/shared-assets/hooks.ts");
-    const types = source("core/shared-assets/types.ts");
-    const localeTypes = source("core/i18n/locales/types.ts");
-    const zhCN = source("core/i18n/locales/zh-CN.ts");
-    const enUS = source("core/i18n/locales/en-US.ts");
-
-    for (const [contents, removedNames] of [
-      [adminPage, ["CreateAssetDialog", "useCreateAdminProjectAsset"]],
-      [adminDialogs, ["CreateAssetDialog"]],
-      [api, ["createProjectAsset", "createAdminProjectAsset"]],
-      [hooks, ["useCreateProjectAsset", "useCreateAdminProjectAsset"]],
-      [types, ["CreateAssetInput", "createAssetInputSchema"]],
-      [
-        localeTypes,
-        [
-          "createProjectAsset",
-          "createAssetTitle",
-          "skillCreationDescription",
-          "assetCreationDescription",
-        ],
-      ],
-      [
-        zhCN,
-        [
-          "createProjectAsset",
-          "createAssetTitle",
-          "skillCreationDescription",
-          "assetCreationDescription",
-        ],
-      ],
-      [
-        enUS,
-        [
-          "createProjectAsset",
-          "createAssetTitle",
-          "skillCreationDescription",
-          "assetCreationDescription",
-        ],
-      ],
-    ] as const) {
-      for (const name of removedNames) {
-        expect(contents).not.toMatch(new RegExp(`\\b${name}\\b`, "u"));
-      }
-    }
-
-    expect(adminPage).toContain("useCreateAdminProjectAssetVersion");
-    expect(adminPage).toContain("<CreateVersionDialog");
   });
 
   test("guides only imported Skills with declared secrets to secret setup", () => {

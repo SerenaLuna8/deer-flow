@@ -179,11 +179,13 @@ def _budget_observation(
     observation_id: str = "a" * 64,
     role: str = "lead",
     scope_id: str = "run-budget",
+    budget_scope: str = "run",
 ) -> ToolCallControlObservation:
     return ToolCallBudgetObservation(
         reason_code="tool_budget_exhausted",
         role=role,
         scope_id=scope_id,
+        budget_scope=budget_scope,
         workload_profile="research",
         count_before=199,
         proposed=3,
@@ -263,6 +265,41 @@ async def test_tool_call_control_observation_is_safe_deduplicated_and_precedes_t
     assert "query" not in serialized
     assert "url" not in serialized
     assert "args" not in serialized
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("role", "scope_id", "budget_scope"),
+    [
+        ("lead", "run-budget", "lead"),
+        ("subagent", "subagent-task-1", "subagent_task"),
+    ],
+)
+async def test_subject_scoped_tool_call_budget_observation_names_its_independent_counter(
+    role: str,
+    scope_id: str,
+    budget_scope: str,
+) -> None:
+    store = _RecordingEventStore()
+    journal = RunJournal(
+        "run-budget",
+        "thread-budget",
+        store,
+        flush_threshold=100,
+    )
+
+    journal.record_tool_call_control_observation(
+        _budget_observation(
+            role=role,
+            scope_id=scope_id,
+            budget_scope=budget_scope,
+        ),
+    )
+    await journal.flush()
+
+    payload = store.events[0]["content"]
+    assert payload["schema_version"] == 3
+    assert payload["budget_scope"] == budget_scope
 
 
 @pytest.mark.anyio

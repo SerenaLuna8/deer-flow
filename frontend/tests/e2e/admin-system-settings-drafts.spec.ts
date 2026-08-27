@@ -201,7 +201,7 @@ function systemSettingsCatalog() {
       agent_runtime: {
         section: "agent_runtime",
         revision: 1,
-        schema_version: 5,
+        schema_version: 6,
         effective_revision: 1,
         effect_scope: "new_requests_and_runs",
         updated_at: TIMESTAMP,
@@ -269,7 +269,10 @@ function systemSettingsCatalog() {
               window_size: 20,
             },
           },
-          internal_tool_call_limit: 200,
+          internal_tool_call_limits: {
+            lead_per_run: 200,
+            subagent_per_task: 50,
+          },
           read_before_write: { enabled: true },
           safety_finish_reason: { enabled: true },
           subagents: {
@@ -524,7 +527,7 @@ test("confirms browser Back navigation while a grouped draft is dirty", async ({
   await expect(page).toHaveURL(/\/admin\/settings\/system$/u);
 });
 
-test("edits and retains the shared per-Run internal tool-call limit draft", async ({
+test("edits and retains independent Lead and per-Task internal tool-call limit drafts", async ({
   page,
   baseURL,
 }) => {
@@ -544,8 +547,11 @@ test("edits and retains the shared per-Run internal tool-call limit draft", asyn
     '[data-settings-subsection="run-execution"]',
   );
   const tokenBudget = page.locator('[data-settings-subsection="token-budget"]');
-  const internalToolCallLimit = page.locator(
-    'input[name="agent_runtime.internal_tool_call_limit"]',
+  const leadToolCallLimit = page.locator(
+    'input[name="agent_runtime.internal_tool_call_limits.lead_per_run"]',
+  );
+  const subagentToolCallLimit = page.locator(
+    'input[name="agent_runtime.internal_tool_call_limits.subagent_per_task"]',
   );
   await expect(executionLimits).toContainText(
     "Always enforced independently of the Token budget toggle.",
@@ -555,11 +561,18 @@ test("edits and retains the shared per-Run internal tool-call limit draft", asyn
   );
   await expect(
     executionLimits.locator(
-      'input[name="agent_runtime.internal_tool_call_limit"]',
+      'input[name="agent_runtime.internal_tool_call_limits.lead_per_run"]',
     ),
   ).toHaveCount(1);
   await expect(
-    tokenBudget.locator('input[name="agent_runtime.internal_tool_call_limit"]'),
+    executionLimits.locator(
+      'input[name="agent_runtime.internal_tool_call_limits.subagent_per_task"]',
+    ),
+  ).toHaveCount(1);
+  await expect(
+    tokenBudget.locator(
+      'input[name^="agent_runtime.internal_tool_call_limits"]',
+    ),
   ).toHaveCount(0);
   const executionBox = await executionLimits.boundingBox();
   const tokenBudgetBox = await tokenBudget.boundingBox();
@@ -571,9 +584,18 @@ test("edits and retains the shared per-Run internal tool-call limit draft", asyn
   await expect(
     tokenBudget.locator('input[name="agent_runtime.token_budget.max_tokens"]'),
   ).toBeDisabled();
-  await expect(internalToolCallLimit).toBeEnabled();
-  await expect(internalToolCallLimit).toHaveValue("200");
-  await internalToolCallLimit.fill("240");
+  await expect(executionLimits).toContainText(
+    "The task delegation call itself counts against the Lead Agent limit.",
+  );
+  await expect(executionLimits).toContainText(
+    "Each Sub-Agent Task has its own count; parallel Tasks do not share this limit.",
+  );
+  await expect(leadToolCallLimit).toBeEnabled();
+  await expect(subagentToolCallLimit).toBeEnabled();
+  await expect(leadToolCallLimit).toHaveValue("200");
+  await expect(subagentToolCallLimit).toHaveValue("50");
+  await leadToolCallLimit.fill("240");
+  await subagentToolCallLimit.fill("60");
   await expect(
     page.locator('[data-settings-dirty-marker="run-limits"]'),
   ).toHaveText("Unsaved");
@@ -582,7 +604,8 @@ test("edits and retains the shared per-Run internal tool-call limit draft", asyn
     .locator('[data-settings-destination="assistant-experience"]')
     .click();
   await destination.click();
-  await expect(internalToolCallLimit).toHaveValue("240");
+  await expect(leadToolCallLimit).toHaveValue("240");
+  await expect(subagentToolCallLimit).toHaveValue("60");
 });
 
 test("explains tested-Key clearing and requires re-entry before create", async ({

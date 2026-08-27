@@ -88,7 +88,7 @@ function catalog(): SystemSettingsCatalog {
       agent_runtime: {
         section: "agent_runtime",
         revision: 6,
-        schema_version: 5,
+        schema_version: 6,
         effective_revision: 6,
         effect_scope: "new_requests_and_runs",
         updated_at: TIMESTAMP,
@@ -156,7 +156,10 @@ function catalog(): SystemSettingsCatalog {
               window_size: 20,
             },
           },
-          internal_tool_call_limit: 200,
+          internal_tool_call_limits: {
+            lead_per_run: 200,
+            subagent_per_task: 50,
+          },
           read_before_write: { enabled: true },
           safety_finish_reason: { enabled: true },
           subagents: {
@@ -182,7 +185,7 @@ function catalog(): SystemSettingsCatalog {
 }
 
 describe("admin Memory document settings", () => {
-  test("renders one shared schema v5 internal tool-call limit under Run budget", () => {
+  test("renders independent schema v6 Lead and per-Task tool-call limits under Run budget", () => {
     const english = renderEnglish(
       <AdminSystemSettingsStateView
         activeModels={[]}
@@ -211,14 +214,27 @@ describe("admin Memory document settings", () => {
     );
 
     expect(english).toContain('data-settings-destination="run-limits"');
-    expect(english).toContain('name="agent_runtime.internal_tool_call_limit"');
-    expect(english).toContain("Internal tool-call limit per Run");
     expect(english).toContain(
-      "Lead Agent and all Sub-Agents share this limit within one Run. Each Run is counted independently, and no new internal tool calls are admitted after the limit is reached.",
+      'name="agent_runtime.internal_tool_call_limits.lead_per_run"',
     );
-    expect(chinese).toContain("每个 Run 内部工具调用上限");
+    expect(english).toContain(
+      'name="agent_runtime.internal_tool_call_limits.subagent_per_task"',
+    );
+    expect(english).toContain("Lead Agent internal tool-call limit per Run");
+    expect(english).toContain("Internal tool-call limit per Sub-Agent Task");
+    expect(english).toContain(
+      "The task delegation call itself counts against the Lead Agent limit.",
+    );
+    expect(english).toContain(
+      "Each Sub-Agent Task has its own count; parallel Tasks do not share this limit.",
+    );
+    expect(chinese).toContain("主Agent 工具调用上限");
+    expect(chinese).toContain("子Agent 工具调用上限");
+    expect(chinese).not.toContain("主 Agent 每个 Run 内部工具调用上限");
+    expect(chinese).not.toContain("每个子 Agent Task 内部工具调用上限");
+    expect(chinese).toContain("task 委托调用本身计入主 Agent 上限。");
     expect(chinese).toContain(
-      "同一 Run 内 Lead Agent 与所有子 Agent 共享此上限；不同 Run 独立计数，达到上限后不再准入新的内部工具调用。",
+      "每个子 Agent Task 独立计数；多个并行 Task 互不共享此上限。",
     );
     expect(english).not.toContain(
       'data-settings-destination="tool-call-budget"',
@@ -238,14 +254,19 @@ describe("admin Memory document settings", () => {
       'name="agent_runtime.max_recursion_limit"',
     );
     expect(executionLimits).toContain(
-      'name="agent_runtime.internal_tool_call_limit"',
+      'name="agent_runtime.internal_tool_call_limits.lead_per_run"',
+    );
+    expect(executionLimits).toContain(
+      'name="agent_runtime.internal_tool_call_limits.subagent_per_task"',
     );
     expect(executionLimits).not.toContain("agent_runtime.token_budget");
     expect(tokenBudget).toContain('name="agent_runtime.token_budget.enabled"');
     expect(tokenBudget).toContain(
       'name="agent_runtime.token_budget.max_tokens"',
     );
-    expect(tokenBudget).not.toContain("agent_runtime.internal_tool_call_limit");
+    expect(tokenBudget).not.toContain(
+      "agent_runtime.internal_tool_call_limits",
+    );
     expect(
       english.indexOf('data-settings-subsection="run-execution"'),
     ).toBeLessThan(english.indexOf('data-settings-subsection="token-budget"'));
@@ -278,7 +299,7 @@ describe("admin Memory document settings", () => {
     const data = catalog();
     const runtimeBase = data.sections.agent_runtime.value;
     const runtimeDraft = structuredClone(runtimeBase);
-    runtimeDraft.internal_tool_call_limit += 1;
+    runtimeDraft.internal_tool_call_limits.lead_per_run += 1;
     runtimeDraft.title.max_chars += 1;
 
     expect(
@@ -368,8 +389,6 @@ describe("admin Memory document settings", () => {
 
     expect(html.match(/data-settings-destination="memory"/gu)).toHaveLength(1);
     expect(html).toContain('data-settings-destination="automations"');
-    expect(html).toContain("bg-blue-50 text-blue-600");
-    expect(html).toContain("hover:bg-blue-50");
     expect(html).toContain('data-settings-save-footer="agent_runtime"');
     expect(html).toContain('data-settings-save-footer="memory_document"');
     expect(html).toContain(

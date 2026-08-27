@@ -20,12 +20,13 @@ export type RunTerminalCanonicalAuthority = Readonly<
 export type RunTerminalReconciliationAdapters<CanonicalHistory> = {
   readCurrentAuthority(): RunTerminalCanonicalAuthority | null;
   reconnectStorage: RunMetadataStorage;
+  preserveVisibleProjection(target: RunTerminalCanonicalAuthority): void;
   setControlledThreadId(threadId: string | null): void;
   switchLocalThreadToNull(): void | Promise<void>;
-  refetchCanonicalThread(
+  readCanonicalRun(
     target: RunTerminalCanonicalAuthority,
   ): Promise<CanonicalHistory>;
-  mergeLiveWithCanonicalHistory(
+  commitCanonicalRun(
     target: RunTerminalCanonicalAuthority,
     history: CanonicalHistory,
   ): void | Promise<void>;
@@ -34,6 +35,7 @@ export type RunTerminalReconciliationAdapters<CanonicalHistory> = {
 export type RunTerminalReconciliationStage =
   | "initial"
   | "reconnect-cleared"
+  | "visible-projection-preserved"
   | "controlled-thread-cleared"
   | "local-thread-detached"
   | "canonical-history-refetched"
@@ -147,6 +149,11 @@ export async function reconcileTerminalRun<CanonicalHistory>(
   clearReconnectValue(adapters.reconnectStorage, key, target.runId);
   if (!isCurrent(target, adapters)) return stale("reconnect-cleared");
 
+  adapters.preserveVisibleProjection(target);
+  if (!isCurrent(target, adapters)) {
+    return stale("visible-projection-preserved");
+  }
+
   adapters.setControlledThreadId(null);
   if (!isCurrent(target, adapters)) {
     return stale("controlled-thread-cleared");
@@ -157,7 +164,7 @@ export async function reconcileTerminalRun<CanonicalHistory>(
 
   let history: CanonicalHistory;
   try {
-    history = await adapters.refetchCanonicalThread(target);
+    history = await adapters.readCanonicalRun(target);
   } catch (error) {
     if (!isCurrent(target, adapters)) {
       return stale("canonical-history-refetched");
@@ -174,7 +181,7 @@ export async function reconcileTerminalRun<CanonicalHistory>(
   }
 
   try {
-    await adapters.mergeLiveWithCanonicalHistory(target, history);
+    await adapters.commitCanonicalRun(target, history);
   } catch (error) {
     if (!isCurrent(target, adapters)) return stale("history-merged");
     return { kind: "failed", stage: "history-merge", error };

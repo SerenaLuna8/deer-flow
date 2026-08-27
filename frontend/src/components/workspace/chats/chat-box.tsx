@@ -167,7 +167,7 @@ const ChatBox: React.FC<{
       durableSelectedArtifact &&
       durableSelectedArtifact !== selectedArtifact
     ) {
-      selectArtifact(durableSelectedArtifact, true);
+      selectArtifact(durableSelectedArtifact, { autoSelect: true });
     }
   }, [durableSelectedArtifact, selectArtifact, selectedArtifact]);
 

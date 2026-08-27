@@ -57,7 +57,7 @@ def _audit_hmac_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_postgres_bootstrap_seeds_one_internal_tool_call_limit(
+async def test_postgres_bootstrap_seeds_independent_internal_tool_call_limits(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -71,8 +71,11 @@ async def test_postgres_bootstrap_seeds_one_internal_tool_call_limit(
             )
 
         assert locked.revision == 1
-        assert locked.schema_version == 5
-        assert locked.value.internal_tool_call_limit == 200
+        assert locked.schema_version == 6
+        assert locked.value.internal_tool_call_limits.model_dump(mode="json") == {
+            "lead_per_run": 200,
+            "subagent_per_task": 50,
+        }
         assert locked.value.loop_detection.identical_calls.model_dump(
             mode="json",
         ) == {
@@ -86,7 +89,7 @@ async def test_postgres_bootstrap_seeds_one_internal_tool_call_limit(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_postgres_previous_v4_policy_remains_admissible_after_v5_deploy(
+async def test_postgres_previous_v4_policy_remains_admissible_after_v6_deploy(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -145,7 +148,8 @@ async def test_postgres_previous_v4_policy_remains_admissible_after_v5_deploy(
 
         assert locked.schema_version == 4
         assert isinstance(locked.value, AgentRuntimePolicyValue)
-        assert locked.value.internal_tool_call_limit == 50
+        assert locked.value.internal_tool_call_limits.lead_per_run == 50
+        assert locked.value.internal_tool_call_limits.subagent_per_task == 50
         assert locked.value.vision_bridge.model_name is None
     finally:
         await engine.dispose()
@@ -393,7 +397,7 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
             owner_user_id=str(admin_id),
             thread_id=thread_id,
         )
-        assert materialized_v1_envelope.schema_version == 5
+        assert materialized_v1_envelope.schema_version == 6
         assert materialized_v1_envelope.value == materialized_v1
         assert set(materialized_batch) == {run_one, run_two}
         assert set(materialized_thread) == {run_one, run_two}

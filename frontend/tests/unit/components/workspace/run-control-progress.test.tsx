@@ -107,6 +107,34 @@ function render(
   );
 }
 
+function subjectBudgetObservation(
+  budgetScope: "lead" | "subagent_task",
+  digestCharacter: string,
+): RunControlObservation {
+  const subagentTask = budgetScope === "subagent_task";
+  const hardLimit = subagentTask ? 50 : 200;
+  const event = parseToolCallBudgetEvent({
+    type: "tool_call_budget",
+    schema_version: 3,
+    budget_scope: budgetScope,
+    reason_code: "tool_budget_exhausted",
+    workload_profile: "research",
+    role: subagentTask ? "subagent" : "lead",
+    run_id: RUN_ID,
+    execution_id: subagentTask ? "d".repeat(32) : null,
+    count_before: hardLimit - 1,
+    proposed: 1,
+    admitted: 1,
+    rejected: 0,
+    count_after: hardLimit,
+    hard_limit: hardLimit,
+    disposition: "exhaust_subject",
+    observation_id: digestCharacter.repeat(64),
+  });
+  if (!event) throw new Error(`subject budget fixture rejected: ${budgetScope}`);
+  return event;
+}
+
 describe("RunControlProgress", () => {
   test("distinguishes repeated-call advisory from the hard limit", () => {
     const html = render(
@@ -149,6 +177,20 @@ describe("RunControlProgress", () => {
     expect(english).not.toContain("Run did not finish");
     expect(chinese).toContain("本 Run 不再准入新的内部工具调用");
     expect(warningOnly).toBe("");
+  });
+
+  test("distinguishes the Lead and one Sub-Agent Task tool-call limits", () => {
+    const chinese = render(
+      [
+        subjectBudgetObservation("lead", "a"),
+        subjectBudgetObservation("subagent_task", "b"),
+      ],
+      "zh-CN",
+    );
+
+    expect(chinese).toContain("主 Agent 内部工具调用上限");
+    expect(chinese).toContain("该子 Agent Task 的内部工具调用上限");
+    expect(chinese).not.toContain("本 Run 不再准入新的内部工具调用");
   });
 
   test("shows the Sub-Agent total limit as a distinct progress reason", () => {

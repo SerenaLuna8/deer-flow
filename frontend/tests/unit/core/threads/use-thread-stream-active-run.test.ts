@@ -1,11 +1,15 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test, rs } from "@rstest/core";
 
 import type { RunMetadataStorage } from "@/core/private-work/types";
 import {
   createActiveRunReconnectStorageProxy,
   readActiveRunCatalog,
+  resolveThreadHistoryId,
   selectExactActiveRunOwner,
+  selectExactTerminalDisplayMessages,
   selectExactTerminalReconciliationError,
+  terminalReconciliationResultError,
   type ActiveRunOwnerProjection,
 } from "@/core/threads/use-thread-stream";
 
@@ -45,6 +49,65 @@ function memoryStorage() {
 }
 
 describe("useThreadStream active Run ownership", () => {
+  test("surfaces a blocked terminal reconnect as a retryable reconciliation error", () => {
+    expect(
+      terminalReconciliationResultError({
+        kind: "blocked",
+        reason: "terminal-reconnect-present",
+      })?.message,
+    ).toMatch(/reconnect state changed/i);
+    expect(
+      terminalReconciliationResultError({ kind: "reconciled" }),
+    ).toBeNull();
+  });
+
+  test("shows a terminal display latch only to its exact Run generation", () => {
+    const messages = [
+      { id: "terminal-answer", type: "ai", content: "done" } as Message,
+    ];
+    const authority: ActiveRunOwnerProjection & { runId: string } = {
+      ...SCOPE,
+      threadId: THREAD_ID,
+      runId: RUN_ID,
+      generation: 9,
+    };
+    const latch = { authority, messages };
+
+    expect(
+      selectExactTerminalDisplayMessages(latch, authority, SCOPE, THREAD_ID),
+    ).toBe(messages);
+    expect(
+      selectExactTerminalDisplayMessages(
+        latch,
+        { ...authority, generation: 10 },
+        SCOPE,
+        THREAD_ID,
+      ),
+    ).toBeNull();
+    expect(
+      selectExactTerminalDisplayMessages(
+        latch,
+        authority,
+        { ...SCOPE, projectId: "55555555-5555-4555-8555-555555555555" },
+        THREAD_ID,
+      ),
+    ).toBeNull();
+    expect(
+      selectExactTerminalDisplayMessages(
+        latch,
+        authority,
+        SCOPE,
+        "66666666-6666-4666-8666-666666666666",
+      ),
+    ).toBeNull();
+  });
+
+  test("keeps history bound to the viewed Thread while the SDK stream detaches", () => {
+    expect(resolveThreadHistoryId(THREAD_ID, null)).toBe(THREAD_ID);
+    expect(resolveThreadHistoryId(null, THREAD_ID)).toBe(THREAD_ID);
+    expect(resolveThreadHistoryId(null, null)).toBeNull();
+  });
+
   test("forces the complete scoped Run catalog and returns only strict resolver entries", async () => {
     const firstPage = Array.from({ length: 1000 }, (_, index) =>
       run(index + 1, index === 999 ? "pending" : "success"),

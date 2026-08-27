@@ -12,8 +12,12 @@ from app.private_work.workload_profile import (
 from app.reliability.run_execution.tool_call_control_policy import (
     resolve_run_tool_call_control_policy,
 )
+from app.system_runtime_settings.app_config_projection import (
+    project_agent_runtime_app_config_policy,
+)
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
+    InternalToolCallLimitsPolicy,
     MaterializedAgentRuntimePolicy,
 )
 from deerflow.agents.middlewares.tool_call_control import (
@@ -30,35 +34,70 @@ def _research_kwargs() -> dict[str, object]:
     }
 
 
-def test_runtime_policy_exposes_only_one_internal_tool_call_limit() -> None:
+def test_internal_tool_call_limits_do_not_leak_into_legacy_app_config() -> None:
+    projected = project_agent_runtime_app_config_policy(
+        AgentRuntimePolicyValue(),
+        max_total_subagents=9,
+    )
+
+    assert "internal_tool_call_limits" not in projected
+
+
+def test_runtime_policy_exposes_strict_role_scoped_internal_tool_call_limits() -> None:
     value = AgentRuntimePolicyValue()
 
-    assert value.internal_tool_call_limit == 200
+    assert value.internal_tool_call_limits.model_dump(mode="json") == {
+        "lead_per_run": 200,
+        "subagent_per_task": 50,
+    }
+    assert "internal_tool_call_limit" not in value.model_dump(mode="python")
     assert "tool_call_budget" not in value.model_dump(mode="python")
 
     with pytest.raises(ValidationError):
         AgentRuntimePolicyValue.model_validate(
             {
                 **value.model_dump(mode="python"),
-                "tool_call_budget": {
-                    "profiles": {},
+                "internal_tool_call_limit": 200,
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        AgentRuntimePolicyValue.model_validate(
+            {
+                **value.model_dump(mode="python"),
+                "internal_tool_call_limits": 200,
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        AgentRuntimePolicyValue.model_validate(
+            {
+                **value.model_dump(mode="python"),
+                "internal_tool_call_limits": {
+                    **value.internal_tool_call_limits.model_dump(mode="python"),
+                    "shared_per_run": 200,
                 },
             }
         )
 
 
-def test_run_policy_does_not_select_tool_limit_by_workload_or_role() -> None:
+def test_v6_run_policy_resolves_independent_role_limits() -> None:
     resolved = resolve_run_tool_call_control_policy(
         MaterializedAgentRuntimePolicy(
-            schema_version=5,
-            value=AgentRuntimePolicyValue(internal_tool_call_limit=17),
+            schema_version=6,
+            value=AgentRuntimePolicyValue(
+                internal_tool_call_limits=InternalToolCallLimitsPolicy(
+                    lead_per_run=17,
+                    subagent_per_task=7,
+                ),
+            ),
         ),
         _research_kwargs(),
     )
 
-    assert resolved.graph_profile.policy.internal_tool_call_limit == 17
-    assert resolved.lead is resolved.subagent
-    assert resolved.lead is resolved.graph_profile.policy
+    assert resolved.graph_profile.accounting_mode == "lead_run_subagent_task"
+    assert resolved.lead.internal_tool_call_limit == 17
+    assert resolved.subagent.internal_tool_call_limit == 7
     assert resolved.max_total_subagents == 9
 
 

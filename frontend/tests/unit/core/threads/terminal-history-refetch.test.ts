@@ -4,13 +4,15 @@ import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
-import { getMessageGroups } from "@/core/messages/utils";
 import { messageIdentity } from "@/core/threads/message-projection";
-import { fetchCanonicalThreadHistory } from "@/core/threads/use-thread-history";
+import type { RunMessage } from "@/core/threads/types";
 import {
-  captureTerminalLiveMessages,
-  mergeCanonicalTerminalHistory,
-} from "@/core/threads/use-thread-stream";
+  fetchCanonicalRunHistory,
+  pruneConfirmedTerminalRunFallbacks,
+  projectTerminalRunFallbacks,
+  resolveTerminalRunHistoryCommit,
+} from "@/core/threads/use-thread-history";
+import { captureTerminalLiveMessages } from "@/core/threads/use-thread-stream";
 
 const THREAD_ID = "33333333-3333-4333-8333-333333333333";
 const RUN_ID = "44444444-4444-4444-8444-444444444444";
@@ -37,9 +39,9 @@ beforeEach(() => {
 });
 
 describe("terminal canonical history", () => {
-  test("refetches an explicit target Thread and its complete Run journal", async () => {
+  test("refetches only the exact terminal Run and its complete journal", async () => {
     const signal = new AbortController().signal;
-    const list = rs.fn(async () => [run()]);
+    const get = rs.fn(async () => run());
     mockedFetch
       .mockResolvedValueOnce(
         Response.json({
@@ -70,24 +72,21 @@ describe("terminal canonical history", () => {
         }),
       );
 
-    const snapshot = await fetchCanonicalThreadHistory(
-      { runs: { list } },
+    const snapshot = await fetchCanonicalRunHistory(
+      { runs: { get } },
       "/api/projects/22222222-2222-4222-8222-222222222222/private-work",
       THREAD_ID,
+      RUN_ID,
       signal,
     );
 
     expect(snapshot.threadId).toBe(THREAD_ID);
-    expect(snapshot.runs.map((entry) => entry.run_id)).toEqual([RUN_ID]);
-    expect(snapshot.messages.map((message) => message.id)).toEqual([
+    expect(snapshot.run.run_id).toBe(RUN_ID);
+    expect(snapshot.rows.map((row) => row.content.id)).toEqual([
       "question",
       "answer",
     ]);
-    expect(list).toHaveBeenCalledWith(THREAD_ID, {
-      limit: 1000,
-      offset: 0,
-      signal,
-    });
+    expect(get).toHaveBeenCalledWith(THREAD_ID, RUN_ID, { signal });
     expect(mockedFetch).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining(`/threads/${THREAD_ID}/runs/${RUN_ID}/messages`),
@@ -96,118 +95,237 @@ describe("terminal canonical history", () => {
     expect(mockedFetch.mock.calls[1]![0]).toContain("before_seq=2");
   });
 
-  test("keeps canonical payload/order and appends only genuinely missing live messages", () => {
-    const canonical = [
-      { id: "question", type: "human", content: "question" },
-      { id: "answer", type: "ai", content: "canonical final" },
-    ] as Message[];
-    const live = [
-      { id: "answer", type: "ai", content: "stale partial" },
-      { id: "late-tool", type: "tool", content: "persisting" },
-    ] as Message[];
+  test("rejects a Run that canonical REST has not confirmed as terminal", async () => {
+    const signal = new AbortController().signal;
+    const get = rs.fn(async () => ({ ...run(), status: "running" }));
 
-    const merged = mergeCanonicalTerminalHistory(canonical, live);
-
-    expect(merged.map((message) => message.id)).toEqual([
-      "question",
-      "answer",
-      "late-tool",
-    ]);
-    expect(merged[1]?.content).toBe("canonical final");
+    await expect(
+      fetchCanonicalRunHistory(
+        { runs: { get } },
+        "/api/projects/22222222-2222-4222-8222-222222222222/private-work",
+        THREAD_ID,
+        RUN_ID,
+        signal,
+      ),
+    ).rejects.toThrow("Canonical REST did not confirm the terminal Run.");
+    expect(mockedFetch).not.toHaveBeenCalled();
   });
 
-  test("keeps run-scoped clarification cards unique and before the terminal answer", () => {
-    const firstRunId = "55555555-5555-4555-8555-555555555555";
-    const secondRunId = "66666666-6666-4666-8666-666666666666";
-    const clarification = (callId: string, question: string) => ({
-      id: `clarification:${callId}`,
-      type: "tool",
-      name: "ask_clarification",
-      tool_call_id: callId,
-      content: question,
-      artifact: {
-        human_input: {
-          version: 1,
-          kind: "human_input_request",
-          source: "ask_clarification",
-          request_id: `clarification:${callId}`,
-          tool_call_id: callId,
-          question,
-          input_mode: "text",
+  test("prepares canonical payloads with only captured-only messages as a session fallback", () => {
+    const canonicalRows = [
+      {
+        run_id: RUN_ID,
+        seq: "1",
+        content: {
+          id: "commit-question",
+          type: "human",
+          content: "canonical question",
         },
-      },
-    });
-    const firstClarification = clarification("call-stage-1", "Stage 1?");
-    const secondClarification = clarification("call-stage-2", "Stage 2?");
-    const canonical = [
-      {
-        id: "first-run-input",
-        type: "human",
-        content: "Create the presentation",
-        run_id: firstRunId,
-        additional_kwargs: { run_id: firstRunId },
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-08-24T00:00:01Z",
       },
       {
-        id: "first-clarification-call",
-        type: "ai",
-        content: "",
-        run_id: firstRunId,
-        tool_calls: [
-          {
-            id: "call-stage-1",
-            name: "ask_clarification",
-            args: { question: "Stage 1?" },
-          },
-        ],
-      },
-      { ...firstClarification, run_id: firstRunId },
-      {
-        id: "first-clarification-answer",
-        type: "human",
-        content: "Stage 1 accepted",
-        run_id: secondRunId,
-        additional_kwargs: {
-          hide_from_ui: true,
-          run_id: secondRunId,
+        run_id: RUN_ID,
+        seq: "3",
+        content: {
+          id: "commit-final",
+          type: "ai",
+          content: "canonical final",
         },
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-08-24T00:00:03Z",
+      },
+    ] as RunMessage[];
+    const captured = [
+      {
+        id: "commit-question",
+        type: "human",
+        content: "stale question",
+        run_id: RUN_ID,
       },
       {
-        id: "second-clarification-call",
+        id: "commit-process",
         type: "ai",
-        content: "",
-        run_id: secondRunId,
-        tool_calls: [
-          {
-            id: "call-stage-2",
-            name: "ask_clarification",
-            args: { question: "Stage 2?" },
-          },
-        ],
+        content: "captured process",
+        run_id: RUN_ID,
       },
-      { ...secondClarification, run_id: secondRunId },
       {
-        id: "terminal-answer",
+        id: "commit-final",
         type: "ai",
-        content: "Presentation complete",
-        run_id: secondRunId,
+        content: "stale final",
+        run_id: RUN_ID,
+      },
+      {
+        id: "other-run-message",
+        type: "ai",
+        content: "must stay outside the exact commit",
+        run_id: "55555555-5555-4555-8555-555555555555",
       },
     ] as unknown as Message[];
-    const liveCheckpoint = canonical.map((message) => {
-      const unscoped = { ...message } as Message & {
-        run_id?: string;
-      };
-      delete unscoped.run_id;
-      return unscoped;
+
+    const result = resolveTerminalRunHistoryCommit({
+      boundThreadId: THREAD_ID,
+      snapshot: {
+        threadId: THREAD_ID,
+        run: run() as never,
+        rows: canonicalRows,
+      },
+      capturedMessages: captured,
     });
 
-    const merged = mergeCanonicalTerminalHistory(canonical, liveCheckpoint);
-    const groups = getMessageGroups(merged);
+    expect(result.kind).toBe("committed");
+    if (result.kind !== "committed") return;
+    expect(result.messages.map((message) => message.id)).toEqual([
+      "commit-question",
+      "commit-process",
+      "commit-final",
+    ]);
+    expect(result.messages[0]?.content).toBe("canonical question");
+    expect(result.messages[2]?.content).toBe("canonical final");
+    expect(result.capturedFallback.map((message) => message.id)).toEqual([
+      "commit-question",
+      "commit-process",
+      "commit-final",
+    ]);
+  });
 
+  test("projects a captured fallback inside only its exact Run window", () => {
+    const olderRunId = "55555555-5555-4555-8555-555555555555";
+    const canonicalHistory = [
+      {
+        id: "older-answer",
+        type: "ai",
+        content: "older",
+        run_id: olderRunId,
+      },
+      {
+        id: "window-question",
+        type: "human",
+        content: "canonical question",
+        run_id: RUN_ID,
+      },
+      {
+        id: "window-final",
+        type: "ai",
+        content: "canonical final",
+        run_id: RUN_ID,
+      },
+    ] as unknown as Message[];
+    const capturedFallbacks = new Map<string, Message[]>([
+      [
+        RUN_ID,
+        [
+          {
+            id: "window-question",
+            type: "human",
+            content: "stale question",
+            run_id: RUN_ID,
+          },
+          {
+            id: "window-process",
+            type: "ai",
+            content: "captured process",
+            run_id: RUN_ID,
+          },
+          {
+            id: "window-final",
+            type: "ai",
+            content: "stale final",
+            run_id: RUN_ID,
+          },
+        ] as unknown as Message[],
+      ],
+    ]);
+    const olderRun = {
+      ...run(),
+      run_id: olderRunId,
+      created_at: "2026-08-23T00:00:00Z",
+      updated_at: "2026-08-23T00:00:02Z",
+    };
+
+    const messages = projectTerminalRunFallbacks(
+      canonicalHistory,
+      capturedFallbacks,
+      [run() as never, olderRun as never],
+      new Set(),
+    );
+
+    expect(messages.map((message) => message.id)).toEqual([
+      "older-answer",
+      "window-question",
+      "window-process",
+      "window-final",
+    ]);
+    expect(messages[1]?.content).toBe("canonical question");
+    expect(messages[3]?.content).toBe("canonical final");
+  });
+
+  test("does not guess where to place a captured-only projection without a shared anchor", () => {
+    expect(() =>
+      resolveTerminalRunHistoryCommit({
+        boundThreadId: THREAD_ID,
+        snapshot: {
+          threadId: THREAD_ID,
+          run: run() as never,
+          rows: [
+            {
+              run_id: RUN_ID,
+              seq: "2",
+              content: {
+                id: "unanchored-canonical-final",
+                type: "ai",
+                content: "canonical final",
+              },
+              metadata: { caller: "lead_agent" },
+              created_at: "2026-08-24T00:00:02Z",
+            },
+          ],
+        },
+        capturedMessages: [
+          {
+            id: "unanchored-captured-process",
+            type: "ai",
+            content: "captured process",
+            run_id: RUN_ID,
+          } as Message,
+        ],
+      }),
+    ).toThrow("Captured terminal messages have no canonical anchor.");
+  });
+
+  test("rejects a late commit after the history hook has switched Threads", () => {
     expect(
-      groups.filter((group) => group.type === "assistant:clarification"),
-    ).toHaveLength(2);
-    expect(groups.at(-1)?.type).toBe("assistant");
-    expect(merged).toEqual(canonical);
+      resolveTerminalRunHistoryCommit({
+        boundThreadId: "66666666-6666-4666-8666-666666666666",
+        snapshot: {
+          threadId: THREAD_ID,
+          run: run() as never,
+          rows: [],
+        },
+        capturedMessages: [],
+      }),
+    ).toEqual({ kind: "stale" });
+  });
+
+  test("releases session fallbacks after canonical absorption or Run supersession", () => {
+    const absorbedRunId = RUN_ID;
+    const supersededRunId = "77777777-7777-4777-8777-777777777777";
+    const pendingRunId = "88888888-8888-4888-8888-888888888888";
+    const message = (id: string, runId: string) =>
+      ({ id, type: "ai", content: id, run_id: runId }) as Message;
+    const fallbacks = new Map<string, Message[]>([
+      [absorbedRunId, [message("absorbed", absorbedRunId)]],
+      [supersededRunId, [message("superseded", supersededRunId)]],
+      [pendingRunId, [message("pending", pendingRunId)]],
+    ]);
+
+    const remaining = pruneConfirmedTerminalRunFallbacks(
+      fallbacks,
+      [message("absorbed", absorbedRunId)],
+      new Set([supersededRunId]),
+    );
+
+    expect([...remaining.keys()]).toEqual([pendingRunId]);
   });
 
   test("keeps reused tool-call ids isolated by checkpoint Run boundaries", () => {

@@ -2398,6 +2398,13 @@ export const zhCN: Translations = {
       toolBudgetExhaustedTitle: "已达到本 Run 的内部工具调用上限",
       toolBudgetExhaustedDescription:
         "本 Run 不再准入新的内部工具调用；Agent 可基于已经收集的证据完成结果。",
+      leadToolBudgetExhaustedTitle: "已达到主 Agent 内部工具调用上限",
+      leadToolBudgetExhaustedDescription:
+        "主 Agent 不再准入新的内部工具调用；各个已启动的子 Agent Task 仍使用自己的独立额度。",
+      subagentTaskToolBudgetExhaustedTitle:
+        "已达到该子 Agent Task 的内部工具调用上限",
+      subagentTaskToolBudgetExhaustedDescription:
+        "只有该子 Agent Task 不再准入新的内部工具调用；主 Agent 与其他子 Agent Task 的额度不受影响。",
       subagentTotalLimitTitle: "已达到 Sub-Agent 委托总数上限",
       subagentTotalLimitDescription:
         "本次运行不能再准入新的 Sub-Agent Task；Lead Agent 可继续使用已经收集的结果。",
@@ -2608,6 +2615,7 @@ export const zhCN: Translations = {
 
   subtasks: {
     subtask: "子任务",
+    unknown: "子任务状态待确认",
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",
@@ -2685,7 +2693,6 @@ export const zhCN: Translations = {
       fraction: "百分比触发条件",
       messages: "消息数触发条件",
     },
-    tokens: (value: string) => `${value} Tokens`,
     messages: (count: number) => `${count.toLocaleString("zh-CN")} 条消息`,
   },
 

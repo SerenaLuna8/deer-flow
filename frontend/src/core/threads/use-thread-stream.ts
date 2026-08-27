@@ -156,7 +156,7 @@ import {
 import type { AgentThread, AgentThreadState } from "./types";
 import {
   useThreadHistory,
-  type CanonicalThreadHistory,
+  type CanonicalRunHistory,
 } from "./use-thread-history";
 
 export type ToolEndEvent = {
@@ -186,6 +186,11 @@ type ActiveRunResolverEntry = {
 type TerminalReconciliationFailure = Readonly<{
   authority: RunTerminalCanonicalAuthority;
   error: Error;
+}>;
+
+type TerminalDisplayLatch = Readonly<{
+  authority: RunTerminalCanonicalAuthority;
+  messages: Message[];
 }>;
 
 export async function readActiveRunCatalog(
@@ -259,25 +264,23 @@ export function selectExactTerminalReconciliationError(
     : null;
 }
 
-export function mergeCanonicalTerminalHistory(
-  canonicalMessages: Message[],
-  liveMessages: Message[],
-): Message[] {
-  const scopedLiveMessages =
-    scopeCheckpointMessagesByKnownRunBoundaries(liveMessages);
-  const canonicalIdentities = new Set(
-    canonicalMessages
-      .map(messageIdentity)
-      .filter((identity): identity is string => identity !== undefined),
-  );
-  const missingLiveMessages = scopedLiveMessages.filter((message) => {
-    const identity = messageIdentity(message);
-    return identity === undefined || !canonicalIdentities.has(identity);
-  });
-  return dedupeMessagesByIdentity([
-    ...canonicalMessages,
-    ...missingLiveMessages,
-  ]);
+export function selectExactTerminalDisplayMessages(
+  latch: TerminalDisplayLatch | null,
+  projection: ActiveRunOwnerProjection | null,
+  scope: ProjectClientScope,
+  threadId: string | null | undefined,
+): Message[] | null {
+  return latch &&
+    projection?.accountId === latch.authority.accountId &&
+    projection.projectId === latch.authority.projectId &&
+    projection.threadId === latch.authority.threadId &&
+    projection.runId === latch.authority.runId &&
+    projection.generation === latch.authority.generation &&
+    scope.accountId === latch.authority.accountId &&
+    scope.projectId === latch.authority.projectId &&
+    threadId === latch.authority.threadId
+    ? latch.messages
+    : null;
 }
 
 export function captureTerminalLiveMessages(
@@ -436,6 +439,13 @@ export function useProjectedThreadMessages(
   );
 }
 
+export function resolveThreadHistoryId(
+  currentViewThreadId: string | null | undefined,
+  controlledStreamThreadId: string | null | undefined,
+): string | null {
+  return currentViewThreadId ?? controlledStreamThreadId ?? null;
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -463,6 +473,20 @@ function terminalReconciliationError(error: unknown): Error {
   return error instanceof Error
     ? error
     : new Error(getStreamErrorMessage(error));
+}
+
+export function terminalReconciliationResultError(
+  result: RunTerminalReconciliationResult,
+): Error | null {
+  if (result.kind === "failed") {
+    return terminalReconciliationError(result.error);
+  }
+  if (result.kind === "blocked") {
+    return new Error(
+      "Terminal Run reconnect state changed during reconciliation. Retry history to continue.",
+    );
+  }
+  return null;
 }
 
 async function readResponseErrorMessage(
@@ -547,6 +571,7 @@ export function useThreadStream({
   const activeRunOwnerProjectionRef = useRef<ActiveRunOwnerProjection | null>(
     null,
   );
+  const terminalDisplayLatchRef = useRef<TerminalDisplayLatch | null>(null);
   const terminalReconciliationFailureRef =
     useRef<TerminalReconciliationFailure | null>(null);
   const [terminalReconciliationFailure, setTerminalReconciliationFailure] =
@@ -560,6 +585,17 @@ export function useThreadStream({
     (projection: ActiveRunOwnerProjection | null) => {
       activeRunOwnerProjectionRef.current = projection;
       setActiveRunOwnerProjection(projection);
+      const latch = terminalDisplayLatchRef.current;
+      if (
+        latch &&
+        (projection?.accountId !== latch.authority.accountId ||
+          projection.projectId !== latch.authority.projectId ||
+          projection.threadId !== latch.authority.threadId ||
+          projection.runId !== latch.authority.runId ||
+          projection.generation !== latch.authority.generation)
+      ) {
+        terminalDisplayLatchRef.current = null;
+      }
       const failure = terminalReconciliationFailureRef.current;
       if (
         failure &&
@@ -666,6 +702,17 @@ export function useThreadStream({
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const messagesRef = useRef<Message[]>([]);
+  const visibleProjectionRef = useRef<{
+    accountId: string;
+    projectId: string;
+    threadId: string | null;
+    messages: Message[];
+  }>({
+    accountId: privateWork.scope.accountId,
+    projectId: privateWork.scope.projectId,
+    threadId: currentViewThreadId,
+    messages: [],
+  });
   const currentRunIdRef = useRef<string | null>(null);
   const currentRunThreadIdRef = useRef<string | null>(null);
   const [runControlProgress, setRunControlProgress] = useState(
@@ -736,6 +783,13 @@ export function useThreadStream({
     };
   }, []);
 
+  // Terminal reconciliation detaches the SDK transport, not the displayed
+  // Thread's durable history. Keeping these identities separate preserves the
+  // loaded history window and scroll position while canonical REST settles.
+  const historyThreadId = resolveThreadHistoryId(
+    currentViewThreadId,
+    onStreamThreadId,
+  );
   const {
     messages: history,
     runs: historyRuns,
@@ -745,8 +799,9 @@ export function useThreadStream({
     error: historyError,
     retry: retryCanonicalHistory,
     appendMessages,
-    refetchCanonicalThread,
-  } = useThreadHistory(onStreamThreadId ?? "", {
+    refetchCanonicalRun,
+    commitTerminalRun,
+  } = useThreadHistory(historyThreadId ?? "", {
     enabled: streamEnabled,
     pendingSupersededRunIds,
     privateWork,
@@ -1791,6 +1846,7 @@ export function useThreadStream({
     runBaselinePreparedRef.current = false;
     pendingArchivedMessagesRef.current = [];
     pendingArchiveThreadIdRef.current = null;
+    terminalDisplayLatchRef.current = null;
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
     preparedReplayAttemptRef.current = null;
@@ -1837,11 +1893,17 @@ export function useThreadStream({
   // buffer stays transient and never resurrects a message that history later
   // filters out (e.g. a superseded run) (#3825).
   useEffect(() => {
+    if (
+      pendingArchiveThreadIdRef.current !== null &&
+      pendingArchiveThreadIdRef.current !== historyThreadId
+    ) {
+      return;
+    }
     pendingArchivedMessagesRef.current = pruneConfirmedArchivedMessages(
       pendingArchivedMessagesRef.current,
       visibleHistory,
     );
-  }, [visibleHistory]);
+  }, [historyThreadId, visibleHistory]);
 
   const reconcileTerminalRun = useCallback(
     (
@@ -1893,13 +1955,19 @@ export function useThreadStream({
         });
       }
 
-      const capturedLiveMessages = captureTerminalLiveMessages(
-        pendingArchivedMessagesRef.current,
-        messagesRef.current,
-      );
+      const visibleProjection = visibleProjectionRef.current;
+      const capturedVisibleMessages =
+        visibleProjection.accountId === target.accountId &&
+        visibleProjection.projectId === target.projectId &&
+        visibleProjection.threadId === target.threadId
+          ? captureTerminalLiveMessages(
+              pendingArchivedMessagesRef.current,
+              visibleProjection.messages,
+            )
+          : [];
       const promise = Promise.resolve()
         .then(() =>
-          reconcileTerminalRunProjection<CanonicalThreadHistory>(target, {
+          reconcileTerminalRunProjection<CanonicalRunHistory>(target, {
             readCurrentAuthority() {
               if (
                 !streamOwnerMountedRef.current ||
@@ -1919,47 +1987,48 @@ export function useThreadStream({
               };
             },
             reconnectStorage: resolverEntry.generation.reconnectStorage,
-            setControlledThreadId: setOnStreamThreadId,
+            preserveVisibleProjection(authority) {
+              terminalDisplayLatchRef.current = {
+                authority,
+                messages: capturedVisibleMessages,
+              };
+            },
+            setControlledThreadId(controlledThreadId) {
+              if (controlledThreadId !== null) {
+                const latch = terminalDisplayLatchRef.current;
+                if (
+                  latch?.authority.accountId === target.accountId &&
+                  latch.authority.projectId === target.projectId &&
+                  latch.authority.threadId === target.threadId &&
+                  latch.authority.runId === target.runId &&
+                  latch.authority.generation === target.generation
+                ) {
+                  terminalDisplayLatchRef.current = null;
+                }
+              }
+              setOnStreamThreadId(controlledThreadId);
+            },
             switchLocalThreadToNull() {
               thread.switchThread(null);
             },
-            async refetchCanonicalThread(authority) {
-              const snapshot = await refetchCanonicalThread(authority.threadId);
-              const terminalRun = snapshot.runs.find(
-                (run) => run.run_id === authority.runId,
+            async readCanonicalRun(authority) {
+              return refetchCanonicalRun(authority.threadId, authority.runId);
+            },
+            async commitCanonicalRun(_authority, snapshot) {
+              const commit = await commitTerminalRun(
+                snapshot,
+                capturedVisibleMessages,
               );
-              if (
-                !terminalRun ||
-                !["success", "error", "timeout", "interrupted"].includes(
-                  terminalRun.status,
-                )
-              ) {
+              if (commit.kind === "stale") {
                 throw new Error(
-                  "Canonical Thread history did not confirm the terminal Run.",
+                  "Terminal Run history target changed before commit.",
                 );
               }
-              return snapshot;
-            },
-            mergeLiveWithCanonicalHistory(authority, snapshot) {
-              const merged = mergeCanonicalTerminalHistory(
-                snapshot.messages,
-                capturedLiveMessages,
-              );
-              pendingArchivedMessagesRef.current = merged;
-              pendingArchiveThreadIdRef.current = authority.threadId;
-              messagesRef.current = merged;
-              queryClient.setQueryData<Run[]>(
-                scopedThreadQueryKey(
-                  privateWork.scope,
-                  "thread",
-                  authority.threadId,
-                ),
-                snapshot.runs,
-              );
             },
           }),
         )
         .then((result) => {
+          const reconciliationError = terminalReconciliationResultError(result);
           if (result.kind === "reconciled") {
             const projection = activeRunOwnerProjectionRef.current;
             if (
@@ -1971,10 +2040,10 @@ export function useThreadStream({
               currentRunThreadIdRef.current = null;
               setLiveMessagesThreadId(null);
             }
-          } else if (result.kind === "failed") {
+          } else if (reconciliationError) {
             const failure: TerminalReconciliationFailure = {
               authority: target,
-              error: terminalReconciliationError(result.error),
+              error: reconciliationError,
             };
             terminalReconciliationFailureRef.current = failure;
             setTerminalReconciliationFailure(failure);
@@ -1994,10 +2063,10 @@ export function useThreadStream({
       return promise;
     },
     [
+      commitTerminalRun,
       privateWork,
       publishActiveRunOwnerProjection,
-      queryClient,
-      refetchCanonicalThread,
+      refetchCanonicalRun,
       thread,
     ],
   );
@@ -2961,12 +3030,12 @@ export function useThreadStream({
       ),
     [explicitActiveRunId, persistedMessages, thread.isLoading],
   );
-  // The three refs below are replaced, never mutated in place. Their identities
+  // The bridge refs below are replaced, never mutated in place. Their values
   // therefore form safe semantic dependencies for the projection memo.
   const pendingArchivedMessages = pendingArchivedMessagesRef.current;
   const pendingArchiveThreadId = pendingArchiveThreadIdRef.current;
   const runBaselineMessageIds = currentRunBaselineMessageIdsRef.current;
-  const mergedMessages = useProjectedThreadMessages({
+  const projectedMessages = useProjectedThreadMessages({
     threadId,
     visibleHistory,
     pendingArchivedMessages,
@@ -2978,6 +3047,23 @@ export function useThreadStream({
     visibleOptimisticMessages,
     historyRuns,
   });
+  const terminalDisplayMessages = selectExactTerminalDisplayMessages(
+    terminalDisplayLatchRef.current,
+    activeRunOwnerProjection,
+    privateWork.scope,
+    currentViewThreadId,
+  );
+  const terminalDisplayLatched = terminalDisplayMessages !== null;
+  const mergedMessages = terminalDisplayMessages ?? projectedMessages;
+  // Terminal reconciliation synchronously clears the SDK store while durable
+  // history settles independently. Keep the exact rendered projection
+  // available to its pre-detach bridge so React never observes an empty frame.
+  visibleProjectionRef.current = {
+    accountId: privateWork.scope.accountId,
+    projectId: privateWork.scope.projectId,
+    threadId: currentViewThreadId,
+    messages: mergedMessages,
+  };
   const pendingUsageBaselineMessageIds =
     pendingUsageBaselineMessageIdsRef.current;
   const pendingUsageMessages = useMemo(
@@ -3043,6 +3129,7 @@ export function useThreadStream({
   return {
     thread: mergedThread,
     boundThreadId: onStreamThreadId ?? null,
+    terminalDisplayLatched,
     activeRunId: exactActiveRunOwner.activeRunId,
     activeRunResolverGeneration: exactActiveRunOwner.resolverGeneration,
     pendingUsageMessages,

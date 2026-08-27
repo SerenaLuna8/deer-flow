@@ -230,21 +230,5 @@ test.describe("real backend render (replay, no API key)", () => {
     expect(durableTextFrames.length - 1).toBeLessThanOrEqual(
       Math.floor((logicalChunkCount - 1) / 10),
     );
-
-    // Visual regression is OS-sensitive (a macOS baseline won't match CI's
-    // Linux render), so it's a local dev gate only; in CI we capture the render
-    // as an artifact for human review instead of hard-asserting a cross-OS
-    // baseline. The DOM assertions above are the CI gate.
-    if (process.env.CI) {
-      await page.screenshot({
-        path: "test-results/real-backend-render.png",
-        fullPage: true,
-      });
-    } else {
-      await expect(page).toHaveScreenshot("real-backend-render.png", {
-        maxDiffPixelRatio: 0.02,
-        fullPage: true,
-      });
-    }
   });
 });

@@ -527,12 +527,6 @@ _ACTION_CONTRACTS[AuditAction.PURGE_COMPLETED] = AuditActionContract(
             metadata_equals=(("resource_kind", "former_owner"),),
         ),
         _variant(
-            AuditScope.PROJECT,
-            "process",
-            processes=(AuditProcess.GATEWAY, AuditProcess.WORKER),
-            metadata_equals=(("resource_kind", "archived_skill"),),
-        ),
-        _variant(
             AuditScope.PLATFORM,
             "process",
             processes=(AuditProcess.WORKER,),
@@ -1189,7 +1183,6 @@ class PurgeAuditMetadata(_AuditMetadata):
         "account",
         "file",
         "former_owner",
-        "archived_skill",
     ]
     purged_count: StrictInt = Field(ge=0)
 

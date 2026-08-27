@@ -251,6 +251,29 @@ async function mockProjectMemoryRoute(
   return { memoryRequests };
 }
 
+test("keeps the account menu usable after collapsing the project sidebar", async ({
+  page,
+}) => {
+  await mockProjectMemoryRoute(page);
+  await page.goto("/projects/alpha/memory");
+
+  const projectMenu = page.getByRole("complementary", {
+    name: "Project menu",
+  });
+  await projectMenu
+    .getByRole("button", { name: "Collapse project menu" })
+    .click();
+
+  await expect(projectMenu).toHaveAttribute("data-state", "collapsed");
+  const accountMenu = projectMenu.getByRole("button", { name: "Account" });
+  await expect(accountMenu).toBeVisible();
+  await expect(accountMenu).toBeInViewport();
+  await accountMenu.click();
+  await expect(
+    page.getByRole("menuitem", { name: "System settings" }),
+  ).toBeVisible();
+});
+
 test("the Memory document page organizes, diffs and restores versions", async ({
   page,
 }) => {

@@ -439,9 +439,15 @@ def test_legacy_policy_without_workload_profile_is_interactive() -> None:
     assert effective_run_workload_profile_from_kwargs({}, policy_schema_version=3) == EffectiveRunWorkloadProfile(name="interactive")
 
 
-def test_v4_policy_requires_a_frozen_workload_profile() -> None:
+@pytest.mark.parametrize("policy_schema_version", [4, 5, 6])
+def test_current_workload_aware_policy_requires_a_frozen_workload_profile(
+    policy_schema_version: int,
+) -> None:
     with pytest.raises(RunWorkloadProfileUnsupported):
-        effective_run_workload_profile_from_kwargs({}, policy_schema_version=4)
+        effective_run_workload_profile_from_kwargs(
+            {},
+            policy_schema_version=policy_schema_version,
+        )
 
 
 def test_legacy_policy_cannot_claim_a_research_workload_profile() -> None:
@@ -459,7 +465,7 @@ def test_legacy_policy_cannot_claim_a_research_workload_profile() -> None:
         )
 
 
-@pytest.mark.parametrize("policy_schema_version", [1, 6, True])
+@pytest.mark.parametrize("policy_schema_version", [1, 7, True])
 def test_unknown_policy_schema_version_fails_closed(
     policy_schema_version: object,
 ) -> None:
@@ -501,7 +507,7 @@ def test_malformed_frozen_workload_profile_fails_closed(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_v5_freezes_workload_and_continuation_inherits_source_effective(
+async def test_postgres_v6_freezes_workload_and_continuation_inherits_source_effective(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -591,7 +597,7 @@ async def test_postgres_v5_freezes_workload_and_continuation_inherits_source_eff
         assert set(by_run) == {source_run_id, continuation_run_id}
         source_kwargs, source_schema = by_run[source_run_id]
         continuation_kwargs, continuation_schema = by_run[continuation_run_id]
-        assert source_schema == continuation_schema == 5
+        assert source_schema == continuation_schema == 6
         assert parse_persisted_run_workload_profile(source_kwargs[RUN_WORKLOAD_PROFILE_KWARG]) == (
             RequestedRunWorkloadProfile(name="research"),
             EffectiveRunWorkloadProfile(name="research"),

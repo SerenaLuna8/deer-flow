@@ -56,12 +56,10 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_call_control import (
     FixedToolCallControlScope,
+    GraphToolCallControlTopology,
     PerInvocationToolCallControlScope,
     ResolvedGraphToolCallControlProfile,
-    RunToolCallLimitAuthority,
-    ToolCallControlBinding,
     ToolCallControlObserver,
-    build_tool_call_control,
     default_graph_tool_call_control_profile,
 )
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
@@ -395,7 +393,7 @@ def build_middlewares(
         resolved_max_concurrent_subagents: Server-resolved per-batch limit.
         resolved_max_total_subagents: Server-resolved per-execution delegation
             total. It remains owned by ``SubagentLimitMiddleware``.
-        tool_call_control: The already-bound repeated-call and shared Run
+        tool_call_control: The already-bound repeated-call and scoped
             tool-call-limit Adapter for this graph execution profile.
 
     Returns:
@@ -735,19 +733,12 @@ def _make_lead_agent(
     else:
         configured_run_id = cfg.get("run_id")
         control_scope = FixedToolCallControlScope(configured_run_id) if isinstance(configured_run_id, str) and configured_run_id else PerInvocationToolCallControlScope()
-    tool_call_limit_authority = RunToolCallLimitAuthority(
-        hard_limit=tool_call_control_profile.policy.internal_tool_call_limit,
+    tool_call_control_topology = GraphToolCallControlTopology(
+        profile=tool_call_control_profile,
+        lead_scope=control_scope,
     )
-    tool_call_control = build_tool_call_control(
-        tool_call_control_profile.lead,
-        ToolCallControlBinding(
-            role="lead",
-            scope=control_scope,
-            workload_profile=tool_call_control_profile.workload_profile,
-            observer=tool_call_control_observer,
-            limit_authority=tool_call_limit_authority,
-            limit_scope=control_scope,
-        ),
+    tool_call_control = tool_call_control_topology.build_lead(
+        observer=tool_call_control_observer,
     )
     agent_config = load_agent_config(agent_name) if private_runtime is None else None
     agent_definition_model_settings = getattr(private_runtime, "model_settings", None) if private_runtime is not None else getattr(agent_config, "model_settings", None)
@@ -1068,10 +1059,8 @@ def _make_lead_agent(
         final_tools,
         ParentExecutionBindingFactory(
             parent_profile,
-            tool_call_control_profile=tool_call_control_profile,
+            tool_call_control_topology=tool_call_control_topology,
             tool_call_control_observer=tool_call_control_observer,
-            tool_call_limit_authority=tool_call_limit_authority,
-            tool_call_limit_scope=control_scope,
         ),
     )
     configured_run_id = cfg.get("run_id")

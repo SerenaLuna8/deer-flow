@@ -11,6 +11,7 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
@@ -1029,6 +1030,9 @@ class PrivateFileService:
         scope: PrivateResourceScope,
         source_thread_id: str,
         target_thread_id: str,
+        *,
+        expected_target_created_at: datetime,
+        expected_target_deleted_at: datetime,
     ) -> None:
         del source_thread_id
         try:
@@ -1050,15 +1054,20 @@ class PrivateFileService:
             )
             if project is None or membership is None:
                 raise PrivateWorkUnavailable("branch-authority-rollback")
-            await session.execute(
+            target = await session.scalar(
                 select(ThreadMetaRow.thread_id)
                 .where(
                     ThreadMetaRow.project_id == project_id,
                     ThreadMetaRow.owner_user_id == owner_user_id,
                     ThreadMetaRow.thread_id == target_thread_id,
+                    ThreadMetaRow.created_at == expected_target_created_at,
+                    ThreadMetaRow.deleted_at == expected_target_deleted_at,
+                    ThreadMetaRow.checkpoint_delete_status == "not_requested",
                 )
                 .with_for_update(of=ThreadMetaRow)
             )
+            if target is None:
+                raise PrivateWorkUnavailable("branch-authority-rollback")
             rows = (
                 (
                     await session.execute(

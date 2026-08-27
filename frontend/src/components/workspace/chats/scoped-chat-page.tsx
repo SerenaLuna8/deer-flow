@@ -258,6 +258,7 @@ export function ScopedChatPage({
 
   const {
     thread,
+    terminalDisplayLatched,
     activeRunId,
     activeRunResolverGeneration,
     reconcileTerminalRun,
@@ -883,8 +884,11 @@ export function ScopedChatPage({
                   testId="main-message-list"
                   threadId={threadId}
                   thread={thread}
+                  activeRunId={activeRunId}
                   runExecutionState={runExecutionState}
+                  terminalDisplayLatched={terminalDisplayLatched}
                   initialScroll="instant"
+                  resizeScroll={thread.isLoading ? "smooth" : "instant"}
                   paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                   hasMoreHistory={hasMoreHistory}
                   loadMoreHistory={loadMoreHistory}

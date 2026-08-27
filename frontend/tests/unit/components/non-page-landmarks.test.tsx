@@ -1,7 +1,6 @@
 import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { AdminPage } from "@/components/admin/ui/admin-page";
 import { Section } from "@/components/landing/section";
 import { TodoList } from "@/components/workspace/todo-list";
 
@@ -24,12 +23,5 @@ describe("nested content landmarks", () => {
     expect(html).toContain('aria-expanded="false"');
     expect(html).toMatch(/aria-controls="[^"]+"/u);
     expect(html).toContain('hidden=""');
-  });
-
-  test("makes the Admin skip-link target programmatically focusable", () => {
-    const html = renderToStaticMarkup(<AdminPage>Admin content</AdminPage>);
-
-    expect(html).toContain('id="admin-main"');
-    expect(html).toContain('tabindex="-1"');
   });
 });

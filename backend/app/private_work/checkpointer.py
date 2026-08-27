@@ -50,7 +50,10 @@ from app.private_work.output_delivery_obligation import (
     transition_output_delivery_obligation_for_approval_terminal,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
-from app.private_work.thread_repository import PrivateThreadRepository
+from app.private_work.thread_repository import (
+    PrivateThreadRecord,
+    PrivateThreadRepository,
+)
 from app.projects.capabilities import Capability
 from deerflow.agents.memory.snip import (
     MEMORY_ARCHIVE_RECEIPT_KEY,
@@ -1040,10 +1043,40 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         *,
         expected_version: int | None = None,
     ) -> None:
+        """Tombstone a business Thread while retaining its raw checkpoint."""
+
+        await self._atombstone_thread(
+            thread_id,
+            expected_version=expected_version,
+            expected_created_at=None,
+        )
+
+    async def atombstone_compensated_create(
+        self,
+        thread_id: str,
+        *,
+        expected_version: int,
+        expected_created_at: datetime,
+    ) -> PrivateThreadRecord:
+        """Hide one exact failed-create generation before destructive cleanup."""
+
+        return await self._atombstone_thread(
+            thread_id,
+            expected_version=expected_version,
+            expected_created_at=expected_created_at,
+        )
+
+    async def _atombstone_thread(
+        self,
+        thread_id: str,
+        *,
+        expected_version: int | None,
+        expected_created_at: datetime | None,
+    ) -> PrivateThreadRecord:
         context = require_issued_private_work_context(self._context)
         conflict_after_commit = False
         synchronously_cancelled_runs: set[str] = set()
-        delete_candidate = None
+        tombstone: PrivateThreadRecord | None = None
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -1069,11 +1102,12 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                         )
                         if tombstone is None:
                             raise PrivateWorkNotFound(context.request_id)
-                        delete_candidate = checkpoint_delete_candidate_from_record(
-                            tombstone,
-                        )
+                        if expected_created_at is not None and tombstone.created_at != expected_created_at:
+                            raise PrivateWorkConflict(context.request_id)
                     else:
                         if expected_version is not None and record.version != expected_version:
+                            raise PrivateWorkConflict(context.request_id)
+                        if expected_created_at is not None and record.created_at != expected_created_at:
                             raise PrivateWorkConflict(context.request_id)
                         (
                             conflict_after_commit,
@@ -1083,62 +1117,11 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                             thread_id,
                         )
                         if not conflict_after_commit:
-                            deleted = await repository.mark_deleted(
+                            tombstone = await repository.mark_deleted(
                                 scope=context.resource_scope,
                                 thread_id=thread_id,
                                 expected_version=record.version,
                                 thread_kind=self._thread_kind,
-                            )
-                            delete_candidate = checkpoint_delete_candidate_from_record(
-                                deleted,
-                            )
-                            ready_files = (
-                                (
-                                    await session.execute(
-                                        select(PrivateFileRow)
-                                        .where(
-                                            PrivateFileRow.project_id == context.project_id,
-                                            PrivateFileRow.owner_user_id == str(context.user_id),
-                                            PrivateFileRow.thread_id == thread_id,
-                                            PrivateFileRow.status == "ready",
-                                        )
-                                        .with_for_update(of=PrivateFileRow)
-                                    )
-                                )
-                                .scalars()
-                                .all()
-                            )
-                            for file_row in ready_files:
-                                await self._quota.release_file(
-                                    session,
-                                    context.resource_scope,
-                                    file_id=file_row.id,
-                                    size=file_row.size,
-                                    request_id=context.request_id,
-                                )
-                            await session.execute(
-                                update(PrivateFileRow)
-                                .where(
-                                    PrivateFileRow.project_id == context.project_id,
-                                    PrivateFileRow.owner_user_id == str(context.user_id),
-                                    PrivateFileRow.thread_id == thread_id,
-                                    PrivateFileRow.status != "deleted",
-                                )
-                                .values(
-                                    status="deleted",
-                                    deleted_at=deleted.deleted_at,
-                                    updated_at=deleted.deleted_at,
-                                )
-                            )
-                            await session.execute(
-                                update(PrivateArtifactRow)
-                                .where(
-                                    PrivateArtifactRow.project_id == context.project_id,
-                                    PrivateArtifactRow.owner_user_id == str(context.user_id),
-                                    PrivateArtifactRow.thread_id == thread_id,
-                                    PrivateArtifactRow.deleted_at.is_(None),
-                                )
-                                .values(deleted_at=deleted.deleted_at)
                             )
             for run_id in synchronously_cancelled_runs:
                 try:
@@ -1153,17 +1136,139 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                     pass
             if conflict_after_commit:
                 raise PrivateWorkConflict(context.request_id)
+            if tombstone is None or tombstone.deleted_at is None:
+                raise PrivateWorkUnavailable(context.request_id)
+            return tombstone
         except PrivateWorkError:
             raise
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
 
-        if delete_candidate is None:
+    async def acleanup_compensated_create(
+        self,
+        thread_id: str,
+        *,
+        expected_created_at: datetime,
+        expected_deleted_at: datetime,
+    ) -> bool:
+        """Physically clean one already-hidden failed-create generation."""
+
+        context = require_issued_private_work_context(self._context)
+        candidate = None
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._revalidator.require(
+                        session,
+                        context,
+                        Capability.PRIVATE_WORK_CREATE,
+                        lock=True,
+                    )
+                    repository = PrivateThreadRepository(session)
+                    tombstone = await repository.get_deleted(
+                        scope=context.resource_scope,
+                        thread_id=thread_id,
+                        lock=True,
+                        thread_kind=self._thread_kind,
+                    )
+                    if tombstone is None:
+                        raise PrivateWorkNotFound(context.request_id)
+                    if tombstone.created_at != expected_created_at:
+                        raise PrivateWorkConflict(context.request_id)
+                    if tombstone.deleted_at != expected_deleted_at:
+                        raise PrivateWorkConflict(context.request_id)
+
+                    if tombstone.checkpoint_delete_status == "not_requested":
+                        await self._cleanup_compensated_thread_files(
+                            session,
+                            context,
+                            thread_id,
+                            deleted_at=tombstone.deleted_at,
+                        )
+                        tombstone = await repository.request_checkpoint_delete_for_compensation(
+                            scope=context.resource_scope,
+                            thread_id=thread_id,
+                            expected_created_at=expected_created_at,
+                            expected_deleted_at=expected_deleted_at,
+                            thread_kind=self._thread_kind,
+                        )
+                    elif tombstone.checkpoint_delete_status == "complete":
+                        return True
+                    candidate = checkpoint_delete_candidate_from_record(
+                        tombstone,
+                    )
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+
+        if candidate is None:
             raise PrivateWorkUnavailable(context.request_id)
-        await recover_checkpoint_delete_candidate(
+        return await recover_checkpoint_delete_candidate(
             self._raw,
             self._session_factory,
-            delete_candidate,
+            candidate,
+        )
+
+    async def _cleanup_compensated_thread_files(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        thread_id: str,
+        *,
+        deleted_at: datetime | None,
+    ) -> None:
+        """Release and hide files only for a failed create/branch cleanup."""
+
+        if deleted_at is None:
+            raise PrivateWorkUnavailable(context.request_id)
+        ready_files = (
+            (
+                await session.execute(
+                    select(PrivateFileRow)
+                    .where(
+                        PrivateFileRow.project_id == context.project_id,
+                        PrivateFileRow.owner_user_id == str(context.user_id),
+                        PrivateFileRow.thread_id == thread_id,
+                        PrivateFileRow.status == "ready",
+                    )
+                    .with_for_update(of=PrivateFileRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for file_row in ready_files:
+            await self._quota.release_file(
+                session,
+                context.resource_scope,
+                file_id=file_row.id,
+                size=file_row.size,
+                request_id=context.request_id,
+            )
+        await session.execute(
+            update(PrivateFileRow)
+            .where(
+                PrivateFileRow.project_id == context.project_id,
+                PrivateFileRow.owner_user_id == str(context.user_id),
+                PrivateFileRow.thread_id == thread_id,
+                PrivateFileRow.status != "deleted",
+            )
+            .values(
+                status="deleted",
+                deleted_at=deleted_at,
+                updated_at=deleted_at,
+            )
+        )
+        await session.execute(
+            update(PrivateArtifactRow)
+            .where(
+                PrivateArtifactRow.project_id == context.project_id,
+                PrivateArtifactRow.owner_user_id == str(context.user_id),
+                PrivateArtifactRow.thread_id == thread_id,
+                PrivateArtifactRow.deleted_at.is_(None),
+            )
+            .values(deleted_at=deleted_at)
         )
 
     def _run_sync(self, coroutine_factory: Callable[[], Awaitable[_T]]) -> _T:

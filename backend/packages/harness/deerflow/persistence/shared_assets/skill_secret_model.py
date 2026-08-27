@@ -235,7 +235,7 @@ class ProjectSkillSecretTombstoneRow(Base):
             name="ck_project_skill_secret_tombstones_digest",
         ),
         CheckConstraint(
-            "reason IN ('replace', 'clear', 'version_purge', 'skill_delete')",
+            "reason IN ('replace', 'clear')",
             name="ck_project_skill_secret_tombstones_reason",
         ),
     )

@@ -112,8 +112,10 @@ class _PolicyConfig:
         *,
         trigger: tuple[str, int | float],
         tool_search_enabled: bool = True,
+        max_recursion_limit: int = 1_000,
     ) -> None:
         self._value = {
+            "max_recursion_limit": max_recursion_limit,
             "summarization": {
                 "enabled": True,
                 "trigger": trigger,
@@ -127,7 +129,7 @@ class _PolicyConfig:
         return deepcopy(self._value)
 
 
-def test_runtime_policy_compatibility_excludes_only_summarization_trigger() -> None:
+def test_runtime_policy_compatibility_ignores_summarization_trigger() -> None:
     original = _PolicyConfig(trigger=("tokens", 100_000))
     changed_trigger = _PolicyConfig(trigger=("fraction", 0.8))
     changed_request_policy = _PolicyConfig(
@@ -138,6 +140,20 @@ def test_runtime_policy_compatibility_excludes_only_summarization_trigger() -> N
     assert provider_request_runtime_policy_identity(original) != provider_request_runtime_policy_identity(changed_trigger)
     assert provider_request_runtime_policy_compatibility_identity(original) == provider_request_runtime_policy_compatibility_identity(changed_trigger)
     assert provider_request_runtime_policy_compatibility_identity(original) != provider_request_runtime_policy_compatibility_identity(changed_request_policy)
+
+
+def test_runtime_policy_compatibility_ignores_execution_step_limit() -> None:
+    original = _PolicyConfig(
+        trigger=("tokens", 100_000),
+        max_recursion_limit=1_000,
+    )
+    changed_step_limit = _PolicyConfig(
+        trigger=("tokens", 100_000),
+        max_recursion_limit=200,
+    )
+
+    assert provider_request_runtime_policy_identity(original) != provider_request_runtime_policy_identity(changed_step_limit)
+    assert provider_request_runtime_policy_compatibility_identity(original) == provider_request_runtime_policy_compatibility_identity(changed_step_limit)
 
 
 def test_profile_trigger_counts_first_call_system_all_tools_and_durable_context() -> None:

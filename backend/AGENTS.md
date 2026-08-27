@@ -117,11 +117,14 @@ or downgrade an application database.
   through an interactive prompt or `CONFIRM_DATABASE`, rejects PostgreSQL's
   protected databases, then delegates to the same complete Schema V1 bootstrap.
   It never prints credentials or restarts services.
-- Fresh setup seeds one internal tool-call hard limit at `200`. Every internal
-  tool occurrence counts uniformly; the Lead and all delegated Agents share one
-  count within a Run, while different Runs remain isolated. This seed belongs to
-  `default_policy_value()` and must not rewrite existing immutable policy
-  versions or historical v2/v3/v4 payloads.
+- Fresh setup seeds Runtime Policy schema v6 internal tool-call limits at `200`
+  for the Lead per Run and `50` for each Sub-Agent Task. A `task` delegation is
+  a Lead tool occurrence. The Lead count persists across Graph Turns in the Run;
+  each Task execution owns a separate count, so parallel Tasks never consume one
+  another's allowance and there is no additional Run aggregate. These defaults
+  belong to `default_policy_value()` and must not rewrite already admitted Runs,
+  existing immutable policy versions, or historical v2–v5 payloads; those retain
+  the legacy count shared across the Lead and every delegated Agent in the Run.
 - Every initialized application table and column has a checked-in
   Chinese comment. LangGraph comments are applied after its third-party setup,
   and each physical `run_events` partition copies the parent comments. Run
@@ -172,12 +175,15 @@ or downgrade an application database.
   may choose only their own single invocation profile.
 - Every automatically assembled Lead, SDK/Embedded, and delegated Agent Graph
   has exactly one `ToolCallControl`. It alone owns repeated-call identity,
-  complete-batch arbitration, replay receipts, and the Run-scoped internal
-  tool-call count. Every internal tool occurrence counts against the same hard
-  limit shared by the Lead and all delegated Agents; reaching it rejects further
-  internal tool calls in that Run, without affecting another Run.
+  complete-batch arbitration, replay receipts, and the correctly bound internal
+  tool-call count. Under policy v6, the Lead binds one Run-stable count, including
+  `task` calls, while each delegated Task execution binds its own count; parallel
+  Tasks are independent and no extra Run aggregate is applied. Reaching a v6
+  limit rejects later internal calls only in that exact binding. Already admitted
+  Runs and retained v2–v5 policies continue to bind the legacy count shared by
+  the Lead and all delegated Tasks in that Run.
   `SubagentLimitMiddleware` remains a separate policy. Keep enforcement
-  Run-scoped and register only one control middleware.
+  binding-scoped and register only one control middleware per graph.
 - The public SDK graph adapter generates a fresh internal ToolCallControl scope
   for every top-level `invoke`, `stream`, `ainvoke`, and `astream` call while
   preserving a copied caller context. Callers never supply or reuse that
@@ -343,13 +349,15 @@ or downgrade an application database.
 - Project Skill deletion is an irreversible transition to `archived`, not a
   reference-gated physical delete. In one Project-governed transaction it hides
   the Skill, removes every direct Agent Skill reference, advances each affected
-  Agent Definition without changing Agent status, destroys Skill Secret
-  ciphertext, and records the affected count. Archived Skills are absent from
-  all ordinary detail/version/file/secret reads and do not reserve slug or
-  display-name uniqueness. A trusted purger removes Version files and releases
-  quota only after both current and legacy retained Run references are absent;
-  it keeps the Skill identity and Secret Tombstones. Thread deletion alone does
-  not delete retained Runs or release those references.
+  Agent Definition without changing Agent status, and records the affected
+  count. Archived Skills are absent from all ordinary detail/version/file/secret
+  reads and do not reserve slug or display-name uniqueness, but retain their
+  Current Version pointer, every Version and file, quota reservation, Secret
+  state, Generations, and ciphertext for the Project lifetime. Run or Thread
+  deletion and former-owner or account-private retention never purge that
+  content. Only final deletion of the whole Project destroys it and releases its
+  quota; no Skill-scoped physical purge or periodic reconciler exists.
+
 #### Runtime admission and MCP
 
 - Runtime-visible Skill names are unique case-insensitively within a project,
@@ -496,9 +504,19 @@ or downgrade an application database.
   durable owner root.
 - Private Thread deletion is an exact project/owner force-revocation boundary:
   it terminalizes matching Run/Job/Attempt and approval authority before the
-  tombstone commits. Raw checkpoint removal is idempotent recovery work fenced
-  to the exact tombstone generation; it must never make a committed logical
-  deletion appear to fail or touch a recreated same-ID Thread.
+  tombstone commits. It retains the Thread checkpoint, ready files, Artifacts,
+  and file quota reservation while ordinary reads remain hidden. Only a trusted
+  failed-create/branch compensation or explicit retention purge may request raw
+  checkpoint removal; that cleanup remains fenced to the exact tombstone
+  generation and must never touch a recreated same-ID Thread. Pre-cutover
+  `pending`/`retry_required` tombstones remain grandfathered cleanup requests
+  because their original business-delete versus compensation provenance is not
+  recoverable. Compensation physically purges only when the exact-generation
+  tombstone, branch-authority rollback, file/quota cleanup, raw checkpoint
+  cleanup, and metadata purge all succeed. Any incomplete or unprovable step
+  fails closed into a hidden retained tombstone for explicit retention cleanup;
+  the raw-checkpoint reconciler never infers provenance or purges metadata,
+  files, or Artifacts.
 
 ### Configuration, models, and `inspect_image`
 
@@ -629,6 +647,9 @@ source constant changes, update this section and the owning detailed document.
 - Fresh System Runtime Policy and SDK/Embedded fallback repeated-call defaults
   are warning `3`, hard limit `20`, and window `20`; existing immutable policy
   versions and historical v2/v3 payloads keep their frozen values.
+- Fresh Runtime Policy schema v6 internal tool-call defaults are Lead-per-Run
+  `200` and Sub-Agent-per-Task `50`; historical v2–v5 policies retain their
+  frozen shared Run limit.
 - Subagent concurrency is canonically clamped to `1..4`; the per-Run total remains independently bounded to `1..50`.
 - Project Skill archives remain limited to 100 MiB total, 64 MiB per regular
   file, and 16384 regular files; archive-create routes have a scoped

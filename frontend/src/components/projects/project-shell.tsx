@@ -71,8 +71,9 @@ function ProjectAccountMenu({
         <Button
           type="button"
           variant="ghost"
-          className={compact ? "shrink-0 px-2" : "w-full justify-start"}
+          className={compact ? "size-10 shrink-0 p-0" : "w-full justify-start"}
           aria-label={t.project.navigation.account}
+          title={compact ? t.project.navigation.account : undefined}
         >
           <UserRoundIcon aria-hidden className="size-4 shrink-0" />
           {!compact && <span className="truncate">{accountUsername}</span>}
@@ -158,6 +159,15 @@ export function ProjectShell({
           project={project}
           collapsed={desktopNavCollapsed}
           onCollapsedChange={setDesktopNavCollapsed}
+          compactFooter={
+            <ProjectAccountMenu
+              accountUsername={accountUsername}
+              systemRole={systemRole}
+              compact
+              onOpenSettings={() => setSettingsOpen(true)}
+              onLogout={onLogout}
+            />
+          }
           footer={
             <ProjectAccountMenu
               accountUsername={accountUsername}

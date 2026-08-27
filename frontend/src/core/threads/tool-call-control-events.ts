@@ -33,7 +33,7 @@ const legacyToolCallControlReasonCodeSchema = z.union([
 ]);
 
 const controlPayloadCommonShape = {
-  schema_version: z.union([z.literal(1), z.literal(2)]),
+  schema_version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   workload_profile: z.enum(["interactive", "research"]),
   role: z.enum(["lead", "subagent"]),
   run_id: z.string().uuid(),
@@ -49,7 +49,7 @@ const controlPayloadCommonShape = {
 } as const;
 
 type CommonControlPayload = {
-  schema_version: 1 | 2;
+  schema_version: 1 | 2 | 3;
   workload_profile: "interactive" | "research";
   role: "lead" | "subagent";
   run_id: string;
@@ -178,18 +178,21 @@ export type RepeatedCallEvent = z.infer<typeof repeatedCallEventSchema>;
 const toolCallBudgetPayloadShape = {
   ...controlPayloadCommonShape,
   reason_code: toolCallBudgetReasonCodeSchema,
+  budget_scope: z.enum(["run", "lead", "subagent_task"]).optional(),
   tool_name: z.string().regex(SAFE_TOOL_NAME_PATTERN).optional(),
   disposition: z.enum([
     "advisory",
     "truncate_tool_calls",
     "exhaust_tool",
     "exhaust_run",
+    "exhaust_subject",
   ]),
 } as const;
 
 type ToolCallBudgetPayload = CommonControlPayload & {
   reason_code: string;
   disposition: string;
+  budget_scope?: "run" | "lead" | "subagent_task";
   tool_name?: string;
 };
 
@@ -208,6 +211,7 @@ function validateToolCallBudgetPayload(
   if (value.schema_version === 2) {
     if (
       value.reason_code !== "tool_budget_exhausted" ||
+      value.budget_scope !== undefined ||
       value.warn_threshold !== undefined ||
       value.tool_name !== undefined ||
       (value.disposition !== "truncate_tool_calls" &&
@@ -220,6 +224,33 @@ function validateToolCallBudgetPayload(
       });
     }
     return;
+  }
+  if (value.schema_version === 3) {
+    const subjectMatchesRole =
+      (value.budget_scope === "lead" && value.role === "lead") ||
+      (value.budget_scope === "subagent_task" && value.role === "subagent");
+    if (
+      !subjectMatchesRole ||
+      value.reason_code !== "tool_budget_exhausted" ||
+      value.warn_threshold !== undefined ||
+      value.tool_name !== undefined ||
+      (value.disposition !== "truncate_tool_calls" &&
+        value.disposition !== "exhaust_subject")
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Subject tool-call limit payload is invalid",
+        path: ["budget_scope"],
+      });
+    }
+    return;
+  }
+  if (value.budget_scope !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "legacy tool-budget observations cannot name a budget subject",
+      path: ["budget_scope"],
+    });
   }
   if (value.warn_threshold === undefined || value.tool_name === undefined) {
     context.addIssue({

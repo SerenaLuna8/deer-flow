@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import select
 from support.private_thread_seed import (
     PrivateThreadSeed,
@@ -13,6 +14,8 @@ from support.private_thread_seed import (
 )
 from support.run_closure import add_sealed_test_run
 
+from app.private_work.checkpointer import ProjectScopedCheckpointer
+from app.private_work.errors import PrivateWorkNotFound, PrivateWorkUnavailable
 from app.private_work.file_service import PrivateFileService
 from app.private_work.sandbox_files import (
     RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG,
@@ -21,11 +24,13 @@ from app.private_work.sandbox_files import (
     admit_current_upload_snapshot,
     persisted_current_upload_snapshot,
 )
+from app.private_work.thread_repository import PrivateThreadRepository
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.models import QuotaSourceRef
 from app.quotas.service import QuotaService
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.private_work.model import (
+    PrivateArtifactRow,
     PrivateFileChunkRow,
     PrivateFileRow,
 )
@@ -52,15 +57,19 @@ def _quota_source_ref(payload: bytes) -> QuotaSourceRef:
     )
 
 
-def _file_service(seed: PrivateThreadSeed) -> PrivateFileService:
+def _quota_enforcer(seed: PrivateThreadSeed) -> ProjectQuotaEnforcer:
     quota_service = QuotaService(
         seed.factory,
         QuotaConfig(),
         source_ref_hasher=_quota_source_ref,
     )
+    return ProjectQuotaEnforcer(quota_service)
+
+
+def _file_service(seed: PrivateThreadSeed) -> PrivateFileService:
     return PrivateFileService(
         seed.factory,
-        quota=ProjectQuotaEnforcer(quota_service),
+        quota=_quota_enforcer(seed),
     )
 
 
@@ -288,6 +297,225 @@ async def test_conditional_discard_deletes_unreferenced_upload_and_releases_quot
             (len(content), "reserve"),
         ]
         assert sum(row[1] for row in after.ledger) == 0
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_retains_upload_artifact_and_storage_quota(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    service = _file_service(seed)
+    thread_id = str(uuid.uuid4())
+    content = b"retained thread upload bytes"
+    try:
+        await _add_thread(seed, thread_id)
+        upload = await _upload(
+            seed,
+            service,
+            thread_id=thread_id,
+            content=content,
+            name="retained.txt",
+        )
+        run_id = str(uuid.uuid4())
+        async with seed.factory() as session, session.begin():
+            await add_sealed_test_run(
+                session,
+                RunRow(
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    assistant_id=str(seed.project_agent_id),
+                    owner_user_id=str(seed.owner_a.user_id),
+                    status="success",
+                    metadata_json={},
+                    kwargs_json={},
+                    project_id=seed.owner_a.project_id,
+                ),
+            )
+            artifact = PrivateArtifactRow(
+                project_id=seed.owner_a.project_id,
+                owner_user_id=str(seed.owner_a.user_id),
+                thread_id=thread_id,
+                run_id=run_id,
+                file_id=upload.id,
+                display_name="retained.txt",
+                media_type="text/plain",
+                artifact_metadata={"logical_path": upload.logical_path},
+            )
+            session.add(artifact)
+            await session.flush()
+            artifact_id = artifact.id
+
+        before = await _stored_state(seed, file_id=upload.id)
+        assert before.file is not None
+        assert before.chunks[0][2] == content
+
+        await (
+            ProjectScopedCheckpointer(
+                InMemorySaver(),
+                seed.factory,
+                quota=_quota_enforcer(seed),
+            )
+            .for_context(seed.owner_a)
+            .adelete_thread(
+                thread_id,
+                expected_version=1,
+            )
+        )
+
+        assert await _stored_state(seed, file_id=upload.id) == before
+        assert (
+            await service.get_ready(
+                seed.owner_a,
+                thread_id=thread_id,
+                file_id=upload.id,
+            )
+            is None
+        )
+        with pytest.raises(PrivateWorkNotFound):
+            await service.list_ready(
+                seed.owner_a,
+                thread_id=thread_id,
+            )
+        async with seed.factory() as session:
+            retained_artifact = await session.get(
+                PrivateArtifactRow,
+                artifact_id,
+            )
+            tombstone = await session.get(ThreadMetaRow, thread_id)
+            assert retained_artifact is not None
+            assert retained_artifact.deleted_at is None
+            assert tombstone is not None
+            assert tombstone.deleted_at is not None
+            assert tombstone.checkpoint_delete_status == "not_requested"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_failed_create_compensation_releases_concurrent_upload_quota(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    service = _file_service(seed)
+    thread_id = str(uuid.uuid4())
+    content = b"failed create concurrent upload"
+    try:
+        await _add_thread(seed, thread_id)
+        upload = await _upload(
+            seed,
+            service,
+            thread_id=thread_id,
+            content=content,
+            name="compensated.txt",
+        )
+        before = await _stored_state(seed, file_id=upload.id)
+        assert before.counter is not None and before.counter[:2] == (
+            0,
+            len(content),
+        )
+        async with seed.factory() as session:
+            active_thread = await session.get(ThreadMetaRow, thread_id)
+            assert active_thread is not None
+            expected_created_at = active_thread.created_at
+
+        compensator = ProjectScopedCheckpointer(
+            InMemorySaver(),
+            seed.factory,
+            quota=_quota_enforcer(seed),
+        ).for_context(seed.owner_a)
+        tombstone = await compensator.atombstone_compensated_create(
+            thread_id,
+            expected_version=1,
+            expected_created_at=expected_created_at,
+        )
+        assert tombstone.deleted_at is not None
+        cleaned = await compensator.acleanup_compensated_create(
+            thread_id,
+            expected_created_at=expected_created_at,
+            expected_deleted_at=tombstone.deleted_at,
+        )
+        assert cleaned
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).purge_compensated_create(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                expected_created_at=expected_created_at,
+                expected_deleted_at=tombstone.deleted_at,
+            )
+
+        after = await _stored_state(seed, file_id=upload.id)
+        assert after.file is None
+        assert after.chunks == ()
+        assert after.counter is not None and after.counter[:2] == (0, 0)
+        assert sorted((row[1], row[2]) for row in after.ledger) == [
+            (-len(content), "release"),
+            (len(content), "reserve"),
+        ]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_stale_branch_rollback_cannot_delete_recreated_thread_upload(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    service = _file_service(seed)
+    thread_id = str(uuid.uuid4())
+    content = b"replacement generation upload"
+    try:
+        await _add_thread(seed, thread_id)
+        async with seed.factory() as session, session.begin():
+            repository = PrivateThreadRepository(session)
+            tombstone = await repository.mark_deleted(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                expected_version=1,
+            )
+            assert tombstone.deleted_at is not None
+            await repository.request_checkpoint_delete_for_compensation(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                expected_created_at=tombstone.created_at,
+                expected_deleted_at=tombstone.deleted_at,
+            )
+            assert await repository.set_checkpoint_delete_status(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                status="complete",
+            )
+            await repository.purge_compensated_create(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                expected_created_at=tombstone.created_at,
+                expected_deleted_at=tombstone.deleted_at,
+            )
+
+        await _add_thread(seed, thread_id)
+        upload = await _upload(
+            seed,
+            service,
+            thread_id=thread_id,
+            content=content,
+            name="replacement.txt",
+        )
+        before = await _stored_state(seed, file_id=upload.id)
+
+        with pytest.raises(PrivateWorkUnavailable):
+            await service.rollback_branch_authority(
+                seed.owner_a.resource_scope,
+                "source-thread",
+                thread_id,
+                expected_target_created_at=tombstone.created_at,
+                expected_target_deleted_at=tombstone.deleted_at,
+            )
+
+        assert await _stored_state(seed, file_id=upload.id) == before
     finally:
         await seed.engine.dispose()
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Protocol
 
 from langgraph.checkpoint.base import empty_checkpoint
@@ -96,6 +97,9 @@ class BranchAuthorityCopyHook(Protocol):
         scope: PrivateResourceScope,
         source_thread_id: str,
         target_thread_id: str,
+        *,
+        expected_target_created_at: datetime,
+        expected_target_deleted_at: datetime,
     ) -> None: ...
 
 
@@ -186,7 +190,11 @@ class PrivateThreadService:
                 {},
             )
         except Exception as exc:
-            await self._compensate_create(context, thread_id)
+            await self._compensate_create(
+                context,
+                thread_id,
+                expected_created_at=record.created_at,
+            )
             if isinstance(exc, PrivateWorkError):
                 raise
             raise PrivateWorkUnavailable(context.request_id) from None
@@ -496,6 +504,7 @@ class PrivateThreadService:
             await self._compensate_create(
                 context,
                 target_thread_id,
+                expected_created_at=record.created_at,
                 source_thread_id=source_thread_id,
             )
             if isinstance(exc, PrivateWorkError):
@@ -613,43 +622,60 @@ class PrivateThreadService:
         context: PrivateWorkContext,
         thread_id: str,
         *,
+        expected_created_at: datetime,
         source_thread_id: str | None = None,
     ) -> None:
-        checkpoint_clean = True
+        saver = self._project_scoped_checkpointer.for_context(context)
+        tombstone = None
         try:
-            await self._project_scoped_checkpointer.for_context(context).adelete_thread(thread_id, expected_version=1)
+            tombstone = await saver.atombstone_compensated_create(
+                thread_id,
+                expected_version=1,
+                expected_created_at=expected_created_at,
+            )
         except Exception:
-            checkpoint_clean = False
+            pass
 
-        authority_clean = True
-        if source_thread_id is not None and self._branch_copy_hook is not None:
+        tombstone_deleted_at = tombstone.deleted_at if tombstone is not None else None
+        authority_clean = tombstone_deleted_at is not None
+        if tombstone is not None and tombstone_deleted_at is not None and source_thread_id is not None and self._branch_copy_hook is not None:
             try:
                 await self._branch_copy_hook.rollback_branch_authority(
                     context.resource_scope,
                     source_thread_id,
                     thread_id,
+                    expected_target_created_at=tombstone.created_at,
+                    expected_target_deleted_at=tombstone_deleted_at,
                 )
             except Exception:
                 authority_clean = False
 
+        checkpoint_clean = False
+        if tombstone is not None and tombstone_deleted_at is not None and authority_clean:
+            try:
+                checkpoint_clean = await saver.acleanup_compensated_create(
+                    thread_id,
+                    expected_created_at=tombstone.created_at,
+                    expected_deleted_at=tombstone_deleted_at,
+                )
+            except Exception:
+                checkpoint_clean = False
+
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    repository = PrivateThreadRepository(session)
-                    if checkpoint_clean and authority_clean:
-                        await repository.purge_compensated_create(
+                    if tombstone is not None and tombstone_deleted_at is not None and authority_clean and checkpoint_clean:
+                        await PrivateThreadRepository(
+                            session,
+                        ).purge_compensated_create(
                             scope=context.resource_scope,
                             thread_id=thread_id,
-                        )
-                    else:
-                        await repository.set_checkpoint_delete_status(
-                            scope=context.resource_scope,
-                            thread_id=thread_id,
-                            status="retry_required",
+                            expected_created_at=tombstone.created_at,
+                            expected_deleted_at=tombstone_deleted_at,
                         )
         except Exception:
             raise PrivateWorkUnavailable(context.request_id) from None
-        if not checkpoint_clean or not authority_clean:
+        if tombstone is None or tombstone_deleted_at is None or not authority_clean or not checkpoint_clean:
             raise PrivateWorkUnavailable(context.request_id)
 
     @staticmethod

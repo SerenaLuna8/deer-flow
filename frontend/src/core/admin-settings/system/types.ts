@@ -277,7 +277,12 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
           identical_calls: identicalCallsSchema,
         })
         .strict(),
-      internal_tool_call_limit: boundedInteger(1, 100_000),
+      internal_tool_call_limits: z
+        .object({
+          lead_per_run: boundedInteger(1, 100_000),
+          subagent_per_task: boundedInteger(1, 100_000),
+        })
+        .strict(),
       read_before_write: z.object({ enabled: z.boolean() }).strict(),
       safety_finish_reason: z.object({ enabled: z.boolean() }).strict(),
       subagents: z

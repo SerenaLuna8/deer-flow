@@ -46,7 +46,6 @@ from app.private_work.run_skill_tree_orphan_reaper import (
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.shared_assets.agent_payload_checksum import agent_payload_checksum
 from app.shared_assets.models import AgentPayload
-from app.shared_assets.skill_deletion import ArchivedSkillPurger
 from deerflow.config.paths import get_paths
 from deerflow.persistence.execution_approvals import (
     EXECUTION_APPROVAL_ACTIVE_STATUSES,
@@ -544,7 +543,6 @@ class RetentionPurgeRepository:
         *,
         quota: ProjectQuotaEnforcer,
         approval_audit: RetentionExecutionApprovalAuditPort,
-        archived_skill_purger: ArchivedSkillPurger | None = None,
     ) -> int:
         if candidate.resource_kind == "project":
             assert candidate.project_id is not None
@@ -612,12 +610,6 @@ class RetentionPurgeRepository:
                 request_id=candidate.request_id,
                 approval_audit=approval_audit,
             )
-            if archived_skill_purger is not None:
-                await archived_skill_purger.purge_project_in_session(
-                    session,
-                    candidate.project_id,
-                    request_id=candidate.request_id,
-                )
             return 1
         assert candidate.owner_user_id is not None
         for project_id in candidate.project_ids:
@@ -645,12 +637,6 @@ class RetentionPurgeRepository:
                 request_id=candidate.request_id,
                 approval_audit=approval_audit,
             )
-            if archived_skill_purger is not None:
-                await archived_skill_purger.purge_project_in_session(
-                    session,
-                    project_id,
-                    request_id=candidate.request_id,
-                )
         completed = await session.execute(
             update(UserRow)
             .where(
@@ -1638,7 +1624,6 @@ class RetentionPurger:
         approval_audit: RetentionExecutionApprovalAuditPort,
         quota: ProjectQuotaEnforcer,
         repository: RetentionPurgeRepository | None = None,
-        archived_skill_purger: ArchivedSkillPurger | None = None,
     ) -> None:
         if type(audit) is not TrustedOperationAuditSink:
             raise TypeError("retention purge requires audit authority")
@@ -1651,7 +1636,6 @@ class RetentionPurger:
         self._approval_audit = approval_audit
         self._quota = quota
         self.repository = RetentionPurgeRepository() if repository is None else repository
-        self._archived_skill_purger = archived_skill_purger
 
     async def purge(
         self,
@@ -1670,7 +1654,6 @@ class RetentionPurger:
                 candidate,
                 quota=self._quota,
                 approval_audit=self._approval_audit,
-                archived_skill_purger=self._archived_skill_purger,
             )
             await session.flush()
             await self._audit.purge_completed(

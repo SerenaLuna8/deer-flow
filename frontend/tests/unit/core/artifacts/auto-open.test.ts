@@ -1,21 +1,21 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 import { describe, expect, test } from "@rstest/core";
 
 import {
   advanceWriteArtifactAutoOpenState,
   createWriteArtifactAutoOpenState,
+  resolveRequestedArtifactViewMode,
   type WriteArtifactSelection,
 } from "@/core/artifacts/preview";
 
 const oldSelection: WriteArtifactSelection = {
   key: "ai-old/call-old",
   url: "write-file:///outputs/old.md",
+  preferredViewMode: "preview",
 };
 const newSelection: WriteArtifactSelection = {
   key: "ai-new/call-new",
   url: "write-file:///outputs/new.md",
+  preferredViewMode: "preview",
 };
 
 describe("write artifact auto-open ownership", () => {
@@ -95,24 +95,33 @@ describe("write artifact auto-open ownership", () => {
     expect(result.state.seenKeys).toEqual(new Set([oldSelection.key]));
   });
 
-  test("keeps automatic opening centralized in MessageList", () => {
-    const messageGroupSource = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/components/workspace/messages/message-group.tsx",
-      ),
-      "utf8",
-    );
-    const messageListSource = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/components/workspace/messages/message-list.tsx",
-      ),
-      "utf8",
-    );
+  test("requests preview only for the matching execution-time artifact", () => {
+    const request = {
+      id: 1,
+      artifact: newSelection.url,
+      mode: newSelection.preferredViewMode,
+    };
 
-    expect(messageGroupSource).not.toContain("autoOpenArtifactUrl");
-    expect(messageGroupSource).not.toContain("autoSelect");
-    expect(messageListSource).toContain("advanceWriteArtifactAutoOpenState");
+    expect(
+      resolveRequestedArtifactViewMode({
+        request,
+        filepath: newSelection.url,
+        canPreview: true,
+      }),
+    ).toBe("preview");
+    expect(
+      resolveRequestedArtifactViewMode({
+        request,
+        filepath: newSelection.url,
+        canPreview: false,
+      }),
+    ).toBe("code");
+    expect(
+      resolveRequestedArtifactViewMode({
+        request,
+        filepath: oldSelection.url,
+        canPreview: true,
+      }),
+    ).toBeUndefined();
   });
 });

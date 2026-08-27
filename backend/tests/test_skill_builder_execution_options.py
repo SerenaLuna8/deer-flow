@@ -17,13 +17,13 @@ from app.gateway.routers.project_skill_builder import (
     _turn,
     require_admissible_execution_options,
 )
+from app.private_work.skill_builder_run_admission import (
+    SkillBuilderRunAdmissionService,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.errors import AssetValidationFailed
-from app.shared_assets.skill_builder_run_admission import (
-    SkillBuilderRunAdmissionService,
-)
 from app.shared_assets.skill_design_generation import (
     MAX_SKILL_DESIGN_ATTACHMENT_BYTES,
     SkillDesignAttachment,

@@ -223,7 +223,7 @@ class ThreadMetaRepository:
                 .where(*self._thread_predicate(thread_id, scope))
                 .values(
                     deleted_at=now,
-                    checkpoint_delete_status="pending",
+                    checkpoint_delete_status="not_requested",
                     updated_at=now,
                     version=ThreadMetaRow.version + 1,
                 )
@@ -239,11 +239,14 @@ class ThreadMetaRepository:
         *,
         scope: PrivateResourceScope,
     ) -> bool:
-        if status not in {"pending", "complete", "retry_required"}:
+        if status not in {"complete", "retry_required"}:
             raise ValueError("invalid checkpoint delete status")
         predicate = [
             ThreadMetaRow.thread_id == thread_id,
             ThreadMetaRow.deleted_at.is_not(None),
+            ThreadMetaRow.checkpoint_delete_status.in_(
+                ("pending", "retry_required"),
+            ),
             ThreadMetaRow.project_id == uuid.UUID(scope.project_id),
             ThreadMetaRow.owner_user_id == scope.owner_user_id,
         ]

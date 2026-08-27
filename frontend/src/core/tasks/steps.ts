@@ -92,7 +92,7 @@ export function messageToStep(
  */
 export function stepsForDisplay(
   steps: SubtaskStep[] | undefined,
-  status: "in_progress" | "completed" | "failed",
+  status: "unknown" | "in_progress" | "completed" | "failed",
 ): SubtaskStep[] {
   const visible = (steps ?? [])
     .filter((step) => step.kind === "tool" || step.text.trim() !== "")

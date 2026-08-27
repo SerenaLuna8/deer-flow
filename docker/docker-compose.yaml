@@ -85,7 +85,7 @@ services:
       - ${ACT_WEAVE_HOME}:/app/backend/.deer-flow
       # DooD: the host Docker socket is never mounted into Gateway. The opt-in
       # docker-compose.dood.yaml overlay adds it only to Worker for aio mode.
-      # See backend/docs/CONFIGURATION.md Security Note for details.
+      # See the repository README.md security boundary for details.
 
       # CLI auth dirs are never mounted into Gateway. The opt-in
       # docker-compose.cli-auth.yaml overlay adds them read-only only to Worker.

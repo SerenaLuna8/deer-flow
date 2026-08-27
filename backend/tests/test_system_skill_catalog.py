@@ -65,16 +65,6 @@ def test_catalog_skill_entries_match_public_skill_directories() -> None:
     assert len({entry.source_key for entry in skill_entries}) == len(_public_skill_directories())
 
 
-def test_packaged_catalog_excludes_actweave_docs_mcp() -> None:
-    catalog = load_bootstrap_catalog()
-    mcp_entries = [entry for entry in catalog.entries if entry.kind == "mcp"]
-
-    assert mcp_entries == []
-    assert all(entry.source_key != "builtin:mcp:deerflow-docs" for entry in catalog.entries)
-    assert all(entry.slug != "deerflow-docs" for entry in catalog.entries)
-    assert all(entry.display_name != "ActWeave Docs" for entry in catalog.entries)
-
-
 def test_each_latest_skill_archive_matches_its_public_source_bytes() -> None:
     catalog = load_bootstrap_catalog()
     source_directories = _public_skill_directories()

@@ -698,7 +698,7 @@ def test_resolver_accepts_only_worker_shaped_authorities() -> None:
     assert resolve_memory_authority(load_only, method="load_snapshot") is not None
 
 
-def test_recall_tool_is_async_only_and_uses_the_shared_tool_call_limit() -> None:
+def test_recall_tool_is_async_only_and_uses_role_scoped_tool_call_defaults() -> None:
     assert recall_memory_tool.name == "recall_memory"
     assert recall_memory_tool.coroutine is not None
 
@@ -707,8 +707,16 @@ def test_recall_tool_is_async_only_and_uses_the_shared_tool_call_limit() -> None
         default_graph_tool_call_control_profile,
     )
 
-    assert AgentRuntimePolicyValue().internal_tool_call_limit == 200
-    assert default_graph_tool_call_control_profile().policy.internal_tool_call_limit == 200
+    assert AgentRuntimePolicyValue().internal_tool_call_limits.model_dump(
+        mode="json",
+    ) == {
+        "lead_per_run": 200,
+        "subagent_per_task": 50,
+    }
+    profile = default_graph_tool_call_control_profile()
+    assert profile.accounting_mode == "lead_run_subagent_task"
+    assert profile.lead.internal_tool_call_limit == 200
+    assert profile.subagent.internal_tool_call_limit == 50
 
 
 def test_example_config_omits_database_runtime_policy_tombstones() -> None:

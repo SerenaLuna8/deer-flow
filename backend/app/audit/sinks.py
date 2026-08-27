@@ -1450,7 +1450,6 @@ class TrustedOperationAuditSink:
             "project",
             "file",
             "former_owner",
-            "archived_skill",
         }:
             raise TypeError("purge audit resource kind is invalid")
         self._require_process(AuditProcess.WORKER)

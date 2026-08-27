@@ -10,8 +10,8 @@
 # root-equivalent control of the host. Only load this overlay when you have
 # explicitly chosen aio (DooD) sandbox mode and accept that trade-off. The
 # default LocalSandboxProvider and the provisioner/Kubernetes mode do NOT need
-# it and never load this file. See backend/docs/CONFIGURATION.md Security Note
-# section for the full threat model.
+# it and never load this file. See the repository README.md security boundary
+# and config.example.yaml for the current threat model and configuration.
 #
 # scripts/deploy.sh and scripts/docker.sh append this overlay automatically
 # only when detect_sandbox_mode() returns "aio". Manual use:

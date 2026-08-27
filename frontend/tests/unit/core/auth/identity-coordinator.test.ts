@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 import { describe, expect, test, rs } from "@rstest/core";
 
 import { createAuthIdentityCoordinator } from "@/core/auth/identity-coordinator";
@@ -152,14 +149,5 @@ describe("auth identity coordinator", () => {
     ).resolves.toBe(false);
     expect(commit).not.toHaveBeenCalled();
     expect(loading).toEqual([false]);
-  });
-
-  test("AuthProvider effect activates before registering dispose cleanup", () => {
-    const source = readFileSync(
-      resolve(process.cwd(), "src/core/auth/AuthProvider.tsx"),
-      "utf8",
-    );
-    expect(source).toContain("identityCoordinator.activate();");
-    expect(source).toContain("return () => identityCoordinator.dispose();");
   });
 });

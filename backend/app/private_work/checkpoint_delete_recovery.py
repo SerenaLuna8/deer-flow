@@ -39,6 +39,8 @@ def checkpoint_delete_candidate_from_record(
 
     if record.deleted_at is None:
         raise ValueError("checkpoint delete candidate requires a tombstone")
+    if record.checkpoint_delete_status not in {"pending", "retry_required"}:
+        raise ValueError("checkpoint delete candidate requires requested cleanup")
     return CheckpointDeleteCandidate(
         thread_id=record.thread_id,
         project_id=record.project_id,

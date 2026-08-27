@@ -231,19 +231,6 @@ async def run_worker(
                 current_policy_reader=SystemQuotaPolicyReader(),
             )
         )
-        from app.shared_assets.skill_deletion import (
-            ArchivedSkillPurger,
-            DurableArchivedSkillPurgeAuditSink,
-        )
-
-        archived_skill_purger = ArchivedSkillPurger(
-            session_factory,
-            quota=quota_enforcer,
-            audit=DurableArchivedSkillPurgeAuditSink(
-                audit_service,
-                process_context=worker_audit_context,
-            ),
-        )
         terminal_port = PrivateRunJobTerminalPort(
             quota=quota_enforcer,
             audit=audit_sink,
@@ -343,7 +330,6 @@ async def run_worker(
                     mount_owner_reconciler=run_skill_orphan_reaper,
                     retry_initial_seconds=(config.worker.retry_initial_seconds),
                     retry_max_seconds=config.worker.retry_max_seconds,
-                    archived_skill_purger=archived_skill_purger,
                 ),
                 "mcp_discovery": McpToolDiscoveryJobHandler(
                     session_factory,

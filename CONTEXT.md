@@ -82,12 +82,8 @@ _Avoid_: Version Activation
 A Skill authored and governed within one Project.
 
 **Skill Deletion**:
-The irreversible archival of a Project Skill that hides it from project use, prevents future Run Admission from resolving it, removes it from every Project Agent Definition without changing those Agents' lifecycle status, and destroys its Configuration Secret ciphertext. Retained Runs keep their admitted definition and Version-file closure, but one that has not materialized a destroyed secret, or later retries, fails closed.
+The irreversible archival of a Project Skill that hides it from project use, prevents future Run Admission from resolving it, and removes it from every Project Agent Definition without changing those Agents' lifecycle status. Its Current Version, Versions, files, storage allocation, and Configuration Secrets remain part of the Project until the whole Project is finally deleted.
 _Avoid_: Skill Suspension, immediate physical purge
-
-**Archived Skill Purge**:
-The eventual removal of an archived Project Skill's Version files and Version records after no retained Run still pins them. The minimal archived Skill identity and already-created Secret Tombstones remain. A logical Thread deletion does not release its retained Runs; individual Run deletion or retention cleanup does.
-_Avoid_: Skill Deletion, Run retention
 
 **System Skill**:
 A platform-governed Skill installed once as an immutable v1. Projects can use it but cannot create, save, activate, or replace its definition; changed content requires a different System Skill identity.
@@ -172,6 +168,10 @@ Whether a System Skill's current v1 definition is permitted for new Run Admissio
 The durable conversation-continuity boundary within a Project. A Thread owns an ordered history of Runs and their shared graph state; each new Run resolves its Agent Definition and the Current Versions of its Skill assets.
 _Avoid_: Chat, Session
 
+**Thread Deletion**:
+An irreversible owner action that hides a Thread and revokes its active execution while retaining its Checkpoint, files, Artifacts, and admitted Runs until an explicit retention cleanup. Retained files continue to consume storage quota, and deletion alone does not create a restore surface.
+_Avoid_: Thread purge, recoverable archive
+
 **Run**:
 One admitted request to advance a Thread under a fixed execution definition. A Run owns the user-visible business outcome and may span multiple Job Attempts.
 _Avoid_: Job, Attempt, Graph Turn
@@ -189,7 +189,7 @@ The server-confirmed `interactive` or `research` workload policy frozen into one
 _Avoid_: Agent mode, permission profile, model-selected research
 
 **ToolCallControl**:
-The single Harness arbitration seam that applies frozen repeated-call policy and one internal tool-call hard limit before ToolNode execution. It counts every internal tool occurrence uniformly across the Lead and all Sub-Agent Tasks in one Run, stops further admission at the limit, and isolates the count between Runs. It owns scope and replay receipts, but does not own Sub-Agent concurrency, Token Budget, tool authorization, or approval authority.
+The single Harness arbitration seam that applies frozen repeated-call policy and internal tool-call hard limits before ToolNode execution. Under Runtime Policy v6, one Lead binding counts across its Run, including each `task` delegation call, while every Sub-Agent Task execution binding owns a separate count; parallel Tasks never consume one another's limit and there is no additional Run-wide aggregate. Replay receipts remain idempotent within the exact binding. Already admitted Runs and retained v2–v5 policies preserve their frozen legacy count shared by the Lead and all Sub-Agent Tasks. ToolCallControl owns count binding and replay receipts, but does not own Sub-Agent concurrency, Token Budget, tool authorization, or approval authority.
 _Avoid_: Loop detector, tool permission policy
 
 **Job**:
@@ -221,7 +221,7 @@ The root Agent in a Run that owns the user-facing response and may delegate boun
 _Avoid_: Harness
 
 **Sub-Agent Task**:
-A delegated Agent execution inside its parent Run. It may have its own graph, tools, model, and other execution constraints, but shares the parent Run's internal tool-call count and authority; it is not a Run, Job, or Job Attempt.
+A delegated Agent execution inside its parent Run. It may have its own graph, tools, model, and other execution constraints. Under Runtime Policy v6 it owns an internal tool-call count distinct from the Lead and every sibling Task while retaining the parent Run's authority; retained v2–v5 policies keep the legacy shared Run count. It is not a Run, Job, or Job Attempt.
 _Avoid_: Child Run, background Job
 
 **Goal Continuation**:

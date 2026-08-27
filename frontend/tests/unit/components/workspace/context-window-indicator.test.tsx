@@ -85,16 +85,17 @@ describe("ContextWindowIndicator", () => {
     expect(details).toContain("当前上下文");
     expect(details).toContain("压缩触发");
     expect(details).toContain("总上下文");
-    expect(details).toContain("16.0K Tokens");
-    expect(details).toContain("32.0K Tokens");
-    expect(details).toContain("128.0K Tokens");
+    expect(details).toContain("16.0K");
+    expect(details).toContain("32.0K");
+    expect(details).toContain("128.0K");
+    expect(details).not.toContain("Tokens");
     expect(details).not.toContain("安全占用上界");
     expect(details).not.toContain("上次供应商实测");
     expect(details).not.toContain("自动压缩条件");
     expect(details).not.toContain("Token 触发条件");
     expect(details).not.toContain("当前条件值");
     expect(details).not.toContain("已达到触发条件");
-    expect(details).not.toContain("13.5K Tokens");
+    expect(details).not.toContain("13.5K");
     expect(details).not.toContain("50%");
     expect(indicator).toContain('data-context-window-state="ready"');
     expect(indicator).toContain('data-progress="12.5"');
@@ -127,15 +128,16 @@ describe("ContextWindowIndicator", () => {
 
     expect(details).toContain('aria-valuenow="44.57"');
     expect(details).toContain("当前上下文");
-    expect(details).toContain("115.0K Tokens");
+    expect(details).toContain("115.0K");
     expect(details).toContain("压缩触发");
-    expect(details).toContain("206.4K Tokens");
+    expect(details).toContain("206.4K");
     expect(details).toContain("总上下文");
-    expect(details).toContain("258.0K Tokens");
+    expect(details).toContain("258.0K");
+    expect(details).not.toContain("Tokens");
     expect(details).not.toContain("百分比触发条件");
     expect(details).not.toContain("45%");
     expect(details).not.toContain("80%");
-    expect(details).not.toContain("138.0K Tokens");
+    expect(details).not.toContain("138.0K");
     expect(details).not.toContain("已包含上次压缩摘要");
   });
 
@@ -167,17 +169,17 @@ describe("ContextWindowIndicator", () => {
     expect(details).toContain('aria-disabled="true"');
     expect(details).not.toContain("aria-valuenow");
     expect(details).toContain("当前上下文");
-    expect(details).toContain("92.7K Tokens");
+    expect(details).toContain("92.7K");
     expect(details).toContain("压缩触发");
-    expect(details).toContain("32.0K Tokens");
+    expect(details).toContain("32.0K");
     expect(details).toContain("总上下文");
     expect(details).toContain("未配置");
     expect(details).not.toContain("安全占用上界");
-    expect(details).not.toContain("115.3K Tokens");
+    expect(details).not.toContain("115.3K");
     expect(details).not.toContain("已达到触发条件");
     expect(indicator).toContain('data-context-window-state="ready"');
     expect(indicator).not.toContain("data-progress");
-    expect(indicator).toContain("估算上下文 92.7K Tokens，窗口上限未配置");
+    expect(indicator).toContain("估算上下文 92.7K，窗口上限未配置");
   });
 
   test("shows the real message threshold when compression is message-based", () => {
@@ -227,8 +229,9 @@ describe("ContextWindowIndicator", () => {
     const details = render(<ContextWindowDetails usage={value} />);
 
     expect(details).toContain("压缩触发");
-    expect(details).toContain("102.4K Tokens");
-    expect(details).not.toContain("32.0K Tokens");
+    expect(details).toContain("102.4K");
+    expect(details).not.toContain("32.0K");
+    expect(details).not.toContain("Tokens");
     expect(details).not.toContain("多个条件任一达到即自动压缩");
     expect(details).not.toContain("Token 触发条件");
     expect(details).not.toContain("百分比触发条件");
@@ -241,11 +244,12 @@ describe("ContextWindowIndicator", () => {
     const indicator = render(<ContextWindowIndicator usage={disabled} />);
 
     expect(details).toContain("当前上下文");
-    expect(details).toContain("16.0K Tokens");
+    expect(details).toContain("16.0K");
     expect(details).toContain("压缩触发");
     expect(details).toContain("已关闭");
     expect(details).toContain("总上下文");
-    expect(details).toContain("128.0K Tokens");
+    expect(details).toContain("128.0K");
+    expect(details).not.toContain("Tokens");
     expect(details).not.toContain("自动压缩条件");
     expect(indicator).toContain('data-context-window-state="ready"');
     expect(indicator).toContain('data-progress="12.5"');

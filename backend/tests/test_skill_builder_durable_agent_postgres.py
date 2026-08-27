@@ -24,6 +24,9 @@ from app.private_work.retention_authority import RetentionPurgeAuthority
 from app.private_work.retention_purge import purge_private_scope
 from app.private_work.run_repository import PrivateRunRepository
 from app.private_work.run_service import PrivateRunService
+from app.private_work.skill_builder_run_admission import (
+    SkillBuilderRunAdmissionService,
+)
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.context import ProjectContext
 from app.reliability.execution import (
@@ -36,14 +39,13 @@ from app.shared_assets.models import SkillArchiveFile
 from app.shared_assets.skill_builder_activity_stream import (
     SkillBuilderActivityEmitter,
 )
+from app.shared_assets.skill_builder_admission_contract import (
+    SkillBuilderRunAdmission,
+)
 from app.shared_assets.skill_builder_contract import (
     SkillBuilderCandidateFileList,
     SkillBuilderCandidateFileUpsert,
     SkillBuilderCandidateFinalize,
-)
-from app.shared_assets.skill_builder_run_admission import (
-    SkillBuilderRunAdmission,
-    SkillBuilderRunAdmissionService,
 )
 from app.shared_assets.skill_design_activity import (
     MAX_SKILL_DESIGN_ACTIVITY_BYTES_PER_OPERATION,

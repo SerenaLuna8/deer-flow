@@ -563,9 +563,12 @@ def provider_request_runtime_policy_identity(app_config: object) -> str:
 def provider_request_runtime_policy_compatibility_identity(
     app_config: object,
 ) -> str:
-    """Fingerprint request policy while allowing Gauge trigger changes."""
+    """Fingerprint request policy while allowing Gauge-safe changes."""
 
     material = _provider_request_runtime_policy_material(app_config)
+    # This limits Graph execution depth; it does not reshape the retained
+    # provider request measured by an idle Context Gauge.
+    material.pop("max_recursion_limit", None)
     summarization = material.get("summarization")
     if isinstance(summarization, Mapping):
         compatible_summarization = dict(summarization)

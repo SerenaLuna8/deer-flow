@@ -105,13 +105,6 @@ test("the same Thread resolves the current Agent Definition for each new Run", a
     project,
     firstRunId,
   );
-  await page.screenshot({
-    path:
-      process.env.CURRENT_VERSION_EVIDENCE_PATH ??
-      "/tmp/deer-flow-current-definition-same-thread.png",
-    fullPage: true,
-  });
-
   const saved = await context.request.post(
     `${APP}/api/projects/${project.id}/test-only/agents/${project.agent.id}/save-next-definition`,
     { headers: { "X-CSRF-Token": project.csrf } },

@@ -22,7 +22,7 @@ def _validate_profile_name(value: object) -> None:
 
 
 def _require_supported_policy_schema_version(value: object) -> int:
-    if type(value) is not int or value not in {2, 3, 4, 5}:
+    if type(value) is not int or value not in {2, 3, 4, 5, 6}:
         raise RunWorkloadProfileUnsupported
     return value
 
@@ -140,7 +140,7 @@ def freeze_admitted_run_workload_profile(
         inherited_effective=inherited_effective,
     )
     frozen_kwargs = dict(kwargs)
-    if schema_version in {4, 5}:
+    if schema_version in {4, 5, 6}:
         frozen_kwargs[RUN_WORKLOAD_PROFILE_KWARG] = persisted_run_workload_profile(requested, effective)
     return effective, frozen_kwargs
 

@@ -6,11 +6,7 @@ from sqlalchemy.dialects import postgresql
 
 from app.audit.models import AssetAuditMetadata, PurgeAuditMetadata
 from app.gateway.routers.project_assets import SkillDeleteResponse, project_router
-from app.shared_assets.skill_deletion import (
-    ArchivedSkillPurgeReconciler,
-    ArchivedSkillPurgeReport,
-    SkillDeleteResult,
-)
+from app.shared_assets.skill_deletion import SkillDeleteResult
 from deerflow.persistence.shared_assets.skill_model import SkillRow
 from deerflow.persistence.shared_assets.skill_secret_model import (
     ProjectSkillSecretTombstoneRow,
@@ -28,24 +24,16 @@ def test_archived_project_skills_leave_the_live_name_namespace() -> None:
     assert _project_unique_predicate("uq_skills_project_display_name") == ("scope = 'project' AND status != 'archived'")
 
 
-def test_skill_delete_is_a_first_class_secret_tombstone_reason() -> None:
+def test_skill_delete_does_not_tombstone_retained_secret_ciphertext() -> None:
     reason = next(constraint for constraint in ProjectSkillSecretTombstoneRow.__table__.constraints if constraint.name == "ck_project_skill_secret_tombstones_reason")
 
-    assert "'skill_delete'" in str(reason.sqltext)
+    assert str(reason.sqltext) == "reason IN ('replace', 'clear')"
 
 
-def test_skill_lifecycle_results_expose_only_safe_aggregate_facts() -> None:
+def test_skill_delete_result_exposes_only_affected_agent_count() -> None:
     deletion = SkillDeleteResult(affected_agent_count=2)
-    purge = ArchivedSkillPurgeReport(
-        projects_scanned=1,
-        skills_examined=3,
-        skills_purged=1,
-        versions_purged=2,
-        released_bytes=4096,
-    )
 
     assert deletion.affected_agent_count == 2
-    assert purge == ArchivedSkillPurgeReport(1, 3, 1, 2, 4096)
 
 
 def test_skill_delete_http_contract_returns_affected_agent_count() -> None:
@@ -78,48 +66,9 @@ def test_skill_delete_audit_requires_affected_agent_count_iff_deleted(
         AssetAuditMetadata.model_validate(metadata)
 
 
-def test_archived_skill_purge_audit_metadata_is_content_free() -> None:
-    metadata = PurgeAuditMetadata(
-        resource_kind="archived_skill",
-        purged_count=2,
-    )
-
-    assert metadata.model_dump(mode="json") == {
-        "resource_kind": "archived_skill",
-        "purged_count": 2,
-    }
-
-
-class _FlakySweep:
-    def __init__(self) -> None:
-        self.calls = 0
-        self.recovered = __import__("asyncio").Event()
-
-    async def sweep(self, *, limit: int, request_id: str):
-        del limit, request_id
-        self.calls += 1
-        if self.calls == 1:
-            raise RuntimeError("temporary purge failure")
-        self.recovered.set()
-        return ArchivedSkillPurgeReport(0, 0, 0, 0, 0)
-
-
-@pytest.mark.asyncio
-async def test_low_frequency_purge_reconciler_survives_one_failed_pass() -> None:
-    import asyncio
-
-    sweep = _FlakySweep()
-    reconciler = ArchivedSkillPurgeReconciler(
-        sweep,  # type: ignore[arg-type]
-        batch_size=10,
-        interval_seconds=0.01,
-    )
-
-    await reconciler.start()
-    try:
-        await asyncio.wait_for(sweep.recovered.wait(), timeout=1)
-    finally:
-        await reconciler.aclose()
-
-    assert reconciler.closed is True
-    assert sweep.calls >= 2
+def test_archived_skill_has_no_physical_purge_audit_resource_kind() -> None:
+    with pytest.raises(ValidationError):
+        PurgeAuditMetadata(
+            resource_kind="archived_skill",  # type: ignore[arg-type]
+            purged_count=2,
+        )

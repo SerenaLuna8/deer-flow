@@ -82,14 +82,6 @@ class SkillRow(Base):
                 "scope = 'project' AND status != 'archived'",
             ),
         ),
-        Index(
-            "ix_skills_archived_purge",
-            project_id,
-            id,
-            postgresql_where=text(
-                "scope = 'project' AND status = 'archived'",
-            ),
-        ),
     )
 
 

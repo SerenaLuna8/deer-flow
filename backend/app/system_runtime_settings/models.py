@@ -254,6 +254,11 @@ class LoopDetectionPolicy(_PolicyModel):
     )
 
 
+class InternalToolCallLimitsPolicy(_PolicyModel):
+    lead_per_run: int = Field(default=200, ge=1, le=100_000)
+    subagent_per_task: int = Field(default=50, ge=1, le=100_000)
+
+
 class SubagentTotalsByWorkloadPolicy(_PolicyModel):
     interactive: int = Field(default=6, ge=1, le=50)
     research: int = Field(default=9, ge=1, le=50)
@@ -295,7 +300,9 @@ class AgentRuntimePolicyValue(_PolicyModel):
     tool_search: ToolSearchPolicy = Field(default_factory=ToolSearchPolicy)
     tool_output: ToolOutputPolicy = Field(default_factory=ToolOutputPolicy)
     loop_detection: LoopDetectionPolicy = Field(default_factory=LoopDetectionPolicy)
-    internal_tool_call_limit: int = Field(default=200, ge=1, le=100_000)
+    internal_tool_call_limits: InternalToolCallLimitsPolicy = Field(
+        default_factory=InternalToolCallLimitsPolicy,
+    )
     read_before_write: EnabledPolicy = Field(default_factory=EnabledPolicy)
     safety_finish_reason: EnabledPolicy = Field(default_factory=EnabledPolicy)
     subagents: SubagentPolicy = Field(default_factory=SubagentPolicy)
@@ -444,6 +451,7 @@ __all__ = [
     "DEFAULT_VISION_BRIDGE_MODEL_NAME",
     "DEFAULT_MEMORY_DOCUMENT_SECTIONS",
     "IdenticalCallsPolicy",
+    "InternalToolCallLimitsPolicy",
     "LoopDetectionPolicy",
     "LockedMemoryDocumentPolicy",
     "MaterializedAgentRuntimePolicy",

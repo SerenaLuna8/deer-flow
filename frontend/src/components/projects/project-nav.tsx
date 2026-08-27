@@ -441,12 +441,14 @@ function ProjectNavigationLinksContent({
 export function ProjectDesktopNav({
   project,
   footer,
+  compactFooter,
   collapsed = false,
   onCollapsedChange,
   className,
 }: {
   project: Project;
   footer: React.ReactNode;
+  compactFooter: React.ReactNode;
   collapsed?: boolean;
   onCollapsedChange?: (collapsed: boolean) => void;
   className?: string;
@@ -478,6 +480,7 @@ export function ProjectDesktopNav({
           <div className="min-h-0 flex-1 overflow-y-auto p-2">
             <ProjectNavigationLinks project={project} collapsed />
           </div>
+          <div className="border-border/70 border-t p-2">{compactFooter}</div>
         </>
       ) : (
         <>

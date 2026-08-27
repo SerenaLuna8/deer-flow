@@ -24,6 +24,7 @@ from app.system_runtime_settings.validation import (
     LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
     PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
     RUNTIME_POLICY_SCHEMA_VERSION,
+    SINGLE_LIMIT_RUNTIME_POLICY_SCHEMA_VERSION,
     RuntimePolicyInvalid,
     canonical_policy_payload_for_schema,
     decode_policy_value_for_schema,
@@ -45,6 +46,7 @@ def _materialize_exact(
         LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
         INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION,
         PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
+        SINGLE_LIMIT_RUNTIME_POLICY_SCHEMA_VERSION,
         RUNTIME_POLICY_SCHEMA_VERSION,
     }:
         raise SystemRuntimePolicyRepositoryInvariant

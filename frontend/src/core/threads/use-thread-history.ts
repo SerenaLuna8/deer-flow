@@ -1,5 +1,13 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import type { EventSequence } from "../private-work/event-sequence";
 import { usePrivateWorkAccess } from "../private-work/provider";
@@ -9,7 +17,11 @@ import {
 } from "../private-work/types";
 
 import { fetchRunMessagesPage } from "./api";
-import { dedupeMessagesByIdentity } from "./message-projection";
+import {
+  dedupeMessagesByIdentity,
+  messageIdentity,
+  messageRunId,
+} from "./message-projection";
 import {
   buildVisibleHistoryMessages,
   filterVisibleHistoryRows,
@@ -22,57 +34,276 @@ import {
   shouldReloadEmptyRunAfterTerminalFailure,
   shouldAutoContinueOnEmptyRun,
 } from "./run-history";
-import { fetchAllThreadRuns, useThreadRuns } from "./thread-runs";
+import { scopedThreadQueryKey } from "./thread-query-key";
+import { useThreadRuns } from "./thread-runs";
 import type { RunMessage } from "./types";
 
-const CANONICAL_THREAD_HISTORY_MAX_MESSAGE_PAGES = 1000;
+const CANONICAL_RUN_HISTORY_MAX_MESSAGE_PAGES = 1000;
 
-export type CanonicalThreadHistory = Readonly<{
+type RunsGetClient = {
+  runs: {
+    get(
+      threadId: string,
+      runId: string,
+      options?: { signal?: AbortSignal },
+    ): Promise<unknown>;
+  };
+};
+
+export type CanonicalRunHistory = Readonly<{
   threadId: string;
-  runs: Run[];
-  messages: Message[];
+  run: Run;
+  rows: RunMessage[];
 }>;
 
-export async function fetchCanonicalThreadHistory(
-  apiClient: Parameters<typeof fetchAllThreadRuns>[0],
+export async function fetchCanonicalRunHistory(
+  apiClient: RunsGetClient,
   apiBaseURL: string,
   threadId: string,
+  runId: string,
   signal: AbortSignal,
-): Promise<CanonicalThreadHistory> {
-  const runs = await fetchAllThreadRuns(apiClient, threadId, undefined, signal);
-  let rows: RunMessage[] = [];
-  let messagePageCount = 0;
-  for (const run of runs) {
-    let beforeSeq: EventSequence | undefined;
-    while (true) {
-      signal.throwIfAborted();
-      messagePageCount += 1;
-      if (messagePageCount > CANONICAL_THREAD_HISTORY_MAX_MESSAGE_PAGES) {
-        throw new Error("Canonical Thread history exceeded the page limit.");
-      }
-      const page = await fetchRunMessagesPage(
-        apiBaseURL,
-        threadId,
-        run.run_id,
-        beforeSeq,
-        signal,
-      );
-      rows = mergeRunMessageRows(rows, page.data, runs);
-      const nextBeforeSeq = getNextRunMessagesBeforeSeq(page);
-      if (nextBeforeSeq === null) break;
-      if (nextBeforeSeq === undefined) {
-        throw new Error(
-          `Run ${run.run_id} returned a non-advancing message page.`,
-        );
-      }
-      beforeSeq = nextBeforeSeq;
-    }
+): Promise<CanonicalRunHistory> {
+  const run = (await apiClient.runs.get(threadId, runId, { signal })) as Run;
+  if (run.run_id !== runId || run.thread_id !== threadId) {
+    throw new Error("Canonical REST returned a different Run authority.");
   }
+  if (
+    !["success", "error", "timeout", "interrupted"].includes(
+      run.status as string,
+    )
+  ) {
+    throw new Error("Canonical REST did not confirm the terminal Run.");
+  }
+  let rows: RunMessage[] = [];
+  let beforeSeq: EventSequence | undefined;
+  let messagePageCount = 0;
+
+  while (true) {
+    signal.throwIfAborted();
+    messagePageCount += 1;
+    if (messagePageCount > CANONICAL_RUN_HISTORY_MAX_MESSAGE_PAGES) {
+      throw new Error("Canonical Run history exceeded the page limit.");
+    }
+    const page = await fetchRunMessagesPage(
+      apiBaseURL,
+      threadId,
+      runId,
+      beforeSeq,
+      signal,
+    );
+    rows = mergeRunMessageRows(rows, page.data, [run]);
+    const nextBeforeSeq = getNextRunMessagesBeforeSeq(page);
+    if (nextBeforeSeq === null) break;
+    if (nextBeforeSeq === undefined) {
+      throw new Error(`Run ${runId} returned a non-advancing message page.`);
+    }
+    beforeSeq = nextBeforeSeq;
+  }
+
+  return { threadId, run, rows };
+}
+
+export type TerminalRunHistoryCommitResult =
+  | Readonly<{ kind: "stale" }>
+  | Readonly<{
+      kind: "committed";
+      messages: Message[];
+      capturedFallback: Message[];
+    }>;
+
+function mergeCanonicalRunMessages(
+  canonicalMessages: Message[],
+  capturedMessages: Message[],
+): Message[] {
+  const canonicalIdentities = new Set(
+    canonicalMessages
+      .map(messageIdentity)
+      .filter((identity): identity is string => identity !== undefined),
+  );
+  const capturedBeforeCanonical = new Map<string, Message[]>();
+  const capturedAfterCanonical: Message[] = [];
+  let nextCanonicalIdentity: string | undefined;
+
+  for (let index = capturedMessages.length - 1; index >= 0; index -= 1) {
+    const message = capturedMessages[index];
+    if (!message) continue;
+    const identity = messageIdentity(message);
+    if (identity !== undefined && canonicalIdentities.has(identity)) {
+      nextCanonicalIdentity = identity;
+      continue;
+    }
+    if (nextCanonicalIdentity === undefined) {
+      capturedAfterCanonical.unshift(message);
+      continue;
+    }
+    const before = capturedBeforeCanonical.get(nextCanonicalIdentity) ?? [];
+    before.unshift(message);
+    capturedBeforeCanonical.set(nextCanonicalIdentity, before);
+  }
+
+  const merged: Message[] = [];
+  for (const message of canonicalMessages) {
+    const identity = messageIdentity(message);
+    if (identity !== undefined) {
+      merged.push(...(capturedBeforeCanonical.get(identity) ?? []));
+    }
+    merged.push(message);
+  }
+  merged.push(...capturedAfterCanonical);
+  return dedupeMessagesByIdentity(merged);
+}
+
+export function projectTerminalRunFallbacks(
+  canonicalHistory: Message[],
+  capturedFallbacks: ReadonlyMap<string, Message[]>,
+  runsNewestFirst: Run[],
+  supersededRunIds: ReadonlySet<string>,
+): Message[] {
+  if (capturedFallbacks.size === 0) {
+    return canonicalHistory;
+  }
+  const chronologicalRunOrder = new Map<string, number>();
+  [...runsNewestFirst]
+    .reverse()
+    .forEach((run, index) => chronologicalRunOrder.set(run.run_id, index));
+  const orderedFallbacks = [...capturedFallbacks.entries()].sort(
+    ([leftRunId], [rightRunId]) =>
+      (chronologicalRunOrder.get(leftRunId) ?? Number.MAX_SAFE_INTEGER) -
+      (chronologicalRunOrder.get(rightRunId) ?? Number.MAX_SAFE_INTEGER),
+  );
+  let projected = canonicalHistory;
+
+  for (const [runId, capturedMessages] of orderedFallbacks) {
+    if (supersededRunIds.has(runId)) continue;
+    const firstRunIndex = projected.findIndex(
+      (message) => messageRunId(message) === runId,
+    );
+    const canonicalRunMessages = projected.filter(
+      (message) => messageRunId(message) === runId,
+    );
+    const mergedRunMessages = mergeCanonicalRunMessages(
+      canonicalRunMessages,
+      capturedMessages,
+    );
+    const withoutRun = projected.filter(
+      (message) => messageRunId(message) !== runId,
+    );
+    let insertionIndex = firstRunIndex;
+    if (insertionIndex < 0) {
+      const targetOrder = chronologicalRunOrder.get(runId);
+      insertionIndex =
+        targetOrder === undefined
+          ? withoutRun.length
+          : withoutRun.findIndex((message) => {
+              const messageOrder = chronologicalRunOrder.get(
+                messageRunId(message) ?? "",
+              );
+              return messageOrder !== undefined && messageOrder > targetOrder;
+            });
+      if (insertionIndex < 0) insertionIndex = withoutRun.length;
+    }
+    projected = [
+      ...withoutRun.slice(0, insertionIndex),
+      ...mergedRunMessages,
+      ...withoutRun.slice(insertionIndex),
+    ];
+  }
+  return dedupeMessagesByIdentity(projected);
+}
+
+export function pruneConfirmedTerminalRunFallbacks(
+  capturedFallbacks: ReadonlyMap<string, Message[]>,
+  canonicalHistory: Message[],
+  supersededRunIds: ReadonlySet<string>,
+): ReadonlyMap<string, Message[]> {
+  let next: Map<string, Message[]> | null = null;
+  for (const [runId, capturedMessages] of capturedFallbacks) {
+    const canonicalIdentities = new Set(
+      canonicalHistory
+        .filter((message) => messageRunId(message) === runId)
+        .map(messageIdentity)
+        .filter((identity): identity is string => identity !== undefined),
+    );
+    const confirmed = capturedMessages.every((message) => {
+      const identity = messageIdentity(message);
+      return identity !== undefined && canonicalIdentities.has(identity);
+    });
+    if (!supersededRunIds.has(runId) && !confirmed) continue;
+    next ??= new Map(capturedFallbacks);
+    next.delete(runId);
+  }
+  return next ?? capturedFallbacks;
+}
+
+export function resolveTerminalRunHistoryCommit({
+  boundThreadId,
+  snapshot,
+  capturedMessages,
+}: {
+  boundThreadId: string;
+  snapshot: CanonicalRunHistory;
+  capturedMessages: Message[];
+}): TerminalRunHistoryCommitResult {
+  if (boundThreadId !== snapshot.threadId) {
+    return { kind: "stale" };
+  }
+  const runId = snapshot.run.run_id;
+  if (snapshot.run.thread_id !== snapshot.threadId) {
+    throw new Error("Canonical Run does not belong to the target Thread.");
+  }
+  if (snapshot.rows.some((row) => row.run_id !== runId)) {
+    throw new Error("Canonical Run history contains a row from another Run.");
+  }
+
+  const canonicalMessages = buildVisibleHistoryMessages(
+    snapshot.rows,
+    new Set(),
+    [],
+  );
+  const capturedRunMessages = dedupeMessagesByIdentity(
+    capturedMessages.filter(
+      (message) =>
+        messageRunId(message) === runId &&
+        messageIdentity(message) !== undefined,
+    ),
+  );
+  const canonicalIdentities = new Set(
+    canonicalMessages
+      .map(messageIdentity)
+      .filter((identity): identity is string => identity !== undefined),
+  );
+  const hasCapturedOnlyMessage = capturedRunMessages.some((message) => {
+    const identity = messageIdentity(message);
+    return identity !== undefined && !canonicalIdentities.has(identity);
+  });
+  const hasSharedIdentity = capturedRunMessages.some((message) => {
+    const identity = messageIdentity(message);
+    return identity !== undefined && canonicalIdentities.has(identity);
+  });
+  if (hasCapturedOnlyMessage && !hasSharedIdentity) {
+    throw new Error("Captured terminal messages have no canonical anchor.");
+  }
+  const capturedFallback = hasCapturedOnlyMessage ? capturedRunMessages : [];
   return {
-    threadId,
-    runs,
-    messages: buildVisibleHistoryMessages(rows, getSupersededRunIds(runs), []),
+    kind: "committed",
+    messages:
+      capturedFallback.length > 0
+        ? mergeCanonicalRunMessages(canonicalMessages, capturedFallback)
+        : canonicalMessages,
+    capturedFallback,
   };
+}
+
+function upsertCanonicalRun(runs: Run[], canonicalRun: Run): Run[] {
+  const existingIndex = runs.findIndex(
+    (run) => run.run_id === canonicalRun.run_id,
+  );
+  if (existingIndex < 0) {
+    return [canonicalRun, ...runs];
+  }
+  return runs.map((run, index) =>
+    index === existingIndex ? canonicalRun : run,
+  );
 }
 
 type ThreadHistoryOptions = {
@@ -90,6 +321,7 @@ export function useThreadHistory(
   }: ThreadHistoryOptions = {},
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
+  const queryClient = useQueryClient();
   const runs = useThreadRuns(threadId, { enabled }, privateWork);
   const threadIdRef = useRef(threadId);
   const runsRef = useRef(runs.data ?? []);
@@ -103,22 +335,67 @@ export function useThreadHistory(
   const initialHistoryPublishedRef = useRef(false);
   const initialHistoryStagedRowsRef = useRef<RunMessage[]>([]);
   const loadGenerationRef = useRef(0);
+  const pendingTerminalCommitRef = useRef<{
+    threadId: string;
+    result: TerminalRunHistoryCommitResult;
+    resolve(result: TerminalRunHistoryCommitResult): void;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [messageLoadError, setMessageLoadError] = useState<Error | null>(null);
   const [messageRows, setMessageRows] = useState<RunMessage[]>([]);
   const [appendedMessages, setAppendedMessages] = useState<Message[]>([]);
+  const [terminalRunFallbacks, setTerminalRunFallbacks] = useState<
+    ReadonlyMap<string, Message[]>
+  >(() => new Map());
 
   const supersededRunIds = useMemo(() => {
     return getSupersededRunIds(runs.data, pendingSupersededRunIds);
   }, [pendingSupersededRunIds, runs.data]);
 
+  const canonicalMessages = useMemo(
+    () =>
+      buildVisibleHistoryMessages(
+        messageRows,
+        supersededRunIds,
+        appendedMessages,
+      ),
+    [appendedMessages, messageRows, supersededRunIds],
+  );
   const messages = useMemo(() => {
-    return buildVisibleHistoryMessages(
-      messageRows,
+    return projectTerminalRunFallbacks(
+      canonicalMessages,
+      terminalRunFallbacks,
+      runs.data ?? runsRef.current,
       supersededRunIds,
-      appendedMessages,
     );
-  }, [appendedMessages, messageRows, supersededRunIds]);
+  }, [canonicalMessages, runs.data, supersededRunIds, terminalRunFallbacks]);
+  useLayoutEffect(() => {
+    const pending = pendingTerminalCommitRef.current;
+    if (!pending) {
+      return;
+    }
+    pendingTerminalCommitRef.current = null;
+    pending.resolve(
+      pending.threadId === threadId ? pending.result : { kind: "stale" },
+    );
+  }, [messages, threadId]);
+  useEffect(
+    () => () => {
+      const pending = pendingTerminalCommitRef.current;
+      pendingTerminalCommitRef.current = null;
+      pending?.resolve({ kind: "stale" });
+    },
+    [],
+  );
+  useEffect(() => {
+    setTerminalRunFallbacks((current) =>
+      pruneConfirmedTerminalRunFallbacks(
+        current,
+        canonicalMessages,
+        supersededRunIds,
+      ),
+    );
+  }, [canonicalMessages, supersededRunIds]);
 
   const loadMessages = useCallback(async () => {
     if (!enabled) {
@@ -182,7 +459,7 @@ export function useThreadHistory(
           return;
         }
         const _messages = result.data;
-        if (stagingInitialHistory) {
+        if (stagingInitialHistory && !initialHistoryPublishedRef.current) {
           initialHistoryStagedRowsRef.current = mergeRunMessageRows(
             initialHistoryStagedRowsRef.current,
             _messages,
@@ -217,7 +494,7 @@ export function useThreadHistory(
           } else {
             loadedRunIdsRef.current.add(run.run_id);
           }
-          if (stagingInitialHistory) {
+          if (stagingInitialHistory && !initialHistoryPublishedRef.current) {
             pendingLoadRef.current = !isInitialHistoryWindowLoaded(
               runsRef.current,
               loadedRunIdsRef.current,
@@ -243,6 +520,7 @@ export function useThreadHistory(
 
       if (
         stagingInitialHistory &&
+        !initialHistoryPublishedRef.current &&
         isInitialHistoryWindowLoaded(runsRef.current, loadedRunIdsRef.current)
       ) {
         const stagedRows = initialHistoryStagedRowsRef.current;
@@ -289,6 +567,7 @@ export function useThreadHistory(
       setMessageLoadError(null);
       setMessageRows([]);
       setAppendedMessages([]);
+      setTerminalRunFallbacks(new Map());
     }
 
     if (!enabled) {
@@ -349,17 +628,79 @@ export function useThreadHistory(
     }
     void loadMessages();
   }, [loadMessages, refetchRuns, runsFailed]);
-  const refetchCanonicalThread = useCallback(
-    (targetThreadId: string) =>
+  const refetchCanonicalRun = useCallback(
+    (targetThreadId: string, targetRunId: string) =>
       runPrivateWorkAbortable(privateWork, (signal) =>
-        fetchCanonicalThreadHistory(
+        fetchCanonicalRunHistory(
           privateWork.client,
           privateWork.apiBaseURL,
           targetThreadId,
+          targetRunId,
           signal ?? new AbortController().signal,
         ),
       ),
     [privateWork],
+  );
+  const commitTerminalRun = useCallback(
+    (
+      snapshot: CanonicalRunHistory,
+      capturedMessages: Message[],
+    ): Promise<TerminalRunHistoryCommitResult> => {
+      const resolved = resolveTerminalRunHistoryCommit({
+        boundThreadId: threadIdRef.current,
+        snapshot,
+        capturedMessages,
+      });
+      if (resolved.kind === "stale") {
+        return Promise.resolve(resolved);
+      }
+
+      const runId = snapshot.run.run_id;
+      const nextRuns = upsertCanonicalRun(runsRef.current, snapshot.run);
+      runsRef.current = nextRuns;
+      runStatusesRef.current.set(runId, snapshot.run.status as string);
+      loadedRunIdsRef.current.add(runId);
+      runBeforeSeqRef.current.delete(runId);
+      indexRef.current = findLatestUnloadedRunIndex(
+        nextRuns,
+        loadedRunIdsRef.current,
+      );
+      let committedRows = snapshot.rows;
+      if (!initialHistoryPublishedRef.current) {
+        committedRows = mergeRunMessageRows(
+          initialHistoryStagedRowsRef.current,
+          snapshot.rows,
+          nextRuns,
+        );
+        initialHistoryStagedRowsRef.current = [];
+        initialHistoryPublishedRef.current = true;
+      }
+      setMessageRows((previous) =>
+        mergeRunMessageRows(previous, committedRows, nextRuns),
+      );
+      setTerminalRunFallbacks((previous) => {
+        const next = new Map(previous);
+        if (resolved.capturedFallback.length > 0) {
+          next.set(runId, resolved.capturedFallback);
+        } else {
+          next.delete(runId);
+        }
+        return next;
+      });
+      setMessageLoadError(null);
+      queryClient.setQueryData<Run[]>(
+        scopedThreadQueryKey(privateWork.scope, "thread", snapshot.threadId),
+        (current) => upsertCanonicalRun(current ?? nextRuns, snapshot.run),
+      );
+      return new Promise((resolve) => {
+        pendingTerminalCommitRef.current = {
+          threadId: snapshot.threadId,
+          result: resolved,
+          resolve,
+        };
+      });
+    },
+    [privateWork.scope, queryClient],
   );
   return {
     runs: runs.data,
@@ -370,6 +711,7 @@ export function useThreadHistory(
     loadMore: loadMessages,
     error: historyError,
     retry: retryHistory,
-    refetchCanonicalThread,
+    refetchCanonicalRun,
+    commitTerminalRun,
   };
 }

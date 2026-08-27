@@ -33,11 +33,9 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from deerflow.agents.middlewares.tool_call_control import (
-        ResolvedGraphToolCallControlProfile,
-        RunToolCallLimitAuthority,
+        GraphToolCallControlTopology,
         ToolCallControlObservation,
         ToolCallControlObserver,
-        ToolCallControlScope,
     )
     from deerflow.subagents.lifecycle import (
         SubagentExecutionBinding,
@@ -53,17 +51,17 @@ else:
     Runtime = Any
 
 
-def _validate_tool_call_control_profile(value: object | None) -> None:
+def _validate_tool_call_control_topology(value: object | None) -> None:
     if value is None:
         return
     # Delayed to avoid the tools -> task_tool -> binding initialization cycle.
     from deerflow.agents.middlewares.tool_call_control import (
-        ResolvedGraphToolCallControlProfile,
+        GraphToolCallControlTopology,
     )
 
-    if type(value) is not ResolvedGraphToolCallControlProfile:
+    if type(value) is not GraphToolCallControlTopology:
         raise TypeError(
-            "tool_call_control_profile must be ResolvedGraphToolCallControlProfile or None",
+            "tool_call_control_topology must be GraphToolCallControlTopology or None",
         )
 
 
@@ -381,39 +379,21 @@ class ParentExecutionBinding(_OpaqueExecutionObject):
     owner_loop: asyncio.AbstractEventLoop
     store: object | None
     barrier: ParentExecutionBarrier
-    tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None
+    tool_call_control_topology: GraphToolCallControlTopology | None = None
     tool_call_control_observer: ToolCallControlObserver | None = None
-    tool_call_limit_authority: RunToolCallLimitAuthority | None = None
-    tool_call_limit_scope_id: str | None = None
 
     def __post_init__(self) -> None:
-        _validate_tool_call_control_profile(self.tool_call_control_profile)
+        _validate_tool_call_control_topology(self.tool_call_control_topology)
         if self.tool_call_control_observer is not None and not callable(
             getattr(self.tool_call_control_observer, "observe", None),
         ):
             raise TypeError(
                 "tool_call_control_observer must implement observe()",
             )
-        if self.tool_call_control_observer is not None and self.tool_call_control_profile is None:
+        if self.tool_call_control_observer is not None and self.tool_call_control_topology is None:
             raise ValueError(
-                "tool_call_control_observer requires a resolved graph profile",
+                "tool_call_control_observer requires a control topology",
             )
-        if self.tool_call_control_profile is not None:
-            from deerflow.agents.middlewares.tool_call_control import (
-                RunToolCallLimitAuthority,
-            )
-
-            if not isinstance(
-                self.tool_call_limit_authority,
-                RunToolCallLimitAuthority,
-            ):
-                raise TypeError(
-                    "tool_call_limit_authority is required with a resolved graph profile",
-                )
-            if not isinstance(self.tool_call_limit_scope_id, str) or not self.tool_call_limit_scope_id.strip():
-                raise ValueError(
-                    "tool_call_limit_scope_id is required with a resolved graph profile",
-                )
 
     def to_lifecycle_binding(
         self,
@@ -450,10 +430,8 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
     """Graph-owned factory for per-Sub-Agent Task parent bindings."""
 
     profile: ParentExecutionProfile
-    tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None
+    tool_call_control_topology: GraphToolCallControlTopology | None = None
     tool_call_control_observer: ToolCallControlObserver | None = None
-    tool_call_limit_authority: RunToolCallLimitAuthority | None = None
-    tool_call_limit_scope: ToolCallControlScope | None = None
 
     def __post_init__(self) -> None:
         if type(self.profile) not in {
@@ -463,38 +441,17 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
             PrivateRunParentExecutionProfile,
         }:
             raise TypeError("unsupported parent execution profile")
-        _validate_tool_call_control_profile(self.tool_call_control_profile)
+        _validate_tool_call_control_topology(self.tool_call_control_topology)
         if self.tool_call_control_observer is not None and not callable(
             getattr(self.tool_call_control_observer, "observe", None),
         ):
             raise TypeError(
                 "tool_call_control_observer must implement observe()",
             )
-        if self.tool_call_control_observer is not None and self.tool_call_control_profile is None:
+        if self.tool_call_control_observer is not None and self.tool_call_control_topology is None:
             raise ValueError(
-                "tool_call_control_observer requires a resolved graph profile",
+                "tool_call_control_observer requires a control topology",
             )
-        if self.tool_call_control_profile is not None:
-            from deerflow.agents.middlewares.tool_call_control import (
-                FixedToolCallControlScope,
-                PerInvocationToolCallControlScope,
-                RunToolCallLimitAuthority,
-            )
-
-            if not isinstance(
-                self.tool_call_limit_authority,
-                RunToolCallLimitAuthority,
-            ):
-                raise TypeError(
-                    "tool_call_limit_authority is required with a resolved graph profile",
-                )
-            if not isinstance(
-                self.tool_call_limit_scope,
-                (FixedToolCallControlScope, PerInvocationToolCallControlScope),
-            ):
-                raise TypeError(
-                    "tool_call_limit_scope is required with a resolved graph profile",
-                )
 
     def bind(self, runtime: Runtime) -> ParentExecutionBinding:
         """Capture one invocation without materializing a subagent runner."""
@@ -520,7 +477,7 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
                 barrier=barrier,
             )
         )
-        limit_scope_id = None if self.tool_call_limit_scope is None else self.tool_call_limit_scope.resolve(runtime)
+        topology = None if self.tool_call_control_topology is None else self.tool_call_control_topology.bind_parent_scope(runtime)
         return ParentExecutionBinding(
             profile=self.profile,
             state=MappingProxyType(dict(state)),
@@ -529,10 +486,8 @@ class ParentExecutionBindingFactory(_OpaqueExecutionObject):
             owner_loop=owner_loop,
             store=runtime.store,
             barrier=barrier,
-            tool_call_control_profile=self.tool_call_control_profile,
+            tool_call_control_topology=topology,
             tool_call_control_observer=observer,
-            tool_call_limit_authority=self.tool_call_limit_authority,
-            tool_call_limit_scope_id=limit_scope_id,
         )
 
 

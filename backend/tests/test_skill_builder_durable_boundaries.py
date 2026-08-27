@@ -19,7 +19,9 @@ from app.gateway.routers.project_skill_builder import (
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from app.shared_assets.skill_builder_run_admission import SkillBuilderRunAdmission
+from app.shared_assets.skill_builder_admission_contract import (
+    SkillBuilderRunAdmission,
+)
 from app.shared_assets.skill_design_service import SkillDesignService
 
 

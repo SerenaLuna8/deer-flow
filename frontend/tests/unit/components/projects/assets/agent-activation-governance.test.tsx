@@ -27,13 +27,6 @@ describe("Agent Definition authoring governance", () => {
     expect(
       projectAssetCanDelete("agents", {
         scope: "project",
-        capabilities: [EDIT],
-        definition_id: "11111111-1111-4111-8111-111111111111",
-      }),
-    ).toBe(true);
-    expect(
-      projectAssetCanDelete("agents", {
-        scope: "project",
         capabilities: [EDIT, MANAGE_BINDINGS],
         definition_id: "11111111-1111-4111-8111-111111111111",
       }),

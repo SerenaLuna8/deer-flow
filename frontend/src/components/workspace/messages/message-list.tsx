@@ -12,6 +12,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -19,6 +20,10 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
+import {
+  useStickToBottomContext,
+  type StickToBottomContext,
+} from "use-stick-to-bottom";
 
 import {
   Conversation,
@@ -110,6 +115,7 @@ import { SubtaskCard } from "./subtask-card";
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
+const TERMINAL_SCROLL_ESCAPE_DISTANCE_PX = 70;
 
 const SELECTION_TOOLBAR_MARGIN = 8;
 // Approximate rendered height of the pill (p-1 padding + h-8 button). Used only
@@ -128,6 +134,52 @@ type MessageEditSession = {
   messageId: string;
   draft: string;
 };
+
+function TerminalScrollIntentTracker({
+  userScrolledAwayRef,
+}: {
+  userScrolledAwayRef: { current: boolean };
+}) {
+  const conversation = useStickToBottomContext();
+  useLayoutEffect(() => {
+    const scroller = conversation.scrollRef.current;
+    if (!scroller) {
+      return;
+    }
+    let pointerActive = false;
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) {
+        userScrolledAwayRef.current = true;
+      }
+    };
+    const onPointerDown = () => {
+      pointerActive = true;
+    };
+    const onPointerUp = () => {
+      pointerActive = false;
+    };
+    const onScroll = () => {
+      const bottomDistance =
+        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
+      if (bottomDistance <= 2) {
+        userScrolledAwayRef.current = false;
+      } else if (pointerActive) {
+        userScrolledAwayRef.current = true;
+      }
+    };
+    scroller.addEventListener("wheel", onWheel, { passive: true });
+    scroller.addEventListener("pointerdown", onPointerDown, { passive: true });
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    return () => {
+      scroller.removeEventListener("wheel", onWheel);
+      scroller.removeEventListener("pointerdown", onPointerDown);
+      scroller.removeEventListener("scroll", onScroll);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [conversation, userScrolledAwayRef]);
+  return null;
+}
 
 function TokenBudgetNotice({ messages }: { messages: Message[] }) {
   const { t } = useI18n();
@@ -346,6 +398,8 @@ export function MessageList({
   enableSidecarActions = true,
   sidecarSurface = false,
   suspendLoadingIndicators = false,
+  terminalDisplayLatched = false,
+  activeRunId = null,
   runExecutionState,
   executionApproval = null,
   observedExecutionApprovalId = null,
@@ -388,6 +442,8 @@ export function MessageList({
   enableSidecarActions?: boolean;
   sidecarSurface?: boolean;
   suspendLoadingIndicators?: boolean;
+  terminalDisplayLatched?: boolean;
+  activeRunId?: string | null;
   runExecutionState?: RunExecutionState | "unavailable" | null;
   executionApproval?: ExecutionApprovalProjection | null;
   observedExecutionApprovalId?: string | null;
@@ -406,6 +462,15 @@ export function MessageList({
   } = useArtifacts();
   const sidecar = useMaybeSidecar();
   const visualRunIsLoading = thread.isLoading && !suspendLoadingIndicators;
+  const terminalHandoffActive = terminalDisplayLatched;
+  const conversationContextRef = useRef<StickToBottomContext | null>(null);
+  const previousScrollLoadingRef = useRef(thread.isLoading);
+  const previousScrollThreadIdRef = useRef(threadId);
+  const previousTerminalHandoffRef = useRef(false);
+  const terminalFollowBottomRef = useRef(false);
+  const terminalFollowAnimationFrameRef = useRef(0);
+  const terminalFollowFramesRemainingRef = useRef(0);
+  const terminalUserScrolledAwayRef = useRef(false);
   const [selectionToolbar, setSelectionToolbar] =
     useState<SelectionToolbarState | null>(null);
   const [turnStartTime, setTurnStartTime] = useState<number | null>(() =>
@@ -416,6 +481,153 @@ export function MessageList({
     ReadonlyMap<string, number>
   >(() => new Map());
   const prevIsLoading = useRef(thread.isLoading);
+  const stopTerminalFollowFrame = useCallback(() => {
+    if (terminalFollowAnimationFrameRef.current !== 0) {
+      cancelAnimationFrame(terminalFollowAnimationFrameRef.current);
+      terminalFollowAnimationFrameRef.current = 0;
+    }
+  }, []);
+  const queueTerminalFollowFrames = useCallback((frameCount = 2) => {
+    terminalFollowFramesRemainingRef.current = Math.max(
+      terminalFollowFramesRemainingRef.current,
+      frameCount,
+    );
+    if (terminalFollowAnimationFrameRef.current !== 0) {
+      return;
+    }
+    const follow = () => {
+      terminalFollowAnimationFrameRef.current = 0;
+      if (!terminalFollowBottomRef.current) {
+        return;
+      }
+      if (terminalFollowFramesRemainingRef.current <= 0) {
+        return;
+      }
+      const conversation = conversationContextRef.current;
+      const scroller = conversation?.scrollRef.current;
+      if (!conversation || !scroller) {
+        return;
+      }
+      if (terminalUserScrolledAwayRef.current) {
+        terminalFollowBottomRef.current = false;
+        terminalFollowFramesRemainingRef.current = 0;
+        conversation.stopScroll();
+        return;
+      }
+      const selection = window.getSelection();
+      const selectionAnchor =
+        selection && !selection.isCollapsed && selection.rangeCount > 0
+          ? selection.getRangeAt(0).commonAncestorContainer
+          : null;
+      if (!selectionAnchor || !scroller.contains(selectionAnchor)) {
+        void conversation.scrollToBottom("instant");
+        scroller.scrollTop = scroller.scrollHeight;
+        terminalFollowFramesRemainingRef.current -= 1;
+        if (terminalFollowFramesRemainingRef.current === 0) {
+          if (!previousTerminalHandoffRef.current) {
+            terminalFollowBottomRef.current = false;
+          }
+          return;
+        }
+      } else {
+        terminalFollowFramesRemainingRef.current = 0;
+        conversation.stopScroll();
+        return;
+      }
+      terminalFollowAnimationFrameRef.current = requestAnimationFrame(follow);
+    };
+    terminalFollowAnimationFrameRef.current = requestAnimationFrame(follow);
+  }, []);
+  useLayoutEffect(() => {
+    if (previousScrollThreadIdRef.current !== threadId) {
+      stopTerminalFollowFrame();
+      previousScrollThreadIdRef.current = threadId;
+      previousScrollLoadingRef.current = thread.isLoading;
+      previousTerminalHandoffRef.current = false;
+      terminalFollowBottomRef.current = false;
+      terminalFollowFramesRemainingRef.current = 0;
+      terminalUserScrolledAwayRef.current = false;
+    }
+    const runJustFinished =
+      previousScrollLoadingRef.current && !thread.isLoading;
+    const terminalJustStarted =
+      !previousTerminalHandoffRef.current && terminalHandoffActive;
+    const terminalJustSettled =
+      previousTerminalHandoffRef.current && !terminalHandoffActive;
+    previousScrollLoadingRef.current = thread.isLoading;
+    previousTerminalHandoffRef.current = terminalHandoffActive;
+
+    const conversation = conversationContextRef.current;
+    if (!conversation) {
+      return;
+    }
+
+    const scroller = conversation.scrollRef.current;
+    if (!scroller) {
+      return;
+    }
+
+    if (terminalJustStarted || (runJustFinished && !terminalHandoffActive)) {
+      const bottomDistance =
+        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
+      const escapedBeforeTerminal =
+        terminalUserScrolledAwayRef.current ||
+        (conversation.state.escapedFromLock &&
+          bottomDistance > TERMINAL_SCROLL_ESCAPE_DISTANCE_PX);
+      terminalFollowBottomRef.current = !escapedBeforeTerminal;
+    }
+    if (!terminalFollowBottomRef.current) {
+      if (runJustFinished || terminalJustStarted) {
+        conversation.stopScroll();
+      }
+      stopTerminalFollowFrame();
+      return;
+    }
+    if (terminalUserScrolledAwayRef.current) {
+      terminalFollowBottomRef.current = false;
+      terminalFollowFramesRemainingRef.current = 0;
+      stopTerminalFollowFrame();
+      conversation.stopScroll();
+      return;
+    }
+    const selection = window.getSelection();
+    const selectionAnchor =
+      selection && !selection.isCollapsed && selection.rangeCount > 0
+        ? selection.getRangeAt(0).commonAncestorContainer
+        : null;
+    if (selectionAnchor && scroller.contains(selectionAnchor)) {
+      if (terminalJustSettled) {
+        terminalFollowBottomRef.current = false;
+      }
+      terminalFollowFramesRemainingRef.current = 0;
+      stopTerminalFollowFrame();
+      conversation.stopScroll();
+      return;
+    }
+
+    void conversation.scrollToBottom("instant");
+    scroller.scrollTop = scroller.scrollHeight;
+    if (terminalJustSettled) {
+      queueTerminalFollowFrames();
+    } else if (!terminalHandoffActive) {
+      terminalFollowBottomRef.current = false;
+      stopTerminalFollowFrame();
+    } else {
+      queueTerminalFollowFrames();
+    }
+  }, [
+    queueTerminalFollowFrames,
+    stopTerminalFollowFrame,
+    terminalHandoffActive,
+    thread.isLoading,
+    thread.messages,
+    threadId,
+  ]);
+  useEffect(() => stopTerminalFollowFrame, [stopTerminalFollowFrame]);
+  const effectiveResizeScroll =
+    terminalHandoffActive || terminalFollowBottomRef.current
+      ? "instant"
+      : resizeScroll;
   const messages = useMemo(
     () =>
       projectTokenBudgetMessages(
@@ -451,7 +663,10 @@ export function MessageList({
       latestSelection &&
       selectedArtifact !== latestSelection.url
     ) {
-      selectArtifact(latestSelection.url, true);
+      selectArtifact(latestSelection.url, {
+        autoSelect: true,
+        requestedViewMode: latestSelection.preferredViewMode,
+      });
       setArtifactsOpen(true);
     }
   }, [
@@ -987,11 +1202,7 @@ export function MessageList({
   );
 
   const hydrateSubtasks = (groupMessages: Message[]) => {
-    const subtaskRunIsActive = isSubtaskRunActive(
-      groupMessages,
-      messages,
-      thread.isLoading,
-    );
+    const subtaskRunIsActive = isSubtaskRunActive(groupMessages, activeRunId);
     const tasks = new Set<Subtask>();
     const taskIds = new Set<string>();
 
@@ -1148,10 +1359,14 @@ export function MessageList({
     <>
       <Conversation
         className={cn("flex size-full flex-col justify-center", className)}
+        contextRef={conversationContextRef}
         data-testid={testId}
         initial={initialScroll}
-        resize={resizeScroll}
+        resize={effectiveResizeScroll}
       >
+        <TerminalScrollIntentTracker
+          userScrolledAwayRef={terminalUserScrolledAwayRef}
+        />
         <ConversationContent
           className="mx-auto w-full max-w-(--chat-content-width) gap-8 pt-8"
           data-testid="chat-message-content"

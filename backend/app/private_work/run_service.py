@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import logging
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -53,7 +51,6 @@ from app.private_work.run_repository import (
 )
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
-from app.shared_assets.skill_deletion import ArchivedSkillPurger
 from deerflow.persistence.execution_approvals import (
     EXECUTION_APPROVAL_ACTIVE_STATUSES,
     ExecutionApprovalRequestRow,
@@ -74,7 +71,6 @@ from deerflow.runtime.private_scope import PrivateResourceScope
 
 TERMINAL_PRIVATE_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 _RUN_RETENTION_NAMESPACE = uuid.UUID("b4ab3129-e23d-4ee6-b7db-71f87754e65f")
-logger = logging.getLogger(__name__)
 
 
 class PrivateRunQuotaPort(Protocol):
@@ -160,7 +156,6 @@ class PrivateRunService:
         quota: PrivateRunQuotaPort | None = None,
         audit: PrivateRunAuditPort | None = None,
         approval_audit: HostExecutionApprovalAuditPort | None = None,
-        archived_skill_purger: ArchivedSkillPurger | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._revalidator = PrivateWorkRevalidator()
@@ -168,7 +163,6 @@ class PrivateRunService:
         self._quota = quota or _NoopPrivateRunQuota()
         self._audit = audit or _NoopPrivateRunAudit()
         self._approval_audit = approval_audit or NoopHostExecutionApprovalAudit()
-        self._archived_skill_purger = archived_skill_purger
 
     @staticmethod
     async def _require_thread(
@@ -421,7 +415,6 @@ class PrivateRunService:
     ) -> None:
         context = require_issued_private_work_context(context)
         conflict_after_commit = False
-        run_deleted = False
         synchronously_cancelled_runs: set[str] = set()
         try:
             async with self._session_factory() as session, session.begin():
@@ -637,25 +630,12 @@ class PrivateRunService:
                         run_id=run_id,
                     ):
                         raise PrivateWorkNotFound(context.request_id)
-                    run_deleted = True
             for cancelled_run_id in synchronously_cancelled_runs:
                 await self._automation_reconciler.handle_run_completion(
                     SimpleNamespace(run_id=cancelled_run_id),
                 )
             if conflict_after_commit:
                 raise PrivateWorkConflict(context.request_id)
-            if run_deleted and self._archived_skill_purger is not None:
-                try:
-                    await self._archived_skill_purger.purge_project(
-                        context.project_id,
-                        request_id=context.request_id,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    # Run deletion is already committed. The low-frequency
-                    # reconciler owns retry and no private coordinates are logged.
-                    logger.warning("Archived Skill purge deferred after Run deletion")
         except PrivateWorkError:
             raise
         except AutomationError:

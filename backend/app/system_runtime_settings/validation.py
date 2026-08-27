@@ -25,12 +25,14 @@ from app.system_runtime_settings.schema_codec import (
     canonical_policy_value_v2,
     canonical_policy_value_v3,
     canonical_policy_value_v4,
+    canonical_policy_value_v5,
 )
 
 LEGACY_RUNTIME_POLICY_SCHEMA_VERSION = 2
 INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION = 3
 PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION = 4
-RUNTIME_POLICY_SCHEMA_VERSION = 5
+SINGLE_LIMIT_RUNTIME_POLICY_SCHEMA_VERSION = 5
+RUNTIME_POLICY_SCHEMA_VERSION = 6
 MAX_RUNTIME_POLICY_BYTES = 32 * 1024
 _SECRET_KEY = re.compile(
     r"(?i)(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
@@ -185,7 +187,7 @@ def canonical_policy_payload_for_schema(
     """Canonicalize a stored payload using its declared schema version.
 
     Runtime-policy rows are immutable and may already be frozen into Runs.
-    Schemas v2 through v4 therefore remain readable through version-owned codecs.
+    Schemas v2 through v5 therefore remain readable through version-owned codecs.
     Schema v2 predates ``vision_bridge``; decoding supplies the safe
     ``model_name=None`` default while checksum verification still uses each
     legacy schema's exact JSON shape.
@@ -197,6 +199,7 @@ def canonical_policy_payload_for_schema(
         LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
         INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION,
         PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
+        SINGLE_LIMIT_RUNTIME_POLICY_SCHEMA_VERSION,
     }:
         try:
             parsed_section = RuntimePolicySection(section)
@@ -206,6 +209,7 @@ def canonical_policy_payload_for_schema(
                 LEGACY_RUNTIME_POLICY_SCHEMA_VERSION: canonical_policy_value_v2,
                 INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION: canonical_policy_value_v3,
                 PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION: canonical_policy_value_v4,
+                SINGLE_LIMIT_RUNTIME_POLICY_SCHEMA_VERSION: canonical_policy_value_v5,
             }[schema_version]
             normalized = canonicalizer(parsed_section, raw)
             _reject_secret_material(normalized)
@@ -257,7 +261,11 @@ def _decode_legacy_agent_runtime(
             "window_size": legacy_loop["window_size"],
         },
     }
-    upgraded["internal_tool_call_limit"] = max(hard_limits)
+    hard_limit = max(hard_limits)
+    upgraded["internal_tool_call_limits"] = {
+        "lead_per_run": hard_limit,
+        "subagent_per_task": hard_limit,
+    }
     upgraded["subagents"] = {
         "max_concurrent": 3,
         "max_total_per_run_by_workload": {
@@ -301,7 +309,29 @@ def _decode_v4_agent_runtime(
                 if not isinstance(limit, Mapping):
                     raise RuntimePolicyInvalid
                 hard_limits.append(limit["hard_limit"])
-    upgraded["internal_tool_call_limit"] = max(hard_limits)
+    hard_limit = max(hard_limits)
+    upgraded["internal_tool_call_limits"] = {
+        "lead_per_run": hard_limit,
+        "subagent_per_task": hard_limit,
+    }
+    parsed = parse_policy_value(RuntimePolicySection.AGENT_RUNTIME, upgraded)
+    if not isinstance(parsed, AgentRuntimePolicyValue):
+        raise RuntimePolicyInvalid
+    return parsed
+
+
+def _decode_v5_agent_runtime(
+    value: Mapping[str, object],
+) -> AgentRuntimePolicyValue:
+    upgraded = AgentRuntimePolicyValue().model_dump(mode="python")
+    for key, item in value.items():
+        if key != "internal_tool_call_limit":
+            upgraded[key] = deepcopy(item)
+    hard_limit = value["internal_tool_call_limit"]
+    upgraded["internal_tool_call_limits"] = {
+        "lead_per_run": hard_limit,
+        "subagent_per_task": hard_limit,
+    }
     parsed = parse_policy_value(RuntimePolicySection.AGENT_RUNTIME, upgraded)
     if not isinstance(parsed, AgentRuntimePolicyValue):
         raise RuntimePolicyInvalid
@@ -334,6 +364,8 @@ def decode_policy_value_for_schema(
             return _decode_legacy_agent_runtime(canonical.value)
         if schema_version == PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION and parsed_section is RuntimePolicySection.AGENT_RUNTIME:
             return _decode_v4_agent_runtime(canonical.value)
+        if schema_version == SINGLE_LIMIT_RUNTIME_POLICY_SCHEMA_VERSION and parsed_section is RuntimePolicySection.AGENT_RUNTIME:
+            return _decode_v5_agent_runtime(canonical.value)
         return parse_policy_value(parsed_section, canonical.value)
     except RuntimePolicyInvalid:
         raise
@@ -348,6 +380,7 @@ __all__ = [
     "INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION",
     "PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION",
     "RUNTIME_POLICY_SCHEMA_VERSION",
+    "SINGLE_LIMIT_RUNTIME_POLICY_SCHEMA_VERSION",
     "RuntimePolicyInvalid",
     "canonical_policy_payload",
     "canonical_policy_payload_for_schema",

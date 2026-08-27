@@ -69,13 +69,21 @@ def resolve_run_tool_call_control_policy(
         value.subagents.max_total_per_run_by_workload,
         workload.name,
     )
+    limits = value.internal_tool_call_limits
+    lead = ResolvedToolCallControlPolicy(
+        repeated_calls=repeated,
+        internal_tool_call_limit=limits.lead_per_run,
+    )
+    subagent = ResolvedToolCallControlPolicy(
+        repeated_calls=repeated,
+        internal_tool_call_limit=limits.subagent_per_task,
+    )
     return ResolvedRunToolCallControlPolicy(
         graph_profile=ResolvedGraphToolCallControlProfile(
             workload_profile=workload.name,
-            policy=ResolvedToolCallControlPolicy(
-                repeated_calls=repeated,
-                internal_tool_call_limit=value.internal_tool_call_limit,
-            ),
+            accounting_mode=("shared_run" if materialized.schema_version <= 5 else "lead_run_subagent_task"),
+            lead=lead,
+            subagent=subagent,
         ),
         max_concurrent_subagents=value.subagents.max_concurrent,
         max_total_subagents=max_total_subagents,

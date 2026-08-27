@@ -59,10 +59,7 @@ from app.shared_assets.models import (
     ResolvedSkillVersionSnapshot,
     SkillAssetRef,
 )
-from app.shared_assets.skill_deletion import (
-    ArchivedSkillPurger,
-    SkillDeletionCoordinator,
-)
+from app.shared_assets.skill_deletion import SkillDeletionCoordinator
 from app.shared_assets.skill_version_facts import skill_version_archive_facts
 from deerflow.config.run_skill_snapshot_config import RunSkillSnapshotConfig
 from deerflow.persistence.bootstrap import _install_full_schema
@@ -72,6 +69,7 @@ from deerflow.persistence.shared_assets import (
     AgentRow,
     AgentSkillRefRow,
     SkillRow,
+    SkillVersionFileRow,
     SkillVersionRow,
 )
 from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
@@ -1498,51 +1496,10 @@ async def test_postgres_legacy_mode_uses_same_repository_to_write_v3_without_ref
         await engine.dispose()
 
 
-class _ArchivedSkillPurgeQuota:
-    def __init__(self) -> None:
-        self.released: list[uuid.UUID] = []
-
-    async def release_skill_version_if_reserved(
-        self,
-        _session: AsyncSession,
-        _project_id: uuid.UUID,
-        *,
-        version_id: uuid.UUID,
-        size: int,
-    ) -> bool:
-        assert size >= 0
-        self.released.append(version_id)
-        return True
-
-    async def reconcile_project_storage(
-        self,
-        _session: AsyncSession,
-        _project_id: uuid.UUID,
-    ) -> None:
-        return None
-
-
-class _ArchivedSkillPurgeAudit:
-    def __init__(self) -> None:
-        self.events: list[tuple[uuid.UUID, int]] = []
-
-    async def archived_skill_purged(
-        self,
-        _session: AsyncSession,
-        *,
-        project_id: uuid.UUID,
-        skill_id: uuid.UUID,
-        version_count: int,
-        request_id: str,
-    ) -> None:
-        del project_id, request_id
-        self.events.append((skill_id, version_count))
-
-
 @pytest.mark.parametrize("schema_version", [3, 4], ids=["legacy-v3", "reference-v4"])
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_admission_first_allows_archive_but_purger_keeps_run_package(
+async def test_postgres_admission_first_allows_archive_and_retains_skill_package(
     postgres_database_url: str,
     schema_version: int,
 ) -> None:
@@ -1600,17 +1557,6 @@ async def test_postgres_admission_first_allows_archive_but_purger_keeps_run_pack
         archived = await archive_task
         assert archived.affected_agent_count == 1
 
-        quota = _ArchivedSkillPurgeQuota()
-        audit = _ArchivedSkillPurgeAudit()
-        report = await ArchivedSkillPurger(
-            factory,
-            quota=quota,
-            audit=audit,
-        ).purge_project(scope.project_id)
-        assert report.skills_purged == 0
-        assert quota.released == []
-        assert audit.events == []
-
         async with factory() as session:
             agent = await session.get(AgentRow, scope.agent_id)
             assert agent is not None
@@ -1622,6 +1568,7 @@ async def test_postgres_admission_first_allows_archive_but_purger_keeps_run_pack
             assert skill.status == "archived"
             assert skill.current_version_id == scope.skill_version_id
             assert await session.get(SkillVersionRow, scope.skill_version_id) is not None
+            assert await session.scalar(select(func.count()).select_from(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == scope.skill_version_id)) == scope.skill_file_count
             assert (
                 await session.scalar(
                     text("SELECT count(*) FROM run_asset_versions WHERE run_id=:run_id"),
@@ -1651,7 +1598,7 @@ async def test_postgres_admission_first_allows_archive_but_purger_keeps_run_pack
 )
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_archive_first_rejects_admission_then_purger_removes_package(
+async def test_postgres_archive_first_rejects_admission_and_retains_skill_package(
     postgres_database_url: str,
     writer_mode: str,
 ) -> None:
@@ -1702,18 +1649,6 @@ async def test_postgres_archive_first_rejects_admission_then_purger_removes_pack
         with pytest.raises(RunSnapshotAssetStale):
             await admission_task
 
-        quota = _ArchivedSkillPurgeQuota()
-        audit = _ArchivedSkillPurgeAudit()
-        report = await ArchivedSkillPurger(
-            factory,
-            quota=quota,
-            audit=audit,
-        ).purge_project(scope.project_id)
-        assert report.skills_purged == 1
-        assert report.versions_purged == 1
-        assert quota.released == [scope.skill_version_id]
-        assert audit.events == [(scope.skill_id, 1)]
-
         async with factory() as session:
             agent = await session.get(AgentRow, scope.agent_id)
             assert agent is not None
@@ -1723,8 +1658,9 @@ async def test_postgres_archive_first_rejects_admission_then_purger_removes_pack
             skill = await session.get(SkillRow, scope.skill_id)
             assert skill is not None
             assert skill.status == "archived"
-            assert skill.current_version_id is None
-            assert await session.get(SkillVersionRow, scope.skill_version_id) is None
+            assert skill.current_version_id == scope.skill_version_id
+            assert await session.get(SkillVersionRow, scope.skill_version_id) is not None
+            assert await session.scalar(select(func.count()).select_from(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == scope.skill_version_id)) == scope.skill_file_count
     finally:
         reset_run_skill_snapshot_writer_for_testing()
         if deletion.in_transaction():

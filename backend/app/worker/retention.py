@@ -33,7 +33,6 @@ from app.private_work.run_skill_tree_orphan_reaper import (
     RunSkillTreeOrphanReaper,
 )
 from app.quotas.integration import ProjectQuotaEnforcer
-from app.shared_assets.skill_deletion import ArchivedSkillPurger
 from app.worker.service import (
     JobLeaseAuthority,
     JobOutcome,
@@ -64,7 +63,6 @@ class RetentionPurgeJobHandler:
         clock: Callable[[], datetime] | None = None,
         retry_initial_seconds: int = 2,
         retry_max_seconds: int = 300,
-        archived_skill_purger: ArchivedSkillPurger | None = None,
     ) -> None:
         if type(audit) is not TrustedOperationAuditSink:
             raise TypeError("retention Worker handler requires trusted audit authority")
@@ -89,7 +87,6 @@ class RetentionPurgeJobHandler:
         self._clock = clock
         self._retry_initial_seconds = retry_initial_seconds
         self._retry_max_seconds = retry_max_seconds
-        self._archived_skill_purger = archived_skill_purger
 
     async def _candidate(
         self,
@@ -427,7 +424,6 @@ class RetentionPurgeJobHandler:
                         candidate,
                         quota=self._quota,
                         approval_audit=self._approval_audit,
-                        archived_skill_purger=self._archived_skill_purger,
                     )
                 except (
                     RetentionExecutionActive,

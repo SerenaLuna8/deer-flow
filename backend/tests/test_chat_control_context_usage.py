@@ -51,13 +51,16 @@ class _IdlePolicyConfig:
         marker: str,
         *,
         trigger: tuple[str, int | float] = ("tokens", 100_000),
+        max_recursion_limit: int = 1_000,
     ) -> None:
         self.marker = marker
         self.trigger = trigger
+        self.max_recursion_limit = max_recursion_limit
 
     def model_dump(self, *, mode: str):
         assert mode == "json"
         return {
+            "max_recursion_limit": self.max_recursion_limit,
             "summarization": {"trigger": self.trigger},
             "tool_search": {"marker": self.marker},
         }
@@ -132,9 +135,24 @@ def test_idle_context_usage_ignores_unrelated_catalog_generation_changes() -> No
     )
 
 
-def test_idle_context_usage_applies_current_compaction_trigger() -> None:
-    frozen_config = _IdlePolicyConfig("same", trigger=("tokens", 100_000))
-    current_config = _IdlePolicyConfig("same", trigger=("fraction", 0.8))
+@pytest.mark.parametrize(
+    ("frozen_config", "current_config"),
+    (
+        (
+            _IdlePolicyConfig("same", trigger=("tokens", 100_000)),
+            _IdlePolicyConfig("same", trigger=("fraction", 0.8)),
+        ),
+        (
+            _IdlePolicyConfig("same", max_recursion_limit=1_000),
+            _IdlePolicyConfig("same", max_recursion_limit=200),
+        ),
+    ),
+    ids=("compaction-trigger", "execution-step-limit"),
+)
+def test_idle_context_usage_allows_gauge_safe_policy_changes(
+    frozen_config: _IdlePolicyConfig,
+    current_config: _IdlePolicyConfig,
+) -> None:
     exact_assets = (("agent", "project", "agent-1", "agent-version-1", "a" * 64),)
     profile = {
         "authority_identity": "run-1",
@@ -146,6 +164,8 @@ def test_idle_context_usage_applies_current_compaction_trigger() -> None:
         "workload_profile": "interactive",
         "mcp_closure_present": False,
     }
+
+    assert provider_request_runtime_policy_identity(frozen_config) != provider_request_runtime_policy_identity(current_config)
 
     assert (
         ProjectChatControlService._idle_provider_request_profile(

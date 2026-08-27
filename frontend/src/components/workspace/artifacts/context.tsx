@@ -2,12 +2,22 @@ import {
   createContext,
   useCallback,
   useContext,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 
 import { useSidebar } from "@/components/ui/sidebar";
+import type {
+  ArtifactViewMode,
+  ArtifactViewModeRequest,
+} from "@/core/artifacts/preview";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
+
+type ArtifactSelectOptions = {
+  autoSelect?: boolean;
+  requestedViewMode?: ArtifactViewMode;
+};
 
 export interface ArtifactsContextType {
   enabled: boolean;
@@ -16,7 +26,9 @@ export interface ArtifactsContextType {
 
   selectedArtifact: string | null;
   autoSelect: boolean;
-  select: (artifact: string, autoSelect?: boolean) => void;
+  viewModeRequest: ArtifactViewModeRequest | null;
+  select: (artifact: string, options?: ArtifactSelectOptions) => void;
+  consumeViewModeRequest: (requestId: number) => void;
   deselect: () => void;
   showList: () => void;
 
@@ -44,6 +56,9 @@ function ArtifactsStateProvider({
 }) {
   const [artifacts, setArtifacts] = useState<string[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
+  const [viewModeRequest, setViewModeRequest] =
+    useState<ArtifactViewModeRequest | null>(null);
+  const nextViewModeRequestIdRef = useRef(0);
   const [autoSelect, setAutoSelect] = useState(true);
   const [open, setOpen] = useState(isStaticWebsiteOnly());
   const [autoOpen, setAutoOpen] = useState(true);
@@ -56,9 +71,20 @@ function ArtifactsStateProvider({
   );
 
   const select = useCallback(
-    (artifact: string, autoSelect = false) => {
+    (artifact: string, options: ArtifactSelectOptions = {}) => {
       if (!enabled) return;
+      const { autoSelect = false, requestedViewMode } = options;
       setSelectedArtifact(artifact);
+      if (requestedViewMode) {
+        nextViewModeRequestIdRef.current += 1;
+        setViewModeRequest({
+          id: nextViewModeRequestIdRef.current,
+          artifact,
+          mode: requestedViewMode,
+        });
+      } else {
+        setViewModeRequest(null);
+      }
       if (!isStaticWebsiteOnly()) {
         setSidebarOpen(false);
       }
@@ -69,9 +95,16 @@ function ArtifactsStateProvider({
     [enabled, setSidebarOpen, setSelectedArtifact, setAutoSelect],
   );
 
+  const consumeViewModeRequest = useCallback((requestId: number) => {
+    setViewModeRequest((current) =>
+      current?.id === requestId ? null : current,
+    );
+  }, []);
+
   const deselect = useCallback(() => {
     if (!enabled) return;
     setSelectedArtifact(null);
+    setViewModeRequest(null);
     setAutoSelect(true);
     setOpen(false);
   }, [enabled]);
@@ -79,6 +112,7 @@ function ArtifactsStateProvider({
   const showList = useCallback(() => {
     if (!enabled) return;
     setSelectedArtifact(null);
+    setViewModeRequest(null);
     setAutoSelect(false);
     setAutoOpen(false);
     setOpen(true);
@@ -105,7 +139,9 @@ function ArtifactsStateProvider({
     },
 
     selectedArtifact: enabled ? selectedArtifact : null,
+    viewModeRequest: enabled ? viewModeRequest : null,
     select,
+    consumeViewModeRequest,
     deselect,
     showList,
   };

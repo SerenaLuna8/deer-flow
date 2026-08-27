@@ -873,7 +873,7 @@ async def test_thread_delete_removes_terminal_approval_pair_and_keeps_audit(
             assert await session.get(AuditLogRow, audit_id) is not None
             thread = await session.get(ThreadMetaRow, thread_id)
             assert thread is not None and thread.deleted_at is not None
-        assert raw.deleted_threads == [thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -960,7 +960,7 @@ async def test_thread_delete_converges_expired_retry_safe_requested_continuation
             assert receipt is not None
             assert await session.get(ExecutionApprovalResultReceiptRow, receipt.id) is None
         assert approval_audit.run_terminals == [continuation.run.run_id]
-        assert raw.deleted_threads == [thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -1039,7 +1039,7 @@ async def test_thread_delete_revokes_live_or_unsafe_continuation(
             assert persisted_attempt is not None and persisted_attempt.outcome == "cancelled"
             assert persisted_thread is not None and persisted_thread.deleted_at is not None
         assert approval_audit.run_terminals == [continuation.run.run_id]
-        assert raw.deleted_threads == [thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -1116,7 +1116,7 @@ async def test_thread_delete_revokes_ordinary_active_run_without_approval(
         assert approval_audit.run_terminals == [active.run.run_id]
         assert quota.released_runs == [active.run.run_id]
         assert reconciler.completed_runs == [active.run.run_id]
-        assert raw.deleted_threads == [thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -1195,7 +1195,7 @@ async def test_thread_delete_revokes_reverse_job_when_run_job_id_is_null_and_clo
         assert audit.run_terminals == [active.run.run_id]
         assert quota.released_runs == [active.run.run_id]
         assert reconciler.completed_runs == [active.run.run_id]
-        assert raw.deleted_threads == [thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -1441,7 +1441,7 @@ async def test_thread_delete_projected_terminal_job_wins_over_active_reverse_job
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_thread_delete_automation_reconcile_failure_does_not_skip_raw_cleanup(
+async def test_thread_delete_automation_reconcile_failure_keeps_tombstone(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -1475,8 +1475,8 @@ async def test_thread_delete_automation_reconcile_failure_does_not_skip_raw_clea
             assert persisted_run is not None and persisted_run.status == "interrupted"
             assert persisted_thread is not None
             assert persisted_thread.deleted_at is not None
-            assert persisted_thread.checkpoint_delete_status == "complete"
-        assert raw.deleted_threads == [thread_id]
+            assert persisted_thread.checkpoint_delete_status == "not_requested"
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -1535,7 +1535,7 @@ async def test_thread_delete_revokes_terminal_run_finalization_without_duplicate
         assert approval_audit.run_terminals == []
         assert quota.released_runs == []
         assert reconciler.completed_runs == []
-        assert raw.deleted_threads == [thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -1585,7 +1585,7 @@ async def test_thread_delete_settles_unresolved_attempt_for_terminal_job_and_run
             assert persisted_attempt.outcome == "cancelled"
             assert persisted_attempt.finished_at is not None
         assert approval_audit.run_terminals == []
-        assert raw.deleted_threads == [thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -1656,7 +1656,7 @@ async def test_thread_delete_force_cancel_is_exact_thread_scoped(
             assert other_attempt is not None and other_attempt.outcome is None
             assert other_thread is not None and other_thread.deleted_at is None
         assert approval_audit.run_terminals == [target.run.run_id]
-        assert raw.deleted_threads == [target_thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -1811,7 +1811,7 @@ async def test_thread_delete_reverse_job_discovery_is_project_owner_and_thread_s
             ):
                 assert rows[key].status == "running"
                 assert rows[key].execution_lease_token_hash is not None
-        assert raw.deleted_threads == [target_thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
         await other_project_seed.engine.dispose()
@@ -1903,7 +1903,7 @@ async def test_thread_delete_terminalizes_every_active_approval_state(
         ]
         active = source if continuation is None else continuation
         assert approval_audit.run_terminals == [active.run.run_id]
-        assert raw.deleted_threads == [thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 
@@ -2007,7 +2007,7 @@ async def test_thread_delete_revokes_recent_claim_with_expired_db_lease(
             assert thread is not None and thread.deleted_at is not None
         assert approval_audit.terminals == [(source.run.run_id, "cancelled")]
         assert approval_audit.run_terminals == [continuation.run.run_id]
-        assert raw.deleted_threads == [thread_id]
+        assert raw.deleted_threads == []
     finally:
         await seed.engine.dispose()
 

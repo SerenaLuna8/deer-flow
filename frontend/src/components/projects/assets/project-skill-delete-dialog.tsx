@@ -19,7 +19,7 @@ export function projectAssetDeleteDescription(
   assetName: string,
 ): string {
   if (assetKind === "Skill") {
-    return `删除后，Skill“${assetName}”将从项目中隐藏并停止用于新运行。系统会从所有 Agent 中移除该 Skill；这些 Agent 将保持各自当前状态，不会被自动停用。Skill 保存的秘密会立即销毁。历史记录与已固定的版本文件保留，但尚未物化秘密或后续重试的运行可能失败。此操作不可恢复。`;
+    return `删除后，Skill“${assetName}”将从项目中隐藏并停止用于新运行。系统会从所有 Agent 中移除该 Skill；这些 Agent 将保持各自当前状态，不会被自动停用。Skill 的全部版本文件、已配置的秘密密文以及所占存储空间都会保留，删除不会释放存储空间。只有整个项目被最终删除时，这些内容才会一并销毁。此操作不可恢复。`;
   }
   if (assetKind === "Agent") {
     return `删除后，Agent“${assetName}”将不再出现在项目 Agent 列表中，也不再用于新的运行。已有对话和运行记录会保留，正在执行的运行会继续完成。`;

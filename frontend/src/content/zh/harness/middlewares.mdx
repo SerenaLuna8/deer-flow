@@ -32,7 +32,7 @@ import { Callout } from "nextra/components";
 9. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
 10. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
 11. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
-12. `ToolCallControl` — 仲裁重复调用与 Run 内部工具调用 hard limit
+12. `ToolCallControl` — 仲裁重复调用与 Run/Task 内部工具调用 hard limit
 13. `HostExecutionBatchBarrierMiddleware` — 隔离 Local 主机执行审批批次（仅 Local approval profile）
 14. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
 15. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
@@ -54,11 +54,11 @@ import { Callout } from "nextra/components";
 
 ### ToolCallControl
 
-在 ToolNode 执行前仲裁完整工具调用批次。它把重复调用检测与单一内部工具调用 hard limit 保持为两种独立语义，并只准入确定性的可执行前缀。所有内部工具统一计数；同一 Run 的 Lead 与所有 Sub-Agent 共用一个计数，不同 Run 相互独立。
+在 ToolNode 执行前仲裁完整工具调用批次。它把重复调用检测与内部工具调用 hard limit 保持为两种独立语义，并只准入确定性的可执行前缀。
 
-相同 checkpoint receipt 的重放不会重复消费上限。达到共享 hard limit 后，该 Run 不再准入新的内部工具调用。
+System Runtime Policy v6 为主 Agent 和 Sub-Agent Task 使用不同的计数绑定：主 Agent 在同一 Run 内持续累计，`task` 委托调用本身计入主 Agent；每个 Sub-Agent Task 按自己的执行标识从独立额度开始计数，多个并行 Task 互不占用额度，也没有额外的 Run 汇总上限。相同 checkpoint receipt 的重放不会在其精确绑定中重复消费额度；达到上限后，只停止该绑定后续的内部工具调用。
 
-**配置**：平台设置 `/admin/settings/system` 中 System Runtime Policy 的单一内部工具调用 hard limit；每个已准入 Run 使用冻结值。
+**配置**：平台设置 `/admin/settings/system` 中的 `internal_tool_call_limits.lead_per_run` 与 `internal_tool_call_limits.subagent_per_task`；默认分别为 `200` 和 `50`，并冻结到新准入的 Run。已准入 Run 与历史 v2–v5 策略继续使用其冻结的 Lead/Sub-Agent 全 Run 共享上限，不会被转换为 v6 计数。
 
 ---
 

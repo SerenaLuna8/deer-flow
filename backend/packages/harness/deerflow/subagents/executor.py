@@ -50,8 +50,7 @@ from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
     from deerflow.agents.middlewares.tool_call_control import (
-        ResolvedGraphToolCallControlProfile,
-        RunToolCallLimitAuthority,
+        GraphToolCallControlTopology,
         ToolCallControlObserver,
     )
 
@@ -503,10 +502,8 @@ class _SubagentGraphRunner:
         middleware_override: tuple[object, ...] | None = None,
         sdk_feature_snapshot: object | None = None,
         tool_search_enabled: bool | None = None,
-        tool_call_control_profile: ResolvedGraphToolCallControlProfile | None = None,
+        tool_call_control_topology: GraphToolCallControlTopology | None = None,
         tool_call_control_observer: ToolCallControlObserver | None = None,
-        tool_call_limit_authority: RunToolCallLimitAuthority | None = None,
-        tool_call_limit_scope_id: str | None = None,
     ):
         """Initialize one lifecycle-owned graph runner.
 
@@ -530,12 +527,11 @@ class _SubagentGraphRunner:
             tool_search_enabled: Explicit delegated tool-search policy. SDK
                 callers pass ``False`` so graph construction never reads global
                 configuration.
-            tool_call_control_profile: Exact graph-owned Lead/Sub-Agent control
-                profile selected before this Task invocation.
+            tool_call_control_topology: Graph-owned accounting Module selected
+                before this Task invocation. It alone binds the Task execution
+                ID to either a parent-shared or Task-private counter.
             tool_call_control_observer: Optional parent-owner-loop observation
                 Adapter already bound by :mod:`deerflow.subagents.binding`.
-            tool_call_limit_authority: Parent Run's shared internal tool-call counter.
-            tool_call_limit_scope_id: Exact parent Run/invocation counter key.
         """
         if type(delegated_context) is not DelegatedRuntimeContextProjection:
             raise TypeError(
@@ -577,28 +573,16 @@ class _SubagentGraphRunner:
             )
         if tool_search_enabled is not None and type(tool_search_enabled) is not bool:
             raise TypeError("tool_search_enabled must be a boolean or None")
-        if tool_call_control_profile is not None:
+        if tool_call_control_topology is not None:
             # Delayed to avoid executor's tools -> task_tool import cycle while
             # the ToolCallControl module itself is still initializing.
             from deerflow.agents.middlewares.tool_call_control import (
-                ResolvedGraphToolCallControlProfile,
-                RunToolCallLimitAuthority,
+                GraphToolCallControlTopology,
             )
 
-            if type(tool_call_control_profile) is not ResolvedGraphToolCallControlProfile:
+            if type(tool_call_control_topology) is not GraphToolCallControlTopology:
                 raise TypeError(
-                    "tool_call_control_profile must be ResolvedGraphToolCallControlProfile or None",
-                )
-            if not isinstance(
-                tool_call_limit_authority,
-                RunToolCallLimitAuthority,
-            ):
-                raise TypeError(
-                    "tool_call_limit_authority is required with a resolved graph profile",
-                )
-            if not isinstance(tool_call_limit_scope_id, str) or not tool_call_limit_scope_id.strip():
-                raise ValueError(
-                    "tool_call_limit_scope_id is required with a resolved graph profile",
+                    "tool_call_control_topology must be GraphToolCallControlTopology or None",
                 )
         if tool_call_control_observer is not None and not callable(
             getattr(tool_call_control_observer, "observe", None),
@@ -606,18 +590,16 @@ class _SubagentGraphRunner:
             raise TypeError(
                 "tool_call_control_observer must implement observe()",
             )
-        if tool_call_control_observer is not None and tool_call_control_profile is None:
+        if tool_call_control_observer is not None and tool_call_control_topology is None:
             raise ValueError(
-                "tool_call_control_observer requires a resolved graph profile",
+                "tool_call_control_observer requires a control topology",
             )
         self._model_override = model_override
         self._middleware_override = middleware_override
         self._sdk_feature_snapshot = sdk_feature_snapshot
         self._tool_search_enabled = tool_search_enabled
-        self._tool_call_control_profile = tool_call_control_profile
+        self._tool_call_control_topology = tool_call_control_topology
         self._tool_call_control_observer = tool_call_control_observer
-        self._tool_call_limit_authority = tool_call_limit_authority
-        self._tool_call_limit_scope_id = tool_call_limit_scope_id
 
         self._base_tools = _filter_tools(
             tools,
@@ -653,29 +635,14 @@ class _SubagentGraphRunner:
         DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
         """
         tool_call_control = None
-        if self._middleware_override is None and self._tool_call_control_profile is not None:
+        if self._middleware_override is None and self._tool_call_control_topology is not None:
             if not isinstance(execution_id, uuid.UUID):
                 raise TypeError(
                     "execution_id must be the lifecycle internal UUID when ToolCallControl is enabled",
                 )
-            from deerflow.agents.middlewares.tool_call_control import (
-                FixedToolCallControlScope,
-                ToolCallControlBinding,
-                build_tool_call_control,
-            )
-
-            tool_call_control = build_tool_call_control(
-                self._tool_call_control_profile.subagent,
-                ToolCallControlBinding(
-                    role="subagent",
-                    scope=FixedToolCallControlScope(str(execution_id)),
-                    workload_profile=(self._tool_call_control_profile.workload_profile),
-                    observer=self._tool_call_control_observer,
-                    limit_authority=self._tool_call_limit_authority,
-                    limit_scope=FixedToolCallControlScope(
-                        self._tool_call_limit_scope_id,
-                    ),
-                ),
+            tool_call_control = self._tool_call_control_topology.build_subagent_task(
+                execution_id,
+                observer=self._tool_call_control_observer,
             )
         self._tool_call_control_middleware = tool_call_control
 
@@ -708,7 +675,7 @@ class _SubagentGraphRunner:
                     ),
                     delegated=True,
                     tool_call_control=tool_call_control,
-                    workload_profile=(self._tool_call_control_profile.workload_profile if self._tool_call_control_profile is not None else "interactive"),
+                    workload_profile=(self._tool_call_control_topology.profile.workload_profile if self._tool_call_control_topology is not None else "interactive"),
                 )
             else:
                 raise RuntimeError(
@@ -792,7 +759,7 @@ class _SubagentGraphRunner:
         Legacy TokenBudgetMiddleware retains its existing parent ``run_id``
         contract and is safe here because each delegated graph builds a fresh
         instance. A later loop is stronger than token/turn caps, and every one
-        of those is stronger than shared Run tool-call-limit exhaustion.
+        of those is stronger than scoped tool-call-budget exhaustion.
         """
 
         priorities: dict[str, int] = {

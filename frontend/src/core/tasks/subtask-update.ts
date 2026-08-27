@@ -30,29 +30,51 @@ export function computeNextSubtask(
   previous: Subtask | undefined,
   task: Partial<Subtask> & { id: string },
 ): { next: Subtask; becameTerminal: boolean; changed: boolean } {
+  const inferredFailure =
+    task.status === "failed" && task.statusSource === "inferred";
+  const incoming = inferredFailure
+    ? ({ ...task, status: "unknown" } as const)
+    : task;
   const previousStatus = previous?.status;
   const previousSource = previous?.statusSource;
-  const incomingSource = task.statusSource;
+  const incomingSource = incoming.statusSource;
   const hasLowerAuthority =
     previousSource !== undefined &&
     incomingSource !== undefined &&
     STATUS_SOURCE_RANK[incomingSource] < STATUS_SOURCE_RANK[previousSource];
   const preserveTerminalStatus =
     isTerminalSubtaskStatus(previousStatus) &&
-    (task.status === "in_progress" || hasLowerAuthority);
+    previousSource !== "inferred" &&
+    (incoming.status === "unknown" ||
+      incoming.status === "in_progress" ||
+      hasLowerAuthority);
+  const preserveRunningAgainstInferredFailure =
+    inferredFailure &&
+    previousStatus === "in_progress" &&
+    previousSource === "custom_event";
+  const preserveApprovalAgainstInferredUnknown =
+    previousStatus === "in_progress" &&
+    previousSource === "execution_approval" &&
+    incoming.status === "unknown" &&
+    incomingSource === "inferred";
   const preserveEqualHigherAuthorityStatus =
-    hasLowerAuthority && task.status === previousStatus;
+    hasLowerAuthority && incoming.status === previousStatus;
 
   // MessageList writes the pending task tool-call state before parsing the
   // matching ToolMessage in the same render. Keep authoritative terminal
   // results stable across later inferred renders so the card cannot regress
-  // from completed to the synthetic "failed" fallback.
+  // to a weaker pending or legacy inferred state.
   const next: Subtask = {
     ...previous,
-    ...task,
+    ...incoming,
   } as Subtask;
 
-  if (preserveTerminalStatus && previous) {
+  if (
+    (preserveTerminalStatus ||
+      preserveRunningAgainstInferredFailure ||
+      preserveApprovalAgainstInferredUnknown) &&
+    previous
+  ) {
     next.status = previous.status;
     next.statusSource = previous.statusSource;
     next.result = previous.result;
@@ -60,28 +82,26 @@ export function computeNextSubtask(
     next.stopReason = previous.stopReason;
   } else if (preserveEqualHigherAuthorityStatus && previous) {
     // MessageList replays its inferred task-tool projection on every render.
-    // A pending approval can already have an unstructured ToolMessage whose
-    // safest status is still `in_progress`.  Do not let that equal, weaker
-    // projection oscillate `tool_result -> inferred -> tool_result`: the
-    // tool-result write deliberately schedules a provider update and would
-    // otherwise create an unbounded render loop.
+    // Keep an equal, higher-authority source so the replay cannot oscillate
+    // `tool_result -> inferred -> tool_result`: a tool-result write schedules
+    // a provider update and would otherwise create an unbounded render loop.
     next.statusSource = previous.statusSource;
-  } else if (task.status === "completed") {
+  } else if (incoming.status === "completed") {
     delete next.error;
-  } else if (task.status === "failed") {
+  } else if (incoming.status === "failed") {
     delete next.result;
   }
 
-  if (task.steps) {
-    next.steps = mergeSteps(previous?.steps ?? [], task.steps);
+  if (incoming.steps) {
+    next.steps = mergeSteps(previous?.steps ?? [], incoming.steps);
   }
 
   // Usage events are cumulative snapshots. A delayed older frame must not
   // make the card appear to have spent fewer tokens than it already reported.
   if (
-    task.usage &&
+    incoming.usage &&
     previous?.usage &&
-    task.usage.totalTokens < previous.usage.totalTokens
+    incoming.usage.totalTokens < previous.usage.totalTokens
   ) {
     next.usage = previous.usage;
   }

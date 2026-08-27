@@ -250,6 +250,23 @@ export function defaultProjectAssetSource(
     : "project";
 }
 
+export function projectAssetSourceAfterCatalogChange({
+  currentSource,
+  data,
+  kind,
+  initialized,
+  touched,
+}: {
+  currentSource: ProjectAssetSourceFilter;
+  data: Pick<ProjectAssetList, "system_items" | "project_items">;
+  kind: MutableAssetKind;
+  initialized: boolean;
+  touched: boolean;
+}): ProjectAssetSourceFilter {
+  if (initialized || touched) return currentSource;
+  return kind === "agents" ? "project" : defaultProjectAssetSource(data);
+}
+
 export function projectAssetSourceOptions(
   kind: MutableAssetKind,
 ): ReadonlyArray<readonly [ProjectAssetSourceFilter, string]> {
@@ -902,6 +919,7 @@ function ProjectAssetCatalog({
   const [sourceFilter, setSourceFilter] =
     useState<ProjectAssetSourceFilter>("project");
   const [sourceTouched, setSourceTouched] = useState(false);
+  const sourceInitialized = useRef(false);
   const [bindingIntent, setBindingIntent] = useState<{
     assetId: string;
     checked: boolean;
@@ -1329,12 +1347,17 @@ function ProjectAssetCatalog({
 
   const data = query.data;
   useEffect(() => {
-    if (!sourceTouched && data) {
-      setSourceFilter(
-        kind === "agents" ? "project" : defaultProjectAssetSource(data),
-      );
-    }
-  }, [data, kind, sourceTouched]);
+    if (!data) return;
+    const nextSource = projectAssetSourceAfterCatalogChange({
+      currentSource: sourceFilter,
+      data,
+      kind,
+      initialized: sourceInitialized.current,
+      touched: sourceTouched,
+    });
+    sourceInitialized.current = true;
+    if (nextSource !== sourceFilter) setSourceFilter(nextSource);
+  }, [data, kind, sourceFilter, sourceTouched]);
   const filteredData = useMemo(
     () =>
       data

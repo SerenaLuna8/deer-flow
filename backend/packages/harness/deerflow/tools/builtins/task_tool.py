@@ -900,10 +900,8 @@ async def _run_task_through_lifecycle(
             "thread_data": thread_data,
             "trace_id": trace_id,
             "delegated_context": delegated_context,
-            "tool_call_control_profile": parent_binding.tool_call_control_profile,
+            "tool_call_control_topology": parent_binding.tool_call_control_topology,
             "tool_call_control_observer": parent_binding.tool_call_control_observer,
-            "tool_call_limit_authority": parent_binding.tool_call_limit_authority,
-            "tool_call_limit_scope_id": parent_binding.tool_call_limit_scope_id,
         }
         if runtime_agent_profile is not None:
             executor_kwargs["agent_model_settings"] = runtime_agent_profile.model_settings

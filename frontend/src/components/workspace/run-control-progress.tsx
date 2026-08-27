@@ -66,9 +66,30 @@ export function RunControlProgress({
             break;
           }
           case "tool_budget_exhausted":
-            title = t.conversation.toolCallControl.toolBudgetExhaustedTitle;
-            description =
-              t.conversation.toolCallControl.toolBudgetExhaustedDescription;
+            if (
+              "budget_scope" in observation &&
+              observation.budget_scope === "lead"
+            ) {
+              title =
+                t.conversation.toolCallControl.leadToolBudgetExhaustedTitle;
+              description =
+                t.conversation.toolCallControl
+                  .leadToolBudgetExhaustedDescription;
+            } else if (
+              "budget_scope" in observation &&
+              observation.budget_scope === "subagent_task"
+            ) {
+              title =
+                t.conversation.toolCallControl
+                  .subagentTaskToolBudgetExhaustedTitle;
+              description =
+                t.conversation.toolCallControl
+                  .subagentTaskToolBudgetExhaustedDescription;
+            } else {
+              title = t.conversation.toolCallControl.toolBudgetExhaustedTitle;
+              description =
+                t.conversation.toolCallControl.toolBudgetExhaustedDescription;
+            }
             break;
           case "subagent_total_limit":
             title = t.conversation.toolCallControl.subagentTotalLimitTitle;

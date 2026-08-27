@@ -11,10 +11,12 @@ from app.system_runtime_settings.models import (
     AutomationsPolicyValue,
     EnabledPolicy,
     InputPolishPolicy,
+    LoopDetectionPolicy,
     MemoryDocumentPolicy,
     MemoryPolicy,
     QuotaPolicyValue,
     RuntimePolicySection,
+    SubagentPolicy,
     SummarizationPolicy,
     TitlePolicy,
     TokenBudgetPolicy,
@@ -247,6 +249,32 @@ class _AgentRuntimePolicyValueV4(_SchemaV3Model):
     vision_bridge: VisionBridgePolicy = Field(default_factory=VisionBridgePolicy)
 
 
+class _AgentRuntimePolicyValueV5(_SchemaV3Model):
+    token_usage: EnabledPolicy = Field(default_factory=EnabledPolicy)
+    token_budget: TokenBudgetPolicy = Field(default_factory=TokenBudgetPolicy)
+    max_recursion_limit: int = Field(default=1_000, ge=1, le=100_000)
+    title: TitlePolicy = Field(default_factory=TitlePolicy)
+    suggestions: EnabledPolicy = Field(default_factory=EnabledPolicy)
+    input_polish: InputPolishPolicy = Field(default_factory=InputPolishPolicy)
+    summarization: SummarizationPolicy = Field(default_factory=SummarizationPolicy)
+    memory: MemoryPolicy = Field(default_factory=MemoryPolicy)
+    tool_search: ToolSearchPolicy = Field(default_factory=ToolSearchPolicy)
+    tool_output: ToolOutputPolicy = Field(default_factory=ToolOutputPolicy)
+    loop_detection: LoopDetectionPolicy = Field(default_factory=LoopDetectionPolicy)
+    internal_tool_call_limit: int = Field(default=200, ge=1, le=100_000)
+    read_before_write: EnabledPolicy = Field(default_factory=EnabledPolicy)
+    safety_finish_reason: EnabledPolicy = Field(default_factory=EnabledPolicy)
+    subagents: SubagentPolicy = Field(default_factory=SubagentPolicy)
+    vision_bridge: VisionBridgePolicy = Field(default_factory=VisionBridgePolicy)
+
+    @model_validator(mode="after")
+    def validate_repeat_window(self) -> _AgentRuntimePolicyValueV5:
+        identical_calls = self.loop_detection.identical_calls
+        if identical_calls.window_size < identical_calls.hard_limit:
+            raise ValueError("window_size must be >= hard_limit")
+        return self
+
+
 _SCHEMA_V3_MODELS: Mapping[RuntimePolicySection, type[BaseModel]] = {
     RuntimePolicySection.AGENT_RUNTIME: _AgentRuntimePolicyValueV3,
     RuntimePolicySection.AUTH: AuthPolicyValue,
@@ -263,6 +291,13 @@ _SCHEMA_V2_MODELS: Mapping[RuntimePolicySection, type[BaseModel]] = {
 }
 _SCHEMA_V4_MODELS: Mapping[RuntimePolicySection, type[BaseModel]] = {
     RuntimePolicySection.AGENT_RUNTIME: _AgentRuntimePolicyValueV4,
+    RuntimePolicySection.AUTH: AuthPolicyValue,
+    RuntimePolicySection.AUTOMATIONS: AutomationsPolicyValue,
+    RuntimePolicySection.MEMORY_DOCUMENT: MemoryDocumentPolicy,
+    RuntimePolicySection.QUOTAS: QuotaPolicyValue,
+}
+_SCHEMA_V5_MODELS: Mapping[RuntimePolicySection, type[BaseModel]] = {
+    RuntimePolicySection.AGENT_RUNTIME: _AgentRuntimePolicyValueV5,
     RuntimePolicySection.AUTH: AuthPolicyValue,
     RuntimePolicySection.AUTOMATIONS: AutomationsPolicyValue,
     RuntimePolicySection.MEMORY_DOCUMENT: MemoryDocumentPolicy,
@@ -300,8 +335,19 @@ def canonical_policy_value_v4(
     return _SCHEMA_V4_MODELS[section].model_validate(raw).model_dump(mode="json")
 
 
+def canonical_policy_value_v5(
+    section: RuntimePolicySection,
+    value: BaseModel | Mapping[str, object],
+) -> dict[str, object]:
+    """Return the exact schema-v5 value without current-schema defaults."""
+
+    raw = value.model_dump(mode="python") if isinstance(value, BaseModel) else value
+    return _SCHEMA_V5_MODELS[section].model_validate(raw).model_dump(mode="json")
+
+
 __all__ = [
     "canonical_policy_value_v2",
     "canonical_policy_value_v3",
     "canonical_policy_value_v4",
+    "canonical_policy_value_v5",
 ]

@@ -62,11 +62,9 @@ from deerflow.agents.middlewares.manifest import (
 )
 from deerflow.agents.middlewares.tool_call_control import (
     TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY,
+    GraphToolCallControlTopology,
     PerInvocationToolCallControlScope,
-    RunToolCallLimitAuthority,
-    ToolCallControlBinding,
     ToolCallControlWorkloadProfile,
-    build_tool_call_control,
     default_graph_tool_call_control_profile,
 )
 from deerflow.agents.thread_state import (
@@ -265,8 +263,7 @@ def create_deerflow_agent(
         effective_middleware = list(middleware)
         feature_snapshot = None
         tool_call_control_profile = None
-        tool_call_limit_authority = None
-        tool_call_limit_scope = None
+        tool_call_control_topology = None
     else:
         feat = features or RuntimeFeatures()
         loop_detection_enabled = _validate_loop_detection_feature(
@@ -276,9 +273,9 @@ def create_deerflow_agent(
             workload_profile,
             repeated_calls_enabled=loop_detection_enabled,
         )
-        tool_call_limit_scope = PerInvocationToolCallControlScope()
-        tool_call_limit_authority = RunToolCallLimitAuthority(
-            hard_limit=tool_call_control_profile.policy.internal_tool_call_limit,
+        tool_call_control_topology = GraphToolCallControlTopology(
+            profile=tool_call_control_profile,
+            lead_scope=PerInvocationToolCallControlScope(),
         )
         feature_snapshot = SdkFeatureSnapshot.capture(
             feat,
@@ -289,16 +286,7 @@ def create_deerflow_agent(
             name=name,
             plan_mode=plan_mode,
             extra_middleware=extra_middleware or [],
-            tool_call_control=build_tool_call_control(
-                tool_call_control_profile.lead,
-                ToolCallControlBinding(
-                    role="lead",
-                    scope=tool_call_limit_scope,
-                    workload_profile=workload_profile,
-                    limit_authority=tool_call_limit_authority,
-                    limit_scope=tool_call_limit_scope,
-                ),
-            ),
+            tool_call_control=tool_call_control_topology.build_lead(),
             workload_profile=workload_profile,
         )
         # Deduplicate by tool name — user-provided tools take priority.
@@ -331,9 +319,7 @@ def create_deerflow_agent(
             checkpoint_channel_mode=checkpoint_channel_mode,
             checkpoint_snapshot_frequency=checkpoint_snapshot_frequency,
         ),
-        tool_call_control_profile=tool_call_control_profile,
-        tool_call_limit_authority=tool_call_limit_authority,
-        tool_call_limit_scope=tool_call_limit_scope,
+        tool_call_control_topology=tool_call_control_topology,
     )
     effective_tools = bind_task_tool_in_tools(
         effective_tools,
@@ -476,14 +462,10 @@ def _assemble_from_features(
     workload_profile = _validate_workload_profile(workload_profile)
     if not delegated and loop_detection_enabled and tool_call_control is None:
         profile = default_graph_tool_call_control_profile(workload_profile)
-        tool_call_control = build_tool_call_control(
-            profile.lead,
-            ToolCallControlBinding(
-                role="lead",
-                scope=PerInvocationToolCallControlScope(),
-                workload_profile=workload_profile,
-            ),
-        )
+        tool_call_control = GraphToolCallControlTopology(
+            profile=profile,
+            lead_scope=PerInvocationToolCallControlScope(),
+        ).build_lead()
     if delegated and loop_detection_enabled and tool_call_control is None:
         raise ValueError(
             "delegated SDK graph requires an execution-scoped ToolCallControl",

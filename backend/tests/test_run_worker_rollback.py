@@ -31,11 +31,10 @@ from deerflow.runtime.runs.worker import (
     _agent_factory_supports_app_config,
     _build_runtime_context,
     _collect_pre_existing_message_ids,
-    _extract_llm_error_fallback_message,
+    _extract_llm_error_fallback,
     _install_runtime_context,
     _linearize_delta_checkpoint_resume,
     _rollback_to_pre_run_checkpoint,
-    _try_extract_from_message,
     run_agent,
 )
 from deerflow.runtime.secret_context import _SLASH_SKILL_ACTIVATION_RUN_KEY
@@ -1769,201 +1768,7 @@ def test_agent_factory_supports_app_config_returns_false_when_signature_lookup_f
     assert _agent_factory_supports_app_config(BrokenCallable()) is False
 
 
-# ---------------------------------------------------------------------------
-# _extract_llm_error_fallback_message coverage
-# ---------------------------------------------------------------------------
-
-
-def test_try_extract_from_message_finds_fallback_on_message_object():
-    msg = AIMessage(
-        content="fallback",
-        additional_kwargs={
-            "deerflow_error_fallback": True,
-            "error_detail": "Connection error.",
-            "error_reason": "transient",
-        },
-    )
-    assert _try_extract_from_message(msg) == "Connection error."
-
-
-def test_try_extract_from_message_finds_fallback_on_dict():
-    msg = {
-        "content": "fallback",
-        "additional_kwargs": {
-            "deerflow_error_fallback": True,
-            "error_detail": "Quota exceeded.",
-        },
-    }
-    assert _try_extract_from_message(msg) == "Quota exceeded."
-
-
-def test_try_extract_from_message_returns_none_for_normal_message():
-    msg = AIMessage(content="hello")
-    assert _try_extract_from_message(msg) is None
-
-
-def test_extract_llm_error_fallback_message_large_state_chunk_no_fallback():
-    """Normal-size state dict without fallback markers must not raise and should return None."""
-    large_state = {
-        "messages": [
-            AIMessage(content="Hello!"),
-            {"role": "user", "content": "Hi there"},
-        ],
-        "foo": "x" * 10_000,
-        "bar": {"nested": {"deep": {"data": list(range(1000))}}},
-        "baz": [{"id": i, "payload": "y" * 1000} for i in range(500)],
-    }
-    assert _extract_llm_error_fallback_message(large_state) is None
-
-
-def test_extract_llm_error_fallback_message_finds_fallback_in_messages_list():
-    state = {
-        "messages": [
-            AIMessage(content="Hello!"),
-            AIMessage(
-                content="Unavailable.",
-                additional_kwargs={
-                    "deerflow_error_fallback": True,
-                    "error_detail": "Connection error.",
-                },
-            ),
-        ],
-        "other_state": "large_value" * 1000,
-    }
-    assert _extract_llm_error_fallback_message(state) == "Connection error."
-
-
-def test_extract_llm_error_fallback_message_finds_fallback_in_raw_message():
-    msg = AIMessage(
-        content="Unavailable.",
-        additional_kwargs={
-            "deerflow_error_fallback": True,
-            "error_reason": "quota",
-        },
-    )
-    assert _extract_llm_error_fallback_message(msg) == "quota"
-
-
-def test_extract_llm_error_fallback_message_finds_fallback_in_tuple():
-    item = (
-        "messages",
-        AIMessage(
-            content="Unavailable.",
-            additional_kwargs={
-                "deerflow_error_fallback": True,
-                "error_detail": "Circuit open.",
-            },
-        ),
-    )
-    assert _extract_llm_error_fallback_message(item) == "Circuit open."
-
-
-def test_extract_llm_error_fallback_message_returns_none_for_empty_values():
-    assert _extract_llm_error_fallback_message({}) is None
-    assert _extract_llm_error_fallback_message([]) is None
-    assert _extract_llm_error_fallback_message(None) is None
-    assert _extract_llm_error_fallback_message("string") is None
-
-
-def test_extract_llm_error_fallback_message_finds_fallback_in_updates_mode():
-    """stream_mode='updates' yields dicts keyed by node name (e.g. {'call_model': {...}}).
-    Fallback marker is nested inside the node's state update, not at the top level."""
-    update_chunk = {
-        "call_model": {
-            "messages": [
-                AIMessage(
-                    content="Unavailable.",
-                    additional_kwargs={
-                        "deerflow_error_fallback": True,
-                        "error_detail": "Connection error.",
-                    },
-                )
-            ]
-        }
-    }
-    assert _extract_llm_error_fallback_message(update_chunk) == "Connection error."
-
-
-def test_extract_llm_error_fallback_message_updates_mode_no_fallback():
-    """Normal updates chunk without any fallback should return None safely."""
-    update_chunk = {
-        "__interrupt__": [
-            {
-                "value": "ask_human",
-                "resumable": True,
-                "ns": ["agent"],
-                "when": "during",
-            }
-        ]
-    }
-    assert _extract_llm_error_fallback_message(update_chunk) is None
-
-
-# ---------------------------------------------------------------------------
-# pre_existing_ids filtering — stale fallback markers from prior runs
-# ---------------------------------------------------------------------------
-
-
-def test_try_extract_skips_message_with_pre_existing_id():
-    """Fallback marker on a message whose id is in pre_existing_ids must be ignored."""
-    msg = AIMessage(
-        id="stale-1",
-        content="Unavailable.",
-        additional_kwargs={
-            "deerflow_error_fallback": True,
-            "error_detail": "Connection error.",
-        },
-    )
-    assert _try_extract_from_message(msg, {"stale-1"}) is None
-    # Without the filter, the same message would still surface the marker.
-    assert _try_extract_from_message(msg) == "Connection error."
-
-
-def test_try_extract_still_finds_fresh_message_when_others_are_stale():
-    """A non-stale message with a fallback marker must still match."""
-    msg = AIMessage(
-        id="fresh-1",
-        content="Unavailable.",
-        additional_kwargs={
-            "deerflow_error_fallback": True,
-            "error_detail": "Connection error.",
-        },
-    )
-    assert _try_extract_from_message(msg, {"stale-1", "stale-2"}) == "Connection error."
-
-
-def test_try_extract_skips_dict_message_with_pre_existing_id():
-    msg = {
-        "id": "stale-2",
-        "content": "Unavailable.",
-        "additional_kwargs": {
-            "deerflow_error_fallback": True,
-            "error_detail": "Quota exceeded.",
-        },
-    }
-    assert _try_extract_from_message(msg, {"stale-2"}) is None
-    assert _try_extract_from_message(msg) == "Quota exceeded."
-
-
-def test_extract_llm_error_fallback_message_skips_stale_history():
-    """A state chunk replaying a stale fallback marker from a prior run must return None."""
-    state = {
-        "messages": [
-            AIMessage(id="stale-1", content="Hi"),
-            AIMessage(
-                id="stale-fallback",
-                content="Unavailable.",
-                additional_kwargs={
-                    "deerflow_error_fallback": True,
-                    "error_detail": "Connection error.",
-                },
-            ),
-        ]
-    }
-    assert _extract_llm_error_fallback_message(state, {"stale-1", "stale-fallback"}) is None
-
-
-def test_extract_llm_error_fallback_message_returns_fresh_marker_alongside_stale_history():
+def test_extract_llm_error_fallback_returns_fresh_marker_alongside_stale_history():
     """Stale history is ignored, but a brand-new fallback in the same chunk is reported."""
     state = {
         "messages": [
@@ -1986,24 +1791,14 @@ def test_extract_llm_error_fallback_message_returns_fresh_marker_alongside_stale
             ),
         ]
     }
-    assert _extract_llm_error_fallback_message(state, {"stale-1", "stale-fallback"}) == "Fresh error."
 
+    fallback = _extract_llm_error_fallback(
+        state,
+        {"stale-1", "stale-fallback"},
+    )
 
-def test_extract_llm_error_fallback_message_default_filter_is_empty():
-    """Passing no pre_existing_ids must preserve the original (pre-fix) behavior."""
-    state = {
-        "messages": [
-            AIMessage(
-                id="any",
-                content="Unavailable.",
-                additional_kwargs={
-                    "deerflow_error_fallback": True,
-                    "error_detail": "Connection error.",
-                },
-            )
-        ]
-    }
-    assert _extract_llm_error_fallback_message(state) == "Connection error."
+    assert fallback is not None
+    assert fallback.message == "Fresh error."
 
 
 def test_collect_pre_existing_message_ids_pulls_ids_from_snapshot():

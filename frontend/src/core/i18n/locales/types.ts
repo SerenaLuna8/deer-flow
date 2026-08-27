@@ -2166,6 +2166,10 @@ export interface Translations {
       ) => string;
       toolBudgetExhaustedTitle: string;
       toolBudgetExhaustedDescription: string;
+      leadToolBudgetExhaustedTitle: string;
+      leadToolBudgetExhaustedDescription: string;
+      subagentTaskToolBudgetExhaustedTitle: string;
+      subagentTaskToolBudgetExhaustedDescription: string;
       subagentTotalLimitTitle: string;
       subagentTotalLimitDescription: string;
     };
@@ -2359,6 +2363,7 @@ export interface Translations {
   // Subtasks
   subtasks: {
     subtask: string;
+    unknown: string;
     in_progress: string;
     completed: string;
     failed: string;
@@ -2435,7 +2440,6 @@ export interface Translations {
       fraction: string;
       messages: string;
     };
-    tokens: (value: string) => string;
     messages: (count: number) => string;
   };
 

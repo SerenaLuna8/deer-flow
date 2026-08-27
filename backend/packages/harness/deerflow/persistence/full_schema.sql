@@ -794,8 +794,6 @@ CREATE UNIQUE INDEX uq_skills_system_slug ON skills (lower(slug)) WHERE scope = 
 
 CREATE UNIQUE INDEX uq_skills_project_slug ON skills (project_id, lower(slug)) WHERE scope = 'project' AND status != 'archived';
 
-CREATE INDEX ix_skills_archived_purge ON skills (project_id, id) WHERE scope = 'project' AND status = 'archived';
-
 CREATE TABLE project_skill_secret_tombstones (
     id UUID NOT NULL,
     project_id UUID NOT NULL,
@@ -814,7 +812,7 @@ CREATE TABLE project_skill_secret_tombstones (
     CONSTRAINT uq_project_skill_secret_tombstones_generation UNIQUE (project_id, skill_id, skill_version_id, secret_name, destroyed_generation_id),
     CONSTRAINT ck_project_skill_secret_tombstones_revision CHECK (revision >= 1),
     CONSTRAINT ck_project_skill_secret_tombstones_digest CHECK (envelope_digest ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT ck_project_skill_secret_tombstones_reason CHECK (reason IN ('replace', 'clear', 'version_purge', 'skill_delete'))
+    CONSTRAINT ck_project_skill_secret_tombstones_reason CHECK (reason IN ('replace', 'clear'))
 );
 
 CREATE TABLE system_runtime_policy_versions (
@@ -2970,22 +2968,9 @@ BEGIN
                     JOIN projects project ON project.id = asset.project_id
                     WHERE version.id = OLD.skill_version_id
                       AND asset.scope = 'project'
-                      AND (
-                          (
-                              project.status = 'pending_deletion'
-                              AND project.deletion_effective_at IS NOT NULL
-                              AND project.deletion_effective_at <= now()
-                          )
-                          OR (
-                              project.status = 'active'
-                              AND asset.status = 'archived'
-                              AND asset.current_version_id IS NULL
-                              AND current_setting(
-                                  'deerflow.archived_skill_purge_asset_id',
-                                  true
-                              ) = asset.id::text
-                          )
-                      )
+                      AND project.status = 'pending_deletion'
+                      AND project.deletion_effective_at IS NOT NULL
+                      AND project.deletion_effective_at <= now()
                       AND NOT EXISTS (
                           SELECT 1
                           FROM run_skill_version_refs pinned

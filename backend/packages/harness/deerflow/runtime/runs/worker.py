@@ -3287,11 +3287,6 @@ def _try_extract_llm_error_fallback(
     return None
 
 
-def _try_extract_from_message(obj: Any, pre_existing_ids: set[str] | None = None) -> str | None:
-    fallback = _try_extract_llm_error_fallback(obj, pre_existing_ids)
-    return fallback.message if fallback is not None else None
-
-
 def _extract_llm_error_fallback(
     value: Any,
     pre_existing_ids: set[str] | None = None,
@@ -3352,14 +3347,6 @@ def _extract_llm_error_fallback(
         return None
 
     return walk(value)
-
-
-def _extract_llm_error_fallback_message(
-    value: Any,
-    pre_existing_ids: set[str] | None = None,
-) -> str | None:
-    fallback = _extract_llm_error_fallback(value, pre_existing_ids)
-    return fallback.message if fallback is not None else None
 
 
 def _checkpoint_messages_from_values_or_snapshot(

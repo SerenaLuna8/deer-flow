@@ -51,10 +51,10 @@ PostgreSQL 是业务元数据、运行状态、资产版本、Checkpoint、Job�
 
 ## 文档
 
-- [后端文档索引](docs/README.md)
-- [架构](docs/ARCHITECTURE.md)
-- [API](docs/API.md)
-- [配置](docs/CONFIGURATION.md)
-- [开发约定](AGENTS.md)
+- [项目概览](../README.md)
+- [安装与运行](../Install.md)
+- [领域术语](../CONTEXT.md)
+- [架构决策](../docs/adr/)
+- [后端开发约定](AGENTS.md)
 
 精确请求/响应模型以运行中的 `/openapi.json`、源码和当前测试为准。

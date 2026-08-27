@@ -52,14 +52,12 @@ export type SkillSecretInjectionMode = "automatic" | "explicit";
 
 export function resolveSkillSecretEditorAccess({
   editable,
-  canEdit,
   canBeginEdit,
 }: {
   editable?: boolean;
-  canEdit?: boolean;
   canBeginEdit?: boolean;
 }): { editable: boolean; canBeginEdit: boolean } {
-  const resolvedEditable = editable ?? canEdit ?? false;
+  const resolvedEditable = editable ?? false;
   return {
     editable: resolvedEditable,
     canBeginEdit: !resolvedEditable && Boolean(canBeginEdit),
@@ -198,7 +196,6 @@ function diagnosticLocation(
 export function SkillSecretDeclarationsEditor({
   projectId,
   content,
-  canEdit,
   editable,
   canBeginEdit = false,
   showEmptyDescription = true,
@@ -212,8 +209,6 @@ export function SkillSecretDeclarationsEditor({
 }: {
   projectId: string;
   content: string;
-  /** @deprecated Prefer `editable`; retained while callers migrate. */
-  canEdit?: boolean;
   editable?: boolean;
   canBeginEdit?: boolean;
   showEmptyDescription?: boolean;
@@ -243,7 +238,6 @@ export function SkillSecretDeclarationsEditor({
   contentRef.current = content;
   const access = resolveSkillSecretEditorAccess({
     editable,
-    canEdit,
     canBeginEdit,
   });
 

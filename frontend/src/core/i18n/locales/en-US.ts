@@ -2538,6 +2538,13 @@ export const enUS: Translations = {
       toolBudgetExhaustedTitle: "Run internal tool-call limit reached",
       toolBudgetExhaustedDescription:
         "No new internal tool calls can be admitted in this Run. The Agent can finish with the evidence already collected.",
+      leadToolBudgetExhaustedTitle: "Lead Agent tool-call limit reached",
+      leadToolBudgetExhaustedDescription:
+        "No new internal tool calls can be admitted for the Lead Agent. Each active Sub-Agent Task keeps its own independent allowance.",
+      subagentTaskToolBudgetExhaustedTitle:
+        "Sub-Agent Task tool-call limit reached",
+      subagentTaskToolBudgetExhaustedDescription:
+        "No new internal tool calls can be admitted for this Sub-Agent Task. The Lead Agent and other Sub-Agent Tasks are unaffected.",
       subagentTotalLimitTitle: "Sub-Agent delegation limit reached",
       subagentTotalLimitDescription:
         "No more Sub-Agent Tasks can be admitted in this Run. The Lead Agent can continue with the results already collected.",
@@ -2755,6 +2762,7 @@ export const enUS: Translations = {
 
   subtasks: {
     subtask: "Subtask",
+    unknown: "Subtask status pending",
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",
@@ -2835,7 +2843,6 @@ export const enUS: Translations = {
       fraction: "Percentage condition",
       messages: "Message condition",
     },
-    tokens: (value: string) => `${value} Tokens`,
     messages: (count: number) =>
       `${count.toLocaleString("en-US")} message${count === 1 ? "" : "s"}`,
   },

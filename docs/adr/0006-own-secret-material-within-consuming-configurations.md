@@ -4,9 +4,10 @@ status: accepted
 
 # Own secret material within consuming configurations
 
-> **Partially superseded:** ADR-0009 replaces the Project Skill deletion gate
-> and tombstone-retention clauses. Project Skill archival now destroys its
-> Secret ciphertext immediately while Version files remain pinned by Runs.
+> **Partially superseded:** ADR-0009 replaces the Project Skill deletion gate,
+> and ADR-0011 replaces the Skill-archive secret-destruction and purge clauses.
+> Project Skill archival now preserves its Secret Generations and ciphertext
+> together with every Version and file for the Project lifetime.
 
 ActWeave stores each Configuration Secret within the model, Skill, MCP, or Channel configuration that consumes it instead of governing secrets as independently reusable assets. A secret used by multiple configurations is stored as a separate protected copy for each owner, and existing centrally managed secret data is not migrated. This removes cross-domain lifecycle and selection coupling at the cost of repeated entry and independent replacement, while retaining shared, business-neutral encryption, key loading, redaction, and execution-boundary injection infrastructure.
 
@@ -54,7 +55,7 @@ System Skill v1 is immutable after first installation. An identical checksum is 
 
 Moving a Project Skill Version to Historical or publishing a later MCP Version is not an implicit secret replacement or clearing. That lifecycle transition alone does not destroy the Version's independently encrypted Current Secret Generations. In particular, a superseded but still-published MCP Version may remain the exact dependency of an Agent and may supply its own secret to a later new Run. Retained Versions remain independently addressable for write-only status and explicit clearing; a superseded MCP Version also permits replacement and reruns discovery for that exact Version, while a Historical Skill permits clearing for explicit revocation but cannot receive a replacement that no future Run could resolve. Replacement and clearing destroy only the previous Generation of the same exact Version and slot; they never sweep independent copies owned by other Versions.
 
-Physical MCP deletion retains its existing exact-reference gate: it is rejected while an Agent or retained Run Snapshot still requires the exact definition. Project Skill deletion instead follows ADR-0009: it archives regardless of Agent or Run references, automatically removes Agent bindings, destroys its domain-owned Secret Generation ciphertext immediately, and preserves non-secret Tombstones. Final Project purge is different because it first deletes the Project's retained Run references and then cascades through its domain-owned secrets and Assets.
+Physical MCP deletion retains its existing exact-reference gate: it is rejected while an Agent or retained Run Snapshot still requires the exact definition. Project Skill deletion instead follows ADR-0009 and ADR-0011: it archives regardless of Agent or Run references, automatically removes Agent bindings, and preserves its domain-owned Secret state, Generations, and ciphertext together with its Current Version pointer, every Version and file, and quota reservation. Run deletion, Thread deletion, and former-owner or account-private retention do not clear archived Skill content. Final Project purge remains the sole destruction boundary because it cascades through all Project-owned secrets and Assets and releases their quota.
 
 ## Run boundary
 
@@ -88,4 +89,4 @@ This is a development-stage baseline replacement rather than an upgrade. The exi
 
 The current development database is explicitly deleted and rebuilt once for this change. `make setup-db` remains non-destructive: it installs only an empty database or validates the current Schema V1 and refuses old, non-empty, or mismatched schemas.
 
-This decision supersedes the Credential ownership, permission, mapping-inheritance, and executable-secret-retention clauses in ADR-0002. ADR-0002's Skill version lifecycle remains accepted; ADR-0009 separately supersedes all of its Project and System Agent version semantics. Run Snapshots continue to freeze definitions and exact secret references, but immediate ciphertext destruction means an old snapshot no longer guarantees that referenced secret material remains executable.
+This decision supersedes the Credential ownership, permission, mapping-inheritance, and executable-secret-retention clauses in ADR-0002. ADR-0002's Skill version lifecycle remains accepted; ADR-0009 separately supersedes all of its Project and System Agent version semantics, while ADR-0011 governs archived Project Skill retention. Run Snapshots continue to freeze definitions and exact secret references, but explicit secret replacement, clearing, or definition invalidation means an old snapshot does not always guarantee that referenced secret material remains executable.

@@ -22,12 +22,6 @@ describe("project chat routing", () => {
     );
     expect(scope.threadListPath).toBe(scope.threadBasePath);
     expect(scope.canApproveHostExecution).toBe(true);
-    expect(scope).not.toHaveProperty("newThreadPath");
-    expect(
-      Object.values(scope).some(
-        (value) => typeof value === "string" && value.endsWith("/new"),
-      ),
-    ).toBe(false);
   });
 
   test("derives host execution approval only from the server capability", () => {

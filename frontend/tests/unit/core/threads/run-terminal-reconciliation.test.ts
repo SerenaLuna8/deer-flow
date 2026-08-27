@@ -1,3 +1,4 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test, rs } from "@rstest/core";
 
 import type { RunMetadataStorage } from "@/core/private-work/types";
@@ -76,17 +77,18 @@ function harness({
   const adapters: RunTerminalReconciliationAdapters<CanonicalHistory> = {
     readCurrentAuthority: () => selectedCurrent,
     reconnectStorage: reconnect.storage,
+    preserveVisibleProjection: () => undefined,
     setControlledThreadId(threadId) {
       events.push(`controlled:${threadId ?? "null"}`);
     },
     switchLocalThreadToNull() {
       events.push("sdk:null");
     },
-    async refetchCanonicalThread(target) {
+    async readCanonicalRun(target) {
       events.push(`refetch:${target.threadId}:${target.runId}`);
       return history;
     },
-    mergeLiveWithCanonicalHistory(target, canonicalHistory) {
+    commitCanonicalRun(target, canonicalHistory) {
       events.push(`merge:${target.threadId}:${canonicalHistory.terminalRunId}`);
     },
   };
@@ -102,6 +104,70 @@ function harness({
 }
 
 describe("terminal Run reconciliation", () => {
+  test("keeps the visible terminal projection while canonical REST is pending", async () => {
+    let resolveHistory: ((history: CanonicalHistory) => void) | undefined;
+    const historyPromise = new Promise<CanonicalHistory>((resolve) => {
+      resolveHistory = resolve;
+    });
+    const reconnect = memoryStorage({
+      [RECONNECT_KEY]: TERMINAL_A.runId,
+    });
+    const events: string[] = [];
+    let liveMessages = [
+      {
+        id: "terminal-answer",
+        type: "ai",
+        content: "Terminal answer",
+        run_id: TERMINAL_A.runId,
+      } as Message,
+    ];
+    let preservedMessages: Message[] = [];
+    const visibleMessageIds = () =>
+      (liveMessages.length > 0 ? liveMessages : preservedMessages).map(
+        (message) => message.id,
+      );
+    const adapters = {
+      readCurrentAuthority: () => TERMINAL_A,
+      reconnectStorage: reconnect.storage,
+      preserveVisibleProjection(target: RunTerminalCanonicalAuthority) {
+        events.push("preserve");
+        preservedMessages = [...liveMessages];
+        expect(target).toEqual(TERMINAL_A);
+      },
+      setControlledThreadId(threadId: string | null) {
+        events.push(`controlled:${threadId ?? "null"}`);
+      },
+      switchLocalThreadToNull() {
+        events.push("sdk:null");
+        liveMessages = [];
+      },
+      readCanonicalRun() {
+        events.push("refetch");
+        return historyPromise;
+      },
+      commitCanonicalRun() {
+        events.push("merge");
+      },
+    } satisfies RunTerminalReconciliationAdapters<CanonicalHistory>;
+
+    const reconciliation = reconcileTerminalRun(TERMINAL_A, adapters);
+    await Promise.resolve();
+
+    expect(events).toEqual([
+      "preserve",
+      "controlled:null",
+      "sdk:null",
+      "refetch",
+    ]);
+    expect(visibleMessageIds()).toEqual(["terminal-answer"]);
+
+    resolveHistory?.({
+      threadId: TERMINAL_A.threadId,
+      terminalRunId: TERMINAL_A.runId,
+    });
+    await expect(reconciliation).resolves.toEqual({ kind: "reconciled" });
+  });
+
   test("retries the exact failed reconciliation after clearing its failure", async () => {
     const events: string[] = [];
     const result = { kind: "reconciled" } as const;
@@ -169,7 +235,7 @@ describe("terminal Run reconciliation", () => {
   test("keeps the local owner detached and the exact reconnect key cleared when REST fails", async () => {
     const target = harness();
     const failure = new Error("canonical REST unavailable");
-    target.adapters.refetchCanonicalThread = async () => {
+    target.adapters.readCanonicalRun = async () => {
       target.events.push("refetch:failed");
       throw failure;
     };
@@ -251,6 +317,20 @@ describe("terminal Run reconciliation", () => {
         expectedStage: "reconnect-cleared",
       },
       {
+        name: "visible projection preserve",
+        install(target) {
+          return {
+            ...target.adapters,
+            preserveVisibleProjection() {
+              target.events.push("preserve");
+              target.setCurrent(ACTIVE_B);
+            },
+          };
+        },
+        expectedEvents: ["preserve"],
+        expectedStage: "visible-projection-preserved",
+      },
+      {
         name: "controlled detach",
         install(target) {
           return {
@@ -283,7 +363,7 @@ describe("terminal Run reconciliation", () => {
         install(target) {
           return {
             ...target.adapters,
-            async refetchCanonicalThread(authority) {
+            async readCanonicalRun(authority) {
               target.events.push(
                 `refetch:${authority.threadId}:${authority.runId}`,
               );
@@ -304,7 +384,7 @@ describe("terminal Run reconciliation", () => {
         install(target) {
           return {
             ...target.adapters,
-            mergeLiveWithCanonicalHistory(authority, history) {
+            commitCanonicalRun(authority, history) {
               target.events.push(
                 `merge:${authority.threadId}:${history.terminalRunId}`,
               );
@@ -384,7 +464,7 @@ describe("terminal Run reconciliation", () => {
 
   test("does not restore while a late writer reintroduces the terminal reconnect key", async () => {
     const target = harness();
-    target.adapters.mergeLiveWithCanonicalHistory = () => {
+    target.adapters.commitCanonicalRun = () => {
       target.events.push("merge:late-terminal-write");
       target.reconnect.storage.setItem(RECONNECT_KEY, TERMINAL_A.runId);
     };

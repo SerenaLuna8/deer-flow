@@ -1,6 +1,7 @@
 """Interface acceptance for Harness tool-call control."""
 
 import random
+import uuid
 from collections.abc import Iterable
 from typing import get_args
 
@@ -20,8 +21,10 @@ from deerflow.agents.middlewares.tool_call_control import (
     TOOL_CALL_CONTROL_RECEIPT_KEY,
     TOOL_CALL_CONTROL_STATE_KEY,
     FixedToolCallControlScope,
+    GraphToolCallControlTopology,
     PerInvocationToolCallControlScope,
     RepeatedCallPolicy,
+    ResolvedGraphToolCallControlProfile,
     ResolvedToolCallControlPolicy,
     ToolCallControlBinding,
     ToolCallControlReasonCode,
@@ -1924,19 +1927,167 @@ def test_reason_code_contract_is_closed() -> None:
     "workload_profile",
     ["interactive", "research"],
 )
-def test_default_graph_profile_uses_one_shared_limit(
+def test_default_graph_profile_separates_lead_and_subagent_task_limits(
     workload_profile: str,
 ) -> None:
     profile = default_graph_tool_call_control_profile(workload_profile)  # type: ignore[arg-type]
 
     assert profile.workload_profile == workload_profile
-    assert profile.lead is profile.subagent
-    assert profile.policy.internal_tool_call_limit == 200
+    assert profile.accounting_mode == "lead_run_subagent_task"
+    assert profile.lead.internal_tool_call_limit == 200
+    assert profile.subagent.internal_tool_call_limit == 50
     assert profile.lead.repeated_calls == RepeatedCallPolicy(
         warn_threshold=3,
         hard_limit=20,
         window_size=20,
     )
+
+
+def test_subject_topology_counts_task_on_lead_and_child_work_on_its_task() -> None:
+    observations: list[object] = []
+
+    class _Observer:
+        def observe(self, observation: object) -> None:
+            observations.append(observation)
+
+    topology = GraphToolCallControlTopology(
+        profile=ResolvedGraphToolCallControlProfile(
+            workload_profile="interactive",
+            accounting_mode="lead_run_subagent_task",
+            lead=_policy(internal_tool_call_limit=1),
+            subagent=_policy(internal_tool_call_limit=1),
+        ),
+        lead_scope=FixedToolCallControlScope("parent-run"),
+    )
+    lead = topology.build_lead(observer=_Observer())
+    child_execution_id = uuid.uuid4()
+    child = topology.build_subagent_task(
+        child_execution_id,
+        observer=_Observer(),
+    )
+
+    lead_update = lead.after_model(
+        {
+            "messages": [
+                AIMessage(
+                    id="lead-task-proposal",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"description": "delegate"},
+                            "id": "task-call",
+                        }
+                    ],
+                )
+            ]
+        },
+        Runtime(context={}),
+    )
+    child_update = child.after_model(
+        {
+            "messages": [
+                AIMessage(
+                    id="child-tool-proposal",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "lookup",
+                            "args": {"value": "delegated"},
+                            "id": "lookup-call",
+                        }
+                    ],
+                )
+            ]
+        },
+        Runtime(context={}),
+    )
+
+    assert lead_update is not None
+    assert child_update is not None
+    assert [call["name"] for call in lead_update["messages"][0].tool_calls] == [
+        "task",
+    ]
+    assert [call["name"] for call in child_update["messages"][0].tool_calls] == [
+        "lookup",
+    ]
+    assert "Lead Agent internal tool-call limit" in lead_update[TOOL_CALL_CONTROL_STATE_KEY]["pending_notices"][0]
+    assert "this Sub-Agent Task" in child_update[TOOL_CALL_CONTROL_STATE_KEY]["pending_notices"][0]
+    assert [observation.budget_scope for observation in observations] == [
+        "lead",
+        "subagent_task",
+    ]
+    assert all(observation.disposition == "exhaust_subject" for observation in observations)
+
+
+def test_legacy_topology_reuses_parent_authority_and_scope() -> None:
+    observations: list[object] = []
+
+    class _Observer:
+        def observe(self, observation: object) -> None:
+            observations.append(observation)
+
+    policy = _policy(internal_tool_call_limit=1)
+    topology = GraphToolCallControlTopology(
+        profile=ResolvedGraphToolCallControlProfile(
+            workload_profile="interactive",
+            accounting_mode="shared_run",
+            lead=policy,
+            subagent=policy,
+        ),
+        lead_scope=FixedToolCallControlScope("legacy-parent-run"),
+    )
+    lead = topology.build_lead(observer=_Observer())
+    child_execution_id = uuid.uuid4()
+    child = topology.build_subagent_task(
+        child_execution_id,
+        observer=_Observer(),
+    )
+
+    lead_update = lead.after_model(
+        {
+            "messages": [
+                AIMessage(
+                    id="legacy-lead-proposal",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"description": "delegate"},
+                            "id": "legacy-task-call",
+                        }
+                    ],
+                )
+            ]
+        },
+        Runtime(context={}),
+    )
+    child_update = child.after_model(
+        {
+            "messages": [
+                AIMessage(
+                    id="legacy-child-proposal",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "lookup",
+                            "args": {"value": "must-not-run"},
+                            "id": "legacy-lookup-call",
+                        }
+                    ],
+                )
+            ]
+        },
+        Runtime(context={}),
+    )
+
+    assert lead_update is not None
+    assert child_update is not None
+    assert child_update["messages"][0].tool_calls == []
+    assert child_update[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 1
+    assert observations[-1].scope_id == str(child_execution_id)
+    assert observations[-1].budget_scope == "run"
+    assert observations[-1].disposition == "truncate_tool_calls"
 
 
 def test_inspect_image_counts_against_the_shared_limit() -> None:

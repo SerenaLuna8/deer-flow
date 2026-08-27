@@ -28,7 +28,6 @@ function percent(value: number, locale: string) {
 
 function compressionTriggerValue(
   usage: ThreadContextUsageResponse,
-  tokens: (value: string) => string,
   messages: (count: number) => string,
   disabled: string,
   notConfigured: string,
@@ -39,7 +38,7 @@ function compressionTriggerValue(
   if (trigger.type === "messages") {
     return messages(trigger.threshold_value);
   }
-  return tokens(formatTokenCount(trigger.threshold_tokens));
+  return formatTokenCount(trigger.threshold_tokens);
 }
 
 function contextWindowProgress(usage: ThreadContextUsageResponse) {
@@ -101,7 +100,6 @@ export function ContextWindowDetails({
   const progress = contextWindowProgress(usage);
   const trigger = compressionTriggerValue(
     usage,
-    t.contextWindow.tokens,
     t.contextWindow.messages,
     t.contextWindow.disabled,
     t.contextWindow.notConfigured,
@@ -139,7 +137,7 @@ export function ContextWindowDetails({
             {t.contextWindow.estimatedContext}
           </dt>
           <dd className="font-mono">
-            {t.contextWindow.tokens(formatTokenCount(usage.estimated_tokens))}
+            {formatTokenCount(usage.estimated_tokens)}
           </dd>
           <dt className="text-muted-foreground">{t.contextWindow.triggerAt}</dt>
           <dd className="font-mono">{trigger}</dd>
@@ -149,9 +147,7 @@ export function ContextWindowDetails({
           <dd className="font-mono">
             {usage.context_window_tokens === null
               ? t.contextWindow.notConfigured
-              : t.contextWindow.tokens(
-                  formatTokenCount(usage.context_window_tokens),
-                )}
+              : formatTokenCount(usage.context_window_tokens)}
           </dd>
         </dl>
       </div>
@@ -189,7 +185,7 @@ export function ContextWindowIndicator({
         ? t.contextWindow.unavailable
         : renderedProgress === null
           ? t.contextWindow.usageWithoutCapacity(
-              t.contextWindow.tokens(formatTokenCount(usage.estimated_tokens)),
+              formatTokenCount(usage.estimated_tokens),
             )
           : t.contextWindow.progressLabel(renderedProgress);
   const open = hoverOpen || pinned;

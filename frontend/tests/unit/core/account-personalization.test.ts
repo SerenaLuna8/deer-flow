@@ -30,7 +30,6 @@ afterEach(() => {
 describe("account personalization client", () => {
   test("exposes personalization in Settings and scopes its query to the account", () => {
     expect(SETTINGS_SECTION_IDS).toContain("personalization");
-    expect(SETTINGS_SECTION_IDS).not.toContain("about");
     expect(accountPersonalizationQueryKey(ACCOUNT_ID)).toEqual([
       "account",
       ACCOUNT_ID,

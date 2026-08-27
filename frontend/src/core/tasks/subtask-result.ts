@@ -64,19 +64,13 @@ const STRUCTURED_SUBAGENT_KEYS = [
 ];
 
 const SUCCESS_PREFIX = "Task Succeeded. Result:";
-const FAILURE_PREFIX = "Task failed.";
-const TIMEOUT_PREFIX = "Task timed out";
-const CANCELLED_PREFIX = "Task cancelled by user.";
-const POLLING_TIMEOUT_PREFIX = "Task polling timed out";
-const ERROR_WRAPPER_PATTERN = /^Error\b/i;
 
 /**
  * Map from the backend ``subagent_status`` value to the frontend
  * {@link SubtaskStatus} enum. The frontend collapses ``cancelled`` /
- * ``timed_out`` / ``polling_timed_out`` into ``failed`` because the
- * subtask card only renders three pill states. The richer backend
- * vocabulary still survives on ``error`` for tooling that wants the
- * detail.
+ * ``timed_out`` / ``polling_timed_out`` into the terminal ``failed`` state.
+ * The richer backend vocabulary still survives on ``error`` for tooling that
+ * wants the detail.
  *
  * ``max_turns_reached`` is kept as a **deprecated read-only alias**: Phase 1
  * (#3949) wrote it into ``ToolMessage.additional_kwargs``, which is checkpointed
@@ -104,13 +98,12 @@ const STRUCTURED_STATUS_TO_SUBTASK: Record<string, SubtaskStatus> = {
  * ``ToolMessage.additional_kwargs``. The textual ``content`` remains
  * model-visible display content only; it is not parsed as a protocol.
  *
- * Returning `in_progress` is the **deliberate** default for content that
- * carries no structured stamp.
+ * Returning `unknown` is the deliberate default for content that carries no
+ * structured stamp.
  * LangChain only ever emits a `ToolMessage` once the tool itself has
  * returned (success or wrapped exception), so an unknown shape means
- * "the contract changed underneath us" — surfacing it as still-running
- * prompts the operator to investigate, where eagerly marking it
- * terminal-failed would mask the drift.
+ * "the contract changed underneath us" — surfacing an unknown state prompts
+ * the operator to investigate without inventing a terminal failure.
  */
 export function parseSubtaskResult(
   text: string,
@@ -121,7 +114,7 @@ export function parseSubtaskResult(
     if (!hasStructuredSubagentMetadata(additionalKwargs)) {
       return parseLegacyTaskResult(text.trim());
     }
-    return { status: "in_progress" };
+    return { status: "unknown" };
   }
 
   const update: SubtaskResultUpdate = { status: structured.status };
@@ -155,42 +148,7 @@ function parseLegacyTaskResult(trimmed: string): SubtaskResultUpdate {
     };
   }
 
-  if (trimmed.startsWith(FAILURE_PREFIX)) {
-    return {
-      status: "failed",
-      error: trimmed.slice(FAILURE_PREFIX.length).trim(),
-    };
-  }
-
-  if (trimmed.startsWith(TIMEOUT_PREFIX)) {
-    return { status: "failed", error: trimmed };
-  }
-
-  if (trimmed.startsWith(CANCELLED_PREFIX)) {
-    return { status: "failed", error: trimmed };
-  }
-
-  if (trimmed.startsWith(POLLING_TIMEOUT_PREFIX)) {
-    return { status: "failed", error: trimmed };
-  }
-
-  if (ERROR_WRAPPER_PATTERN.test(trimmed)) {
-    return { status: "failed", error: trimmed };
-  }
-
-  return { status: "in_progress" };
-}
-
-export function hasSubtaskToolResult(
-  toolCallId: string | undefined,
-  messages: Message[],
-) {
-  if (!toolCallId) {
-    return false;
-  }
-  return messages.some(
-    (message) => message.type === "tool" && message.tool_call_id === toolCallId,
-  );
+  return { status: "unknown" };
 }
 
 export function derivePendingSubtaskStatus(
@@ -198,10 +156,16 @@ export function derivePendingSubtaskStatus(
   messages: Message[],
   isOwningRunActive: boolean,
 ): SubtaskStatus {
-  if (isOwningRunActive || hasSubtaskToolResult(toolCallId, messages)) {
-    return "in_progress";
+  if (
+    toolCallId &&
+    messages.some(
+      (message) =>
+        message.type === "tool" && message.tool_call_id === toolCallId,
+    )
+  ) {
+    return "unknown";
   }
-  return "failed";
+  return isOwningRunActive ? "in_progress" : "unknown";
 }
 
 function messageRunId(message: Message): string | undefined {
@@ -219,28 +183,17 @@ function messageRunId(message: Message): string | undefined {
  * Decide whether a subtask group belongs to the currently running parent Run.
  *
  * A subtask group can stop being the last visible group while the Lead Agent
- * continues with other tools or starts another subtask. Run identity, rather
- * than group position, is therefore the stable ownership signal. Looking up
- * the latest Run ID also restores the correct running state after navigating
- * away from an active conversation and reconnecting.
+ * continues with other tools or starts another subtask. Compare it only with
+ * the active Run resolved from authoritative Run/history state; SDK loading
+ * state and message order are not lifecycle authority.
  */
 export function isSubtaskRunActive(
   groupMessages: Message[],
-  allMessages: Message[],
-  isRunLoading: boolean,
+  activeRunId: string | null | undefined,
 ): boolean {
-  if (!isRunLoading) {
-    return false;
-  }
-
-  const activeRunId = [...allMessages]
-    .reverse()
-    .map(messageRunId)
-    .find((runId): runId is string => Boolean(runId));
   if (!activeRunId) {
     return false;
   }
-
   return groupMessages.some((message) => messageRunId(message) === activeRunId);
 }
 

@@ -91,7 +91,10 @@ function agentRuntimeSettings() {
         window_size: 20,
       },
     },
-    internal_tool_call_limit: 200,
+    internal_tool_call_limits: {
+      lead_per_run: 200,
+      subagent_per_task: 50,
+    },
     read_before_write: { enabled: true },
     safety_finish_reason: { enabled: true },
     subagents: {
@@ -176,7 +179,7 @@ describe("admin contracts", () => {
     ).toBe(false);
   });
 
-  test("accepts the complete schema v5 Agent runtime policy without an outer wrapper", () => {
+  test("accepts the complete schema v6 Agent runtime policy with independent Lead and Sub-Agent Task limits", () => {
     const parsed = agentRuntimeSettingsValueSchema.parse(
       agentRuntimeSettings(),
     );
@@ -186,7 +189,10 @@ describe("admin contracts", () => {
       hard_limit: 5,
       window_size: 20,
     });
-    expect(parsed.internal_tool_call_limit).toBe(200);
+    expect(parsed.internal_tool_call_limits).toEqual({
+      lead_per_run: 200,
+      subagent_per_task: 50,
+    });
     expect(parsed.subagents.max_total_per_run_by_workload).toEqual({
       interactive: 6,
       research: 9,
@@ -198,15 +204,24 @@ describe("admin contracts", () => {
       string,
       unknown
     >;
-    delete missingLimit.internal_tool_call_limit;
+    delete missingLimit.internal_tool_call_limits;
     expect(
       agentRuntimeSettingsValueSchema.safeParse(missingLimit).success,
     ).toBe(false);
 
     const invalidLimit = structuredClone(agentRuntimeSettings());
-    invalidLimit.internal_tool_call_limit = 0;
+    invalidLimit.internal_tool_call_limits.lead_per_run = 0;
     expect(
       agentRuntimeSettingsValueSchema.safeParse(invalidLimit).success,
+    ).toBe(false);
+
+    const legacySharedLimit = {
+      ...agentRuntimeSettings(),
+      internal_tool_call_limit: 200,
+    } as Record<string, unknown>;
+    delete legacySharedLimit.internal_tool_call_limits;
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse(legacySharedLimit).success,
     ).toBe(false);
 
     const legacy = structuredClone(agentRuntimeSettings()) as Record<

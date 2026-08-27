@@ -30,7 +30,7 @@ type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
   defaultSection?: SettingsSectionId;
 };
 
-export function settingsNavigationItemClassName(active: boolean): string {
+function settingsNavigationItemClassName(active: boolean): string {
   return cn(
     "relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors before:pointer-events-none before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full",
     active

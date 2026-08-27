@@ -239,14 +239,21 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
     en: "Maximum steps per Run",
     unit: "步",
   },
-  "agent_runtime.internal_tool_call_limit": {
-    zh: "每个 Run 内部工具调用上限",
-    en: "Internal tool-call limit per Run",
+  "agent_runtime.internal_tool_call_limits.lead_per_run": {
+    zh: "主Agent 工具调用上限",
+    en: "Lead Agent internal tool-call limit per Run",
     unit: "次",
-    hintZh:
-      "同一 Run 内 Lead Agent 与所有子 Agent 共享此上限；不同 Run 独立计数，达到上限后不再准入新的内部工具调用。",
+    hintZh: "task 委托调用本身计入主 Agent 上限。",
     hintEn:
-      "Lead Agent and all Sub-Agents share this limit within one Run. Each Run is counted independently, and no new internal tool calls are admitted after the limit is reached.",
+      "The task delegation call itself counts against the Lead Agent limit.",
+  },
+  "agent_runtime.internal_tool_call_limits.subagent_per_task": {
+    zh: "子Agent 工具调用上限",
+    en: "Internal tool-call limit per Sub-Agent Task",
+    unit: "次",
+    hintZh: "每个子 Agent Task 独立计数；多个并行 Task 互不共享此上限。",
+    hintEn:
+      "Each Sub-Agent Task has its own count; parallel Tasks do not share this limit.",
   },
   "agent_runtime.vision_bridge.model_name": {
     zh: "视觉模型",
@@ -1373,7 +1380,7 @@ const AGENT_RUNTIME_DESTINATION_FIELDS: Record<
     "token_usage",
     "token_budget",
     "max_recursion_limit",
-    "internal_tool_call_limit",
+    "internal_tool_call_limits",
     "subagents",
   ],
   "assistant-experience": ["title", "suggestions", "input_polish"],
@@ -1533,11 +1540,22 @@ function AgentRuntimeEditor({
             onChange={(next) => update("max_recursion_limit", next)}
           />
           <NumberField
-            name="agent_runtime.internal_tool_call_limit"
-            value={value.internal_tool_call_limit}
+            name="agent_runtime.internal_tool_call_limits.lead_per_run"
+            value={value.internal_tool_call_limits.lead_per_run}
             min={1}
             max={100_000}
-            onChange={(next) => update("internal_tool_call_limit", next)}
+            onChange={(next) =>
+              update("internal_tool_call_limits.lead_per_run", next)
+            }
+          />
+          <NumberField
+            name="agent_runtime.internal_tool_call_limits.subagent_per_task"
+            value={value.internal_tool_call_limits.subagent_per_task}
+            min={1}
+            max={100_000}
+            onChange={(next) =>
+              update("internal_tool_call_limits.subagent_per_task", next)
+            }
           />
         </RuntimeSubsection>
 

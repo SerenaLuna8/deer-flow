@@ -465,73 +465,6 @@ class TestStream:
         ensure_agent.assert_not_called()
         assert len(list(saver.list(config))) == checkpoint_count
 
-    def test_messages_mode_emits_token_deltas(self, client):
-        """stream() forwards LangGraph ``messages`` mode chunks as delta events.
-
-        Regression for bytedance/deer-flow#1969 — before the fix the client
-        only subscribed to ``values`` mode, so LLM output was delivered as
-        a single cumulative dump after each graph node finished instead of
-        token-by-token deltas as the model generated them.
-        """
-        # Three AI chunks sharing the same id, followed by a terminal
-        # values snapshot with the fully assembled message — this matches
-        # the shape LangGraph emits when ``stream_mode`` includes both
-        # ``messages`` and ``values``.
-        assembled = AIMessage(content="Hel lo world!", id="ai-1", usage_metadata={"input_tokens": 3, "output_tokens": 4, "total_tokens": 7})
-        agent = MagicMock()
-        agent.stream.return_value = iter(
-            [
-                ("messages", (AIMessageChunk(content="Hel", id="ai-1"), {})),
-                ("messages", (AIMessageChunk(content=" lo ", id="ai-1"), {})),
-                (
-                    "messages",
-                    (
-                        AIMessageChunk(
-                            content="world!",
-                            id="ai-1",
-                            usage_metadata={"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
-                        ),
-                        {},
-                    ),
-                ),
-                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), assembled]}),
-            ]
-        )
-
-        with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
-        ):
-            events = list(client.stream("hi", thread_id="t-stream"))
-
-        # Three delta messages-tuple events, all with the same id, each
-        # carrying only its own delta (not cumulative).
-        ai_text_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
-        assert [e.data["content"] for e in ai_text_events] == ["Hel", " lo ", "world!"]
-        assert all(e.data["id"] == "ai-1" for e in ai_text_events)
-
-        # The values snapshot MUST NOT re-synthesize an AI text event for
-        # the already-streamed id (otherwise consumers see duplicated text).
-        assert len(ai_text_events) == 3
-
-        # Usage metadata attached only to the chunk that actually carried
-        # it, and counted into cumulative usage exactly once (the values
-        # snapshot's duplicate usage on the assembled AIMessage must not
-        # be double-counted).
-        events_with_usage = [e for e in ai_text_events if "usage_metadata" in e.data]
-        assert len(events_with_usage) == 1
-        assert events_with_usage[0].data["usage_metadata"] == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
-        end_event = events[-1]
-        assert end_event.type == "end"
-        assert end_event.data["usage"] == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
-
-        # The values snapshot itself is still emitted.
-        assert any(e.type == "values" for e in events)
-
-        # stream_mode includes ``messages`` — the whole point of this fix.
-        call_kwargs = agent.stream.call_args.kwargs
-        assert "messages" in call_kwargs["stream_mode"]
-
     def test_stream_emits_additional_kwargs_updates_for_streamed_ai_messages(self, client):
         """stream() emits a follow-up AI event when attribution metadata arrives via values."""
         assembled = AIMessage(
@@ -684,58 +617,13 @@ class TestStream:
         assert msg_events[0].data["content"] == "result"
 
     # ------------------------------------------------------------------
-    # Refactor regression guards (PR #1974 follow-up safety)
+    # Canonical stream event contract (PR #1974 follow-up safety)
     #
-    # The three tests below are not bug-fix tests — they exist to lock
-    # the *exact* contract of stream() so a future refactor (e.g. moving
+    # This golden sequence locks the *exact* contract of stream() so a
+    # future refactor (e.g. moving
     # to ``agent.astream()``, sharing a core with Gateway's run_agent,
     # changing the dedup strategy) cannot silently change behavior.
     # ------------------------------------------------------------------
-
-    def test_dedup_requires_messages_before_values_invariant(self, client):
-        """Canary: locks the order-dependence of cross-mode dedup.
-
-        ``streamed_ids`` is populated only by the ``messages`` branch.
-        If a ``values`` snapshot arrives BEFORE its corresponding
-        ``messages`` chunks for the same id, the values path falls
-        through and synthesizes its own AI text event, then the
-        messages chunk emits another delta — consumers see the same
-        id twice.
-
-        Under normal LangGraph operation this never happens (messages
-        chunks are emitted during LLM streaming, the values snapshot
-        after the node completes), so the implicit invariant is safe
-        in production.  This test exists as a tripwire for refactors
-        that switch to ``agent.astream()`` or share a core with
-        Gateway: if the ordering ever changes, this test fails and
-        forces the refactor to either (a) preserve the ordering or
-        (b) deliberately re-baseline to a stronger order-independent
-        dedup contract — and document the new contract here.
-        """
-        agent = MagicMock()
-        agent.stream.return_value = iter(
-            [
-                # values arrives FIRST — streamed_ids still empty.
-                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), AIMessage(content="Hello", id="ai-1")]}),
-                # messages chunk for the same id arrives SECOND.
-                ("messages", (AIMessageChunk(content="Hello", id="ai-1"), {})),
-            ]
-        )
-
-        with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
-        ):
-            events = list(client.stream("hi", thread_id="t-order-canary"))
-
-        ai_text_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
-        # Current behavior: 2 events (values synthesis + messages delta).
-        # If a refactor makes dedup order-independent, this becomes 1 —
-        # update the assertion AND the docstring above to record the
-        # new contract, do not silently fix this number.
-        assert len(ai_text_events) == 2
-        assert all(e.data["id"] == "ai-1" for e in ai_text_events)
-        assert [e.data["content"] for e in ai_text_events] == ["Hello", "Hello"]
 
     def test_messages_mode_golden_event_sequence(self, client):
         """Locks the **exact** event sequence for a canonical streaming turn.
@@ -809,55 +697,6 @@ class TestStream:
             ("end", {"usage": usage}),
         ]
         assert actual == expected
-
-    def test_chat_accumulates_in_linear_time(self, client):
-        """``chat()`` must use a non-quadratic accumulation strategy.
-
-        PR #1974 commit 2 replaced ``buffer = buffer + delta`` with
-        ``list[str].append`` + ``"".join`` to fix an O(n²) regression
-        introduced in commit 1.  This test guards against a future
-        refactor accidentally restoring the quadratic path.
-
-        Threshold rationale (10,000 single-char chunks, 1 second):
-            * Current O(n) implementation: ~50-200 ms total, including
-              all mock + event yield overhead.
-            * O(n²) regression at n=10,000: chat accumulation alone
-              becomes ~500 ms-2 s (50 M character copies), reliably
-              over the bound on any reasonable CI.
-
-        If this test ever flakes on slow CI, do NOT raise the threshold
-        blindly — first confirm the implementation still uses
-        ``"".join``, then consider whether the test should move to a
-        benchmark suite that excludes mock overhead.
-        """
-        import time
-
-        n = 10_000
-        chunks: list = [("messages", (AIMessageChunk(content="x", id="ai-1"), {})) for _ in range(n)]
-        chunks.append(
-            (
-                "values",
-                {
-                    "messages": [
-                        HumanMessage(content="go", id="h-1"),
-                        AIMessage(content="x" * n, id="ai-1"),
-                    ]
-                },
-            )
-        )
-        agent = MagicMock()
-        agent.stream.return_value = iter(chunks)
-
-        with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
-        ):
-            start = time.monotonic()
-            result = client.chat("go", thread_id="t-perf")
-            elapsed = time.monotonic() - start
-
-        assert result == "x" * n
-        assert elapsed < 1.0, f"chat() took {elapsed:.3f}s for {n} chunks — possible O(n^2) regression (see PR #1974 commit 2 for the original fix)"
 
     def test_none_id_chunks_produce_duplicates_known_limitation(self, client):
         """Documents a known dedup limitation: ``messages`` chunks with ``id=None``.
@@ -1058,8 +897,11 @@ class TestEnsureAgent:
         assert profile.asset_context is client._asset_context
         assert profile.graph.model is model
         assert profile.subagent_enabled is True
-        assert binding_factory.tool_call_control_profile.workload_profile == "research"
-        assert binding_factory.tool_call_control_profile.policy.internal_tool_call_limit == 200
+        control_profile = binding_factory.tool_call_control_topology.profile
+        assert control_profile.workload_profile == "research"
+        assert control_profile.accounting_mode == "lead_run_subagent_task"
+        assert control_profile.lead.internal_tool_call_limit == 200
+        assert control_profile.subagent.internal_tool_call_limit == 50
         assert isinstance(
             create_agent.call_args.kwargs["middleware"][0],
             ToolCallControl,

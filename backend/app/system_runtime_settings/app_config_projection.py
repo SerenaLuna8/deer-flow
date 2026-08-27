@@ -23,13 +23,13 @@ def project_agent_runtime_app_config_policy(
 ) -> Mapping[str, object]:
     """Return only policy leaves still represented by Harness ``AppConfig``.
 
-    The internal tool-call limit and repeated-call thresholds are resolved separately and
-    passed to ``ToolCallControl``. ``AppConfig`` retains only the compatibility
+    The internal tool-call limits and repeated-call thresholds are resolved separately
+    and passed to ``ToolCallControl``. ``AppConfig`` retains only the compatibility
     enablement switch and the selected workload's legacy Sub-Agent total.
     """
 
     overlay = policy.model_dump(mode="python")
-    overlay.pop("internal_tool_call_limit", None)
+    overlay.pop("internal_tool_call_limits", None)
     overlay["loop_detection"] = {
         "enabled": policy.loop_detection.enabled,
     }

@@ -65,22 +65,19 @@ const message = {
 } as unknown as Message;
 
 describe("MessageList recovered model failures", () => {
-  test("does not project recovered retry diagnostics into Chinese conversation history", () => {
-    const html = renderMessageList(message, "zh-CN");
+  test("does not project recovered retry diagnostics into conversation history", () => {
+    for (const { locale, removedNotice } of [
+      { locale: "zh-CN", removedNotice: "模型调用失败后已恢复" },
+      { locale: "en-US", removedNotice: "Model request failures recovered" },
+    ] as const) {
+      const html = renderMessageList(message, locale);
 
-    expect(html).toContain("最终回答仍然完成。");
-    expect(html).not.toContain('data-testid="recovered-model-failure-notice"');
-    expect(html).not.toContain("模型调用失败后已恢复");
-    expect(html).not.toContain("LLM_PROVIDER_UNAVAILABLE");
-  });
-
-  test("does not project recovered retry diagnostics into English conversation history", () => {
-    const html = renderMessageList(message, "en-US");
-
-    expect(html).toContain("最终回答仍然完成。");
-    expect(html).not.toContain('data-testid="recovered-model-failure-notice"');
-    expect(html).not.toContain("Model request failures recovered");
-    expect(html).not.toContain("api_key");
-    expect(html).not.toContain("ConnectionError(");
+      expect(html).toContain("最终回答仍然完成。");
+      expect(html).not.toContain(
+        'data-testid="recovered-model-failure-notice"',
+      );
+      expect(html).not.toContain(removedNotice);
+      expect(html).not.toContain("LLM_PROVIDER_UNAVAILABLE");
+    }
   });
 });

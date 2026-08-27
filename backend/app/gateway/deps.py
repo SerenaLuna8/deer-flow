@@ -274,35 +274,6 @@ async def gateway_platform_runtime(
             current_policy_reader=SystemQuotaPolicyReader(),
         )
         project_quota_enforcer = ProjectQuotaEnforcer(quota_service)
-        from app.shared_assets.skill_deletion import (
-            ArchivedSkillPurger,
-            DurableArchivedSkillPurgeAuditSink,
-            archived_skill_purge_reconciler_runtime,
-        )
-
-        archived_skill_purger = ArchivedSkillPurger(
-            sf,
-            quota=project_quota_enforcer,
-            audit=DurableArchivedSkillPurgeAuditSink(
-                audit_service,
-                process_context=gateway_audit_context,
-            ),
-        )
-        archived_skill_purge_reconciler = await stack.enter_async_context(archived_skill_purge_reconciler_runtime(archived_skill_purger))
-        app.state.archived_skill_purge_reconciler = archived_skill_purge_reconciler
-
-        async def clear_archived_skill_purge_reconciler_state() -> None:
-            if (
-                getattr(
-                    app.state,
-                    "archived_skill_purge_reconciler",
-                    None,
-                )
-                is archived_skill_purge_reconciler
-            ):
-                del app.state.archived_skill_purge_reconciler
-
-        stack.push_async_callback(clear_archived_skill_purge_reconciler_state)
         app.state.project_quota_service = quota_service
         app.state.project_quota_enforcer = project_quota_enforcer
         from app.private_work.checkpoint_delete_recovery import checkpoint_delete_reconciler_runtime
@@ -445,7 +416,6 @@ async def gateway_platform_runtime(
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
             approval_audit=operational_audit_sink,
-            archived_skill_purger=archived_skill_purger,
         )
         app.state.private_feedback_service = PrivateFeedbackService(sf)
         app.state.private_file_streamer = PrivateFileStreamer(sf)

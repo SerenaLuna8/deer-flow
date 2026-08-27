@@ -18,6 +18,13 @@ type ArtifactPreviewMessage = {
 export type WriteArtifactSelection = {
   key: string;
   url: string;
+  preferredViewMode: ArtifactViewMode;
+};
+
+export type ArtifactViewModeRequest = {
+  id: number;
+  artifact: string;
+  mode: ArtifactViewMode;
 };
 
 export type WriteArtifactAutoOpenState = {
@@ -124,6 +131,7 @@ export function extractWriteArtifactSelections(
           messageId: message.id,
           toolCallId: toolCall.id,
         }),
+        preferredViewMode: "preview",
       });
     }
   }
@@ -341,6 +349,21 @@ export function getArtifactViewState({
     canPreview,
     initialViewMode: canPreview ? "preview" : "code",
   };
+}
+
+export function resolveRequestedArtifactViewMode({
+  request,
+  filepath,
+  canPreview,
+}: {
+  request: ArtifactViewModeRequest | null;
+  filepath: string;
+  canPreview: boolean;
+}): ArtifactViewMode | undefined {
+  if (request?.artifact !== filepath) {
+    return undefined;
+  }
+  return request.mode === "preview" && !canPreview ? "code" : request.mode;
 }
 
 export function appendHtmlPreviewBaseHref(

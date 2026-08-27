@@ -17,6 +17,9 @@ from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_d
 from support.system_model_seed import seed_system_model_config
 
 from app.private_work.run_repository import PrivateRunRepository
+from app.private_work.skill_builder_run_admission import (
+    SkillBuilderRunAdmissionService,
+)
 from app.projects.context import ProjectContext
 from app.shared_assets.bootstrap import service as bootstrap_service
 from app.shared_assets.errors import (
@@ -28,7 +31,6 @@ from app.shared_assets.errors import (
     SkillDesignTargetUnsupported,
 )
 from app.shared_assets.skill_builder_contract import SkillBuilderCandidateFileList
-from app.shared_assets.skill_builder_run_admission import SkillBuilderRunAdmissionService
 from app.shared_assets.skill_deletion import SkillDeleteResult
 from app.shared_assets.skill_design_activity import SkillDesignActivityKind
 from app.shared_assets.skill_design_repository import SkillDesignRepository

@@ -4,6 +4,10 @@ status: accepted
 
 # Use one Project Agent Definition and archive deleted Skills
 
+> **Partially superseded:** ADR-0011 replaces this ADR's immediate Skill-secret
+> destruction and archived-Skill purge clauses. ADR-0010 separately replaces its
+> former Thread private-state cleanup clause.
+
 A Project Agent owns one mutable Agent Definition rather than a
 Current/Candidate/Historical Version lineage. Saving that Definition immediately
 changes future Run Admission under optimistic revision control. Each successful
@@ -36,26 +40,17 @@ fence. Admission that commits first retains a complete pre-deletion closure;
 deletion that commits first causes the next admission to read the complete
 post-deletion Agent Definition. Partial dependency closures are not valid.
 
-Logical deletion immediately destroys the Project Skill's Configuration Secret
-ciphertext and retains non-secret tombstones. A Run Snapshot pins a Secret
-Generation identity but does not copy the ciphertext, so an already admitted
-Run that has not materialized the secret, or later retries, fails closed. This
-execution cost is accepted in exchange for immediate secret destruction. An
-already executing Run that materialized the secret before deletion may finish.
+Per ADR-0011, logical deletion preserves the Project Skill's Current Version
+pointer, every immutable Version and file, quota reservation, Secret state,
+Generations, and ciphertext. It creates no Skill-specific physical-cleanup
+eligibility, regardless of whether a retained Run still references a Version.
 
-Archived Skill Version files and quota remain owned until no retained Run
-references any Version of that Skill. A trusted archived Skill purge then
-clears the Current Version pointer, removes files and Version rows, releases
-storage quota, and keeps the minimal archived Skill row plus its non-secret
-Secret Tombstones.
+Terminal Run deletion, Thread deletion, and former-owner or account-private
+retention do not remove archived Skill content, and no periodic reconciler scans
+for it. Only final deletion of the whole Project destroys the archived Skill
+closure and releases its quota. ADR-0010 separately specifies that Thread
+Deletion retains the Thread's private state and admitted Runs.
 
-Individual terminal Run deletion and owner/account retention cleanup can release
-the final references and invoke the purger; a low-frequency sweep repairs missed
-invocations. Ordinary successful Runs have no age-based expiry. Thread deletion
-continues to hide the Thread and remove its checkpoint/private presentation
-state, but it does not physically delete its retained Runs or their Run
-Snapshots, so it is not a reference-release event. Expanding Thread deletion to
-destroy all terminal Run closures would be a separate product decision.
-
-This trades immediate storage reclamation for deterministic execution, retry,
-and replay of already admitted Runs without preserving obsolete Agent versions.
+This trades Skill-scoped storage reclamation for a simple permanent archive
+boundary and deterministic execution, retry, and replay of admitted Runs without
+preserving obsolete Agent versions.

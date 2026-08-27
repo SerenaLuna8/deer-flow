@@ -7,7 +7,7 @@ import {
   SquareArrowOutUpRightIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -35,6 +35,7 @@ import {
   createHtmlPreviewScrollKey,
   getArtifactViewState,
   HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
+  resolveRequestedArtifactViewMode,
 } from "@/core/artifacts/preview";
 import { extractCitationSources } from "@/core/citations/sources";
 import { writeTextToClipboard } from "@/core/clipboard";
@@ -76,7 +77,14 @@ export function ArtifactFileDetail({
 }) {
   const { t } = useI18n();
   const privateWork = useProjectPrivateWorkScope();
-  const { artifacts, setOpen, select, showList } = useArtifacts();
+  const {
+    artifacts,
+    consumeViewModeRequest,
+    select,
+    setOpen,
+    showList,
+    viewModeRequest,
+  } = useArtifacts();
   const { thread } = useThread();
   const isWriteFile = useMemo(() => {
     return filepathFromProps.startsWith("write-file:");
@@ -178,6 +186,11 @@ export function ArtifactFileDetail({
     isSupportPreview,
     toolResult,
   });
+  const requestedViewMode = resolveRequestedArtifactViewMode({
+    request: viewModeRequest,
+    filepath: filepathFromProps,
+    canPreview: artifactViewState.canPreview,
+  });
   const { content, url, isLoading, error } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
@@ -206,8 +219,16 @@ export function ArtifactFileDetail({
   );
 
   const [viewMode, setViewMode] = useState<"code" | "preview">(
-    artifactViewState.initialViewMode,
+    requestedViewMode ?? artifactViewState.initialViewMode,
   );
+  const effectiveViewMode = requestedViewMode ?? viewMode;
+  useLayoutEffect(() => {
+    if (requestedViewMode === undefined || !viewModeRequest) {
+      return;
+    }
+    setViewMode(requestedViewMode);
+    consumeViewModeRequest(viewModeRequest.id);
+  }, [consumeViewModeRequest, requestedViewMode, viewModeRequest]);
   useEffect(() => {
     setViewMode(artifactViewState.initialViewMode);
   }, [artifactViewState.initialViewMode]);
@@ -244,7 +265,7 @@ export function ArtifactFileDetail({
               type="single"
               variant="outline"
               size="sm"
-              value={viewMode}
+              value={effectiveViewMode}
               onValueChange={(value) => {
                 if (value) {
                   setViewMode(value as "code" | "preview");
@@ -349,7 +370,7 @@ export function ArtifactFileDetail({
         ) : (
           <>
             {artifactViewState.canPreview &&
-              viewMode === "preview" &&
+              effectiveViewMode === "preview" &&
               (language === "markdown" || language === "html") && (
                 <ArtifactFilePreview
                   content={visibleContent}
@@ -358,7 +379,7 @@ export function ArtifactFileDetail({
                   url={url}
                 />
               )}
-            {isCodeFile && viewMode === "code" && (
+            {isCodeFile && effectiveViewMode === "code" && (
               <CodeEditor
                 className="size-full resize-none rounded-none border-none"
                 language={language ?? "text"}

@@ -61,6 +61,45 @@ def _control_policy(*, hard_limit: int = 2) -> ResolvedToolCallControlPolicy:
     )
 
 
+def test_legacy_shared_run_checkpoint_fingerprint_remains_replayable() -> None:
+    control = build_tool_call_control(
+        _control_policy(),
+        ToolCallControlBinding(
+            role="lead",
+            scope=FixedToolCallControlScope("legacy-run"),
+        ),
+    )
+    initialized = control.before_agent({}, Runtime(context={}))
+
+    assert initialized is not None
+    facts = initialized[TOOL_CALL_CONTROL_STATE_KEY]
+    assert facts["contract_fingerprint"] == ("669f7e7d029689d80ea9ce9dcd6818c70de72706dda0a1ba750c5e658dd97931")
+
+    replay = control.after_model(
+        {
+            TOOL_CALL_CONTROL_STATE_KEY: facts,
+            "messages": [
+                AIMessage(
+                    id="legacy-checkpoint-proposal",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "web_search",
+                            "args": {"query": "legacy"},
+                            "id": "legacy-call",
+                        }
+                    ],
+                )
+            ],
+        },
+        Runtime(context={}),
+    )
+
+    assert replay is not None
+    assert replay[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 1
+    assert replay["messages"][0].tool_calls[0]["id"] == "legacy-call"
+
+
 @pytest.mark.parametrize("mode", ["full", "delta"])
 def test_materialized_checkpoint_replay_preserves_controlled_batch_and_hard_limit(
     mode: CheckpointChannelMode,

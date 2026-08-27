@@ -694,7 +694,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
     class RuntimePolicy:
         async def materialize_run_snapshot_envelope(self, **_kwargs):
             return MaterializedAgentRuntimePolicy(
-                schema_version=5,
+                schema_version=6,
                 value=runtime_policy,
             )
 
@@ -832,8 +832,9 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         PrivateRunVisionDispatchAuthority,
     )
     assert observed["tool_control_policy"].workload_profile == "interactive"
+    assert observed["tool_control_policy"].accounting_mode == "lead_run_subagent_task"
     assert observed["tool_control_policy"].lead.internal_tool_call_limit == 200
-    assert observed["tool_control_policy"].lead is observed["tool_control_policy"].subagent
+    assert observed["tool_control_policy"].subagent.internal_tool_call_limit == 50
     assert observed["max_concurrent_subagents"] == 3
     assert observed["max_total_subagents"] == 6
 

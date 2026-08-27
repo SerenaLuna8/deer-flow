@@ -416,22 +416,9 @@ BEGIN
                     JOIN projects project ON project.id = asset.project_id
                     WHERE version.id = OLD.skill_version_id
                       AND asset.scope = 'project'
-                      AND (
-                          (
-                              project.status = 'pending_deletion'
-                              AND project.deletion_effective_at IS NOT NULL
-                              AND project.deletion_effective_at <= now()
-                          )
-                          OR (
-                              project.status = 'active'
-                              AND asset.status = 'archived'
-                              AND asset.current_version_id IS NULL
-                              AND current_setting(
-                                  'deerflow.archived_skill_purge_asset_id',
-                                  true
-                              ) = asset.id::text
-                          )
-                      )
+                      AND project.status = 'pending_deletion'
+                      AND project.deletion_effective_at IS NOT NULL
+                      AND project.deletion_effective_at <= now()
                       AND NOT EXISTS (
                           SELECT 1
                           FROM run_skill_version_refs pinned

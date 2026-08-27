@@ -5,6 +5,7 @@ import type { Project } from "@/core/projects/types";
 const ACCOUNT_ID = "90000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const THREAD_ID = "20000000-0000-4000-8000-000000000001";
+const OTHER_THREAD_ID = "20000000-0000-4000-8000-000000000002";
 const AGENT_ID = "30000000-0000-4000-8000-000000000001";
 const MODEL_ID = "30000000-0000-4000-8000-000000000002";
 const FILE_ID = "40000000-0000-4000-8000-000000000001";
@@ -55,7 +56,10 @@ const thread = {
   agent_scope: "system",
   display_name: "Attachment pre-upload",
   status: "idle",
-  metadata: {},
+  metadata: {
+    agent_asset_id: AGENT_ID,
+    agent_scope: "system",
+  },
   version: 1,
   created_at: TIMESTAMP,
   updated_at: TIMESTAMP,
@@ -68,7 +72,7 @@ const systemAgent = {
   slug: "project-assistant",
   display_name: "Main",
   status: "active",
-  current_version_id: null,
+  definition_id: "30000000-0000-4000-8000-000000000003",
   revision: 1,
   created_by_user_id: ACCOUNT_ID,
   created_at: TIMESTAMP,
@@ -117,9 +121,11 @@ async function mockProjectChat(
     liveRunControlEvents?: readonly MockRunControlEvent[];
     duplicateLiveRunControlEvents?: boolean;
     liveValuesMessages?: readonly Record<string, unknown>[];
+    canonicalValuesMessages?: readonly Record<string, unknown>[];
     continuationValuesMessages?: readonly Record<string, unknown>[];
     followupSuggestions?: readonly string[];
     gateFirstRunAdmission?: boolean;
+    gateTerminalHandoff?: boolean;
   } = {
     filename: FILE_NAME,
     mediaType: "text/plain",
@@ -130,6 +136,8 @@ async function mockProjectChat(
   const uploadPath = `${privateWorkBase}/threads/${THREAD_ID}/uploads`;
   const releaseUpload = deferred<void>();
   const firstRunAdmissionGate = deferred<void>();
+  const terminalExecutionStateGate = deferred<void>();
+  const canonicalHistoryGate = deferred<void>();
   const unexpectedRequests: string[] = [];
   const uploadRequests: string[] = [];
   const runRequestBodies: unknown[] = [];
@@ -138,11 +146,69 @@ async function mockProjectChat(
   let runListGetCount = 0;
   let runMessagesGetCount = 0;
   let suggestionPostCount = 0;
+  let executionStateGetCount = 0;
+  let canonicalHistoryGetCount = 0;
+  let canonicalHistoryReleased = false;
   let failedRunVisible = false;
   let completedRunId: string | null = null;
   let effectiveWorkloadProfile: "interactive" | "research" | null = null;
   let durableRunId: string | null = null;
   let durableRunControlEvents: Record<string, unknown>[] = [];
+
+  if (upload.gateTerminalHandoff && upload.liveValuesMessages) {
+    await page.addInitScript(
+      ({ streamPath, threadId, runId, messages }) => {
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (input, init) => {
+          const requestURL =
+            input instanceof Request ? input.url : String(input);
+          const requestMethod =
+            init?.method ?? (input instanceof Request ? input.method : "GET");
+          const path = new URL(requestURL, window.location.origin).pathname;
+          if (requestMethod === "POST" && path === streamPath) {
+            const encoder = new TextEncoder();
+            const body = new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  encoder.encode(
+                    [
+                      "event: metadata",
+                      `data: ${JSON.stringify({ run_id: runId, thread_id: threadId })}`,
+                      "id: 1",
+                      "",
+                      "event: values",
+                      `data: ${JSON.stringify({ messages })}`,
+                      "id: 2",
+                      "",
+                      "",
+                    ].join("\n"),
+                  ),
+                );
+              },
+              cancel() {
+                Reflect.set(window, "__terminalHeldStreamCancelled", true);
+              },
+            });
+            return new Response(body, {
+              status: 200,
+              headers: {
+                "Content-Type": "text/event-stream",
+                "Content-Location": `${streamPath.replace(/\/runs\/stream$/u, "")}/runs/${runId}`,
+                Location: `/threads/${threadId}/runs/${runId}/stream`,
+              },
+            });
+          }
+          return originalFetch(input, init);
+        };
+      },
+      {
+        streamPath: `${privateWorkBase}/threads/${THREAD_ID}/runs/stream`,
+        threadId: THREAD_ID,
+        runId: RUN_ID,
+        messages: upload.liveValuesMessages,
+      },
+    );
+  }
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -250,7 +316,12 @@ async function mockProjectChat(
       return json(route, {
         values: {
           title: thread.display_name,
-          messages: [],
+          messages:
+            upload.gateTerminalHandoff && completedRunId
+              ? canonicalHistoryReleased
+                ? (upload.canonicalValuesMessages ?? upload.liveValuesMessages)
+                : upload.liveValuesMessages
+              : [],
           artifacts: [],
           todos: [],
         },
@@ -319,6 +390,59 @@ async function mockProjectChat(
       );
     }
     if (
+      upload.gateTerminalHandoff &&
+      completedRunId === RUN_ID &&
+      path === `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}` &&
+      method === "GET"
+    ) {
+      canonicalHistoryGetCount += 1;
+      await canonicalHistoryGate.promise;
+      return json(route, {
+        run_id: RUN_ID,
+        thread_id: THREAD_ID,
+        assistant_id: AGENT_ID,
+        created_at: TIMESTAMP,
+        updated_at: TIMESTAMP,
+        status: "success",
+        metadata: {},
+        multitask_strategy: "reject",
+        error: null,
+        model_name: MODEL_ID,
+        execution_profile: {
+          model_name: MODEL_ID,
+          thinking_enabled: false,
+          reasoning_effort: null,
+          supports_vision: true,
+        },
+        workload_profile: effectiveWorkloadProfile,
+      });
+    }
+    if (
+      upload.gateTerminalHandoff &&
+      path ===
+        `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/execution-state` &&
+      method === "GET"
+    ) {
+      executionStateGetCount += 1;
+      await terminalExecutionStateGate.promise;
+      completedRunId = RUN_ID;
+      return json(route, {
+        phase: "terminal",
+        observed_at: TIMESTAMP,
+        phase_started_at: TIMESTAMP,
+        execution_started_at: TIMESTAMP,
+        retry_at: null,
+        run_status: "success",
+      });
+    }
+    if (
+      path ===
+        `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/feedback` &&
+      method === "GET"
+    ) {
+      return json(route, null);
+    }
+    if (
       (path ===
         `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/events` ||
         path ===
@@ -346,7 +470,9 @@ async function mockProjectChat(
         : RUN_ID;
       const durableMessages = path.includes(SECOND_RUN_ID)
         ? upload.continuationValuesMessages?.slice(-1)
-        : upload.liveValuesMessages;
+        : upload.gateTerminalHandoff && canonicalHistoryReleased
+          ? (upload.canonicalValuesMessages ?? upload.liveValuesMessages)
+          : upload.liveValuesMessages;
       if (durableMessages) {
         return json(route, {
           data: durableMessages.map((content, index) => ({
@@ -609,10 +735,17 @@ async function mockProjectChat(
   return {
     releaseUpload: () => releaseUpload.resolve(),
     releaseFirstRunAdmission: () => firstRunAdmissionGate.resolve(),
+    releaseTerminalExecutionState: () => terminalExecutionStateGate.resolve(),
+    releaseCanonicalHistory: () => {
+      canonicalHistoryReleased = true;
+      canonicalHistoryGate.resolve();
+    },
     runPostCount: () => runPostCount,
     runListGetCount: () => runListGetCount,
     runMessagesGetCount: () => runMessagesGetCount,
     suggestionPostCount: () => suggestionPostCount,
+    executionStateGetCount: () => executionStateGetCount,
+    canonicalHistoryGetCount: () => canonicalHistoryGetCount,
     runRequestBodies,
     unexpectedRequests,
     uploadPostCount: () => uploadPostCount,
@@ -620,6 +753,335 @@ async function mockProjectChat(
     uploadPath,
   };
 }
+
+async function mockActiveSubtaskReconnect(page: Page) {
+  const taskId = "task-active-reconnect";
+  const taskDescription = "ACTIVE_SUBTASK_RECONNECT";
+  const returnedStep = "RETURNED_TASK_RUNNING_MARKER";
+  const privateWorkBase = `/api/projects/${PROJECT_ID}/private-work`;
+  const activeMessages: Record<string, unknown>[] = [
+    {
+      id: "human-active-reconnect",
+      type: "human",
+      content: "Keep researching while I switch conversations.",
+      additional_kwargs: { run_id: RUN_ID },
+    },
+    {
+      id: "ai-active-reconnect",
+      type: "ai",
+      content: "",
+      additional_kwargs: { run_id: RUN_ID },
+      tool_calls: [
+        {
+          id: taskId,
+          name: "task",
+          args: {
+            subagent_type: "general-purpose",
+            description: taskDescription,
+            prompt: "Continue the active research.",
+          },
+        },
+      ],
+    },
+  ];
+  const otherThread = {
+    ...thread,
+    thread_id: OTHER_THREAD_ID,
+    display_name: "Other active conversation",
+  };
+  const base = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    liveValuesMessages: activeMessages,
+  });
+  const returnCatalogGate = deferred<void>();
+  let gateReturnCatalog = false;
+
+  await page.addInitScript(
+    ({ streamPath, threadId, runId, messages, taskId, returnedStep }) => {
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = async (input, init) => {
+        const requestURL = input instanceof Request ? input.url : String(input);
+        const requestMethod =
+          init?.method ?? (input instanceof Request ? input.method : "GET");
+        const path = new URL(requestURL, window.location.origin).pathname;
+        if (requestMethod === "GET" && path === streamPath) {
+          const encoder = new TextEncoder();
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  [
+                    "event: metadata",
+                    `data: ${JSON.stringify({ run_id: runId, thread_id: threadId })}`,
+                    "id: 1",
+                    "",
+                    "event: values",
+                    `data: ${JSON.stringify({ messages })}`,
+                    "id: 2",
+                    "",
+                    "event: custom",
+                    `data: ${JSON.stringify({
+                      type: "task_running",
+                      task_id: taskId,
+                      message: {
+                        type: "ai",
+                        id: "returned-task-running",
+                        content: returnedStep,
+                      },
+                      message_index: 1,
+                      usage: {
+                        input_tokens: 80_000,
+                        output_tokens: 6_160,
+                        total_tokens: 86_160,
+                      },
+                    })}`,
+                    "id: 3",
+                    "",
+                    "",
+                  ].join("\n"),
+                ),
+              );
+            },
+          });
+          return new Response(body, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        return originalFetch(input, init);
+      };
+    },
+    {
+      streamPath: `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/stream`,
+      threadId: THREAD_ID,
+      runId: RUN_ID,
+      messages: activeMessages,
+      taskId,
+      returnedStep,
+    },
+  );
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const method = request.method();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const otherThreadBase = `${privateWorkBase}/threads/${OTHER_THREAD_ID}`;
+
+    if (path === `${privateWorkBase}/threads/search` && method === "POST") {
+      return json(route, { items: [thread, otherThread] });
+    }
+    if (path === `${privateWorkBase}/threads/${THREAD_ID}/state`) {
+      return json(route, {
+        values: {
+          title: thread.display_name,
+          messages: activeMessages,
+          artifacts: [],
+          todos: [],
+        },
+        next: [],
+        metadata: {},
+        checkpoint: {},
+        checkpoint_id: null,
+        parent_checkpoint_id: null,
+        created_at: TIMESTAMP,
+        tasks: [],
+      });
+    }
+    if (
+      path === `${privateWorkBase}/threads/${THREAD_ID}/runs` &&
+      method === "GET"
+    ) {
+      if (gateReturnCatalog) {
+        await returnCatalogGate.promise;
+      }
+      return json(route, [
+        {
+          run_id: RUN_ID,
+          thread_id: THREAD_ID,
+          assistant_id: AGENT_ID,
+          created_at: TIMESTAMP,
+          updated_at: TIMESTAMP,
+          status: "running",
+          metadata: {},
+          multitask_strategy: "reject",
+          error: null,
+          model_name: MODEL_ID,
+          execution_profile: {
+            model_name: MODEL_ID,
+            thinking_enabled: false,
+            reasoning_effort: null,
+            supports_vision: true,
+          },
+          workload_profile: "research",
+        },
+      ]);
+    }
+    if (
+      path ===
+        `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/execution-state` &&
+      method === "GET"
+    ) {
+      return json(route, {
+        phase: "executing",
+        observed_at: TIMESTAMP,
+        phase_started_at: TIMESTAMP,
+        execution_started_at: TIMESTAMP,
+        retry_at: null,
+        run_status: "running",
+      });
+    }
+    if (path === otherThreadBase && method === "GET") {
+      return json(route, otherThread);
+    }
+    if (path === `${otherThreadBase}/state` && method === "GET") {
+      return json(route, {
+        values: {
+          title: otherThread.display_name,
+          messages: [],
+          artifacts: [],
+          todos: [],
+        },
+        next: [],
+        metadata: {},
+        checkpoint: {},
+        checkpoint_id: null,
+        parent_checkpoint_id: null,
+        created_at: TIMESTAMP,
+        tasks: [],
+      });
+    }
+    if (path === `${otherThreadBase}/runs` && method === "GET") {
+      return json(route, []);
+    }
+    if (path === `${otherThreadBase}/context-usage` && method === "GET") {
+      return json(route, {
+        thread_id: OTHER_THREAD_ID,
+        enabled: true,
+        estimated_tokens: 0,
+        message_count: 0,
+        summary_present: false,
+        context_window_tokens: 100_000,
+        triggers: [],
+        primary_trigger: null,
+      });
+    }
+    if (
+      path === `${otherThreadBase}/context-usage/authority` &&
+      method === "GET"
+    ) {
+      return json(route, {
+        thread_id: OTHER_THREAD_ID,
+        cache_marker: "idle:none",
+      });
+    }
+    if (
+      path === `${otherThreadBase}/execution-approvals/active` &&
+      method === "GET"
+    ) {
+      return json(route, {
+        schema_version: 1,
+        server_time: TIMESTAMP,
+        approval: null,
+      });
+    }
+    if (path === `${otherThreadBase}/uploads/limits` && method === "GET") {
+      return json(route, {
+        max_files: 5,
+        max_file_size: 10_000_000,
+        max_total_size: 20_000_000,
+        project_storage: {
+          policy: "project_quota",
+          remaining_bytes: 1_000_000_000,
+        },
+        request_id: "request-other-upload-limits",
+      });
+    }
+    if (path === `${otherThreadBase}/uploads` && method === "GET") {
+      return json(route, []);
+    }
+    return route.fallback();
+  });
+
+  return {
+    ...base,
+    taskDescription,
+    returnedStep,
+    otherThreadName: otherThread.display_name,
+    gateReturnCatalog() {
+      gateReturnCatalog = true;
+    },
+    releaseReturnCatalog() {
+      returnCatalogGate.resolve();
+    },
+  };
+}
+
+test("never flashes a failed Sub-Agent card after switching conversations", async ({
+  page,
+}) => {
+  const fixture = await mockActiveSubtaskReconnect(page);
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  await expect(
+    page.getByText(fixture.taskDescription, { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/Running subtask|子任务运行中/u)).toBeVisible();
+
+  await page.evaluate(() => {
+    Reflect.set(window, "__subtaskFailureSeen", false);
+    const observer = new MutationObserver(() => {
+      if (/Subtask failed|子任务失败/u.test(document.body.innerText)) {
+        Reflect.set(window, "__subtaskFailureSeen", true);
+      }
+    });
+    observer.observe(document.body, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    Reflect.set(window, "__subtaskFailureObserver", observer);
+  });
+
+  await page.getByText(fixture.otherThreadName, { exact: true }).click();
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/alpha/chats/${OTHER_THREAD_ID}$`, "u"),
+  );
+
+  fixture.gateReturnCatalog();
+  await page.getByText(thread.display_name, { exact: true }).click();
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/alpha/chats/${THREAD_ID}$`, "u"),
+  );
+  await expect(
+    page.getByText(fixture.taskDescription, { exact: true }),
+  ).toBeVisible();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  await expect(page.getByText(/Subtask failed|子任务失败/u)).toHaveCount(0);
+  await expect(
+    page.getByText(/Subtask status pending|子任务状态待确认/u),
+  ).toBeVisible();
+
+  fixture.releaseReturnCatalog();
+  await expect(page.getByText(/Running subtask|子任务运行中/u)).toBeVisible();
+  await page.getByText(fixture.taskDescription, { exact: true }).click();
+  await expect(
+    page.getByText(fixture.returnedStep, { exact: true }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => Reflect.get(window, "__subtaskFailureSeen")),
+    )
+    .toBe(false);
+  expect(fixture.unexpectedRequests).toEqual([]);
+});
 
 test("does not offer follow-up suggestions while the user is answering a clarification", async ({
   page,
@@ -1040,6 +1502,89 @@ test("soft-wraps plain-text code blocks without changing their content", async (
   expect(presentation.text?.match(/\n/g) ?? []).toHaveLength(1);
 });
 
+test("auto-opens each execution-created file in preview after a prior source view", async ({
+  page,
+}) => {
+  const firstPrompt = "Create the first Markdown report.";
+  const secondPrompt = "Create the second Markdown report.";
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    liveValuesMessages: [
+      {
+        id: "human-first-preview",
+        type: "human",
+        content: firstPrompt,
+        additional_kwargs: { run_id: RUN_ID },
+      },
+      {
+        id: "ai-first-preview",
+        type: "ai",
+        content: "",
+        additional_kwargs: { run_id: RUN_ID },
+        tool_calls: [
+          {
+            id: "write-first-preview",
+            name: "write_file",
+            args: {
+              path: "/mnt/data/outputs/first-report.md",
+              content: "# First execution preview",
+            },
+          },
+        ],
+      },
+    ],
+    continuationValuesMessages: [
+      {
+        id: "human-second-preview",
+        type: "human",
+        content: secondPrompt,
+        additional_kwargs: { run_id: SECOND_RUN_ID },
+      },
+      {
+        id: "ai-second-preview",
+        type: "ai",
+        content: "",
+        additional_kwargs: { run_id: SECOND_RUN_ID },
+        tool_calls: [
+          {
+            id: "write-second-preview",
+            name: "write_file",
+            args: {
+              path: "/mnt/data/outputs/second-report.md",
+              content: "# Second execution preview",
+            },
+          },
+        ],
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill(firstPrompt);
+  await composer.press("Enter");
+  await expect.poll(requests.runPostCount).toBe(1);
+
+  const artifactsPanel = page.locator("#artifacts");
+  await expect(
+    artifactsPanel.getByRole("heading", { name: "First execution preview" }),
+  ).toBeVisible();
+
+  const viewToggles = artifactsPanel.locator('[data-slot="toggle-group-item"]');
+  await viewToggles.nth(0).click();
+  await expect(viewToggles.nth(0)).toHaveAttribute("data-state", "on");
+
+  await composer.fill(secondPrompt);
+  await composer.press("Enter");
+  await expect.poll(requests.runPostCount).toBe(2);
+  await expect(
+    artifactsPanel.getByRole("heading", { name: "Second execution preview" }),
+  ).toBeVisible();
+  await expect(viewToggles.nth(1)).toHaveAttribute("data-state", "on");
+});
+
 test("mounts delivered files only after the final answer without moving them", async ({
   page,
 }) => {
@@ -1128,6 +1673,566 @@ test("mounts delivered files only after the final answer without moving them", a
   });
   expect(samples.length).toBeGreaterThan(0);
   expect(new Set(samples)).toEqual(new Set(["card-after-final"]));
+});
+
+test("keeps the terminal handoff at the bottom without replaying a smooth scroll", async ({
+  page,
+}) => {
+  const finalMarker = "TERMINAL_HANDOFF_FINAL_MARKER";
+  const canonicalOnlyMarker = "TERMINAL_HANDOFF_CANONICAL_ONLY_MARKER";
+  const longFinalAnswer = [
+    finalMarker,
+    ...Array.from(
+      { length: 70 },
+      (_, index) =>
+        `Terminal handoff paragraph ${index + 1}. This keeps the conversation taller than the viewport.`,
+    ),
+  ].join("\n\n");
+  const canonicalFinalAnswer = [
+    longFinalAnswer,
+    canonicalOnlyMarker,
+    ...Array.from(
+      { length: 24 },
+      (_, index) =>
+        `Canonical-only terminal paragraph ${index + 1}. This creates a deterministic positive resize after the gate opens.`,
+    ),
+  ].join("\n\n");
+  const liveValuesMessages = [
+    {
+      id: "human-terminal-handoff",
+      type: "human",
+      content: "Keep the completed conversation visually stable.",
+      additional_kwargs: { run_id: RUN_ID },
+    },
+    {
+      id: "ai-terminal-present-files",
+      type: "ai",
+      content: "Publishing the terminal report.",
+      additional_kwargs: { run_id: RUN_ID },
+      tool_calls: [
+        {
+          id: "terminal-present-report",
+          name: "present_files",
+          args: { filepaths: ["outputs/terminal-report.md"] },
+        },
+      ],
+    },
+    {
+      id: "tool-terminal-present-files",
+      type: "tool",
+      name: "present_files",
+      tool_call_id: "terminal-present-report",
+      content: "ok",
+      additional_kwargs: { run_id: RUN_ID },
+    },
+    {
+      id: "ai-terminal-final",
+      type: "ai",
+      content: longFinalAnswer,
+      additional_kwargs: { run_id: RUN_ID },
+    },
+  ] satisfies readonly Record<string, unknown>[];
+  const canonicalValuesMessages = liveValuesMessages.map((message) =>
+    message.id === "ai-terminal-final"
+      ? { ...message, content: canonicalFinalAnswer }
+      : message,
+  );
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    gateTerminalHandoff: true,
+    liveValuesMessages,
+    canonicalValuesMessages,
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("Keep the completed conversation visually stable.");
+  await composer.press("Enter");
+  await expect(page.getByText(finalMarker, { exact: true })).toBeVisible();
+  await expect.poll(requests.executionStateGetCount).toBe(1);
+
+  const messageList = page.getByTestId("main-message-list");
+  await messageList.evaluate((root) => {
+    const scroller = root.firstElementChild;
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("The main conversation scroller is unavailable.");
+    }
+    scroller.scrollTop = scroller.scrollHeight;
+  });
+  await expect
+    .poll(() =>
+      messageList.evaluate((root) => {
+        const scroller = root.firstElementChild;
+        if (!(scroller instanceof HTMLElement)) return null;
+        return {
+          bottomDistance:
+            scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop,
+          scrollTop: scroller.scrollTop,
+        };
+      }),
+    )
+    .toMatchObject({ bottomDistance: 0 });
+
+  await page.evaluate(
+    ({ answer, canonicalMarker }) => {
+      const root = document.querySelector('[data-testid="main-message-list"]');
+      const scroller = root?.firstElementChild;
+      const turn = Array.from(
+        document.querySelectorAll('[data-assistant-turn=""]'),
+      ).find((element) => element.textContent?.includes(answer));
+      if (
+        !(root instanceof HTMLElement) ||
+        !(scroller instanceof HTMLElement) ||
+        !(turn instanceof HTMLElement)
+      ) {
+        throw new Error(
+          "The terminal handoff probe could not find its DOM seam.",
+        );
+      }
+
+      const scrollSamples: Array<{
+        bottomDistance: number;
+        canonicalCommitted: boolean;
+        scrollTop: number;
+      }> = [];
+      let removedVisibleTurn = false;
+      let observedEmptyConversation = false;
+      let scrollAnimationFrame = 0;
+      const sampleScroll = () => {
+        scrollAnimationFrame = 0;
+        scrollSamples.push({
+          bottomDistance:
+            scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop,
+          canonicalCommitted: Boolean(
+            document.body.textContent?.includes(canonicalMarker),
+          ),
+          scrollTop: scroller.scrollTop,
+        });
+      };
+      const onScroll = () => {
+        if (scrollAnimationFrame === 0) {
+          scrollAnimationFrame = requestAnimationFrame(sampleScroll);
+        }
+      };
+      const stopScrollProbe = () => {
+        if (scrollAnimationFrame !== 0) {
+          cancelAnimationFrame(scrollAnimationFrame);
+        }
+        scroller.removeEventListener("scroll", onScroll);
+      };
+      scroller.addEventListener("scroll", onScroll, { passive: true });
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const removedNode of record.removedNodes) {
+            if (
+              removedNode === turn ||
+              (removedNode instanceof Element && removedNode.contains(turn))
+            ) {
+              removedVisibleTurn = true;
+            }
+          }
+        }
+        if (
+          document.querySelectorAll('[data-assistant-turn=""]').length === 0
+        ) {
+          observedEmptyConversation = true;
+        }
+      });
+      observer.observe(root, { childList: true, subtree: true });
+      Reflect.set(window, "__terminalHandoffProbe", {
+        initialScrollHeight: scroller.scrollHeight,
+        initialScrollTop: scroller.scrollTop,
+        observer,
+        onScroll,
+        stopScrollProbe,
+        removedVisibleTurn: () => removedVisibleTurn,
+        root,
+        scrollSamples,
+        scroller,
+        turn,
+        observedEmptyConversation: () => observedEmptyConversation,
+      });
+    },
+    { answer: finalMarker, canonicalMarker: canonicalOnlyMarker },
+  );
+
+  let handoff: {
+    bottomDistance: number;
+    initialScrollHeight: number;
+    initialScrollTop: number;
+    observedEmptyConversation: boolean;
+    removedVisibleTurn: boolean;
+    sameRoot: boolean;
+    sameScroller: boolean;
+    sameTurn: boolean;
+    scrollHeight: number;
+    scrollSamples: Array<{
+      bottomDistance: number;
+      canonicalCommitted: boolean;
+      scrollTop: number;
+    }>;
+  } | null = null;
+  try {
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        }),
+    );
+    requests.releaseTerminalExecutionState();
+    await expect.poll(requests.canonicalHistoryGetCount).toBeGreaterThan(0);
+    await expect(
+      page.getByText(canonicalOnlyMarker, { exact: true }),
+    ).toHaveCount(0);
+
+    requests.releaseCanonicalHistory();
+    await expect(
+      page.getByText(canonicalOnlyMarker, { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByTestId("assistant-delivered-files")).toHaveCount(1);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        }),
+    );
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const probe = Reflect.get(window, "__terminalHandoffProbe") as {
+            scrollSamples: Array<{ canonicalCommitted: boolean }>;
+          };
+          return probe.scrollSamples.some(
+            (sample) => sample.canonicalCommitted,
+          );
+        }),
+      )
+      .toBe(true);
+
+    handoff = await page.evaluate((answer) => {
+      const probe = Reflect.get(window, "__terminalHandoffProbe") as {
+        initialScrollHeight: number;
+        initialScrollTop: number;
+        observedEmptyConversation: () => boolean;
+        removedVisibleTurn: () => boolean;
+        root: HTMLElement;
+        scrollSamples: Array<{
+          bottomDistance: number;
+          canonicalCommitted: boolean;
+          scrollTop: number;
+        }>;
+        scroller: HTMLElement;
+        turn: HTMLElement;
+      };
+      const currentRoot = document.querySelector(
+        '[data-testid="main-message-list"]',
+      );
+      const currentScroller = currentRoot?.firstElementChild;
+      const currentTurn = Array.from(
+        document.querySelectorAll('[data-assistant-turn=""]'),
+      ).find((element) => element.textContent?.includes(answer));
+      return {
+        bottomDistance:
+          probe.scroller.scrollHeight -
+          probe.scroller.clientHeight -
+          probe.scroller.scrollTop,
+        initialScrollHeight: probe.initialScrollHeight,
+        initialScrollTop: probe.initialScrollTop,
+        observedEmptyConversation: probe.observedEmptyConversation(),
+        removedVisibleTurn: probe.removedVisibleTurn(),
+        sameRoot: currentRoot === probe.root,
+        sameScroller: currentScroller === probe.scroller,
+        sameTurn: currentTurn === probe.turn,
+        scrollHeight: probe.scroller.scrollHeight,
+        scrollSamples: [...probe.scrollSamples],
+      };
+    }, finalMarker);
+  } finally {
+    requests.releaseCanonicalHistory();
+    await page.evaluate(() => {
+      const probe = Reflect.get(window, "__terminalHandoffProbe") as
+        | {
+            observer: MutationObserver;
+            stopScrollProbe: () => void;
+          }
+        | undefined;
+      probe?.observer.disconnect();
+      probe?.stopScrollProbe();
+    });
+  }
+
+  expect(handoff).not.toBeNull();
+  if (handoff === null) {
+    throw new Error("The bottom terminal handoff was not observed.");
+  }
+  expect(handoff).toMatchObject({
+    observedEmptyConversation: false,
+    removedVisibleTurn: false,
+    sameRoot: true,
+    sameScroller: true,
+    sameTurn: true,
+  });
+  expect(handoff.initialScrollTop).toBeGreaterThan(0);
+  expect(handoff.scrollHeight).toBeGreaterThan(handoff.initialScrollHeight);
+  expect(handoff.scrollSamples.length).toBeGreaterThan(0);
+  expect(
+    handoff.scrollSamples.some((sample) => sample.canonicalCommitted),
+  ).toBe(true);
+  expect(
+    handoff.scrollSamples.filter((sample) => sample.bottomDistance > 2),
+  ).toEqual([]);
+  expect(handoff.bottomDistance).toBeLessThanOrEqual(2);
+  expect(requests.unexpectedRequests).toEqual([]);
+});
+
+test("preserves the reading position when the user scrolls up before terminal handoff", async ({
+  page,
+}) => {
+  const finalMarker = "TERMINAL_HANDOFF_SCROLLED_UP_MARKER";
+  const canonicalOnlyMarker =
+    "TERMINAL_HANDOFF_SCROLLED_UP_CANONICAL_ONLY_MARKER";
+  const longFinalAnswer = [
+    finalMarker,
+    ...Array.from(
+      { length: 70 },
+      (_, index) =>
+        `Scrolled-up paragraph ${index + 1}. This keeps the active Run taller than the viewport.`,
+    ),
+  ].join("\n\n");
+  const canonicalFinalAnswer = [
+    longFinalAnswer,
+    canonicalOnlyMarker,
+    ...Array.from(
+      { length: 24 },
+      (_, index) =>
+        `Scrolled-up canonical paragraph ${index + 1}. This grows content below the stable reading anchor.`,
+    ),
+  ].join("\n\n");
+  const liveValuesMessages = [
+    {
+      id: "human-terminal-scrolled-up",
+      type: "human",
+      content: "Keep my reading position when this Run finishes.",
+      additional_kwargs: { run_id: RUN_ID },
+    },
+    {
+      id: "ai-terminal-scrolled-up",
+      type: "ai",
+      content: longFinalAnswer,
+      additional_kwargs: { run_id: RUN_ID },
+    },
+  ] satisfies readonly Record<string, unknown>[];
+  const canonicalValuesMessages = liveValuesMessages.map((message) =>
+    message.id === "ai-terminal-scrolled-up"
+      ? { ...message, content: canonicalFinalAnswer }
+      : message,
+  );
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    gateTerminalHandoff: true,
+    liveValuesMessages,
+    canonicalValuesMessages,
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("Keep my reading position when this Run finishes.");
+  await composer.press("Enter");
+  await expect(page.getByText(finalMarker, { exact: true })).toBeVisible();
+  await expect.poll(requests.executionStateGetCount).toBe(1);
+
+  const messageList = page.getByTestId("main-message-list");
+  await messageList.hover();
+  await page.mouse.wheel(0, -600);
+  await expect
+    .poll(() =>
+      messageList.evaluate((root) => {
+        const scroller = root.firstElementChild;
+        if (!(scroller instanceof HTMLElement)) return 0;
+        return (
+          scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop
+        );
+      }),
+    )
+    .toBeGreaterThan(200);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+
+  await page.evaluate((canonicalMarker) => {
+    const root = document.querySelector('[data-testid="main-message-list"]');
+    const scroller = root?.firstElementChild;
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("The scrolled-up handoff probe could not find its seam.");
+    }
+    const scrollerBounds = scroller.getBoundingClientRect();
+    const viewportCenter =
+      scrollerBounds.top +
+      Math.min(scrollerBounds.height, window.innerHeight) / 2;
+    const anchor = Array.from(scroller.querySelectorAll("p"))
+      .filter((element) => {
+        const bounds = element.getBoundingClientRect();
+        return (
+          bounds.bottom > scrollerBounds.top &&
+          bounds.top < scrollerBounds.bottom
+        );
+      })
+      .sort(
+        (left, right) =>
+          Math.abs(left.getBoundingClientRect().top - viewportCenter) -
+          Math.abs(right.getBoundingClientRect().top - viewportCenter),
+      )[0];
+    if (!anchor?.textContent) {
+      throw new Error(
+        "The scrolled-up handoff probe could not find an anchor.",
+      );
+    }
+
+    const anchorText = anchor.textContent;
+    const anchorTop = anchor.getBoundingClientRect().top;
+    const samples: Array<{
+      anchorOffset: number;
+      bottomDistance: number;
+      canonicalCommitted: boolean;
+      scrollTop: number;
+    }> = [];
+    let anchorMissing = false;
+    let animationFrame = 0;
+    const sample = () => {
+      const currentAnchor = Array.from(scroller.querySelectorAll("p")).find(
+        (element) => element.textContent === anchorText,
+      );
+      if (!currentAnchor) {
+        anchorMissing = true;
+        return;
+      }
+      samples.push({
+        anchorOffset: currentAnchor.getBoundingClientRect().top - anchorTop,
+        bottomDistance:
+          scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop,
+        canonicalCommitted: Boolean(
+          document.body.textContent?.includes(canonicalMarker),
+        ),
+        scrollTop: scroller.scrollTop,
+      });
+    };
+    const onScroll = () => sample();
+    const onAnimationFrame = () => {
+      sample();
+      animationFrame = requestAnimationFrame(onAnimationFrame);
+    };
+    const stop = () => {
+      cancelAnimationFrame(animationFrame);
+      scroller.removeEventListener("scroll", onScroll);
+    };
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    sample();
+    animationFrame = requestAnimationFrame(onAnimationFrame);
+    Reflect.set(window, "__terminalScrolledUpProbe", {
+      anchorMissing: () => anchorMissing,
+      initialBottomDistance:
+        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop,
+      initialScrollHeight: scroller.scrollHeight,
+      sample,
+      samples,
+      scroller,
+      stop,
+    });
+  }, canonicalOnlyMarker);
+
+  let handoff: {
+    anchorMissing: boolean;
+    bottomDistance: number;
+    initialBottomDistance: number;
+    initialScrollHeight: number;
+    samples: Array<{
+      anchorOffset: number;
+      bottomDistance: number;
+      canonicalCommitted: boolean;
+      scrollTop: number;
+    }>;
+    scrollHeight: number;
+  } | null = null;
+  try {
+    requests.releaseTerminalExecutionState();
+    await expect.poll(requests.canonicalHistoryGetCount).toBeGreaterThan(0);
+    await expect(
+      page.getByText(canonicalOnlyMarker, { exact: true }),
+    ).toHaveCount(0);
+
+    requests.releaseCanonicalHistory();
+    await expect(
+      page.getByText(canonicalOnlyMarker, { exact: true }),
+    ).toBeVisible();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        }),
+    );
+    handoff = await page.evaluate(() => {
+      const probe = Reflect.get(window, "__terminalScrolledUpProbe") as {
+        anchorMissing: () => boolean;
+        initialBottomDistance: number;
+        initialScrollHeight: number;
+        sample: () => void;
+        samples: Array<{
+          anchorOffset: number;
+          bottomDistance: number;
+          canonicalCommitted: boolean;
+          scrollTop: number;
+        }>;
+        scroller: HTMLElement;
+      };
+      probe.sample();
+      return {
+        anchorMissing: probe.anchorMissing(),
+        bottomDistance:
+          probe.scroller.scrollHeight -
+          probe.scroller.clientHeight -
+          probe.scroller.scrollTop,
+        initialBottomDistance: probe.initialBottomDistance,
+        initialScrollHeight: probe.initialScrollHeight,
+        samples: [...probe.samples],
+        scrollHeight: probe.scroller.scrollHeight,
+      };
+    });
+  } finally {
+    requests.releaseCanonicalHistory();
+    await page.evaluate(() => {
+      const probe = Reflect.get(window, "__terminalScrolledUpProbe") as
+        | { stop: () => void }
+        | undefined;
+      probe?.stop();
+    });
+  }
+
+  expect(handoff).not.toBeNull();
+  if (handoff === null) {
+    throw new Error("The scrolled-up terminal handoff was not observed.");
+  }
+  expect(handoff.anchorMissing).toBe(false);
+  expect(handoff.initialBottomDistance).toBeGreaterThan(200);
+  expect(handoff.bottomDistance).toBeGreaterThan(200);
+  expect(handoff.scrollHeight).toBeGreaterThan(handoff.initialScrollHeight);
+  expect(handoff.samples.length).toBeGreaterThan(0);
+  expect(handoff.samples.some((sample) => sample.canonicalCommitted)).toBe(
+    true,
+  );
+  expect(
+    handoff.samples.filter((sample) => Math.abs(sample.anchorOffset) > 2),
+  ).toEqual([]);
+  expect(
+    handoff.samples.filter((sample) => sample.bottomDistance <= 2),
+  ).toEqual([]);
+  expect(requests.unexpectedRequests).toEqual([]);
 });
 
 test("keeps the one-Run Research choice after a pre-admission failure", async ({

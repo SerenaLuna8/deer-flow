@@ -9,6 +9,7 @@ rs.mock("next/navigation", () => ({
 import { ProjectHome } from "@/components/projects/project-home";
 import {
   isProjectNavigationItemActive,
+  ProjectDesktopNav,
   projectNavigationItems,
 } from "@/components/projects/project-nav";
 import { ProjectShell } from "@/components/projects/project-shell";
@@ -91,6 +92,30 @@ function renderShell(project: Project) {
           >
             <p>Project content</p>
           </ProjectShell>
+        </ProjectPrivateWorkProvider>
+      </QueryClientProvider>
+    </I18nProvider>,
+  );
+}
+
+function renderDesktopNav(collapsed: boolean) {
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale="en-US">
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectPrivateWorkProvider
+          accountId="22222222-2222-4222-8222-222222222222"
+          projectId={adminProject.id}
+        >
+          <ProjectDesktopNav
+            project={adminProject}
+            collapsed={collapsed}
+            compactFooter={
+              <button aria-label="Account" data-compact="true">
+                member
+              </button>
+            }
+            footer={<button aria-label="Account">member</button>}
+          />
         </ProjectPrivateWorkProvider>
       </QueryClientProvider>
     </I18nProvider>,
@@ -272,10 +297,6 @@ describe("project shell navigation", () => {
   test("renders implemented asset destinations from authoring authority", () => {
     const html = renderShell(adminProject);
 
-    expect(html).toContain("md:grid-cols-[15rem_minmax(0,1fr)]");
-    expect(html).toContain("bg-blue-50 text-blue-600 before:bg-blue-600");
-    expect(html).toContain("hover:bg-blue-50");
-    expect(html).not.toContain("hover:text-blue-600");
     expect(html).toContain('data-slot="project-brand-logo"');
     expect(html).not.toContain("项目空间");
     for (const label of [
@@ -295,6 +316,14 @@ describe("project shell navigation", () => {
       expect(html).not.toContain(unavailable);
     }
     expect(html).toContain("Project content");
+  });
+
+  test("keeps the account menu reachable when the desktop menu is collapsed", () => {
+    const html = renderDesktopNav(true);
+
+    expect(html).toContain('data-state="collapsed"');
+    expect(html).toContain('aria-label="Account"');
+    expect(html).toContain('data-compact="true"');
   });
 
   test("renders an English-only shell with a keyboard skip target", () => {

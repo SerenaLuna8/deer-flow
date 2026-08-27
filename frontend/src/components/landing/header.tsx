@@ -12,14 +12,10 @@ export type HeaderProps = {
   locale?: Locale;
 };
 
-export function buildPublicHeaderLinks(lang: string, docsLabel: string) {
-  return [{ href: `/${lang}/docs`, label: docsLabel }];
-}
-
 export async function Header({ className, homeURL, locale }: HeaderProps) {
   const { locale: resolvedLocale, t } = await getI18n(locale);
   const lang = resolvedLocale.substring(0, 2);
-  const links = buildPublicHeaderLinks(lang, t.home.docs);
+  const links = [{ href: `/${lang}/docs`, label: t.home.docs }];
   return (
     <header
       className={cn(

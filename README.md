@@ -22,7 +22,9 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - 多账户、多项目工作区，包含成员、角色、邀请、配额、审计和通知。
 - 项目私有 Thread/Run、持久化 SSE、断线恢复、取消、重试和文件交付。删除会话会
   立即撤销该会话仍在运行的服务端执行权限并结束其 durable stream；已经发出的外部
-  操作无法由平台召回。会话输入框选择、粘贴或拖入附件后会立即在后台预上传；发送
+  操作无法由平台召回。删除后的会话、checkpoint、既有文件、制品和 Run 记录继续保留，
+  普通会话接口不再显示或读取它们；保留文件继续占用存储配额，直到项目、账号或原成员
+  retention 执行最终清理。会话输入框选择、粘贴或拖入附件后会立即在后台预上传；发送
   消息时复用同一上传结果，不会重复上传。已经持久化的完整回复不会因运行时或沙箱
   回收失败被改写为 Agent 执行失败；此类回收问题作为 Worker 运维错误重试和记录。
   每次模型调用的思考内容可独立折叠；思考、过程输出和工具调用按模型调用顺序逐项展示，
@@ -57,8 +59,10 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   名称，同一名称可用于创建具有新 ID 的 Agent。Agent 详情直接编辑唯一 Definition，
   保存使用 revision 做并发控制。项目 Skill 删除同样是不可恢复的归档：它从普通页面隐藏，
   自动从全部 Agent Definition 解绑且不改变 Agent 的启用/停用状态；同名 Skill 可重新创建。
-  删除会立即销毁该 Skill 的 Secret 密文，因此尚未物化秘密或后续重试的旧 Run 会失败关闭；
-  已固定的 Skill Version 文件在最后一条 Run 引用清理后才释放配额并物理清除，Skill 墓碑保留。
+  归档保留 Current Version 指针、全部 Skill Version 与文件、存储配额占用，以及 Secret
+  状态、各 Generation 与密文；删除 Run、会话，以及清理原成员或账号私有数据时都不会清理
+  这些内容，删除 Skill 本身也不会释放存储空间。只有整个项目被最终删除时，以上内容才会
+  一并销毁并释放配额。
   Skill 可在 `SKILL.md` 中通过
   `required-secrets` 声明敏感环境变量；版本工作台和 AI Builder 提供结构化表单并与
   同一源码副本同步。版本工作台的“运行秘密”按精确 Skill Version 和变量名保存项目独有
@@ -98,8 +102,11 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - 项目主会话可为下一次 Run 一次性选择 Interactive 或 Research Workload Profile；
   Gateway 把服务端确认的 effective profile 冻结进 Run Snapshot，隐藏 continuation 与
   Job retry 继承同一选择。Research 提高 Sub-Agent 工作量上限，但不增加工具、项目或数据
-  访问权限。内部工具调用采用单一 hard limit：同一 Run 的 Lead 与所有 Sub-Agent 共用一个
-  计数，所有内部工具统一累计，不同 Run 相互独立；达到上限后不再准入新的内部工具调用。
+  访问权限。System Runtime Policy v6 分别冻结主 Agent 每个 Run 的内部工具调用上限和每个
+  Sub-Agent Task 的上限：`task` 委托调用本身计入主 Agent，同一 Run 的主 Agent 跨隐藏
+  Graph Turn 持续累计；每个 Sub-Agent Task 按自己的执行标识独立计数，多个并行 Task
+  互不占用额度，也没有额外的 Run 汇总上限。已准入 Run 及历史 v2–v5 策略继续使用其冻结的
+  Lead/Sub-Agent 全 Run 共享上限，不会在执行中改变语义。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。超大的完整
   工具 turn 通过有界分层 SNIP 逐 turn 压缩，receipt 仍绑定原始 checkpoint source；
   Dream 模型不可用会显示明确失败，不会伪装成“没有待整理 Memory”。上下文用量与
@@ -118,7 +125,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
-  System Runtime Policy v5 在系统设置中配置单一内部工具调用 hard limit 及委托上限；
+  System Runtime Policy v6 在系统设置中分别配置主 Agent 每 Run 与每个 Sub-Agent Task 的
+  内部工具调用 hard limit，并配置委托上限；
   管理员每次保存都会在同一事务中创建不可变的新版本并将其设为当前生效版本，只影响之后
   准入的 Run。
 
@@ -182,8 +190,8 @@ make setup
 ```
 
 `make setup` 会引导生成根目录 `config.yaml` 和所需环境配置。不要提交
-`config.yaml`、`.env`、数据库密码或 provider key。完整字段和升级规则见
-[配置参考](./backend/docs/CONFIGURATION.md)。
+`config.yaml`、`.env`、数据库密码或 provider key。完整字段见
+[配置模板](./config.example.yaml)，安装和升级规则见 [安装流程](./Install.md)。
 
 ### 初始化数据库
 
@@ -208,9 +216,10 @@ make check-db
   `postgres`、`template0` 和 `template1`，也会在有效 `search_path` 不以
   `public` 为当前 Schema 时拒绝执行。它不会自动启动服务，且删除的数据不可恢复。
 
-- 空库初始化的 System Runtime Policy v1 将内部工具调用 hard limit 设为 `200`。同一
-  Run 的 Lead 与所有 Sub-Agent 共用该计数，`inspect_image`、`task` 与其他内部工具统一
-  累计，不同 Run 相互独立；重复执行初始化不会覆盖既有数据库的当前策略版本。
+- 空库初始化的首个 System Runtime Policy 使用 schema v6：主 Agent 每个 Run 的内部工具
+  调用上限为 `200`，每个 Sub-Agent Task 为 `50`。`task` 本身计入主 Agent；并行 Task
+  分别计数。重复执行初始化不会覆盖既有数据库的当前策略版本，已准入 Run 和历史 v2–v5
+  策略仍保留旧的全 Run 共享计数语义。
 - 初始化会为应用表、Schema V1 标记表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
 - 非空旧库、未知 marker 或 catalog drift 都会安全失败；开发阶段请重建数据库。
@@ -301,8 +310,8 @@ Luna 身份硬编码。
 
 Run 仍冻结精确 `purpose="vision"` 模型配置载荷和 Secret Generation，Worker 调用前后仍使用
 durable dispatch authority；暂停模型或清除 API Key 会阻断后续调用，但不能召回已经
-在途的请求。完整架构、实施状态、历史兼容和验收门禁见
-[Vision Bridge 架构收敛改造方案](./backend/docs/VISION_BRIDGE_REFACTOR_PLAN.md)。
+在途的请求。当前架构、历史兼容和验收约束见
+[后端开发约定](./backend/AGENTS.md)。
 
 ## Docker 与部署
 
@@ -390,11 +399,11 @@ checkout 手工执行相关 PostgreSQL、前端、浏览器、安全、容器和
 - `LocalSandboxProvider` 在 Worker 的 OS namespace 执行命令，不是强隔离边界；
   native 本机部署就是宿主账号，Compose 部署则是 Worker 容器；只用于可信环境。
 - 如确需 Local Bash，可配置逐条 `allow_once` / `deny` 审批；批准仍是宿主 RCE，
-  不会变成沙箱，也没有会话级授权。详见
-  [Local Provider 本机命令单次审批](./backend/docs/HOST_EXECUTION_APPROVAL.md)。
+  不会变成沙箱，也没有会话级授权。配置字段见
+  [配置模板](./config.example.yaml)，执行边界见 [后端开发约定](./backend/AGENTS.md)。
 - Apple silicon Mac 上需要执行 Agent 生成的 Bash/Python 时，优先使用
-  `AioSandboxProvider` + Apple Container；配置与实测流程见
-  [Apple Container Sandbox](./backend/docs/APPLE_CONTAINER.md)。
+  `AioSandboxProvider` + Apple Container；配置与 Provider 验收坐标见
+  [配置模板](./config.example.yaml) 和 [后端开发约定](./backend/AGENTS.md)。
 - API key、Cookie、Secret、数据库密码和完整连接 URL 不得进入代码、日志、
   截图、浏览器缓存或诊断材料。
 - System admin 不自动拥有项目权限；项目访问必须服从服务端返回的 membership 和
@@ -404,11 +413,9 @@ checkout 手工执行相关 PostgreSQL、前端、浏览器、安全、容器和
 
 - [安装流程](./Install.md)
 - [后端概览](./backend/README.md)
-- [后端文档索引](./backend/docs/README.md)
-- [系统架构](./backend/docs/ARCHITECTURE.md)
-- [API 路由](./backend/docs/API.md)
-- [配置参考](./backend/docs/CONFIGURATION.md)
 - [前端概览](./frontend/README.md)
+- [领域术语](./CONTEXT.md)
+- [架构决策](./docs/adr/)
 - [后端开发约定](./backend/AGENTS.md)
 - [前端开发约定](./frontend/AGENTS.md)
 
