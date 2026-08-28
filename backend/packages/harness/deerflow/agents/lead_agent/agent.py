@@ -51,6 +51,7 @@ from deerflow.agents.middlewares.provider_request_usage import (
     collect_custom_middleware_request_contract,
     collect_middleware_system_prompts,
     collect_middleware_tools,
+    declared_visual_max_tokens_per_image,
     provider_request_runtime_policy_identity,
 )
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
@@ -495,9 +496,22 @@ def build_middlewares(
     title_middleware = TitleMiddleware(app_config=resolved_app_config)
 
     # Always install checkpoint cleanup. Text-only models disable ephemeral
-    # image injection but still purge legacy base64 channels/messages.
+    # image injection but still purge legacy base64 channels/messages. Vision
+    # injection additionally requires a declared per-image token cost for the
+    # adapter; otherwise the final provider guard would reject every
+    # image-bearing request fail-closed.
     model_config = resolved_app_config.get_model_config(model_name) if model_name else None
-    vision_middleware = ViewImageMiddleware(enable_injection=bool(model_config is not None and model_config.supports_vision))
+    vision_middleware = ViewImageMiddleware(
+        enable_injection=bool(
+            model_config is not None
+            and model_config.supports_vision
+            and declared_visual_max_tokens_per_image(
+                model_config.system_provider_adapter,
+                model_config.use,
+            )
+            is not None
+        )
+    )
 
     # Auto-promote deferred MCP schemas from PR1 routing metadata before the
     # deferred filter decides which schemas to hide for this model call.

@@ -2376,6 +2376,7 @@ export interface Translations {
       turn_capped: string;
       loop_capped: string;
       tool_budget_capped: string;
+      output_truncated: string;
     };
   };
 
@@ -2458,11 +2459,6 @@ export interface Translations {
     allConditions: string;
     anyCondition: string;
     primary: string;
-    triggerTypes: {
-      tokens: string;
-      fraction: string;
-      messages: string;
-    };
     messages: (count: number) => string;
   };
 

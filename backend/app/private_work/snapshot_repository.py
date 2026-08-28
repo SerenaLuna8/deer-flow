@@ -1038,7 +1038,9 @@ class RunSnapshotRepository:
         _, frozen_workload_kwargs = freeze_admitted_run_workload_profile(
             safe_request.kwargs,
             requested=safe_request.workload_profile,
-            policy_schema_version=(locked_runtime_policy.schema_version if locked_runtime_policy is not None else 3),
+            # Without a runtime-policy service the admission still freezes the
+            # baseline v1 workload contract.
+            policy_schema_version=(locked_runtime_policy.schema_version if locked_runtime_policy is not None else 1),
             inherited_effective=inherited_workload_profile,
         )
         safe_request = replace(safe_request, kwargs=frozen_workload_kwargs)

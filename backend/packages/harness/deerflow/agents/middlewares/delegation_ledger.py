@@ -30,6 +30,39 @@ _STATUS_ONLY_RESULT_BRIEFS = {
 }
 
 
+def cancelled_delegation_updates(
+    entries: list[DelegationEntry] | list[dict],
+    *,
+    project_id: str,
+    owner_user_id: str,
+    run_id: str,
+) -> list[DelegationEntry]:
+    """Return terminal updates for unfinished delegations in one exact Run."""
+
+    updates: list[DelegationEntry] = []
+    for entry in entries:
+        if entry.get("project_id") == project_id and entry.get("owner_user_id") == owner_user_id and entry.get("run_id") == run_id and entry.get("status") == "in_progress":
+            updates.append(cast(DelegationEntry, {**entry, "status": "cancelled"}))
+    return updates
+
+
+def stale_delegation_updates(
+    entries: list[DelegationEntry] | list[dict],
+    *,
+    project_id: str,
+    owner_user_id: str,
+    current_run_id: str,
+) -> list[DelegationEntry]:
+    """Converge prior Run-scoped unfinished entries before a new Run's model."""
+
+    updates: list[DelegationEntry] = []
+    for entry in entries:
+        entry_run_id = entry.get("run_id")
+        if entry.get("project_id") == project_id and entry.get("owner_user_id") == owner_user_id and isinstance(entry_run_id, str) and entry_run_id and entry_run_id != current_run_id and entry.get("status") == "in_progress":
+            updates.append(cast(DelegationEntry, {**entry, "status": "cancelled"}))
+    return updates
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 

@@ -6,7 +6,7 @@ import hashlib
 import html
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Literal, NotRequired, TypedDict, cast, override
@@ -28,7 +28,15 @@ from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
+from pydantic import ValidationError
 
+from deerflow.agents.context_compaction_warning import (
+    CONTEXT_COMPACTION_WARNING_STATE_KEY,
+    ContextCompactionFailureReason,
+    ContextCompactionMiddlewareState,
+    clear_context_compaction_warning,
+    context_compaction_warning_update,
+)
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.memory.snip import (
     MEMORY_ARCHIVE_CONTEXT_KEY,
@@ -44,6 +52,9 @@ from deerflow.agents.memory.snip import (
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.provider_request_usage import (
     ProviderRequestContextMeasurement,
+    ProviderRequestProfile,
+    ProviderRequestUsageUnsupported,
+    contains_visual_material,
     measure_profile_snapshot_context,
 )
 from deerflow.agents.provider_request_contract import (
@@ -52,13 +63,20 @@ from deerflow.agents.provider_request_contract import (
     PROVIDER_REQUEST_PROFILE_STATE_KEY,
 )
 from deerflow.config.app_config import get_app_config
-from deerflow.config.summarization_config import validate_summary_prompt_template
+from deerflow.config.summarization_config import (
+    MIN_TRIM_TOKENS_TO_SUMMARIZE,
+    EffectiveCompactionPolicy,
+    effective_compaction_trigger_tokens,
+    resolve_effective_compaction_policy,
+    validate_summary_prompt_template,
+)
 from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.models.runtime import AsyncAbortEvent
 from deerflow.runtime.context_evidence import (
     ContextCheckpointEstimator,
     ContextCheckpointProjectionSnapshot,
     ContextCompactionCheckpointReceipt,
+    VisualTokenCostContractError,
 )
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
@@ -91,13 +109,26 @@ def _context_model_token_counter(model: Any) -> Any:
 class SnipPromptBudgetTooSmall(RuntimeError):
     """The configured budget cannot contain the packaged SNIP prompt itself."""
 
+    reason = ContextCompactionFailureReason.PROMPT_BUDGET_TOO_SMALL
+
 
 class SnipSourceTooLarge(RuntimeError):
     """One complete turn exceeds the bounded hierarchical SNIP workload."""
 
+    reason = ContextCompactionFailureReason.SOURCE_TOO_LARGE
+
 
 class SnipCompactionFailed(RuntimeError):
     """A planned SNIP attempt could not produce a committable summary."""
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        reason: ContextCompactionFailureReason = (ContextCompactionFailureReason.COMPACTION_FAILED),
+    ) -> None:
+        self.reason = reason
+        super().__init__(detail or reason.value)
 
 
 class SnipModelOutputInvalid(SnipCompactionFailed):
@@ -185,16 +216,15 @@ class _SnipReductionStep:
 
 
 class ContextTriggerUsage(TypedDict):
-    """One configured OR trigger measured against the current retained context."""
+    """The configured token trigger measured against the retained context."""
 
-    type: Literal["fraction", "tokens", "messages"]
+    type: Literal["tokens"]
     configured_value: int | float
     current_value: int | float
     threshold_value: int | float
     remaining_value: int | float
     progress_percent: float
     reached: bool
-    context_window_tokens: NotRequired[int]
     threshold_tokens: NotRequired[int]
 
 
@@ -234,6 +264,8 @@ def _resolve_thread_id(runtime: Runtime) -> str | None:
 class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     """SNIP compaction that removes only complete conversation turns."""
 
+    state_schema = ContextCompactionMiddlewareState
+
     def __init__(
         self,
         *args,
@@ -243,9 +275,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         dual_output_contract: bool | None = None,
         **kwargs,
     ) -> None:
-        # The summary model owns SNIP generation only. Fraction triggers and
-        # retained-context reporting must use the Lead model that will receive
-        # the provider request.
+        # The summary model owns SNIP generation only. Retained-context
+        # reporting must use the Lead model that will receive the provider
+        # request.
         self._context_model = context_model
         self._context_compaction_observer = context_compaction_observer
         requested_token_counter = kwargs.get(
@@ -660,8 +692,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             raise ValueError("Model max_input_tokens must be positive")
         triggers, primary_trigger = self._measure_trigger_usage(
             token_value=estimated_tokens,
-            message_count=message_count,
-            context_window_tokens=context_window_tokens,
             reported_token_messages=trigger_messages,
         )
         return ContextUsageMeasurement(
@@ -677,59 +707,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self,
         *,
         token_value: int,
-        message_count: int,
-        context_window_tokens: int | None,
         reported_token_messages: list[AnyMessage] | None = None,
     ) -> tuple[tuple[ContextTriggerUsage, ...], ContextTriggerUsage | None]:
         triggers: list[ContextTriggerUsage] = []
         for trigger_type, configured_value in self._trigger_conditions:
-            if trigger_type == "messages":
-                threshold = int(configured_value)
-                current = message_count
-                triggers.append(
-                    ContextTriggerUsage(
-                        type="messages",
-                        configured_value=threshold,
-                        current_value=current,
-                        threshold_value=threshold,
-                        remaining_value=max(0, threshold - current),
-                        progress_percent=self._context_progress(current, threshold),
-                        reached=current >= threshold,
-                    )
-                )
-                continue
-
-            if trigger_type == "tokens":
-                threshold_tokens = int(configured_value)
-                reached = token_value >= threshold_tokens or (
-                    reported_token_messages is not None
-                    and self._should_summarize_based_on_reported_tokens(
-                        reported_token_messages,
-                        float(threshold_tokens),
-                    )
-                )
-                triggers.append(
-                    ContextTriggerUsage(
-                        type="tokens",
-                        configured_value=threshold_tokens,
-                        current_value=token_value,
-                        threshold_value=threshold_tokens,
-                        remaining_value=max(0, threshold_tokens - token_value),
-                        progress_percent=self._context_progress(
-                            token_value,
-                            threshold_tokens,
-                        ),
-                        reached=reached,
-                        threshold_tokens=threshold_tokens,
-                    )
-                )
-                continue
-
-            if context_window_tokens is None:
-                raise ValueError("Model max_input_tokens is required for fraction triggers")
-            threshold_fraction = float(configured_value)
-            threshold_tokens = max(1, int(context_window_tokens * threshold_fraction))
-            current_fraction = round(token_value / context_window_tokens, 6)
+            if trigger_type != "tokens":
+                raise ValueError("Summarization triggers support tokens only")
+            threshold_tokens = int(configured_value)
             reached = token_value >= threshold_tokens or (
                 reported_token_messages is not None
                 and self._should_summarize_based_on_reported_tokens(
@@ -739,20 +723,16 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             )
             triggers.append(
                 ContextTriggerUsage(
-                    type="fraction",
-                    configured_value=threshold_fraction,
-                    current_value=current_fraction,
-                    threshold_value=threshold_fraction,
-                    remaining_value=round(
-                        max(0.0, threshold_fraction - current_fraction),
-                        6,
-                    ),
+                    type="tokens",
+                    configured_value=threshold_tokens,
+                    current_value=token_value,
+                    threshold_value=threshold_tokens,
+                    remaining_value=max(0, threshold_tokens - token_value),
                     progress_percent=self._context_progress(
-                        current_fraction,
-                        threshold_fraction,
+                        token_value,
+                        threshold_tokens,
                     ),
                     reached=reached,
-                    context_window_tokens=context_window_tokens,
                     threshold_tokens=threshold_tokens,
                 )
             )
@@ -776,8 +756,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             raise ValueError("Model max_input_tokens must be positive")
         triggers, primary_trigger = self._measure_trigger_usage(
             token_value=measurement.safety_bound_tokens,
-            message_count=measurement.message_count,
-            context_window_tokens=context_window_tokens,
         )
         return ContextUsageMeasurement(
             estimated_tokens=measurement.estimated_tokens,
@@ -1328,6 +1306,86 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 cutoffs.append(end)
         return tuple(reversed(cutoffs))
 
+    def _provider_safe_retention_cutoff(
+        self,
+        state: Mapping[str, object],
+        profile_snapshot: Mapping[str, object],
+        *,
+        protect_latest_complete_turn: bool,
+    ) -> int | None:
+        """Choose the least aggressive whole-turn cutoff safe for dispatch.
+
+        The configured ``keep`` remains the approximate recent-history target,
+        but it is not a Provider-wire upper bound: one character may occupy
+        several UTF-8 bytes, each message and image has adapter framing, and a
+        single retained message can itself exceed keep.  A candidate therefore
+        qualifies only when both the approximate keep target and the frozen
+        Provider profile agree, with room for the replacement summary.
+        """
+
+        raw_messages = state.get("messages")
+        if not isinstance(raw_messages, list) or self.keep[0] != "tokens":
+            return None
+        messages = cast("list[AnyMessage]", raw_messages)
+        trigger_tokens = [int(value) for trigger_type, value in self._trigger_conditions if trigger_type == "tokens"]
+        if not trigger_tokens:
+            return None
+        threshold = min(trigger_tokens)
+        complete_turns = self._complete_turn_ranges(messages)
+        if protect_latest_complete_turn and complete_turns:
+            protected_latest = complete_turns[-1]
+            complete_turns = complete_turns[:-1]
+            if protected_latest[1] < len(messages):
+                # An open follow-up makes the previous complete turn eligible
+                # only as the last-resort capacity candidate. This preserves
+                # the normal continuity rule while retaining the existing
+                # oversized-turn progress contract.
+                complete_turns = (*complete_turns, protected_latest)
+
+        expected_start = 0
+        for start, end in complete_turns:
+            if start != expected_start:
+                break
+            expected_start = end
+            preserved = messages[end:]
+            if self._partial_token_counter(preserved) > int(self.keep[1]):
+                continue
+            projected_state = dict(state)
+            projected_state["messages"] = preserved
+            projected_state["summary_text"] = None
+            try:
+                measurement = measure_profile_snapshot_context(
+                    profile_snapshot,
+                    projected_state,
+                )
+            except ProviderRequestUsageUnsupported:
+                return None
+            if measurement.safety_bound_tokens + MIN_SNIP_SUMMARY_OUTPUT_TOKENS < threshold:
+                return end
+        return None
+
+    def _compacted_result_fits_provider_profile(
+        self,
+        state: Mapping[str, object],
+        result: ContextCompactionResult,
+    ) -> bool:
+        """Recheck the generated summary at the same Provider boundary."""
+
+        profile_snapshot = state.get(PROVIDER_REQUEST_PROFILE_STATE_KEY)
+        if not isinstance(profile_snapshot, Mapping):
+            return True
+        projected_state = dict(state)
+        projected_state["messages"] = list(result.preserved_messages)
+        projected_state["summary_text"] = result.summary_text
+        try:
+            measurement = measure_profile_snapshot_context(
+                profile_snapshot,
+                projected_state,
+            )
+        except ProviderRequestUsageUnsupported:
+            return False
+        return all(trigger_type != "tokens" or measurement.safety_bound_tokens < int(configured_value) for trigger_type, configured_value in self._trigger_conditions)
+
     def _overbudget_progress_cutoff(
         self,
         messages: list[AnyMessage],
@@ -1376,26 +1434,14 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         profile_snapshot: object,
         measurement: ProviderRequestContextMeasurement,
     ) -> bool:
-        """Evaluate automatic OR triggers from the shared safety measurement."""
+        """Evaluate the automatic token trigger from the safety measurement."""
 
         if not isinstance(profile_snapshot, Mapping):
             return False
-        context_window = profile_snapshot.get("max_input_tokens")
         for trigger_type, configured_value in self._trigger_conditions:
-            if trigger_type == "messages":
-                if measurement.message_count >= int(configured_value):
-                    return True
-                continue
-            if trigger_type == "tokens":
-                if measurement.safety_bound_tokens >= int(configured_value):
-                    return True
-                continue
-            if not isinstance(context_window, int) or context_window <= 0:
-                raise ValueError("Provider request profile requires max_input_tokens for fraction triggers")
-            if measurement.safety_bound_tokens >= max(
-                1,
-                int(context_window * float(configured_value)),
-            ):
+            if trigger_type != "tokens":
+                raise ValueError("Summarization triggers support tokens only")
+            if measurement.safety_bound_tokens >= int(configured_value):
                 return True
         return False
 
@@ -1411,28 +1457,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         fixed = measurement.components.get("fixed")
         if fixed is None:
             return False
-        context_window = profile_snapshot.get("max_input_tokens")
-        for trigger_type, configured_value in self._trigger_conditions:
-            if trigger_type == "tokens":
-                if fixed.safety_bound_tokens >= int(configured_value):
-                    return True
-                continue
-            if trigger_type != "fraction":
-                continue
-            if not isinstance(context_window, int) or context_window <= 0:
-                raise ValueError("Provider request profile requires max_input_tokens for fraction triggers")
-            if fixed.safety_bound_tokens >= max(
-                1,
-                int(context_window * float(configured_value)),
-            ):
-                return True
-        return False
-
-    def _profile_message_trigger_reached(
-        self,
-        measurement: ProviderRequestContextMeasurement,
-    ) -> bool:
-        return any(trigger_type == "messages" and measurement.message_count >= int(configured_value) for trigger_type, configured_value in self._trigger_conditions)
+        return any(trigger_type == "tokens" and fixed.safety_bound_tokens >= int(configured_value) for trigger_type, configured_value in self._trigger_conditions)
 
     def _prepare_compaction(
         self,
@@ -1448,10 +1473,18 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         profile_measurement: ProviderRequestContextMeasurement | None = None
         profile_snapshot = state.get(PROVIDER_REQUEST_PROFILE_STATE_KEY)
         if not force and isinstance(profile_snapshot, Mapping):
-            profile_measurement = measure_profile_snapshot_context(
-                profile_snapshot,
-                state,
-            )
+            try:
+                profile_measurement = measure_profile_snapshot_context(
+                    profile_snapshot,
+                    state,
+                )
+            except ProviderRequestUsageUnsupported as exc:
+                # Approximate fallback cannot prove a Provider-safe cutoff.
+                # The automatic hook maps this typed failure to a one-turn
+                # warning; the final Provider guard still owns dispatch.
+                raise SnipCompactionFailed(
+                    reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
+                ) from exc
         total_tokens = profile_measurement.safety_bound_tokens if profile_measurement is not None else self.token_counter(trigger_messages)
         should_summarize = self._profile_trigger_reached(profile_snapshot, profile_measurement) if profile_measurement is not None else self._should_summarize(trigger_messages, total_tokens)
         if not force and not should_summarize:
@@ -1463,21 +1496,29 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 profile_snapshot,
                 profile_measurement,
             )
-            and not self._profile_message_trigger_reached(profile_measurement)
         ):
             return None
 
-        requested_cutoff = self._requested_cutoff(messages)
-        candidate_cutoffs = (
-            self._candidate_cutoffs(
-                messages,
-                requested_cutoff,
-                protect_latest_complete_turn=not force,
+        provider_profile_qualified = not force and profile_measurement is not None and isinstance(profile_snapshot, Mapping)
+        if provider_profile_qualified:
+            provider_cutoff = self._provider_safe_retention_cutoff(
+                state,
+                profile_snapshot,
+                protect_latest_complete_turn=True,
             )
-            if requested_cutoff > 0
-            else ()
-        )
-        if not candidate_cutoffs:
+            candidate_cutoffs = (provider_cutoff,) if provider_cutoff is not None else ()
+        else:
+            requested_cutoff = self._requested_cutoff(messages)
+            candidate_cutoffs = (
+                self._candidate_cutoffs(
+                    messages,
+                    requested_cutoff,
+                    protect_latest_complete_turn=not force,
+                )
+                if requested_cutoff > 0
+                else ()
+            )
+        if not candidate_cutoffs and not provider_profile_qualified:
             progress_cutoff = self._overbudget_progress_cutoff(
                 messages,
                 previous_summary=previous_summary,
@@ -1602,6 +1643,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
+        self._require_receipt_preconditions(
+            state,
+            runtime,
+            asynchronous=False,
+        )
         try:
             summary = self._summarize_with(
                 list(prepared.snip_messages),
@@ -1620,13 +1666,22 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             if force:
                 raise SnipCompactionFailed from exc
             return None
-        return ContextCompactionResult(
+        result = ContextCompactionResult(
             summary_text=summary.continuity,
             messages_to_summarize=prepared.source_messages,
             preserved_messages=prepared.preserved_messages,
             total_tokens=prepared.total_tokens,
             memory_archive_receipt=receipt,
         )
+        if not force and not self._compacted_result_fits_provider_profile(
+            state,
+            result,
+        ):
+            logger.warning(
+                "Compacted Context still exceeds the frozen Provider profile; skipping unsafe result",
+            )
+            return None
+        return result
 
     async def acompact_state(
         self,
@@ -1638,6 +1693,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
+        self._require_receipt_preconditions(
+            state,
+            runtime,
+            asynchronous=True,
+        )
         try:
             summary = await self._asummarize_with(
                 list(prepared.snip_messages),
@@ -1657,18 +1717,35 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             if force:
                 raise SnipCompactionFailed from exc
             return None
-        return ContextCompactionResult(
+        result = ContextCompactionResult(
             summary_text=summary.continuity,
             messages_to_summarize=prepared.source_messages,
             preserved_messages=prepared.preserved_messages,
             total_tokens=prepared.total_tokens,
             memory_archive_receipt=receipt,
         )
+        if not force and not self._compacted_result_fits_provider_profile(
+            state,
+            result,
+        ):
+            logger.warning(
+                "Compacted Context still exceeds the frozen Provider profile; skipping unsafe result",
+            )
+            return None
+        return result
 
     def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
-        result = self.compact_state(state, runtime, force=False)
-        if result is None:
-            return None
+        try:
+            result = self.compact_state(state, runtime, force=False)
+            if result is None:
+                return clear_context_compaction_warning(state)
+            context_update = self._context_compaction_update(
+                state,
+                result,
+                runtime,
+            )
+        except (SnipCompactionFailed, SnipPromptBudgetTooSmall, SnipSourceTooLarge) as error:
+            return context_compaction_warning_update(error.reason)
         return {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
@@ -1676,13 +1753,22 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             ],
             "summary_text": result.summary_text,
             "memory_archive_receipt": result.memory_archive_receipt,
-            **self._context_compaction_update(state, result, runtime),
+            CONTEXT_COMPACTION_WARNING_STATE_KEY: None,
+            **context_update,
         }
 
     async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
-        result = await self.acompact_state(state, runtime, force=False)
-        if result is None:
-            return None
+        try:
+            result = await self.acompact_state(state, runtime, force=False)
+            if result is None:
+                return clear_context_compaction_warning(state)
+            context_update = await self._acontext_compaction_update(
+                state,
+                result,
+                runtime,
+            )
+        except (SnipCompactionFailed, SnipPromptBudgetTooSmall, SnipSourceTooLarge) as error:
+            return context_compaction_warning_update(error.reason)
         return {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
@@ -1690,14 +1776,113 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             ],
             "summary_text": result.summary_text,
             "memory_archive_receipt": result.memory_archive_receipt,
-            **(
-                await self._acontext_compaction_update(
-                    state,
-                    result,
-                    runtime,
-                )
-            ),
+            CONTEXT_COMPACTION_WARNING_STATE_KEY: None,
+            **context_update,
         }
+
+    def _resolve_compaction_estimator(
+        self,
+        state: AgentState,
+    ) -> tuple[Mapping[str, object] | None, ContextCheckpointEstimator]:
+        """Resolve the receipt estimator or raise a typed compaction failure."""
+
+        raw_source_snapshot = state.get(CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY)
+        source_snapshot = raw_source_snapshot if isinstance(raw_source_snapshot, Mapping) else None
+        if source_snapshot is not None:
+            try:
+                estimator = ContextCheckpointProjectionSnapshot.from_safe_mapping(
+                    source_snapshot,
+                ).estimator
+            except (TypeError, ValueError):
+                raise SnipCompactionFailed(
+                    reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
+                ) from None
+            return source_snapshot, estimator
+        profile = state.get(PROVIDER_REQUEST_PROFILE_STATE_KEY)
+        if not isinstance(profile, Mapping):
+            raise SnipCompactionFailed(
+                reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
+            )
+        try:
+            estimator = ContextCheckpointEstimator(
+                error_allowance_ratio=float(profile["error_allowance_ratio"]),
+                provider_fixed_overhead_tokens=int(profile["provider_fixed_overhead_tokens"]),
+                provider_per_message_overhead_tokens=int(profile["provider_per_message_overhead_tokens"]),
+                provider_per_tool_overhead_tokens=int(profile["provider_per_tool_overhead_tokens"]),
+                visual_max_tokens_per_image=profile.get(
+                    "visual_max_tokens_per_image",
+                ),
+                fixed_message_count=(int(profile["bounded_overlay_message_count"]) + 1),
+                tool_count=int(profile["full_tool_count"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            raise SnipCompactionFailed(
+                reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
+            ) from None
+        return None, estimator
+
+    def _require_receipt_preconditions(
+        self,
+        state: AgentState,
+        runtime: Runtime,
+        *,
+        asynchronous: bool,
+    ) -> None:
+        """Fail the static receipt inputs before any SNIP model call.
+
+        Receipt construction itself still runs after the summary exists; this
+        guard only rejects configurations that could never commit, so a doomed
+        compaction cannot first consume its bounded SNIP model-call budget.
+        """
+
+        observer = self._context_compaction_observer
+        if observer is None:
+            return
+        prepare_receipt = getattr(
+            observer,
+            "prepare_compaction_checkpoint_receipt",
+            None,
+        )
+        if not callable(prepare_receipt):
+            if callable(
+                getattr(
+                    observer,
+                    "record_ephemeral_compaction_committed",
+                    None,
+                )
+            ):
+                if not asynchronous:
+                    raise SnipCompactionFailed(
+                        reason=(ContextCompactionFailureReason.OBSERVER_UNSUPPORTED),
+                    )
+                if not isinstance(state.get("messages"), list):
+                    raise SnipCompactionFailed(
+                        reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
+                    )
+                return
+            raise SnipCompactionFailed(
+                reason=ContextCompactionFailureReason.OBSERVER_UNSUPPORTED,
+            )
+        if not isinstance(state.get("messages"), list):
+            raise SnipCompactionFailed(
+                reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
+            )
+        _, estimator = self._resolve_compaction_estimator(state)
+        messages = cast("list[AnyMessage]", state["messages"])
+        if estimator.visual_max_tokens_per_image is None and contains_visual_material(messages):
+            raise SnipCompactionFailed(
+                reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
+            )
+        if (
+            self._source_checkpoint_id(
+                runtime,
+                self._archive_context(runtime),
+            )
+            is None
+        ):
+            raise SnipCompactionFailed(
+                reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
+            )
 
     def _context_compaction_update(
         self,
@@ -1722,73 +1907,56 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 )
             ):
                 raise SnipCompactionFailed(
-                    "Ephemeral Context compaction requires the async hook",
+                    reason=ContextCompactionFailureReason.OBSERVER_UNSUPPORTED,
                 )
             raise SnipCompactionFailed(
-                "Context compaction observer has no checkpoint receipt API",
+                reason=ContextCompactionFailureReason.OBSERVER_UNSUPPORTED,
             )
         source_messages = state.get("messages")
         if not isinstance(source_messages, list):
             raise SnipCompactionFailed(
-                "Context compaction source messages are invalid",
+                reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
             )
         source_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
         source_state_digest = self._context_state_digest(
             source_messages,
             source_summary,
         )
-        raw_source_snapshot = state.get(CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY)
-        source_snapshot = raw_source_snapshot if isinstance(raw_source_snapshot, Mapping) else None
-        if source_snapshot is not None:
-            try:
-                estimator = ContextCheckpointProjectionSnapshot.from_safe_mapping(
-                    source_snapshot,
-                ).estimator
-            except (TypeError, ValueError):
-                raise SnipCompactionFailed(
-                    "Context compaction source snapshot is invalid",
-                ) from None
-        else:
-            profile = state.get(PROVIDER_REQUEST_PROFILE_STATE_KEY)
-            if not isinstance(profile, Mapping):
-                raise SnipCompactionFailed(
-                    "Context compaction estimator is unavailable",
-                )
-            try:
-                estimator = ContextCheckpointEstimator(
-                    error_allowance_ratio=float(profile["error_allowance_ratio"]),
-                    provider_fixed_overhead_tokens=int(profile["provider_fixed_overhead_tokens"]),
-                    provider_per_message_overhead_tokens=int(profile["provider_per_message_overhead_tokens"]),
-                    provider_per_tool_overhead_tokens=int(profile["provider_per_tool_overhead_tokens"]),
-                    fixed_message_count=(int(profile["bounded_overlay_message_count"]) + 1),
-                    tool_count=int(profile["full_tool_count"]),
-                )
-            except (KeyError, TypeError, ValueError):
-                raise SnipCompactionFailed(
-                    "Context compaction estimator is invalid",
-                ) from None
+        source_snapshot, estimator = self._resolve_compaction_estimator(state)
         source_checkpoint_id = self._source_checkpoint_id(
             runtime,
             self._archive_context(runtime),
         )
         if source_checkpoint_id is None:
             raise SnipCompactionFailed(
-                "Context compaction source snapshot is unavailable",
+                reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
             )
-        receipt = prepare_receipt(
-            source_checkpoint_id=source_checkpoint_id,
-            source_snapshot=source_snapshot,
-            estimator=estimator,
-            source_state_digest=source_state_digest,
-            source_tokens=result.total_tokens,
-            result_values={
-                "messages": list(result.preserved_messages),
-                "summary_text": result.summary_text,
-            },
-        )
+        try:
+            receipt = prepare_receipt(
+                source_checkpoint_id=source_checkpoint_id,
+                source_snapshot=source_snapshot,
+                estimator=estimator,
+                source_state_digest=source_state_digest,
+                source_values={
+                    "messages": list(source_messages),
+                    "summary_text": source_summary,
+                },
+                result_values={
+                    "messages": list(result.preserved_messages),
+                    "summary_text": result.summary_text,
+                },
+            )
+        except VisualTokenCostContractError as exc:
+            raise SnipCompactionFailed(
+                reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
+            ) from exc
+        except ValidationError as exc:
+            raise SnipCompactionFailed(
+                reason=ContextCompactionFailureReason.RECEIPT_INVALID,
+            ) from exc
         if not isinstance(receipt, ContextCompactionCheckpointReceipt):
             raise SnipCompactionFailed(
-                "Context compaction observer returned an invalid receipt",
+                reason=ContextCompactionFailureReason.RECEIPT_INVALID,
             )
         return {
             CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY: (receipt.projection_snapshot.to_safe_mapping()),
@@ -1811,12 +1979,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         )
         if not callable(record_ephemeral):
             raise SnipCompactionFailed(
-                "Context compaction observer has no commit API",
+                reason=ContextCompactionFailureReason.OBSERVER_UNSUPPORTED,
             )
         source_messages = state.get("messages")
         if not isinstance(source_messages, list):
             raise SnipCompactionFailed(
-                "Ephemeral Context compaction source is invalid",
+                reason=(ContextCompactionFailureReason.CHECKPOINT_UNMEASURABLE),
             )
         source_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
         summary_tokens = self.token_counter([self._summary_count_message(result.summary_text)])
@@ -1865,11 +2033,62 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         return hashlib.sha256(material).hexdigest()
 
 
+def freeze_summarization_profile(
+    middlewares: Sequence[object],
+    profile: ProviderRequestProfile,
+) -> EffectiveCompactionPolicy | None:
+    """Bind the one compactor to the final frozen Provider request profile."""
+
+    compactors = tuple(middleware for middleware in middlewares if isinstance(middleware, DeerFlowSummarizationMiddleware))
+    if not compactors:
+        return None
+    if len(compactors) != 1:
+        raise ValueError("Only one summarization middleware may be installed")
+    compactor = compactors[0]
+    token_triggers = [int(value) for trigger_type, value in compactor._trigger_conditions if trigger_type == "tokens"]
+    if not token_triggers or compactor.keep[0] != "tokens":
+        return None
+    snapshot = profile.snapshot()
+    baseline = measure_profile_snapshot_context(
+        snapshot,
+        {"messages": []},
+    )
+    policy = resolve_effective_compaction_policy(
+        trigger_tokens=min(token_triggers),
+        keep_tokens=int(compactor.keep[1]),
+        context_window_tokens=profile.max_input_tokens,
+        # The profile measurement is already the Provider safety upper bound:
+        # it includes exact fixed system/tool material, bounded overlays,
+        # provider framing, and the adapter's error allowance. The packaged
+        # dual-output contract reserves its existing 4096-token output budget
+        # for the replacement summary rather than inventing another margin.
+        fixed_noncompressible_safety_tokens=baseline.safety_bound_tokens,
+        summary_headroom_tokens=MIN_SNIP_SUMMARY_OUTPUT_TOKENS,
+        # ``keep`` is a character-counter selection target, not a finite
+        # Provider-wire upper bound (single-message, per-message, visual, and
+        # serialization costs are content dependent). Runtime candidate
+        # selection remeasures each retained tail with this frozen profile.
+        retained_context_safety_tokens=0,
+    )
+    trigger = ("tokens", policy.trigger_tokens) if policy.trigger_tokens is not None else None
+    compactor.trigger = trigger
+    compactor._trigger_clauses = compactor._normalize_trigger(trigger)
+    compactor._trigger_conditions = compactor._legacy_trigger_conditions(trigger)
+    freeze_observer = getattr(
+        compactor._context_compaction_observer,
+        "freeze_compaction_policy",
+        None,
+    )
+    if callable(freeze_observer):
+        freeze_observer(policy)
+    return policy
+
+
 def create_summarization_middleware(
     *,
     app_config: Any | None = None,
     context_model: Any | None = None,
-    keep: tuple[str, int | float] | None = None,
+    keep: tuple[str, int] | None = None,
     context_compaction_observer: object | None = None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
@@ -1877,6 +2096,11 @@ def create_summarization_middleware(
     Both the lead-agent automatic path and the manual context-compaction path
     use this factory so model resolution, prompt compatibility, and retention
     defaults cannot drift.
+
+    ``keep`` overrides the policy retention for one compaction. The policy and
+    the public compact API are token-count-only (``("tokens", n)``); the sole
+    non-token value is the internal ``("messages", 0)`` archive-all sentinel
+    that manual compaction, Seal, and Dream pass for force drains.
     """
     resolved_app_config = app_config or get_app_config()
     config = resolved_app_config.summarization
@@ -1884,12 +2108,30 @@ def create_summarization_middleware(
     if not config.enabled:
         return None
 
-    trigger = None
-    if config.trigger is not None:
-        if isinstance(config.trigger, list):
-            trigger = [item.to_tuple() for item in config.trigger]
-        else:
-            trigger = config.trigger.to_tuple()
+    requested_keep: tuple[str, int] = keep or config.keep.to_tuple()
+    compact_all_complete_turns = requested_keep[0] == "messages" and requested_keep[1] == 0
+    effective_keep = ("messages", 1) if compact_all_complete_turns else requested_keep
+
+    # Automatic summarization triggers on exactly one estimated-token
+    # threshold; message-count and context-fraction triggers were removed.
+    # The absolute policy value is clamped to the context model's declared
+    # capacity so a small-context model cannot sit in the dead zone where the
+    # final Provider guard rejects before the trigger is ever reached.
+    context_profile = getattr(context_model, "profile", None)
+    context_window_tokens = context_profile.get("max_input_tokens") if isinstance(context_profile, Mapping) else None
+    if requested_keep[0] == "tokens":
+        initial_policy = resolve_effective_compaction_policy(
+            trigger_tokens=config.trigger_tokens,
+            keep_tokens=requested_keep[1],
+            context_window_tokens=(context_window_tokens if isinstance(context_window_tokens, int) else None),
+        )
+        trigger_tokens = initial_policy.trigger_tokens
+    else:
+        trigger_tokens = effective_compaction_trigger_tokens(
+            config.trigger_tokens,
+            context_window_tokens if isinstance(context_window_tokens, int) else None,
+        )
+    trigger = ("tokens", trigger_tokens) if trigger_tokens is not None else None
 
     model = ModelRuntime(app_config=resolved_app_config).build_chat_model(
         profile=ModelRuntimeProfile.AGENT_GRAPH,
@@ -1902,9 +2144,6 @@ def create_summarization_middleware(
         model = _ensure_snip_summary_output_budget(model)
     model = model.with_config(tags=["middleware:summarize"])
 
-    requested_keep = keep or config.keep.to_tuple()
-    compact_all_complete_turns = requested_keep[0] == "messages" and requested_keep[1] == 0
-    effective_keep = ("messages", 1) if compact_all_complete_turns else requested_keep
     kwargs: dict[str, Any] = {
         "model": model,
         "context_model": context_model,
@@ -1916,6 +2155,12 @@ def create_summarization_middleware(
         "dual_output_contract": dual_output_contract,
     }
     if config.trim_tokens_to_summarize is not None:
-        kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize
+        # Values below the packaged-prompt floor could never plan a compaction
+        # and previously terminated every triggered Thread. Authoring rejects
+        # them; clamp here so legacy stored values stay operable.
+        kwargs["trim_tokens_to_summarize"] = max(
+            config.trim_tokens_to_summarize,
+            MIN_TRIM_TOKENS_TO_SUMMARIZE,
+        )
 
     return DeerFlowSummarizationMiddleware(**kwargs)

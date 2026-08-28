@@ -26,6 +26,13 @@ from app.audit.service import (
     _bind_worker_audit_process,
 )
 from app.audit.sinks import OperationalAuditSink
+from app.automations.dispatcher import (
+    AdmittedAutomationOccurrence,
+    AutomationDefinitionRef,
+    AutomationDispatcher,
+)
+from app.automations.models import AutomationCreate
+from app.automations.service import ProjectAutomationService
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
     ExecutionApprovalConflict,
@@ -91,13 +98,19 @@ from deerflow.persistence.execution_approvals import (
     ExecutionApprovalRequestRow,
     ExecutionApprovalResultReceiptRow,
 )
-from deerflow.persistence.jobs.model import JobAttemptRow, JobRow, WorkerNodeRow
+from deerflow.persistence.jobs.model import (
+    DeadJobRow,
+    JobAttemptRow,
+    JobRow,
+    WorkerNodeRow,
+)
 from deerflow.persistence.jobs.sql import (
     JobClaim,
     JobOwnerRef,
     JobRepository,
     JobScope,
     JobTerminalEvent,
+    JobTerminalResult,
 )
 from deerflow.persistence.private_work import (
     PrivateArtifactRow,
@@ -107,6 +120,7 @@ from deerflow.persistence.private_work import (
 from deerflow.persistence.private_work.file_repository import PrivateFileRepository
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.shared_assets import AgentRow
 from deerflow.persistence.system_runtime_settings import (
     RunRuntimePolicySnapshotRow,
@@ -120,7 +134,11 @@ from deerflow.persistence.system_settings import (
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.user.private_lifecycle import AccountPrivateGeneration
-from deerflow.runtime.events.models import StreamFrame, StreamLeaseProof
+from deerflow.runtime.events.models import (
+    StreamFrame,
+    StreamLeaseProof,
+    StreamTerminalCandidate,
+)
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.host_execution_approval import (
     HostExecutionOutcome,
@@ -611,6 +629,974 @@ async def test_durable_success_attempt_takeover_activates_marker_without_rerun(
             assert obligation is not None and obligation.status == "deferred"
             assert run is not None and run.status == "success"
             assert job is not None and job.status == "succeeded"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_durable_terminal_takeover_bypasses_retry_safety_and_attempt_limit(
+    migrated_postgres_database_url: str,
+) -> None:
+    """A settlement-only takeover never repeats Harness Execution."""
+
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+
+    class _DurableTerminalTakeoverPort:
+        def __init__(self) -> None:
+            self.proofs: list[object] = []
+
+        async def durable_terminal_takeover_allowed(
+            self,
+            _session,
+            event,
+        ) -> bool:
+            self.proofs.append(event)
+            return True
+
+        async def job_terminalized(
+            self,
+            _session,
+            _event,
+        ) -> JobTerminalResult:
+            return JobTerminalResult(run_terminal_published=False)
+
+    try:
+        expired_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with scenario.seed.factory() as session, session.begin():
+            job = await session.get(
+                JobRow,
+                scenario.claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            job.retry_safety = "unknown"
+            job.max_attempts = job.attempt_count
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+
+        port = _DurableTerminalTakeoverPort()
+        async with scenario.seed.factory() as session, session.begin():
+            takeover_claim = await JobRepository(
+                session,
+                terminal_port=port,
+            ).claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+
+        assert takeover_claim is not None
+        assert takeover_claim.job_id == scenario.claim.job_id
+        assert takeover_claim.attempt_id != scenario.claim.attempt_id
+        assert takeover_claim.retry_safety == "unknown"
+        assert len(port.proofs) == 1
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dead_gate", "expected_dead_code"),
+    [
+        ("retry_safety", "SIDE_EFFECT_STATE_UNKNOWN"),
+        ("attempt_limit", "ATTEMPTS_EXHAUSTED"),
+    ],
+)
+async def test_legacy_success_terminal_drives_settlement_only_takeover(
+    migrated_postgres_database_url: str,
+    dead_gate: str,
+    expected_dead_code: str,
+) -> None:
+    """A retained success frame automatically reconciles an already-dead Job."""
+
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    event_store = DbRunEventStore(
+        scenario.seed.factory,
+        run_event_notify_enabled=False,
+    )
+
+    class _ExecutorMustNotRun:
+        async def execute(self, *_args, **_kwargs):
+            raise AssertionError("terminal takeover must not invoke the Agent Graph")
+
+    try:
+        await scenario.port.seal_suspended_approval_marker(
+            str(scenario.approval_id),
+        )
+        async with scenario.seed.factory() as session, session.begin():
+            await event_store.append_stream_frame(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                frame=StreamFrame(
+                    event="end",
+                    data={"status": "success"},
+                    terminal=True,
+                ),
+                lease=StreamLeaseProof(
+                    job_id=scenario.claim.job_id,
+                    lease_token=scenario.claim.lease_token,
+                ),
+            )
+
+        expired_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with scenario.seed.factory() as session, session.begin():
+            job = await session.get(
+                JobRow,
+                scenario.claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            if dead_gate == "retry_safety":
+                job.retry_safety = "unknown"
+                job.max_attempts = job.attempt_count + 1
+            else:
+                job.retry_safety = "safe"
+                job.max_attempts = job.attempt_count
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+
+        # Reproduce the pre-reconciliation state through the real claim-time
+        # gates: the immutable terminal exists, but this legacy claimant has no
+        # terminal-aware port and therefore writes an append-only dead record.
+        async with scenario.seed.factory() as session, session.begin():
+            dead_claim = await JobRepository(
+                session,
+                owner_ref_hasher=lambda _owner: JobOwnerRef(
+                    key_id="test",
+                    hmac_hex="a" * 64,
+                ),
+            ).claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+            assert dead_claim is None
+
+        async with scenario.seed.factory() as session:
+            predecessor = await session.get(JobRow, scenario.claim.job_id)
+            dead = await session.get(DeadJobRow, scenario.claim.job_id)
+            run = await session.get(RunRow, scenario.source_run_id)
+            assert predecessor is not None and predecessor.status == "dead"
+            assert predecessor.public_error_code == expected_dead_code
+            assert dead is not None and dead.public_error_code == expected_dead_code
+            assert run is not None and run.status == "running"
+            assert run.job_id == scenario.claim.job_id
+
+        terminal_port = PrivateRunJobTerminalPort(
+            event_store=event_store,
+        )
+        async with scenario.seed.factory() as session, session.begin():
+            takeover_claim = await JobRepository(
+                session,
+                owner_ref_hasher=lambda _owner: JobOwnerRef(
+                    key_id="test",
+                    hmac_hex="a" * 64,
+                ),
+                terminal_port=terminal_port,
+            ).claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+            assert takeover_claim is not None
+            assert takeover_claim.job_id != scenario.claim.job_id
+            assert takeover_claim.settlement_only is True
+            assert await JobRepository(session).mark_running(
+                takeover_claim.job_id,
+                lease_token=takeover_claim.lease_token,
+            )
+
+        settlement = await PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=_ExecutorMustNotRun(),
+        )._handle_with_trace(
+            takeover_claim,
+            SimpleNamespace(),
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            run = await session.get(RunRow, scenario.source_run_id)
+            predecessor = await session.get(JobRow, scenario.claim.job_id)
+            dead = await session.get(DeadJobRow, scenario.claim.job_id)
+            successor = await session.get(JobRow, takeover_claim.job_id)
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            assert run is not None and run.status == "success"
+            assert run.job_id == takeover_claim.job_id
+            assert predecessor is not None and predecessor.status == "dead"
+            assert dead is not None and dead.public_error_code == expected_dead_code
+            assert successor is not None and successor.status == "succeeded"
+            assert successor.predecessor_dead_job_id == scenario.claim.job_id
+            assert approval is not None and approval.status == "pending"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_dead_terminal_reconciliation_yields_to_authorization_revocation(
+    migrated_postgres_database_url: str,
+) -> None:
+    """A retained terminal never revives authority revoked after Job death."""
+
+    scenario = await _prepare_clock_scenario(
+        migrated_postgres_database_url,
+        stage=False,
+    )
+    event_store = DbRunEventStore(
+        scenario.seed.factory,
+        run_event_notify_enabled=False,
+    )
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await event_store.append_stream_frame(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                frame=StreamFrame(
+                    event="end",
+                    data={"status": "success"},
+                    terminal=True,
+                ),
+                lease=StreamLeaseProof(
+                    job_id=scenario.claim.job_id,
+                    lease_token=scenario.claim.lease_token,
+                ),
+            )
+            job = await session.get(
+                JobRow,
+                scenario.claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            expired_at = datetime.now(UTC) - timedelta(seconds=1)
+            job.retry_safety = "unknown"
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+
+        async with scenario.seed.factory() as session, session.begin():
+            assert (
+                await JobRepository(
+                    session,
+                    owner_ref_hasher=lambda _owner: JobOwnerRef(
+                        key_id="test",
+                        hmac_hex="a" * 64,
+                    ),
+                ).claim_next(
+                    worker_id=scenario.worker_id,
+                    capabilities=frozenset({"private_run"}),
+                    lease_seconds=300,
+                )
+                is None
+            )
+
+        async with scenario.seed.factory() as session, session.begin():
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert run is not None
+            run.authorization_cancel_requested_at = datetime.now(UTC)
+            run.authorization_cancel_reason = "authorization_revoked"
+
+        async with scenario.seed.factory() as session, session.begin():
+            claim = await JobRepository(
+                session,
+                terminal_port=PrivateRunJobTerminalPort(
+                    event_store=event_store,
+                ),
+            ).claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+            assert claim is None
+
+        async with scenario.seed.factory() as session:
+            successor_count = await session.scalar(
+                sa.select(sa.func.count())
+                .select_from(JobRow)
+                .where(
+                    JobRow.predecessor_dead_job_id == scenario.claim.job_id,
+                )
+            )
+            run = await session.get(RunRow, scenario.source_run_id)
+            assert successor_count == 0
+            assert run is not None and run.job_id == scenario.claim.job_id
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_settlement_only_successor_never_falls_through_to_graph(
+    migrated_postgres_database_url: str,
+) -> None:
+    """Loss of every terminal fact blocks rather than replaying the graph."""
+
+    scenario = await _prepare_clock_scenario(
+        migrated_postgres_database_url,
+        stage=False,
+    )
+    event_store = DbRunEventStore(
+        scenario.seed.factory,
+        run_event_notify_enabled=False,
+    )
+
+    class _CountingExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("settlement-only successor reached the Agent Graph")
+
+    class _NoDurableTerminalFacts:
+        async def get_stream_terminal(self, *_args, **_kwargs):
+            return None
+
+        async def get_stream_terminal_candidate(self, *_args, **_kwargs):
+            return None
+
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await event_store.append_stream_frame(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                frame=StreamFrame(
+                    event="end",
+                    data={"status": "success"},
+                    terminal=True,
+                ),
+                lease=StreamLeaseProof(
+                    job_id=scenario.claim.job_id,
+                    lease_token=scenario.claim.lease_token,
+                ),
+            )
+            job = await session.get(
+                JobRow,
+                scenario.claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            expired_at = datetime.now(UTC) - timedelta(seconds=1)
+            job.retry_safety = "unknown"
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+
+        async with scenario.seed.factory() as session, session.begin():
+            assert (
+                await JobRepository(
+                    session,
+                    owner_ref_hasher=lambda _owner: JobOwnerRef(
+                        key_id="test",
+                        hmac_hex="a" * 64,
+                    ),
+                ).claim_next(
+                    worker_id=scenario.worker_id,
+                    capabilities=frozenset({"private_run"}),
+                    lease_seconds=300,
+                )
+                is None
+            )
+
+        async with scenario.seed.factory() as session, session.begin():
+            successor_claim = await JobRepository(
+                session,
+                terminal_port=PrivateRunJobTerminalPort(
+                    event_store=event_store,
+                ),
+            ).claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+            assert successor_claim is not None
+            assert successor_claim.settlement_only is True
+            assert await JobRepository(session).mark_running(
+                successor_claim.job_id,
+                lease_token=successor_claim.lease_token,
+            )
+
+        executor = _CountingExecutor()
+        handler = PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=executor,
+        )
+        handler._events = _NoDurableTerminalFacts()  # type: ignore[assignment]  # noqa: SLF001
+        with pytest.raises(LeaseLost):
+            await handler._handle_with_trace(
+                successor_claim,
+                SimpleNamespace(),
+            )
+        assert executor.calls == 0
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_dead_automation_terminal_rebinds_occurrence_without_graph(
+    migrated_postgres_database_url: str,
+) -> None:
+    """Automation occurrence and Run move atomically to the successor Job."""
+
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    now = datetime.now(UTC)
+    scheduled_for = now + timedelta(hours=1)
+    worker_id = uuid.uuid4()
+
+    class _ExecutorMustNotRun:
+        async def execute(self, *_args, **_kwargs):
+            raise AssertionError("terminal takeover must not invoke the Agent Graph")
+
+    try:
+        task = await ProjectAutomationService(
+            seed.factory,
+            clock=lambda: now,
+            min_once_delay_seconds=0,
+        ).create(
+            seed.owner_a,
+            AutomationCreate(
+                title="Terminal reconciliation",
+                prompt="This graph has already produced its terminal.",
+                context_mode="fresh_thread_per_run",
+                thread_id=None,
+                agent_asset_id=seed.project_agent_id,
+                agent_scope="project",
+                schedule_type="once",
+                schedule_spec={"run_at": scheduled_for.isoformat()},
+                timezone="UTC",
+            ),
+        )
+        admitted = await AutomationDispatcher(seed.factory).admit_occurrence(
+            AutomationDefinitionRef(
+                project_id=seed.owner_a.project_id,
+                owner_user_id=str(seed.owner_a.user_id),
+                task_id=task.id,
+                membership_version=seed.owner_a.membership_version,
+            ),
+            scheduled_for=scheduled_for,
+            manual_idempotency_key=uuid.uuid4(),
+        )
+        assert isinstance(admitted, AdmittedAutomationOccurrence)
+        async with seed.factory() as session, session.begin():
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="automation-terminal-reconciliation",
+                    capabilities_json=["automation_run"],
+                    max_concurrent_jobs=1,
+                )
+            )
+            job = await session.get(
+                JobRow,
+                admitted.job.job_id,
+                with_for_update=True,
+            )
+            assert job is not None
+            job.priority = 32_767
+
+        async with seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            source_claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"automation_run"}),
+                lease_seconds=300,
+            )
+            assert source_claim is not None
+            assert source_claim.job_id == admitted.job.job_id
+            assert await jobs.mark_running(
+                source_claim.job_id,
+                lease_token=source_claim.lease_token,
+            )
+            await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a_scope,
+                run_id=admitted.run.run_id,
+                job_id=source_claim.job_id,
+                lease_token=source_claim.lease_token,
+                origin_trace_id=source_claim.origin_trace_id,
+            )
+
+        event_store = DbRunEventStore(
+            seed.factory,
+            run_event_notify_enabled=False,
+        )
+        async with seed.factory() as session, session.begin():
+            await event_store.append_stream_frame(
+                session,
+                scope=seed.owner_a_scope,
+                thread_id=admitted.run.thread_id,
+                run_id=admitted.run.run_id,
+                frame=StreamFrame(
+                    event="end",
+                    data={"status": "success"},
+                    terminal=True,
+                ),
+                lease=StreamLeaseProof(
+                    job_id=source_claim.job_id,
+                    lease_token=source_claim.lease_token,
+                ),
+            )
+            job = await session.get(
+                JobRow,
+                source_claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                admitted.run.run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            expired_at = datetime.now(UTC) - timedelta(seconds=1)
+            job.retry_safety = "unknown"
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+
+        async with seed.factory() as session, session.begin():
+            assert (
+                await JobRepository(
+                    session,
+                    owner_ref_hasher=lambda _owner: JobOwnerRef(
+                        key_id="test",
+                        hmac_hex="a" * 64,
+                    ),
+                ).claim_next(
+                    worker_id=worker_id,
+                    capabilities=frozenset({"automation_run"}),
+                    lease_seconds=300,
+                )
+                is None
+            )
+
+        async with seed.factory() as session, session.begin():
+            successor_claim = await JobRepository(
+                session,
+                terminal_port=PrivateRunJobTerminalPort(
+                    event_store=event_store,
+                ),
+            ).claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"automation_run"}),
+                lease_seconds=300,
+            )
+            assert successor_claim is not None
+            assert successor_claim.job_id != source_claim.job_id
+            assert successor_claim.settlement_only is True
+            assert successor_claim.occurrence_id == admitted.occurrence.id
+            assert await JobRepository(session).mark_running(
+                successor_claim.job_id,
+                lease_token=successor_claim.lease_token,
+            )
+            occurrence = await session.get(
+                ScheduledTaskRunRow,
+                admitted.occurrence.id,
+            )
+            assert occurrence is not None
+            assert occurrence.job_id == successor_claim.job_id
+
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=_ExecutorMustNotRun(),
+        )._handle_with_trace(
+            successor_claim,
+            SimpleNamespace(),
+        )
+        await settlement.commit()
+
+        async with seed.factory() as session:
+            predecessor = await session.get(JobRow, source_claim.job_id)
+            successor = await session.get(JobRow, successor_claim.job_id)
+            dead = await session.get(DeadJobRow, source_claim.job_id)
+            run = await session.get(RunRow, admitted.run.run_id)
+            occurrence = await session.get(
+                ScheduledTaskRunRow,
+                admitted.occurrence.id,
+            )
+            assert predecessor is not None and predecessor.status == "dead"
+            assert dead is not None
+            assert successor is not None and successor.status == "succeeded"
+            assert successor.predecessor_dead_job_id == source_claim.job_id
+            assert run is not None and run.status == "success"
+            assert run.job_id == successor_claim.job_id
+            assert occurrence is not None and occurrence.status == "success"
+            assert occurrence.job_id == successor_claim.job_id
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authorization_revoked", "expected_terminal"),
+    [
+        (
+            False,
+            {"status": "error", "error_code": "MODEL_OUTPUT_LIMIT"},
+        ),
+        (True, {"status": "interrupted"}),
+    ],
+)
+async def test_durable_response_terminal_precedes_only_ordinary_stop(
+    migrated_postgres_database_url: str,
+    authorization_revoked: bool,
+    expected_terminal: dict[str, str],
+) -> None:
+    """The explicit terminal authority matrix is independent of write order."""
+
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    events = DbRunEventStore(
+        scenario.seed.factory,
+        run_event_notify_enabled=False,
+    )
+    try:
+        requested_at = datetime.now(UTC)
+        async with scenario.seed.factory() as session, session.begin():
+            job = await session.get(
+                JobRow,
+                scenario.claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            job.cancel_requested_at = requested_at
+            job.cancel_reason = "user_stop"
+            run.cancel_requested_at = requested_at
+            run.cancel_reason = "user_stop"
+            if authorization_revoked:
+                run.authorization_cancel_requested_at = requested_at
+                run.authorization_cancel_reason = "authorization_revoked"
+
+        async with scenario.seed.factory() as session, session.begin():
+            terminal = await events.append_stream_frame(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                frame=StreamFrame.end(
+                    status="error",
+                    error_code="MODEL_OUTPUT_LIMIT",
+                    terminal_authority="durable_response",
+                ),
+                lease=StreamLeaseProof(
+                    job_id=scenario.claim.job_id,
+                    lease_token=scenario.claim.lease_token,
+                ),
+            )
+
+            assert terminal.data == expected_terminal
+            assert terminal.terminal_authority == ("ordinary" if authorization_revoked else "durable_response")
+
+        handler = PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=SimpleNamespace(),
+            job_repository_builder=lambda session: JobRepository(
+                session,
+                owner_ref_hasher=lambda _owner: JobOwnerRef(
+                    "test",
+                    "0" * 64,
+                ),
+                terminal_port=PrivateRunJobTerminalPort(),
+            ),
+        )
+        settlement = handler._settlement(
+            scenario.claim,
+            AgentExecutionResult.failed(
+                "MODEL_OUTPUT_LIMIT",
+                retryable=False,
+                durable_terminal=True,
+            ),
+            scope=scenario.seed.owner_a_scope,
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            run = await session.get(RunRow, scenario.source_run_id)
+            job = await session.get(JobRow, scenario.claim.job_id)
+            assert run is not None and job is not None
+            if authorization_revoked:
+                assert (run.status, job.status) == ("interrupted", "cancelled")
+            else:
+                assert (run.status, job.status) == ("error", "dead")
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "candidate_first"),
+    [
+        ("ordinary_stop", False),
+        ("ordinary_stop", True),
+        ("authorization_revoked", False),
+        ("authorization_revoked", True),
+    ],
+)
+async def test_terminal_candidate_and_stop_arbitrate_independently_of_write_order(
+    migrated_postgres_database_url: str,
+    action: str,
+    candidate_first: bool,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    events = DbRunEventStore(
+        scenario.seed.factory,
+        run_event_notify_enabled=False,
+    )
+    candidate = StreamTerminalCandidate(
+        status="error",
+        error_code="MODEL_OUTPUT_LIMIT",
+        authority="durable_response",
+        precedence="preempts_ordinary_stop",
+    )
+
+    async def write_candidate() -> None:
+        async with scenario.seed.factory() as session, session.begin():
+            stored = await events.append_stream_terminal_candidate(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                candidate=candidate,
+                lease=StreamLeaseProof(
+                    job_id=scenario.claim.job_id,
+                    lease_token=scenario.claim.lease_token,
+                ),
+            )
+            assert stored == candidate
+
+    async def write_action() -> None:
+        requested_at = datetime.now(UTC)
+        async with scenario.seed.factory() as session, session.begin():
+            job = await session.get(
+                JobRow,
+                scenario.claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            job.cancel_requested_at = requested_at
+            job.cancel_reason = "user_stop"
+            run.cancel_requested_at = requested_at
+            run.cancel_reason = "user_stop"
+            if action == "authorization_revoked":
+                run.authorization_cancel_requested_at = requested_at
+                run.authorization_cancel_reason = "authorization_revoked"
+
+    if candidate_first:
+        await write_candidate()
+        await write_action()
+    else:
+        await write_action()
+        await write_candidate()
+
+    async with scenario.seed.factory() as session:
+        assert (
+            await events.get_stream_terminal(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+            )
+            is None
+        )
+
+    settlement = PrivateRunJobHandler(
+        scenario.seed.factory,
+        executor=SimpleNamespace(),
+        job_repository_builder=lambda session: JobRepository(
+            session,
+            owner_ref_hasher=lambda _owner: JobOwnerRef("test", "0" * 64),
+        ),
+    )._settlement(
+        scenario.claim,
+        # Simulate a late local cancellation projection. Settlement must read
+        # the durable candidate rather than trusting this weaker adapter result.
+        AgentExecutionResult.cancelled(),
+        scope=scenario.seed.owner_a_scope,
+    )
+    await settlement.commit()
+
+    async with scenario.seed.factory() as session:
+        run = await session.get(RunRow, scenario.source_run_id)
+        job = await session.get(JobRow, scenario.claim.job_id)
+        terminal = await events.get_stream_terminal(
+            session,
+            scope=scenario.seed.owner_a_scope,
+            thread_id=scenario.thread_id,
+            run_id=scenario.source_run_id,
+        )
+        stored_candidate = await events.get_stream_terminal_candidate(
+            session,
+            scope=scenario.seed.owner_a_scope,
+            thread_id=scenario.thread_id,
+            run_id=scenario.source_run_id,
+        )
+        assert run is not None and job is not None and terminal is not None
+        assert stored_candidate == candidate
+        if action == "authorization_revoked":
+            assert (run.status, job.status, terminal.data) == (
+                "interrupted",
+                "cancelled",
+                {"status": "interrupted"},
+            )
+        else:
+            assert (run.status, job.status, terminal.data) == (
+                "error",
+                "dead",
+                {"status": "error", "error_code": "MODEL_OUTPUT_LIMIT"},
+            )
+        frames = await events.list_stream_frames(
+            session,
+            scope=scenario.seed.owner_a_scope,
+            thread_id=scenario.thread_id,
+            run_id=scenario.source_run_id,
+            cursor=0,
+            limit=100,
+        )
+        assert sum(frame.terminal for frame in frames) == 1
+
+    public_events = await events.list_events(
+        scenario.thread_id,
+        scenario.source_run_id,
+        scope=scenario.seed.owner_a_scope,
+    )
+    assert all(event["event_type"] != "run.terminal_candidate" for event in public_events)
+    await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_terminal_candidate_takeover_settles_without_graph_rerun(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    events = DbRunEventStore(
+        scenario.seed.factory,
+        run_event_notify_enabled=False,
+    )
+
+    class _ExecutorMustNotRun:
+        async def execute(self, *_args, **_kwargs):
+            raise AssertionError("terminal candidate takeover must not run the Agent Graph")
+
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await events.append_stream_terminal_candidate(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                candidate=StreamTerminalCandidate(
+                    status="error",
+                    error_code="MODEL_OUTPUT_LIMIT",
+                    authority="durable_response",
+                    precedence="preempts_ordinary_stop",
+                ),
+                lease=StreamLeaseProof(
+                    job_id=scenario.claim.job_id,
+                    lease_token=scenario.claim.lease_token,
+                ),
+            )
+
+        expired_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with scenario.seed.factory() as session, session.begin():
+            job = await session.get(JobRow, scenario.claim.job_id, with_for_update=True)
+            run = await session.get(RunRow, scenario.source_run_id, with_for_update=True)
+            assert job is not None and run is not None
+            job.retry_safety = "unknown"
+            job.max_attempts = job.attempt_count
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+
+        terminal_port = PrivateRunJobTerminalPort(event_store=events)
+        async with scenario.seed.factory() as session, session.begin():
+            takeover_claim = await JobRepository(
+                session,
+                terminal_port=terminal_port,
+            ).claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+            assert takeover_claim is not None
+            assert takeover_claim.job_id == scenario.claim.job_id
+            assert await JobRepository(session).mark_running(
+                takeover_claim.job_id,
+                lease_token=takeover_claim.lease_token,
+            )
+
+        settlement = await PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=_ExecutorMustNotRun(),
+            job_repository_builder=lambda session: JobRepository(
+                session,
+                owner_ref_hasher=lambda _owner: JobOwnerRef(
+                    "test",
+                    "0" * 64,
+                ),
+            ),
+        )._handle_with_trace(
+            takeover_claim,
+            SimpleNamespace(),
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            run = await session.get(RunRow, scenario.source_run_id)
+            job = await session.get(JobRow, scenario.claim.job_id)
+            terminal = await events.get_stream_terminal(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+            )
+            assert run is not None and run.status == "error"
+            assert job is not None and job.status == "dead"
+            assert terminal is not None and terminal.data == {
+                "status": "error",
+                "error_code": "MODEL_OUTPUT_LIMIT",
+            }
     finally:
         await scenario.seed.engine.dispose()
 

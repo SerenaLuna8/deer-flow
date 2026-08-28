@@ -39,8 +39,32 @@ from deerflow.runtime.context_evidence import (
     VisualMeasurementMetadata,
 )
 
-MODEL_REQUEST_COST_ADAPTER_REVISION = "provider-wire-request-cost-v5"
+MODEL_REQUEST_COST_ADAPTER_REVISION = "provider-wire-request-cost-v6"
+# Additional safety allowance per non-ASCII UTF-8 byte, on top of the base
+# bytes/4 estimate and its ratio allowance. The base grants a 3-byte CJK
+# character only ~0.90-0.94 Tokens, which is not an upper bound for
+# CJK-inefficient tokenizers. The supplement raises the declared ceiling to
+# ~1.5 Tokens per CJK character for adapters known (anthropic) or unknown
+# (vllm) to tokenize CJK expensively, and ~1.05 for the rest. Like the other
+# allowances this is a versioned engineering declaration, not a proof; the
+# post-response bound check records drift instead of failing the Run.
+PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE: dict[str, float] = {
+    "anthropic": 0.19,
+    "deepseek": 0.05,
+    "openai": 0.05,
+    "openai_responses": 0.05,
+    "patched_deepseek": 0.05,
+    "patched_openai": 0.05,
+    "patched_openai_responses": 0.05,
+    "vllm": 0.19,
+}
 _SERIALIZATION_FRAMING_UTF8_BYTES = 1_024
+
+
+def _non_ascii_utf8_bytes(material: bytes) -> int:
+    return sum(1 for byte in material if byte >= 0x80)
+
+
 _MESSAGE_LANE_PROVENANCE_ATTRIBUTE = "_deerflow_message_lane_provenance"
 _VISUAL_BLOCK_TYPES = frozenset({"image", "image_url", "input_image"})
 _SUPPORTED_IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif"})
@@ -384,6 +408,8 @@ def _visual_bytes_and_mime(
 
 def _visual_metadata(
     block: Mapping[str, object],
+    *,
+    max_tokens_per_image: int | None,
 ) -> VisualMeasurementMetadata:
     image_bytes, mime_type = _visual_bytes_and_mime(block)
     raw_url = _visual_url(block)
@@ -397,7 +423,7 @@ def _visual_metadata(
         mime_type=mime_type,
         size_bytes=len(image_bytes) if image_bytes is not None else None,
         detail=_visual_detail(block),
-        strategy=VisualCostStrategy.UNMEASURED,
+        strategy=(VisualCostStrategy.MAX_PER_IMAGE if max_tokens_per_image is not None else VisualCostStrategy.UNMEASURED),
     )
 
 
@@ -412,6 +438,7 @@ class ProviderModelRequestCostAdapter:
         provider_fixed_overhead_tokens: int,
         provider_per_message_overhead_tokens: int,
         provider_per_tool_overhead_tokens: int,
+        visual_max_tokens_per_image: int | None = None,
         lane_resolvers: Sequence[ProviderRequestLaneResolver] = (),
         system_prompt_provenance: SystemPromptProvenance | None = None,
         mcp_dynamic_tools: Sequence[BaseTool | dict[str, Any]] = (),
@@ -421,6 +448,8 @@ class ProviderModelRequestCostAdapter:
             raise ValueError("provider adapter has no message projection")
         if not 0 <= error_allowance_ratio <= 1:
             raise ValueError("error allowance ratio is outside 0..1")
+        if visual_max_tokens_per_image is not None and (type(visual_max_tokens_per_image) is not int or visual_max_tokens_per_image <= 0):
+            raise ValueError("declared visual token bound must be a positive integer")
         if any(
             type(value) is not int or value < 0
             for value in (
@@ -435,6 +464,8 @@ class ProviderModelRequestCostAdapter:
         self._provider_fixed_overhead_tokens = provider_fixed_overhead_tokens
         self._provider_per_message_overhead_tokens = provider_per_message_overhead_tokens
         self._provider_per_tool_overhead_tokens = provider_per_tool_overhead_tokens
+        self._visual_max_tokens_per_image = visual_max_tokens_per_image
+        self._non_ascii_supplement_per_byte = PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE.get(provider_adapter or "", 0.0)
         self._lane_resolvers = tuple(lane_resolvers)
         if system_prompt_provenance is not None and not isinstance(system_prompt_provenance, SystemPromptProvenance):
             raise TypeError("system_prompt_provenance must be a SystemPromptProvenance")
@@ -457,6 +488,7 @@ class ProviderModelRequestCostAdapter:
             provider_fixed_overhead_tokens=int(getattr(profile, "provider_fixed_overhead_tokens")),
             provider_per_message_overhead_tokens=int(getattr(profile, "provider_per_message_overhead_tokens")),
             provider_per_tool_overhead_tokens=int(getattr(profile, "provider_per_tool_overhead_tokens")),
+            visual_max_tokens_per_image=getattr(profile, "visual_max_tokens_per_image", None),
             lane_resolvers=lane_resolvers,
             system_prompt_provenance=system_prompt_provenance,
             mcp_dynamic_tools=mcp_dynamic_tools,
@@ -491,12 +523,17 @@ class ProviderModelRequestCostAdapter:
         del request
         return ContextLane.CONVERSATION
 
-    def _material_estimate(self, material_bytes: int) -> TokenEstimate:
+    def _material_estimate(
+        self,
+        material_bytes: int,
+        non_ascii_bytes: int = 0,
+    ) -> TokenEstimate:
         projected = math.ceil(material_bytes / 4)
+        supplement = math.ceil(non_ascii_bytes * self._non_ascii_supplement_per_byte)
         return TokenEstimate.bounded(
             projected_tokens=projected,
             lower_bound_tokens=projected,
-            safety_upper_bound_tokens=(projected + math.ceil(projected * self._error_allowance_ratio)),
+            safety_upper_bound_tokens=(projected + math.ceil(projected * self._error_allowance_ratio) + supplement),
         )
 
     def _system_prompt_fragments(
@@ -731,7 +768,10 @@ class ProviderModelRequestCostAdapter:
                     )
                     lane_fragments.setdefault(lane, []).append(fragment)
             for visual_index, block in enumerate(visual_blocks):
-                metadata = _visual_metadata(block)
+                metadata = _visual_metadata(
+                    block,
+                    max_tokens_per_image=self._visual_max_tokens_per_image,
+                )
                 source_identity = _digest(
                     {
                         "kind": "visual",
@@ -739,6 +779,15 @@ class ProviderModelRequestCostAdapter:
                         "visual_index": visual_index,
                         "image_digest": metadata.image_digest,
                     }
+                )
+                visual_estimate = (
+                    TokenEstimate.bounded(
+                        projected_tokens=self._visual_max_tokens_per_image,
+                        lower_bound_tokens=0,
+                        safety_upper_bound_tokens=self._visual_max_tokens_per_image,
+                    )
+                    if self._visual_max_tokens_per_image is not None
+                    else TokenEstimate.unmeasured(item_count=1)
                 )
                 visual_contributions.append(
                     ContextContribution(
@@ -752,7 +801,7 @@ class ProviderModelRequestCostAdapter:
                         source_identity_digest=source_identity,
                         lane=ContextLane.VISUAL_MEDIA,
                         model_visible_bytes=0,
-                        token_estimate=TokenEstimate.unmeasured(item_count=1),
+                        token_estimate=visual_estimate,
                         visual=metadata,
                     )
                 )
@@ -787,6 +836,7 @@ class ProviderModelRequestCostAdapter:
             ]
             source_identity = _digest({"lane": lane, "fragment_identities": identities})
             material_bytes = sum(fragment.model_visible_bytes if fragment.model_visible_bytes is not None else len(_canonical_json(fragment.material)) for fragment in fragments)
+            non_ascii_bytes = sum(_non_ascii_utf8_bytes(_canonical_json(fragment.material)) for fragment in fragments)
             contributions.append(
                 ContextContribution(
                     contribution_id=_digest(
@@ -799,7 +849,10 @@ class ProviderModelRequestCostAdapter:
                     source_identity_digest=source_identity,
                     lane=lane,
                     model_visible_bytes=material_bytes,
-                    token_estimate=self._material_estimate(material_bytes),
+                    token_estimate=self._material_estimate(
+                        material_bytes,
+                        non_ascii_bytes,
+                    ),
                 )
             )
 
@@ -847,6 +900,7 @@ class ProviderModelRequestCostAdapter:
 
 __all__ = [
     "MODEL_REQUEST_COST_ADAPTER_REVISION",
+    "PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE",
     "MessageLaneProvenance",
     "ProviderModelRequestCostAdapter",
     "ProviderRequestFragment",

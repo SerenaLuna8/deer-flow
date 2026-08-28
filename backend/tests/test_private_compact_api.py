@@ -64,9 +64,7 @@ def compact_app(
 
 async def _compact_request(
     app: FastAPI,
-    *,
-    keep_type: str,
-    value: int | float,
+    body: dict[str, object],
 ) -> httpx.Response:
     project_id = uuid.uuid4()
     thread_id = uuid.uuid4()
@@ -76,43 +74,76 @@ async def _compact_request(
     ) as client:
         return await client.post(
             f"/api/projects/{project_id}/private-work/threads/{thread_id}/compact",
-            json={"keep": {"type": keep_type, "value": value}},
+            json=body,
         )
 
 
 @pytest.mark.asyncio
-async def test_compact_api_accepts_messages_zero_and_preserves_failure_reason(
+async def test_compact_api_defaults_to_the_policy_keep_and_preserves_failure_reason(
     compact_app: tuple[FastAPI, _CompactService, object],
 ) -> None:
     app, service, runtime_config = compact_app
 
-    response = await _compact_request(
-        app,
-        keep_type="messages",
-        value=0,
-    )
+    response = await _compact_request(app, {})
 
     assert response.status_code == 200
     assert response.json()["compacted"] is False
     assert response.json()["reason"] == "compaction_failed"
     assert len(service.calls) == 1
-    assert service.calls[0]["keep"] == ("messages", 0)
+    assert service.calls[0]["keep"] is None
     assert service.calls[0]["force"] is True
     assert service.calls[0]["app_config"] is runtime_config
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("keep_type", ["fraction", "tokens"])
-async def test_compact_api_rejects_zero_for_non_message_keep_modes(
+async def test_compact_api_forwards_a_token_keep_override(
     compact_app: tuple[FastAPI, _CompactService, object],
-    keep_type: str,
 ) -> None:
     app, service, _runtime_config = compact_app
 
     response = await _compact_request(
         app,
-        keep_type=keep_type,
-        value=0,
+        {"keep": {"type": "tokens", "value": 32_000}},
+    )
+
+    assert response.status_code == 200
+    assert len(service.calls) == 1
+    assert service.calls[0]["keep"] == ("tokens", 32_000)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keep",
+    [
+        {"type": "messages", "value": 0},
+        {"type": "messages", "value": 10},
+        {"type": "fraction", "value": 0.8},
+    ],
+)
+async def test_compact_api_rejects_retired_keep_measurements(
+    compact_app: tuple[FastAPI, _CompactService, object],
+    keep: dict[str, object],
+) -> None:
+    app, service, _runtime_config = compact_app
+
+    response = await _compact_request(app, {"keep": keep})
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "PRIVATE_WORK_INVALID"
+    assert service.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [0, -1, 0.5, 2_000_001])
+async def test_compact_api_rejects_out_of_range_token_keep_values(
+    compact_app: tuple[FastAPI, _CompactService, object],
+    value: int | float,
+) -> None:
+    app, service, _runtime_config = compact_app
+
+    response = await _compact_request(
+        app,
+        {"keep": {"type": "tokens", "value": value}},
     )
 
     assert response.status_code == 422
@@ -132,11 +163,7 @@ async def test_compact_api_preserves_specific_compaction_conflicts(
     app, service, _runtime_config = compact_app
     service.error = error_type("compact-api")
 
-    response = await _compact_request(
-        app,
-        keep_type="messages",
-        value=0,
-    )
+    response = await _compact_request(app, {})
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "PRIVATE_WORK_CONFLICT"

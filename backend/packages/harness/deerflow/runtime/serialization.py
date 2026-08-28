@@ -13,6 +13,9 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from deerflow.agents.context_compaction_warning import (
+    CONTEXT_COMPACTION_WARNING_STATE_KEY,
+)
 from deerflow.agents.memory.snip import MEMORY_ARCHIVE_RECEIPT_KEY
 from deerflow.agents.middlewares.output_limit_recovery_middleware import (
     OUTPUT_LIMIT_RECOVERY_STATE_KEY,
@@ -40,6 +43,7 @@ _INTERNAL_STATE_KEYS = frozenset(
     {
         CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
         CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
+        CONTEXT_COMPACTION_WARNING_STATE_KEY,
         MEMORY_ARCHIVE_RECEIPT_KEY,
         OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY,
         OUTPUT_LIMIT_RECOVERY_STATE_KEY,

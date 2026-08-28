@@ -1,4 +1,4 @@
-# ActWeave
+# Fluva
 
 Weave intelligence into action.
 
@@ -6,7 +6,7 @@ Weave intelligence into action.
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-ActWeave 是一个面向多账户、多项目协作的全栈 Super Agent 系统。它以
+Fluva 是一个面向多账户、多项目协作的全栈 Super Agent 系统。它以
 LangGraph Agent harness 为执行核心，提供项目级权限、Agent/Skill/MCP 资产、长期
 Memory、Sub-Agent、Sandbox、Automation、外部 Channel 和可恢复的持久化会话。
 

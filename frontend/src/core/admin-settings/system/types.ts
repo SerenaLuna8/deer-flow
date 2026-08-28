@@ -129,26 +129,12 @@ const tokenBudgetSchema = z
     message: "Hard stop threshold cannot be below the warning threshold",
   });
 
-const contextSizeSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      type: z.literal("fraction"),
-      value: z.number().finite().gt(0).max(1),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("tokens"),
-      value: boundedInteger(1, 2_000_000),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("messages"),
-      value: boundedInteger(1, 2_000_000),
-    })
-    .strict(),
-]);
+const contextSizeSchema = z
+  .object({
+    type: z.literal("tokens"),
+    value: boundedInteger(1, 2_000_000),
+  })
+  .strict();
 
 const uniqueNameListSchema = <T extends z.ZodType<string>>(
   item: T,
@@ -226,9 +212,9 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
         .object({
           enabled: z.boolean(),
           model_name: modelIdSchema.nullable(),
-          trigger: z.array(contextSizeSchema).max(8).nullable(),
+          trigger_tokens: boundedInteger(1, 2_000_000).nullable(),
           keep: contextSizeSchema,
-          trim_tokens_to_summarize: boundedInteger(1, 2_000_000).nullable(),
+          trim_tokens_to_summarize: boundedInteger(2_000, 2_000_000).nullable(),
           skill_file_read_tool_names: uniqueNameListSchema(
             toolNameSchema,
             32,

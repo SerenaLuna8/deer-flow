@@ -81,10 +81,10 @@ def test_runtime_policy_exposes_strict_role_scoped_internal_tool_call_limits() -
         )
 
 
-def test_v6_run_policy_resolves_independent_role_limits() -> None:
+def test_run_policy_resolves_independent_role_limits() -> None:
     resolved = resolve_run_tool_call_control_policy(
         MaterializedAgentRuntimePolicy(
-            schema_version=6,
+            schema_version=1,
             value=AgentRuntimePolicyValue(
                 internal_tool_call_limits=InternalToolCallLimitsPolicy(
                     lead_per_run=17,
@@ -95,7 +95,6 @@ def test_v6_run_policy_resolves_independent_role_limits() -> None:
         _research_kwargs(),
     )
 
-    assert resolved.graph_profile.accounting_mode == "lead_run_subagent_task"
     assert resolved.lead.internal_tool_call_limit == 17
     assert resolved.subagent.internal_tool_call_limit == 7
     assert resolved.max_total_subagents == 9

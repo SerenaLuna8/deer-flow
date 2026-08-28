@@ -21,10 +21,17 @@ from deerflow.agents.memory.snip import (
     compute_snip_source_digest,
 )
 from deerflow.agents.middlewares import summarization_middleware as summarization_module
+from deerflow.agents.middlewares.provider_request_usage import (
+    build_provider_request_profile,
+)
 from deerflow.agents.middlewares.summarization_middleware import (
     DeerFlowSummarizationMiddleware,
 )
+from deerflow.agents.provider_request_contract import (
+    PROVIDER_REQUEST_PROFILE_STATE_KEY,
+)
 from deerflow.config.model_execution import SystemModelExecutionProvenance
+from deerflow.config.summarization_config import MIN_TRIM_TOKENS_TO_SUMMARIZE
 from deerflow.models import ModelRuntimeProfile
 from deerflow.runtime import context_compaction as context_compaction_module
 from deerflow.runtime.context_compaction import prepare_thread_compaction
@@ -905,7 +912,41 @@ def test_automatic_compaction_advances_to_a_later_oversized_turn_when_keep_block
     assert 2 < model.call_count <= 9
 
 
-def test_automatic_compaction_fails_stably_when_packaged_prompt_cannot_fit() -> None:
+def test_automatic_compaction_skips_stably_when_packaged_prompt_cannot_fit() -> None:
+    model = _model("- [durable] Must not be reached.")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 1),
+        keep=("messages", 1),
+        trim_tokens_to_summarize=1,
+        summary_prompt=SNIP_ARCHIVE_PROMPT,
+    )
+    messages = [
+        HumanMessage(id="old-human", content="old request"),
+        AIMessage(id="old-ai", content="old answer"),
+        HumanMessage(id="recent-human", content="recent request"),
+        AIMessage(id="recent-ai", content="recent answer"),
+        HumanMessage(id="open-human", content="current request"),
+    ]
+
+    assert middleware.before_model({"messages": messages}, _runtime()) == {
+        "context_compaction_warning": {
+            "version": 1,
+            "disposition": "skip_this_turn",
+            "reason": "prompt_budget_too_small",
+        }
+    }
+    assert asyncio.run(middleware.abefore_model({"messages": messages}, _runtime())) == {
+        "context_compaction_warning": {
+            "version": 1,
+            "disposition": "skip_this_turn",
+            "reason": "prompt_budget_too_small",
+        }
+    }
+    assert model.call_count == 0
+
+
+def test_forced_compaction_still_raises_when_packaged_prompt_cannot_fit() -> None:
     model = _model("- [durable] Must not be reached.")
     middleware = DeerFlowSummarizationMiddleware(
         model=model,
@@ -923,11 +964,64 @@ def test_automatic_compaction_fails_stably_when_packaged_prompt_cannot_fit() -> 
     ]
 
     with pytest.raises(summarization_module.SnipPromptBudgetTooSmall):
-        middleware.before_model(
+        middleware.compact_state(
             {"messages": messages},
             _runtime(),
+            force=True,
         )
 
+    assert model.call_count == 0
+
+
+def test_automatic_compaction_skips_when_profile_measurement_is_unsupported() -> None:
+    """Unmeasurable vision state must not commit approximate compaction."""
+
+    model = _model(
+        _dual(
+            "The earlier exchange is archived.",
+            "- [durable] The earlier answer remains available.",
+        )
+    )
+    middleware = _middleware(model)
+    # ``deepseek`` declares no per-image visual cost, so this measurement
+    # stays fail-closed and must skip this compaction turn without invoking the
+    # SNIP model. The final Provider guard independently owns dispatch safety.
+    profile = build_provider_request_profile(
+        model=SimpleNamespace(profile={"max_input_tokens": 100_000}),
+        model_name="vision-lead",
+        provider_adapter="deepseek",
+        system_prompt="canonical system prompt",
+        tools=(),
+        supports_vision=True,
+    )
+    state = {
+        "messages": [
+            HumanMessage(id="old-human", content="old request"),
+            AIMessage(id="old-ai", content="old answer"),
+            HumanMessage(id="mid-human", content="follow-up request"),
+            AIMessage(id="mid-ai", content="follow-up answer"),
+            HumanMessage(id="open-human", content="current request"),
+        ],
+        PROVIDER_REQUEST_PROFILE_STATE_KEY: profile.snapshot(),
+        "viewed_images": {
+            "/mnt/user-data/uploads/photo.png": {
+                "mime_type": "image/png",
+                "size": 12,
+                "sha256": "c" * 64,
+                "file_ref": {"path": "/mnt/user-data/uploads/photo.png"},
+            }
+        },
+    }
+
+    update = middleware.before_model(state, _runtime())
+
+    assert update == {
+        "context_compaction_warning": {
+            "version": 1,
+            "disposition": "skip_this_turn",
+            "reason": "checkpoint_unmeasurable",
+        }
+    }
     assert model.call_count == 0
 
 
@@ -1861,7 +1955,7 @@ def test_configured_custom_prompt_reaches_the_production_factory(
     config = SimpleNamespace(
         enabled=True,
         model_name=None,
-        trigger=None,
+        trigger_tokens=None,
         keep=SimpleNamespace(to_tuple=lambda: ("messages", 1)),
         trim_tokens_to_summarize=20_000,
         summary_prompt=custom_prompt,
@@ -1890,13 +1984,13 @@ def test_configured_custom_prompt_reaches_the_production_factory(
     assert middleware._dual_output_contract is False
 
 
-def test_production_factory_binds_fraction_triggers_to_the_lead_context_model(
+def test_production_factory_binds_context_reporting_to_the_lead_context_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = SimpleNamespace(
         enabled=True,
         model_name=None,
-        trigger=SimpleNamespace(to_tuple=lambda: ("fraction", 0.5)),
+        trigger_tokens=100_000,
         keep=SimpleNamespace(to_tuple=lambda: ("messages", 1)),
         trim_tokens_to_summarize=20_000,
         summary_prompt=None,
@@ -1932,7 +2026,7 @@ def test_explicit_custom_prompt_equal_to_packaged_text_stays_single_segment(
     config = SimpleNamespace(
         enabled=True,
         model_name=None,
-        trigger=None,
+        trigger_tokens=None,
         keep=SimpleNamespace(to_tuple=lambda: ("messages", 1)),
         trim_tokens_to_summarize=20_000,
         summary_prompt=SNIP_ARCHIVE_PROMPT,
@@ -1966,7 +2060,7 @@ def test_packaged_prompt_budget_reaches_the_production_factory(
     config = SimpleNamespace(
         enabled=True,
         model_name=None,
-        trigger=None,
+        trigger_tokens=None,
         keep=SimpleNamespace(to_tuple=lambda: ("messages", 1)),
         trim_tokens_to_summarize=20_000,
         summary_prompt=None,
@@ -1998,6 +2092,32 @@ def test_packaged_prompt_budget_reaches_the_production_factory(
     assert observed == [model]
     assert middleware.summary_prompt == SNIP_ARCHIVE_PROMPT
     assert middleware._dual_output_contract is True
+
+
+def test_production_factory_clamps_trim_budget_to_packaged_prompt_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        enabled=True,
+        model_name=None,
+        trigger_tokens=None,
+        keep=SimpleNamespace(to_tuple=lambda: ("messages", 1)),
+        trim_tokens_to_summarize=100,
+        summary_prompt=None,
+    )
+    app_config = SimpleNamespace(summarization=config)
+    monkeypatch.setattr(
+        summarization_module.ModelRuntime,
+        "build_chat_model",
+        lambda _self, **_kwargs: _model(_dual("Continue the task.", "(nothing)")),
+    )
+
+    middleware = summarization_module.create_summarization_middleware(
+        app_config=app_config,
+    )
+
+    assert middleware is not None
+    assert middleware.trim_tokens_to_summarize == MIN_TRIM_TOKENS_TO_SUMMARIZE
 
 
 def test_snip_summary_model_output_budget_is_raised_for_dual_output() -> None:

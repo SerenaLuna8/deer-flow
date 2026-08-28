@@ -53,6 +53,26 @@ _DETERMINISTIC_NONRETRYABLE_ERROR_CODES = (
 )
 
 
+def _durable_terminal_successor_idempotency_key(
+    predecessor_job_id: uuid.UUID,
+) -> str:
+    """Persist the settlement-only mode in a domain-separated Job identity."""
+
+    return hashlib.sha256((f"durable-terminal-settlement-successor:v1:{predecessor_job_id}").encode()).hexdigest()
+
+
+def _is_durable_terminal_successor(row: JobRow) -> bool:
+    predecessor_job_id = row.predecessor_dead_job_id
+    return (
+        row.job_type in {"private_run", "automation_run"}
+        and predecessor_job_id is not None
+        and row.idempotency_key
+        == _durable_terminal_successor_idempotency_key(
+            predecessor_job_id,
+        )
+    )
+
+
 def _dead_error_code_for_failure(
     *,
     retry_safety: RetrySafety,
@@ -239,6 +259,8 @@ class JobClaim:
     namespace: str | None = None
     origin_trace_id: str | None = None
     execution_domain_affinity: str | None = None
+    predecessor_dead_job_id: uuid.UUID | None = None
+    settlement_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +325,65 @@ _ISSUED_REQUEUE_EVENTS: dict[
 _ISSUED_REQUEUE_EVENTS_LOCK = Lock()
 
 
+@dataclass(frozen=True, slots=True)
+class _DeadTerminalReconciliationCursor:
+    dead_at: datetime
+    job_id: uuid.UUID
+
+
+_DEAD_TERMINAL_RECONCILIATION_PAGE_SIZE = 100
+# This cursor is deliberately process-local: every Worker process makes its own
+# bounded progress, while PostgreSQL row locks and the unique successor lineage
+# remain the cross-process correctness fence.  Compare-and-set advancement keeps
+# concurrent claim loops in one process from moving a shared cursor backwards;
+# weak Engine keys discard state when a session factory is retired.
+_DEAD_TERMINAL_RECONCILIATION_CURSORS: weakref.WeakKeyDictionary[
+    object,
+    dict[
+        tuple[tuple[str, ...], str | None],
+        _DeadTerminalReconciliationCursor,
+    ],
+] = weakref.WeakKeyDictionary()
+_DEAD_TERMINAL_RECONCILIATION_CURSORS_LOCK = Lock()
+
+
+def _dead_terminal_reconciliation_cursor(
+    bind: object,
+    scope: tuple[tuple[str, ...], str | None],
+) -> _DeadTerminalReconciliationCursor | None:
+    """Read one process-local liveness hint without granting authority."""
+
+    with _DEAD_TERMINAL_RECONCILIATION_CURSORS_LOCK:
+        return _DEAD_TERMINAL_RECONCILIATION_CURSORS.get(bind, {}).get(scope)
+
+
+def _advance_dead_terminal_reconciliation_cursor(
+    bind: object,
+    scope: tuple[tuple[str, ...], str | None],
+    *,
+    expected: _DeadTerminalReconciliationCursor | None,
+    updated: _DeadTerminalReconciliationCursor | None,
+) -> None:
+    """Advance a scan page only when a concurrent claimant did not move it."""
+
+    with _DEAD_TERMINAL_RECONCILIATION_CURSORS_LOCK:
+        scoped = _DEAD_TERMINAL_RECONCILIATION_CURSORS.get(bind)
+        current = None if scoped is None else scoped.get(scope)
+        if current != expected:
+            return
+        if updated is None:
+            if scoped is None:
+                return
+            scoped.pop(scope, None)
+            if not scoped:
+                _DEAD_TERMINAL_RECONCILIATION_CURSORS.pop(bind, None)
+            return
+        if scoped is None:
+            scoped = {}
+            _DEAD_TERMINAL_RECONCILIATION_CURSORS[bind] = scoped
+        scoped[scope] = updated
+
+
 def consume_issued_dead_job_requeued_event(
     value: object,
 ) -> TypeGuard[DeadJobRequeuedEvent]:
@@ -352,6 +433,59 @@ class JobTerminalResult:
 
 
 @dataclass(frozen=True, slots=True)
+class DurableTerminalTakeoverRequest:
+    """Coordinates for one expired Job whose durable terminal may settle it."""
+
+    job_id: uuid.UUID
+    attempt_id: uuid.UUID
+    project_id: uuid.UUID
+    owner_user_id: str = field(repr=False)
+    run_id: str = field(repr=False)
+    job_type: Literal["private_run", "automation_run"]
+    retry_safety: RetrySafety
+    attempt_count: int
+    max_attempts: int
+    origin_trace_id: str = field(repr=False)
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DurableDeadTerminalReconciliationRequest:
+    """Exact dead Run coordinates eligible for terminal-only reconciliation."""
+
+    predecessor_job_id: uuid.UUID
+    project_id: uuid.UUID
+    owner_user_id: str = field(repr=False)
+    run_id: str = field(repr=False)
+    occurrence_id: str | None
+    job_type: Literal["private_run", "automation_run"]
+    retry_safety: RetrySafety
+    attempt_count: int
+    max_attempts: int
+    public_error_code: Literal[
+        "SIDE_EFFECT_STATE_UNKNOWN",
+        "ATTEMPTS_EXHAUSTED",
+    ]
+    origin_trace_id: str = field(repr=False)
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DurableTerminalSuccessorRebindRequest:
+    """Atomically move one running Run to its terminal-only successor Job."""
+
+    predecessor_job_id: uuid.UUID
+    successor_job_id: uuid.UUID
+    project_id: uuid.UUID
+    owner_user_id: str = field(repr=False)
+    run_id: str = field(repr=False)
+    occurrence_id: str | None
+    job_type: Literal["private_run", "automation_run"]
+    origin_trace_id: str = field(repr=False)
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class JobRetryResult:
     changed: bool
     run_terminal_published: bool
@@ -366,6 +500,24 @@ class JobAuditPort(Protocol):
 
 
 class JobTerminalPort(Protocol):
+    async def durable_terminal_takeover_allowed(
+        self,
+        session: AsyncSession,
+        event: DurableTerminalTakeoverRequest,
+    ) -> bool: ...
+
+    async def durable_dead_terminal_reconciliation_allowed(
+        self,
+        session: AsyncSession,
+        event: DurableDeadTerminalReconciliationRequest,
+    ) -> bool: ...
+
+    async def rebind_durable_terminal_successor(
+        self,
+        session: AsyncSession,
+        event: DurableTerminalSuccessorRebindRequest,
+    ) -> bool: ...
+
     async def job_terminalized(
         self,
         session: AsyncSession,
@@ -480,7 +632,7 @@ class JobRepository:
                 idempotency_key=request.idempotency_key,
                 status="queued",
                 priority=request.priority,
-                available_at=request.available_at or now,
+                available_at=(request.available_at if request.available_at is not None else sa.func.clock_timestamp()),
                 attempt_count=0,
                 max_attempts=request.max_attempts,
                 retry_safety=request.retry_safety,
@@ -828,6 +980,288 @@ class JobRepository:
             now=now,
         )
 
+    async def _prepare_dead_terminal_successor(
+        self,
+        *,
+        job_types: list[str],
+        execution_domain_claimable: sa.ColumnElement[bool],
+        execution_domain_affinity: str | None,
+        now: datetime,
+    ) -> uuid.UUID | None:
+        """Create and bind one terminal-only successor for a legacy dead Run.
+
+        The dead Job and its append-only dead projection remain untouched. The
+        successor is a new lineage node, and the Run (plus an Automation
+        occurrence when present) is rebound in this same transaction only
+        after the private terminal port proves durable terminal authority.
+        """
+
+        prove = getattr(
+            self._terminal_port,
+            "durable_dead_terminal_reconciliation_allowed",
+            None,
+        )
+        rebind = getattr(
+            self._terminal_port,
+            "rebind_durable_terminal_successor",
+            None,
+        )
+        run_job_types = sorted(set(job_types) & {"private_run", "automation_run"})
+        if not run_job_types or not callable(prove) or not callable(rebind):
+            return None
+
+        cursor_scope = (
+            tuple(run_job_types),
+            execution_domain_affinity,
+        )
+        session_bind = self.session.get_bind()
+        cursor_bind = getattr(session_bind, "engine", session_bind)
+        starting_cursor = _dead_terminal_reconciliation_cursor(
+            cursor_bind,
+            cursor_scope,
+        )
+
+        def candidate_statement(
+            after: _DeadTerminalReconciliationCursor | None,
+        ) -> sa.Select:
+            statement = (
+                sa.select(
+                    JobRow.id,
+                    JobRow.project_id,
+                    JobRow.owner_user_id,
+                    JobRow.job_type,
+                    JobRow.owner_private_generation,
+                    JobRow.retention_resource_kind,
+                    JobRow.retention_effective_at,
+                    JobRow.retention_membership_id,
+                    DeadJobRow.dead_at.label("reconciliation_dead_at"),
+                )
+                .join(
+                    DeadJobRow,
+                    sa.and_(
+                        DeadJobRow.job_id == JobRow.id,
+                        DeadJobRow.project_id == JobRow.project_id,
+                        DeadJobRow.job_type == JobRow.job_type,
+                        DeadJobRow.retry_safety == JobRow.retry_safety,
+                        DeadJobRow.attempt_count == JobRow.attempt_count,
+                        DeadJobRow.public_error_code == JobRow.public_error_code,
+                    ),
+                )
+                .where(
+                    JobRow.job_type.in_(run_job_types),
+                    JobRow.status == "dead",
+                    execution_domain_claimable,
+                    sa.or_(
+                        sa.and_(
+                            JobRow.public_error_code == "SIDE_EFFECT_STATE_UNKNOWN",
+                            JobRow.retry_safety != "safe",
+                        ),
+                        sa.and_(
+                            JobRow.public_error_code == "ATTEMPTS_EXHAUSTED",
+                            JobRow.attempt_count >= JobRow.max_attempts,
+                        ),
+                    ),
+                    ~sa.exists(
+                        sa.select(1).where(
+                            JobRow.__table__.alias("durable_terminal_successor").c.predecessor_dead_job_id == JobRow.id,
+                        )
+                    ),
+                )
+                .order_by(DeadJobRow.dead_at, JobRow.id)
+                .limit(_DEAD_TERMINAL_RECONCILIATION_PAGE_SIZE)
+            )
+            if after is not None:
+                statement = statement.where(
+                    sa.or_(
+                        DeadJobRow.dead_at > after.dead_at,
+                        sa.and_(
+                            DeadJobRow.dead_at == after.dead_at,
+                            JobRow.id > after.job_id,
+                        ),
+                    )
+                )
+            return statement
+
+        candidates = tuple((await self.session.execute(candidate_statement(starting_cursor))).all())
+        if not candidates and starting_cursor is not None:
+            # The cursor reached the end (or its old page disappeared). Wrap in
+            # one extra bounded query; never offset-scan the dead set.
+            candidates = tuple((await self.session.execute(candidate_statement(None))).all())
+        if not candidates:
+            _advance_dead_terminal_reconciliation_cursor(
+                cursor_bind,
+                cursor_scope,
+                expected=starting_cursor,
+                updated=None,
+            )
+            return None
+
+        for candidate in candidates:
+            candidate_cursor = _DeadTerminalReconciliationCursor(
+                dead_at=candidate.reconciliation_dead_at,
+                job_id=candidate.id,
+            )
+            savepoint = await self.session.begin_nested()
+            try:
+                if not await self._lock_claim_authority(
+                    project_id=candidate.project_id,
+                    owner_user_id=candidate.owner_user_id,
+                    job_type=candidate.job_type,
+                    owner_private_generation=(candidate.owner_private_generation),
+                    retention_resource_kind=(candidate.retention_resource_kind),
+                    retention_effective_at=(candidate.retention_effective_at),
+                    retention_membership_id=(candidate.retention_membership_id),
+                ):
+                    await savepoint.rollback()
+                    continue
+                predecessor = await self.session.scalar(
+                    sa.select(JobRow)
+                    .where(
+                        JobRow.id == candidate.id,
+                        JobRow.project_id == candidate.project_id,
+                        JobRow.owner_user_id == candidate.owner_user_id,
+                        JobRow.job_type == candidate.job_type,
+                        JobRow.status == "dead",
+                        execution_domain_claimable,
+                    )
+                    .with_for_update(of=JobRow, skip_locked=True)
+                )
+                if predecessor is None:
+                    await savepoint.rollback()
+                    continue
+                dead = await self.session.scalar(
+                    sa.select(DeadJobRow).where(
+                        DeadJobRow.job_id == predecessor.id,
+                        DeadJobRow.project_id == predecessor.project_id,
+                        DeadJobRow.job_type == predecessor.job_type,
+                        DeadJobRow.retry_safety == predecessor.retry_safety,
+                        DeadJobRow.attempt_count == predecessor.attempt_count,
+                        DeadJobRow.public_error_code == predecessor.public_error_code,
+                    )
+                )
+                successor_exists = await self.session.scalar(
+                    sa.select(
+                        sa.exists().where(
+                            JobRow.predecessor_dead_job_id == predecessor.id,
+                        )
+                    )
+                )
+                eligible_error = (predecessor.public_error_code == "SIDE_EFFECT_STATE_UNKNOWN" and predecessor.retry_safety != "safe") or (
+                    predecessor.public_error_code == "ATTEMPTS_EXHAUSTED" and predecessor.attempt_count >= predecessor.max_attempts
+                )
+                if (
+                    dead is None
+                    or successor_exists is not False
+                    or not eligible_error
+                    or predecessor.owner_user_id is None
+                    or predecessor.run_id is None
+                    or predecessor.origin_trace_id is None
+                    or type(predecessor.owner_private_generation) is not int
+                    or predecessor.owner_private_generation < 1
+                ):
+                    await savepoint.rollback()
+                    continue
+                public_error_code = predecessor.public_error_code
+                if public_error_code not in {
+                    "SIDE_EFFECT_STATE_UNKNOWN",
+                    "ATTEMPTS_EXHAUSTED",
+                }:
+                    await savepoint.rollback()
+                    continue
+                proof = await prove(
+                    self.session,
+                    DurableDeadTerminalReconciliationRequest(
+                        predecessor_job_id=predecessor.id,
+                        project_id=predecessor.project_id,
+                        owner_user_id=predecessor.owner_user_id,
+                        run_id=predecessor.run_id,
+                        occurrence_id=predecessor.automation_occurrence_id,
+                        job_type=predecessor.job_type,
+                        retry_safety=predecessor.retry_safety,
+                        attempt_count=predecessor.attempt_count,
+                        max_attempts=predecessor.max_attempts,
+                        public_error_code=public_error_code,
+                        origin_trace_id=predecessor.origin_trace_id,
+                        occurred_at=now,
+                    ),
+                )
+                if type(proof) is not bool:
+                    raise TypeError("durable dead terminal proof returned an invalid result")
+                if not proof:
+                    await savepoint.rollback()
+                    continue
+                successor_id, created = await self._enqueue(
+                    EnqueueJob(
+                        job_type=predecessor.job_type,
+                        scope=JobScope(
+                            predecessor.project_id,
+                            predecessor.owner_user_id,
+                        ),
+                        idempotency_key=(
+                            _durable_terminal_successor_idempotency_key(
+                                predecessor.id,
+                            )
+                        ),
+                        run_id=predecessor.run_id,
+                        occurrence_id=(predecessor.automation_occurrence_id),
+                        max_attempts=predecessor.max_attempts,
+                        owner_private_generation=AccountPrivateGeneration(
+                            owner_user_id=predecessor.owner_user_id,
+                            generation=(predecessor.owner_private_generation),
+                        ),
+                        retry_safety="safe",
+                        priority=predecessor.priority,
+                        available_at=now,
+                        predecessor_dead_job_id=predecessor.id,
+                        origin_trace_id=predecessor.origin_trace_id,
+                        execution_domain_affinity=(predecessor.execution_domain_affinity),
+                    )
+                )
+                if not created:
+                    raise RuntimeError("durable terminal successor identity was already used")
+                rebound = await rebind(
+                    self.session,
+                    DurableTerminalSuccessorRebindRequest(
+                        predecessor_job_id=predecessor.id,
+                        successor_job_id=successor_id,
+                        project_id=predecessor.project_id,
+                        owner_user_id=predecessor.owner_user_id,
+                        run_id=predecessor.run_id,
+                        occurrence_id=(predecessor.automation_occurrence_id),
+                        job_type=predecessor.job_type,
+                        origin_trace_id=predecessor.origin_trace_id,
+                        occurred_at=now,
+                    ),
+                )
+                if type(rebound) is not bool:
+                    raise TypeError("durable terminal successor rebind returned an invalid result")
+                if not rebound:
+                    raise RuntimeError("durable terminal successor rebind lost authority")
+                await self.session.flush()
+                await savepoint.commit()
+                _advance_dead_terminal_reconciliation_cursor(
+                    cursor_bind,
+                    cursor_scope,
+                    expected=starting_cursor,
+                    updated=candidate_cursor,
+                )
+                return successor_id
+            except BaseException:
+                if savepoint.is_active:
+                    await savepoint.rollback()
+                raise
+        last_candidate = candidates[-1]
+        _advance_dead_terminal_reconciliation_cursor(
+            cursor_bind,
+            cursor_scope,
+            expected=starting_cursor,
+            updated=_DeadTerminalReconciliationCursor(
+                dead_at=last_candidate.reconciliation_dead_at,
+                job_id=last_candidate.id,
+            ),
+        )
+        return None
+
     async def claim_next(
         self,
         *,
@@ -864,6 +1298,8 @@ class JobRepository:
                 JobRow.execution_domain_affinity == execution_domain_affinity,
             )
         explicit_claimed_at = self._now(now) if now is not None else None
+        preferred_candidate_id: uuid.UUID | None = None
+        dead_reconciliation_attempted = False
 
         def claimable_at(value):
             return sa.or_(
@@ -920,10 +1356,36 @@ class JobRepository:
                 )
                 .limit(1)
             )
+            if preferred_candidate_id is not None:
+                candidate_statement = candidate_statement.where(
+                    JobRow.id == preferred_candidate_id,
+                )
             if skipped_ids:
                 candidate_statement = candidate_statement.where(JobRow.id.not_in(skipped_ids))
             candidate = (await self.session.execute(candidate_statement)).one_or_none()
             if candidate is None:
+                if preferred_candidate_id is not None:
+                    preferred_candidate_id = None
+                    continue
+                if not dead_reconciliation_attempted:
+                    dead_reconciliation_attempted = True
+                    reconciliation_at = (
+                        explicit_claimed_at
+                        if explicit_claimed_at is not None
+                        else await self.session.scalar(
+                            sa.select(sa.func.clock_timestamp()),
+                        )
+                    )
+                    if not isinstance(reconciliation_at, datetime) or reconciliation_at.tzinfo is None:
+                        raise RuntimeError("database claim clock is unavailable")
+                    preferred_candidate_id = await self._prepare_dead_terminal_successor(
+                        job_types=job_types,
+                        execution_domain_claimable=(execution_domain_claimable),
+                        execution_domain_affinity=execution_domain_affinity,
+                        now=reconciliation_at,
+                    )
+                    if preferred_candidate_id is not None:
+                        continue
                 return None
 
             savepoint = await self.session.begin_nested()
@@ -1011,7 +1473,34 @@ class JobRepository:
                 raise RuntimeError("Run job trace authority is invalid")
 
             if row.status in {"leased", "running"}:
-                if row.retry_safety != "safe":
+                terminal_takeover = False
+                takeover = getattr(
+                    self._terminal_port,
+                    "durable_terminal_takeover_allowed",
+                    None,
+                )
+                if callable(takeover) and row.job_type in {"private_run", "automation_run"} and row.owner_user_id is not None and row.run_id is not None and row.origin_trace_id is not None:
+                    terminal_takeover = await takeover(
+                        self.session,
+                        DurableTerminalTakeoverRequest(
+                            job_id=row.id,
+                            attempt_id=active_attempt_id,
+                            project_id=row.project_id,
+                            owner_user_id=row.owner_user_id,
+                            run_id=row.run_id,
+                            job_type=row.job_type,
+                            retry_safety=row.retry_safety,
+                            attempt_count=row.attempt_count,
+                            max_attempts=row.max_attempts,
+                            origin_trace_id=row.origin_trace_id,
+                            occurred_at=claimed_at,
+                        ),
+                    )
+                    if type(terminal_takeover) is not bool:
+                        raise TypeError(
+                            "durable terminal takeover port returned an invalid result",
+                        )
+                if not terminal_takeover and row.retry_safety != "safe":
                     public_error_code = "SIDE_EFFECT_STATE_UNKNOWN"
                     owner_ref = self._owner_ref(row.owner_user_id)
                     await self._finish_current_attempt(
@@ -1028,11 +1517,11 @@ class JobRepository:
                     )
                     await self.session.flush()
                     return None
-                if row.cancel_requested_at is not None:
+                if not terminal_takeover and row.cancel_requested_at is not None:
                     await self._settle_unowned_cancel(row, now=claimed_at)
                     await self.session.flush()
                     return None
-                if row.attempt_count >= row.max_attempts:
+                if not terminal_takeover and row.attempt_count >= row.max_attempts:
                     owner_ref = self._owner_ref(row.owner_user_id)
                     await self._finish_current_attempt(
                         row,
@@ -1092,6 +1581,8 @@ class JobRepository:
                 namespace=row.namespace,
                 origin_trace_id=row.origin_trace_id,
                 execution_domain_affinity=row.execution_domain_affinity,
+                predecessor_dead_job_id=row.predecessor_dead_job_id,
+                settlement_only=_is_durable_terminal_successor(row),
             )
         return None
 
@@ -1779,6 +2270,9 @@ class JobRepository:
 
 
 __all__ = [
+    "DurableDeadTerminalReconciliationRequest",
+    "DurableTerminalSuccessorRebindRequest",
+    "DurableTerminalTakeoverRequest",
     "EnqueueJob",
     "DeadJobRecord",
     "DeadJobRequeuedEvent",

@@ -116,11 +116,30 @@ def get_available_tools(
     if model_name is None and config.models:
         model_name = config.models[0].name
 
-    # Add view_image_tool only if the model supports vision
+    # Add view_image_tool only when the model supports vision AND its adapter
+    # declares a per-image token cost. Without a declared cost the final
+    # provider guard fails closed on every image-bearing request, so offering
+    # the tool would only arm a guaranteed failure.
     model_config = config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
-        builtin_tools.append(view_image_tool)
-        logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
+        # Lazy import preserves the tools -> agents middleware import boundary.
+        from deerflow.agents.middlewares.provider_request_usage import (
+            declared_visual_max_tokens_per_image,
+        )
+
+        if (
+            declared_visual_max_tokens_per_image(
+                model_config.system_provider_adapter,
+                model_config.use,
+            )
+            is not None
+        ):
+            builtin_tools.append(view_image_tool)
+            logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
+        else:
+            logger.info(
+                f"Excluding view_image_tool for model '{model_name}': provider adapter declares no per-image token cost",
+            )
 
     # The MCP runtime loader owns pre-cutover file behavior. This layer must
     # not probe ExtensionsConfig because cutover is provider-only.

@@ -162,10 +162,12 @@ async def test_cancelled_provider_dispatch_is_durably_marked_ambiguous() -> None
 @pytest.mark.asyncio
 async def test_unmeasured_visual_is_prepared_for_partial_projection_before_guard_failure() -> None:
     model = _model()
+    # ``deepseek`` declares no per-image token cost, so its visual material
+    # keeps the fail-closed dispatch contract exercised here.
     profile = build_provider_request_profile(
         model=model,
         model_name="lead",
-        provider_adapter="openai",
+        provider_adapter="deepseek",
         system_prompt="system",
         tools=(),
         supports_vision=True,

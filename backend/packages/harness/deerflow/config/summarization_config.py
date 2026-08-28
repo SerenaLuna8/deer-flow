@@ -1,13 +1,100 @@
 """Configuration for conversation summarization."""
 
+from dataclasses import dataclass
 from string import Formatter
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-ContextSizeType = Literal["fraction", "tokens", "messages"]
+ContextSizeType = Literal["tokens"]
 DEFAULT_SKILL_FILE_READ_TOOL_NAMES: tuple[str, ...] = ("read_file", "read", "view", "cat")
+# The packaged dual-segment SNIP prompt plus its bounded repair suffix costs
+# roughly 830 approximate tokens before any conversation content. Budgets that
+# cannot contain one leaf prompt can never plan a compaction, so authoring
+# rejects them and the production factory clamps legacy values up to this floor.
+MIN_TRIM_TOKENS_TO_SUMMARIZE = 2_000
 _SUMMARY_PROMPT_CONTRACT_ERROR = "summary_prompt must be a valid format template whose only replacement field is {messages}"
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveCompactionPolicy:
+    """One model-bound automatic-compaction policy.
+
+    ``keep_tokens`` is the approximate recent-history selection target.
+    Capacity adaptation may move the trigger earlier; the frozen Provider
+    profile separately qualifies each concrete retained tail. The safety fields
+    expose the statically provable contribution instead of hiding it inside a
+    percentage clamp; ``retained_context_safety_tokens == 0`` means concrete
+    retention is enforced dynamically by that profile.
+    """
+
+    trigger_tokens: int | None
+    keep_tokens: int
+    context_window_tokens: int | None
+    fixed_noncompressible_safety_tokens: int
+    summary_headroom_tokens: int
+    retained_context_safety_tokens: int
+
+    @property
+    def noncompressible_safety_tokens(self) -> int:
+        return self.fixed_noncompressible_safety_tokens + self.summary_headroom_tokens
+
+
+class CompactionPolicyIncompatible(ValueError):
+    """The authorized retention floor cannot fit below compaction's trigger."""
+
+
+def resolve_effective_compaction_policy(
+    *,
+    trigger_tokens: int | None,
+    keep_tokens: int,
+    context_window_tokens: int | None,
+    fixed_noncompressible_safety_tokens: int = 0,
+    summary_headroom_tokens: int = 0,
+    retained_context_safety_tokens: int | None = None,
+) -> EffectiveCompactionPolicy:
+    """Resolve the known portion of the joint compaction invariant.
+
+    A known model capacity can advance the trigger. Profile-aware callers
+    supply the Provider safety-bound cost of fixed material; they may pass zero
+    for retained context when concrete cutoff candidates are checked at runtime.
+    """
+
+    effective_trigger = min(trigger_tokens, context_window_tokens) if trigger_tokens is not None and context_window_tokens is not None else trigger_tokens
+    effective_retained_tokens = keep_tokens if retained_context_safety_tokens is None else retained_context_safety_tokens
+    if effective_trigger is not None and fixed_noncompressible_safety_tokens + summary_headroom_tokens + effective_retained_tokens >= effective_trigger:
+        raise CompactionPolicyIncompatible(
+            "Compaction retention and noncompressible context must fit strictly below the effective trigger",
+        )
+    return EffectiveCompactionPolicy(
+        trigger_tokens=effective_trigger,
+        keep_tokens=keep_tokens,
+        context_window_tokens=context_window_tokens,
+        fixed_noncompressible_safety_tokens=(fixed_noncompressible_safety_tokens),
+        summary_headroom_tokens=summary_headroom_tokens,
+        retained_context_safety_tokens=effective_retained_tokens,
+    )
+
+
+def effective_compaction_trigger_tokens(
+    trigger_tokens: int | None,
+    context_window_tokens: int | None,
+) -> int | None:
+    """Clamp the absolute compaction trigger to the Provider Model capacity.
+
+    The trigger is one global policy value while ``max_input_tokens`` varies
+    per model. A trigger strictly above the capacity leaves a dead zone
+    (``capacity < occupancy < trigger``) where the final Provider guard
+    rejects the request before automatic compaction ever participates, so
+    every site that freezes a trigger next to a known capacity clamps here.
+    An unknown or non-positive capacity keeps the configured trigger.
+    """
+
+    if trigger_tokens is None:
+        return None
+    if not isinstance(context_window_tokens, int) or isinstance(context_window_tokens, bool) or context_window_tokens <= 0:
+        return trigger_tokens
+    return min(trigger_tokens, context_window_tokens)
 
 
 def validate_summary_prompt_template(template: str) -> str:
@@ -31,12 +118,19 @@ def validate_summary_prompt_template(template: str) -> str:
 
 
 class ContextSize(BaseModel):
-    """Context size specification for trigger or keep parameters."""
+    """Token-based retention size for the post-summarization keep policy.
 
-    type: ContextSizeType = Field(description="Type of context size specification")
-    value: int | float = Field(description="Value for the context size specification")
+    Message-count and context-fraction measurements were removed; recent
+    history is preserved by token count only.
+    """
 
-    def to_tuple(self) -> tuple[ContextSizeType, int | float]:
+    type: ContextSizeType = Field(
+        default="tokens",
+        description="Type of context size specification (token count only)",
+    )
+    value: int = Field(ge=1, description="Number of recent-history tokens to preserve")
+
+    def to_tuple(self) -> tuple[ContextSizeType, int]:
         """Convert to tuple format expected by SummarizationMiddleware."""
         return (self.type, self.value)
 
@@ -52,19 +146,14 @@ class SummarizationConfig(BaseModel):
         default=None,
         description="Model name to use for summarization (None = use a lightweight model)",
     )
-    trigger: ContextSize | list[ContextSize] | None = Field(
+    trigger_tokens: int | None = Field(
         default=None,
-        description="One or more thresholds that trigger summarization. When any threshold is met, summarization runs. "
-        "Examples: {'type': 'messages', 'value': 50} triggers at 50 messages, "
-        "{'type': 'tokens', 'value': 4000} triggers at 4000 tokens, "
-        "{'type': 'fraction', 'value': 0.8} triggers at 80% of model's max input tokens",
+        ge=1,
+        description="Estimated-token threshold that triggers automatic summarization. None disables the automatic trigger.",
     )
     keep: ContextSize = Field(
-        default_factory=lambda: ContextSize(type="messages", value=20),
-        description="Context retention policy after summarization. Specifies how much history to preserve. "
-        "Examples: {'type': 'messages', 'value': 20} keeps 20 messages, "
-        "{'type': 'tokens', 'value': 3000} keeps 3000 tokens, "
-        "{'type': 'fraction', 'value': 0.3} keeps 30% of model's max input tokens",
+        default_factory=lambda: ContextSize(type="tokens", value=64_000),
+        description="Context retention policy after summarization. Specifies how many tokens of recent history to preserve.",
     )
     trim_tokens_to_summarize: int | None = Field(
         default=4000,
@@ -85,6 +174,16 @@ class SummarizationConfig(BaseModel):
         if value is None:
             return None
         return validate_summary_prompt_template(value)
+
+    @model_validator(mode="after")
+    def validate_retention_below_trigger(self) -> "SummarizationConfig":
+        if self.enabled and self.trigger_tokens is not None:
+            resolve_effective_compaction_policy(
+                trigger_tokens=self.trigger_tokens,
+                keep_tokens=self.keep.value,
+                context_window_tokens=None,
+            )
+        return self
 
 
 # Global configuration instance

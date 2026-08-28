@@ -1,6 +1,6 @@
 ---
 title: 集成指南
-description: ActWeave Harness 不仅仅是一个独立应用程序——它是一个可以导入并在你自己的后端、API 服务器、自动化系统或多 Agent 协调器中使用的 Python 库。
+description: Fluva Harness 不仅仅是一个独立应用程序——它是一个可以导入并在你自己的后端、API 服务器、自动化系统或多 Agent 协调器中使用的 Python 库。
 ---
 
 import { Callout } from "nextra/components";
@@ -8,11 +8,11 @@ import { Callout } from "nextra/components";
 # 集成指南
 
 <Callout type="info" emoji="🔌">
-  ActWeave Harness 可以嵌入任何 Python 应用程序。本指南涵盖在你自己的系统中将
-  ActWeave 作为库使用的集成模式。
+  Fluva Harness 可以嵌入任何 Python 应用程序。本指南涵盖在你自己的系统中将
+  Fluva 作为库使用的集成模式。
 </Callout>
 
-ActWeave Harness 不仅仅是一个独立应用程序——它是一个可以导入并在你自己的后端、API 服务器、自动化系统或多 Agent 协调器中使用的 Python 库。
+Fluva Harness 不仅仅是一个独立应用程序——它是一个可以导入并在你自己的后端、API 服务器、自动化系统或多 Agent 协调器中使用的 Python 库。
 
 ## 嵌入 DeerFlowClient
 
@@ -105,7 +105,7 @@ result = await client.ainvoke(
 
 ## 与 FastAPI 集成
 
-ActWeave Gateway 本身是一个 FastAPI 应用程序。你可以将其作为子应用程序挂载：
+Fluva Gateway 本身是一个 FastAPI 应用程序。你可以将其作为子应用程序挂载：
 
 ```python
 from fastapi import FastAPI
@@ -115,7 +115,7 @@ load_config()
 
 app = FastAPI()
 
-# 挂载 ActWeave Gateway
+# 挂载 Fluva Gateway
 from deerflow.app.gateway.main import app as gateway_app
 app.mount("/deerflow", gateway_app)
 ```

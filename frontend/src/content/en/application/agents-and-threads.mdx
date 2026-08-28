@@ -1,13 +1,13 @@
 ---
 title: Agents and Threads
-description: ActWeave App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
+description: Fluva App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
 ---
 
 import { Callout, Steps } from "nextra/components";
 
 # Agents and Threads
 
-ActWeave App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
+Fluva App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
 
 ## Agents
 
@@ -15,7 +15,7 @@ ActWeave App supports multiple named agents and maintains conversation state acr
 
 Main is the project-level orchestrator and the fallback when the project has no custom default Agent. For every Run, the server resolves each Agent's current Definition, each Skill's Current Version, and the admitted MCP configurations available in the entered project. The complete definitions are then frozen in the Run Snapshot. Main can delegate to the other admitted Agents, but it never sees assets owned by another project.
 
-A project administrator may instead select an active project Agent with a valid Definition as the project default. A configured default that is no longer executable fails closed; ActWeave does not silently switch it back to Main.
+A project administrator may instead select an active project Agent with a valid Definition as the project default. A configured default that is no longer executable fails closed; Fluva does not silently switch it back to Main.
 
 The current project default Agent can be deleted directly. Deletion soft-archives it, clears the default automatically, and makes subsequent project work fall back to Main. Existing conversations, Automations, Channels, OAuth connections, and Run records are retained rather than cascade-deleted. An already admitted Run continues with its frozen snapshot; starting a new Run from an existing conversation reports that the Agent was deleted and requires switching Agents. An archived record no longer occupies the project name, so the same slug may be reused by a new Agent with a new ID; old conversations remain bound to the archived ID.
 
@@ -114,7 +114,7 @@ PostgreSQL drivers are default dependencies. A standalone `checkpointer` configu
 
 ### Thread data storage
 
-When you select, paste, or drop an attachment into a persisted thread, ActWeave
+When you select, paste, or drop an attachment into a persisted thread, Fluva
 starts uploading it in the background while you continue typing. Sending waits
 only for any unfinished portion and reuses the ready upload; it does not upload
 the same attachment a second time.

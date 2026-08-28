@@ -42,6 +42,14 @@ class LeaseLost(RuntimeError):
         super().__init__("job lease ownership was lost")
 
 
+class SettlementOutcomeUnknown(RuntimeError):
+    """The Run Settlement commit may have landed, but its ACK was lost."""
+
+    def __init__(self, job_id: uuid.UUID) -> None:
+        self.job_id = job_id
+        super().__init__("job settlement outcome is unknown")
+
+
 def _database_sqlstate(error: BaseException) -> str | None:
     pending: list[BaseException] = [error]
     seen: set[int] = set()
@@ -434,7 +442,10 @@ class WorkerService:
             except TimeoutError:
                 await authority.heartbeat()
 
-    async def _stop_handler_after_lease_loss(self, handler_task: asyncio.Task) -> None:
+    async def _stop_handler_after_authority_loss(
+        self,
+        handler_task: asyncio.Task,
+    ) -> None:
         handler_task.cancel()
         try:
             done, pending = await asyncio.wait(
@@ -528,13 +539,37 @@ class WorkerService:
                 outcome = result
             heartbeat_stop.set()
             await heartbeat_task
-            if isinstance(result, JobSettlement):
-                await result.commit()
-            else:
-                await self._settle(claim, outcome)
+            try:
+                if isinstance(result, JobSettlement):
+                    await result.commit()
+                else:
+                    await self._settle(claim, outcome)
+            except (asyncio.CancelledError, LeaseLost):
+                raise
+            except Exception as error:
+                if _is_transient_database_connectivity_error(error):
+                    # The settlement transaction may have committed while its
+                    # acknowledgement was lost, so the outcome is unknown.
+                    # Abandon the lease for exact-scope durable recovery
+                    # instead of retrying in-process or escalating one Job's
+                    # database hiccup into a process-wide Worker failure.
+                    # Known domain conflicts already surface as LeaseLost from
+                    # the handler-owned commit; anything else is a programming
+                    # invariant and stays loud.
+                    logger.warning(
+                        "Job settlement outcome unknown after database connectivity failure job_ref=%s failure_type=%s sqlstate=%s",
+                        _task_key(claim.job_id),
+                        type(error).__name__,
+                        _database_sqlstate(error) or "unknown",
+                    )
+                    raise SettlementOutcomeUnknown(claim.job_id) from error
+                raise
+        except SettlementOutcomeUnknown:
+            authority.invalidate()
+            await self._stop_handler_after_authority_loss(handler_task)
         except LeaseLost:
             authority.invalidate()
-            await self._stop_handler_after_lease_loss(handler_task)
+            await self._stop_handler_after_authority_loss(handler_task)
         except Exception:
             authority.invalidate()
             handler_task.cancel()

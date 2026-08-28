@@ -1,1 +1,0 @@
-{"database_created": true, "database_dropped": true, "database_name": "deerflow_test_replay_15931_f4705b2100fb45c19a02fb5b2356debd", "gateway_outcome": "stopped", "schema_version": 1, "worker": {"fresh": false, "mode": "delayed", "running": false, "starts": 1, "stops": 1}, "worker_mode": "delayed"}

@@ -570,6 +570,7 @@ class PrivateAgentRuntime:
                         definition,
                         material,
                         authorization_boundary=self._authorization_boundary,
+                        endpoint_policy=self._endpoint_policy,
                         http_client_factory=self._http_client_factory,
                         discovery_timeout_seconds=self._discovery_timeout_seconds,
                         session_cache=current_session_cache,
@@ -861,6 +862,7 @@ class PrivateAgentRuntime:
                     schema.name,
                     arguments,
                     authorization_boundary=self._authorization_boundary,
+                    endpoint_policy=self._endpoint_policy,
                     http_client_factory=self._http_client_factory,
                     discovery_timeout_seconds=self._discovery_timeout_seconds,
                     tool_call_timeout_seconds=self._tool_call_timeout_seconds,
@@ -1016,6 +1018,7 @@ class PrivateAgentRuntime:
         material: Mapping[str, Mapping[str, object]],
         authorization_boundary: object | None = None,
         *,
+        endpoint_policy: McpEndpointPolicy | None = None,
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
         _bind_live_client_session: bool = False,
@@ -1089,7 +1092,11 @@ class PrivateAgentRuntime:
                         {server_name: material},
                     )
                     if catalog_oauth:
-                        token_manager = OAuthTokenManager(catalog_oauth)
+                        token_manager = OAuthTokenManager(
+                            catalog_oauth,
+                            endpoint_policy=endpoint_policy,
+                            http_client_factory=http_client_factory,
+                        )
                         authorization = await token_manager.get_authorization_header(server_name)
                         remember_authorization(authorization)
                         if authorization:
@@ -1158,6 +1165,7 @@ class PrivateAgentRuntime:
         material: Mapping[str, Mapping[str, object]],
         authorization_boundary: object | None = None,
         *,
+        endpoint_policy: McpEndpointPolicy | None = None,
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
     ) -> McpRunSession:
@@ -1170,6 +1178,7 @@ class PrivateAgentRuntime:
             definition,
             material,
             authorization_boundary,
+            endpoint_policy=endpoint_policy,
             http_client_factory=http_client_factory,
             discovery_timeout_seconds=discovery_timeout_seconds,
             _bind_live_client_session=True,
@@ -1189,6 +1198,7 @@ class PrivateAgentRuntime:
         ],
         authorization_boundary: object | None = None,
         *,
+        endpoint_policy: McpEndpointPolicy | None = None,
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
         operation_timeout_seconds: int | None = None,
@@ -1203,6 +1213,7 @@ class PrivateAgentRuntime:
                 definition,
                 material,
                 authorization_boundary,
+                endpoint_policy=endpoint_policy,
                 http_client_factory=http_client_factory,
                 discovery_timeout_seconds=discovery_timeout_seconds,
             )
@@ -1226,6 +1237,7 @@ class PrivateAgentRuntime:
         material: Mapping[str, Mapping[str, object]],
         authorization_boundary: object | None = None,
         *,
+        endpoint_policy: McpEndpointPolicy | None = None,
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int | None = None,
         session_cache: McpRunSessionCache | None = None,
@@ -1311,6 +1323,7 @@ class PrivateAgentRuntime:
                     definition,
                     material,
                     authorization_boundary,
+                    endpoint_policy=endpoint_policy,
                     http_client_factory=http_client_factory,
                     discovery_timeout_seconds=effective_timeout,
                 )
@@ -1327,6 +1340,7 @@ class PrivateAgentRuntime:
                 definition,
                 material,
                 copy_schemas,
+                endpoint_policy=endpoint_policy,
             )
         return await cls._with_one_shot_mcp_tools(
             version_id,
@@ -1334,6 +1348,7 @@ class PrivateAgentRuntime:
             material,
             copy_schemas,
             authorization_boundary,
+            endpoint_policy=endpoint_policy,
             http_client_factory=http_client_factory,
             discovery_timeout_seconds=effective_timeout,
             operation_timeout_seconds=effective_timeout,
@@ -1348,6 +1363,7 @@ class PrivateAgentRuntime:
         arguments: Mapping[str, object],
         authorization_boundary: object | None = None,
         *,
+        endpoint_policy: McpEndpointPolicy | None = None,
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
         tool_call_timeout_seconds: int = _DEFAULT_MCP_TOOL_CALL_TIMEOUT_SECONDS,
@@ -1391,6 +1407,7 @@ class PrivateAgentRuntime:
                         definition,
                         material,
                         authorization_boundary,
+                        endpoint_policy=endpoint_policy,
                         http_client_factory=http_client_factory,
                         discovery_timeout_seconds=discovery_timeout_seconds,
                     )
@@ -1408,6 +1425,7 @@ class PrivateAgentRuntime:
                     definition,
                     material,
                     call_selected,
+                    endpoint_policy=endpoint_policy,
                     http_client_factory=http_client_factory,
                     discovery_timeout_seconds=discovery_timeout_seconds,
                     operation_timeout_seconds=tool_call_timeout_seconds,
@@ -1418,6 +1436,7 @@ class PrivateAgentRuntime:
                 material,
                 call_selected,
                 authorization_boundary,
+                endpoint_policy=endpoint_policy,
                 http_client_factory=http_client_factory,
                 discovery_timeout_seconds=discovery_timeout_seconds,
                 operation_timeout_seconds=tool_call_timeout_seconds,

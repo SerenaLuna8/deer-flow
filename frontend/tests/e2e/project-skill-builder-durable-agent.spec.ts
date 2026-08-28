@@ -1,13 +1,18 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 import type { Project } from "@/core/projects/types";
-import type { SkillBuilderSession } from "@/core/skill-builder";
+import type {
+  SkillBuilderActivity,
+  SkillBuilderExecutionPreference,
+  SkillBuilderSession,
+} from "@/core/skill-builder";
 
 const ACCOUNT_ID = "90000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const SESSION_ID = "20000000-0000-4000-8000-000000000001";
 const THREAD_ID = "30000000-0000-4000-8000-000000000001";
 const RUN_ID = "40000000-0000-4000-8000-000000000001";
+const OPERATION_ID = "40000000-0000-4000-8000-000000000002";
 const SKILL_ID = "50000000-0000-4000-8000-000000000001";
 const SKILL_VERSION_ID = "60000000-0000-4000-8000-000000000001";
 const MCP_ID = "70000000-0000-4000-8000-000000000001";
@@ -15,6 +20,12 @@ const MCP_VERSION_ID = "80000000-0000-4000-8000-000000000001";
 const MODEL_ID = "80000000-0000-4000-8000-000000000002";
 const TIMESTAMP = "2026-08-13T00:00:00Z";
 const DRAFT_CHECKSUM = "a".repeat(64);
+const DEFAULT_EXECUTION_PREFERENCE: SkillBuilderExecutionPreference = {
+  model_name: MODEL_ID,
+  mode: "flash",
+  thinking_enabled: false,
+  reasoning_effort: null,
+};
 
 const skillContent = `---\nname: research-helper\ndescription: Research a topic with the project catalog.\n---\n\n# Research helper\n`;
 
@@ -62,7 +73,10 @@ function json(route: Route, body: unknown, status = 200) {
   });
 }
 
-function session(lifecycle: Lifecycle): SkillBuilderSession {
+function session(
+  lifecycle: Lifecycle,
+  executionPreference: SkillBuilderExecutionPreference | null = null,
+): SkillBuilderSession {
   const activeRun =
     lifecycle === "pending" || lifecycle === "running"
       ? {
@@ -86,7 +100,9 @@ function session(lifecycle: Lifecycle): SkillBuilderSession {
         : complete
           ? "draft_ready"
           : "generating",
-    revision: complete ? 3 : lifecycle === "interviewing" ? 1 : 2,
+    revision:
+      (complete ? 3 : lifecycle === "interviewing" ? 1 : 2) +
+      (executionPreference ? 1 : 0),
     messages: complete
       ? [
           {
@@ -172,21 +188,77 @@ function session(lifecycle: Lifecycle): SkillBuilderSession {
         }
       : {}),
     ...(activeRun ? { activeRun } : {}),
+    execution_preference: executionPreference,
     created_at: TIMESTAMP,
     updated_at: TIMESTAMP,
   };
 }
 
+function activities(lifecycle: Lifecycle): SkillBuilderActivity[] {
+  if (lifecycle === "interviewing") return [];
+  const base = {
+    operation_id: OPERATION_ID,
+    run_id: RUN_ID,
+    created_at: TIMESTAMP,
+  };
+  const result: SkillBuilderActivity[] = [
+    {
+      ...base,
+      seq: "1",
+      kind: "request_accepted",
+      attempt: null,
+      payload: {},
+    },
+    {
+      ...base,
+      seq: "2",
+      kind: "attempt_started",
+      attempt: 1,
+      payload: {},
+    },
+    {
+      ...base,
+      seq: "3",
+      kind: "tool_started",
+      attempt: 1,
+      payload: {
+        tool_call_id: "call-read",
+        tool_name: "read_candidate_file",
+        path: "SKILL.md",
+      },
+    },
+    {
+      ...base,
+      seq: "4",
+      kind: "tool_completed",
+      attempt: 1,
+      payload: {
+        tool_call_id: "call-read",
+        tool_name: "read_candidate_file",
+        path: "SKILL.md",
+      },
+    },
+  ];
+  if (lifecycle === "draft_ready") {
+    result.push({
+      ...base,
+      seq: "5",
+      kind: "run_terminal",
+      attempt: 1,
+      payload: { status: "completed", code: null },
+    });
+  }
+  return result;
+}
+
 async function mockSkillBuilderDurableAgent(page: Page) {
   let lifecycle: Lifecycle = "interviewing";
+  let executionPreference: SkillBuilderExecutionPreference | null = null;
   const createBodies: unknown[] = [];
   const turnBodies: unknown[] = [];
   let sessionReads = 0;
   const unexpectedRequests: string[] = [];
   const sessionsBase = `/api/projects/${PROJECT_ID}/skill-builder/sessions`;
-  const runStreamPath = `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/${RUN_ID}/stream`;
-  const privateStreamSecret = "tool-arguments-and-results-must-stay-private";
-  let streamRequests = 0;
 
   await page.route("**/api/**", (route) => {
     const request = route.request();
@@ -254,95 +326,47 @@ async function mockSkillBuilderDurableAgent(page: Page) {
         token_usage: { enabled: false },
       });
     }
-    if (path === runStreamPath && method === "GET") {
-      streamRequests += 1;
-      if (lifecycle === "pending") {
-        return route.fulfill({
-          status: 200,
-          contentType: "text/event-stream",
-          body: "",
-        });
-      }
-      const frames = [
-        "event: values",
-        `data: ${JSON.stringify({
-          messages: [
-            {
-              id: `run-admission-${RUN_ID}`,
-              type: "human",
-              content: "private prompt",
-              additional_kwargs: { run_id: RUN_ID },
-            },
-            {
-              id: "assistant-tools",
-              type: "ai",
-              content: "",
-              tool_calls: [
-                {
-                  id: "call-read",
-                  name: "read_file",
-                  args: { path: privateStreamSecret },
-                },
-                {
-                  id: "call-bash",
-                  name: "bash",
-                  args: { command: privateStreamSecret },
-                },
-                {
-                  id: "call-builder",
-                  name: "skill_builder_finalize",
-                  args: { summary: privateStreamSecret },
-                },
-              ],
-            },
-            {
-              id: "result-read",
-              type: "tool",
-              tool_call_id: "call-read",
-              name: "read_file",
-              status: "success",
-              content: privateStreamSecret,
-            },
-            {
-              id: "result-bash",
-              type: "tool",
-              tool_call_id: "call-bash",
-              name: "bash",
-              status: "success",
-              content: privateStreamSecret,
-            },
-            {
-              id: "result-builder",
-              type: "tool",
-              tool_call_id: "call-builder",
-              name: "skill_builder_finalize",
-              status: "success",
-              content: privateStreamSecret,
-            },
-          ],
-        })}`,
-        "id: 1",
-        "",
-      ];
-      if (lifecycle === "draft_ready") {
-        frames.push(
-          "event: end",
-          `data: ${JSON.stringify({ status: "completed" })}`,
-          "id: 2",
-          "",
-        );
-      }
-      frames.push("");
-      return route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body: frames.join("\n"),
+    if (
+      path === `/api/projects/${PROJECT_ID}/skills/frontmatter/parse` &&
+      method === "POST"
+    ) {
+      const body = request.postDataJSON() as { source_sha256: string };
+      return json(route, {
+        source_sha256: body.source_sha256,
+        valid: true,
+        patchable: true,
+        projection: {
+          required_secrets: [],
+          secrets_autonomous: false,
+          secrets_autonomous_explicit: false,
+          shorthand_count: 0,
+        },
+        diagnostics: [],
+        request_id: "frontmatter-parse-1",
       });
+    }
+    if (
+      path === `${sessionsBase}/${SESSION_ID}/activities` &&
+      method === "GET"
+    ) {
+      return json(route, {
+        data: activities(lifecycle),
+        request_id: "activities-1",
+      });
+    }
+    if (
+      path === `${sessionsBase}/${SESSION_ID}/activities/stream` &&
+      method === "GET"
+    ) {
+      return route.fulfill({ status: 204 });
     }
     if (path === sessionsBase && method === "POST") {
       createBodies.push(request.postDataJSON());
       lifecycle = "interviewing";
-      return json(route, { data: session(lifecycle), request_id: "create-1" });
+      return json(route, {
+        data: session(lifecycle, executionPreference),
+        request_id: "create-1",
+      });
     }
     if (path === sessionsBase && method === "GET") {
       return json(route, {
@@ -351,8 +375,8 @@ async function mockSkillBuilderDurableAgent(page: Page) {
             id: SESSION_ID,
             slug: "research-helper",
             display_name: "research-helper",
-            status: session(lifecycle).status,
-            revision: session(lifecycle).revision,
+            status: session(lifecycle, executionPreference).status,
+            revision: session(lifecycle, executionPreference).revision,
             updated_at: TIMESTAMP,
           },
         ],
@@ -362,8 +386,19 @@ async function mockSkillBuilderDurableAgent(page: Page) {
     if (path === `${sessionsBase}/${SESSION_ID}` && method === "GET") {
       sessionReads += 1;
       return json(route, {
-        data: session(lifecycle),
+        data: session(lifecycle, executionPreference),
         request_id: `session-${sessionReads}`,
+      });
+    }
+    if (
+      path === `${sessionsBase}/${SESSION_ID}/execution-preference` &&
+      method === "PUT"
+    ) {
+      executionPreference =
+        request.postDataJSON() as SkillBuilderExecutionPreference;
+      return json(route, {
+        data: session(lifecycle, executionPreference),
+        request_id: "execution-preference-1",
       });
     }
     if (path === `${sessionsBase}/${SESSION_ID}/turns` && method === "POST") {
@@ -389,8 +424,6 @@ async function mockSkillBuilderDurableAgent(page: Page) {
     turnBodies,
     unexpectedRequests,
     sessionReads: () => sessionReads,
-    streamRequests: () => streamRequests,
-    privateStreamSecret,
     setLifecycle(next: Lifecycle) {
       lifecycle = next;
     },
@@ -420,16 +453,15 @@ test("Skill Builder durable Agent admits, recovers a Run after refresh, and disp
   await composer.fill("创建一个能检索项目资料的 Skill");
   await page.getByRole("button", { name: "Send" }).click();
 
-  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "Queued, waiting to run",
-  );
+  await expect(composer).toBeDisabled();
   expect(builder.turnBodies).toEqual([
     {
       input: {
         kind: "message",
         message: "创建一个能检索项目资料的 Skill",
+        ...DEFAULT_EXECUTION_PREFERENCE,
       },
-      expected_revision: 1,
+      expected_revision: 2,
       idempotency_key: expect.any(String),
     },
   ]);
@@ -437,25 +469,9 @@ test("Skill Builder durable Agent admits, recovers a Run after refresh, and disp
   builder.setLifecycle("running");
   const readsBeforeRefresh = builder.sessionReads();
   await page.reload();
-  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "Running",
-  );
-  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "read_file",
-  );
-  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "bash",
-  );
-  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "skill_builder_finalize",
-  );
-  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "3 tool steps",
-  );
-  await expect(
-    page.getByTestId("skill-builder-run-activity"),
-  ).not.toContainText(builder.privateStreamSecret);
-  expect(builder.streamRequests()).toBeGreaterThan(0);
+  const activity = page.getByTestId("skill-builder-activity");
+  await expect(activity).toContainText("Thinking and execution");
+  await expect(activity).toContainText("read_candidate_file");
   await expect(
     page.getByRole("heading", { name: "Candidate files" }),
   ).toHaveCount(0);
@@ -467,13 +483,16 @@ test("Skill Builder durable Agent admits, recovers a Run after refresh, and disp
   ).toBeVisible({
     timeout: 8_000,
   });
-  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "This turn completed",
-  );
   await expect(
     page.getByRole("heading", { name: "Candidate files" }),
   ).toBeVisible();
-  await expect(page.getByRole("tab")).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Files" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(
+    page.getByRole("tab", { name: "Runtime secrets" }),
+  ).toBeVisible();
   await expect(page.getByTestId("skill-builder-dependencies")).toHaveCount(0);
 
   await page.getByRole("button", { name: "Close candidate files" }).click();
@@ -486,6 +505,13 @@ test("Skill Builder durable Agent admits, recovers a Run after refresh, and disp
   await expect(filesTrigger).toBeVisible();
 
   await page.reload();
+  await expect(page.getByTestId("skill-builder-activity")).toContainText(
+    "Completed",
+  );
+  await expect(
+    page.getByRole("heading", { name: "Candidate files" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Close candidate files" }).click();
   await expect(
     page.getByRole("heading", { name: "Candidate files" }),
   ).toHaveCount(0);

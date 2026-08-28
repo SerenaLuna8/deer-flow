@@ -18,7 +18,7 @@ const persistedMessageSchema = z
     type: z.string().min(1),
     content: z.union([z.string(), z.array(z.unknown())]),
   })
-  // LangChain messages are an extensible third-party union. The ActWeave
+  // LangChain messages are an extensible third-party union. The Fluva
   // wrapper below stays strict while this nested payload preserves supported
   // provider/tool-specific fields.
   .passthrough();
@@ -112,25 +112,16 @@ const threadCompactResponseSchema = z
 
 export type ThreadCompactResponse = z.infer<typeof threadCompactResponseSchema>;
 
-export type CompactThreadKeep =
-  | { type: "fraction"; value: number }
-  | { type: "tokens"; value: number }
-  | { type: "messages"; value: number };
+// Retained recent history is measured in tokens only; the retired
+// message-count and context-fraction measurements were removed.
+export type CompactThreadKeep = { type: "tokens"; value: number };
 
-const compactThreadKeepSchema = z.discriminatedUnion("type", [
-  z
-    .object({ type: z.literal("fraction"), value: z.number().gt(0).max(1) })
-    .strict(),
-  z
-    .object({ type: z.literal("tokens"), value: z.number().int().positive() })
-    .strict(),
-  z
-    .object({
-      type: z.literal("messages"),
-      value: z.number().int().nonnegative(),
-    })
-    .strict(),
-]);
+const compactThreadKeepSchema = z
+  .object({
+    type: z.literal("tokens"),
+    value: z.number().int().positive().max(2_000_000),
+  })
+  .strict();
 
 export type PrivateWorkRequestOptions = Pick<
   ProjectPrivateWorkScope,

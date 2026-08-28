@@ -43,7 +43,7 @@ def test_runtime_policy_defaults_match_harness_caller_defaults(
     }
     resolved = resolve_run_tool_call_control_policy(
         MaterializedAgentRuntimePolicy(
-            schema_version=6,
+            schema_version=1,
             value=AgentRuntimePolicyValue(),
         ),
         kwargs,
@@ -51,15 +51,14 @@ def test_runtime_policy_defaults_match_harness_caller_defaults(
     expected_profile = default_graph_tool_call_control_profile(  # type: ignore[arg-type]
         workload_profile,
     )
-    assert resolved.graph_profile.accounting_mode == "lead_run_subagent_task"
     assert resolved.lead == expected_profile.lead
     assert resolved.subagent == expected_profile.subagent
 
 
-def test_v6_materialization_uses_independent_limits_for_each_role() -> None:
+def test_schema_v1_materialization_uses_independent_limits_for_each_role() -> None:
     resolved = resolve_run_tool_call_control_policy(
         MaterializedAgentRuntimePolicy(
-            schema_version=6,
+            schema_version=1,
             value=AgentRuntimePolicyValue(
                 internal_tool_call_limits=InternalToolCallLimitsPolicy(
                     lead_per_run=37,
@@ -71,7 +70,6 @@ def test_v6_materialization_uses_independent_limits_for_each_role() -> None:
     )
 
     assert resolved.workload_profile == EffectiveRunWorkloadProfile(name="research")
-    assert resolved.graph_profile.accounting_mode == "lead_run_subagent_task"
     assert resolved.lead.internal_tool_call_limit == 37
     assert resolved.subagent.internal_tool_call_limit == 11
     assert resolved.max_concurrent_subagents == 3
@@ -81,51 +79,23 @@ def test_v6_materialization_uses_independent_limits_for_each_role() -> None:
     assert resolved.app_config_policy["subagents"] == {"max_total_per_run": 9}
 
 
-def test_legacy_materialization_uses_shared_accounting_without_a_frozen_selector() -> None:
-    resolved = resolve_run_tool_call_control_policy(
-        MaterializedAgentRuntimePolicy(
-            schema_version=3,
-            value=AgentRuntimePolicyValue(
-                internal_tool_call_limits=InternalToolCallLimitsPolicy(
-                    lead_per_run=200,
-                    subagent_per_task=200,
-                ),
-            ),
-        ),
-        {},
-    )
-
-    assert resolved.workload_profile.name == "interactive"
-    assert resolved.graph_profile.accounting_mode == "shared_run"
-    assert resolved.lead == resolved.subagent
-    assert resolved.lead.internal_tool_call_limit == 200
-    assert resolved.max_total_subagents == 6
-
-
-def test_v5_materialization_keeps_legacy_shared_run_accounting() -> None:
-    resolved = resolve_run_tool_call_control_policy(
-        MaterializedAgentRuntimePolicy(
-            schema_version=5,
-            value=AgentRuntimePolicyValue(
-                internal_tool_call_limits=InternalToolCallLimitsPolicy(
-                    lead_per_run=37,
-                    subagent_per_task=37,
-                ),
-            ),
-        ),
-        _research_kwargs(),
-    )
-
-    assert resolved.graph_profile.accounting_mode == "shared_run"
-    assert resolved.lead == resolved.subagent
-    assert resolved.lead.internal_tool_call_limit == 37
-
-
-def test_v4_materialization_fails_closed_without_the_admitted_selector() -> None:
+@pytest.mark.parametrize("schema_version", [2, 3, 4, 5, 6, 7])
+def test_retired_policy_schema_numbers_fail_closed(schema_version: int) -> None:
     with pytest.raises(RunWorkloadProfileUnsupported):
         resolve_run_tool_call_control_policy(
             MaterializedAgentRuntimePolicy(
-                schema_version=4,
+                schema_version=schema_version,
+                value=AgentRuntimePolicyValue(),
+            ),
+            _research_kwargs(),
+        )
+
+
+def test_schema_v1_fails_closed_without_the_admitted_selector() -> None:
+    with pytest.raises(RunWorkloadProfileUnsupported):
+        resolve_run_tool_call_control_policy(
+            MaterializedAgentRuntimePolicy(
+                schema_version=1,
                 value=AgentRuntimePolicyValue(),
             ),
             {},

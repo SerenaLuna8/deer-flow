@@ -83,7 +83,6 @@ _TOOL_CALL_CONTROL_DISPOSITIONS = frozenset(
         "tool_free_finalization",
         "truncate_tool_calls",
         "exhaust_tool",
-        "exhaust_run",
         "exhaust_subject",
     }
 )
@@ -1015,11 +1014,7 @@ class RunJournal(BaseCallbackHandler):
         else:
             if observation.reason_code not in _TOOL_CALL_BUDGET_REASON_CODES:
                 raise ValueError("tool-budget reason code is invalid")
-            if observation.budget_scope not in {
-                "run",
-                "lead",
-                "subagent_task",
-            }:
+            if observation.budget_scope not in {"lead", "subagent_task"}:
                 raise ValueError("tool-budget scope is invalid")
             if observation.budget_scope == "lead" and observation.role != "lead":
                 raise ValueError("Lead tool budget requires the Lead role")
@@ -1027,17 +1022,10 @@ class RunJournal(BaseCallbackHandler):
                 raise ValueError(
                     "Sub-Agent Task tool budget requires the Sub-Agent role",
                 )
-            if observation.budget_scope == "run":
-                valid_budget_dispositions = {
-                    "truncate_tool_calls",
-                    "exhaust_run",
-                }
-            else:
-                valid_budget_dispositions = {
-                    "truncate_tool_calls",
-                    "exhaust_subject",
-                }
-            if observation.disposition not in valid_budget_dispositions:
+            if observation.disposition not in {
+                "truncate_tool_calls",
+                "exhaust_subject",
+            }:
                 raise ValueError(
                     "tool-budget disposition does not match its scope",
                 )
@@ -1077,9 +1065,8 @@ class RunJournal(BaseCallbackHandler):
             if observation.role == "subagent"
             else None
         )
-        tool_budget_schema_version = 2 if isinstance(observation, ToolCallBudgetObservation) and observation.budget_scope == "run" else 3
         payload: dict[str, object] = {
-            "schema_version": (tool_budget_schema_version if isinstance(observation, ToolCallBudgetObservation) else 1),
+            "schema_version": (3 if isinstance(observation, ToolCallBudgetObservation) else 1),
             "reason_code": observation.reason_code,
             "workload_profile": observation.workload_profile,
             "role": observation.role,
@@ -1096,7 +1083,7 @@ class RunJournal(BaseCallbackHandler):
         }
         if isinstance(observation, RepeatedCallObservation):
             payload["warn_threshold"] = observation.warn_threshold
-        elif observation.budget_scope != "run":
+        else:
             payload["budget_scope"] = observation.budget_scope
         return payload
 

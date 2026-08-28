@@ -694,6 +694,9 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
     )
     runtime_policy = AgentRuntimePolicyValue(
         title={"enabled": False},
+        summarization={
+            "keep": {"type": "tokens", "value": 8_000},
+        },
         vision_bridge={"model_name": vision_model_ref},
     )
     materialized_purposes: list[str] = []
@@ -701,7 +704,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
     class RuntimePolicy:
         async def materialize_run_snapshot_envelope(self, **_kwargs):
             return MaterializedAgentRuntimePolicy(
-                schema_version=6,
+                schema_version=1,
                 value=runtime_policy,
             )
 
@@ -852,7 +855,6 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         PrivateRunVisionDispatchAuthority,
     )
     assert observed["tool_control_policy"].workload_profile == "interactive"
-    assert observed["tool_control_policy"].accounting_mode == "lead_run_subagent_task"
     assert observed["tool_control_policy"].lead.internal_tool_call_limit == 200
     assert observed["tool_control_policy"].subagent.internal_tool_call_limit == 50
     assert observed["max_concurrent_subagents"] == 3

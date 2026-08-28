@@ -117,7 +117,7 @@ export const zhCN: Translations = {
 
     createYourOwnSkill: "创建你自己的 Agent SKill",
     createYourOwnSkillDescription:
-      "创建你的 Agent Skill 来释放 ActWeave 的潜力。通过自定义技能，ActWeave\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
+      "创建你的 Agent Skill 来释放 Fluva 的潜力。通过自定义技能，Fluva\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
   },
 
   // Clipboard
@@ -174,7 +174,7 @@ export const zhCN: Translations = {
     voiceInputStartLabel: "语音输入",
     voiceInputStopLabel: "停止语音输入",
     voiceInputStart:
-      "语音输入。ActWeave 只接收转写文本，音频由浏览器或系统语音服务处理。",
+      "语音输入。Fluva 只接收转写文本，音频由浏览器或系统语音服务处理。",
     voiceInputListening: "正在聆听... 点击停止语音输入。",
     voiceInputUnsupported:
       "当前浏览器不支持语音输入。建议使用 Chrome 或 Edge。",
@@ -333,7 +333,7 @@ export const zhCN: Translations = {
     navigation: {
       label: "项目导航",
       menuLabel: "项目菜单栏",
-      workspaceAria: "ActWeave 工作空间",
+      workspaceAria: "Fluva 工作空间",
       overview: "项目概览",
       conversations: "会话",
       automations: "自动化",
@@ -572,7 +572,7 @@ export const zhCN: Translations = {
     reviewAction: "查看需复核版本",
     emptyTitle: "还没有长期记忆",
     emptyDescription:
-      "继续对话后，ActWeave 会先记录待整理内容，再通过 Dream 汇入这份文档。",
+      "继续对话后，Fluva 会先记录待整理内容，再通过 Dream 汇入这份文档。",
     pending: "待整理",
     pendingUnit: (value) => `${value} 条`,
     dream: "立即整理",
@@ -1357,7 +1357,7 @@ export const zhCN: Translations = {
     },
     empty: {
       title: "还没有定时任务",
-      description: "创建一个任务，让 ActWeave 按计划自动完成工作。",
+      description: "创建一个任务，让 Fluva 按计划自动完成工作。",
       action: "创建第一条任务",
       filteredTitle: "没有符合条件的任务",
       filteredDescription: "调整筛选条件，或清除筛选查看全部任务。",
@@ -2197,10 +2197,10 @@ export const zhCN: Translations = {
 
   // Workspace
   workspace: {
-    officialWebsite: "访问 ActWeave 官方网站",
+    officialWebsite: "访问 Fluva 官方网站",
     settingsAndMore: "设置和更多",
     contactUs: "联系我们",
-    about: "关于 ActWeave",
+    about: "关于 Fluva",
     logout: "退出登录",
     gatewayUnavailable: "网关暂时不可用。",
     gatewayUnavailableRetrying: "正在后台重试…",
@@ -2497,20 +2497,20 @@ export const zhCN: Translations = {
     saveAndConnect: "保存并连接",
     saveChanges: "保存修改",
     descriptions: {
-      telegram: "通过 ActWeave Bot 接收 Telegram 私聊消息。",
+      telegram: "通过 Fluva Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",
-      discord: "通过 ActWeave Bot 接收 Discord 服务器消息。",
-      feishu: "通过 ActWeave 应用接收飞书和 Lark 消息。",
-      dingtalk: "通过 ActWeave Bot 接收钉钉 Stream Push 消息。",
-      wechat: "通过 ActWeave Bot 接收微信 iLink 消息。",
-      wecom: "通过 ActWeave AI Bot 接收企业微信消息。",
+      discord: "通过 Fluva Bot 接收 Discord 服务器消息。",
+      feishu: "通过 Fluva 应用接收飞书和 Lark 消息。",
+      dingtalk: "通过 Fluva Bot 接收钉钉 Stream Push 消息。",
+      wechat: "通过 Fluva Bot 接收微信 iLink 消息。",
+      wecom: "通过 Fluva AI Bot 接收企业微信消息。",
     },
     connectedAs: (name: string) => `已连接为 ${name}。`,
   },
 
   // Page titles (document title)
   pages: {
-    appName: "ActWeave",
+    appName: "Fluva",
     chats: "对话",
     newChat: "新对话",
     untitled: "未命名",
@@ -2536,7 +2536,7 @@ export const zhCN: Translations = {
     rememberMemory: "写入记忆",
     remembered: "已记住：",
     memoryDisabledNotSaved: "记忆已关闭，未保存",
-    skillInstallTooltip: "安装技能并使其可在 ActWeave 中使用",
+    skillInstallTooltip: "安装技能并使其可在 Fluva 中使用",
   },
 
   humanInput: {
@@ -2560,11 +2560,11 @@ export const zhCN: Translations = {
   },
 
   executionApproval: {
-    title: "请求在 ActWeave Worker 所在环境执行命令。",
+    title: "请求在 Fluva Worker 所在环境执行命令。",
     localHost: "本机宿主环境",
     riskTitle: "将使用你的本机账号权限运行",
     riskWarning:
-      "这不是隔离沙箱。命令会在 ActWeave Worker 所在的操作系统环境中运行，可能访问本机账号可读取的文件和凭据、使用网络、启动后台进程，并把输出返回给 Agent 或模型。仅在你信任这条精确命令时允许。",
+      "这不是隔离沙箱。命令会在 Fluva Worker 所在的操作系统环境中运行，可能访问本机账号可读取的文件和凭据、使用网络、启动后台进程，并把输出返回给 Agent 或模型。仅在你信任这条精确命令时允许。",
     command: "完整命令",
     workingDirectory: "工作目录",
     sourceAgent: "来源 Agent",
@@ -2583,7 +2583,7 @@ export const zhCN: Translations = {
       "主进程已经退出，但这不能证明它没有产生副作用或遗留后台进程。",
     unknownTitle: "无法确定执行状态",
     unknownWarning:
-      "该命令或其子进程可能仍在运行并产生副作用。重新请求前请先检查 ActWeave Worker 所在环境；本次授权不能直接重试。",
+      "该命令或其子进程可能仍在运行并产生副作用。重新请求前请先检查 Fluva Worker 所在环境；本次授权不能直接重试。",
     statuses: {
       pending: "等待审批",
       approved: "已批准",
@@ -2630,6 +2630,8 @@ export const zhCN: Translations = {
       turn_capped: "子任务已达到执行轮次预算。",
       loop_capped: "子任务因重复工具调用循环而停止。",
       tool_budget_capped: "子任务已达到工具调用额度；可用结果已保留。",
+      output_truncated:
+        "Provider 截断了子任务输出；已保留的部分结果可能不完整。",
     },
   },
 
@@ -2713,11 +2715,6 @@ export const zhCN: Translations = {
     allConditions: "已配置条件",
     anyCondition: "多个条件任一达到即自动压缩。",
     primary: "最近条件",
-    triggerTypes: {
-      tokens: "Token 触发条件",
-      fraction: "百分比触发条件",
-      messages: "消息数触发条件",
-    },
     messages: (count: number) => `${count.toLocaleString("zh-CN")} 条消息`,
   },
 
@@ -2727,7 +2724,7 @@ export const zhCN: Translations = {
     noResults: "未找到结果。",
     actions: "操作",
     keyboardShortcuts: "键盘快捷键",
-    keyboardShortcutsDescription: "使用键盘快捷键更快地操作 ActWeave。",
+    keyboardShortcutsDescription: "使用键盘快捷键更快地操作 Fluva。",
     openCommandPalette: "打开命令面板",
     toggleSidebar: "切换侧边栏",
   },
@@ -2735,7 +2732,7 @@ export const zhCN: Translations = {
   // Settings
   settings: {
     title: "设置",
-    description: "根据你的偏好调整 ActWeave 的界面和行为。",
+    description: "根据你的偏好调整 Fluva 的界面和行为。",
     sections: {
       account: "账号",
       personalization: "个性化",
@@ -2750,7 +2747,7 @@ export const zhCN: Translations = {
     },
     personalization: {
       title: "记忆",
-      description: "控制 ActWeave 如何为你的账号收集、保留和使用长期记忆。",
+      description: "控制 Fluva 如何为你的账号收集、保留和使用长期记忆。",
       loading: "正在加载记忆设置…",
       loadError: "无法加载记忆设置",
       loadErrorDescription: "当前设置没有被更改，请稍后重试。",
@@ -2804,7 +2801,7 @@ export const zhCN: Translations = {
     },
     channels: {
       title: "渠道",
-      description: "连接可在浏览器外向 ActWeave 发送消息的即时通讯账号。",
+      description: "连接可在浏览器外向 Fluva 发送消息的即时通讯账号。",
       disabled:
         "当前服务器未启用渠道连接。请联系管理员开启 channel_connections。",
     },
@@ -2814,7 +2811,7 @@ export const zhCN: Translations = {
       createSkill: "新建技能",
       emptyTitle: "还没有技能",
       emptyDescription:
-        "将你的 Agent Skill 文件夹放在 ActWeave 根目录下的 `/skills/custom` 文件夹中。",
+        "将你的 Agent Skill 文件夹放在 Fluva 根目录下的 `/skills/custom` 文件夹中。",
       emptyButton: "创建你的第一个技能",
       adminRequired: "需要管理员权限才能管理 Agent Skill。",
       installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
@@ -2847,7 +2844,7 @@ export const zhCN: Translations = {
       changePasswordDescription: "更新你的账号密码。",
       ssoPasswordDescription: "密码由你的 SSO 提供商管理。",
       ssoPasswordMessage:
-        "此账号通过 {provider} 登录，ActWeave 无法在此管理或修改密码。请前往你的 SSO 提供商账号设置中进行操作。",
+        "此账号通过 {provider} 登录，Fluva 无法在此管理或修改密码。请前往你的 SSO 提供商账号设置中进行操作。",
       currentPassword: "当前密码",
       newPassword: "新密码",
       confirmNewPassword: "确认新密码",
@@ -2890,7 +2887,7 @@ export const zhCN: Translations = {
     createAdminAccount: "创建管理员账号",
     adminSetupRequiredTitle: "需要先完成管理员初始化",
     adminSetupRequiredDescription:
-      "ActWeave 需要先创建管理员账号，然后才能创建新的普通账号。",
+      "Fluva 需要先创建管理员账号，然后才能创建新的普通账号。",
     orContinueWith: "或使用以下方式登录",
     ssoHint: "如果你的账号使用单点登录（SSO），请改用下方的选项登录。",
     continueWith: (provider: string) => `使用 ${provider} 登录`,
@@ -2910,7 +2907,7 @@ export const zhCN: Translations = {
   setup: {
     loading: "加载中…",
     initAdminTitle: "创建管理员账号",
-    initAdminDescription: "设置管理员账号后即可开始使用 ActWeave。",
+    initAdminDescription: "设置管理员账号后即可开始使用 Fluva。",
     username: "用户名",
     usernamePlaceholder: "字母开头，3–32 位字母、数字或下划线",
     usernameHint: "仅限字母、数字和下划线，不能使用中文或特殊字符。",

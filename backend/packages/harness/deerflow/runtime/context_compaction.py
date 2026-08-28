@@ -63,7 +63,7 @@ class PreparedThreadCompaction:
 def _create_compaction_middleware(
     *,
     app_config: AppConfig,
-    keep: tuple[str, int | float] | None,
+    keep: tuple[str, int] | None,
 ) -> DeerFlowSummarizationMiddleware:
     middleware = create_summarization_middleware(app_config=app_config, keep=keep)
     if middleware is None:
@@ -90,7 +90,7 @@ async def prepare_thread_compaction(
     accessor: CheckpointStateAccessor,
     thread_id: str,
     *,
-    keep: tuple[str, int | float] | None = None,
+    keep: tuple[str, int] | None = None,
     force: bool = True,
     user_id: str | None = None,
     agent_name: str | None = None,

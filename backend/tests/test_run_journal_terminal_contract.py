@@ -180,7 +180,7 @@ def _budget_observation(
     observation_id: str = "a" * 64,
     role: str = "lead",
     scope_id: str = "run-budget",
-    budget_scope: str = "run",
+    budget_scope: str = "lead",
 ) -> ToolCallControlObservation:
     return ToolCallBudgetObservation(
         reason_code="tool_budget_exhausted",
@@ -246,7 +246,7 @@ async def test_tool_call_control_observation_is_safe_deduplicated_and_precedes_t
     ]
     payload = store.events[0]["content"]
     assert payload == {
-        "schema_version": 2,
+        "schema_version": 3,
         "reason_code": "tool_budget_exhausted",
         "workload_profile": "research",
         "role": "lead",
@@ -259,6 +259,7 @@ async def test_tool_call_control_observation_is_safe_deduplicated_and_precedes_t
         "count_after": 200,
         "hard_limit": 200,
         "disposition": "truncate_tool_calls",
+        "budget_scope": "lead",
         "observation_id": "a" * 64,
     }
     serialized = str(payload)
@@ -345,6 +346,7 @@ async def test_tool_call_control_observer_marshals_subagent_observation_to_owner
             observation_id="b" * 64,
             role="subagent",
             scope_id="private-internal-execution-id",
+            budget_scope="subagent_task",
         ),
     )
     await asyncio.sleep(0)

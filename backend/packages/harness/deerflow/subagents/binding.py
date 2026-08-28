@@ -494,12 +494,17 @@ class ParentExecutionBinding(_OpaqueExecutionObject):
         if not callable(runner_factory):
             raise TypeError("runner_factory must be callable")
         policy = SubagentQuiescencePolicy.REQUIRED_BEFORE_RETURN if type(self.profile) is PrivateRunParentExecutionProfile else SubagentQuiescencePolicy.BOUNDED_WITH_REAPER
+        raw_scheduling_key = self.context.get(RuntimeContextKeys.RUN_ID)
+        if not isinstance(raw_scheduling_key, str) or not raw_scheduling_key:
+            raw_scheduling_key = self.context.get(RuntimeContextKeys.THREAD_ID)
+        scheduling_key = raw_scheduling_key if isinstance(raw_scheduling_key, str) and raw_scheduling_key else None
         return SubagentExecutionBinding(
             runner_factory=runner_factory,
             quiescence_policy=policy,
             inherited_operations_barrier=self.barrier,
             owner_loop_quiescent=self.barrier.is_quiescent,
             settle_usage=settle_usage,
+            scheduling_key=scheduling_key,
         )
 
 

@@ -119,7 +119,7 @@ export const enUS: Translations = {
 
     createYourOwnSkill: "Create Your Own Skill",
     createYourOwnSkillDescription:
-      "Create your own skill to release the power of ActWeave. With customized skills,\nActWeave can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.",
+      "Create your own skill to release the power of Fluva. With customized skills,\nFluva can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.",
   },
 
   // Clipboard
@@ -177,7 +177,7 @@ export const enUS: Translations = {
     voiceInputStartLabel: "Dictate with voice",
     voiceInputStopLabel: "Stop voice input",
     voiceInputStart:
-      "Dictate with voice. ActWeave receives only transcribed text; audio is handled by your browser or system speech service.",
+      "Dictate with voice. Fluva receives only transcribed text; audio is handled by your browser or system speech service.",
     voiceInputListening: "Listening... Click to stop voice input.",
     voiceInputUnsupported:
       "Voice input is not supported in this browser. Try Chrome or Edge.",
@@ -350,7 +350,7 @@ export const enUS: Translations = {
     navigation: {
       label: "Project navigation",
       menuLabel: "Project menu",
-      workspaceAria: "ActWeave workspace",
+      workspaceAria: "Fluva workspace",
       overview: "Overview",
       conversations: "Chats",
       automations: "Automations",
@@ -602,7 +602,7 @@ export const enUS: Translations = {
     reviewAction: "Review this version",
     emptyTitle: "No long-term memory yet",
     emptyDescription:
-      "As you keep talking, ActWeave records pending notes and Dream organizes them into this document.",
+      "As you keep talking, Fluva records pending notes and Dream organizes them into this document.",
     pending: "Pending",
     pendingUnit: (value) => `${value} ${value === 1 ? "item" : "items"}`,
     dream: "Organize now",
@@ -1420,7 +1420,7 @@ export const enUS: Translations = {
     empty: {
       title: "No scheduled tasks yet",
       description:
-        "Create a task and let ActWeave automatically complete work on schedule.",
+        "Create a task and let Fluva automatically complete work on schedule.",
       action: "Create your first task",
       filteredTitle: "No tasks match your filters",
       filteredDescription:
@@ -2322,10 +2322,10 @@ export const enUS: Translations = {
 
   // Workspace
   workspace: {
-    officialWebsite: "ActWeave's official website",
+    officialWebsite: "Fluva's official website",
     settingsAndMore: "Settings and more",
     contactUs: "Contact us",
-    about: "About ActWeave",
+    about: "About Fluva",
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
     gatewayUnavailableRetrying: "Retrying in the background…",
@@ -2639,20 +2639,20 @@ export const enUS: Translations = {
     saveAndConnect: "Save and connect",
     saveChanges: "Save changes",
     descriptions: {
-      telegram: "Telegram direct messages through your ActWeave bot.",
+      telegram: "Telegram direct messages through your Fluva bot.",
       slack: "Slack workspace messages and mentions.",
-      discord: "Discord server messages through your ActWeave bot.",
-      feishu: "Feishu and Lark messages through your ActWeave app.",
-      dingtalk: "DingTalk Stream Push messages through your ActWeave bot.",
-      wechat: "WeChat iLink messages through your ActWeave bot.",
-      wecom: "WeCom messages through your ActWeave AI bot.",
+      discord: "Discord server messages through your Fluva bot.",
+      feishu: "Feishu and Lark messages through your Fluva app.",
+      dingtalk: "DingTalk Stream Push messages through your Fluva bot.",
+      wechat: "WeChat iLink messages through your Fluva bot.",
+      wecom: "WeCom messages through your Fluva AI bot.",
     },
     connectedAs: (name: string) => `Connected as ${name}.`,
   },
 
   // Page titles (document title)
   pages: {
-    appName: "ActWeave",
+    appName: "Fluva",
     chats: "Chats",
     newChat: "New chat",
     untitled: "Untitled",
@@ -2679,7 +2679,7 @@ export const enUS: Translations = {
     rememberMemory: "Save to memory",
     remembered: "Remembered:",
     memoryDisabledNotSaved: "Memory is disabled; not saved",
-    skillInstallTooltip: "Install skill and make it available to ActWeave",
+    skillInstallTooltip: "Install skill and make it available to Fluva",
   },
 
   humanInput: {
@@ -2704,11 +2704,11 @@ export const enUS: Translations = {
   },
 
   executionApproval: {
-    title: "Request to run a command in the ActWeave Worker host environment.",
+    title: "Request to run a command in the Fluva Worker host environment.",
     localHost: "Local host",
     riskTitle: "Runs with your local account permissions",
     riskWarning:
-      "This is not an isolated sandbox. The command runs in the ActWeave Worker OS environment and may access files and credentials available to your local account, use the network, start background processes, and return output to the Agent or model. Allow it only if you trust this exact command.",
+      "This is not an isolated sandbox. The command runs in the Fluva Worker OS environment and may access files and credentials available to your local account, use the network, start background processes, and return output to the Agent or model. Allow it only if you trust this exact command.",
     command: "Exact command",
     workingDirectory: "Working directory",
     sourceAgent: "Source Agent",
@@ -2727,7 +2727,7 @@ export const enUS: Translations = {
       "The main process exited, but this does not prove that it had no side effects or left no background processes.",
     unknownTitle: "Execution state is unknown",
     unknownWarning:
-      "The command or one of its child processes may still be running and producing side effects. Inspect the ActWeave Worker host environment before requesting it again; this authorization cannot be retried.",
+      "The command or one of its child processes may still be running and producing side effects. Inspect the Fluva Worker host environment before requesting it again; this authorization cannot be retried.",
     statuses: {
       pending: "Waiting for approval",
       approved: "Approved",
@@ -2779,6 +2779,8 @@ export const enUS: Translations = {
       loop_capped: "The Sub-Agent stopped after a repeated tool-call loop.",
       tool_budget_capped:
         "The Sub-Agent reached its tool-call budget; any usable result was preserved.",
+      output_truncated:
+        "The Provider truncated the Sub-Agent output; the partial result may be incomplete.",
     },
   },
 
@@ -2865,11 +2867,6 @@ export const enUS: Translations = {
     allConditions: "Configured conditions",
     anyCondition: "Compression starts when any condition is reached.",
     primary: "Closest",
-    triggerTypes: {
-      tokens: "Token condition",
-      fraction: "Percentage condition",
-      messages: "Message condition",
-    },
     messages: (count: number) =>
       `${count.toLocaleString("en-US")} message${count === 1 ? "" : "s"}`,
   },
@@ -2881,7 +2878,7 @@ export const enUS: Translations = {
     actions: "Actions",
     keyboardShortcuts: "Keyboard Shortcuts",
     keyboardShortcutsDescription:
-      "Navigate ActWeave faster with keyboard shortcuts.",
+      "Navigate Fluva faster with keyboard shortcuts.",
     openCommandPalette: "Open Command Palette",
     toggleSidebar: "Toggle Sidebar",
   },
@@ -2889,7 +2886,7 @@ export const enUS: Translations = {
   // Settings
   settings: {
     title: "Settings",
-    description: "Adjust how ActWeave looks and behaves for you.",
+    description: "Adjust how Fluva looks and behaves for you.",
     sections: {
       account: "Account",
       personalization: "Personalization",
@@ -2905,7 +2902,7 @@ export const enUS: Translations = {
     personalization: {
       title: "Memory",
       description:
-        "Control how ActWeave collects, retains, and uses long-term memory for your account.",
+        "Control how Fluva collects, retains, and uses long-term memory for your account.",
       loading: "Loading Memory settings…",
       loadError: "Memory settings could not be loaded",
       loadErrorDescription:
@@ -2966,7 +2963,7 @@ export const enUS: Translations = {
     channels: {
       title: "Channels",
       description:
-        "Connect IM accounts that can send messages to ActWeave from outside the browser.",
+        "Connect IM accounts that can send messages to Fluva from outside the browser.",
       disabled:
         "Channel connections are not enabled on this server. Ask an administrator to enable channel_connections.",
     },
@@ -2977,7 +2974,7 @@ export const enUS: Translations = {
       createSkill: "Create skill",
       emptyTitle: "No agent skill yet",
       emptyDescription:
-        "Put your agent skill folders under the `/skills/custom` folder under the root folder of ActWeave.",
+        "Put your agent skill folders under the `/skills/custom` folder under the root folder of Fluva.",
       emptyButton: "Create Your First Skill",
       adminRequired: "Admin privileges are required to manage agent skills.",
       installAdminRequired:
@@ -3012,7 +3009,7 @@ export const enUS: Translations = {
       changePasswordDescription: "Update your account password.",
       ssoPasswordDescription: "Password is managed by your SSO provider.",
       ssoPasswordMessage:
-        "This account signs in with {provider}, so ActWeave cannot manage or change its password here. Use your SSO provider's account settings instead.",
+        "This account signs in with {provider}, so Fluva cannot manage or change its password here. Use your SSO provider's account settings instead.",
       currentPassword: "Current password",
       newPassword: "New password",
       confirmNewPassword: "Confirm new password",
@@ -3059,7 +3056,7 @@ export const enUS: Translations = {
     createAdminAccount: "Create admin account",
     adminSetupRequiredTitle: "Administrator setup is required",
     adminSetupRequiredDescription:
-      "ActWeave needs an administrator account before new regular accounts can be created.",
+      "Fluva needs an administrator account before new regular accounts can be created.",
     orContinueWith: "Or continue with",
     ssoHint:
       "If your account uses single sign-on, sign in with the option below instead.",

@@ -896,6 +896,7 @@ def _patched_open(monkeypatch: pytest.MonkeyPatch, tool: _RemoteTool) -> _Opener
         material: Any,
         authorization_boundary: Any = None,
         *,
+        endpoint_policy: Any = None,
         http_client_factory: Any = None,
         discovery_timeout_seconds: int = 15,
     ):

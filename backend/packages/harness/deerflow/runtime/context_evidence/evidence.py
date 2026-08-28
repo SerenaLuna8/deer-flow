@@ -136,13 +136,27 @@ class WindowOpenedV1(_StrictContract):
     context_window_tokens: int | None = Field(default=None, ge=1, le=2_000_000)
     compaction_enabled: bool
     compaction_threshold_tokens: int | None = Field(default=None, ge=1)
+    compaction_keep_tokens: int | None = Field(default=None, ge=1)
+    compaction_fixed_safety_tokens: int | None = Field(default=None, ge=0)
+    compaction_summary_headroom_tokens: int | None = Field(default=None, ge=0)
+    # Zero denotes runtime candidate qualification by the frozen Provider
+    # profile; positive values are a statically derived retained contribution.
+    compaction_retained_safety_tokens: int | None = Field(default=None, ge=0)
     compaction_authority: Literal["frozen_run", "idle_history"] | None = None
 
     @model_validator(mode="after")
     def _validate_compaction_authority(self) -> Self:
+        frozen_budget = (
+            self.compaction_keep_tokens,
+            self.compaction_fixed_safety_tokens,
+            self.compaction_summary_headroom_tokens,
+            self.compaction_retained_safety_tokens,
+        )
+        if any(value is not None for value in frozen_budget) and not all(value is not None for value in frozen_budget):
+            raise ValueError("frozen compaction budget must be complete")
         if self.compaction_enabled and self.compaction_authority is None:
             raise ValueError("enabled compaction requires a frozen authority")
-        if not self.compaction_enabled and (self.compaction_threshold_tokens is not None or self.compaction_authority is not None):
+        if not self.compaction_enabled and (self.compaction_threshold_tokens is not None or self.compaction_authority is not None or any(value is not None for value in frozen_budget)):
             raise ValueError("disabled compaction cannot retain active policy facts")
         return self
 
@@ -177,6 +191,10 @@ class ProviderUsageUnreportedV1(_StrictContract):
 
 class ProviderRetrySafety(StrEnum):
     NO_RESPONSE_PROVEN = "no_response_proven"
+    # The Provider answered with a definite failure status that produced no
+    # completion, and the exact adapter proves an identical retry is safe
+    # (for example a documented 429 rate-limit rejection).
+    FAILED_RESPONSE_RETRY_SAFE = "failed_response_retry_safe"
     UNSAFE = "unsafe"
     UNKNOWN = "unknown"
 

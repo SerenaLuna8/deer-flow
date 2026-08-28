@@ -97,8 +97,10 @@ class RecoveredPrivateRunTerminal:
             raise TypeError("recovered terminal requires an AgentExecutionResult")
         if type(self.ensure_stream_terminal) is not bool:
             raise TypeError("ensure_stream_terminal must be a boolean")
-        if self.ensure_stream_terminal and self.result.status != "succeeded":
-            raise ValueError("only recovered success can repair a stream terminal")
+        if self.ensure_stream_terminal and not (self.result.status == "succeeded" or self.result.durable_terminal):
+            raise ValueError(
+                "stream terminal repair requires a durable recovered result",
+            )
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,6 +9,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.mcp.config import ExtensionsConfig, McpOAuthConfig
+from deerflow.mcp.http_security import SecureMcpHttpClientFactory
+from deerflow.mcp_definition_policy import (
+    McpEndpointPolicy,
+    validate_remote_mcp_endpoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +30,36 @@ class _OAuthToken:
 class OAuthTokenManager:
     """Acquire/cache/refresh OAuth tokens for MCP servers."""
 
-    def __init__(self, oauth_by_server: dict[str, McpOAuthConfig]):
+    def __init__(
+        self,
+        oauth_by_server: dict[str, McpOAuthConfig],
+        *,
+        endpoint_policy: McpEndpointPolicy | None = None,
+        http_client_factory: SecureMcpHttpClientFactory | None = None,
+    ):
         self._oauth_by_server = oauth_by_server
+        self._endpoint_policy = endpoint_policy
+        self._http_client_factory = http_client_factory
         self._tokens: dict[str, _OAuthToken] = {}
         self._locks: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name in oauth_by_server}
 
     @classmethod
-    def from_runtime_config(cls, runtime_mcp_config: ExtensionsConfig) -> OAuthTokenManager:
+    def from_runtime_config(
+        cls,
+        runtime_mcp_config: ExtensionsConfig,
+        *,
+        endpoint_policy: McpEndpointPolicy | None = None,
+        http_client_factory: SecureMcpHttpClientFactory | None = None,
+    ) -> OAuthTokenManager:
         oauth_by_server: dict[str, McpOAuthConfig] = {}
         for server_name, server_config in runtime_mcp_config.get_enabled_mcp_servers().items():
             if server_config.oauth and server_config.oauth.enabled:
                 oauth_by_server[server_name] = server_config.oauth
-        return cls(oauth_by_server)
+        return cls(
+            oauth_by_server,
+            endpoint_policy=endpoint_policy,
+            http_client_factory=http_client_factory,
+        )
 
     def has_oauth_servers(self) -> bool:
         return bool(self._oauth_by_server)
@@ -72,6 +95,13 @@ class OAuthTokenManager:
     async def _fetch_token(self, oauth: McpOAuthConfig) -> _OAuthToken:
         import httpx  # pyright: ignore[reportMissingImports]
 
+        token_url = validate_remote_mcp_endpoint(
+            oauth.token_url,
+            endpoint_policy=self._endpoint_policy,
+        )
+        if self._http_client_factory is None:
+            raise ValueError("OAuth token HTTP client policy is unavailable")
+
         data: dict[str, str] = {
             "grant_type": oauth.grant_type,
             **oauth.extra_token_params,
@@ -87,8 +117,12 @@ class OAuthTokenManager:
         data["client_id"] = oauth.client_id
         data["client_secret"] = oauth.client_secret
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(oauth.token_url, data=data)
+        async with self._http_client_factory(
+            None,
+            httpx.Timeout(15.0),
+            None,
+        ) as client:
+            response = await client.post(token_url, data=data)
             response.raise_for_status()
             payload = response.json()
 

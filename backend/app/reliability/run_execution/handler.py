@@ -37,17 +37,24 @@ from app.private_work.run_metadata import run_token_budget_usage
 from app.private_work.run_repository import (
     PrivateRunExecutionLeaseLost,
     PrivateRunRepository,
+    PrivateRunUsageSnapshot,
 )
 from app.private_work.snapshot_repository import RunSnapshotRepository
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.reliability.run_execution.boundary import (
+    PrivateRunExecutionBoundary,
+)
 from app.reliability.run_execution.contracts import (
     AgentExecutionResult,
     PrivateRunExecution,
 )
 from app.reliability.run_execution.contracts import (
     RecoveredPrivateRunTerminal as _RecoveredPrivateRunTerminal,
+)
+from app.reliability.run_execution.delegation_ledger_settlement import (
+    settle_run_delegation_ledger_cancelled,
 )
 from app.reliability.run_execution.errors import (
     AmbiguousExternalSideEffect,
@@ -91,9 +98,13 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.events.models import (
     STREAM_TERMINAL_ERROR_CODES,
     StoredStreamFrame,
+    StreamTerminalCandidate,
+    stream_terminal_status_for_run_settlement,
 )
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.trace_context import normalize_trace_id, request_trace_context
 
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -111,6 +122,7 @@ class PrivateRunJobHandler:
             error.public_error_code,
             retryable=False,
             attempt_usage=error.attempt_usage,
+            durable_terminal=(error.public_error_code == "MODEL_OUTPUT_LIMIT"),
         )
 
     def __init__(
@@ -535,6 +547,22 @@ class PrivateRunJobHandler:
                     ),
                     context.resource_scope,
                 )
+            candidate = await self._events.get_stream_terminal_candidate(
+                session,
+                scope=context.resource_scope,
+                thread_id=state.run.thread_id,
+                run_id=state.run.run_id,
+            )
+            if candidate is not None:
+                return (
+                    None,
+                    state.cancel_requested,
+                    _RecoveredPrivateRunTerminal(
+                        self._terminal_candidate_result(candidate),
+                        ensure_stream_terminal=True,
+                    ),
+                    context.resource_scope,
+                )
             # The suspension marker is committed after checkpoint drain and
             # before the public success terminal.  If that later stream write
             # lost its Worker, the marker itself is the server-owned recovery
@@ -560,6 +588,11 @@ class PrivateRunJobHandler:
                     ),
                     context.resource_scope,
                 )
+            if claim.settlement_only:
+                # This successor exists only to settle an already-produced
+                # durable terminal. Losing every proof is never authority to
+                # execute the Agent Graph again.
+                raise LeaseLost(claim.job_id)
             if runtime_kind == "skill_builder":
                 recovered_builder_terminal = await self._recovered_skill_builder_terminal_in_session(
                     session,
@@ -682,6 +715,23 @@ class PrivateRunJobHandler:
             )
         return AgentExecutionResult.failed("DURABLE_STREAM_TERMINAL_INVALID")
 
+    @staticmethod
+    def _terminal_candidate_result(
+        candidate: StreamTerminalCandidate,
+        *,
+        attempt_usage: PrivateRunUsageSnapshot | None = None,
+    ) -> AgentExecutionResult:
+        """Project one validated internal candidate into execution settlement."""
+
+        if type(candidate) is not StreamTerminalCandidate:
+            raise TypeError("stream terminal candidate is required")
+        return AgentExecutionResult.failed(
+            candidate.error_code,
+            retryable=False,
+            attempt_usage=attempt_usage,
+            durable_terminal=True,
+        )
+
     async def _heartbeat(
         self,
         claim: JobClaim,
@@ -710,9 +760,9 @@ class PrivateRunJobHandler:
     ) -> JobSettlement:
         durable_terminal = durable_terminal or result.durable_terminal
         ensure_failed_stream_terminal = durable_terminal and result.status == "failed" and result.public_error_code == "CONTEXT_PROVIDER_CALL_AMBIGUOUS"
-        if ensure_stream_terminal and (not durable_terminal or result.status != "succeeded"):
+        if ensure_stream_terminal and not durable_terminal:
             raise ValueError(
-                "stream terminal repair requires a durable successful result",
+                "stream terminal repair requires a durable result",
             )
         outcome = JobOutcome(result.status, result.public_error_code)
         origin_trace_id = normalize_trace_id(claim.origin_trace_id)
@@ -731,19 +781,40 @@ class PrivateRunJobHandler:
                         claim,
                         lock_builder=True,
                     )
+                    candidate_run = await self._runs(session).get(
+                        scope=locked_scope,
+                        run_id=claim.run_id or "",
+                    )
+                    if candidate_run is None:
+                        raise PrivateRunExecutionLeaseLost
+                    candidate = await self._events.get_stream_terminal_candidate(
+                        session,
+                        scope=locked_scope,
+                        thread_id=candidate_run.thread_id,
+                        run_id=claim.run_id or "",
+                    )
+                    settlement_result = (
+                        self._terminal_candidate_result(
+                            candidate,
+                            attempt_usage=result.attempt_usage,
+                        )
+                        if candidate is not None
+                        else result
+                    )
+                    settlement_durable_terminal = durable_terminal or settlement_result.durable_terminal or candidate is not None
                     settlement = await self._runs(session).settle_execution(
                         scope=locked_scope,
                         run_id=claim.run_id or "",
                         job_id=claim.job_id,
                         lease_token=claim.lease_token,
-                        outcome=result.status,
-                        public_error_code=result.public_error_code,
+                        outcome=settlement_result.status,
+                        public_error_code=settlement_result.public_error_code,
                         ambiguous_side_effect=ambiguous_side_effect,
-                        retryable_failure=(result.retryable and not durable_terminal),
-                        cancel_preempts_outcome=not durable_terminal,
+                        retryable_failure=(settlement_result.retryable and not settlement_durable_terminal),
+                        cancel_preempts_outcome=not settlement_durable_terminal,
                         retry_initial_seconds=self._retry_initial_seconds,
                         retry_max_seconds=self._retry_max_seconds,
-                        attempt_usage=result.attempt_usage,
+                        attempt_usage=settlement_result.attempt_usage,
                     )
                     settled_run = settlement.run
                     if settled_run.status in {
@@ -773,9 +844,9 @@ class PrivateRunJobHandler:
                             session,
                             claim=claim,
                             succeeded=settled_run.status == "success",
-                            suspended_approval_id=(result.suspended_approval_id if settled_run.status == "success" else None),
+                            suspended_approval_id=(settlement_result.suspended_approval_id if settled_run.status == "success" else None),
                             request_ttl_seconds=(self._execution_approval_ttl_seconds),
-                            durable_terminal_replay=durable_terminal,
+                            durable_terminal_replay=settlement_durable_terminal,
                             audit=self._execution_approval_audit,
                         )
                     if settled_run.status in {
@@ -788,27 +859,16 @@ class PrivateRunJobHandler:
                             session,
                             claim,
                             settled_status=settled_run.status,
-                            public_error_code=result.public_error_code,
+                            public_error_code=(settlement_result.public_error_code),
                         )
-                    if ensure_stream_terminal:
-                        if settled_run.status != "success":
+                    if candidate is not None or ensure_stream_terminal or ensure_failed_stream_terminal:
+                        try:
+                            stream_status = stream_terminal_status_for_run_settlement(
+                                RunStatus(settled_run.status),
+                            )
+                        except ValueError:
                             raise PrivateRunExecutionLeaseLost
-                        await self._events.ensure_settled_stream_terminal(
-                            session,
-                            scope=locked_scope,
-                            thread_id=settled_run.thread_id,
-                            run_id=settled_run.run_id,
-                            status="completed",
-                        )
-                    elif ensure_failed_stream_terminal:
-                        if settled_run.status == "error":
-                            stream_status = "error"
-                            stream_error_code = settled_run.error if settled_run.error in STREAM_TERMINAL_ERROR_CODES else None
-                        elif settled_run.status == "interrupted" and settled_run.error is not None:
-                            stream_status = "interrupted"
-                            stream_error_code = None
-                        else:
-                            raise PrivateRunExecutionLeaseLost
+                        stream_error_code = settled_run.error if settled_run.error in STREAM_TERMINAL_ERROR_CODES else None
                         await self._events.ensure_settled_stream_terminal(
                             session,
                             scope=locked_scope,
@@ -816,6 +876,7 @@ class PrivateRunJobHandler:
                             run_id=settled_run.run_id,
                             status=stream_status,
                             error_code=stream_error_code,
+                            settlement_authority=(settlement.stream_terminal_authority),
                         )
                     if not settlement.run_terminal_published and settled_run.status in {
                         "success",
@@ -836,7 +897,7 @@ class PrivateRunJobHandler:
                             job_id=claim.job_id,
                             job_type=claim.job_type,
                             status=settled_run.status,
-                            public_error_code=result.public_error_code,
+                            public_error_code=(settlement_result.public_error_code),
                             request_id=claim.origin_trace_id,
                         )
                 if claim.job_type == "automation_run" and settled_run is not None:
@@ -894,6 +955,95 @@ class PrivateRunJobHandler:
             # checkpoint-safe success proof.
             raise LeaseLost(claim.job_id) from None
 
+    async def _settle_cancelled_delegations(
+        self,
+        claim: JobClaim,
+        authority: JobLeaseAuthority,
+        *,
+        execution: PrivateRunExecution | None,
+        scope: PrivateResourceScope,
+    ) -> bool:
+        """Close this parent Run's unfinished delegation ledger before Stop."""
+
+        if self._project_checkpointer is None or claim.run_id is None:
+            return False
+        if execution is None:
+            if claim.scope.owner_user_id is None:
+                raise LeaseLost(claim.job_id)
+            try:
+                owner_user_id = uuid.UUID(claim.scope.owner_user_id)
+            except ValueError:
+                raise LeaseLost(claim.job_id) from None
+            try:
+                async with self._factory() as session, session.begin():
+                    project = await resolve_project_context_in_transaction(
+                        session,
+                        owner_user_id,
+                        claim.scope.project_id,
+                        claim.origin_trace_id or "",
+                        lock=True,
+                    )
+                    project.require(Capability.PRIVATE_WORK_CREATE)
+                    project.require(Capability.SHARED_ASSETS_EXECUTE)
+                    context = PrivateWorkContext.from_project(project)
+                    runtime_kind, _builder_thread_id = await self._runtime_kind_in_session(
+                        session,
+                        claim,
+                    )
+                    run = await self._runs(session).get(
+                        scope=context.resource_scope,
+                        run_id=claim.run_id,
+                    )
+                    if run is None or run.job_id != claim.job_id or runtime_kind != "chat":
+                        raise LeaseLost(claim.job_id)
+                    thread_id = run.thread_id
+            except (ProjectForbidden, ProjectNotFound):
+                # Authorization revocation owns the Run terminal but cannot
+                # authorize a checkpoint mutation. The next admitted Run's
+                # before-model reconciliation closes the prior scoped entry.
+                return False
+        else:
+            context = execution.context
+            runtime_kind = execution.runtime_kind
+            thread_id = execution.run.thread_id
+            if runtime_kind != "chat":
+                return False
+        if context.resource_scope.project_id != scope.project_id or context.resource_scope.owner_user_id != scope.owner_user_id:
+            raise LeaseLost(claim.job_id)
+
+        boundary = PrivateRunExecutionBoundary(
+            self._factory,
+            context=context,
+            claim=claim,
+            expected_worker_id=authority.expected_worker_id,
+            runtime_kind=runtime_kind,
+        )
+        saver = self._project_checkpointer.for_context(
+            context,
+            thread_kind=runtime_kind,
+        )
+        saver.set_authorization_boundary(boundary)
+        try:
+            return await settle_run_delegation_ledger_cancelled(
+                saver,
+                thread_id=thread_id,
+                project_id=context.resource_scope.project_id,
+                owner_user_id=context.resource_scope.owner_user_id,
+                run_id=claim.run_id,
+            )
+        except AuthorizationRevoked:
+            if boundary.authorization_revoked:
+                # Never forge state after membership/capability revocation.
+                # The next admitted Run converges this prior Run-scoped entry.
+                return False
+            raise LeaseLost(claim.job_id) from None
+        except LeaseLost:
+            raise
+        except Exception:
+            # Do not settle the Job terminal while its checkpoint invariant is
+            # unknown. Lease takeover can retry the idempotent terminal write.
+            raise LeaseLost(claim.job_id) from None
+
     async def _handle_with_trace(
         self,
         claim: JobClaim,
@@ -911,6 +1061,13 @@ class PrivateRunJobHandler:
             # settlement.  Let the durable lease expire for exact-scope retry.
             raise LeaseLost(claim.job_id) from None
         if recovered_terminal is not None:
+            if recovered_terminal.result.status == "cancelled":
+                await self._settle_cancelled_delegations(
+                    claim,
+                    authority,
+                    execution=None,
+                    scope=settlement_scope,
+                )
             return self._settlement(
                 claim,
                 recovered_terminal.result,
@@ -926,6 +1083,12 @@ class PrivateRunJobHandler:
             )
         authority.bind_heartbeat_callback(lambda: self._heartbeat(claim, execution.context))
         if cancel_requested or authority.cancel_requested:
+            await self._settle_cancelled_delegations(
+                claim,
+                authority,
+                execution=execution,
+                scope=execution.context.resource_scope,
+            )
             return self._settlement(
                 claim,
                 AgentExecutionResult.cancelled(),
@@ -988,6 +1151,13 @@ class PrivateRunJobHandler:
         if authority.cancel_requested and not result.durable_terminal:
             result = AgentExecutionResult.cancelled(
                 attempt_usage=result.attempt_usage,
+            )
+        if result.status == "cancelled":
+            await self._settle_cancelled_delegations(
+                claim,
+                authority,
+                execution=execution,
+                scope=execution.context.resource_scope,
             )
         return self._settlement(
             claim,

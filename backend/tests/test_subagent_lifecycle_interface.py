@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 import threading
@@ -37,12 +38,14 @@ from deerflow.subagents.lifecycle import (
     SubagentTaskCall,
     SubagentTaskEvent,
     SubagentTaskLifecycle,
+    SubagentTaskOutcome,
     SubagentTaskSnapshot,
     SubagentTaskStatus,
     SubagentTimedOut,
     SubagentTimeoutPhase,
     SubagentUsageCompleteness,
     SubagentUsageSettlement,
+    _ExecutionRecord,
     _ProcessSubagentScheduler,
     _SubagentGraphExecutionSnapshot,
 )
@@ -171,6 +174,28 @@ class _BlockingBarrier:
             await asyncio.sleep(0.002)
 
 
+class _CountingBlockingBarrier:
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.first_waiter = threading.Event()
+        self.replacement_waiter = threading.Event()
+        self._lock = threading.Lock()
+        self._waiters = 0
+
+    def seal(self) -> None:
+        return
+
+    async def wait_quiescent(self) -> None:
+        with self._lock:
+            self._waiters += 1
+            if self._waiters == 1:
+                self.first_waiter.set()
+            else:
+                self.replacement_waiter.set()
+        while not self.release.is_set():
+            await asyncio.sleep(0.002)
+
+
 def _call(
     task_id: str = "same-correlation-id",
     *,
@@ -194,6 +219,7 @@ def _binding(
     barrier=NO_INHERITED_OPERATIONS,
     settle_usage=None,
     owner_loop_quiescent=None,
+    scheduling_key: str | None = None,
 ) -> SubagentExecutionBinding:
     return SubagentExecutionBinding(
         runner_factory=runner_factory,
@@ -201,6 +227,7 @@ def _binding(
         inherited_operations_barrier=barrier,
         settle_usage=settle_usage,
         owner_loop_quiescent=owner_loop_quiescent,
+        scheduling_key=scheduling_key,
     )
 
 
@@ -387,6 +414,29 @@ async def test_tool_budget_cap_survives_as_a_completed_contributing_reason() -> 
         assert isinstance(outcome, SubagentCompleted)
         assert outcome.result == "completed from admitted evidence"
         assert outcome.stop_reason == "tool_budget_capped"
+    finally:
+        await lifecycle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_provider_output_truncation_survives_lifecycle_normalization() -> None:
+    lifecycle = _lifecycle()
+
+    async def behavior(holder: _FakeHolder) -> None:
+        holder.complete(
+            "usable partial result",
+            stop_reason="output_truncated",
+        )
+
+    try:
+        outcome = await lifecycle.run(
+            _call(),
+            _binding(lambda: _FakeRunner(behavior)),
+        )
+
+        assert isinstance(outcome, SubagentCompleted)
+        assert outcome.result == "usable partial result"
+        assert outcome.stop_reason == "output_truncated"
     finally:
         await lifecycle.aclose()
 
@@ -741,6 +791,280 @@ async def test_scheduler_gate_is_held_until_cancelled_thread_work_is_quiescent()
         assert second_admitted.is_set()
     finally:
         release_first_thread.set()
+        await lifecycle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_reserves_admission_for_another_parent_run() -> None:
+    lifecycle = _lifecycle(max_concurrency=2)
+    first_a_started = threading.Event()
+    second_a_started = threading.Event()
+    b_started = threading.Event()
+    release_first_a = threading.Event()
+
+    async def first_a(holder: _FakeHolder) -> None:
+        holder.mark_running()
+        first_a_started.set()
+        while not release_first_a.is_set():
+            await asyncio.sleep(0.002)
+        holder.complete("first A complete")
+
+    async def second_a(holder: _FakeHolder) -> None:
+        holder.mark_running()
+        second_a_started.set()
+        holder.complete("second A complete")
+
+    async def run_b(holder: _FakeHolder) -> None:
+        holder.mark_running()
+        b_started.set()
+        holder.complete("B complete")
+
+    task_a1 = asyncio.create_task(
+        lifecycle.run(
+            _call("a-1"),
+            _binding(lambda: _FakeRunner(first_a), scheduling_key="run-a"),
+        )
+    )
+    await _wait_thread_event(first_a_started)
+    task_a2 = asyncio.create_task(
+        lifecycle.run(
+            _call("a-2"),
+            _binding(lambda: _FakeRunner(second_a), scheduling_key="run-a"),
+        )
+    )
+    await asyncio.sleep(0.03)
+    assert second_a_started.is_set() is False
+
+    task_b = asyncio.create_task(
+        lifecycle.run(
+            _call("b-1"),
+            _binding(lambda: _FakeRunner(run_b), scheduling_key="run-b"),
+        )
+    )
+    try:
+        await _wait_thread_event(b_started)
+        outcome_b = await asyncio.wait_for(task_b, timeout=1.0)
+        assert isinstance(outcome_b, SubagentCompleted)
+        assert second_a_started.is_set() is False
+
+        release_first_a.set()
+        await _wait_thread_event(second_a_started)
+        outcomes_a = await asyncio.wait_for(
+            asyncio.gather(task_a1, task_a2),
+            timeout=1.0,
+        )
+        assert all(isinstance(outcome, SubagentCompleted) for outcome in outcomes_a)
+    finally:
+        release_first_a.set()
+        await lifecycle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_emits_structured_warning_after_five_second_queue_wait(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scheduler = _ProcessSubagentScheduler(max_concurrency=1)
+    lifecycle = SubagentTaskLifecycle(_scheduler=scheduler)
+    original_submit = scheduler.submit
+
+    def submit_with_aged_queue(record, context) -> None:
+        record.queued_at_monotonic -= 5.1
+        original_submit(record, context)
+
+    scheduler.submit = submit_with_aged_queue  # type: ignore[method-assign]
+
+    async def behavior(holder: _FakeHolder) -> None:
+        holder.complete("queued work complete")
+
+    try:
+        with caplog.at_level(
+            logging.WARNING,
+            logger="deerflow.subagents.lifecycle",
+        ):
+            outcome = await lifecycle.run(
+                _call("queue-warning", queue=10.0),
+                _binding(
+                    lambda: _FakeRunner(behavior),
+                    scheduling_key="run-warning",
+                ),
+            )
+        assert isinstance(outcome, SubagentCompleted)
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and record.getMessage().startswith(
+                "Sub-Agent Task scheduler admitted",
+            )
+        ]
+        assert len(warnings) == 1
+        warning = warnings[0]
+        assert warning.event == "subagent_scheduler_queue_wait"
+        assert warning.execution_id == str(outcome.execution_id)
+        assert warning.scheduling_key == "run-warning"
+        assert warning.queue_wait_seconds >= 5.0
+        assert warning.queue_wait_warning_threshold_seconds == 5.0
+    finally:
+        await lifecycle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_emits_structured_warning_when_queue_timeout_expires(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "deerflow.subagents.lifecycle._QUEUE_WAIT_WARNING_SECONDS",
+        0.005,
+    )
+    lifecycle = _lifecycle(max_concurrency=1)
+    blocker_started = threading.Event()
+    timed_out_runner_started = False
+
+    async def blocker_behavior(holder: _FakeHolder) -> None:
+        holder.mark_running()
+        blocker_started.set()
+        # Deliberately stall the isolated scheduler loop so the owner-loop
+        # deadline wins the queue-timeout race deterministically.
+        time.sleep(0.1)
+        holder.complete("blocker complete")
+
+    async def timed_out_behavior(holder: _FakeHolder) -> None:
+        nonlocal timed_out_runner_started
+        timed_out_runner_started = True
+        holder.complete("must not start")
+
+    blocker_task = asyncio.create_task(
+        lifecycle.run(
+            _call("queue-blocker", queue=1.0, execution=1.0),
+            _binding(
+                lambda: _FakeRunner(blocker_behavior),
+                scheduling_key="run-blocker",
+            ),
+        ),
+    )
+    try:
+        await _wait_thread_event(blocker_started)
+        with caplog.at_level(
+            logging.WARNING,
+            logger="deerflow.subagents.lifecycle",
+        ):
+            outcome = await lifecycle.run(
+                _call("queue-timeout", queue=0.03),
+                _binding(
+                    lambda: _FakeRunner(timed_out_behavior),
+                    scheduling_key="run-timeout",
+                ),
+            )
+
+        assert isinstance(outcome, SubagentTimedOut)
+        assert outcome.timeout_phase is SubagentTimeoutPhase.QUEUE
+        assert timed_out_runner_started is False
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and record.getMessage().startswith(
+                "Sub-Agent Task scheduler queue timed out",
+            )
+        ]
+        assert len(warnings) == 1
+        warning = warnings[0]
+        assert warning.event == "subagent_scheduler_queue_wait"
+        assert warning.execution_id == str(outcome.execution_id)
+        assert warning.scheduling_key == "run-timeout"
+        assert warning.queue_wait_seconds >= 0.005
+        assert warning.queue_wait_warning_threshold_seconds == 0.005
+    finally:
+        await asyncio.wait_for(blocker_task, timeout=1.0)
+        await lifecycle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_queue_timeout_winner_rejects_late_gate_admission_once(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "deerflow.subagents.lifecycle._QUEUE_WAIT_WARNING_SECONDS",
+        0.005,
+    )
+    admission_entered = threading.Event()
+    release_admission = threading.Event()
+    original_mark_admission_acquired = _ExecutionRecord.mark_admission_acquired
+
+    def delayed_mark_admission_acquired(
+        record: _ExecutionRecord,
+        scheduling_key: str,
+    ) -> bool:
+        admission_entered.set()
+        assert release_admission.wait(timeout=1.0)
+        return original_mark_admission_acquired(record, scheduling_key)
+
+    monkeypatch.setattr(
+        _ExecutionRecord,
+        "mark_admission_acquired",
+        delayed_mark_admission_acquired,
+    )
+    lifecycle = _lifecycle(max_concurrency=1)
+    timed_out_runner_started = False
+
+    async def timed_out_behavior(holder: _FakeHolder) -> None:
+        nonlocal timed_out_runner_started
+        timed_out_runner_started = True
+        holder.complete("must not start")
+
+    async def follower_behavior(holder: _FakeHolder) -> None:
+        holder.complete("follower complete")
+
+    task: asyncio.Task[SubagentTaskOutcome] | None = None
+    try:
+        with caplog.at_level(
+            logging.WARNING,
+            logger="deerflow.subagents.lifecycle",
+        ):
+            task = asyncio.create_task(
+                lifecycle.run(
+                    _call("late-admission-timeout", queue=0.03),
+                    _binding(
+                        lambda: _FakeRunner(timed_out_behavior),
+                        scheduling_key="run-late-admission",
+                    ),
+                ),
+            )
+            await _wait_thread_event(admission_entered)
+            await asyncio.sleep(0.06)
+            release_admission.set()
+            outcome = await asyncio.wait_for(task, timeout=1.0)
+
+        assert isinstance(outcome, SubagentTimedOut)
+        assert outcome.timeout_phase is SubagentTimeoutPhase.QUEUE
+        assert timed_out_runner_started is False
+        queue_records = [record for record in caplog.records if record.event == "subagent_scheduler_queue_wait" and record.execution_id == str(outcome.execution_id)]
+        assert len(queue_records) == 1
+        assert (
+            queue_records[0]
+            .getMessage()
+            .startswith(
+                "Sub-Agent Task scheduler queue timed out",
+            )
+        )
+
+        follower = await asyncio.wait_for(
+            lifecycle.run(
+                _call("late-admission-follower", queue=0.2),
+                _binding(
+                    lambda: _FakeRunner(follower_behavior),
+                    scheduling_key="run-late-admission",
+                ),
+            ),
+            timeout=1.0,
+        )
+        assert isinstance(follower, SubagentCompleted)
+    finally:
+        release_admission.set()
+        if task is not None and not task.done():
+            await asyncio.wait_for(task, timeout=1.0)
         await lifecycle.aclose()
 
 
@@ -1306,6 +1630,288 @@ def test_sync_process_exit_fallback_is_idempotent() -> None:
     scheduler.close_sync_fallback(timeout_seconds=0)
     scheduler.close_sync_fallback(timeout_seconds=0)
     assert scheduler.active_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_scheduler_loop_restart_reaps_live_work_without_releasing_the_replacement_gate() -> None:
+    scheduler = _ProcessSubagentScheduler(max_concurrency=1)
+    lifecycle = SubagentTaskLifecycle(_scheduler=scheduler)
+    stale_loop: asyncio.AbstractEventLoop | None = None
+    stale_thread: threading.Thread | None = None
+    stale_barrier = _CountingBlockingBarrier()
+    replacement_started = threading.Event()
+    release_replacement = threading.Event()
+    replacement_thread_work_finished = threading.Event()
+    queued_started = threading.Event()
+    old_run: asyncio.Task[object] | None = None
+    replacement_run: asyncio.Task[object] | None = None
+    queued_run: asyncio.Task[object] | None = None
+
+    async def old_behavior(holder: _FakeHolder) -> None:
+        holder.complete("completion from the dead scheduler epoch")
+
+    async def replacement_behavior(holder: _FakeHolder) -> None:
+        replacement_started.set()
+        while not release_replacement.is_set():
+            await asyncio.sleep(0.002)
+        await asyncio.to_thread(replacement_thread_work_finished.set)
+        holder.complete("replacement complete")
+
+    async def queued_behavior(holder: _FakeHolder) -> None:
+        queued_started.set()
+        holder.complete("queued complete")
+
+    try:
+        old_run = asyncio.create_task(
+            lifecycle.run(
+                _call("before-loop-death"),
+                _binding(
+                    lambda: _FakeRunner(old_behavior),
+                    barrier=stale_barrier,
+                ),
+            ),
+        )
+        await _wait_thread_event(stale_barrier.first_waiter)
+        with scheduler._lock:
+            stale_loop = scheduler._loop
+            stale_thread = scheduler._thread
+            stale_gate = scheduler._gate
+        assert stale_loop is not None
+        assert stale_thread is not None
+        assert stale_gate is not None
+
+        stale_loop.call_soon_threadsafe(stale_loop.stop)
+        await asyncio.to_thread(stale_thread.join, 1.0)
+        assert stale_thread.is_alive() is False
+
+        replacement_run = asyncio.create_task(
+            lifecycle.run(
+                _call("after-loop-death"),
+                _binding(lambda: _FakeRunner(replacement_behavior)),
+            )
+        )
+        await _wait_thread_event(replacement_started)
+        with scheduler._lock:
+            replacement = scheduler._loop
+            replacement_gate = scheduler._gate
+
+        assert replacement is not stale_loop
+        assert replacement_gate is not stale_gate
+
+        queued_run = asyncio.create_task(
+            lifecycle.run(
+                _call("queued-behind-replacement"),
+                _binding(lambda: _FakeRunner(queued_behavior)),
+            )
+        )
+        await asyncio.sleep(0.03)
+        assert queued_started.is_set() is False
+
+        stale_barrier.release.set()
+        old_outcome = await asyncio.wait_for(old_run, timeout=1.0)
+        assert isinstance(old_outcome, SubagentFailed)
+        assert old_outcome.failure_code is SubagentFailureCode.EXECUTION_FAILED
+        assert old_outcome.quiescent is True
+        await _wait_until(stale_loop.is_closed)
+        assert stale_loop.is_closed()
+        await asyncio.sleep(0.03)
+        assert queued_started.is_set() is False
+
+        release_replacement.set()
+        replacement_outcome = await asyncio.wait_for(replacement_run, timeout=1.0)
+        queued_outcome = await asyncio.wait_for(queued_run, timeout=1.0)
+        assert isinstance(replacement_outcome, SubagentCompleted)
+        assert isinstance(queued_outcome, SubagentCompleted)
+        assert replacement_thread_work_finished.is_set()
+        assert scheduler.active_count() == 0
+        await asyncio.wait_for(lifecycle.aclose(), timeout=1.0)
+    finally:
+        stale_barrier.release.set()
+        release_replacement.set()
+        pending_runs = tuple(task for task in (old_run, replacement_run, queued_run) if task is not None and not task.done())
+        if pending_runs:
+            await asyncio.wait_for(
+                asyncio.gather(*pending_runs, return_exceptions=True),
+                timeout=1.0,
+            )
+        if not lifecycle._closed:
+            await asyncio.wait_for(lifecycle.aclose(), timeout=1.0)
+        if stale_loop is not None and not stale_loop.is_closed():
+            assert stale_loop.is_running() is False
+            stale_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_aclose_reaps_live_work_after_scheduler_loop_death_without_another_submission() -> None:
+    scheduler = _ProcessSubagentScheduler(max_concurrency=1)
+    lifecycle = SubagentTaskLifecycle(_scheduler=scheduler)
+    stale_barrier = _CountingBlockingBarrier()
+    stale_loop: asyncio.AbstractEventLoop | None = None
+    stale_thread: threading.Thread | None = None
+    run_task: asyncio.Task[SubagentTaskOutcome] | None = None
+    close_task: asyncio.Task[None] | None = None
+
+    async def behavior(holder: _FakeHolder) -> None:
+        holder.complete("completion awaiting dead-loop cleanup")
+
+    def drain_stale_loop_blocking() -> None:
+        assert stale_loop is not None
+        failures: list[BaseException] = []
+
+        def drain() -> None:
+            try:
+                asyncio.set_event_loop(stale_loop)
+                pending = tuple(asyncio.all_tasks(stale_loop))
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    stale_loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True),
+                    )
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                asyncio.set_event_loop(None)
+
+        cleanup_thread = threading.Thread(target=drain)
+        cleanup_thread.start()
+        cleanup_thread.join(timeout=1.0)
+        assert cleanup_thread.is_alive() is False
+        assert failures == []
+
+    try:
+        run_task = asyncio.create_task(
+            lifecycle.run(
+                _call("close-after-loop-death"),
+                _binding(
+                    lambda: _FakeRunner(behavior),
+                    barrier=stale_barrier,
+                ),
+            )
+        )
+        await _wait_thread_event(stale_barrier.first_waiter)
+        with scheduler._lock:
+            stale_loop = scheduler._loop
+            stale_thread = scheduler._thread
+        assert stale_loop is not None
+        assert stale_thread is not None
+
+        stale_loop.call_soon_threadsafe(stale_loop.stop)
+        await asyncio.to_thread(stale_thread.join, 1.0)
+        assert stale_thread.is_alive() is False
+        stale_barrier.release.set()
+
+        close_task = asyncio.create_task(lifecycle.aclose())
+        await _wait_until(close_task.done, timeout=0.5)
+        await close_task
+        outcome = await asyncio.wait_for(run_task, timeout=1.0)
+
+        assert isinstance(outcome, SubagentCancelled)
+        assert outcome.cancellation_code is SubagentCancellationCode.LIFECYCLE_SHUTDOWN
+        assert outcome.quiescent is True
+        assert scheduler.active_count() == 0
+    finally:
+        stale_barrier.release.set()
+        if stale_loop is not None and stale_thread is not None and not stale_thread.is_alive():
+            drain_stale_loop_blocking()
+        if close_task is not None and not close_task.done():
+            await asyncio.wait_for(close_task, timeout=1.0)
+        elif not lifecycle._closed:
+            await asyncio.wait_for(lifecycle.aclose(), timeout=1.0)
+        if run_task is not None and not run_task.done():
+            await asyncio.wait_for(run_task, timeout=1.0)
+        if stale_loop is not None and not stale_loop.is_closed():
+            stale_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_aclose_waits_for_live_graph_unwind_after_scheduler_loop_death() -> None:
+    scheduler = _ProcessSubagentScheduler(max_concurrency=1)
+    lifecycle = SubagentTaskLifecycle(_scheduler=scheduler)
+    graph_started = threading.Event()
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    cleanup_finished = threading.Event()
+    stale_loop: asyncio.AbstractEventLoop | None = None
+    stale_thread: threading.Thread | None = None
+    run_task: asyncio.Task[SubagentTaskOutcome] | None = None
+    close_task: asyncio.Task[None] | None = None
+
+    async def behavior(holder: _FakeHolder) -> None:
+        holder.mark_running()
+        graph_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            while not release_cleanup.is_set():
+                await asyncio.sleep(0.002)
+            cleanup_finished.set()
+
+    def drain_stale_loop_blocking() -> None:
+        assert stale_loop is not None
+
+        def drain() -> None:
+            asyncio.set_event_loop(stale_loop)
+            pending = tuple(asyncio.all_tasks(stale_loop))
+            for task in pending:
+                task.cancel()
+            if pending:
+                stale_loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True),
+                )
+            asyncio.set_event_loop(None)
+
+        cleanup_thread = threading.Thread(target=drain)
+        cleanup_thread.start()
+        cleanup_thread.join(timeout=1.0)
+        assert cleanup_thread.is_alive() is False
+
+    try:
+        run_task = asyncio.create_task(
+            lifecycle.run(
+                _call("live-graph-at-loop-death"),
+                _binding(lambda: _FakeRunner(behavior)),
+            )
+        )
+        await _wait_thread_event(graph_started)
+        with scheduler._lock:
+            stale_loop = scheduler._loop
+            stale_thread = scheduler._thread
+        assert stale_loop is not None
+        assert stale_thread is not None
+
+        stale_loop.call_soon_threadsafe(stale_loop.stop)
+        await asyncio.to_thread(stale_thread.join, 1.0)
+        assert stale_thread.is_alive() is False
+
+        close_task = asyncio.create_task(lifecycle.aclose())
+        await _wait_thread_event(cleanup_started, timeout=0.5)
+        await asyncio.sleep(0.02)
+        assert close_task.done() is False
+        assert cleanup_finished.is_set() is False
+
+        release_cleanup.set()
+        await asyncio.wait_for(close_task, timeout=1.0)
+        outcome = await asyncio.wait_for(run_task, timeout=1.0)
+
+        assert isinstance(outcome, SubagentCancelled)
+        assert outcome.cancellation_code is SubagentCancellationCode.LIFECYCLE_SHUTDOWN
+        assert outcome.quiescent is True
+        assert cleanup_finished.is_set()
+        assert stale_loop.is_closed()
+        assert scheduler.active_count() == 0
+    finally:
+        release_cleanup.set()
+        if close_task is not None and not close_task.done():
+            await asyncio.wait_for(close_task, timeout=1.0)
+        elif not lifecycle._closed:
+            await asyncio.wait_for(lifecycle.aclose(), timeout=1.0)
+        if run_task is not None and not run_task.done():
+            await asyncio.wait_for(run_task, timeout=1.0)
+        if stale_loop is not None and stale_thread is not None and not stale_thread.is_alive() and not stale_loop.is_closed():
+            drain_stale_loop_blocking()
+            stale_loop.close()
 
 
 def test_production_executor_implements_the_graph_runner_adapter() -> None:

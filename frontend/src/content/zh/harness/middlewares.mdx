@@ -161,22 +161,13 @@ summarization:
   # 推荐使用轻量级、经济的模型，如 "gpt-4o-mini"
   model_name: null
 
-  # 触发条件——满足任意一个条件时运行摘要
-  trigger:
-    - type: tokens # 当上下文超过 N 个 token 时触发
-      value: 32000
-    # - type: messages  # 当消息数超过 N 时触发
-    #   value: 50
-    # - type: fraction  # 当上下文达到模型最大输入的 X% 时触发
-    #   value: 0.8
+  # 触发条件——上下文估算 Token 达到该值时运行摘要（null = 不自动触发）
+  trigger_tokens: 320000
 
-  # 摘要后保留多少最近历史
+  # 摘要后保留多少最近历史（仅支持按 Token 数）
   keep:
-    type: messages
-    value: 10 # 保留最近 10 条消息
-    # 或者按 token 保留：
-    # type: tokens
-    # value: 3000
+    type: tokens
+    value: 64000 # 最多保留最近 64000 个 token 的历史
 
   # 为摘要器准备消息时要裁剪的最大 token 数
   trim_tokens_to_summarize: 15564
@@ -185,17 +176,7 @@ summarization:
   summary_prompt: null
 ```
 
-**触发类型**：
-
-- `tokens`：当对话中总 token 数超过 `value` 时触发。
-- `messages`：当消息数超过 `value` 时触发。
-- `fraction`：当上下文达到模型最大输入 token 限制的 `value` 比例时触发。
-
-**保留类型**：
-
-- `messages`：摘要后保留最后 `value` 条消息。
-- `tokens`：保留最近 `value` 个 token 的历史。
-- `fraction`：保留模型最大输入 token 限制的 `value` 比例的最近历史。
+**保留策略**：仅支持 `tokens` 一种类型。摘要后中间件最多保留最近 `value` 个 token 的历史（默认 `64000`）。按消息数、按上下文占比的保留方式已移除，不再接受。
 
 ## 编写自定义中间件
 

@@ -1732,6 +1732,7 @@ async def run_agent(
 
         # 8. Final status
         if _model_output_limit_terminal():
+            record.terminal_authority = "durable_response"
             await private_files.mark_failed()
             await run_manager.set_status(
                 run_id,
@@ -1799,6 +1800,7 @@ async def run_agent(
         action = record.abort_action
         model_output_limit_terminal = _model_output_limit_terminal()
         if model_output_limit_terminal:
+            record.terminal_authority = "durable_response"
             await private_files.mark_failed()
             await run_manager.set_status(
                 run_id,
@@ -1893,6 +1895,7 @@ async def run_agent(
                 error=exc.code.value,
             )
             if exc.code is PublicRunErrorCode.MODEL_OUTPUT_LIMIT:
+                record.terminal_authority = "durable_response"
                 await bridge.publish_end(run_id)
                 terminal_published = True
             else:

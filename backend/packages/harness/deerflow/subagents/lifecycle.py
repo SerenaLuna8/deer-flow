@@ -20,6 +20,7 @@ import logging
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import Context, ContextVar, copy_context
@@ -39,7 +40,10 @@ from deerflow.error_codes import (
 )
 from deerflow.runtime.host_execution_approval import HostExecutionApprovalArtifact
 from deerflow.subagents.change_signal import SubagentChangeSignal, wait_for_change
-from deerflow.subagents.status_contract import SubagentStopReasonValue
+from deerflow.subagents.status_contract import (
+    SUBAGENT_STOP_REASON_VALUES,
+    SubagentStopReasonValue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,7 @@ MAX_CONCURRENT_SUBAGENT_EXECUTIONS = 16
 _PROGRESS_HEARTBEAT_SECONDS = 1.0
 _BARRIER_RETRY_SECONDS = 0.1
 _OWNER_LOOP_RECEIPT_POLL_SECONDS = 0.01
+_QUEUE_WAIT_WARNING_SECONDS = 5.0
 
 
 class SubagentTaskStatus(StrEnum):
@@ -95,6 +100,7 @@ class SubagentFailureCode(StrEnum):
     TOOL_CALL_CONTROL_STATE_INVALID = TOOL_CALL_CONTROL_STATE_INVALID_ERROR_CODE
     LOOP_FINALIZATION_FAILED = LOOP_FINALIZATION_FAILED_ERROR_CODE
     TURN_BUDGET_EXHAUSTED = "SUBAGENT_TURN_BUDGET_EXHAUSTED"
+    MODEL_OUTPUT_LIMIT = "MODEL_OUTPUT_LIMIT"
     LLM_QUOTA_EXCEEDED = "LLM_QUOTA_EXCEEDED"
     LLM_AUTHENTICATION_FAILED = "LLM_AUTHENTICATION_FAILED"
     LLM_PROVIDER_BUSY = "LLM_PROVIDER_BUSY"
@@ -257,6 +263,7 @@ class SubagentExecutionBinding:
     inherited_operations_barrier: SubagentInheritedOperationsBarrier | None
     owner_loop_quiescent: Callable[[], bool] | None = None
     settle_usage: SubagentUsageSettlementHook | None = None
+    scheduling_key: str | None = None
 
     def __post_init__(self) -> None:
         if not callable(self.runner_factory):
@@ -271,6 +278,8 @@ class SubagentExecutionBinding:
             raise ValueError(
                 "BOUNDED_WITH_REAPER needs an owner-loop quiescence probe for a real inherited-operations barrier",
             )
+        if self.scheduling_key is not None and (not isinstance(self.scheduling_key, str) or not self.scheduling_key.strip() or len(self.scheduling_key) > 256):
+            raise ValueError("scheduling_key must be a non-blank bounded string")
 
 
 def _freeze_value(value: Any) -> Any:
@@ -475,6 +484,20 @@ class _LifecycleThreadPoolExecutor(ThreadPoolExecutor):
         return future
 
 
+@dataclass(frozen=True, slots=True)
+class _SchedulerEpoch:
+    number: int
+    loop: asyncio.AbstractEventLoop
+    gate: _RunFairAdmissionGate
+    executor: _LifecycleThreadPoolExecutor
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmissionLease:
+    epoch: _SchedulerEpoch
+    scheduling_key: str
+
+
 @dataclass(slots=True)
 class _ExecutionRecord:
     execution_id: uuid.UUID
@@ -489,6 +512,8 @@ class _ExecutionRecord:
     thread_operations: _ThreadOperationReceipts = field(
         default_factory=lambda: _ThreadOperationReceipts(),
     )
+    scheduler_epoch: _SchedulerEpoch | None = None
+    scheduler_context: Context | None = None
     graph_quiesced: threading.Event = field(default_factory=threading.Event)
     overall_quiesced: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -502,8 +527,9 @@ class _ExecutionRecord:
     termination: _TerminationRequest | None = None
     outcome: SubagentTaskOutcome | None = None
     usage_settlement_started: bool = False
-    finalizer_started: bool = False
-    admission_lease_active: bool = False
+    finalizer_epoch_number: int | None = None
+    admission_lease: _AdmissionLease | None = None
+    admission_release_claimed: bool = False
     delivery_fault_count: int = 0
     returned: bool = False
 
@@ -595,18 +621,40 @@ class _ExecutionRecord:
         self.changes.notify()
         return should_cancel
 
-    def mark_admission_acquired(self) -> None:
+    def bind_scheduler_epoch(
+        self,
+        epoch: _SchedulerEpoch,
+        context: Context,
+    ) -> None:
         with self.lock:
-            if self.admission_lease_active:
-                raise RuntimeError("Sub-Agent Task admission lease was acquired twice")
-            self.admission_lease_active = True
+            if self.scheduler_epoch is not None or self.scheduler_context is not None:
+                raise RuntimeError("Sub-Agent Task scheduler epoch was bound twice")
+            self.scheduler_epoch = epoch
+            self.scheduler_context = context
 
-    def claim_admission_release(self) -> bool:
+    def mark_admission_acquired(self, scheduling_key: str) -> bool:
         with self.lock:
-            if not self.admission_lease_active:
+            epoch = self.scheduler_epoch
+            if epoch is None:
+                raise RuntimeError("Sub-Agent Task scheduler epoch is unavailable")
+            if self.admission_lease is not None:
+                raise RuntimeError("Sub-Agent Task admission lease was acquired twice")
+            if self.termination is not None or self.admission_release_claimed:
                 return False
-            self.admission_lease_active = False
+            self.admission_lease = _AdmissionLease(
+                epoch=epoch,
+                scheduling_key=scheduling_key,
+            )
             return True
+
+    def claim_admission_release(self) -> _AdmissionLease | None:
+        with self.lock:
+            if self.admission_release_claimed:
+                return None
+            self.admission_release_claimed = True
+            lease = self.admission_lease
+            self.admission_lease = None
+            return lease
 
     def mark_graph_quiescent(self) -> None:
         with self.lock:
@@ -623,11 +671,11 @@ class _ExecutionRecord:
         self.overall_quiesced.set()
         self.changes.notify(terminal=True)
 
-    def claim_finalizer(self) -> bool:
+    def claim_finalizer(self, epoch: _SchedulerEpoch) -> bool:
         with self.lock:
-            if self.finalizer_started:
+            if self.finalizer_epoch_number is not None and self.finalizer_epoch_number >= epoch.number:
                 return False
-            self.finalizer_started = True
+            self.finalizer_epoch_number = epoch.number
             return True
 
     def mark_returned(self) -> bool:
@@ -636,10 +684,139 @@ class _ExecutionRecord:
             return self.overall_quiesced.is_set()
 
 
+@dataclass(frozen=True, slots=True)
+class _RetiredSchedulerEpoch:
+    """A stopped scheduler loop that still owns live execution records."""
+
+    epoch: _SchedulerEpoch
+    prior_thread: threading.Thread | None
+    records: tuple[_ExecutionRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _RetiredLoopDrain:
+    """Join receipt for one restarted retired-loop teardown."""
+
+    loop: asyncio.AbstractEventLoop
+    thread: threading.Thread
+    closed: threading.Event
+
+
 class _SchedulerState(StrEnum):
     ACCEPTING = "accepting"
     CLOSING = "closing"
     CLOSED = "closed"
+
+
+class _RunFairAdmissionGate:
+    """Bounded admission with one reserved slot and round-robin Run queues.
+
+    A single parent Run may burst up to ``capacity - 1`` concurrent Tasks.
+    The reserved slot lets a newly queued Run enter without waiting for that
+    entire burst to finish. Once saturated, queued Runs rotate one admission
+    at a time instead of inheriting task-level FIFO order from the busiest Run.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        if capacity <= 0:
+            raise ValueError("admission capacity must be greater than zero")
+        self._capacity = capacity
+        self._active_total = 0
+        self._active_by_key: dict[str, int] = {}
+        self._waiters: dict[str, deque[asyncio.Future[None]]] = {}
+        self._rotation: deque[str] = deque()
+        self._retired = False
+
+    def retire(self) -> None:
+        """Fence a dead loop's waiters while preserving releasable leases."""
+
+        self._retired = True
+        self._waiters.clear()
+        self._rotation.clear()
+
+    def _per_run_limit(self) -> int:
+        return self._capacity if self._capacity == 1 else self._capacity - 1
+
+    def _can_admit(self, key: str) -> bool:
+        return self._active_total < self._capacity and self._active_by_key.get(key, 0) < self._per_run_limit()
+
+    def _admit(self, key: str, waiter: asyncio.Future[None]) -> None:
+        self._active_total += 1
+        self._active_by_key[key] = self._active_by_key.get(key, 0) + 1
+        if not waiter.done():
+            waiter.set_result(None)
+
+    def _dispatch(self) -> None:
+        while self._rotation and self._active_total < self._capacity:
+            admitted = False
+            for _ in range(len(self._rotation)):
+                key = self._rotation.popleft()
+                queue = self._waiters.get(key)
+                while queue and queue[0].cancelled():
+                    queue.popleft()
+                if not queue:
+                    self._waiters.pop(key, None)
+                    continue
+                if not self._can_admit(key):
+                    self._rotation.append(key)
+                    continue
+                waiter = queue.popleft()
+                if queue:
+                    self._rotation.append(key)
+                else:
+                    self._waiters.pop(key, None)
+                self._admit(key, waiter)
+                admitted = True
+                break
+            if not admitted:
+                return
+
+    async def acquire(self, key: str) -> None:
+        if self._retired:
+            raise RuntimeError("Sub-Agent admission gate belongs to a retired scheduler epoch")
+        if not self._rotation and self._can_admit(key):
+            self._active_total += 1
+            self._active_by_key[key] = self._active_by_key.get(key, 0) + 1
+            return
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        queue = self._waiters.setdefault(key, deque())
+        if not queue:
+            self._rotation.append(key)
+        queue.append(waiter)
+        self._dispatch()
+        try:
+            await waiter
+        except BaseException:
+            admitted_before_cancellation = waiter.done() and not waiter.cancelled()
+            if not waiter.done():
+                waiter.cancel()
+            queue = self._waiters.get(key)
+            if queue is not None:
+                try:
+                    queue.remove(waiter)
+                except ValueError:
+                    pass
+                if not queue:
+                    self._waiters.pop(key, None)
+                    self._rotation = deque(item for item in self._rotation if item != key)
+            if admitted_before_cancellation:
+                self.release(key)
+                raise
+            self._dispatch()
+            raise
+
+    def release(self, key: str) -> None:
+        active = self._active_by_key.get(key, 0)
+        if active <= 0 or self._active_total <= 0:
+            raise RuntimeError("Sub-Agent admission release has no matching acquire")
+        if active == 1:
+            self._active_by_key.pop(key, None)
+        else:
+            self._active_by_key[key] = active - 1
+        self._active_total -= 1
+        if not self._retired:
+            self._dispatch()
 
 
 class _ProcessSubagentScheduler:
@@ -654,20 +831,42 @@ class _ProcessSubagentScheduler:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._started: threading.Event | None = None
-        self._gate: asyncio.Semaphore | None = None
+        self._gate: _RunFairAdmissionGate | None = None
+        self._epoch_number = 0
+        self._current_epoch: _SchedulerEpoch | None = None
         self._records: dict[uuid.UUID, _ExecutionRecord] = {}
-        self._thread_executor = _LifecycleThreadPoolExecutor(
-            thread_name_prefix="subagent-lifecycle-worker",
-        )
+        self._retired_loop_drains: list[_RetiredLoopDrain] = []
 
-    def _ensure_loop_locked(self) -> asyncio.AbstractEventLoop:
+    def _ensure_loop_locked(
+        self,
+    ) -> tuple[_SchedulerEpoch, _RetiredSchedulerEpoch | None]:
         loop = self._loop
         thread = self._thread
-        if loop is not None and not loop.is_closed() and loop.is_running() and thread is not None and thread.is_alive():
-            return loop
+        current_epoch = self._current_epoch
+        if loop is not None and not loop.is_closed() and loop.is_running() and thread is not None and thread.is_alive() and current_epoch is not None:
+            return current_epoch, None
 
+        # ``asyncio`` synchronization primitives are owned by the loop that
+        # first had to wait on them. If the process scheduler loop dies, its
+        # gate cannot be carried into the replacement loop. Fence that exact
+        # epoch before admitting replacement work. Its stopped loop is resumed
+        # only by the retired-epoch drain so the original graph Tasks can unwind
+        # before that exact loop is closed.
+        retired_epoch: _RetiredSchedulerEpoch | None = None
+        if current_epoch is not None:
+            current_epoch.gate.retire()
+            retired_epoch = _RetiredSchedulerEpoch(
+                epoch=current_epoch,
+                prior_thread=thread,
+                records=tuple(record for record in self._records.values() if not record.overall_quiesced.is_set()),
+            )
+
+        next_epoch_number = self._epoch_number + 1
         loop = asyncio.new_event_loop()
-        loop.set_default_executor(self._thread_executor)
+        executor = _LifecycleThreadPoolExecutor(
+            thread_name_prefix=(f"subagent-lifecycle-worker-{next_epoch_number}"),
+        )
+        loop.set_default_executor(executor)
         started = threading.Event()
 
         def run_loop() -> None:
@@ -687,20 +886,125 @@ class _ProcessSubagentScheduler:
             if not loop.is_closed():
                 loop.close()
             raise RuntimeError("Timed out starting Sub-Agent Task scheduler")
+        self._epoch_number = next_epoch_number
+        gate = _RunFairAdmissionGate(self._max_concurrency)
+        epoch = _SchedulerEpoch(
+            number=self._epoch_number,
+            loop=loop,
+            gate=gate,
+            executor=executor,
+        )
         self._loop = loop
         self._thread = thread
         self._started = started
-        return loop
+        self._gate = gate
+        self._current_epoch = epoch
+        return epoch, retired_epoch
+
+    def _start_retired_epoch_drain(
+        self,
+        retired: _RetiredSchedulerEpoch | None,
+    ) -> None:
+        """Resume a stopped epoch long enough to unwind and close its real loop."""
+
+        if retired is None:
+            return
+        loop = retired.epoch.loop
+        records = retired.records
+        for record in records:
+            record.request_termination(
+                SubagentTaskStatus.FAILED,
+                failure_code=SubagentFailureCode.EXECUTION_FAILED,
+            )
+
+        closed = threading.Event()
+
+        def drain_retired_loop() -> None:
+            prior_thread = retired.prior_thread
+            if prior_thread is not None and prior_thread is not threading.current_thread() and prior_thread.is_alive():
+                prior_thread.join()
+            if loop.is_closed():
+                logger.error(
+                    "Retired Sub-Agent scheduler loop was already closed before graph unwind: epoch=%s",
+                    retired.epoch.number,
+                )
+                closed.set()
+                return
+
+            asyncio.set_event_loop(loop)
+
+            async def cancel_and_wait_for_real_quiescence() -> None:
+                for record in records:
+                    with record.lock:
+                        source_task = record.source_task
+                    if source_task is not None and not source_task.done():
+                        source_task.cancel()
+                while any(not record.overall_quiesced.is_set() for record in records):
+                    await asyncio.sleep(0.002)
+                # Let finalizer completion callbacks run before stopping the loop.
+                await asyncio.sleep(0)
+                loop.stop()
+
+            try:
+                loop.create_task(
+                    cancel_and_wait_for_real_quiescence(),
+                    name=f"subagent-retired-epoch-{retired.epoch.number}",
+                )
+                while any(not record.overall_quiesced.is_set() for record in records):
+                    # A second external stop must not turn a pending graph into a
+                    # false quiescence receipt. Resume until every real finalizer
+                    # has acknowledged graph and inherited-operation teardown.
+                    loop.run_forever()
+                loop.run_until_complete(asyncio.sleep(0))
+                pending = tuple(task for task in asyncio.all_tasks(loop) if not task.done())
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True),
+                    )
+                loop.close()
+                retired.epoch.executor.shutdown(
+                    wait=True,
+                    cancel_futures=True,
+                )
+            except BaseException as exc:
+                logger.error(
+                    "Retired Sub-Agent scheduler loop drain failed: epoch=%s exception_type=%s",
+                    retired.epoch.number,
+                    type(exc).__name__,
+                )
+            finally:
+                asyncio.set_event_loop(None)
+                closed.set()
+
+        drain_thread = threading.Thread(
+            target=drain_retired_loop,
+            name=f"subagent-retired-loop-{retired.epoch.number}",
+            daemon=True,
+        )
+        drain = _RetiredLoopDrain(
+            loop=loop,
+            thread=drain_thread,
+            closed=closed,
+        )
+        with self._lock:
+            self._retired_loop_drains.append(drain)
+            drain_thread.start()
 
     def submit(self, record: _ExecutionRecord, context: Context) -> None:
         with self._lock:
             if self._state is not _SchedulerState.ACCEPTING:
                 raise RuntimeError("Sub-Agent Task lifecycle is closing")
-            loop = self._ensure_loop_locked()
+            epoch, retired_epoch = self._ensure_loop_locked()
+            loop = epoch.loop
+            record.bind_scheduler_epoch(epoch, context)
             self._records[record.execution_id] = record
 
+        self._start_retired_epoch_drain(retired_epoch)
+
         def schedule() -> None:
-            coroutine = self._run_record(record)
+            coroutine = self._run_record(record, epoch)
             try:
                 task = loop.create_task(coroutine, context=context)
             except BaseException:
@@ -709,10 +1013,16 @@ class _ProcessSubagentScheduler:
                     SubagentTaskStatus.FAILED,
                     failure_code=SubagentFailureCode.EXECUTION_FAILED,
                 )
-                self._start_finalizer(record)
+                self._start_finalizer(record, epoch)
                 return
             cancel_before_start = record.install_source_task(task)
-            task.add_done_callback(lambda completed: self._source_task_done(record, completed))
+            task.add_done_callback(
+                lambda completed: self._source_task_done(
+                    record,
+                    completed,
+                    epoch,
+                )
+            )
             if cancel_before_start:
                 task.cancel()
 
@@ -726,11 +1036,47 @@ class _ProcessSubagentScheduler:
             record.mark_graph_quiescent()
             record.mark_overall_quiescent()
 
-    async def _run_record(self, record: _ExecutionRecord) -> None:
-        gate = self._gate
-        if gate is None:
-            gate = asyncio.Semaphore(self._max_concurrency)
-            self._gate = gate
+    @staticmethod
+    def _log_queue_wait(
+        record: _ExecutionRecord,
+        *,
+        scheduling_key: str,
+        timed_out: bool,
+    ) -> None:
+        queue_wait_seconds = max(
+            0.0,
+            time.monotonic() - record.queued_at_monotonic,
+        )
+        extra = {
+            "event": "subagent_scheduler_queue_wait",
+            "execution_id": str(record.execution_id),
+            "scheduling_key": scheduling_key,
+            "queue_wait_seconds": queue_wait_seconds,
+            "queue_wait_warning_threshold_seconds": (_QUEUE_WAIT_WARNING_SECONDS),
+        }
+        if timed_out:
+            logger.warning(
+                "Sub-Agent Task scheduler queue timed out: execution_id=%s queue_wait_seconds=%.3f",
+                record.execution_id,
+                queue_wait_seconds,
+                extra=extra,
+            )
+            return
+        log_queue_admission = logger.warning if queue_wait_seconds >= _QUEUE_WAIT_WARNING_SECONDS else logger.info
+        log_queue_admission(
+            "Sub-Agent Task scheduler admitted: execution_id=%s queue_wait_seconds=%.3f",
+            record.execution_id,
+            queue_wait_seconds,
+            extra=extra,
+        )
+
+    async def _run_record(
+        self,
+        record: _ExecutionRecord,
+        epoch: _SchedulerEpoch,
+    ) -> None:
+        gate = epoch.gate
+        scheduling_key = record.binding.scheduling_key or str(record.execution_id)
 
         deadline_watchdog: asyncio.Task[None] | None = None
         receipt_token = _CURRENT_THREAD_OPERATION_RECEIPTS.set(
@@ -739,23 +1085,40 @@ class _ProcessSubagentScheduler:
         try:
             queue_remaining = record.queued_at_monotonic + record.call.queue_timeout_seconds - time.monotonic()
             if queue_remaining <= 0:
-                record.request_termination(
+                if record.request_termination(
                     SubagentTaskStatus.TIMED_OUT,
                     timeout_phase=SubagentTimeoutPhase.QUEUE,
-                )
+                ):
+                    self._log_queue_wait(
+                        record,
+                        scheduling_key=scheduling_key,
+                        timed_out=True,
+                    )
                 return
             try:
                 await asyncio.wait_for(
-                    gate.acquire(),
+                    gate.acquire(scheduling_key),
                     timeout=queue_remaining,
                 )
             except TimeoutError:
-                record.request_termination(
+                if record.request_termination(
                     SubagentTaskStatus.TIMED_OUT,
                     timeout_phase=SubagentTimeoutPhase.QUEUE,
-                )
+                ):
+                    self._log_queue_wait(
+                        record,
+                        scheduling_key=scheduling_key,
+                        timed_out=True,
+                    )
                 return
-            record.mark_admission_acquired()
+            if not record.mark_admission_acquired(scheduling_key):
+                gate.release(scheduling_key)
+                return
+            self._log_queue_wait(
+                record,
+                scheduling_key=scheduling_key,
+                timed_out=False,
+            )
             if record.mark_execution_started():
                 return
             source_task = asyncio.current_task()
@@ -824,6 +1187,7 @@ class _ProcessSubagentScheduler:
         self,
         record: _ExecutionRecord,
         task: asyncio.Task[None],
+        epoch: _SchedulerEpoch,
     ) -> None:
         if task.cancelled():
             record.request_termination(
@@ -847,12 +1211,16 @@ class _ProcessSubagentScheduler:
                 )
         # This callback runs only after the actual asyncio.Task has completed;
         # unlike concurrent Future.cancelled(), it is a graph-unwind receipt.
-        self._start_finalizer(record)
+        self._start_finalizer(record, epoch)
 
-    def _start_finalizer(self, record: _ExecutionRecord) -> None:
+    def _start_finalizer(
+        self,
+        record: _ExecutionRecord,
+        epoch: _SchedulerEpoch,
+    ) -> None:
         """Start the process-loop reaper after the real graph Task is done."""
 
-        if not record.claim_finalizer():
+        if not record.claim_finalizer(epoch):
             return
         barrier = record.binding.inherited_operations_barrier
         if barrier is not None:
@@ -899,7 +1267,8 @@ class _ProcessSubagentScheduler:
         with record.lock:
             holder = record.result_holder
             task = record.source_task
-            loop = self._loop
+            epoch = record.scheduler_epoch
+            loop = epoch.loop if epoch is not None else None
         if holder is not None:
             holder.cancel_event.set()
         if task is not None and loop is not None and loop.is_running():
@@ -916,16 +1285,23 @@ class _ProcessSubagentScheduler:
     def release_admission(self, record: _ExecutionRecord) -> None:
         """Release the process gate only after all child resources are quiet."""
 
-        if not record.claim_admission_release():
+        lease = record.claim_admission_release()
+        if lease is None:
             return
-        gate = self._gate
-        if gate is None:
-            raise RuntimeError("Sub-Agent Task scheduler gate is unavailable")
-        gate.release()
+        lease.epoch.gate.release(lease.scheduling_key)
 
     def records(self) -> tuple[_ExecutionRecord, ...]:
         with self._lock:
             return tuple(self._records.values())
+
+    def recover_dead_loop_records(self) -> None:
+        """Resume a dead epoch until its real Tasks unwind and its loop closes."""
+
+        with self._lock:
+            if not any(not record.overall_quiesced.is_set() for record in self._records.values()):
+                return
+            _epoch, retired_epoch = self._ensure_loop_locked()
+        self._start_retired_epoch_drain(retired_epoch)
 
     def active_count(self) -> int:
         with self._lock:
@@ -948,6 +1324,7 @@ class _ProcessSubagentScheduler:
                 cancellation_code=SubagentCancellationCode.PROCESS_SHUTDOWN,
             )
             self.cancel(record)
+        self.recover_dead_loop_records()
         deadline = time.monotonic() + max(timeout_seconds, 0.0)
         incomplete = 0
         for record in records:
@@ -965,21 +1342,35 @@ class _ProcessSubagentScheduler:
         with self._lock:
             loop = self._loop
             thread = self._thread
+            current_epoch = self._current_epoch
+            retired_loop_drains = tuple(self._retired_loop_drains)
             self._loop = None
             self._thread = None
             self._gate = None
+            self._current_epoch = None
+            self._retired_loop_drains.clear()
             self._records.clear()
             self._state = _SchedulerState.CLOSED
+        for drain in retired_loop_drains:
+            if drain.thread.is_alive() and drain.thread is not threading.current_thread():
+                drain.thread.join(
+                    timeout=None if wait_for_thread_operations else 5.0,
+                )
+            if wait_for_thread_operations and (not drain.closed.is_set() or not drain.loop.is_closed()):
+                raise RuntimeError(
+                    "Retired Sub-Agent scheduler loop did not close after quiescence",
+                )
         if loop is not None and loop.is_running():
             loop.call_soon_threadsafe(loop.stop)
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=5.0)
         if loop is not None and not loop.is_running() and not loop.is_closed():
             loop.close()
-        self._thread_executor.shutdown(
-            wait=wait_for_thread_operations,
-            cancel_futures=True,
-        )
+        if current_epoch is not None:
+            current_epoch.executor.shutdown(
+                wait=wait_for_thread_operations,
+                cancel_futures=True,
+            )
 
 
 def _copy_detached_context() -> Context:
@@ -1044,12 +1435,7 @@ def _aggregate_usage(
 
 
 def _normalize_stop_reason(value: str | None) -> SubagentStopReasonValue | None:
-    if value not in {
-        "token_capped",
-        "turn_capped",
-        "loop_capped",
-        "tool_budget_capped",
-    }:
+    if value not in SUBAGENT_STOP_REASON_VALUES:
         return None
     return cast(SubagentStopReasonValue, value)
 
@@ -1549,12 +1935,18 @@ class SubagentTaskLifecycle:
         cancellation_code: SubagentCancellationCode | None = None,
         timeout_phase: SubagentTimeoutPhase | None = None,
     ) -> None:
-        record.request_termination(
+        won_terminal = record.request_termination(
             status,
             failure_code=failure_code,
             cancellation_code=cancellation_code,
             timeout_phase=timeout_phase,
         )
+        if won_terminal and timeout_phase is SubagentTimeoutPhase.QUEUE:
+            self._scheduler._log_queue_wait(
+                record,
+                scheduling_key=(record.binding.scheduling_key or str(record.execution_id)),
+                timed_out=True,
+            )
         self._scheduler.cancel(record)
 
     async def _wait_after_caller_cancel(
@@ -1627,6 +2019,7 @@ class SubagentTaskLifecycle:
                     status=SubagentTaskStatus.CANCELLED,
                     cancellation_code=SubagentCancellationCode.LIFECYCLE_SHUTDOWN,
                 )
+            self._scheduler.recover_dead_loop_records()
 
             for record in records:
                 _, interrupted = await self._wait_ignoring_caller_cancellation(

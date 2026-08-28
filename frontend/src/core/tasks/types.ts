@@ -15,7 +15,8 @@ export type SubtaskStopReason =
   | "token_capped"
   | "turn_capped"
   | "loop_capped"
-  | "tool_budget_capped";
+  | "tool_budget_capped"
+  | "output_truncated";
 
 export interface SubtaskExecutionApprovalState {
   approvalId: string;
@@ -40,7 +41,7 @@ export interface Subtask {
   executionApproval?: SubtaskExecutionApprovalState;
   subagent_type: string;
   description: string;
-  /** Effective ActWeave model selected for this delegated run. */
+  /** Effective Fluva model selected for this delegated run. */
   modelName?: string;
   /** Latest cumulative token snapshot reported by the delegated run. */
   usage?: TokenUsage;
@@ -55,10 +56,10 @@ export interface Subtask {
   result?: string;
   error?: string;
   /**
-   * Why a guardrail cap ended the run early (token, turn, loop, or tool-call
-   * budget), or ``undefined`` for a clean run. The pill status stays normal
-   * (``completed``/``failed``); the task surface can show the cap without
-   * parsing result text (#3875 Phase 2).
+   * Why the run ended without a clean final response (a guardrail cap or
+   * Provider output truncation), or ``undefined`` for a clean run. The pill
+   * status stays normal (``completed``/``failed``); the task surface shows the
+   * reason without parsing result text.
    */
   stopReason?: SubtaskStopReason;
 }

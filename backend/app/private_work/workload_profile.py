@@ -22,7 +22,7 @@ def _validate_profile_name(value: object) -> None:
 
 
 def _require_supported_policy_schema_version(value: object) -> int:
-    if type(value) is not int or value not in {2, 3, 4, 5, 6}:
+    if type(value) is not int or value != 1:
         raise RunWorkloadProfileUnsupported
     return value
 
@@ -89,13 +89,7 @@ def effective_run_workload_profile_from_kwargs(
 ) -> EffectiveRunWorkloadProfile:
     if not isinstance(kwargs, Mapping):
         raise RunWorkloadProfileUnsupported
-    policy_schema_version = _require_supported_policy_schema_version(
-        policy_schema_version,
-    )
-    if policy_schema_version in {2, 3}:
-        if RUN_WORKLOAD_PROFILE_KWARG in kwargs:
-            raise RunWorkloadProfileUnsupported
-        return EffectiveRunWorkloadProfile(name="interactive")
+    _require_supported_policy_schema_version(policy_schema_version)
     if RUN_WORKLOAD_PROFILE_KWARG not in kwargs:
         raise RunWorkloadProfileUnsupported
     return parse_persisted_run_workload_profile(kwargs[RUN_WORKLOAD_PROFILE_KWARG])[1]
@@ -109,17 +103,10 @@ def resolve_admitted_run_workload_profile(
 ) -> EffectiveRunWorkloadProfile:
     if type(requested) is not RequestedRunWorkloadProfile or (inherited_effective is not None and type(inherited_effective) is not EffectiveRunWorkloadProfile):
         raise RunWorkloadProfileUnsupported
-    schema_version = _require_supported_policy_schema_version(
-        policy_schema_version,
-    )
-    effective = inherited_effective or EffectiveRunWorkloadProfile(
+    _require_supported_policy_schema_version(policy_schema_version)
+    return inherited_effective or EffectiveRunWorkloadProfile(
         name=requested.name,
     )
-    if schema_version in {2, 3}:
-        if requested.name != "interactive" or effective.name != "interactive":
-            raise RunWorkloadProfileUnsupported
-        return EffectiveRunWorkloadProfile(name="interactive")
-    return effective
 
 
 def freeze_admitted_run_workload_profile(
@@ -140,8 +127,7 @@ def freeze_admitted_run_workload_profile(
         inherited_effective=inherited_effective,
     )
     frozen_kwargs = dict(kwargs)
-    if schema_version in {4, 5, 6}:
-        frozen_kwargs[RUN_WORKLOAD_PROFILE_KWARG] = persisted_run_workload_profile(requested, effective)
+    frozen_kwargs[RUN_WORKLOAD_PROFILE_KWARG] = persisted_run_workload_profile(requested, effective)
     return effective, frozen_kwargs
 
 

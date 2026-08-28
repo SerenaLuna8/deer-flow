@@ -231,9 +231,15 @@ async def run_worker(
                 current_policy_reader=SystemQuotaPolicyReader(),
             )
         )
+        run_event_notify_enabled = config.worker.stream.run_event_notify_enabled
+        run_event_store = DbRunEventStore(
+            session_factory,
+            run_event_notify_enabled=run_event_notify_enabled,
+        )
         terminal_port = PrivateRunJobTerminalPort(
             quota=quota_enforcer,
             audit=audit_sink,
+            event_store=run_event_store,
         )
 
         async def reconcile_deferred_automation_terminals() -> None:
@@ -259,7 +265,6 @@ async def run_worker(
                 proxy_url=mcp_security.egress_proxy_url,
                 timeout_seconds=mcp_security.discovery_timeout_seconds,
             )
-            run_event_notify_enabled = config.worker.stream.run_event_notify_enabled
             bridge = PostgresStreamBridge(
                 session_factory,
                 run_event_notify_enabled=run_event_notify_enabled,
@@ -268,10 +273,6 @@ async def run_worker(
                 make_checkpointer(config),
             )
             store = await stack.enter_async_context(make_store(config))
-            run_event_store = DbRunEventStore(
-                session_factory,
-                run_event_notify_enabled=run_event_notify_enabled,
-            )
             project_checkpointer = ProjectScopedCheckpointer(
                 raw_checkpointer,
                 session_factory,

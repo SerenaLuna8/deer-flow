@@ -27,6 +27,12 @@ from app.shared_assets.skill_archive import (
 )
 from app.system_runtime_settings.models import IdenticalCallsPolicy
 from deerflow.agents.memory.snip import MAX_CONTINUITY_CHARS, MAX_SNIP_OUTPUT_CHARS
+from deerflow.agents.middlewares.provider_request_cost_adapter import (
+    PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE,
+)
+from deerflow.agents.middlewares.provider_request_usage import (
+    _PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE,
+)
 from deerflow.agents.middlewares.summarization_middleware import (
     MIN_SNIP_SUMMARY_OUTPUT_TOKENS,
 )
@@ -41,6 +47,7 @@ from deerflow.config.subagents_config import (
     MIN_CONCURRENT_SUBAGENT_CALLS,
     MIN_TOTAL_SUBAGENTS_PER_RUN,
 )
+from deerflow.config.summarization_config import MIN_TRIM_TOKENS_TO_SUMMARIZE
 from deerflow.config.vision_bridge_config import (
     DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS,
 )
@@ -203,6 +210,31 @@ DOCUMENTED_CONSTANTS = (
         pattern=r"tagged fact lines bounded to ([\d,]+) characters",
         expected=f"{MAX_SNIP_OUTPUT_CHARS:,}",
         source="deerflow.agents.memory.snip.MAX_SNIP_OUTPUT_CHARS",
+    ),
+    DocumentedConstant(
+        pattern=r"`trim_tokens_to_summarize` has a floor of ([\d,]+) tokens",
+        expected=f"{MIN_TRIM_TOKENS_TO_SUMMARIZE:,}",
+        source="deerflow.config.summarization_config.MIN_TRIM_TOKENS_TO_SUMMARIZE",
+    ),
+    DocumentedConstant(
+        pattern=r"per-image token upper bounds: ([\d,]+) \(anthropic\)",
+        expected=f"{_PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE['anthropic']:,}",
+        source="provider_request_usage._PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE['anthropic']",
+    ),
+    DocumentedConstant(
+        pattern=r"\(anthropic\) and ([\d,]+) \(openai families\)",
+        expected=f"{_PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE['openai']:,}",
+        source="provider_request_usage._PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE['openai']",
+    ),
+    DocumentedConstant(
+        pattern=r"declared safety supplement of ([\d.]+) tokens per byte on anthropic/vllm",
+        expected=str(PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE["anthropic"]),
+        source="provider_request_cost_adapter.PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE['anthropic']",
+    ),
+    DocumentedConstant(
+        pattern=r"anthropic/vllm and ([\d.]+) on the other adapters",
+        expected=str(PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE["deepseek"]),
+        source="provider_request_cost_adapter.PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE['deepseek']",
     ),
     DocumentedConstant(
         pattern=r"`worker\.stream\.text_delta_flush_ms`, default (\d+)ms",

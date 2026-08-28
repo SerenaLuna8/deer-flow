@@ -699,7 +699,9 @@ def test_state_system_message_is_not_misattributed_to_conversation() -> None:
 
 
 def test_visual_request_forms_partial_measurement_but_final_guard_fails_closed() -> None:
-    profile = _profile()
+    # ``deepseek`` declares no per-image token cost, so visual material keeps
+    # the fail-closed dispatch contract with a visible partial lower bound.
+    profile = _profile(provider_adapter="deepseek")
     request = _request(
         profile,
         messages=[
@@ -925,6 +927,7 @@ async def test_async_guard_durably_orders_evidence_and_observes_raw_usage_when_t
     projection_snapshot = result.command.update[CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY]
     assert projection_snapshot["measurement"]["request_fingerprint"] == (events[0][1].request_fingerprint)
     assert projection_snapshot["estimator"]["tool_count"] == 1
+    assert projection_snapshot["estimator"]["visual_max_tokens_per_image"] == 2_048
     assert projection_snapshot["provider_call_id"] == (
         ProviderCallIdentity.derive(
             subject=ContextSubject.lead_thread(thread_id="thread-1"),

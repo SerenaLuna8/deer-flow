@@ -23,7 +23,7 @@ describe("Welcome", () => {
     );
 
     expect(html).toContain("你好，欢迎回来！");
-    expect(html).not.toContain("欢迎使用 🦌 ActWeave");
+    expect(html).not.toContain("欢迎使用 🦌 Fluva");
   });
 
   test("keeps the dedicated Skill creation description", () => {
@@ -36,6 +36,6 @@ describe("Welcome", () => {
     );
 
     expect(html).toContain("创建你自己的 Agent SKill");
-    expect(html).toContain("创建你的 Agent Skill 来释放 ActWeave 的潜力");
+    expect(html).toContain("创建你的 Agent Skill 来释放 Fluva 的潜力");
   });
 });

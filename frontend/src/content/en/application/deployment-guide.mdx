@@ -1,13 +1,13 @@
 ---
 title: Deployment Guide
-description: ActWeave boundaries for local and Docker Compose deployments.
+description: Fluva boundaries for local and Docker Compose deployments.
 ---
 
 import { Callout } from "nextra/components";
 
 # Deployment Guide
 
-The ActWeave topology consists of Nginx, Frontend, Gateway, Worker, an optional Scheduler, and an optional Provisioner. PostgreSQL is the only application persistence database and is not provisioned by the ActWeave Compose stack.
+The Fluva topology consists of Nginx, Frontend, Gateway, Worker, an optional Scheduler, and an optional Provisioner. PostgreSQL is the only application persistence database and is not provisioned by the Fluva Compose stack.
 
 <Callout type="warning">
   The repository provides local and Docker Compose launch resources, but Docker Compose, browsers, model providers, and Sandbox modes require separate capacity, security, and failure validation in the target environment. This page is not production certification.
@@ -22,7 +22,7 @@ The ActWeave topology consists of Nginx, Frontend, Gateway, Worker, an optional 
 
 ```bash
 export POSTGRES_ADMIN_URL='<administrator URL for the postgres maintenance database>'
-export DATABASE_URL='<fresh ActWeave target database URL>'
+export DATABASE_URL='<fresh Fluva target database URL>'
 make setup-db
 make check-db
 ```
@@ -73,7 +73,7 @@ Before deployment, verify at least the following:
 | Container/AIO provider | Container isolation; validate Docker socket, network, and mount permissions |
 | Provisioner/Kubernetes | A separate service creates Sandbox Pods; requires cluster-level security validation |
 
-Provisioner/Kubernetes is a Sandbox provider only; this repository does not provide a Kubernetes/Helm deployment target for the complete ActWeave stack.
+Provisioner/Kubernetes is a Sandbox provider only; this repository does not provide a Kubernetes/Helm deployment target for the complete Fluva stack.
 
 Sandbox isolation does not replace project authorization, least-privilege secret injection, or network egress control.
 

@@ -54,7 +54,10 @@ logger = logging.getLogger(__name__)
 _IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
 _IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
 _MAX_CURRENT_UPLOAD_IMAGES = 4
-_MAX_CURRENT_UPLOAD_TOTAL_BYTES = MAX_IMAGE_BYTES
+# The public contract is independently bounded on both dimensions: at most
+# four unique images, each at most ``MAX_IMAGE_BYTES``. Keep an explicit
+# aggregate allocation guard without silently tightening the per-image limit.
+_MAX_CURRENT_UPLOAD_TOTAL_BYTES = _MAX_CURRENT_UPLOAD_IMAGES * MAX_IMAGE_BYTES
 
 
 class ViewImageMiddlewareState(ThreadState):

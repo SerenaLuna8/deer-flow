@@ -1,19 +1,19 @@
 ---
 title: 创建你的第一个 Harness
-description: 本教程介绍如何以编程方式使用 ActWeave Harness Python SDK——直接在你的 Python 代码中导入和使用 ActWeave，而不是通过 Web 界面。
+description: 本教程介绍如何以编程方式使用 Fluva Harness Python SDK——直接在你的 Python 代码中导入和使用 Fluva，而不是通过 Web 界面。
 ---
 
 import { Callout } from "nextra/components";
 
 # 创建你的第一个 Harness
 
-本教程介绍如何以编程方式使用 ActWeave Harness Python SDK——直接在你的 Python 代码中导入和使用 ActWeave，而不是通过 Web 界面。
+本教程介绍如何以编程方式使用 Fluva Harness Python SDK——直接在你的 Python 代码中导入和使用 Fluva，而不是通过 Web 界面。
 
 ## 前置条件
 
 - Python 3.12+
 - 已安装 `uv`
-- 已克隆 ActWeave 仓库
+- 已克隆 Fluva 仓库
 
 ## 安装
 
@@ -23,7 +23,7 @@ uv sync
 ```
 
 <Callout type="info">
-  完整 ActWeave 应用会把模型定义和模型自有的加密 API Key 存入 PostgreSQL 系统设置。
+  完整 Fluva 应用会把模型定义和模型自有的加密 API Key 存入 PostgreSQL 系统设置。
   下面的底层 SDK 示例仅直接构造一个内存中的 LangChain 模型实例，不会创建或持久化
   应用模型定义。
 </Callout>

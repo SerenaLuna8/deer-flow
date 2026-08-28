@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from asyncpg.exceptions import CannotConnectNowError
 from sqlalchemy.exc import DBAPIError, ProgrammingError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from app.reliability.workers import WorkerRegistry
 from app.worker.service import (
@@ -739,6 +740,102 @@ async def test_handler_owned_settlement_runs_after_job_heartbeat_stops() -> None
     await service.run_until_idle()
 
     assert len(backend.succeeded) == 1
+
+
+@pytest.mark.asyncio
+async def test_settlement_connectivity_failure_abandons_lease_without_worker_failure() -> None:
+    """An unknown settlement outcome must not escalate into a process failure.
+
+    A database connectivity failure during the settlement transaction cannot
+    prove whether the commit landed (the ACK may have been lost), so the
+    Worker abandons the lease for exact-scope durable recovery instead of
+    retrying in-process or killing every other in-flight Run on this process.
+    """
+
+    backend = _FakeBackend(job_count=0)
+    claim = _claim(1)
+
+    async def handler(_claim, _authority):
+        async def commit() -> None:
+            raise SQLAlchemyTimeoutError()
+
+        return JobSettlement(JobOutcome.succeeded(), commit)
+
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"retention_purge": handler},
+        _config(heartbeat_seconds=0.001),
+        repository_builder=_FakeRepository,
+    )
+
+    await service._execute_claim(claim)
+
+    assert backend.succeeded == []
+    assert backend.failed == []
+    assert backend.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_settlement_outcome_unknown_does_not_stop_a_sibling_job(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One uncertain Run Settlement remains scoped to its exact Job Attempt."""
+
+    backend = _FakeBackend(job_count=2)
+    uncertain_job_id, sibling_job_id = tuple(claim.job_id for claim in backend.claims)
+
+    async def handler(claim, _authority):
+        async def commit() -> None:
+            if claim.job_id == uncertain_job_id:
+                raise SQLAlchemyTimeoutError()
+            backend.succeeded.append(claim.job_id)
+
+        return JobSettlement(JobOutcome.succeeded(), commit)
+
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"retention_purge": handler},
+        _config(
+            heartbeat_seconds=0.001,
+            max_concurrent_jobs=2,
+            poll_interval_seconds=0.001,
+        ),
+        repository_builder=_FakeRepository,
+    )
+
+    await service.run_until_idle()
+
+    assert backend.succeeded == [sibling_job_id]
+    assert backend.failed == []
+    assert str(uncertain_job_id) not in caplog.text
+    assert "Job settlement outcome unknown" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_settlement_invariant_failure_keeps_process_level_error() -> None:
+    """Programming invariants inside settlement stay loud."""
+
+    backend = _FakeBackend(job_count=0)
+    claim = _claim(1)
+
+    async def handler(_claim, _authority):
+        async def commit() -> None:
+            raise ValueError("settlement invariant violated")
+
+        return JobSettlement(JobOutcome.succeeded(), commit)
+
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"retention_purge": handler},
+        _config(heartbeat_seconds=0.001),
+        repository_builder=_FakeRepository,
+    )
+
+    with pytest.raises(ValueError):
+        await service._execute_claim(claim)
 
 
 @pytest.mark.asyncio

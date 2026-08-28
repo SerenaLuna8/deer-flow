@@ -285,7 +285,7 @@ class ProjectChatControlService:
         thread_id: str,
         *,
         force: bool,
-        keep: tuple[str, int | float] | None,
+        keep: tuple[str, int] | None,
         app_config: AppConfig,
     ) -> ThreadCompactionResult:
         """Prepare outside locks, then compare-and-swap under a second lock."""
@@ -389,6 +389,10 @@ class ProjectChatControlService:
                 receipt = compaction_checkpoint_receipt(
                     source_projection_snapshot,
                     source_checkpoint_id=prepared.source_checkpoint_id,
+                    source_values=self._compaction_source_values(
+                        current,
+                        request_id=context.request_id,
+                    ),
                     checkpoint_values=result_values,
                     result_generation=ContextWindowGeneration(
                         generation_id=uuid.uuid4(),
@@ -467,6 +471,26 @@ class ProjectChatControlService:
             return ContextCheckpointProjectionSnapshot.from_safe_mapping(raw)
         except (TypeError, ValueError):
             raise PrivateWorkUnavailable(request_id) from None
+
+    @staticmethod
+    def _compaction_source_values(
+        current: object,
+        *,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Expose the locked pre-compaction state for same-basis re-measure."""
+
+        current_values = getattr(current, "values", None)
+        if not isinstance(current_values, Mapping):
+            raise PrivateWorkUnavailable(request_id)
+        messages = current_values.get("messages")
+        if not isinstance(messages, list):
+            raise PrivateWorkUnavailable(request_id)
+        summary = current_values.get("summary_text")
+        return {
+            "messages": list(messages),
+            "summary_text": summary if isinstance(summary, str) else None,
+        }
 
     @staticmethod
     def _compaction_result_values(

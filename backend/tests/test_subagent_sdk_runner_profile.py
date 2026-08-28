@@ -865,17 +865,104 @@ def test_subagent_stop_receipts_use_their_own_scope_and_priority() -> None:
         "tool-control",
         "tool_budget_capped",
     )
-    runner._legacy_stop_reason_middlewares = [
+    runner._additional_stop_reason_middlewares = [
         _Receipt("token-budget", "token_capped"),
         _Receipt("later-loop", "loop_capped"),
+        _Receipt("provider-output", "output_truncated"),
     ]
 
-    assert runner._consume_guard_stop_reason(internal_execution_id) == "loop_capped"
+    assert runner._consume_stop_reason(internal_execution_id) == "output_truncated"
     assert consumed == [
         ("tool-control", str(internal_execution_id)),
         ("token-budget", "parent-run-id"),
         ("later-loop", "parent-run-id"),
+        ("provider-output", "parent-run-id"),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "expected_status", "expected_result", "expected_error"),
+    [
+        (
+            "usable partial result",
+            _SubagentGraphStatus.COMPLETED,
+            "usable partial result",
+            None,
+        ),
+        ("", _SubagentGraphStatus.FAILED, None, "MODEL_OUTPUT_LIMIT"),
+    ],
+)
+async def test_provider_output_truncation_requires_usable_partial_text(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    expected_status: _SubagentGraphStatus,
+    expected_result: str | None,
+    expected_error: str | None,
+) -> None:
+    from deerflow.subagents import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(
+        executor_module,
+        "inject_langfuse_metadata",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "is_trace_correlation_enabled",
+        lambda _config: False,
+    )
+
+    class _OutputLimitReceipt:
+        def consume_stop_reason(self, _scope_id: str | None) -> str:
+            return "output_truncated"
+
+    class _Agent:
+        async def astream(self, *_args: object, **_kwargs: object):
+            yield {
+                "messages": [
+                    AIMessage(
+                        content=content,
+                        response_metadata={"finish_reason": "length"},
+                    )
+                ]
+            }
+
+    runner = _SubagentGraphRunner(
+        config=_config(),
+        tools=[],
+        delegated_context=_delegated_context(
+            app_config=SimpleNamespace(
+                token_usage=SimpleNamespace(enabled=False),
+            ),
+            run_id="parent-run-id",
+            token_usage_tracking_enabled=False,
+        ),
+        parent_model="provider-model",
+        model_override=object(),
+        middleware_override=(),
+        tool_search_enabled=False,
+    )
+
+    async def build_initial_state(_task: str):
+        return {}, [], SimpleNamespace(deferred_names=frozenset())
+
+    runner._build_initial_state = build_initial_state  # type: ignore[method-assign]
+    runner._create_agent = MagicMock(return_value=_Agent())  # type: ignore[method-assign]
+    runner._additional_stop_reason_middlewares = [_OutputLimitReceipt()]
+    result = _SubagentGraphResult(
+        execution_id=uuid.uuid4(),
+        trace_id=runner.trace_id,
+        status=_SubagentGraphStatus.PENDING,
+    )
+
+    outcome = await runner._aexecute("inspect delegated state", result)
+
+    assert outcome.status is expected_status
+    assert outcome.result == expected_result
+    assert outcome.error == expected_error
+    assert outcome.stop_reason == "output_truncated"
 
 
 @pytest.mark.asyncio

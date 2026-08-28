@@ -512,13 +512,10 @@ def test_lead_middleware_builder_binds_summarization_to_the_lead_context_model()
 
 def test_subagent_middleware_builder_inherits_frozen_summarization_and_uses_its_own_context_model() -> None:
     app_config = _full_feature_app_config()
-    app_config.summarization.trigger = ContextSize(
-        type="fraction",
-        value=0.75,
-    )
-    app_config.summarization.keep = ContextSize(type="messages", value=7)
+    app_config.summarization.trigger_tokens = 24_000
+    app_config.summarization.keep = ContextSize(type="tokens", value=7_000)
     app_config.summarization.summary_prompt = "Frozen summary: {messages}"
-    app_config.summarization.trim_tokens_to_summarize = 1_234
+    app_config.summarization.trim_tokens_to_summarize = 2_345
     context_model = MagicMock(name="subagent-context-model")
     context_model.profile = {"max_input_tokens": 32_000}
     summary_model = MagicMock(name="frozen-summary-model")
@@ -543,10 +540,10 @@ def test_subagent_middleware_builder_inherits_frozen_summarization_and_uses_its_
     )
     assert summarization._context_model is context_model
     assert summarization._get_profile_limits() == 32_000
-    assert summarization.trigger == ("fraction", 0.75)
-    assert summarization.keep == ("messages", 7)
+    assert summarization.trigger == ("tokens", 24_000)
+    assert summarization.keep == ("tokens", 7_000)
     assert summarization.summary_prompt == "Frozen summary: {messages}"
-    assert summarization.trim_tokens_to_summarize == 1_234
+    assert summarization.trim_tokens_to_summarize == 2_345
     names = _names(chain)
     assert names.index("DurableContextMiddleware") < names.index(
         "DeerFlowSummarizationMiddleware",
@@ -865,6 +862,7 @@ def test_subagent_runtime_chain_is_the_lead_runtime_minus_uploads() -> None:
     assert subagent[len(expected_base) :] == [
         "DurableContextMiddleware",
         "DeerFlowSummarizationMiddleware",
+        "SubagentOutputLimitMiddleware",
         "ViewImageMiddleware",
         "TokenBudgetMiddleware",
         "SafetyFinishReasonMiddleware",

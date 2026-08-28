@@ -127,7 +127,7 @@ describe("ExecutionApprovalCard", () => {
 
     expect(html).toContain('data-execution-approval-state="pending"');
     expect(html).toContain(
-      "Request to run a command in the ActWeave Worker host environment",
+      "Request to run a command in the Fluva Worker host environment",
     );
     expect(html).toContain("Jiangfeng Mac");
     expect(html).toContain("Bash subagent");

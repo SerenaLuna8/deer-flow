@@ -186,8 +186,13 @@ async def test_provider_ambiguity_settles_lead_context_before_terminal_error(
     class RuntimePolicy:
         async def materialize_run_snapshot_envelope(self, **_kwargs):
             return MaterializedAgentRuntimePolicy(
-                schema_version=6,
-                value=AgentRuntimePolicyValue(title={"enabled": False}),
+                schema_version=1,
+                value=AgentRuntimePolicyValue(
+                    title={"enabled": False},
+                    summarization={
+                        "keep": {"type": "tokens", "value": 8_000},
+                    },
+                ),
             )
 
     class Models:

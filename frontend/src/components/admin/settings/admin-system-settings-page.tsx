@@ -102,9 +102,7 @@ type SaveSection = (
   expectedRevision: number,
 ) => Promise<SystemSettingsMutationResponse | null>;
 
-type ContextSize = NonNullable<
-  AgentRuntimeSettingsValue["summarization"]["trigger"]
->[number];
+type ContextSize = AgentRuntimeSettingsValue["summarization"]["keep"];
 
 type LocalizedCopy = {
   en: string;
@@ -347,6 +345,14 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
   "agent_runtime.summarization.model_name": {
     zh: "摘要模型",
     en: "Summarization model",
+  },
+  "agent_runtime.summarization.trigger_tokens": {
+    zh: "摘要触发 Token 数",
+    en: "Summarization trigger tokens",
+    unit: "Token",
+    hintZh: "上下文估算 Token 达到该值后自动压缩历史；留空则不自动触发。",
+    hintEn:
+      "Compress history automatically when estimated context tokens reach this value. Leave empty to disable the automatic trigger.",
   },
   "agent_runtime.summarization.trim_tokens_to_summarize": {
     zh: "单次待摘要内容上限",
@@ -1098,88 +1104,28 @@ function pathValue(value: unknown, path: string): unknown {
   }, value);
 }
 
-function ContextSizeRow({
+function KeepTokensField({
   name,
   onChange,
-  onRemove,
   value,
 }: {
   name: string;
   onChange: (value: ContextSize) => void;
-  onRemove?: () => void;
   value: ContextSize;
 }) {
-  const { locale, t } = useI18n();
-  const labels = t.adminSystemSettings.fields;
-  const isKeep = name.includes(".keep");
-  const typeLabel = locale === "zh-CN" ? "计算方式" : "Measure by";
-  const valueLabel = isKeep
-    ? locale === "zh-CN"
-      ? "保留数量"
-      : "Number to keep"
-    : locale === "zh-CN"
-      ? "触发阈值"
-      : "Trigger threshold";
-  const unit =
-    value.type === "tokens"
-      ? "Token"
-      : value.type === "messages"
-        ? locale === "zh-CN"
-          ? "条消息"
-          : "messages"
-        : "%";
+  const { locale } = useI18n();
+  const valueLabel = locale === "zh-CN" ? "保留 Token 数" : "Tokens to keep";
   return (
-    <div className="grid gap-3">
-      <FieldShell name={`${name}.type`} label={typeLabel}>
-        <select
-          name={`${name}.type`}
-          value={value.type}
-          aria-label={typeLabel}
-          onChange={(event) => {
-            const type = event.target.value as ContextSize["type"];
-            onChange({ type, value: type === "fraction" ? 0.8 : 1 });
-          }}
-          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-        >
-          <option value="tokens">
-            {locale === "zh-CN" ? "Token 数" : "Token count"}
-          </option>
-          <option value="messages">
-            {locale === "zh-CN" ? "消息数" : "Message count"}
-          </option>
-          <option value="fraction">
-            {locale === "zh-CN" ? "上下文占比" : "Context percentage"}
-          </option>
-        </select>
-      </FieldShell>
-      <NumberField
-        name={`${name}.value`}
-        label={valueLabel}
-        value={value.value}
-        min={value.type === "fraction" ? 1 : 1}
-        max={value.type === "fraction" ? 100 : 2_000_000}
-        scale={value.type === "fraction" ? 0.01 : 1}
-        step={1}
-        unit={unit}
-        onChange={(next) => onChange({ ...value, value: next } as ContextSize)}
-      />
-      {onRemove ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          aria-label={
-            locale === "zh-CN" ? "删除此条件" : "Remove this condition"
-          }
-          title={labels.removeRow}
-          className="justify-self-end"
-          onClick={onRemove}
-        >
-          <XIcon aria-hidden />
-          {locale === "zh-CN" ? "删除条件" : "Remove condition"}
-        </Button>
-      ) : null}
-    </div>
+    <NumberField
+      name={`${name}.value`}
+      label={valueLabel}
+      value={value.value}
+      min={1}
+      max={2_000_000}
+      step={1}
+      unit="Token"
+      onChange={(next) => onChange({ type: "tokens", value: next })}
+    />
   );
 }
 
@@ -1739,9 +1685,16 @@ function AgentRuntimeEditor({
             onChange={(next) => update("summarization.model_name", next)}
           />
           <NullableNumberField
+            name="agent_runtime.summarization.trigger_tokens"
+            value={value.summarization.trigger_tokens}
+            min={1}
+            max={2_000_000}
+            onChange={(next) => update("summarization.trigger_tokens", next)}
+          />
+          <NullableNumberField
             name="agent_runtime.summarization.trim_tokens_to_summarize"
             value={value.summarization.trim_tokens_to_summarize}
-            min={1}
+            min={2_000}
             max={2_000_000}
             onChange={(next) =>
               update("summarization.trim_tokens_to_summarize", next)
@@ -1754,53 +1707,13 @@ function AgentRuntimeEditor({
               update("summarization.skill_file_read_tool_names", next)
             }
           />
-          <div className="space-y-3">
-            <p className="text-sm font-medium">
-              {locale === "zh-CN" ? "摘要触发条件" : "Summary triggers"}
-            </p>
-            {(value.summarization.trigger ?? []).map((trigger, index) => (
-              <ContextSizeRow
-                key={index}
-                name={`agent_runtime.summarization.trigger.${index}`}
-                value={trigger}
-                onChange={(next) => {
-                  const triggers = [...(value.summarization.trigger ?? [])];
-                  triggers[index] = next;
-                  update("summarization.trigger", triggers);
-                }}
-                onRemove={() => {
-                  const triggers = (value.summarization.trigger ?? []).filter(
-                    (_item, current) => current !== index,
-                  );
-                  update(
-                    "summarization.trigger",
-                    triggers.length ? triggers : null,
-                  );
-                }}
-              />
-            ))}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={(value.summarization.trigger?.length ?? 0) >= 8}
-              onClick={() =>
-                update("summarization.trigger", [
-                  ...(value.summarization.trigger ?? []),
-                  { type: "tokens", value: 1 },
-                ])
-              }
-            >
-              {locale === "zh-CN" ? "添加触发条件" : "Add trigger"}
-            </Button>
-          </div>
           <div>
             <p className="mb-2 text-sm font-medium">
               {locale === "zh-CN"
                 ? "摘要后保留的最近历史"
                 : "Recent history retained after summarizing"}
             </p>
-            <ContextSizeRow
+            <KeepTokensField
               name="agent_runtime.summarization.keep"
               value={value.summarization.keep}
               onChange={(next) => update("summarization.keep", next)}

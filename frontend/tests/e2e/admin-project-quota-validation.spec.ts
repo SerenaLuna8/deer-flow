@@ -37,6 +37,19 @@ async function mockProjectQuotaAdmin(page: Page) {
         registration_enabled: true,
       });
     }
+    if (path === `/api/admin/projects/${PROJECT_ID}` && method === "GET") {
+      return json(route, {
+        project_id: PROJECT_ID,
+        slug: "quota-project",
+        display_name: "Quota Project",
+        status: "active",
+        is_suspended: false,
+        state_version: 1,
+        created_at: "2026-08-17T00:00:00Z",
+        updated_at: "2026-08-17T00:00:00Z",
+        deletion_effective_at: null,
+      });
+    }
     if (
       path === `/api/admin/projects/${PROJECT_ID}/usage` &&
       method === "GET"

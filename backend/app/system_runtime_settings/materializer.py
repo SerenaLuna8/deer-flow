@@ -20,11 +20,7 @@ from app.system_runtime_settings.repository import (
     SystemRuntimePolicyRepositoryInvariant,
 )
 from app.system_runtime_settings.validation import (
-    INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION,
-    LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
-    PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
     RUNTIME_POLICY_SCHEMA_VERSION,
-    SINGLE_LIMIT_RUNTIME_POLICY_SCHEMA_VERSION,
     RuntimePolicyInvalid,
     canonical_policy_payload_for_schema,
     decode_policy_value_for_schema,
@@ -42,13 +38,7 @@ def _materialize_exact(
     value: dict[str, object],
     checksum: str,
 ) -> RuntimePolicyValue:
-    if schema_version not in {
-        LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
-        INTERMEDIATE_RUNTIME_POLICY_SCHEMA_VERSION,
-        PREVIOUS_RUNTIME_POLICY_SCHEMA_VERSION,
-        SINGLE_LIMIT_RUNTIME_POLICY_SCHEMA_VERSION,
-        RUNTIME_POLICY_SCHEMA_VERSION,
-    }:
+    if schema_version != RUNTIME_POLICY_SCHEMA_VERSION:
         raise SystemRuntimePolicyRepositoryInvariant
     canonical = canonical_policy_payload_for_schema(
         section,

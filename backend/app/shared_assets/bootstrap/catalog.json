@@ -148,7 +148,7 @@
       "display_name": "Main",
       "version": 1,
       "payload_path": "content/project-assistant-v1.agent.json",
-      "sha256": "a846b076ff31718cfc4c17a9d40927b14762c724b91371cf9cf41e35f92a823f"
+      "sha256": "49944f9def6ba9ce3dedd8a4a62c61472bd6d403af086b44fc63430188100ce1"
     },
     {
       "source_key": "builtin:agent:skill-builder",

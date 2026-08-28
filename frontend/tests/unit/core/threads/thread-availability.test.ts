@@ -28,6 +28,17 @@ test("keeps a cached not-found result loading while metadata refetches", () => {
   ).toBe("loading");
 });
 
+test("keeps a cached Thread available while metadata refetches", () => {
+  expect(
+    resolveThreadAvailability({
+      isLoading: false,
+      isFetching: true,
+      data: { thread_id: "thread-a" },
+      error: null,
+    }),
+  ).toBe("available");
+});
+
 test("keeps metadata loading and failures distinct from not found", () => {
   expect(
     resolveThreadAvailability({

@@ -56,7 +56,7 @@ export function Hero({ className }: { className?: string }) {
       />
       <div className="container-md relative z-10 mx-auto flex min-h-[92svh] flex-col items-center justify-center px-4 pt-20 pb-14">
         <h1 className="text-center text-5xl leading-tight font-bold break-words md:text-6xl">
-          ActWeave
+          Fluva
         </h1>
         <p className="text-muted-foreground mt-3 text-center text-base tracking-[0.08em] sm:text-lg">
           Weave intelligence into action.
@@ -84,7 +84,7 @@ export function Hero({ className }: { className?: string }) {
         </p>
         <Link href="/workspace">
           <Button className="mt-8 h-11 px-5" size="lg">
-            <span className="text-md">Get Started with ActWeave 1.0</span>
+            <span className="text-md">Get Started with Fluva 1.0</span>
             <ChevronRightIcon className="size-4" />
           </Button>
         </Link>

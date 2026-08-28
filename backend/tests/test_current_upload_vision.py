@@ -928,7 +928,7 @@ def test_current_image_count_limit_fails_closed() -> None:
         ViewImageMiddleware()._inject_request(request)
 
 
-def test_current_image_aggregate_byte_limit_fails_closed() -> None:
+def test_four_current_images_each_within_per_image_limit_are_admitted() -> None:
     entries = tuple(
         _entry(
             logical_path=f"uploads/image-{index}.png",
@@ -937,10 +937,11 @@ def test_current_image_aggregate_byte_limit_fails_closed() -> None:
         )
         for index in range(4)
     )
-    request, _runtime = _request(_Authority(entries))
+    _request_value, runtime = _request(_Authority(entries))
 
-    with pytest.raises(RuntimeError, match="Current image upload is unavailable"):
-        ViewImageMiddleware()._inject_request(request)
+    images = ViewImageMiddleware()._current_upload_images(runtime)
+
+    assert len(images) == 4
 
 
 def test_duplicate_current_image_content_is_read_and_injected_once(

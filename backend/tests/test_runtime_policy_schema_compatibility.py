@@ -1,4 +1,10 @@
-"""Exact Runtime Policy schema compatibility and v6 contracts."""
+"""Exact Runtime Policy schema v1 contracts.
+
+The pre-release policy history (schemas v2-v7) was consolidated into one v1
+baseline before launch. These tests pin that v1 is the only readable schema:
+stored payloads canonicalize and decode exactly, any other declared schema
+number fails closed, and no upgrade path exists.
+"""
 
 from __future__ import annotations
 
@@ -20,10 +26,6 @@ from app.system_runtime_settings.models import (
     MaterializedAgentRuntimePolicy,
     RuntimePolicySection,
 )
-from app.system_runtime_settings.schema_codec import (
-    canonical_policy_value_v2,
-    canonical_policy_value_v4,
-)
 from app.system_runtime_settings.validation import (
     RUNTIME_POLICY_SCHEMA_VERSION,
     RuntimePolicyInvalid,
@@ -33,138 +35,17 @@ from app.system_runtime_settings.validation import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.summarization_config import MIN_TRIM_TOKENS_TO_SUMMARIZE
 
-_V3_AGENT_RUNTIME_VALUE: dict[str, object] = {
-    "token_usage": {"enabled": True},
-    "token_budget": {
-        "enabled": False,
-        "max_tokens": 200_000,
-        "max_input_tokens": None,
-        "max_output_tokens": None,
-        "warn_threshold": 0.8,
-        "hard_stop_threshold": 1.0,
-    },
-    "max_recursion_limit": 1_000,
-    "title": {
-        "enabled": True,
-        "max_words": 6,
-        "max_chars": 60,
-        "model_name": None,
-    },
-    "suggestions": {"enabled": True},
-    "input_polish": {
-        "enabled": True,
-        "max_chars": 4_000,
-        "model_name": None,
-    },
-    "summarization": {
-        "enabled": True,
-        "model_name": None,
-        "trigger": [{"type": "tokens", "value": 32_000}],
-        "keep": {"type": "messages", "value": 10},
-        "trim_tokens_to_summarize": 15_564,
-        "skill_file_read_tool_names": ["read_file", "read", "view", "cat"],
-    },
-    "memory": {
-        "enabled": True,
-        "model_name": None,
-        "dream_interval_minutes": 120,
-        "max_injection_tokens": 2_000,
-        "idle_seal_minutes": 1_440,
-        "episode_retention_days": 365,
-    },
-    "tool_search": {"enabled": False, "auto_promote_top_k": 3},
-    "tool_output": {
-        "enabled": True,
-        "externalize_min_chars": 12_000,
-        "preview_head_chars": 2_000,
-        "preview_tail_chars": 1_000,
-        "fallback_max_chars": 30_000,
-        "fallback_head_chars": 8_000,
-        "fallback_tail_chars": 3_000,
-        "exempt_tools": ["read_file", "read_file_tool"],
-        "tool_overrides": {},
-    },
-    "loop_detection": {
-        "enabled": True,
-        "warn_threshold": 3,
-        "hard_limit": 5,
-        "window_size": 20,
-        "max_tracked_threads": 100,
-        "tool_freq_warn": 30,
-        "tool_freq_hard_limit": 50,
-        "tool_freq_overrides": {
-            "web_fetch": {"warn": 6, "hard_limit": 10},
-            "web_search": {"warn": 6, "hard_limit": 10},
-            "recall_memory": {"warn": 6, "hard_limit": 10},
-            "inspect_image": {"warn": 6, "hard_limit": 9},
-        },
-    },
-    "read_before_write": {"enabled": True},
-    "safety_finish_reason": {"enabled": True},
-    "subagents": {"max_total_per_run": 6},
-    "vision_bridge": {
-        "model_name": "84e322c8-6a3c-516e-9e3c-7f08860efbdb",
-        "timeout_seconds": 60,
-        "contract_version": "vision.bridge.v1",
-    },
-}
-_V3_AGENT_RUNTIME_CHECKSUM = "03c4b5333aaca53fafbe45aad48889e69617c8a18a654412472b63041f17cef4"
-_V2_AGENT_RUNTIME_VALUE = {key: value for key, value in _V3_AGENT_RUNTIME_VALUE.items() if key != "vision_bridge"}
-_V2_AGENT_RUNTIME_CHECKSUM = "272c452dafa5517375b30fe6dde36791cafe028a7c08afc71d2af1cdbae9aa7b"
-
-
-def _v4_role_budget(*, web_warn: int, web_hard_limit: int) -> dict[str, object]:
-    return {
-        "default": {"warn": 30, "hard_limit": 50},
-        "tools": {
-            "web_search": {"warn": web_warn, "hard_limit": web_hard_limit},
-            "web_fetch": {"warn": web_warn, "hard_limit": web_hard_limit},
-            "recall_memory": {"warn": 6, "hard_limit": 10},
-            "inspect_image": {"warn": 6, "hard_limit": 9},
-        },
-    }
-
-
-_V4_AGENT_RUNTIME_VALUE = deepcopy(_V3_AGENT_RUNTIME_VALUE)
-_V4_AGENT_RUNTIME_VALUE["loop_detection"] = {
+_RETIRED_TRIGGER_LIST_SUMMARIZATION: dict[str, object] = {
     "enabled": True,
-    "identical_calls": {
-        "warn_threshold": 3,
-        "hard_limit": 5,
-        "window_size": 20,
-    },
-}
-_V4_AGENT_RUNTIME_VALUE["tool_call_budget"] = {
-    "profiles": {
-        "interactive": {
-            "lead": _v4_role_budget(web_warn=6, web_hard_limit=10),
-            "subagent": _v4_role_budget(web_warn=6, web_hard_limit=10),
-        },
-        "research": {
-            "lead": _v4_role_budget(web_warn=20, web_hard_limit=30),
-            "subagent": _v4_role_budget(web_warn=12, web_hard_limit=20),
-        },
-    },
-}
-_V4_AGENT_RUNTIME_VALUE["subagents"] = {
-    "max_concurrent": 3,
-    "max_total_per_run_by_workload": {
-        "interactive": 6,
-        "research": 9,
-    },
-}
-_V4_AGENT_RUNTIME_VALUE["vision_bridge"] = {
     "model_name": None,
-    "timeout_seconds": 60,
-    "contract_version": "vision.bridge.v1",
+    "trigger": [{"type": "tokens", "value": 32_000}],
+    "keep": {"type": "tokens", "value": 64_000},
+    "trim_tokens_to_summarize": 15_564,
+    "skill_file_read_tool_names": ["read_file", "read", "view", "cat"],
 }
-_V4_AGENT_RUNTIME_CHECKSUM = "06fc1c841ba2fe4c7d8ad318326b095050f2e9d78d9b2f319d88f4fa018b19f5"
-_V5_AGENT_RUNTIME_VALUE = AgentRuntimePolicyValue().model_dump(mode="python")
-_V5_AGENT_RUNTIME_VALUE.pop("internal_tool_call_limits")
-_V5_AGENT_RUNTIME_VALUE["internal_tool_call_limit"] = 200
-_V5_AGENT_RUNTIME_CHECKSUM = "06bfbdb213ac0c3544df378e00c59e2a33a36900bbddab319713c65d36ae5f85"
-_LEGACY_OTHER_SECTION_CASES = (
+_OTHER_SECTION_CASES = (
     (
         RuntimePolicySection.AUTH,
         {"allow_registration": True},
@@ -238,12 +119,163 @@ def _gateway_request_with_policy(policy: AgentRuntimePolicyValue) -> Request:
     )
 
 
-@pytest.mark.asyncio
-async def test_gateway_projects_decoded_v3_policy_before_app_config_overlay() -> None:
+def test_schema_v1_is_the_only_runtime_policy_schema() -> None:
+    canonical = canonical_policy_payload(
+        RuntimePolicySection.AGENT_RUNTIME,
+        AgentRuntimePolicyValue(),
+    )
+
+    assert RUNTIME_POLICY_SCHEMA_VERSION == 1
+    assert canonical.schema_version == 1
+    assert canonical.value["internal_tool_call_limits"] == {
+        "lead_per_run": 200,
+        "subagent_per_task": 50,
+    }
+    assert "internal_tool_call_limit" not in canonical.value
+    assert "tool_call_budget" not in canonical.value
+    assert canonical.value["summarization"]["trigger_tokens"] == 320_000
+    assert canonical.value["summarization"]["keep"] == {
+        "type": "tokens",
+        "value": 64_000,
+    }
+    assert "trigger" not in canonical.value["summarization"]
+
+
+def test_schema_v1_roundtrips_through_declared_schema_reads() -> None:
+    canonical = canonical_policy_payload(
+        RuntimePolicySection.AGENT_RUNTIME,
+        AgentRuntimePolicyValue(),
+    )
+    reread = canonical_policy_payload_for_schema(
+        RuntimePolicySection.AGENT_RUNTIME,
+        canonical.value,
+        schema_version=1,
+    )
     decoded = decode_policy_value_for_schema(
         RuntimePolicySection.AGENT_RUNTIME,
-        _V3_AGENT_RUNTIME_VALUE,
-        schema_version=3,
+        canonical.value,
+        schema_version=1,
+    )
+
+    assert reread == canonical
+    assert isinstance(decoded, AgentRuntimePolicyValue)
+    assert decoded == AgentRuntimePolicyValue()
+
+
+@pytest.mark.parametrize("schema_version", [0, 2, 3, 4, 5, 6, 7, True])
+def test_retired_schema_numbers_fail_closed(schema_version: object) -> None:
+    value = AgentRuntimePolicyValue().model_dump(mode="json")
+
+    with pytest.raises(RuntimePolicyInvalid):
+        canonical_policy_payload_for_schema(
+            RuntimePolicySection.AGENT_RUNTIME,
+            value,
+            schema_version=schema_version,  # type: ignore[arg-type]
+        )
+    with pytest.raises(RuntimePolicyInvalid):
+        decode_policy_value_for_schema(
+            RuntimePolicySection.AGENT_RUNTIME,
+            value,
+            schema_version=schema_version,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("schema_version", [2, 5, 6, 7])
+def test_materializer_rejects_retired_schema_numbers(schema_version: int) -> None:
+    canonical = canonical_policy_payload(
+        RuntimePolicySection.AGENT_RUNTIME,
+        AgentRuntimePolicyValue(),
+    )
+
+    with pytest.raises(Exception):  # noqa: B017 - repository invariant marker
+        _materialize_exact(
+            RuntimePolicySection.AGENT_RUNTIME,
+            schema_version=schema_version,
+            value=canonical.value,
+            checksum=canonical.checksum,
+        )
+
+
+def test_schema_v1_rejects_retired_keep_measurements() -> None:
+    for keep in (
+        {"type": "messages", "value": 10},
+        {"type": "fraction", "value": 0.8},
+    ):
+        value = AgentRuntimePolicyValue().model_dump(mode="python")
+        value["summarization"]["keep"] = keep
+
+        with pytest.raises(RuntimePolicyInvalid):
+            canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
+
+
+def test_schema_v1_rejects_keep_that_cannot_reduce_below_trigger() -> None:
+    value = AgentRuntimePolicyValue().model_dump(mode="python")
+    value["summarization"]["trigger_tokens"] = 64_000
+    value["summarization"]["keep"] = {
+        "type": "tokens",
+        "value": 64_000,
+    }
+
+    with pytest.raises(RuntimePolicyInvalid):
+        canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
+
+
+def test_schema_v1_rejects_the_retired_trigger_list_shape() -> None:
+    value = AgentRuntimePolicyValue().model_dump(mode="python")
+    value["summarization"] = deepcopy(_RETIRED_TRIGGER_LIST_SUMMARIZATION)
+
+    with pytest.raises(RuntimePolicyInvalid):
+        canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
+
+
+def test_schema_v1_materialization_resolves_role_scoped_limits() -> None:
+    canonical = canonical_policy_payload(
+        RuntimePolicySection.AGENT_RUNTIME,
+        AgentRuntimePolicyValue(),
+    )
+    materialized = materialize_agent_runtime_policy(
+        schema_version=1,
+        value=canonical.value,
+        checksum=canonical.checksum,
+    )
+    resolved = resolve_run_tool_call_control_policy(
+        materialized,
+        {
+            "__run_workload_profile": {
+                "requested": {"name": "interactive"},
+                "effective": {"name": "interactive"},
+            }
+        },
+    )
+
+    assert isinstance(materialized, MaterializedAgentRuntimePolicy)
+    assert materialized.schema_version == 1
+    assert materialized.value.internal_tool_call_limits.lead_per_run == 200
+    assert materialized.value.internal_tool_call_limits.subagent_per_task == 50
+    assert resolved.lead.internal_tool_call_limit == 200
+    assert resolved.subagent.internal_tool_call_limit == 50
+
+
+def test_schema_v1_materialization_rejects_checksum_mismatch() -> None:
+    canonical = canonical_policy_payload(
+        RuntimePolicySection.AGENT_RUNTIME,
+        AgentRuntimePolicyValue(),
+    )
+
+    with pytest.raises(Exception):  # noqa: B017 - repository invariant marker
+        materialize_agent_runtime_policy(
+            schema_version=1,
+            value=canonical.value,
+            checksum="0" * 64,
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_projects_decoded_v1_policy_before_app_config_overlay() -> None:
+    decoded = decode_policy_value_for_schema(
+        RuntimePolicySection.AGENT_RUNTIME,
+        AgentRuntimePolicyValue().model_dump(mode="json"),
+        schema_version=1,
     )
     assert isinstance(decoded, AgentRuntimePolicyValue)
 
@@ -258,404 +290,37 @@ async def test_gateway_projects_decoded_v3_policy_before_app_config_overlay() ->
 
     assert runtime.token_usage.enabled is True
     assert runtime.loop_detection.enabled is True
+    assert runtime.summarization.trigger_tokens == 320_000
     assert runtime.subagents.max_total_per_run == 6
 
 
-def test_schema_v3_agent_runtime_fixture_remains_exact_when_v6_is_current() -> None:
-    canonical = canonical_policy_payload_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        _V3_AGENT_RUNTIME_VALUE,
-        schema_version=3,
-    )
-
-    assert RUNTIME_POLICY_SCHEMA_VERSION == 6
-    assert canonical.schema_version == 3
-    assert canonical.value == _V3_AGENT_RUNTIME_VALUE
-    assert canonical.checksum == _V3_AGENT_RUNTIME_CHECKSUM
-    assert "agent_runtime" not in canonical.value
-
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload_for_schema(
-            RuntimePolicySection.AGENT_RUNTIME,
-            AgentRuntimePolicyValue(),
-            schema_version=3,
-        )
-
-
-def test_schema_v2_uses_its_own_exact_codec_without_v3_bridge_defaults() -> None:
-    assert (
-        canonical_policy_value_v2(
-            RuntimePolicySection.AGENT_RUNTIME,
-            _V2_AGENT_RUNTIME_VALUE,
-        )
-        == _V2_AGENT_RUNTIME_VALUE
-    )
-
-    canonical = canonical_policy_payload_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        _V2_AGENT_RUNTIME_VALUE,
-        schema_version=2,
-    )
-
-    assert canonical.schema_version == 2
-    assert canonical.value == _V2_AGENT_RUNTIME_VALUE
-    assert canonical.checksum == _V2_AGENT_RUNTIME_CHECKSUM
-
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload_for_schema(
-            RuntimePolicySection.AGENT_RUNTIME,
-            _V3_AGENT_RUNTIME_VALUE,
-            schema_version=2,
-        )
-
-
-def test_schema_v5_agent_runtime_has_one_internal_tool_call_limit() -> None:
-    canonical = canonical_policy_payload_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        _V5_AGENT_RUNTIME_VALUE,
-        schema_version=5,
-    )
-    defaults = canonical_policy_payload_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        {},
-        schema_version=5,
-    )
-
-    assert canonical.schema_version == 5
-    assert canonical.checksum == _V5_AGENT_RUNTIME_CHECKSUM
-    assert defaults == canonical
-    assert "agent_runtime" not in canonical.value
-    assert canonical.value["internal_tool_call_limit"] == 200
-    assert "tool_call_budget" not in canonical.value
-    assert canonical.value["loop_detection"] == {
-        "enabled": True,
-        "identical_calls": {
-            "warn_threshold": 3,
-            "hard_limit": 20,
-            "window_size": 20,
-        },
-    }
-    assert canonical.value["subagents"] == {
-        "max_concurrent": 3,
-        "max_total_per_run_by_workload": {
-            "interactive": 6,
-            "research": 9,
-        },
-    }
-
-
-def test_schema_v6_agent_runtime_has_independent_internal_tool_call_limits() -> None:
-    canonical = canonical_policy_payload(
-        RuntimePolicySection.AGENT_RUNTIME,
-        AgentRuntimePolicyValue(),
-    )
-
-    assert canonical.schema_version == 6
-    assert canonical.value["internal_tool_call_limits"] == {
-        "lead_per_run": 200,
-        "subagent_per_task": 50,
-    }
-    assert "internal_tool_call_limit" not in canonical.value
-
-
-def test_schema_v5_single_limit_decodes_to_equal_current_role_limits() -> None:
-    decoded = decode_policy_value_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        _V5_AGENT_RUNTIME_VALUE,
-        schema_version=5,
-    )
-
-    assert isinstance(decoded, AgentRuntimePolicyValue)
-    assert decoded.internal_tool_call_limits.lead_per_run == 200
-    assert decoded.internal_tool_call_limits.subagent_per_task == 200
-
-
-def test_schema_v5_materialization_preserves_legacy_schema_envelope() -> None:
-    materialized = materialize_agent_runtime_policy(
-        schema_version=5,
-        value=_V5_AGENT_RUNTIME_VALUE,
-        checksum=_V5_AGENT_RUNTIME_CHECKSUM,
-    )
-
-    assert materialized.schema_version == 5
-    assert materialized.value.internal_tool_call_limits.lead_per_run == 200
-    assert materialized.value.internal_tool_call_limits.subagent_per_task == 200
-
-
-def test_schema_v5_preserves_its_repeat_window_validation() -> None:
-    value = deepcopy(_V5_AGENT_RUNTIME_VALUE)
-    value["loop_detection"]["identical_calls"]["window_size"] = 4
-
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload_for_schema(
-            RuntimePolicySection.AGENT_RUNTIME,
-            value,
-            schema_version=5,
-        )
-
-
-@pytest.mark.parametrize(
-    ("schema_version", "value"),
-    [
-        (2, _V2_AGENT_RUNTIME_VALUE),
-        (3, _V3_AGENT_RUNTIME_VALUE),
-        (4, _V4_AGENT_RUNTIME_VALUE),
-    ],
-)
-def test_schemas_v2_through_v4_decode_to_equal_current_role_limits(
-    schema_version: int,
-    value: dict[str, object],
-) -> None:
-    decoded = decode_policy_value_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        value,
-        schema_version=schema_version,
-    )
-
-    assert isinstance(decoded, AgentRuntimePolicyValue)
-    assert decoded.internal_tool_call_limits.lead_per_run == 50
-    assert decoded.internal_tool_call_limits.subagent_per_task == 50
-
-
-def test_schema_v4_agent_runtime_fixture_remains_exact_when_v6_is_current() -> None:
-    assert (
-        canonical_policy_value_v4(
-            RuntimePolicySection.AGENT_RUNTIME,
-            _V4_AGENT_RUNTIME_VALUE,
-        )
-        == _V4_AGENT_RUNTIME_VALUE
-    )
-
-    canonical = canonical_policy_payload_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        _V4_AGENT_RUNTIME_VALUE,
-        schema_version=4,
-    )
-
-    assert canonical.schema_version == 4
-    assert canonical.value == _V4_AGENT_RUNTIME_VALUE
-    assert canonical.checksum == _V4_AGENT_RUNTIME_CHECKSUM
-
-    with pytest.raises(RuntimePolicyInvalid):
-        canonical_policy_payload_for_schema(
-            RuntimePolicySection.AGENT_RUNTIME,
-            AgentRuntimePolicyValue(),
-            schema_version=4,
-        )
-
-
-def test_schema_v4_agent_runtime_decodes_max_hard_limit_into_equal_role_limits() -> None:
-    legacy = deepcopy(_V4_AGENT_RUNTIME_VALUE)
-    legacy["tool_call_budget"]["profiles"]["research"]["subagent"]["tools"]["web_fetch"] = {"warn": 12, "hard_limit": 87}
-
-    decoded = decode_policy_value_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        legacy,
-        schema_version=4,
-    )
-
-    assert isinstance(decoded, AgentRuntimePolicyValue)
-    assert decoded.internal_tool_call_limits.lead_per_run == 87
-    assert decoded.internal_tool_call_limits.subagent_per_task == 87
-    assert "tool_call_budget" not in decoded.model_dump(mode="json")
-
-
-def test_schema_v3_agent_runtime_decodes_frequency_into_equal_role_limits() -> None:
-    legacy = deepcopy(_V3_AGENT_RUNTIME_VALUE)
-    legacy["loop_detection"] = {
-        "enabled": True,
-        "warn_threshold": 4,
-        "hard_limit": 7,
-        "window_size": 15,
-        "max_tracked_threads": 88,
-        "tool_freq_warn": 17,
-        "tool_freq_hard_limit": 23,
-        "tool_freq_overrides": {
-            "web_search": {"warn": 11, "hard_limit": 13},
-            "custom_reader": {"warn": 5, "hard_limit": 8},
-        },
-    }
-    legacy["subagents"] = {"max_total_per_run": 8}
-
-    decoded = decode_policy_value_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        legacy,
-        schema_version=3,
-    )
-
-    assert isinstance(decoded, AgentRuntimePolicyValue)
-    assert decoded.loop_detection.model_dump(mode="json") == {
-        "enabled": True,
-        "identical_calls": {
-            "warn_threshold": 4,
-            "hard_limit": 7,
-            "window_size": 15,
-        },
-    }
-    assert decoded.internal_tool_call_limits.lead_per_run == 23
-    assert decoded.internal_tool_call_limits.subagent_per_task == 23
-    assert "tool_call_budget" not in decoded.model_dump(mode="json")
-    assert decoded.subagents.max_concurrent == 3
-    assert decoded.subagents.max_total_per_run_by_workload.interactive == 8
-    assert decoded.subagents.max_total_per_run_by_workload.research == 9
-
-    v2_decoded = decode_policy_value_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        _V2_AGENT_RUNTIME_VALUE,
-        schema_version=2,
-    )
-    assert isinstance(v2_decoded, AgentRuntimePolicyValue)
-    assert v2_decoded.vision_bridge.model_name is None
-
-
-@pytest.mark.parametrize(
-    ("schema_version", "fixture", "expected_checksum"),
-    [
-        (
-            2,
-            _V2_AGENT_RUNTIME_VALUE,
-            "e4db7cf1df779a1b55bdcd9f3a0c0f569bedfe34985b22899dd886f5563ebf8f",
-        ),
-        (
-            3,
-            _V3_AGENT_RUNTIME_VALUE,
-            "0b78237e5fe652fcec375cd528a9058ddb75b1f0f8aeab01020d52a0e38b452e",
-        ),
-    ],
-)
-def test_legacy_repeat_window_below_hard_limit_materializes_and_resolves_exactly(
-    schema_version: int,
-    fixture: dict[str, object],
-    expected_checksum: str,
-) -> None:
-    legacy = deepcopy(fixture)
-    legacy["loop_detection"]["window_size"] = 4
-
-    canonical = canonical_policy_payload_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        legacy,
-        schema_version=schema_version,
-    )
-    materialized = materialize_agent_runtime_policy(
-        schema_version=schema_version,
-        value=canonical.value,
-        checksum=expected_checksum,
-    )
-    resolved = resolve_run_tool_call_control_policy(materialized, {})
-
-    assert canonical.value == legacy
-    assert canonical.checksum == expected_checksum
-    assert materialized.value.loop_detection.identical_calls.model_dump(
-        mode="json",
-    ) == {
-        "warn_threshold": 3,
-        "hard_limit": 5,
-        "window_size": 4,
-    }
-    assert resolved.lead.repeated_calls.hard_limit == 5
-    assert resolved.lead.repeated_calls.window_size == 4
-
-
-def test_schema_v3_task_frequency_remains_exact_and_contributes_to_role_limits() -> None:
-    legacy = deepcopy(_V3_AGENT_RUNTIME_VALUE)
-    legacy["loop_detection"]["tool_freq_overrides"]["task"] = {
-        "warn": 55,
-        "hard_limit": 60,
-    }
-
-    canonical = canonical_policy_payload_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        legacy,
-        schema_version=3,
-    )
-    decoded = decode_policy_value_for_schema(
-        RuntimePolicySection.AGENT_RUNTIME,
-        canonical.value,
-        schema_version=3,
-    )
-
-    assert canonical.value["loop_detection"]["tool_freq_overrides"]["task"] == {
-        "warn": 55,
-        "hard_limit": 60,
-    }
-    assert isinstance(decoded, AgentRuntimePolicyValue)
-    assert decoded.internal_tool_call_limits.lead_per_run == 60
-    assert decoded.internal_tool_call_limits.subagent_per_task == 60
-
-
-@pytest.mark.parametrize(
-    ("schema_version", "value", "checksum"),
-    [
-        (2, _V2_AGENT_RUNTIME_VALUE, _V2_AGENT_RUNTIME_CHECKSUM),
-        (3, _V3_AGENT_RUNTIME_VALUE, _V3_AGENT_RUNTIME_CHECKSUM),
-        (4, _V4_AGENT_RUNTIME_VALUE, _V4_AGENT_RUNTIME_CHECKSUM),
-    ],
-)
-def test_materializer_verifies_legacy_checksum_then_returns_current_policy(
-    schema_version: int,
-    value: dict[str, object],
-    checksum: str,
-) -> None:
-    materialized = _materialize_exact(
-        RuntimePolicySection.AGENT_RUNTIME,
-        schema_version=schema_version,
-        value=value,
-        checksum=checksum,
-    )
-
-    assert isinstance(materialized, AgentRuntimePolicyValue)
-    assert materialized.internal_tool_call_limits.lead_per_run == 50
-    assert materialized.internal_tool_call_limits.subagent_per_task == 50
-
-
-def test_agent_runtime_materialization_preserves_frozen_schema_in_envelope() -> None:
-    materialized = materialize_agent_runtime_policy(
-        schema_version=3,
-        value=_V3_AGENT_RUNTIME_VALUE,
-        checksum=_V3_AGENT_RUNTIME_CHECKSUM,
-    )
-
-    assert isinstance(materialized, MaterializedAgentRuntimePolicy)
-    assert materialized.schema_version == 3
-    assert isinstance(materialized.value, AgentRuntimePolicyValue)
-    assert materialized.value.internal_tool_call_limits.lead_per_run == 50
-    assert materialized.value.internal_tool_call_limits.subagent_per_task == 50
-
-
-@pytest.mark.parametrize("schema_version", [2, 3, 4, 5])
 @pytest.mark.parametrize(
     ("section", "value", "checksum"),
-    _LEGACY_OTHER_SECTION_CASES,
+    _OTHER_SECTION_CASES,
 )
-def test_other_runtime_policy_sections_keep_exact_legacy_values_and_checksums(
-    schema_version: int,
+def test_other_runtime_policy_sections_keep_exact_values_and_checksums(
     section: RuntimePolicySection,
     value: dict[str, object],
     checksum: str,
 ) -> None:
-    canonical = canonical_policy_payload_for_schema(
+    canonical = canonical_policy_payload(section, value)
+    reread = canonical_policy_payload_for_schema(
         section,
         value,
-        schema_version=schema_version,
+        schema_version=1,
     )
-    decoded = decode_policy_value_for_schema(
-        section,
-        value,
-        schema_version=schema_version,
-    )
-    current = canonical_policy_payload(section, value)
+    decoded = decode_policy_value_for_schema(section, value, schema_version=1)
 
+    assert canonical.schema_version == 1
     assert canonical.value == value
     assert canonical.checksum == checksum
+    assert reread == canonical
     assert decoded.model_dump(mode="json") == value
-    assert current.schema_version == 6
-    assert current.value == value
-    assert current.checksum == checksum
 
 
 @pytest.mark.parametrize("field", ["lead_per_run", "subagent_per_task"])
 @pytest.mark.parametrize("limit", [0, 100_001])
-def test_schema_v6_rejects_out_of_range_internal_tool_call_limit(
+def test_schema_v1_rejects_out_of_range_internal_tool_call_limit(
     field: str,
     limit: int,
 ) -> None:
@@ -666,11 +331,23 @@ def test_schema_v6_rejects_out_of_range_internal_tool_call_limit(
         canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
 
 
-def test_schema_v6_rejects_legacy_tool_budget_and_agent_runtime_wrapper() -> None:
+def test_schema_v1_rejects_trim_budget_below_packaged_prompt_floor() -> None:
+    value = AgentRuntimePolicyValue().model_dump(mode="python")
+    value["summarization"]["trim_tokens_to_summarize"] = MIN_TRIM_TOKENS_TO_SUMMARIZE - 1
+
+    with pytest.raises(RuntimePolicyInvalid):
+        canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
+
+    value["summarization"]["trim_tokens_to_summarize"] = MIN_TRIM_TOKENS_TO_SUMMARIZE
+    canonical = canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)
+    summarization = canonical.value["summarization"]
+    assert isinstance(summarization, dict)
+    assert summarization["trim_tokens_to_summarize"] == MIN_TRIM_TOKENS_TO_SUMMARIZE
+
+
+def test_schema_v1_rejects_retired_tool_budget_and_agent_runtime_wrapper() -> None:
     legacy_budget = AgentRuntimePolicyValue().model_dump(mode="python")
-    legacy_budget["tool_call_budget"] = deepcopy(
-        _V4_AGENT_RUNTIME_VALUE["tool_call_budget"],
-    )
+    legacy_budget["tool_call_budget"] = {"profiles": {}}
     with pytest.raises(RuntimePolicyInvalid):
         canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, legacy_budget)
 
@@ -679,3 +356,11 @@ def test_schema_v6_rejects_legacy_tool_budget_and_agent_runtime_wrapper() -> Non
             RuntimePolicySection.AGENT_RUNTIME,
             {"agent_runtime": AgentRuntimePolicyValue().model_dump(mode="python")},
         )
+
+
+def test_schema_v1_repeat_window_must_cover_the_hard_limit() -> None:
+    value = AgentRuntimePolicyValue().model_dump(mode="python")
+    value["loop_detection"]["identical_calls"]["window_size"] = 4
+
+    with pytest.raises(RuntimePolicyInvalid):
+        canonical_policy_payload(RuntimePolicySection.AGENT_RUNTIME, value)

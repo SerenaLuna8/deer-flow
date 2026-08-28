@@ -236,8 +236,8 @@ function systemSettingsCatalog() {
           summarization: {
             enabled: true,
             model_name: null,
-            trigger: null,
-            keep: { type: "messages", value: 20 },
+            trigger_tokens: null,
+            keep: { type: "tokens", value: 64_000 },
             trim_tokens_to_summarize: null,
             skill_file_read_tool_names: ["read_file"],
           },
@@ -635,7 +635,7 @@ test("explains tested-Key clearing and requires re-entry before create", async (
   await dialog.getByLabel("Provider model ID").fill("deepseek-test");
   await dialog.getByLabel("Maximum input tokens").fill("128000");
   await expect(
-    dialog.getByText(/denominator for context-percentage summarization/u),
+    dialog.getByText(/denominator for context-usage percentages/u),
   ).toBeVisible();
   const keyInput = dialog.getByLabel("API Key");
   const save = dialog.getByRole("button", { name: "Save" });

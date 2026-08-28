@@ -179,7 +179,7 @@ async def test_admission_ignores_research_claims_outside_the_typed_workload_fiel
             effective, frozen_kwargs = freeze_admitted_run_workload_profile(
                 request.kwargs,
                 requested=request.workload_profile,
-                policy_schema_version=4,
+                policy_schema_version=1,
             )
             captured.update(
                 context=context,
@@ -320,18 +320,18 @@ def test_run_idempotency_includes_the_requested_workload_profile() -> None:
     )
 
 
-def test_admission_resolves_research_only_for_v4_and_inherits_continuations() -> None:
+def test_admission_resolves_research_and_inherits_continuations() -> None:
     requested_research = RequestedRunWorkloadProfile(name="research")
     inherited_interactive = EffectiveRunWorkloadProfile(name="interactive")
 
     assert resolve_admitted_run_workload_profile(
         requested=requested_research,
-        policy_schema_version=4,
+        policy_schema_version=1,
     ) == EffectiveRunWorkloadProfile(name="research")
     assert (
         resolve_admitted_run_workload_profile(
             requested=requested_research,
-            policy_schema_version=4,
+            policy_schema_version=1,
             inherited_effective=inherited_interactive,
         )
         == inherited_interactive
@@ -342,41 +342,28 @@ def test_admission_resolves_research_only_for_v4_and_inherits_continuations() ->
             requested=requested_research,
             policy_schema_version=3,
         )
-    with pytest.raises(RunWorkloadProfileUnsupported):
-        resolve_admitted_run_workload_profile(
-            requested=RequestedRunWorkloadProfile(),
-            policy_schema_version=3,
-            inherited_effective=EffectiveRunWorkloadProfile(name="research"),
-        )
 
 
-def test_admission_freezes_v4_but_preserves_the_legacy_kwargs_shape() -> None:
+def test_admission_always_freezes_the_workload_profile_kwarg() -> None:
     original = {"input": {"messages": []}}
-    effective_v4, v4_kwargs = freeze_admitted_run_workload_profile(
+    effective, frozen_kwargs = freeze_admitted_run_workload_profile(
         original,
         requested=RequestedRunWorkloadProfile(name="research"),
-        policy_schema_version=4,
-    )
-    effective_v3, v3_kwargs = freeze_admitted_run_workload_profile(
-        original,
-        requested=RequestedRunWorkloadProfile(),
-        policy_schema_version=3,
+        policy_schema_version=1,
     )
 
-    assert effective_v4 == EffectiveRunWorkloadProfile(name="research")
-    assert v4_kwargs[RUN_WORKLOAD_PROFILE_KWARG] == persisted_run_workload_profile(
+    assert effective == EffectiveRunWorkloadProfile(name="research")
+    assert frozen_kwargs[RUN_WORKLOAD_PROFILE_KWARG] == persisted_run_workload_profile(
         RequestedRunWorkloadProfile(name="research"),
-        effective_v4,
+        effective,
     )
-    assert effective_v3 == EffectiveRunWorkloadProfile(name="interactive")
-    assert v3_kwargs == original
     assert original == {"input": {"messages": []}}
 
     with pytest.raises(RunWorkloadProfileUnsupported):
         freeze_admitted_run_workload_profile(
             {RUN_WORKLOAD_PROFILE_KWARG: {}},
             requested=RequestedRunWorkloadProfile(),
-            policy_schema_version=4,
+            policy_schema_version=1,
         )
 
 
@@ -393,7 +380,7 @@ async def test_continuation_reads_the_source_runs_frozen_effective_profile() -> 
         def one_or_none(self) -> object:
             return SimpleNamespace(
                 kwargs_json=source_kwargs,
-                schema_version=4,
+                schema_version=1,
             )
 
     class Session:
@@ -428,44 +415,21 @@ def test_interactive_workload_profile_round_trips_through_server_owned_kwargs() 
     assert (
         effective_run_workload_profile_from_kwargs(
             kwargs,
-            policy_schema_version=4,
+            policy_schema_version=1,
         )
         == effective
     )
 
 
-def test_legacy_policy_without_workload_profile_is_interactive() -> None:
-    assert effective_run_workload_profile_from_kwargs({}, policy_schema_version=2) == EffectiveRunWorkloadProfile(name="interactive")
-    assert effective_run_workload_profile_from_kwargs({}, policy_schema_version=3) == EffectiveRunWorkloadProfile(name="interactive")
-
-
-@pytest.mark.parametrize("policy_schema_version", [4, 5, 6])
-def test_current_workload_aware_policy_requires_a_frozen_workload_profile(
-    policy_schema_version: int,
-) -> None:
+def test_schema_v1_requires_a_frozen_workload_profile() -> None:
     with pytest.raises(RunWorkloadProfileUnsupported):
         effective_run_workload_profile_from_kwargs(
             {},
-            policy_schema_version=policy_schema_version,
+            policy_schema_version=1,
         )
 
 
-def test_legacy_policy_cannot_claim_a_research_workload_profile() -> None:
-    kwargs = {
-        RUN_WORKLOAD_PROFILE_KWARG: persisted_run_workload_profile(
-            RequestedRunWorkloadProfile(name="research"),
-            EffectiveRunWorkloadProfile(name="research"),
-        )
-    }
-
-    with pytest.raises(RunWorkloadProfileUnsupported):
-        effective_run_workload_profile_from_kwargs(
-            kwargs,
-            policy_schema_version=3,
-        )
-
-
-@pytest.mark.parametrize("policy_schema_version", [1, 7, True])
+@pytest.mark.parametrize("policy_schema_version", [0, 2, 5, 7, True])
 def test_unknown_policy_schema_version_fails_closed(
     policy_schema_version: object,
 ) -> None:
@@ -501,13 +465,13 @@ def test_malformed_frozen_workload_profile_fails_closed(
     with pytest.raises(RunWorkloadProfileUnsupported):
         effective_run_workload_profile_from_kwargs(
             {RUN_WORKLOAD_PROFILE_KWARG: persisted_value},
-            policy_schema_version=4,
+            policy_schema_version=1,
         )
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_v6_freezes_workload_and_continuation_inherits_source_effective(
+async def test_postgres_freezes_workload_and_continuation_inherits_source_effective(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -597,7 +561,7 @@ async def test_postgres_v6_freezes_workload_and_continuation_inherits_source_eff
         assert set(by_run) == {source_run_id, continuation_run_id}
         source_kwargs, source_schema = by_run[source_run_id]
         continuation_kwargs, continuation_schema = by_run[continuation_run_id]
-        assert source_schema == continuation_schema == 6
+        assert source_schema == continuation_schema == 1
         assert parse_persisted_run_workload_profile(source_kwargs[RUN_WORKLOAD_PROFILE_KWARG]) == (
             RequestedRunWorkloadProfile(name="research"),
             EffectiveRunWorkloadProfile(name="research"),

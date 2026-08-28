@@ -10,13 +10,10 @@ import uuid
 from contextlib import suppress
 from types import MappingProxyType
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
 
 import pytest
 from langchain.tools import ToolRuntime
-from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
-from langgraph.runtime import Runtime
 
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import RuntimeFeatures
@@ -24,10 +21,6 @@ from deerflow.agents.middlewares.tool_call_control import (
     TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY,
     FixedToolCallControlScope,
     GraphToolCallControlTopology,
-    PerInvocationToolCallControlScope,
-    RepeatedCallPolicy,
-    ResolvedGraphToolCallControlProfile,
-    ResolvedToolCallControlPolicy,
     ToolCallBudgetObservation,
     ToolCallControlObservation,
     default_graph_tool_call_control_profile,
@@ -88,6 +81,32 @@ def _sdk_binding(
         store=None,
         barrier=ParentExecutionBarrier(),
     )
+
+
+@pytest.mark.asyncio
+async def test_parent_run_id_becomes_subagent_scheduling_key() -> None:
+    owner_loop = asyncio.get_running_loop()
+    factory = ParentExecutionBindingFactory(
+        _sdk_binding(owner_loop).profile,
+    )
+    parent = factory.bind(
+        ToolRuntime(
+            state={"messages": []},
+            context={
+                RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: factory,
+                RuntimeContextKeys.RUN_ID: "run-scheduling-authority",
+                RuntimeContextKeys.THREAD_ID: "thread-fallback-must-not-win",
+            },
+            config={},
+            stream_writer=lambda _event: None,
+            tool_call_id="task-scheduling-key",
+            store=None,
+        )
+    )
+
+    lifecycle_binding = parent.to_lifecycle_binding(lambda: object())
+
+    assert lifecycle_binding.scheduling_key == "run-scheduling-authority"
 
 
 @pytest.mark.asyncio
@@ -664,89 +683,3 @@ async def test_parallel_subagent_context_observers_are_isolated_and_ack_on_owner
         (second_execution, "usage_unreported"),
         (second_execution, "settled"),
     }
-
-
-@pytest.mark.asyncio
-async def test_legacy_child_uses_parent_bound_invocation_scope_without_child_context() -> None:
-    owner_loop = asyncio.get_running_loop()
-    parent_profile = _sdk_binding(owner_loop).profile
-    policy = ResolvedToolCallControlPolicy(
-        repeated_calls=RepeatedCallPolicy(
-            enabled=False,
-            warn_threshold=1,
-            hard_limit=2,
-            window_size=2,
-        ),
-        internal_tool_call_limit=1,
-    )
-    topology = GraphToolCallControlTopology(
-        profile=ResolvedGraphToolCallControlProfile(
-            workload_profile="interactive",
-            accounting_mode="shared_run",
-            lead=policy,
-            subagent=policy,
-        ),
-        lead_scope=PerInvocationToolCallControlScope(),
-    )
-    factory = ParentExecutionBindingFactory(
-        parent_profile,
-        tool_call_control_topology=topology,
-    )
-    parent_context = {
-        RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: factory,
-        TOOL_CALL_CONTROL_INVOCATION_ID_CONTEXT_KEY: "sdk-invocation",
-    }
-    runtime = ToolRuntime(
-        state={"messages": []},
-        context=parent_context,
-        config={},
-        stream_writer=lambda _event: None,
-        tool_call_id="public-task-id",
-        store=None,
-    )
-    lead = topology.build_lead()
-    lead_update = lead.after_model(
-        {
-            "messages": [
-                AIMessage(
-                    id="task-proposal",
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "task",
-                            "args": {"description": "delegate"},
-                            "id": "task-call",
-                        }
-                    ],
-                )
-            ]
-        },
-        Runtime(context=parent_context),
-    )
-    assert lead_update is not None
-
-    binding = factory.bind(runtime)
-    child = binding.tool_call_control_topology.build_subagent_task(
-        uuid4(),
-    )
-    child_update = child.after_model(
-        {
-            "messages": [
-                AIMessage(
-                    id="child-proposal",
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "lookup",
-                            "args": {"value": "must-not-run"},
-                            "id": "lookup-call",
-                        }
-                    ],
-                )
-            ]
-        },
-        Runtime(context={}),
-    )
-
-    assert child_update is not None
-    assert child_update["messages"][0].tool_calls == []

@@ -90,13 +90,13 @@ def test_policy_rejects_unknown_contract_version() -> None:
         VisionBridgePolicy(contract_version="vision.bridge.v2")
 
 
-def test_new_policy_payload_uses_schema_v6_and_includes_bridge() -> None:
+def test_new_policy_payload_uses_schema_v1_and_includes_bridge() -> None:
     canonical = canonical_policy_payload(
         "agent_runtime",
         AgentRuntimePolicyValue(),
     )
 
-    assert canonical.schema_version == RUNTIME_POLICY_SCHEMA_VERSION == 6
+    assert canonical.schema_version == RUNTIME_POLICY_SCHEMA_VERSION == 1
     assert canonical.value["vision_bridge"] == {
         "model_name": None,
         "timeout_seconds": 60,

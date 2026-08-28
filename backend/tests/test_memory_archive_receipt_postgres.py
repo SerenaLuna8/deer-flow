@@ -4,9 +4,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 
-import httpx
 import pytest
-from fastapi import FastAPI
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import create_checkpoint
@@ -22,12 +20,6 @@ from support.system_model_seed import (
 )
 
 import deerflow.runtime.checkpoint_mode as checkpoint_mode_state
-from app.gateway.deps import (
-    get_current_agent_runtime_config,
-    private_work_context,
-    require_project_private_open,
-)
-from app.gateway.routers import private_work as private_work_router
 from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.checkpoint_state import (
@@ -77,6 +69,7 @@ from deerflow.runtime.checkpoint_state import (
     CheckpointStateAccessor,
     build_state_mutation_graph,
 )
+from deerflow.runtime.context_compaction import ThreadCompactionResult
 from deerflow.runtime.events.models import StreamFrame, StreamLeaseProof
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.stream import PostgresStreamBridge
@@ -658,11 +651,16 @@ async def test_worker_receipt_activation_does_not_deadlock_durable_stream_append
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_private_compact_endpoint_drains_long_thread_in_multiple_tagged_batches(
+async def test_manual_compact_service_drains_long_thread_in_multiple_tagged_batches(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise the real HTTP/service/checkpoint/history path over several SNIPs."""
+    """Exercise the real service/checkpoint/history path over several SNIPs.
+
+    The drain uses the internal ``("messages", 0)`` archive-all sentinel shared
+    by manual compaction, Seal, and Dream; the public compact API itself is
+    token-count-only and no longer expresses this force semantic.
+    """
 
     _reset_checkpoint_mode(monkeypatch)
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -739,42 +737,25 @@ async def test_private_compact_endpoint_drains_long_thread_in_multiple_tagged_ba
             object(),  # type: ignore[arg-type]
             model_materializer=ModelMaterializer(),  # type: ignore[arg-type]
         )
-        app = FastAPI()
-        app.include_router(private_work_router.router)
-        app.dependency_overrides[private_work_context] = lambda: seed.owner_a
-        app.dependency_overrides[require_project_private_open] = lambda: None
-        app.dependency_overrides[get_current_agent_runtime_config] = lambda: app_config
-        monkeypatch.setattr(
-            private_work_router,
-            "_chat_control_service",
-            lambda _request, _request_id: barrier,
-        )
-
-        compacted_batches: list[dict[str, object]] = []
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://test",
-        ) as client:
-            for _attempt in range(9):
-                response = await client.post(
-                    f"/api/projects/{seed.owner_a.project_id}/private-work/threads/{thread_id}/compact",
-                    json={
-                        "force": True,
-                        "keep": {"type": "messages", "value": 0},
-                    },
-                )
-                assert response.status_code == 200, response.text
-                payload = response.json()
-                if not payload["compacted"]:
-                    assert payload["reason"] == "not_enough_messages"
-                    break
-                compacted_batches.append(payload)
-            else:
-                pytest.fail("long /compact did not drain within its bounded attempts")
+        compacted_batches: list[ThreadCompactionResult] = []
+        for _attempt in range(9):
+            result = await barrier.compact(
+                seed.owner_a,
+                thread_id,
+                force=True,
+                keep=("messages", 0),
+                app_config=app_config,
+            )
+            if not result.compacted:
+                assert result.reason == "not_enough_messages"
+                break
+            compacted_batches.append(result)
+        else:
+            pytest.fail("long manual compaction did not drain within its bounded attempts")
 
         assert len(compacted_batches) >= 2
-        assert sum(int(batch["removed_message_count"]) for batch in compacted_batches) == len(messages)
-        assert all(int(batch["preserved_message_count"]) < len(messages) for batch in compacted_batches)
+        assert sum(batch.removed_message_count for batch in compacted_batches) == len(messages)
+        assert all(batch.preserved_message_count < len(messages) for batch in compacted_batches)
         rows = await _history_rows(seed)
         assert len(rows) == len(compacted_batches)
         assert all(row.status == "pending" for row in rows)

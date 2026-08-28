@@ -28,7 +28,7 @@ export async function Header({ className, homeURL, locale }: HeaderProps) {
           href={homeURL ?? "/"}
           className="font-serif text-xl whitespace-nowrap"
         >
-          ActWeave
+          Fluva
         </Link>
       </div>
       <nav className="ml-auto hidden items-center gap-5 text-sm font-medium sm:flex md:mr-8 md:gap-8">

@@ -27,6 +27,7 @@ class ContextCheckpointEstimator(_StrictContract):
     provider_fixed_overhead_tokens: int = Field(ge=0)
     provider_per_message_overhead_tokens: int = Field(ge=0)
     provider_per_tool_overhead_tokens: int = Field(ge=0)
+    visual_max_tokens_per_image: int | None = Field(default=None, ge=1)
     fixed_message_count: int = Field(ge=0)
     tool_count: int = Field(ge=0)
 

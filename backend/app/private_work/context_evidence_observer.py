@@ -25,6 +25,7 @@ from app.private_work.context_replacement import compaction_checkpoint_receipt
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
+from deerflow.config.summarization_config import EffectiveCompactionPolicy
 from deerflow.error_codes import ContextProviderCallAmbiguousError
 from deerflow.persistence.context_evidence import (
     ContextEvidenceRecord,
@@ -121,6 +122,7 @@ class PrivateRunContextEvidenceObserver:
         )
         self._compaction_enabled = compaction_enabled
         self._compaction_threshold_tokens = compaction_threshold_tokens
+        self._effective_compaction_policy: EffectiveCompactionPolicy | None = None
         self._source_checkpoint_id = source_checkpoint_id
         if rebase_reason is not None and not isinstance(
             rebase_reason,
@@ -145,6 +147,33 @@ class PrivateRunContextEvidenceObserver:
     @property
     def run_id(self) -> str:
         return self._run_id
+
+    @property
+    def effective_compaction_policy(
+        self,
+    ) -> EffectiveCompactionPolicy | None:
+        return self._effective_compaction_policy
+
+    def freeze_compaction_policy(
+        self,
+        policy: EffectiveCompactionPolicy,
+    ) -> None:
+        """Freeze the profile-derived policy before the first Evidence append."""
+
+        if not isinstance(policy, EffectiveCompactionPolicy):
+            raise TypeError("Effective compaction policy is invalid")
+        if not self._compaction_enabled or policy.trigger_tokens is None:
+            raise ValueError("Enabled automatic compaction policy is required")
+        if policy.context_window_tokens != self._model.context_window_tokens:
+            raise ValueError("Compaction policy model capacity does not match")
+        if self._effective_compaction_policy is not None:
+            if self._effective_compaction_policy != policy:
+                raise ValueError("Effective compaction policy is already frozen")
+            return
+        if self._prepared or self._last_source is not None:
+            raise RuntimeError("Context Evidence already opened before policy freeze")
+        self._effective_compaction_policy = policy
+        self._compaction_threshold_tokens = policy.trigger_tokens
 
     def accept_checkpoint_linked(
         self,
@@ -241,7 +270,7 @@ class PrivateRunContextEvidenceObserver:
         source_snapshot: Mapping[str, object] | None,
         estimator: ContextCheckpointEstimator,
         source_state_digest: str,
-        source_tokens: int,
+        source_values: Mapping[str, object],
         result_values: Mapping[str, object],
     ) -> ContextCompactionCheckpointReceipt:
         """Prepare safe repair authority before a Lead checkpoint commit."""
@@ -249,22 +278,13 @@ class PrivateRunContextEvidenceObserver:
         if self._subject.execution_id is not None:
             raise RuntimeError("Sub-Agent compaction has no checkpoint receipt")
         if source_snapshot is None:
-            source_identity = hashlib.sha256(f"lead-pre-provider-compaction-v1:{source_state_digest}".encode()).hexdigest()
-            contribution = ContextContribution(
-                contribution_id=hashlib.sha256(f"lead-pre-provider-compaction-v1:{source_identity}".encode()).hexdigest(),
-                source_identity_digest=source_identity,
-                lane=ContextLane.CONVERSATION,
-                model_visible_bytes=0,
-                token_estimate=TokenEstimate.bounded(
-                    projected_tokens=source_tokens,
-                    lower_bound_tokens=0,
-                    safety_upper_bound_tokens=source_tokens,
-                ),
-            )
+            # The synthetic bootstrap snapshot only carries generation identity
+            # and the estimator; the receipt re-measures both source and result
+            # states itself, so no token value is invented here.
             measurement = FinalRequestMeasurement(
                 request_fingerprint=source_state_digest,
                 adapter_revision="lead-pre-provider-compaction-v1",
-                contributions=(contribution,),
+                contributions=(),
             )
             snapshot = ContextCheckpointProjectionSnapshot(
                 generation=ContextWindowGeneration(
@@ -285,6 +305,7 @@ class PrivateRunContextEvidenceObserver:
         return compaction_checkpoint_receipt(
             snapshot,
             source_checkpoint_id=source_checkpoint_id,
+            source_values=source_values,
             checkpoint_values=result_values,
             result_generation=ContextWindowGeneration(
                 generation_id=uuid.uuid4(),
@@ -723,11 +744,16 @@ class PrivateRunContextEvidenceObserver:
         )
 
     def _window_opened(self) -> WindowOpenedV1:
+        policy = self._effective_compaction_policy
         return WindowOpenedV1(
             model_identity_digest=self._model.identity_digest,
             context_window_tokens=self._model.context_window_tokens,
             compaction_enabled=self._compaction_enabled,
             compaction_threshold_tokens=(self._compaction_threshold_tokens if self._compaction_enabled else None),
+            compaction_keep_tokens=(policy.keep_tokens if policy is not None else None),
+            compaction_fixed_safety_tokens=(policy.fixed_noncompressible_safety_tokens if policy is not None else None),
+            compaction_summary_headroom_tokens=(policy.summary_headroom_tokens if policy is not None else None),
+            compaction_retained_safety_tokens=(policy.retained_context_safety_tokens if policy is not None else None),
             compaction_authority=(CompactionAuthority.FROZEN_RUN.value if self._compaction_enabled else None),
         )
 

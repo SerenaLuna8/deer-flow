@@ -1,6 +1,6 @@
 ---
 title: Lead Agent
-description: The Lead Agent is the central executor in an ActWeave thread. Every conversation, task, and workflow flows through it. Understanding how it works helps you configure it effectively and extend it when needed.
+description: The Lead Agent is the central executor in an Fluva thread. Every conversation, task, and workflow flows through it. Understanding how it works helps you configure it effectively and extend it when needed.
 ---
 
 import { Callout, Steps } from "nextra/components";
@@ -9,11 +9,11 @@ import { Callout, Steps } from "nextra/components";
 
 <Callout type="info" emoji="🧠">
   The Lead Agent is the primary reasoning and orchestration unit in every
-  ActWeave thread. It decides what to do, calls tools, delegates to subagents,
+  Fluva thread. It decides what to do, calls tools, delegates to subagents,
   and returns artifacts.
 </Callout>
 
-The Lead Agent is the central executor in an ActWeave thread. Every conversation, task, and workflow flows through it. Understanding how it works helps you configure it effectively and extend it when needed.
+The Lead Agent is the central executor in an Fluva thread. Every conversation, task, and workflow flows through it. Understanding how it works helps you configure it effectively and extend it when needed.
 
 ## What the Lead Agent does
 
@@ -99,7 +99,7 @@ secret material and are not returned by the API.
 A System Model's `max_tokens` limits generation for one provider call; it is
 not the cumulative limit for the whole Run. When the Lead Agent in a Private
 Run reaches that limit without producing tool intent or structured output,
-ActWeave performs at most one recovery call in the same Run. It keeps the same
+Fluva performs at most one recovery call in the same Run. It keeps the same
 frozen model configuration, disables thinking and tools, and asks the model to
 form a concise, complete final answer from the original task and any visible
 partial answer. It does not claim to continue hidden reasoning.
@@ -107,7 +107,7 @@ partial answer. It does not claim to continue hidden reasoning.
 If the truncated response contains tool intent or structured output, or if the
 single recovery call is still truncated or has no visible answer, automatic
 recovery stops and the UI reports **Model output limit reached**. A failed turn
-with no tool activity also offers **Retry without deep thinking**. ActWeave
+with no tool activity also offers **Retry without deep thinking**. Fluva
 does not automatically replay tool activity that may have side effects.
 
 ## Plan mode

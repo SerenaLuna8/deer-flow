@@ -406,7 +406,7 @@ def test_limit_exhaustion_notice_follows_tool_message_pairing() -> None:
     assert isinstance(exhausted_request[-2], ToolMessage)
     assert isinstance(exhausted_request[-1], HumanMessage)
     notice = str(exhausted_request[-1].content)
-    assert "shared internal tool-call limit" in notice
+    assert "internal tool-call limit for this Sub-Agent Task" in notice
     assert "8 admitted calls" in notice
 
     assert len(observations) == 1
@@ -1933,7 +1933,6 @@ def test_default_graph_profile_separates_lead_and_subagent_task_limits(
     profile = default_graph_tool_call_control_profile(workload_profile)  # type: ignore[arg-type]
 
     assert profile.workload_profile == workload_profile
-    assert profile.accounting_mode == "lead_run_subagent_task"
     assert profile.lead.internal_tool_call_limit == 200
     assert profile.subagent.internal_tool_call_limit == 50
     assert profile.lead.repeated_calls == RepeatedCallPolicy(
@@ -1953,7 +1952,6 @@ def test_subject_topology_counts_task_on_lead_and_child_work_on_its_task() -> No
     topology = GraphToolCallControlTopology(
         profile=ResolvedGraphToolCallControlProfile(
             workload_profile="interactive",
-            accounting_mode="lead_run_subagent_task",
             lead=_policy(internal_tool_call_limit=1),
             subagent=_policy(internal_tool_call_limit=1),
         ),
@@ -2018,76 +2016,6 @@ def test_subject_topology_counts_task_on_lead_and_child_work_on_its_task() -> No
         "subagent_task",
     ]
     assert all(observation.disposition == "exhaust_subject" for observation in observations)
-
-
-def test_legacy_topology_reuses_parent_authority_and_scope() -> None:
-    observations: list[object] = []
-
-    class _Observer:
-        def observe(self, observation: object) -> None:
-            observations.append(observation)
-
-    policy = _policy(internal_tool_call_limit=1)
-    topology = GraphToolCallControlTopology(
-        profile=ResolvedGraphToolCallControlProfile(
-            workload_profile="interactive",
-            accounting_mode="shared_run",
-            lead=policy,
-            subagent=policy,
-        ),
-        lead_scope=FixedToolCallControlScope("legacy-parent-run"),
-    )
-    lead = topology.build_lead(observer=_Observer())
-    child_execution_id = uuid.uuid4()
-    child = topology.build_subagent_task(
-        child_execution_id,
-        observer=_Observer(),
-    )
-
-    lead_update = lead.after_model(
-        {
-            "messages": [
-                AIMessage(
-                    id="legacy-lead-proposal",
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "task",
-                            "args": {"description": "delegate"},
-                            "id": "legacy-task-call",
-                        }
-                    ],
-                )
-            ]
-        },
-        Runtime(context={}),
-    )
-    child_update = child.after_model(
-        {
-            "messages": [
-                AIMessage(
-                    id="legacy-child-proposal",
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "lookup",
-                            "args": {"value": "must-not-run"},
-                            "id": "legacy-lookup-call",
-                        }
-                    ],
-                )
-            ]
-        },
-        Runtime(context={}),
-    )
-
-    assert lead_update is not None
-    assert child_update is not None
-    assert child_update["messages"][0].tool_calls == []
-    assert child_update[TOOL_CALL_CONTROL_STATE_KEY]["admitted_count"] == 1
-    assert observations[-1].scope_id == str(child_execution_id)
-    assert observations[-1].budget_scope == "run"
-    assert observations[-1].disposition == "truncate_tool_calls"
 
 
 def test_inspect_image_counts_against_the_shared_limit() -> None:

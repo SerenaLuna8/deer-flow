@@ -4,7 +4,9 @@ import { describe, expect, test } from "@rstest/core";
 import { taskEventToSubtaskUpdate } from "@/core/tasks/lifecycle";
 import {
   SUBAGENT_ERROR_KEY,
+  SUBAGENT_RESULT_BRIEF_KEY,
   SUBAGENT_STATUS_KEY,
+  SUBAGENT_STOP_REASON_KEY,
   SUBAGENT_USAGE_RECEIPT_ID_KEY,
   derivePendingSubtaskStatus,
   isSubtaskRunActive,
@@ -119,6 +121,36 @@ describe("Sub-Agent status authority", () => {
       id: "task-terminal",
       status: "failed",
       error: "execution failed",
+    });
+  });
+
+  test("preserves a structured partial result while marking Provider output truncation", () => {
+    expect(
+      parseSubtaskResult("display text is not the status protocol", {
+        [SUBAGENT_STATUS_KEY]: "completed",
+        [SUBAGENT_RESULT_BRIEF_KEY]: "usable partial result",
+        [SUBAGENT_STOP_REASON_KEY]: "output_truncated",
+      }),
+    ).toEqual({
+      status: "completed",
+      result: "usable partial result",
+      stopReason: "output_truncated",
+    });
+  });
+
+  test("projects Provider output truncation from the live terminal lifecycle event", () => {
+    expect(
+      parseSubtaskTerminalEvent({
+        type: "task_completed",
+        task_id: "task-truncated",
+        result: "usable partial result",
+        stop_reason: "output_truncated",
+      }),
+    ).toEqual({
+      id: "task-truncated",
+      status: "completed",
+      result: "usable partial result",
+      stopReason: "output_truncated",
     });
   });
 });

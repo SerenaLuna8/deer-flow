@@ -1077,7 +1077,6 @@ def test_research_profile_is_bound_for_delegated_sdk_execution(
     profile = binding_factory.tool_call_control_topology.profile
 
     assert profile.workload_profile == "research"
-    assert profile.accounting_mode == "lead_run_subagent_task"
     assert profile.lead.internal_tool_call_limit == 200
     assert profile.subagent.internal_tool_call_limit == 50
 

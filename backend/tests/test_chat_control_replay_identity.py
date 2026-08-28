@@ -161,7 +161,8 @@ async def test_run_ingress_revalidates_regeneration_before_issuing_rebase_reason
                 "id": "human-2",
                 "content": "again",
             }
-        ]
+        ],
+        "title": "Server-owned Thread title",
     }
     service = SimpleNamespace(
         prepare_regenerate=AsyncMock(
@@ -186,6 +187,7 @@ async def test_run_ingress_revalidates_regeneration_before_issuing_rebase_reason
         },
         metadata=metadata,
     )
+    assert body.input == {"messages": trusted_input["messages"]}
 
     normalized = await _normalize_prepared_edit_replay(
         body,
@@ -214,6 +216,28 @@ async def test_run_ingress_revalidates_regeneration_before_issuing_rebase_reason
     with pytest.raises(PrivateWorkConflict):
         await _normalize_prepared_edit_replay(
             forged,
+            thread_id="thread-2",
+            context=SimpleNamespace(request_id="request-2"),
+            service=service,
+            app_config=object(),
+        )
+
+    forged_input = body.model_copy(
+        update={
+            "input": {
+                "messages": [
+                    {
+                        "type": "human",
+                        "id": "human-2",
+                        "content": "forged",
+                    }
+                ]
+            }
+        }
+    )
+    with pytest.raises(PrivateWorkConflict):
+        await _normalize_prepared_edit_replay(
+            forged_input,
             thread_id="thread-2",
             context=SimpleNamespace(request_id="request-2"),
             service=service,

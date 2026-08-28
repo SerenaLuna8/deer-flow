@@ -154,7 +154,15 @@ def resolve_provider_call(
     elif isinstance(outcome, ProviderAmbiguousV1):
         disposition = ProviderCallDisposition.TERMINAL_AMBIGUOUS
     elif isinstance(outcome, ProviderFailedV1):
-        disposition = ProviderCallDisposition.RETRY_PROVEN_SAFE_FAILURE if outcome.retry_safety is ProviderRetrySafety.NO_RESPONSE_PROVEN else ProviderCallDisposition.TERMINAL_FAILURE
+        disposition = (
+            ProviderCallDisposition.RETRY_PROVEN_SAFE_FAILURE
+            if outcome.retry_safety
+            in {
+                ProviderRetrySafety.NO_RESPONSE_PROVEN,
+                ProviderRetrySafety.FAILED_RESPONSE_RETRY_SAFE,
+            }
+            else ProviderCallDisposition.TERMINAL_FAILURE
+        )
     elif linked is None:
         disposition = ProviderCallDisposition.REPAIR_CHECKPOINT_LINK
     else:

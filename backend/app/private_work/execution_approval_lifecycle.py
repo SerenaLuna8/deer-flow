@@ -45,6 +45,8 @@ class ExecutionApprovalPrivateLifecycleConflict(RuntimeError):
 def staged_approval_has_exact_suspension_marker(
     approval: ExecutionApprovalRequestRow,
     source_run: RunRow,
+    *,
+    bound_job_id: uuid.UUID | None = None,
 ) -> bool:
     """Return whether a staged approval owns this Run's durable success proof.
 
@@ -60,6 +62,7 @@ def staged_approval_has_exact_suspension_marker(
     if marker is None:
         return False
     try:
+        expected_bound_job_id = uuid.UUID(str(approval.source_job_id)) if bound_job_id is None else uuid.UUID(str(bound_job_id))
         exact = (
             approval.status == "staged"
             and marker.approval_id == uuid.UUID(str(approval.id))
@@ -69,7 +72,7 @@ def staged_approval_has_exact_suspension_marker(
             and source_run.owner_user_id == approval.owner_user_id
             and source_run.thread_id == approval.thread_id
             and source_run.run_id == approval.source_run_id
-            and uuid.UUID(str(source_run.job_id)) == uuid.UUID(str(approval.source_job_id))
+            and uuid.UUID(str(source_run.job_id)) == expected_bound_job_id
         )
     except (AttributeError, TypeError, ValueError):
         raise ExecutionApprovalPrivateLifecycleConflict() from None

@@ -1,6 +1,6 @@
-# ActWeave Frontend
+# Fluva Frontend
 
-ActWeave Frontend 是 project-first 架构的 Next.js Web UI。它通过 Nginx
+Fluva Frontend 是 project-first 架构的 Next.js Web UI。它通过 Nginx
 同源访问 Gateway，不执行 Agent graph，也不从浏览器状态推导账户、项目或资产权限。
 
 完整应用从仓库根目录启动：

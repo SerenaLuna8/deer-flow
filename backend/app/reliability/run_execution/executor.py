@@ -120,6 +120,9 @@ from deerflow.config.app_config import (
 )
 from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.summarization_config import (
+    resolve_effective_compaction_policy,
+)
 from deerflow.error_codes import (
     PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
     ContextProviderCallAmbiguousError,
@@ -143,7 +146,10 @@ from deerflow.runtime import (
 )
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError
 from deerflow.runtime.context_evidence import ContextRebaseReason, ContextSubject
-from deerflow.runtime.events.models import STREAM_TERMINAL_ERROR_CODES
+from deerflow.runtime.events.models import (
+    STREAM_TERMINAL_ERROR_CODES,
+    stream_terminal_status_for_run_settlement,
+)
 from deerflow.runtime.host_execution_approval import (
     HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH,
 )
@@ -173,20 +179,22 @@ logger = logging.getLogger("app.reliability.execution")
 def _context_compaction_threshold_tokens(
     app_config: object,
     *,
-    context_window_tokens: int,
+    context_window_tokens: int | None = None,
 ) -> int | None:
     summarization = getattr(app_config, "summarization", None)
-    trigger = getattr(summarization, "trigger", None)
-    candidates = tuple(trigger) if isinstance(trigger, list) else (() if trigger is None else (trigger,))
-    thresholds: list[int] = []
-    for candidate in candidates:
-        trigger_type = getattr(candidate, "type", None)
-        value = getattr(candidate, "value", None)
-        if trigger_type == "tokens" and isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            thresholds.append(value)
-        elif trigger_type == "fraction" and isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1:
-            thresholds.append(max(1, int(context_window_tokens * float(value))))
-    return min(thresholds) if thresholds else None
+    if getattr(summarization, "enabled", False) is not True:
+        return None
+    threshold = getattr(summarization, "trigger_tokens", None)
+    if isinstance(threshold, int) and not isinstance(threshold, bool) and threshold > 0:
+        keep = getattr(getattr(summarization, "keep", None), "value", None)
+        if not isinstance(keep, int) or isinstance(keep, bool) or keep < 1:
+            raise ValueError("Frozen summarization keep policy is invalid")
+        return resolve_effective_compaction_policy(
+            trigger_tokens=threshold,
+            keep_tokens=keep,
+            context_window_tokens=context_window_tokens,
+        ).trigger_tokens
+    return None
 
 
 def _persisted_channel_user_id(
@@ -1041,8 +1049,11 @@ class RunAgentPrivateExecutor:
                     boundary,
                     scope=execution.context.resource_scope,
                     thread_id=execution.run.thread_id,
-                    terminal_status=lambda: str(record.status),
+                    terminal_status=lambda: stream_terminal_status_for_run_settlement(
+                        record.status,
+                    ),
                     terminal_error_code=lambda: record.error if record.error in STREAM_TERMINAL_ERROR_CODES else None,
+                    terminal_authority=lambda: record.terminal_authority,
                 )
                 if execution.runtime_kind == "skill_builder":
                     activity_emitter = await self._skill_builder_activity_emitter_factory(

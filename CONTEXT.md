@@ -104,6 +104,32 @@ _Avoid_: Package cleanup
 The read-only creation of a Skill Distribution Package from one persisted Project Skill Version or a System Skill's Current Version; it may omit standard non-distribution files but does not otherwise change the Skill or its governance state.
 _Avoid_: Backup, lifecycle archive
 
+## Knowledge assets
+
+**Knowledge Base**:
+A Project-shared collection of Knowledge Documents that selects one Knowledge Model Configuration for indexing and search.
+_Avoid_: Dataset, vector table
+
+**Knowledge Document**:
+A source file uploaded to one Knowledge Base. It owns the stored file location, processing status, segments, and embeddings.
+_Avoid_: Source Blob, upload row
+
+**Knowledge Segment**:
+A stable, ordered text chunk derived from one version of a Knowledge Document.
+_Avoid_: random chunk
+
+**Knowledge Task**:
+A durable background work item for document ingestion or deletion.
+_Avoid_: Run, Job, fire-and-forget background task
+
+**Knowledge Citation**:
+A reference to the Knowledge Base, Knowledge Document, and Knowledge Segment that supplied one search result.
+_Avoid_: complete source document
+
+**Knowledge Model Configuration**:
+A platform-administered retrieval profile that binds one Embedding model and one Reranker model to the same provider endpoint and Configuration Secret. A Knowledge Base selects one Knowledge Model Configuration for indexing, candidate retrieval, and reranking. It is distinct from the System Model Configuration used for Agent model execution.
+_Avoid_: System Model Configuration, embedding provider row, reranker provider row
+
 ## Configuration secrets
 
 **Configuration Secret**:

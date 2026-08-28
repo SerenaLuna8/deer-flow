@@ -178,7 +178,10 @@ test.describe("Project Skill Configuration Secrets (real Gateway)", () => {
     await expect(
       detail.getByRole("tab", { name: /^(?:运行秘密|Runtime secrets)$/u }),
     ).toHaveAttribute("aria-selected", "true");
-    const secretInput = detail.getByLabel(`${SECRET_NAME} 秘密值`);
+    const secretInput = detail.getByRole("textbox", {
+      name: `${SECRET_NAME} 秘密值`,
+      exact: true,
+    });
     await expect(secretInput).toHaveValue("");
     await expect(
       detail.getByText("必需 · 未配置", { exact: true }),

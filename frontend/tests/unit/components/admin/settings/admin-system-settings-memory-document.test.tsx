@@ -123,8 +123,8 @@ function catalog(): SystemSettingsCatalog {
           summarization: {
             enabled: true,
             model_name: null,
-            trigger: null,
-            keep: { type: "messages", value: 20 },
+            trigger_tokens: null,
+            keep: { type: "tokens", value: 64_000 },
             trim_tokens_to_summarize: null,
             skill_file_read_tool_names: ["read_file"],
           },
@@ -272,6 +272,42 @@ describe("admin Memory document settings", () => {
     ).toBeLessThan(english.indexOf('data-settings-subsection="token-budget"'));
     expect(chinese).toContain("始终生效，不受 Token 预算开关影响。");
     expect(chinese).toContain("只有本区块中的上限与阈值受开关控制。");
+  });
+
+  test("keeps summarization retention as a single token count without legacy measure modes", () => {
+    const chinese = renderChinese(
+      <AdminSystemSettingsStateView
+        activeModels={[]}
+        lastResults={{}}
+        modelsStatus="ready"
+        onRetry={rs.fn()}
+        onSave={rs.fn(async () => null)}
+        pendingSection={null}
+        retrying={false}
+        sectionErrors={{}}
+        state={{ status: "ready", data: catalog() }}
+      />,
+    );
+    const summarizationStart = chinese.indexOf(
+      'data-agent-settings-group="summarization"',
+    );
+    expect(summarizationStart).toBeGreaterThanOrEqual(0);
+    const summarization = chinese.slice(
+      summarizationStart,
+      chinese.indexOf("</section>", summarizationStart) + "</section>".length,
+    );
+
+    expect(summarization).toContain("摘要后保留的最近历史");
+    expect(summarization).toContain(
+      'name="agent_runtime.summarization.keep.value"',
+    );
+    expect(summarization).toContain('value="64000"');
+    expect(summarization).not.toContain(
+      'name="agent_runtime.summarization.keep.type"',
+    );
+    expect(summarization).not.toContain("计算方式");
+    expect(summarization).not.toContain("消息数");
+    expect(summarization).not.toContain("上下文占比");
   });
 
   test("treats a same-page hash target as navigation within the current document", () => {

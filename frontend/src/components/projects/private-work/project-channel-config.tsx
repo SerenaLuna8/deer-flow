@@ -104,7 +104,7 @@ export const PROJECT_CHANNEL_PROVIDER_DESCRIPTORS = {
         name: "bot_username",
         label: "Bot Username",
         required: false,
-        placeholder: "actweave_bot",
+        placeholder: "fluva_bot",
       },
     ],
     secretFields: [{ name: "bot_token", label: "Bot Token", required: true }],

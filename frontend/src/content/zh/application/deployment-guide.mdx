@@ -1,13 +1,13 @@
 ---
 title: 部署指南
-description: ActWeave 本地与 Docker Compose 部署边界。
+description: Fluva 本地与 Docker Compose 部署边界。
 ---
 
 import { Callout } from "nextra/components";
 
 # 部署指南
 
-ActWeave 的运行拓扑由 Nginx、Frontend、Gateway、Worker、可选 Scheduler 和可选 Provisioner 组成。PostgreSQL 是唯一应用持久化数据库，并且不由 ActWeave Compose stack 自动创建。
+Fluva 的运行拓扑由 Nginx、Frontend、Gateway、Worker、可选 Scheduler 和可选 Provisioner 组成。PostgreSQL 是唯一应用持久化数据库，并且不由 Fluva Compose stack 自动创建。
 
 <Callout type="warning">
   仓库提供本地和 Docker Compose 启动资源，但 Docker Compose、浏览器、模型 provider 和 Sandbox 模式都需要在目标环境单独完成容量、安全和故障验收。本页不构成生产认证。
@@ -22,7 +22,7 @@ ActWeave 的运行拓扑由 Nginx、Frontend、Gateway、Worker、可选 Schedul
 
 ```bash
 export POSTGRES_ADMIN_URL='<连接 postgres maintenance database 的管理员 URL>'
-export DATABASE_URL='<全新 ActWeave 目标库 URL>'
+export DATABASE_URL='<全新 Fluva 目标库 URL>'
 make setup-db
 make check-db
 ```
@@ -73,7 +73,7 @@ make down
 | Container/AIO provider | 容器隔离；需要验证 Docker socket、网络和挂载权限 |
 | Provisioner/Kubernetes | 通过独立服务创建 Sandbox Pod；需要集群级安全验收 |
 
-Provisioner/Kubernetes 仅是 Sandbox provider；当前仓库不提供完整 ActWeave 整栈的 Kubernetes/Helm 部署目标。
+Provisioner/Kubernetes 仅是 Sandbox provider；当前仓库不提供完整 Fluva 整栈的 Kubernetes/Helm 部署目标。
 
 Sandbox 隔离不替代项目授权、Secret 最小权限注入或网络出口控制。
 

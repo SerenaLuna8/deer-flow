@@ -10,13 +10,14 @@ import hashlib
 import json
 import logging
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.jobs.model import JobRow
+from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
 from deerflow.persistence.models.run_event import RunEventRow, ThreadEventSequenceRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
@@ -29,19 +30,28 @@ from deerflow.runtime.events.models import (
     StreamFrame,
     StreamLeaseProof,
     StreamScopeNotFound,
+    StreamTerminalCandidate,
     StreamWriteAuthorityRequired,
     StreamWriteAuthorizationRevoked,
     StreamWriteCancelled,
     StreamWriteLeaseLost,
+    canonical_stream_terminal_status,
+    stream_terminal_status_for_run_settlement,
 )
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 _EXECUTABLE_ROLES = frozenset({"admin", "editor", "runner", "channel_guest"})
 _STREAM_EVENT_NAME_METADATA_KEY = "stream_event_name"
+_STREAM_TERMINAL_AUTHORITY_METADATA_KEY = "stream_terminal_authority"
+_STREAM_TERMINAL_CANDIDATE_EVENT_TYPE = "run.terminal_candidate"
+_INTERNAL_EVENT_CATEGORY = "internal"
+_StreamCancellationAuthority = Literal["none", "ordinary", "authorization_revoked"]
+_SETTLED_STREAM_TERMINAL_AUTHORITY_ISSUER = object()
 
 RUN_EVENTS_NOTIFY_CHANNEL = "run_events"
 """LISTEN/NOTIFY channel that wakes durable SSE consumers after a stream commit.
@@ -50,6 +60,141 @@ NOTIFY is only an alarm clock: the payload is the ``run_id`` and delivery rides
 the writing transaction's commit. Readers never trust it for data — a lost
 notification merely degrades a consumer to its poll-timeout fallback.
 """
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class _SettledStreamTerminalAuthority:
+    """Transaction-local proof of one exact revoked Run settlement."""
+
+    _session: AsyncSession = field(repr=False, compare=False)
+    _transaction: object = field(repr=False, compare=False)
+    project_id: uuid.UUID
+    owner_user_id: str
+    membership_version: int
+    thread_id: str
+    run_id: str
+    job_id: uuid.UUID
+    attempt_id: uuid.UUID
+    attempt_number: int
+    origin_trace_id: str
+    job_type: str
+    automation_occurrence_id: str | None
+    predecessor_dead_job_id: uuid.UUID | None
+    _lease_token_hash: str = field(repr=False)
+
+    def __init__(
+        self,
+        *,
+        issuer: object,
+        session: AsyncSession,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        membership_version: int,
+        thread_id: str,
+        run_id: str,
+        job_id: uuid.UUID,
+        attempt_id: uuid.UUID,
+        attempt_number: int,
+        origin_trace_id: str,
+        job_type: str,
+        automation_occurrence_id: str | None,
+        predecessor_dead_job_id: uuid.UUID | None,
+        lease_token_hash: str,
+    ) -> None:
+        if issuer is not _SETTLED_STREAM_TERMINAL_AUTHORITY_ISSUER:
+            raise TypeError("settled stream terminal authority is private")
+        transaction = session.sync_session.get_transaction()
+        if transaction is None or not transaction.is_active:
+            raise RuntimeError(
+                "settled stream terminal authority requires an active transaction",
+            )
+        for name, value in (
+            ("_session", session),
+            ("_transaction", transaction),
+            ("project_id", project_id),
+            ("owner_user_id", owner_user_id),
+            ("membership_version", membership_version),
+            ("thread_id", thread_id),
+            ("run_id", run_id),
+            ("job_id", job_id),
+            ("attempt_id", attempt_id),
+            ("attempt_number", attempt_number),
+            ("origin_trace_id", origin_trace_id),
+            ("job_type", job_type),
+            ("automation_occurrence_id", automation_occurrence_id),
+            ("predecessor_dead_job_id", predecessor_dead_job_id),
+            ("_lease_token_hash", lease_token_hash),
+        ):
+            object.__setattr__(self, name, value)
+
+
+def _issue_settled_stream_terminal_authority(
+    session: AsyncSession,
+    *,
+    scope: PrivateResourceScope,
+    run: RunRow,
+    job: JobRow,
+    attempt: JobAttemptRow,
+    lease_token: str,
+) -> _SettledStreamTerminalAuthority:
+    """Issue only from the exact locked authorization-revoked settlement."""
+
+    if type(scope) is not PrivateResourceScope or type(run) is not RunRow or type(job) is not JobRow or type(attempt) is not JobAttemptRow or not isinstance(lease_token, str) or not lease_token:
+        raise TypeError("locked stream terminal settlement is invalid")
+    try:
+        project_id = uuid.UUID(scope.project_id)
+        owner_user_id = str(uuid.UUID(scope.owner_user_id))
+    except (TypeError, ValueError):
+        raise ValueError("locked stream terminal scope is invalid") from None
+    lease_token_hash = hashlib.sha256(lease_token.encode("utf-8")).hexdigest()
+    valid_job_lineage = (job.job_type == "private_run" and job.automation_occurrence_id is None) or (job.job_type == "automation_run" and job.automation_occurrence_id is not None)
+    if (
+        (run.status, job.status, attempt.outcome) != ("interrupted", "cancelled", "cancelled")
+        or run.authorization_cancel_requested_at is None
+        or not run.authorization_cancel_reason
+        or run.execution_lease_token_hash is not None
+        or run.execution_lease_expires_at is not None
+        or run.execution_heartbeat_at is not None
+        or job.lease_owner_id is not None
+        or job.lease_token_hash is not None
+        or job.lease_expires_at is not None
+        or job.heartbeat_at is not None
+        or job.completed_at is None
+        or attempt.finished_at is None
+        or run.project_id != project_id
+        or run.owner_user_id != owner_user_id
+        or job.project_id != project_id
+        or job.owner_user_id != owner_user_id
+        or run.job_id != job.id
+        or job.run_id != run.run_id
+        or attempt.job_id != job.id
+        or attempt.attempt_number != job.attempt_count
+        or attempt.lease_token_hash != lease_token_hash
+        or job.origin_trace_id != run.origin_trace_id
+        or not isinstance(run.origin_trace_id, str)
+        or not run.origin_trace_id
+        or not valid_job_lineage
+    ):
+        raise RuntimeError(
+            "settled stream terminal authority requires exact locked lineage",
+        )
+    return _SettledStreamTerminalAuthority(
+        issuer=_SETTLED_STREAM_TERMINAL_AUTHORITY_ISSUER,
+        session=session,
+        project_id=project_id,
+        owner_user_id=owner_user_id,
+        membership_version=scope.membership_version,
+        thread_id=run.thread_id,
+        run_id=run.run_id,
+        job_id=job.id,
+        attempt_id=attempt.id,
+        attempt_number=attempt.attempt_number,
+        origin_trace_id=run.origin_trace_id,
+        job_type=job.job_type,
+        automation_occurrence_id=job.automation_occurrence_id,
+        predecessor_dead_job_id=job.predecessor_dead_job_id,
+        lease_token_hash=lease_token_hash,
+    )
 
 
 class DbRunEventStore(RunEventStore):
@@ -218,7 +363,7 @@ class DbRunEventStore(RunEventStore):
         thread_id: str,
         run_id: str,
         lease: StreamLeaseProof,
-    ) -> bool:
+    ) -> _StreamCancellationAuthority:
         if type(lease) is not StreamLeaseProof:
             raise StreamWriteLeaseLost(
                 "stream lease capability is invalid",
@@ -275,14 +420,11 @@ class DbRunEventStore(RunEventStore):
             raise StreamWriteLeaseLost(
                 "stream execution lease is no longer active",
             )
-        return any(
-            value is not None
-            for value in (
-                job.cancel_requested_at,
-                run.cancel_requested_at,
-                run.authorization_cancel_requested_at,
-            )
-        )
+        if run.authorization_cancel_requested_at is not None:
+            return "authorization_revoked"
+        if job.cancel_requested_at is not None or run.cancel_requested_at is not None:
+            return "ordinary"
+        return "none"
 
     @classmethod
     async def _require_authorized_event_parent(
@@ -323,7 +465,7 @@ class DbRunEventStore(RunEventStore):
                     "job-owned event write requires live execution authority",
                 )
             return parent.project_id, parent.owner_user_id
-        cancel_requested = await cls._authorize_stream_lease(
+        cancellation_authority = await cls._authorize_stream_lease(
             session,
             project_id=project_id,
             owner_user_id=owner_user_id,
@@ -332,7 +474,11 @@ class DbRunEventStore(RunEventStore):
             run_id=run_id,
             lease=lease,
         )
-        if cancel_requested:
+        if cancellation_authority == "authorization_revoked":
+            raise StreamWriteAuthorizationRevoked(
+                "authorization-revoked execution cannot append an internal event",
+            )
+        if cancellation_authority == "ordinary":
             raise StreamWriteCancelled(
                 "cancelled execution cannot append an internal event",
             )
@@ -410,6 +556,7 @@ class DbRunEventStore(RunEventStore):
             data=record["content"],
             terminal=terminal,
             created=created,
+            terminal_authority=(metadata.get(_STREAM_TERMINAL_AUTHORITY_METADATA_KEY, "ordinary") if terminal and isinstance(metadata, dict) else "ordinary"),
         )
 
     async def _notify_stream_append(self, session: AsyncSession, run_id: str) -> None:
@@ -428,7 +575,10 @@ class DbRunEventStore(RunEventStore):
     def _stream_event_storage(frame: StreamFrame) -> tuple[str, dict[str, object]]:
         """Return a bounded database event type plus lossless protocol metadata."""
         if frame.terminal:
-            return "stream.end", {"stream_terminal": True}
+            return "stream.end", {
+                "stream_terminal": True,
+                _STREAM_TERMINAL_AUTHORITY_METADATA_KEY: frame.terminal_authority,
+            }
         event_type, separator, _namespace = frame.event.partition("|")
         metadata: dict[str, object] = {"stream_terminal": False}
         if separator:
@@ -451,7 +601,7 @@ class DbRunEventStore(RunEventStore):
             raise TypeError("StreamFrame is required")
         project_id, owner_user_id = self._coordinates(scope)
         if lease is not None:
-            cancel_requested = await self._authorize_stream_lease(
+            cancellation_authority = await self._authorize_stream_lease(
                 session,
                 project_id=project_id,
                 owner_user_id=owner_user_id,
@@ -473,7 +623,7 @@ class DbRunEventStore(RunEventStore):
                 raise StreamScopeNotFound(
                     "scoped stream Run was not found",
                 ) from None
-            cancel_requested = False
+            cancellation_authority = "none"
 
         # All governance and execution rows are locked before the thread
         # advisory/sequence lock.  Keep the terminal lookup after the sequence
@@ -500,12 +650,19 @@ class DbRunEventStore(RunEventStore):
                 return self._stream_row(terminal, created=False)
             raise StreamClosed("run stream is already terminal")
 
-        if cancel_requested:
+        if cancellation_authority == "authorization_revoked":
+            if not frame.terminal:
+                raise StreamWriteAuthorizationRevoked(
+                    "authorization-revoked execution cannot append a data frame",
+                )
+            frame = StreamFrame.end(status="interrupted")
+        elif cancellation_authority == "ordinary":
             if not frame.terminal:
                 raise StreamWriteCancelled(
                     "cancelled execution cannot append a data frame",
                 )
-            frame = StreamFrame.end(status="interrupted")
+            if frame.terminal_authority != "durable_response":
+                frame = StreamFrame.end(status="interrupted")
 
         event_type, stream_metadata = self._stream_event_storage(frame)
         db_content, metadata = self._content_to_db(frame.data, stream_metadata)
@@ -527,6 +684,140 @@ class DbRunEventStore(RunEventStore):
         await self._notify_stream_append(session, run_id)
         return self._stream_row(row, created=True)
 
+    @staticmethod
+    def _terminal_candidate_from_row(
+        row: RunEventRow,
+    ) -> StreamTerminalCandidate:
+        record = DbRunEventStore._row_to_dict(row)
+        try:
+            return StreamTerminalCandidate.from_payload(record["content"])
+        except (TypeError, ValueError):
+            raise StreamWriteAuthorityRequired(
+                "stored stream terminal candidate is invalid",
+            ) from None
+
+    async def get_stream_terminal_candidate(
+        self,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+    ) -> StreamTerminalCandidate | None:
+        """Read one internal candidate without exposing it to replay APIs."""
+
+        project_id, owner_user_id = self._coordinates(scope)
+        rows = (
+            (
+                await session.execute(
+                    select(RunEventRow)
+                    .where(
+                        RunEventRow.project_id == project_id,
+                        RunEventRow.owner_user_id == owner_user_id,
+                        RunEventRow.thread_id == thread_id,
+                        RunEventRow.run_id == run_id,
+                        RunEventRow.category == _INTERNAL_EVENT_CATEGORY,
+                        RunEventRow.event_type == _STREAM_TERMINAL_CANDIDATE_EVENT_TYPE,
+                    )
+                    .order_by(RunEventRow.seq.asc())
+                    .limit(2)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise StreamWriteAuthorityRequired(
+                "multiple stream terminal candidates exist",
+            )
+        return self._terminal_candidate_from_row(rows[0])
+
+    async def append_stream_terminal_candidate(
+        self,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        candidate: StreamTerminalCandidate,
+        lease: StreamLeaseProof,
+    ) -> StreamTerminalCandidate:
+        """Persist one lease-bound internal candidate, idempotently."""
+
+        if type(candidate) is not StreamTerminalCandidate:
+            raise TypeError("StreamTerminalCandidate is required")
+        project_id, owner_user_id = self._coordinates(scope)
+        # Candidate data is internal settlement evidence, not a public stream
+        # mutation. Ordinary Stop and authorization revocation are therefore
+        # observed by settlement rather than rewriting or suppressing it here.
+        await self._authorize_stream_lease(
+            session,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            membership_version=scope.membership_version,
+            thread_id=thread_id,
+            run_id=run_id,
+            lease=lease,
+        )
+        sequence = await self._lock_event_sequence(
+            session,
+            scope=scope,
+            thread_id=thread_id,
+        )
+        terminal_exists = await session.scalar(
+            select(RunEventRow.id).where(
+                RunEventRow.project_id == project_id,
+                RunEventRow.owner_user_id == owner_user_id,
+                RunEventRow.thread_id == thread_id,
+                RunEventRow.run_id == run_id,
+                RunEventRow.category == "stream",
+                RunEventRow.event_type == "stream.end",
+            )
+        )
+        if terminal_exists is not None:
+            raise StreamClosed("run stream is already terminal")
+
+        existing = await self.get_stream_terminal_candidate(
+            session,
+            scope=scope,
+            thread_id=thread_id,
+            run_id=run_id,
+        )
+        if existing is not None:
+            if existing != candidate:
+                raise StreamWriteAuthorityRequired(
+                    "stream terminal candidate conflicts with existing proof",
+                )
+            return existing
+
+        db_content, metadata = self._content_to_db(
+            candidate.to_payload(),
+            {"internal_event": True},
+        )
+        row = RunEventRow(
+            thread_id=thread_id,
+            run_id=run_id,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            event_type=_STREAM_TERMINAL_CANDIDATE_EVENT_TYPE,
+            category=_INTERNAL_EVENT_CATEGORY,
+            content=db_content,
+            event_metadata=metadata,
+            seq=self._advance_event_sequence(sequence),
+            created_at=datetime.now(UTC),
+        )
+        session.add(row)
+        await session.flush()
+        return candidate
+
+    @staticmethod
+    def _root_values_frame_condition():
+        """Match root ``values`` rows; namespaced subgraph frames keep the full
+        event name in metadata and are never treated as the root state."""
+        return (RunEventRow.event_type == "values") & (RunEventRow.event_metadata[_STREAM_EVENT_NAME_METADATA_KEY].as_string().is_(None))
+
     async def list_stream_frames(
         self,
         session: AsyncSession,
@@ -536,11 +827,14 @@ class DbRunEventStore(RunEventStore):
         cursor: int,
         limit: int,
         run_id: str | None = None,
+        full_state_horizon: int | None = None,
     ) -> tuple[StoredStreamFrame, ...]:
         if type(cursor) is not int or cursor < 0:
             raise ValueError("stream cursor must be a non-negative integer")
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("stream limit must be between 1 and 1000")
+        if full_state_horizon is not None and (type(full_state_horizon) is not int or full_state_horizon < 0):
+            raise ValueError("stream full-state horizon must be a non-negative integer")
         project_id, owner_user_id = self._coordinates(scope)
         thread_exists = await session.scalar(
             select(ThreadMetaRow.thread_id).where(
@@ -568,8 +862,45 @@ class DbRunEventStore(RunEventStore):
         )
         if run_id is not None:
             statement = statement.where(RunEventRow.run_id == run_id)
+        if full_state_horizon is not None:
+            # A root ``values`` frame is the complete Run state, so the newest
+            # one below the horizon supersedes every earlier root ``values``
+            # frame. Dropping the superseded rows keeps ids monotonic with
+            # gaps, which durable cursor consumers already accept.
+            statement = statement.where(
+                or_(
+                    RunEventRow.seq >= full_state_horizon,
+                    ~self._root_values_frame_condition(),
+                )
+            )
         rows = (await session.execute(statement.order_by(RunEventRow.seq.asc()).limit(limit))).scalars()
         return tuple(self._stream_row(row, created=False) for row in rows)
+
+    async def latest_full_state_stream_seq(
+        self,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+    ) -> int:
+        """Return the newest root ``values`` sequence for one exact Run.
+
+        Used as the replay compaction horizon: zero means the Run has not
+        published a root complete-state frame yet and nothing may be dropped.
+        """
+        project_id, owner_user_id = self._coordinates(scope)
+        value = await session.scalar(
+            select(func.max(RunEventRow.seq)).where(
+                RunEventRow.project_id == project_id,
+                RunEventRow.owner_user_id == owner_user_id,
+                RunEventRow.thread_id == thread_id,
+                RunEventRow.run_id == run_id,
+                RunEventRow.category == "stream",
+                self._root_values_frame_condition(),
+            )
+        )
+        return int(value or 0)
 
     async def get_stream_terminal(
         self,
@@ -596,6 +927,130 @@ class DbRunEventStore(RunEventStore):
             return None
         return self._stream_row(row, created=False)
 
+    @staticmethod
+    def _settled_terminal_matches(
+        terminal: RunEventRow,
+        *,
+        expected_content: str,
+        expected_metadata: dict,
+    ) -> bool:
+        """Compare a retained terminal row under status-spelling equivalence.
+
+        Stored rows are immutable, and rows written before the canonical
+        spelling cutover carry ``{"status": "success"}`` where the settled
+        repair expects ``{"status": "completed"}``. Both describe the same
+        business outcome, so idempotent settlement accepts them; every other
+        divergence (status class or error code) still fails closed.
+        """
+
+        stored_metadata = dict(terminal.event_metadata or {})
+        stored_metadata.setdefault(_STREAM_TERMINAL_AUTHORITY_METADATA_KEY, "ordinary")
+        normalized_expected_metadata = dict(expected_metadata)
+        normalized_expected_metadata.setdefault(
+            _STREAM_TERMINAL_AUTHORITY_METADATA_KEY,
+            "ordinary",
+        )
+        if terminal.content == expected_content and stored_metadata == normalized_expected_metadata:
+            return True
+        if stored_metadata != normalized_expected_metadata:
+            return False
+        try:
+            stored = json.loads(terminal.content)
+            expected = json.loads(expected_content)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(stored, dict) or not isinstance(expected, dict):
+            return False
+        stored_status = stored.get("status")
+        expected_status = expected.get("status")
+        if not isinstance(stored_status, str) or not isinstance(expected_status, str):
+            return False
+        return {
+            **stored,
+            "status": canonical_stream_terminal_status(stored_status),
+        } == {
+            **expected,
+            "status": canonical_stream_terminal_status(expected_status),
+        }
+
+    @classmethod
+    async def _require_settled_stream_terminal_authority(
+        cls,
+        session: AsyncSession,
+        *,
+        authority: _SettledStreamTerminalAuthority,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        job: JobRow | None,
+        run: RunRow | None,
+    ) -> None:
+        """Revalidate an exact transaction-local revoked-settlement proof."""
+
+        project_id, owner_user_id = cls._coordinates(scope)
+        transaction = session.sync_session.get_transaction()
+        if (
+            type(authority) is not _SettledStreamTerminalAuthority
+            or authority._session is not session
+            or transaction is None
+            or transaction is not authority._transaction
+            or not transaction.is_active
+            or authority.project_id != project_id
+            or authority.owner_user_id != owner_user_id
+            or authority.membership_version != scope.membership_version
+            or authority.thread_id != thread_id
+            or authority.run_id != run_id
+            or job is None
+            or run is None
+            or authority.job_id != job.id
+            or run.job_id != job.id
+            or job.project_id != project_id
+            or job.owner_user_id != owner_user_id
+            or job.run_id != run_id
+            or run.project_id != project_id
+            or run.owner_user_id != owner_user_id
+            or run.thread_id != thread_id
+            or run.run_id != run_id
+            or (run.status, job.status) != ("interrupted", "cancelled")
+            or run.authorization_cancel_requested_at is None
+            or not run.authorization_cancel_reason
+            or run.execution_lease_token_hash is not None
+            or run.execution_lease_expires_at is not None
+            or run.execution_heartbeat_at is not None
+            or job.lease_owner_id is not None
+            or job.lease_token_hash is not None
+            or job.lease_expires_at is not None
+            or job.heartbeat_at is not None
+            or job.completed_at is None
+            or authority.origin_trace_id != job.origin_trace_id
+            or authority.origin_trace_id != run.origin_trace_id
+            or authority.job_type != job.job_type
+            or authority.automation_occurrence_id != job.automation_occurrence_id
+            or authority.predecessor_dead_job_id != job.predecessor_dead_job_id
+            or authority.attempt_number != job.attempt_count
+        ):
+            raise StreamWriteAuthorityRequired(
+                "stream terminal settlement authority is invalid",
+            )
+        attempt = (
+            await session.execute(
+                select(JobAttemptRow)
+                .where(
+                    JobAttemptRow.id == authority.attempt_id,
+                    JobAttemptRow.job_id == authority.job_id,
+                    JobAttemptRow.attempt_number == authority.attempt_number,
+                    JobAttemptRow.lease_token_hash == authority._lease_token_hash,
+                    JobAttemptRow.outcome == "cancelled",
+                    JobAttemptRow.finished_at.is_not(None),
+                )
+                .with_for_update(of=JobAttemptRow)
+            )
+        ).scalar_one_or_none()
+        if attempt is None:
+            raise StreamWriteAuthorityRequired(
+                "stream terminal settlement lease lineage is invalid",
+            )
+
     async def ensure_settled_stream_terminal(
         self,
         session: AsyncSession,
@@ -605,6 +1060,7 @@ class DbRunEventStore(RunEventStore):
         run_id: str,
         status: str,
         error_code: str | None = None,
+        settlement_authority: _SettledStreamTerminalAuthority | None = None,
     ) -> StoredStreamFrame:
         """Persist the missing terminal fact for an already-settled Run.
 
@@ -615,12 +1071,17 @@ class DbRunEventStore(RunEventStore):
 
         frame = StreamFrame.end(status=status, error_code=error_code)
         project_id, owner_user_id = self._coordinates(scope)
-        await self._lock_stream_governance(
-            session,
-            project_id=project_id,
-            owner_user_id=owner_user_id,
-            membership_version=scope.membership_version,
-        )
+        if settlement_authority is None:
+            await self._lock_stream_governance(
+                session,
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                membership_version=scope.membership_version,
+            )
+        elif type(settlement_authority) is not _SettledStreamTerminalAuthority:
+            raise StreamWriteAuthorityRequired(
+                "stream terminal settlement authority is invalid",
+            )
         projected_job_id = await session.scalar(
             select(RunRow.job_id).where(
                 RunRow.project_id == project_id,
@@ -662,13 +1123,23 @@ class DbRunEventStore(RunEventStore):
             raise StreamWriteAuthorityRequired(
                 "stream terminal repair requires the exact settled Job",
             )
+        if settlement_authority is not None:
+            await self._require_settled_stream_terminal_authority(
+                session,
+                authority=settlement_authority,
+                scope=scope,
+                thread_id=thread_id,
+                run_id=run_id,
+                job=job,
+                run=run,
+            )
 
-        expected_status = {
-            "success": "completed",
-            "error": "error",
-            "timeout": "timeout",
-            "interrupted": "interrupted",
-        }.get(run.status)
+        try:
+            expected_status = stream_terminal_status_for_run_settlement(
+                RunStatus(run.status),
+            )
+        except ValueError:
+            expected_status = None
         expected_data: dict[str, str] = {"status": expected_status or ""}
         if run.error in STREAM_TERMINAL_ERROR_CODES:
             expected_data["error_code"] = run.error
@@ -698,7 +1169,7 @@ class DbRunEventStore(RunEventStore):
         )
         db_content, metadata = self._content_to_db(
             frame.data,
-            {"stream_terminal": True},
+            self._stream_event_storage(frame)[1],
         )
         terminal = (
             await session.execute(
@@ -713,7 +1184,11 @@ class DbRunEventStore(RunEventStore):
             )
         ).scalar_one_or_none()
         if terminal is not None:
-            if terminal.content != db_content or terminal.event_metadata != metadata:
+            if not self._settled_terminal_matches(
+                terminal,
+                expected_content=db_content,
+                expected_metadata=metadata,
+            ):
                 raise StreamWriteAuthorityRequired(
                     "existing stream terminal disagrees with settled Run state",
                 )
@@ -917,6 +1392,7 @@ class DbRunEventStore(RunEventStore):
         stmt = select(RunEventRow).where(
             RunEventRow.thread_id == thread_id,
             RunEventRow.run_id == run_id,
+            RunEventRow.category != _INTERNAL_EVENT_CATEGORY,
             *self._scope_predicates(scope),
         )
         if event_types:

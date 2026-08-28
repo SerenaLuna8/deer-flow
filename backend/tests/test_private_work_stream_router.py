@@ -438,6 +438,7 @@ async def test_durable_consumer_drains_next_page_before_terminal_fallback() -> N
         cursor=100,
         limit=100,
         run_id=run_id,
+        full_state_horizon=None,
     )
     service.get.assert_not_awaited()
     bridge.ensure_settled_terminal.assert_not_awaited()
@@ -687,7 +688,10 @@ async def test_reconnect_waits_for_initial_database_owner_before_propagating_can
     thread_id = uuid.uuid4()
     run_id = uuid.uuid4()
     probe = _CancellationProbe(SimpleNamespace(status="running", error=None) if operation == "get" else ())
-    bridge = SimpleNamespace(read_after=(probe.run if operation == "read_after" else AsyncMock(return_value=())))
+    bridge = SimpleNamespace(
+        read_after=(probe.run if operation == "read_after" else AsyncMock(return_value=())),
+        latest_full_state_seq=AsyncMock(return_value=0),
+    )
     service = SimpleNamespace(
         require_browser_chat_thread=AsyncMock(),
         get=(probe.run if operation == "get" else AsyncMock(return_value=SimpleNamespace(status="running", error=None))),

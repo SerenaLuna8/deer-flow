@@ -14,11 +14,9 @@ export interface SubtaskResultUpdate {
   modelName?: string;
   usage?: Subtask["usage"];
   /**
-   * Why a guardrail cap ended the run early (``token_capped`` / ``turn_capped``
-   * / ``loop_capped``), when the backend stamps ``subagent_stop_reason``. A
-   * capped run keeps a normal pill status — ``completed`` when it produced a
-   * final answer, ``failed`` when it did not — so this field is the only
-   * signal that distinguishes "finished" from "capped" (#3875 Phase 2).
+   * Why the run ended without a clean final response, when the backend stamps
+   * ``subagent_stop_reason``. A run with usable partial work keeps a completed
+   * pill, so this structured field distinguishes it from a clean result.
    */
   stopReason?: SubtaskStopReason;
 }
@@ -45,15 +43,16 @@ export const SUBAGENT_MODEL_NAME_KEY = "subagent_model_name";
 export const SUBAGENT_TOKEN_USAGE_KEY = "subagent_token_usage";
 export const SUBAGENT_USAGE_RECEIPT_ID_KEY = "subagent_usage_receipt_id";
 /**
- * Why a guardrail cap ended a subagent run early (#3875 Phase 2). Mirrors the
- * Python ``SUBAGENT_STOP_REASON_VALUES``. The field is optional/additive —
- * older frontends that only read ``subagent_status`` simply never see it.
+ * Why a Sub-Agent run ended without a clean final response. Mirrors the Python
+ * ``SUBAGENT_STOP_REASON_VALUES``. The field is optional/additive — older
+ * frontends that only read ``subagent_status`` simply never see it.
  */
 const SUBAGENT_STOP_REASON_VALUES = [
   "token_capped",
   "turn_capped",
   "loop_capped",
   "tool_budget_capped",
+  "output_truncated",
 ] as const;
 const STRUCTURED_SUBAGENT_KEYS = [
   SUBAGENT_STATUS_KEY,
@@ -331,15 +330,22 @@ function readExecutionId(value: unknown): string | undefined {
 
 function readEventRuntimeMetadata(
   event: object,
-): Pick<Subtask, "executionId" | "modelName" | "usage"> {
+): Pick<Subtask, "executionId" | "modelName" | "usage" | "stopReason"> {
   const executionId = readExecutionId(Reflect.get(event, "execution_id"));
   const modelName = Reflect.get(event, "model_name");
   const usage = normalizeTokenUsage(Reflect.get(event, "usage"));
+  const rawStopReason = Reflect.get(event, "stop_reason");
+  const stopReason = SUBAGENT_STOP_REASON_VALUES.includes(
+    rawStopReason as (typeof SUBAGENT_STOP_REASON_VALUES)[number],
+  )
+    ? (rawStopReason as SubtaskStopReason)
+    : undefined;
   return {
     ...(executionId ? { executionId } : {}),
     ...(typeof modelName === "string" && modelName.trim()
       ? { modelName: modelName.trim() }
       : {}),
     ...(usage ? { usage } : {}),
+    ...(stopReason ? { stopReason } : {}),
   };
 }

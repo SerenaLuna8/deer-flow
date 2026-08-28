@@ -240,7 +240,7 @@ function ProjectBrand() {
         <span className="size-5 bg-blue-600 mask-[url(/images/deer.svg)] mask-contain mask-center mask-no-repeat dark:bg-blue-300" />
       </span>
       <span className="text-primary truncate font-serif text-xl leading-none">
-        ActWeave
+        Fluva
       </span>
     </Link>
   );

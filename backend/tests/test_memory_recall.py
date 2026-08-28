@@ -714,7 +714,6 @@ def test_recall_tool_is_async_only_and_uses_role_scoped_tool_call_defaults() -> 
         "subagent_per_task": 50,
     }
     profile = default_graph_tool_call_control_profile()
-    assert profile.accounting_mode == "lead_run_subagent_task"
     assert profile.lead.internal_tool_call_limit == 200
     assert profile.subagent.internal_tool_call_limit == 50
 

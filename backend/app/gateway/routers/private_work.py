@@ -38,6 +38,7 @@ from app.gateway.private_work_schemas import (
     PrivateWorkRoute,
     StrictPrivateWorkRequest,
     StrictPrivateWorkResponse,
+    public_run_input_projection,
 )
 from app.gateway.run_event_wakeup import RunEventWakeup
 from app.private_work.chat_controls import ProjectChatControlService
@@ -122,6 +123,7 @@ from deerflow.runtime.events.models import (
     STREAM_TERMINAL_ERROR_CODES,
     StoredStreamFrame,
     StreamCursorOutOfRange,
+    stream_terminal_status_for_run_settlement,
 )
 from deerflow.runtime.events.store import RunEventStore
 from deerflow.runtime.events.stream import (
@@ -134,6 +136,7 @@ from deerflow.runtime.public_token_usage import (
     project_public_token_usage,
 )
 from deerflow.runtime.runs.private_file_lifecycle import await_despite_cancellation
+from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store import RunStore
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import coerce_iso
@@ -506,20 +509,12 @@ class PrivateThreadGoalResponse(StrictPrivateWorkResponse):
 
 
 class PrivateCompactKeep(StrictPrivateWorkRequest):
-    type: Literal["fraction", "tokens", "messages"]
-    value: int | float = Field(ge=0)
+    # Retained recent history is measured in tokens only; the retired
+    # message-count and context-fraction measurements fail closed.
+    type: Literal["tokens"] = "tokens"
+    value: int = Field(ge=1, le=2_000_000)
 
-    @model_validator(mode="after")
-    def validate_value(self) -> PrivateCompactKeep:
-        if self.type != "messages" and float(self.value) <= 0:
-            raise ValueError("fraction and tokens must be greater than 0")
-        if self.type == "fraction" and float(self.value) > 1:
-            raise ValueError("fraction must not exceed 1")
-        if self.type in {"tokens", "messages"} and (not isinstance(self.value, int) or isinstance(self.value, bool)):
-            raise ValueError("tokens and messages require integer values")
-        return self
-
-    def to_tuple(self) -> tuple[str, int | float]:
+    def to_tuple(self) -> tuple[str, int]:
         return self.type, self.value
 
 
@@ -1235,7 +1230,15 @@ async def _normalize_prepared_edit_replay(
         )
         checkpoint = body.checkpoint
         prepared_checkpoint = prepared.get("checkpoint")
-        if checkpoint is None or not isinstance(prepared_checkpoint, Mapping) or checkpoint.checkpoint_id != prepared_checkpoint.get("checkpoint_id") or dict(body.metadata) != prepared.get("metadata") or body.input != prepared.get("input"):
+        prepared_input = prepared.get("input")
+        if (
+            checkpoint is None
+            or not isinstance(prepared_checkpoint, Mapping)
+            or not isinstance(prepared_input, Mapping)
+            or checkpoint.checkpoint_id != prepared_checkpoint.get("checkpoint_id")
+            or dict(body.metadata) != prepared.get("metadata")
+            or body.input != public_run_input_projection(prepared_input)
+        ):
             raise PrivateWorkConflict(context.request_id)
         return body.model_copy(
             update={
@@ -1321,10 +1324,6 @@ def _private_stream_headers(
     }
 
 
-def _fallback_terminal_status(status_value: str) -> str:
-    return "completed" if status_value == "success" else status_value
-
-
 async def _await_stream_database_operation[T](operation: Awaitable[T]) -> T:
     """Finish one session-owning operation before propagating cancellation."""
 
@@ -1342,6 +1341,7 @@ async def _read_private_stream_page(
     thread_id: str,
     run_id: str,
     cursor: int,
+    full_state_horizon: int | None = None,
 ) -> tuple[StoredStreamFrame, ...]:
     try:
         return await _await_stream_database_operation(
@@ -1351,10 +1351,35 @@ async def _read_private_stream_page(
                 cursor=cursor,
                 limit=100,
                 run_id=run_id,
+                full_state_horizon=full_state_horizon,
             )
         )
     except StreamCursorOutOfRange:
         raise ReliabilityInvalidStreamCursor(context.request_id) from None
+    except DBAPIError:
+        raise ReliabilityDatabaseUnavailable(context.request_id) from None
+
+
+async def _read_private_full_state_horizon(
+    bridge: PostgresStreamBridge,
+    context: PrivateWorkContext,
+    thread_id: str,
+    run_id: str,
+) -> int:
+    """Freeze the reconnect replay compaction horizon once per connection.
+
+    Root ``values`` frames carry the complete Run state, so catch-up replay
+    only needs the newest one; frames at or above the horizon (including the
+    live tail) are never dropped.
+    """
+    try:
+        return await _await_stream_database_operation(
+            bridge.latest_full_state_seq(
+                context.resource_scope,
+                thread_id,
+                run_id=run_id,
+            )
+        )
     except DBAPIError:
         raise ReliabilityDatabaseUnavailable(context.request_id) from None
 
@@ -1371,6 +1396,7 @@ async def _durable_private_sse_consumer(
     initial_frames: tuple[StoredStreamFrame, ...],
     cancel_on_disconnect: bool,
     wakeup: RunEventWakeup | None = None,
+    full_state_horizon: int | None = None,
 ) -> AsyncIterator[str]:
     frames = initial_frames
     pending_terminal: StoredStreamFrame | None = None
@@ -1424,6 +1450,7 @@ async def _durable_private_sse_consumer(
                     thread_id,
                     run_id,
                     cursor,
+                    full_state_horizon,
                 )
                 if frames:
                     continue
@@ -1435,7 +1462,9 @@ async def _durable_private_sse_consumer(
                         context.resource_scope,
                         thread_id,
                         run_id,
-                        status=_fallback_terminal_status(record.status),
+                        status=stream_terminal_status_for_run_settlement(
+                            RunStatus(record.status),
+                        ),
                         error_code=(record.error if record.error in STREAM_TERMINAL_ERROR_CODES else None),
                     )
                 )
@@ -2255,12 +2284,19 @@ async def reconnect_private_run_stream(
                 selected_run_id,
             )
         )
+        full_state_horizon = await _read_private_full_state_horizon(
+            bridge,
+            context,
+            selected_thread_id,
+            selected_run_id,
+        )
         initial_frames = await _read_private_stream_page(
             bridge,
             context,
             selected_thread_id,
             selected_run_id,
             cursor,
+            full_state_horizon,
         )
     except PrivateWorkError as error:
         _raise_http(error)
@@ -2279,6 +2315,7 @@ async def reconnect_private_run_stream(
             initial_frames=initial_frames,
             cancel_on_disconnect=False,
             wakeup=_run_event_wakeup(request),
+            full_state_horizon=full_state_horizon,
         ),
         media_type="text/event-stream",
         headers=_private_stream_headers(

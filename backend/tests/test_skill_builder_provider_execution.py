@@ -6,10 +6,17 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
+import openai
 import pytest
+from langchain.agents.middleware.types import ModelRequest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
+from langgraph.runtime import Runtime
 
 import deerflow.agents.lead_agent.agent as lead_agent_module
 from app.private_work.context import PrivateWorkContext
@@ -34,9 +41,14 @@ from app.reliability.run_execution.executor import RunAgentPrivateExecutor
 from app.shared_assets.skill_builder_agent_runtime import SkillBuilderAgentFactory
 from app.shared_assets.skill_design_activity import SkillDesignActivityLimitExceeded
 from app.worker.service import JobLeaseAuthority
+from deerflow.agents.middlewares.provider_request_usage import (
+    FinalProviderRequestGuard,
+    build_provider_request_profile,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.file_authority import AuthorityManifest
+from deerflow.models.provider_outcome import ProviderFailedResponseError
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.runtime import run_agent
 from deerflow.runtime.context_keys import RuntimeContextKeys
@@ -264,6 +276,95 @@ async def test_skill_builder_activity_limit_is_not_retried(tmp_path: Path) -> No
     with pytest.raises(PermanentExecutionError):
         await executor.execute(execution, authority)
     runner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "retry_safe"),
+    ((429, True), (500, False)),
+)
+async def test_skill_builder_provider_status_answer_stays_known_without_chat_observer(
+    tmp_path: Path,
+    status_code: int,
+    retry_safe: bool,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def runner(
+        _bridge,
+        _run_manager,
+        _record,
+        *,
+        ctx,
+        **_kwargs,
+    ) -> RunAgentOutcome:
+        observed["observer"] = ctx.context_evidence_observer
+        model = GenericFakeChatModel(
+            messages=iter([AIMessage(content="unused")]),
+            profile={"max_input_tokens": 100_000},
+        )
+        profile = build_provider_request_profile(
+            model=model,
+            model_name="skill-builder-provider-test",
+            provider_adapter="openai",
+            system_prompt="system",
+            tools=(),
+            supports_vision=False,
+        )
+        request = ModelRequest(
+            model=model,
+            messages=[HumanMessage(content="build a skill")],
+            system_prompt=profile.system_prompt,
+            tools=[],
+            state={
+                "provider_request_profile": profile.snapshot(),
+                "messages": [HumanMessage(content="build a skill")],
+            },
+            runtime=Runtime(context={"run_id": "skill-builder-run"}),
+        )
+        provider_request = httpx.Request(
+            "POST",
+            "https://provider.invalid/v1/chat/completions",
+        )
+        provider_error = (
+            openai.RateLimitError(
+                "rate limited",
+                response=httpx.Response(status_code, request=provider_request),
+                body=None,
+            )
+            if status_code == 429
+            else openai.APIStatusError(
+                "provider failed",
+                response=httpx.Response(status_code, request=provider_request),
+                body=None,
+            )
+        )
+
+        async def provider_call(_request: ModelRequest) -> Any:
+            raise provider_error
+
+        with pytest.raises(ProviderFailedResponseError) as caught:
+            await FinalProviderRequestGuard(
+                profile,
+                evidence_observer=ctx.context_evidence_observer,
+            ).awrap_model_call(request, provider_call)
+        observed["failure_code"] = caught.value.failure_code
+        observed["retry_safe"] = caught.value.retry_safe
+        return _runner_success()
+
+    executor, execution, authority, _runtime = _execution_bundle(
+        tmp_path,
+        runner=runner,
+    )
+
+    result = await executor.execute(execution, authority)
+
+    assert result.status == "succeeded"
+    assert observed == {
+        "observer": None,
+        "failure_code": f"PROVIDER_HTTP_{status_code}",
+        "retry_safe": retry_safe,
+    }
 
 
 def _named_tool(name: str) -> StructuredTool:

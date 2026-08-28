@@ -5,7 +5,7 @@ const meta: MetaRecord = {
     title: "Introduction",
   },
   "why-actweave": {
-    title: "Why ActWeave",
+    title: "Why Fluva",
   },
   "why-deerflow": {
     display: "hidden",

@@ -87,6 +87,8 @@ LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
         "loop_detection.tool_freq_warn",
         "loop_detection.warn_threshold",
         "loop_detection.window_size",
+        # Removed with runtime-policy schema v7: only summarization.trigger_tokens remains.
+        "summarization.trigger",
     }
 )
 
@@ -113,7 +115,7 @@ DATABASE_RUNTIME_POLICY_PATHS = frozenset(
         "summarization.keep",
         "summarization.model_name",
         "summarization.skill_file_read_tool_names",
-        "summarization.trigger",
+        "summarization.trigger_tokens",
         "summarization.trim_tokens_to_summarize",
         "title.enabled",
         "title.max_chars",

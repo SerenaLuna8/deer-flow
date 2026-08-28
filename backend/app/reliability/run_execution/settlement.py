@@ -20,6 +20,9 @@ from app.reliability.run_execution.ports import (
     PrivateRunExecutionQuotaPort,
 )
 from deerflow.persistence.jobs.sql import (
+    DurableDeadTerminalReconciliationRequest,
+    DurableTerminalSuccessorRebindRequest,
+    DurableTerminalTakeoverRequest,
     JobTerminalEvent,
     JobTerminalResult,
 )
@@ -36,6 +39,7 @@ from deerflow.persistence.scheduled_task_runs.model import (
     ScheduledTaskRunRow,
 )
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.trace_context import normalize_trace_id
 
@@ -48,10 +52,12 @@ class PrivateRunJobTerminalPort:
         *,
         quota: PrivateRunExecutionQuotaPort | None = None,
         audit: PrivateRunExecutionAuditPort | None = None,
+        event_store: DbRunEventStore | None = None,
     ) -> None:
         self._automation_reconciliation_pending = asyncio.Event()
         self._quota = quota or NoopPrivateRunExecutionQuota()
         self._audit = audit or NoopPrivateRunExecutionAudit()
+        self._event_store = event_store
         self._execution_approval_audit = (
             self._audit
             if callable(
@@ -72,6 +78,214 @@ class PrivateRunJobTerminalPort:
 
     def restore_automation_reconciliation_pending(self) -> None:
         self._automation_reconciliation_pending.set()
+
+    async def durable_terminal_takeover_allowed(
+        self,
+        session: AsyncSession,
+        event: DurableTerminalTakeoverRequest,
+    ) -> bool:
+        """Authorize a settlement-only Job Attempt from an immutable terminal."""
+
+        if type(event) is not DurableTerminalTakeoverRequest:
+            raise TypeError("durable terminal takeover request is required")
+        if self._event_store is None:
+            return False
+        origin_trace_id = normalize_trace_id(event.origin_trace_id)
+        if origin_trace_id is None:
+            return False
+        run = await session.scalar(
+            sa.select(RunRow)
+            .where(
+                RunRow.project_id == event.project_id,
+                RunRow.owner_user_id == event.owner_user_id,
+                RunRow.run_id == event.run_id,
+                RunRow.job_id == event.job_id,
+                RunRow.origin_trace_id == origin_trace_id,
+                RunRow.status == "running",
+                RunRow.authorization_cancel_requested_at.is_(None),
+            )
+            .with_for_update(of=RunRow)
+            .execution_options(populate_existing=True)
+        )
+        if run is None:
+            return False
+        membership_version = await session.scalar(
+            sa.select(ProjectMembershipRow.version).where(
+                ProjectMembershipRow.project_id == event.project_id,
+                ProjectMembershipRow.user_id == event.owner_user_id,
+                ProjectMembershipRow.status == "active",
+            )
+        )
+        if not isinstance(membership_version, int) or membership_version < 1:
+            return False
+        return await self._has_durable_terminal_proof(
+            session,
+            scope=PrivateResourceScope(
+                project_id=str(event.project_id),
+                owner_user_id=event.owner_user_id,
+                membership_version=membership_version,
+            ),
+            thread_id=run.thread_id,
+            run_id=event.run_id,
+        )
+
+    async def durable_dead_terminal_reconciliation_allowed(
+        self,
+        session: AsyncSession,
+        event: DurableDeadTerminalReconciliationRequest,
+    ) -> bool:
+        """Prove a dead Job can only settle an already-produced terminal."""
+
+        if type(event) is not DurableDeadTerminalReconciliationRequest:
+            raise TypeError("durable dead terminal reconciliation request is required")
+        if self._event_store is None:
+            return False
+        origin_trace_id = normalize_trace_id(event.origin_trace_id)
+        if origin_trace_id is None:
+            return False
+        run = await session.scalar(
+            sa.select(RunRow)
+            .where(
+                RunRow.project_id == event.project_id,
+                RunRow.owner_user_id == event.owner_user_id,
+                RunRow.run_id == event.run_id,
+                RunRow.job_id == event.predecessor_job_id,
+                RunRow.origin_trace_id == origin_trace_id,
+                RunRow.status == "running",
+                RunRow.authorization_cancel_requested_at.is_(None),
+            )
+            .with_for_update(of=RunRow)
+            .execution_options(populate_existing=True)
+        )
+        if run is None:
+            return False
+        if event.job_type == "automation_run":
+            if event.occurrence_id is None:
+                return False
+            occurrence = await session.scalar(
+                sa.select(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.id == event.occurrence_id,
+                    ScheduledTaskRunRow.project_id == event.project_id,
+                    ScheduledTaskRunRow.owner_user_id == event.owner_user_id,
+                    ScheduledTaskRunRow.run_id == event.run_id,
+                    ScheduledTaskRunRow.job_id == event.predecessor_job_id,
+                    ScheduledTaskRunRow.status == "running",
+                )
+                .with_for_update(of=ScheduledTaskRunRow)
+                .execution_options(populate_existing=True)
+            )
+            if occurrence is None:
+                return False
+        elif event.occurrence_id is not None:
+            return False
+        membership_version = await session.scalar(
+            sa.select(ProjectMembershipRow.version).where(
+                ProjectMembershipRow.project_id == event.project_id,
+                ProjectMembershipRow.user_id == event.owner_user_id,
+                ProjectMembershipRow.status == "active",
+            )
+        )
+        if not isinstance(membership_version, int) or membership_version < 1:
+            return False
+        return await self._has_durable_terminal_proof(
+            session,
+            scope=PrivateResourceScope(
+                project_id=str(event.project_id),
+                owner_user_id=event.owner_user_id,
+                membership_version=membership_version,
+            ),
+            thread_id=run.thread_id,
+            run_id=event.run_id,
+        )
+
+    async def _has_durable_terminal_proof(
+        self,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+    ) -> bool:
+        """Single seam for stream terminals and future internal candidates."""
+
+        if self._event_store is None:
+            return False
+        candidate = await self._event_store.get_stream_terminal_candidate(
+            session,
+            scope=scope,
+            thread_id=thread_id,
+            run_id=run_id,
+        )
+        if candidate is not None:
+            return True
+        terminal = await self._event_store.get_stream_terminal(
+            session,
+            scope=scope,
+            thread_id=thread_id,
+            run_id=run_id,
+        )
+        return terminal is not None
+
+    async def rebind_durable_terminal_successor(
+        self,
+        session: AsyncSession,
+        event: DurableTerminalSuccessorRebindRequest,
+    ) -> bool:
+        """Bind a terminal-only successor without erasing dead lineage."""
+
+        if type(event) is not DurableTerminalSuccessorRebindRequest:
+            raise TypeError("durable terminal successor rebind request is required")
+        origin_trace_id = normalize_trace_id(event.origin_trace_id)
+        if origin_trace_id is None:
+            return False
+        run = await session.scalar(
+            sa.select(RunRow)
+            .where(
+                RunRow.project_id == event.project_id,
+                RunRow.owner_user_id == event.owner_user_id,
+                RunRow.run_id == event.run_id,
+                RunRow.job_id == event.predecessor_job_id,
+                RunRow.origin_trace_id == origin_trace_id,
+                RunRow.status == "running",
+                RunRow.authorization_cancel_requested_at.is_(None),
+            )
+            .with_for_update(of=RunRow)
+            .execution_options(populate_existing=True)
+        )
+        if run is None:
+            return False
+        occurrence = None
+        if event.job_type == "automation_run":
+            if event.occurrence_id is None:
+                return False
+            occurrence = await session.scalar(
+                sa.select(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.id == event.occurrence_id,
+                    ScheduledTaskRunRow.project_id == event.project_id,
+                    ScheduledTaskRunRow.owner_user_id == event.owner_user_id,
+                    ScheduledTaskRunRow.run_id == event.run_id,
+                    ScheduledTaskRunRow.job_id == event.predecessor_job_id,
+                    ScheduledTaskRunRow.status == "running",
+                )
+                .with_for_update(of=ScheduledTaskRunRow)
+                .execution_options(populate_existing=True)
+            )
+            if occurrence is None:
+                return False
+        elif event.occurrence_id is not None:
+            return False
+        run.job_id = event.successor_job_id
+        run.execution_lease_token_hash = None
+        run.execution_lease_expires_at = None
+        run.execution_heartbeat_at = None
+        run.updated_at = event.occurred_at
+        if occurrence is not None:
+            occurrence.job_id = event.successor_job_id
+            occurrence.updated_at = event.occurred_at
+        await session.flush()
+        return True
 
     async def job_terminalized(
         self,

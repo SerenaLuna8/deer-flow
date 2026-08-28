@@ -16,8 +16,8 @@ def test_memory_compaction_projection_exposes_only_memory_and_summarization() ->
             },
             "summarization": {
                 "enabled": True,
-                "trigger": [{"type": "tokens", "value": 32000}],
-                "keep": {"type": "messages", "value": 10},
+                "trigger_tokens": 320_000,
+                "keep": {"type": "tokens", "value": 64_000},
                 "trim_tokens_to_summarize": 15564,
             },
         }
@@ -29,4 +29,5 @@ def test_memory_compaction_projection_exposes_only_memory_and_summarization() ->
     assert projected["memory"]["enabled"] is True
     assert projected["memory"]["idle_seal_minutes"] == 45
     assert projected["summarization"]["enabled"] is True
+    assert projected["summarization"]["trigger_tokens"] == 320_000
     assert projected["summarization"]["trim_tokens_to_summarize"] == 15564

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from deerflow.runtime.events.models import StreamTerminalAuthority
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.utils.time import now_iso as _now_iso
 
@@ -77,6 +78,7 @@ class RunRecord:
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     abort_action: str = "interrupt"
     error: str | None = None
+    terminal_authority: StreamTerminalAuthority = "ordinary"
     model_name: str | None = None
     store_only: bool = False
     total_input_tokens: int = 0

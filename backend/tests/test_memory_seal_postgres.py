@@ -41,6 +41,9 @@ from app.system_runtime_settings.models import (
 from app.system_runtime_settings.service import SystemRuntimePolicyService
 from app.worker.memory_seal import MemorySealJobHandler
 from app.worker.service import JobLeaseAuthority, JobSettlement
+from deerflow.agents.provider_request_contract import (
+    CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow, WorkerNodeRow
@@ -51,6 +54,18 @@ from deerflow.persistence.private_work.memory_document_model import (
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
+from deerflow.runtime.context_evidence import (
+    CompactionAuthority,
+    CompactionProjection,
+    ContextCheckpointEstimator,
+    ContextCheckpointProjectionSnapshot,
+    ContextContribution,
+    ContextLane,
+    ContextModelProjection,
+    ContextWindowGeneration,
+    FinalRequestMeasurement,
+    TokenEstimate,
+)
 
 _CONTINUITY = "The sealed thread remains available through compacted continuity."
 _TAGGED_TEXT = "- [durable] Idle sealing archives completed Thread turns before Dream"
@@ -209,6 +224,8 @@ async def _seed_due_thread(
     app_config: AppConfig,
     *,
     thread_id: str,
+    messages: list[HumanMessage | AIMessage] | None = None,
+    projection_snapshot: ContextCheckpointProjectionSnapshot | None = None,
 ) -> tuple[str, datetime, datetime]:
     async with seed.factory() as session:
         policy, _revision = await SystemRuntimePolicyMaterializer.materialize_current_with_revision_in_session(
@@ -266,26 +283,67 @@ async def _seed_due_thread(
         app_config,
         as_node="memory_seal_postgres_test",
     )
+    seeded_messages = messages or [
+        HumanMessage(
+            id=f"human-{thread_id}",
+            content="Archive this completed idle turn.",
+        ),
+        AIMessage(
+            id=f"ai-{thread_id}",
+            content="The idle seal will retain continuity and Memory facts.",
+        ),
+    ]
+    update_values: dict[str, object] = {"messages": seeded_messages}
+    if projection_snapshot is not None:
+        update_values[CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY] = projection_snapshot.to_safe_mapping()
     await state.aupdate(
         checkpoint_config(thread_id),
-        {
-            "messages": [
-                HumanMessage(
-                    id=f"human-{thread_id}",
-                    content="Archive this completed idle turn.",
-                ),
-                AIMessage(
-                    id=f"ai-{thread_id}",
-                    content="The idle seal will retain continuity and Memory facts.",
-                ),
-            ],
-        },
+        update_values,
         as_node="memory_seal_postgres_test",
     )
     source = await state.aget(checkpoint_config(thread_id))
     source_checkpoint_id = snapshot_checkpoint_id(source)
     assert source_checkpoint_id is not None
     return source_checkpoint_id, idle_at, admitted_at
+
+
+def _stale_wire_projection_snapshot() -> ContextCheckpointProjectionSnapshot:
+    return ContextCheckpointProjectionSnapshot(
+        generation=ContextWindowGeneration(
+            generation_id=uuid.UUID("11111111-1111-4111-8111-111111111111"),
+        ),
+        model=ContextModelProjection(
+            identity_digest="f" * 64,
+            context_window_tokens=64_000,
+        ),
+        measurement=FinalRequestMeasurement(
+            request_fingerprint="a" * 64,
+            adapter_revision="seal-stale-wire-v1",
+            contributions=(
+                ContextContribution(
+                    contribution_id="b" * 64,
+                    source_identity_digest="c" * 64,
+                    lane=ContextLane.CONVERSATION,
+                    model_visible_bytes=40,
+                    token_estimate=TokenEstimate.exact(10),
+                ),
+            ),
+        ),
+        compaction=CompactionProjection(
+            enabled=True,
+            threshold_tokens=32_000,
+            reached=False,
+            authority=CompactionAuthority.IDLE_HISTORY,
+        ),
+        estimator=ContextCheckpointEstimator(
+            error_allowance_ratio=0.2,
+            provider_fixed_overhead_tokens=10,
+            provider_per_message_overhead_tokens=2,
+            provider_per_tool_overhead_tokens=3,
+            fixed_message_count=1,
+            tool_count=2,
+        ),
+    )
 
 
 async def _admit_and_claim(
@@ -669,6 +727,127 @@ async def test_memory_seal_real_postgres_scheduler_worker_and_archive_closure(
                 )
             assert explicit_updated_at is not None
             assert explicit_updated_at > no_change_updated_at
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_memory_seal_first_batch_accepts_long_high_metadata_thread(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seal compares the first retained tail with a same-basis source measure."""
+
+    _reset_checkpoint_mode(monkeypatch)
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    thread_id = f"seal-high-metadata-{uuid.uuid4().hex}"
+    messages: list[HumanMessage | AIMessage] = []
+    for turn in range(12):
+        messages.extend(
+            [
+                HumanMessage(
+                    id=f"human-high-{turn}",
+                    content=f"User turn {turn}: " + "u" * 4_000,
+                    additional_kwargs={
+                        "server_metadata": f"human-{turn}-" + "m" * 8_000,
+                    },
+                ),
+                AIMessage(
+                    id=f"ai-high-{turn}",
+                    content=f"Assistant turn {turn}: " + "a" * 4_000,
+                    response_metadata={
+                        "provider_metadata": f"assistant-{turn}-" + "p" * 8_000,
+                    },
+                ),
+            ]
+        )
+
+    try:
+        async with AsyncPostgresSaver.from_conn_string(_checkpointer_url(migrated_postgres_database_url)) as raw:
+            await raw.setup()
+            scoped = ProjectScopedCheckpointer(raw, seed.factory)
+            runtime_model = await _seed_summary_model(seed)
+            await _set_current_summary_model(seed, runtime_model, monkeypatch)
+            app_config = _app_config(
+                migrated_postgres_database_url,
+                runtime_model,
+            )
+            _source_checkpoint_id, _idle_at, admitted_at = await _seed_due_thread(
+                seed,
+                scoped,
+                app_config,
+                thread_id=thread_id,
+                messages=messages,
+                projection_snapshot=_stale_wire_projection_snapshot(),
+            )
+            claim = await _admit_and_claim(
+                seed,
+                thread_id=thread_id,
+                admitted_at=admitted_at,
+            )
+
+            delegate = _barrier(seed, scoped, runtime_model)
+
+            class RecordingSealBarrier:
+                def __init__(self) -> None:
+                    self.results = []
+
+                async def compact(self, *args, **kwargs):
+                    result = await delegate.compact(*args, **kwargs)
+                    self.results.append(result)
+                    return result
+
+                async def lock_and_verify_dream_archive_ready(
+                    self,
+                    *args,
+                    **kwargs,
+                ):
+                    return await delegate.lock_and_verify_dream_archive_ready(
+                        *args,
+                        **kwargs,
+                    )
+
+            barrier = RecordingSealBarrier()
+            settlement = await MemorySealJobHandler(
+                seed.factory,
+                app_config=app_config,
+                barrier=barrier,  # type: ignore[arg-type]
+            )(
+                claim,
+                JobLeaseAuthority(
+                    seed.factory,
+                    claim,
+                    lease_seconds=300,
+                ),
+            )
+
+            assert isinstance(settlement, JobSettlement)
+            assert settlement.outcome.status == "succeeded"
+            assert barrier.results[0].compacted is True
+            assert 0 < barrier.results[0].removed_message_count < len(messages)
+            assert sum(result.removed_message_count for result in barrier.results if result.compacted) == len(messages)
+            await settlement.commit()
+
+            latest = await bind_scoped_checkpoint_state(
+                scoped,
+                seed.owner_a,
+                app_config,
+                as_node="memory_seal_high_metadata_assert",
+            ).aget(checkpoint_config(thread_id))
+            assert latest.values["messages"] == []
+            async with seed.factory() as session:
+                history_count = await session.scalar(
+                    sa.select(sa.func.count())
+                    .select_from(MemoryHistoryEntryRow)
+                    .where(
+                        MemoryHistoryEntryRow.project_id == seed.owner_a.project_id,
+                        MemoryHistoryEntryRow.owner_user_id == str(seed.owner_a.user_id),
+                        MemoryHistoryEntryRow.thread_id == thread_id,
+                    )
+                )
+            assert isinstance(history_count, int)
+            assert history_count >= 2
     finally:
         await seed.engine.dispose()
 

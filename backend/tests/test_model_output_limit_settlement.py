@@ -49,6 +49,7 @@ def test_permanent_output_limit_preserves_attempt_usage_for_job_settlement() -> 
     assert error.attempt_usage == _usage()
     assert result.public_error_code == "MODEL_OUTPUT_LIMIT"
     assert result.retryable is False
+    assert result.durable_terminal is True
     assert result.attempt_usage == _usage()
 
 

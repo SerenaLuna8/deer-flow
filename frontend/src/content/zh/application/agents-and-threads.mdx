@@ -1,6 +1,6 @@
 ---
 title: Agent 与线程
-description: 了解 ActWeave 中 Agent 与线程的关系，以及如何管理自定义 Agent 和对话线程。
+description: 了解 Fluva 中 Agent 与线程的关系，以及如何管理自定义 Agent 和对话线程。
 ---
 
 import { Callout, Steps } from "nextra/components";
@@ -24,7 +24,7 @@ Main 是项目级编排 Agent，也是项目未指定自定义默认 Agent 时�
 
 ### 自定义 Agent
 
-ActWeave 允许你创建多个具有不同专业领域的自定义 Agent。每个 Agent 使用 ActWeave Harness 相同的 Lead Agent 运行时，但具有不同的：
+Fluva 允许你创建多个具有不同专业领域的自定义 Agent。每个 Agent 使用 Fluva Harness 相同的 Lead Agent 运行时，但具有不同的：
 
 - 模型（例如为一个 Agent 使用 GPT-4o，为另一个使用 Claude）
 - 系统提示和指令
@@ -39,7 +39,7 @@ ActWeave 允许你创建多个具有不同专业领域的自定义 Agent。每�
 
 #### 通过界面
 
-1. 打开 ActWeave 应用并进入一个项目。
+1. 打开 Fluva 应用并进入一个项目。
 2. 点击项目菜单中的 **Agents**（Agent 管理）。
 3. 点击 **New Agent**（新建 Agent）。
 4. 输入名称和用途说明，通过 AI 对话回答澄清问题。
@@ -91,7 +91,7 @@ Agent 唯一 Definition 和项目绑定存储在 PostgreSQL 中，并通过项�
 
 ### 线程持久化配置
 
-ActWeave 在每次 Agent 轮次后通过项目 scoped PostgreSQL checkpointer 保存线程状态。这允许：
+Fluva 在每次 Agent 轮次后通过项目 scoped PostgreSQL checkpointer 保存线程状态。这允许：
 
 - 在服务器重启后恢复线程。
 - 在长时间间隔后继续对话。
@@ -108,7 +108,7 @@ PostgreSQL 驱动已是默认依赖；独立的 `checkpointer` 配置不再接�
 
 ### 线程数据目录
 
-在已经创建的会话中选择、粘贴或拖入附件后，ActWeave 会立即在后台上传，输入文字不会
+在已经创建的会话中选择、粘贴或拖入附件后，Fluva 会立即在后台上传，输入文字不会
 被锁定。发送消息只等待尚未完成的部分，并直接复用已就绪的上传结果，不会重复上传同一附件。
 
 每个线程在 `.deer-flow/threads/{thread_id}/` 下有一个专用目录：

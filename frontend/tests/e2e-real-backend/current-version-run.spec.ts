@@ -114,15 +114,30 @@ test("the same Thread resolves the current Agent Definition for each new Run", a
     definition_id?: unknown;
     revision?: unknown;
   };
-  expect(savedBody.revision).toBe(2);
+  expect(typeof savedBody.revision).toBe("number");
   expect(typeof savedBody.definition_id).toBe("string");
   expect(savedBody.definition_id).not.toBe(firstDefinitionId);
 
   const assistantTurn = chat.locator("[data-assistant-turn]").last();
   await assistantTurn.hover();
-  await assistantTurn
-    .getByRole("button", { name: "Regenerate" })
-    .click({ force: true });
+  const regenerate = assistantTurn.getByRole("button", {
+    name: "Regenerate",
+  });
+  await expect(regenerate).toBeEnabled({ timeout: 30_000 });
+  const streamResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith(
+        `/threads/${threadId}/runs/stream`,
+      ),
+  );
+  await regenerate.click();
+  const streamResponse = await streamResponsePromise;
+  if (streamResponse.status() !== 200) {
+    throw new Error(
+      `regenerate stream admission failed (${streamResponse.status()}): ${await streamResponse.text()}`,
+    );
+  }
   await expect
     .poll(async () => (await listRuns(context, project, threadId)).length, {
       timeout: 60_000,

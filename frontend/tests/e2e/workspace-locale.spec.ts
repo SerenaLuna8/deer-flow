@@ -106,7 +106,9 @@ test("workspace follows the selected locale immediately and after refresh", asyn
   await page.goto("/workspace");
 
   const workbench = page.getByTestId("project-workbench");
-  await expect(workbench.getByText("工作空间", { exact: true })).toBeVisible();
+  const workspaceHeading = workbench.locator("h1");
+  await expect(workspaceHeading).toBeVisible();
+  await expect(workspaceHeading).toHaveText("工作空间");
   await expect(workbench.getByPlaceholder("搜索名称或项目标识")).toBeVisible();
   await expect(
     workbench.getByText("暂无项目描述", { exact: true }),
@@ -122,7 +124,7 @@ test("workspace follows the selected locale immediately and after refresh", asyn
   await page.getByRole("option", { name: "English" }).click();
 
   await expect(settings).toHaveAccessibleName("Settings");
-  await expect(workbench.getByText("Workspace", { exact: true })).toBeVisible();
+  await expect(workspaceHeading).toHaveText("Workspace");
   await expect(
     workbench.getByPlaceholder("Search by name or project slug"),
   ).toBeVisible();
@@ -136,7 +138,8 @@ test("workspace follows the selected locale immediately and after refresh", asyn
   await page.getByRole("button", { name: "Close" }).click();
   await page.reload();
 
-  await expect(workbench.getByText("Workspace", { exact: true })).toBeVisible();
+  await expect(workspaceHeading).toBeVisible();
+  await expect(workspaceHeading).toHaveText("Workspace");
   await expect(
     workbench.getByPlaceholder("Search by name or project slug"),
   ).toBeVisible();

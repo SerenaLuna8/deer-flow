@@ -24,7 +24,8 @@ class RunEventStore(abc.ABC):
     1. put() events are retrievable in subsequent queries
     2. seq is strictly increasing within the same thread
     3. list_messages() only returns category="message" events
-    4. list_events() returns all events for the specified run
+    4. list_events() returns all public events for the specified run; internal
+       settlement evidence is never replayed
     5. Returned dicts match the RunEvent field structure
     """
 
@@ -86,7 +87,7 @@ class RunEventStore(abc.ABC):
         after_seq: int | None = None,
         scope: PrivateResourceScope | None = None,
     ) -> list[dict]:
-        """Return the full event stream for a run, ordered by seq ascending.
+        """Return the public event stream for a run, ordered by seq ascending.
 
         Optionally filter by ``event_types`` and/or ``task_id`` (matched against
         ``metadata["task_id"]``). ``after_seq`` is a forward cursor returning the

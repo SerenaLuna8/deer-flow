@@ -39,7 +39,7 @@ const PRIVATE_RUN_CREATE_PATH = /\/threads\/[^/]+\/runs(?:\/(?:stream|wait))?$/;
 
 /**
  * The upstream LangGraph SDK serializes a fixed set of Run fields and does not
- * yet expose ActWeave's top-level ``execution_profile`` extension. Callers put
+ * yet expose Fluva's top-level ``execution_profile`` extension. Callers put
  * the profile under a reserved context key; this final request hook promotes
  * it after SDK serialization and removes the reserved key before the request
  * crosses the trust boundary.

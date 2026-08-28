@@ -359,6 +359,7 @@ class _TaskLifecycleEventAdapter:
                     "usage": usage,
                     "usage_completeness": event.usage_completeness.value,
                     "model_name": self._model_name,
+                    **({"stop_reason": event.stop_reason} if event.stop_reason is not None else {}),
                 }
             )
         elif isinstance(event, SubagentFailed):
@@ -371,6 +372,7 @@ class _TaskLifecycleEventAdapter:
                     "usage": usage,
                     "usage_completeness": event.usage_completeness.value,
                     "model_name": self._model_name,
+                    **({"stop_reason": event.stop_reason} if event.stop_reason is not None else {}),
                 }
             )
         elif isinstance(event, SubagentCancelled):

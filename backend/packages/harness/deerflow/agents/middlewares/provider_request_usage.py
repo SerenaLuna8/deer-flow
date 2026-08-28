@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -44,6 +45,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import (
 )
 from deerflow.agents.middlewares.manifest import MiddlewareHook, middleware_hooks
 from deerflow.agents.middlewares.provider_request_cost_adapter import (
+    PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE,
     ProviderModelRequestCostAdapter,
     provider_visible_message_payload,
     provider_visible_messages_payload,
@@ -61,7 +63,10 @@ from deerflow.error_codes import (
     PublicRunErrorCode,
 )
 from deerflow.models.provider_outcome import (
+    ProviderFailedResponseError,
+    ProviderFailedResponseProof,
     ProviderNoResponseProvenError,
+    classify_provider_failed_response,
     classify_provider_no_response,
 )
 from deerflow.runtime.context_evidence import (
@@ -77,9 +82,12 @@ from deerflow.runtime.context_evidence import (
 )
 from deerflow.runtime.context_keys import RuntimeContextKeys
 
-PROVIDER_REQUEST_ESTIMATOR_REVISION = "provider-wire-engineering-v5"
+logger = logging.getLogger(__name__)
+
+PROVIDER_REQUEST_ESTIMATOR_REVISION = "provider-wire-engineering-v6"
 PROVIDER_REQUEST_ERROR_CONTRACT = "versioned_engineering_allowance_for_app_owned_serialized_material_plus_declared_provider_overhead"
 _SERIALIZATION_FRAMING_UTF8_BYTES = 1_024
+_ESTIMATE_UTF8_BYTES_PER_TOKEN = 4
 
 # These are platform declarations, not estimates learned from observed usage.
 # UTF-8 bytes cover all app-owned material; these allowances cover provider
@@ -105,6 +113,31 @@ _PROVIDER_ERROR_ALLOWANCE_RATIO: dict[str, float] = {
     "patched_openai_responses": 0.20,
     "vllm": 0.25,
 }
+# Declared per-image Token upper bounds for adapters whose providers cap or
+# downscale oversized images server-side (Anthropic ~1,590 Tokens at its
+# 1568px cap; OpenAI high-detail tiling stays under 2,048 after its 2048/768
+# resize). These are platform declarations in the same spirit as the byte
+# allowances above. Adapters without a documented per-image cap (for example
+# ``vllm``, whose cost depends on the served model) stay undeclared, and Lead
+# vision material for them remains fail-closed.
+_PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE: dict[str, int] = {
+    "anthropic": 1_600,
+    "openai": 2_048,
+    "openai_responses": 2_048,
+    "patched_openai": 2_048,
+    "patched_openai_responses": 2_048,
+}
+# Mirrors ViewImageMiddleware._MAX_CURRENT_UPLOAD_IMAGES; a focused test keeps
+# the two values synchronized without importing the middleware (and its PIL
+# dependency chain) here.
+_MAX_CURRENT_UPLOAD_IMAGE_ALLOWANCE = 4
+# Declared byte allowances for the ephemeral image-context message text that
+# ViewImageMiddleware injects around visual blocks (one header plus one label
+# line per image). Visual bytes themselves are excluded from byte accounting
+# and carried as declared per-image Tokens instead.
+_VISION_CONTEXT_HEADER_UTF8_BYTES = 1_024
+_VISION_CONTEXT_PER_IMAGE_UTF8_BYTES = 512
+_VISUAL_BLOCK_TYPES = frozenset({"image", "image_url", "input_image"})
 _PROVIDER_CLASS_TO_ADAPTER = {
     "langchain_anthropic:ChatAnthropic": "anthropic",
     "langchain_deepseek:ChatDeepSeek": "deepseek",
@@ -257,6 +290,28 @@ async def _record_proven_no_response_failure(
         raise cancellation
 
 
+async def _record_provider_failed_response(
+    observer: ProviderRequestEvidenceObserver,
+    provider_call: ProviderCallIdentity,
+    *,
+    proof: ProviderFailedResponseProof,
+) -> None:
+    """Persist a definite failure answer or fail closed as ambiguous."""
+
+    try:
+        cancellation = await _join_durable_observer_transition(
+            observer.record_provider_failed(
+                provider_call,
+                failure_code=proof.failure_code,
+                retry_safety=(ProviderRetrySafety.FAILED_RESPONSE_RETRY_SAFE if proof.retry_safe else ProviderRetrySafety.UNSAFE),
+            )
+        )
+    except (Exception, asyncio.CancelledError) as persistence_error:
+        raise ProviderDispatchOutcomeAmbiguous() from persistence_error
+    if cancellation is not None:
+        raise cancellation
+
+
 class ProviderRequestComponentSnapshot(TypedDict):
     estimated_tokens: int
     error_allowance_tokens: int
@@ -287,6 +342,7 @@ class ProviderRequestProfileSnapshot(TypedDict):
     supported: bool
     unsupported_reason: str | None
     supports_vision: bool
+    visual_max_tokens_per_image: NotRequired[int | None]
     max_input_tokens: int | None
     static_system_utf8_bytes: int
     full_tool_schema_utf8_bytes: int
@@ -315,6 +371,7 @@ class ProviderRequestMeasurementSnapshot(TypedDict):
     full_tool_count: int
     components: dict[str, ProviderRequestComponentSnapshot]
     provider_input_tokens: int | None
+    provider_input_tokens_exceeded_bound: NotRequired[bool]
     authority_identity: str | None
     run_id: NotRequired[str]
 
@@ -534,7 +591,9 @@ def collect_custom_middleware_request_contract(
     return tuple(material), message_count, None
 
 
-def _contains_visual_material(messages: Sequence[BaseMessage]) -> bool:
+def contains_visual_material(messages: Sequence[BaseMessage]) -> bool:
+    """Return whether Provider-visible messages contain a visual block."""
+
     for message in messages:
         content = message.content
         if not isinstance(content, list):
@@ -543,9 +602,41 @@ def _contains_visual_material(messages: Sequence[BaseMessage]) -> bool:
             if not isinstance(block, Mapping):
                 continue
             block_type = str(block.get("type", "")).lower()
-            if block_type in {"image", "image_url", "input_image"}:
+            if block_type in _VISUAL_BLOCK_TYPES:
                 return True
     return False
+
+
+def _is_visual_payload_block(block: object) -> bool:
+    return isinstance(block, Mapping) and str(block.get("type", "")).lower() in _VISUAL_BLOCK_TYPES
+
+
+def _project_visual_blocks(
+    payloads: Sequence[Mapping[str, object]],
+) -> tuple[list[Mapping[str, object]], int]:
+    """Split visual blocks out of provider payloads for byte accounting.
+
+    Visual bytes (base64 data URLs) must never be estimated as text; callers
+    account the returned count against the declared per-image Token bound.
+    """
+
+    projected: list[Mapping[str, object]] = []
+    visual_count = 0
+    for payload in payloads:
+        content = payload.get("content")
+        if not isinstance(content, list):
+            projected.append(payload)
+            continue
+        retained = [block for block in content if not _is_visual_payload_block(block)]
+        removed = len(content) - len(retained)
+        if removed == 0:
+            projected.append(payload)
+            continue
+        visual_count += removed
+        replacement = dict(payload)
+        replacement["content"] = retained
+        projected.append(replacement)
+    return projected, visual_count
 
 
 def _model_max_input_tokens(model: object) -> int | None:
@@ -555,7 +646,11 @@ def _model_max_input_tokens(model: object) -> int | None:
 
 
 def _estimate_from_bytes(value: int) -> int:
-    return math.ceil(value / 4)
+    return math.ceil(value / _ESTIMATE_UTF8_BYTES_PER_TOKEN)
+
+
+def _non_ascii_utf8_bytes(material: bytes) -> int:
+    return sum(1 for byte in material if byte >= 0x80)
 
 
 def _component(
@@ -563,12 +658,16 @@ def _component(
     material_bytes: int,
     error_allowance_ratio: float,
     overhead_tokens: int = 0,
+    non_ascii_bytes: int = 0,
+    non_ascii_supplement_per_byte: float = 0.0,
 ) -> ProviderRequestComponent:
     estimate = _estimate_from_bytes(material_bytes)
     # This is a deliberately versioned engineering allowance, not a proof
     # about every provider tokenizer. Raw bytes remain separately auditable and
     # are used for profile-drift checks; they are not treated as token usage.
-    allowance = math.ceil(estimate * error_allowance_ratio) + overhead_tokens
+    # Non-ASCII material carries a declared per-byte supplement because bytes/4
+    # is not an upper bound for CJK-inefficient tokenizers.
+    allowance = math.ceil(estimate * error_allowance_ratio) + math.ceil(non_ascii_bytes * non_ascii_supplement_per_byte) + overhead_tokens
     return ProviderRequestComponent(
         estimated_tokens=estimate,
         error_allowance_tokens=allowance,
@@ -604,6 +703,7 @@ class ProviderRequestProfile:
     runtime_policy_identity: str | None
     workload_profile: str | None
     error_allowance_ratio: float
+    visual_max_tokens_per_image: int | None = None
 
     @property
     def full_tool_count(self) -> int:
@@ -630,6 +730,7 @@ class ProviderRequestProfile:
             "supported": self.supported,
             "unsupported_reason": self.unsupported_reason,
             "supports_vision": self.supports_vision,
+            "visual_max_tokens_per_image": self.visual_max_tokens_per_image,
             "max_input_tokens": self.max_input_tokens,
             "static_system_utf8_bytes": self.static_system_utf8_bytes,
             "full_tool_schema_utf8_bytes": self.full_tool_schema_utf8_bytes,
@@ -648,7 +749,7 @@ class ProviderRequestProfile:
         messages = list(request.messages)
         if request.system_message is not None:
             messages = [request.system_message, *messages]
-        if _contains_visual_material(messages):
+        if self.visual_max_tokens_per_image is None and contains_visual_material(messages):
             raise ProviderRequestUsageUnsupported("provider_request_usage_unsupported: vision overhead is undeclared")
         tools = canonicalize_full_tools(tuple(request.tools or ()))
         actual_facts = tuple(provider_tool_schema_fact(tool) for tool in tools)
@@ -665,11 +766,20 @@ class ProviderRequestProfile:
                 provider_adapter=self.provider_adapter,
             )
         )
+        visual_count = 0
+        if self.visual_max_tokens_per_image is not None:
+            message_payloads, visual_count = _project_visual_blocks(message_payloads)
         tool_payloads = [_tool_payload(tool) for tool in tools]
         material = _canonical_json({"messages": message_payloads, "tools": tool_payloads})
-        overhead = self.provider_fixed_overhead_tokens + len(messages) * self.provider_per_message_overhead_tokens + len(tools) * self.provider_per_tool_overhead_tokens
+        # The non-ASCII supplement covers conversation material only: the
+        # frozen profile cannot reconstruct system/tool text composition from
+        # its snapshot, so both sides of the drift comparison exclude it.
+        conversation_payloads = message_payloads[1:] if request.system_message is not None else message_payloads
+        conversation_non_ascii = _non_ascii_utf8_bytes(_canonical_json(conversation_payloads))
+        non_ascii_supplement = math.ceil(conversation_non_ascii * PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE.get(self.provider_adapter, 0.0))
+        overhead = self.provider_fixed_overhead_tokens + len(messages) * self.provider_per_message_overhead_tokens + len(tools) * self.provider_per_tool_overhead_tokens + visual_count * (self.visual_max_tokens_per_image or 0)
         estimate = _estimate_from_bytes(len(material))
-        allowance = math.ceil(estimate * self.error_allowance_ratio) + overhead
+        allowance = math.ceil(estimate * self.error_allowance_ratio) + non_ascii_supplement + overhead
         return ProviderRequestMaterialMeasurement(
             estimated_tokens=estimate,
             error_allowance_tokens=allowance,
@@ -691,6 +801,27 @@ def resolve_provider_adapter(
     if getattr(model, "use_responses_api", None) is True and resolved in {"openai", "patched_openai"}:
         return f"{resolved}_responses"
     return resolved
+
+
+def declared_visual_max_tokens_per_image(
+    provider_adapter: str | None,
+    provider_class_path: str | None = None,
+    *,
+    model: object | None = None,
+) -> int | None:
+    """Return the declared per-image Token upper bound for one adapter.
+
+    ``None`` means the adapter has no declared visual cost; Lead vision
+    injection and the ``view_image`` tool must stay disarmed for it because
+    the final provider guard fails closed on unmeasured visual material.
+    """
+
+    resolved = resolve_provider_adapter(
+        provider_adapter,
+        provider_class_path,
+        model=model,
+    )
+    return _PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE.get(resolved or "")
 
 
 def provider_request_closure_identity(
@@ -839,6 +970,7 @@ def build_provider_request_profile(
         runtime_policy_identity=runtime_policy_identity,
         workload_profile=workload_profile,
         error_allowance_ratio=snapshot["error_allowance_ratio"],
+        visual_max_tokens_per_image=snapshot.get("visual_max_tokens_per_image"),
     )
 
 
@@ -885,6 +1017,7 @@ def build_provider_request_profile_snapshot_from_facts(
         reason = "provider_request_usage_unsupported: workload profile is invalid"
     overhead = _PROVIDER_OVERHEAD.get(resolved_adapter or "", (0, 0, 0))
     allowance_ratio = _PROVIDER_ERROR_ALLOWANCE_RATIO.get(resolved_adapter or "", 0.0)
+    visual_max_tokens = _PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE.get(resolved_adapter or "") if supports_vision else None
     try:
         effective_facts = _canonicalize_tool_schema_facts(tool_schema_facts)
         effective_middleware_prompts = tuple(prompt for prompt in middleware_system_prompts if isinstance(prompt, str) and prompt)
@@ -939,6 +1072,7 @@ def build_provider_request_profile_snapshot_from_facts(
             "overlay_messages": bounded_overlay_message_count,
             "overhead": overhead,
             "supports_vision": supports_vision,
+            "visual_max_tokens_per_image": visual_max_tokens,
             "authority_identity": authority_identity,
             "capture_provider_input_tokens": capture_provider_input_tokens,
             "closure_identity": closure_identity,
@@ -964,6 +1098,7 @@ def build_provider_request_profile_snapshot_from_facts(
         "supported": reason is None,
         "unsupported_reason": reason,
         "supports_vision": supports_vision,
+        "visual_max_tokens_per_image": visual_max_tokens,
         "max_input_tokens": _model_max_input_tokens(model),
         "static_system_utf8_bytes": system_bytes,
         "full_tool_schema_utf8_bytes": tool_bytes,
@@ -1066,10 +1201,13 @@ def measure_profile_snapshot_context(
     messages = list(raw_messages) if isinstance(raw_messages, list) else []
     if any(not isinstance(message, BaseMessage) for message in messages):
         raise ProviderRequestUsageUnsupported("provider_request_usage_unsupported: checkpoint messages are invalid")
-    if _contains_visual_material(messages):
+    raw_visual_declared = snapshot.get("visual_max_tokens_per_image")
+    visual_declared = raw_visual_declared if isinstance(raw_visual_declared, int) and not isinstance(raw_visual_declared, bool) and raw_visual_declared > 0 else None
+    if visual_declared is None and contains_visual_material(messages):
         raise ProviderRequestUsageUnsupported("provider_request_usage_unsupported: vision overhead is undeclared")
     viewed_images = current.get("viewed_images")
-    if snapshot.get("supports_vision") is True and isinstance(viewed_images, Mapping) and viewed_images:
+    viewed_image_count = len(viewed_images) if isinstance(viewed_images, Mapping) else 0
+    if snapshot.get("supports_vision") is True and viewed_image_count and visual_declared is None:
         raise ProviderRequestUsageUnsupported("provider_request_usage_unsupported: vision overhead is undeclared")
 
     durable_messages = _state_ephemeral_material(current)
@@ -1082,46 +1220,47 @@ def measure_profile_snapshot_context(
     provider_messages = project_dangling_tool_call_messages(
         project_input_sanitization_messages(messages),
     )
-    provider_message_payloads = provider_visible_messages_payload(
-        provider_messages,
-        provider_adapter=provider_adapter,
+    provider_message_payloads = list(
+        provider_visible_messages_payload(
+            provider_messages,
+            provider_adapter=provider_adapter,
+        )
     )
-    compressible_bytes = len(_canonical_json(provider_message_payloads))
+    state_visual_count = 0
+    if visual_declared is not None:
+        provider_message_payloads, state_visual_count = _project_visual_blocks(
+            provider_message_payloads,
+        )
+    # A vision-declared profile reserves the ephemeral image-context message
+    # that ViewImageMiddleware injects: every retained viewed_images entry plus
+    # the bounded current-upload allowance, each at the declared per-image cost,
+    # plus the bounded label text around the visual blocks.
+    vision_active = snapshot.get("supports_vision") is True and visual_declared is not None
+    vision_image_allowance = (viewed_image_count + _MAX_CURRENT_UPLOAD_IMAGE_ALLOWANCE) if vision_active else 0
+    vision_overhead_tokens = (vision_image_allowance + state_visual_count) * (visual_declared or 0)
+    vision_context_bytes = (_VISION_CONTEXT_HEADER_UTF8_BYTES + vision_image_allowance * _VISION_CONTEXT_PER_IMAGE_UTF8_BYTES) if vision_active else 0
+    vision_message_count = 1 if vision_active else 0
+    non_ascii_supplement_per_byte = PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE.get(provider_adapter, 0.0)
+    compressible_material = _canonical_json(provider_message_payloads)
+    compressible_bytes = len(compressible_material)
     fixed_bytes = int(snapshot["static_system_utf8_bytes"]) + int(snapshot["full_tool_schema_utf8_bytes"]) + _SERIALIZATION_FRAMING_UTF8_BYTES
-    ephemeral_bytes = (
-        int(snapshot["bounded_overlay_utf8_bytes"])
-        + sum(
-            len(
-                _material_bytes(
-                    message,
-                    provider_adapter=provider_adapter,
-                )
-            )
-            for message in durable_messages
+    rendered_materials = [
+        _material_bytes(
+            message,
+            provider_adapter=provider_adapter,
         )
-        + sum(
-            len(
-                _material_bytes(
-                    message,
-                    provider_adapter=provider_adapter,
-                )
-            )
-            for message in todo_messages
-        )
-        + sum(
-            len(
-                _material_bytes(
-                    message,
-                    provider_adapter=provider_adapter,
-                )
-            )
-            for message in slash_messages
-        )
-    )
+        for message in (*durable_messages, *todo_messages, *slash_messages)
+    ]
+    ephemeral_bytes = int(snapshot["bounded_overlay_utf8_bytes"]) + vision_context_bytes + sum(len(material) for material in rendered_materials)
+    # Declared overlay and vision label allowances have no retained text, so
+    # they count fully toward the non-ASCII supplement (conservative).
+    ephemeral_non_ascii_bytes = int(snapshot["bounded_overlay_utf8_bytes"]) + vision_context_bytes + sum(_non_ascii_utf8_bytes(material) for material in rendered_materials)
     compressible = _component(
         material_bytes=compressible_bytes,
         error_allowance_ratio=float(allowance_ratio),
         overhead_tokens=(len(provider_message_payloads) * int(snapshot["provider_per_message_overhead_tokens"])),
+        non_ascii_bytes=_non_ascii_utf8_bytes(compressible_material),
+        non_ascii_supplement_per_byte=non_ascii_supplement_per_byte,
     )
     fixed = _component(
         material_bytes=fixed_bytes,
@@ -1131,7 +1270,11 @@ def measure_profile_snapshot_context(
     ephemeral = _component(
         material_bytes=ephemeral_bytes,
         error_allowance_ratio=float(allowance_ratio),
-        overhead_tokens=((len(durable_messages) + len(todo_messages) + len(slash_messages) + int(snapshot["bounded_overlay_message_count"])) * int(snapshot["provider_per_message_overhead_tokens"])),
+        overhead_tokens=(
+            ((len(durable_messages) + len(todo_messages) + len(slash_messages) + vision_message_count + int(snapshot["bounded_overlay_message_count"])) * int(snapshot["provider_per_message_overhead_tokens"])) + vision_overhead_tokens
+        ),
+        non_ascii_bytes=ephemeral_non_ascii_bytes,
+        non_ascii_supplement_per_byte=non_ascii_supplement_per_byte,
     )
     components = {
         "compressible": compressible,
@@ -1143,7 +1286,7 @@ def measure_profile_snapshot_context(
         error_allowance_tokens=sum(item.error_allowance_tokens for item in components.values()),
         safety_bound_tokens=sum(item.safety_bound_tokens for item in components.values()),
         material_utf8_bytes=compressible_bytes + fixed_bytes + ephemeral_bytes,
-        message_count=(len(provider_message_payloads) + len(durable_messages) + len(todo_messages) + len(slash_messages) + int(snapshot["bounded_overlay_message_count"]) + 1),
+        message_count=(len(provider_message_payloads) + len(durable_messages) + len(todo_messages) + len(slash_messages) + vision_message_count + int(snapshot["bounded_overlay_message_count"]) + 1),
         full_tool_count=int(snapshot["full_tool_count"]),
         components=components,
     )
@@ -1299,14 +1442,27 @@ class FinalProviderRequestGuard(AgentMiddleware):
         return actual, allowed, evidence_measurement
 
     @staticmethod
-    def _validated_provider_input_tokens(
+    def _observed_provider_input_tokens(
         response: ModelResponse,
         actual: ProviderRequestMaterialMeasurement,
-    ) -> int | None:
+    ) -> tuple[int | None, bool]:
+        """Record, never execute: a completed provider response is authoritative.
+
+        An observation above the versioned engineering bound is estimator-drift
+        evidence (for example a CJK-inefficient tokenizer), not a reason to
+        discard an already completed, already billed provider response. The
+        bound keeps protecting dispatch through capacity admission only.
+        """
+
         provider_input_tokens = _provider_input_tokens(response)
-        if provider_input_tokens is not None and provider_input_tokens > actual.safety_bound_tokens:
-            raise ProviderRequestUsageUnsupported("provider_request_usage_unsupported: provider input tokens exceeded current engineering safety bound")
-        return provider_input_tokens
+        if provider_input_tokens is None or provider_input_tokens <= actual.safety_bound_tokens:
+            return provider_input_tokens, False
+        logger.warning(
+            "Provider reported %d input tokens above the versioned engineering safety bound %d; recording estimator drift",
+            provider_input_tokens,
+            actual.safety_bound_tokens,
+        )
+        return provider_input_tokens, True
 
     def _snapshot(
         self,
@@ -1314,6 +1470,8 @@ class FinalProviderRequestGuard(AgentMiddleware):
         actual: ProviderRequestMaterialMeasurement,
         allowed: ProviderRequestContextMeasurement,
         provider_input_tokens: int | None,
+        *,
+        provider_input_bound_exceeded: bool = False,
     ) -> ProviderRequestMeasurementSnapshot:
         result: ProviderRequestMeasurementSnapshot = {
             "version": 1,
@@ -1332,6 +1490,8 @@ class FinalProviderRequestGuard(AgentMiddleware):
             "provider_input_tokens": (provider_input_tokens if self.profile.capture_provider_input_tokens and _runtime_token_usage_tracking_enabled(request.runtime) else None),
             "authority_identity": self.profile.authority_identity,
         }
+        if provider_input_bound_exceeded:
+            result["provider_input_tokens_exceeded_bound"] = True
         run_id = _runtime_run_id(request.runtime)
         if run_id is not None:
             result["run_id"] = run_id
@@ -1348,10 +1508,19 @@ class FinalProviderRequestGuard(AgentMiddleware):
         actual, allowed, _evidence_measurement = self._measure_and_validate(request)
         result = handler(request)
         response = _model_response(result)
-        provider_input_tokens = self._validated_provider_input_tokens(response, actual)
+        provider_input_tokens, bound_exceeded = self._observed_provider_input_tokens(
+            response,
+            actual,
+        )
         return _attach_measurement(
             result,
-            self._snapshot(request, actual, allowed, provider_input_tokens),
+            self._snapshot(
+                request,
+                actual,
+                allowed,
+                provider_input_tokens,
+                provider_input_bound_exceeded=bound_exceeded,
+            ),
         )
 
     @override
@@ -1409,6 +1578,26 @@ class FinalProviderRequestGuard(AgentMiddleware):
                         failure_code=proven_error.failure_code,
                     )
                 raise proven_error from error
+            failed_response_proof = classify_provider_failed_response(
+                provider_adapter=self.profile.provider_adapter,
+                error=error,
+            )
+            if failed_response_proof is not None:
+                # A definite Provider failure answer is a known outcome, not
+                # an ambiguous dispatch. Record it and propagate both the
+                # original SDK error and adapter-owned retry safety so the
+                # outer error-handling policy cannot infer safety from status
+                # alone.
+                if observer is not None and provider_call is not None:
+                    await _record_provider_failed_response(
+                        observer,
+                        provider_call,
+                        proof=failed_response_proof,
+                    )
+                raise ProviderFailedResponseError(
+                    proof=failed_response_proof,
+                    provider_error=error,
+                ) from error
             if observer is not None and provider_call is not None:
                 try:
                     await _record_ambiguity_despite_cancellation(
@@ -1446,7 +1635,7 @@ class FinalProviderRequestGuard(AgentMiddleware):
                 raise ProviderDispatchOutcomeAmbiguous() from error
         if deferred_cancellation is not None:
             raise deferred_cancellation
-        provider_input_tokens = self._validated_provider_input_tokens(
+        provider_input_tokens, bound_exceeded = self._observed_provider_input_tokens(
             response,
             actual,
         )
@@ -1483,6 +1672,7 @@ class FinalProviderRequestGuard(AgentMiddleware):
                         provider_fixed_overhead_tokens=(self.profile.provider_fixed_overhead_tokens),
                         provider_per_message_overhead_tokens=(self.profile.provider_per_message_overhead_tokens),
                         provider_per_tool_overhead_tokens=(self.profile.provider_per_tool_overhead_tokens),
+                        visual_max_tokens_per_image=(self.profile.visual_max_tokens_per_image),
                         fixed_message_count=fixed_message_count,
                         tool_count=actual.tool_count,
                     ),
@@ -1512,6 +1702,7 @@ class FinalProviderRequestGuard(AgentMiddleware):
                     actual,
                     allowed,
                     provider_input_tokens,
+                    provider_input_bound_exceeded=bound_exceeded,
                 ),
                 context_projection_snapshot=context_projection_snapshot,
             )
@@ -1546,6 +1737,8 @@ __all__ = [
     "collect_custom_middleware_request_contract",
     "collect_middleware_tools",
     "collect_middleware_system_prompts",
+    "contains_visual_material",
+    "declared_visual_max_tokens_per_image",
     "measure_profile_context",
     "measure_profile_snapshot_context",
     "provider_request_closure_identity",

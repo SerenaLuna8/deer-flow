@@ -58,8 +58,8 @@ function agentRuntimeSettings() {
     summarization: {
       enabled: true,
       model_name: null,
-      trigger: null,
-      keep: { type: "messages", value: 20 },
+      trigger_tokens: null,
+      keep: { type: "tokens", value: 64_000 },
       trim_tokens_to_summarize: null,
       skill_file_read_tool_names: ["read_file"],
     },
@@ -246,6 +246,17 @@ describe("admin contracts", () => {
         agent_runtime: agentRuntimeSettings(),
       }).success,
     ).toBe(false);
+
+    for (const keep of [
+      { type: "messages", value: 20 },
+      { type: "fraction", value: 0.8 },
+    ] as const) {
+      const legacyKeep = structuredClone(agentRuntimeSettings());
+      legacyKeep.summarization.keep = keep;
+      expect(
+        agentRuntimeSettingsValueSchema.safeParse(legacyKeep).success,
+      ).toBe(false);
+    }
   });
 
   test("rejects the removed per-tool budget contract", () => {

@@ -1252,6 +1252,7 @@ async def test_failure_detail_and_cancellation_code_keep_adapter_owned_wire() ->
     )
 
     assert failed_events[-1]["error"] == "Reached max_turns=7"
+    assert failed_events[-1]["stop_reason"] == "turn_capped"
     assert failed_message.content == ("Task failed (capped: turn budget). Error: Reached max_turns=7")
 
     cancelled_events: list[dict[str, object]] = []
@@ -1274,3 +1275,47 @@ async def test_failure_detail_and_cancellation_code_keep_adapter_owned_wire() ->
 
     assert cancelled_events[-1]["error"] == "Cancelled by user"
     assert cancelled_message.content == ("Task cancelled by user. Error: Cancelled by user")
+
+
+@pytest.mark.asyncio
+async def test_provider_output_truncation_is_visible_in_event_and_tool_receipt() -> None:
+    now = datetime.now(UTC)
+    outcome = SubagentCompleted(
+        execution_id=uuid.uuid4(),
+        task_id="call-output-truncated",
+        trace_id="trace",
+        queued_at=now,
+        started_at=now,
+        completed_at=now,
+        ai_messages=(),
+        usage=None,
+        usage_completeness=SubagentUsageCompleteness.FINAL_OBSERVED,
+        quiescent=True,
+        result="usable partial result",
+        stop_reason="output_truncated",
+    )
+    events: list[dict[str, object]] = []
+    adapter = task_module._TaskLifecycleEventAdapter(
+        writer=events.append,
+        task_id=outcome.task_id,
+        description="output truncation probe",
+        model_name="parent-model",
+        execution_timeout_seconds=120,
+    )
+
+    await adapter(outcome)
+    message = _tool_message(
+        task_module._outcome_command(
+            outcome,
+            tool_call_id=outcome.task_id,
+            model_name="parent-model",
+            execution_timeout_seconds=120,
+        )
+    )
+
+    assert events[-1]["type"] == "task_completed"
+    assert events[-1]["result"] == "usable partial result"
+    assert events[-1]["stop_reason"] == "output_truncated"
+    assert message.additional_kwargs["subagent_status"] == "completed"
+    assert message.additional_kwargs["subagent_stop_reason"] == "output_truncated"
+    assert message.content == ("Task output was truncated by the Provider. Partial result: usable partial result")

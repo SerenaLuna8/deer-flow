@@ -24,6 +24,10 @@ from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
 from deerflow.persistence.jobs.sql import JobRepository, JobScope
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.events.store.db import (
+    _issue_settled_stream_terminal_authority,
+    _SettledStreamTerminalAuthority,
+)
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.token_budget_usage import TokenBudgetUsageSnapshot
 from deerflow.trace_context import generate_trace_id, normalize_trace_id
@@ -107,6 +111,10 @@ class PrivateRunMaterializationCancelState:
 class PrivateRunSettlement:
     run: PrivateRunRecord
     run_terminal_published: bool
+    stream_terminal_authority: _SettledStreamTerminalAuthority | None = field(
+        default=None,
+        repr=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -981,7 +989,7 @@ class PrivateRunRepository:
                 run=self.record(run),
                 run_terminal_published=True,
             )
-        await self._locked_active_attempt(
+        active_attempt = await self._locked_active_attempt(
             job=job,
             job_id=job_id,
             token_hash=token_hash,
@@ -1078,9 +1086,25 @@ class PrivateRunRepository:
         run.execution_heartbeat_at = None
         run.updated_at = settled_at
         await self.session.flush()
+        stream_terminal_authority = None
+        if authorization_revoked:
+            # The event adapter accepts this private capability only in this
+            # exact transaction. Refresh the bulk-updated Job/Attempt rows so
+            # issuance proves the completed lease lineage, not caller intent.
+            await self.session.refresh(job)
+            await self.session.refresh(active_attempt)
+            stream_terminal_authority = _issue_settled_stream_terminal_authority(
+                self.session,
+                scope=scope,
+                run=run,
+                job=job,
+                attempt=active_attempt,
+                lease_token=lease_token,
+            )
         return PrivateRunSettlement(
             run=self.record(run),
             run_terminal_published=run_terminal_published,
+            stream_terminal_authority=stream_terminal_authority,
         )
 
     async def request_cancel(

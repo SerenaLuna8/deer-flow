@@ -32,6 +32,7 @@ from deerflow.agents.middlewares.provider_request_usage import (
     collect_middleware_system_prompts,
     collect_middleware_tools,
     measure_profile_context,
+    measure_profile_snapshot_context,
     provider_request_runtime_policy_compatibility_identity,
     provider_request_runtime_policy_identity,
     provider_tool_schema_fact,
@@ -70,11 +71,12 @@ def _profile(
     max_input_tokens: int = 100_000,
     supports_vision: bool = False,
     capture_provider_input_tokens: bool = True,
+    provider_adapter: str = "openai",
 ):
     return build_provider_request_profile(
         model=_model(max_input_tokens=max_input_tokens),
         model_name="lead",
-        provider_adapter="openai",
+        provider_adapter=provider_adapter,
         system_prompt="canonical system prompt " * 20,
         tools=(default_tool, deferred_tool),
         bounded_overlay_material=("bounded dynamic reminder",),
@@ -445,33 +447,56 @@ def test_final_guard_merges_scalar_measurement_without_replacing_outer_command()
     assert "messages" not in result.command.update
 
 
-def test_final_guard_fails_closed_when_provider_input_exceeds_current_engineering_bound() -> None:
+def test_final_guard_records_provider_input_exceeding_engineering_bound() -> None:
+    """A completed provider response is kept; bound drift becomes a recorded fact."""
+
     profile = _profile(max_input_tokens=200_000)
     request = _request(profile)
     actual = profile.measure_request(request)
-    called = False
+    provider_message = AIMessage(
+        content="answer",
+        usage_metadata={
+            "input_tokens": actual.safety_bound_tokens + 1,
+            "output_tokens": 1,
+            "total_tokens": actual.safety_bound_tokens + 2,
+        },
+    )
 
-    def handler(_request: ModelRequest) -> ModelResponse:
-        nonlocal called
-        called = True
-        return ModelResponse(
+    result = FinalProviderRequestGuard(profile).wrap_model_call(
+        request,
+        lambda _request: ModelResponse(result=[provider_message]),
+    )
+
+    assert isinstance(result, ExtendedModelResponse)
+    assert result.model_response.result == [provider_message]
+    measurement = result.command.update[PROVIDER_REQUEST_MEASUREMENT_STATE_KEY]
+    assert measurement["provider_input_tokens"] == actual.safety_bound_tokens + 1
+    assert measurement["provider_input_tokens_exceeded_bound"] is True
+
+
+def test_final_guard_does_not_flag_provider_input_within_engineering_bound() -> None:
+    profile = _profile(max_input_tokens=200_000)
+    request = _request(profile)
+
+    result = FinalProviderRequestGuard(profile).wrap_model_call(
+        request,
+        lambda _request: ModelResponse(
             result=[
                 AIMessage(
                     content="answer",
                     usage_metadata={
-                        "input_tokens": actual.safety_bound_tokens + 1,
+                        "input_tokens": 123,
                         "output_tokens": 1,
-                        "total_tokens": actual.safety_bound_tokens + 2,
+                        "total_tokens": 124,
                     },
                 )
             ]
-        )
+        ),
+    )
 
-    with pytest.raises(ProviderRequestUsageUnsupported) as caught:
-        FinalProviderRequestGuard(profile).wrap_model_call(request, handler)
-
-    assert called is True
-    assert "engineering safety bound" in (caught.value.internal_detail or "")
+    measurement = result.command.update[PROVIDER_REQUEST_MEASUREMENT_STATE_KEY]
+    assert measurement["provider_input_tokens"] == 123
+    assert "provider_input_tokens_exceeded_bound" not in measurement
 
 
 def test_final_guard_disabled_token_tracking_keeps_safety_measurement_without_persisting_exact_provider_usage() -> None:
@@ -507,7 +532,7 @@ def test_final_guard_disabled_token_tracking_keeps_safety_measurement_without_pe
     }
 
 
-def test_final_guard_tracking_off_still_rejects_provider_input_above_bound() -> None:
+def test_final_guard_tracking_off_still_records_provider_input_above_bound() -> None:
     profile = _profile(
         max_input_tokens=200_000,
         capture_provider_input_tokens=False,
@@ -518,25 +543,52 @@ def test_final_guard_tracking_off_still_rejects_provider_input_above_bound() -> 
     )
     actual = profile.measure_request(request)
 
-    with pytest.raises(ProviderRequestUsageUnsupported) as caught:
-        FinalProviderRequestGuard(profile).wrap_model_call(
-            request,
-            lambda _request: ModelResponse(
-                result=[
-                    AIMessage(
-                        content="answer",
-                        usage_metadata={
-                            "input_tokens": actual.safety_bound_tokens + 1,
-                            "output_tokens": 1,
-                            "total_tokens": actual.safety_bound_tokens + 2,
-                        },
-                    )
-                ]
-            ),
-        )
+    result = FinalProviderRequestGuard(profile).wrap_model_call(
+        request,
+        lambda _request: ModelResponse(
+            result=[
+                AIMessage(
+                    content="answer",
+                    usage_metadata={
+                        "input_tokens": actual.safety_bound_tokens + 1,
+                        "output_tokens": 1,
+                        "total_tokens": actual.safety_bound_tokens + 2,
+                    },
+                )
+            ]
+        ),
+    )
 
     assert profile.snapshot()["capture_provider_input_tokens"] is False
-    assert "engineering safety bound" in (caught.value.internal_detail or "")
+    measurement = result.command.update[PROVIDER_REQUEST_MEASUREMENT_STATE_KEY]
+    # The exact provider count stays unpersisted, while the content-free
+    # drift fact is still recorded.
+    assert measurement["provider_input_tokens"] is None
+    assert measurement["provider_input_tokens_exceeded_bound"] is True
+
+
+def test_cjk_material_receives_a_declared_non_ascii_safety_supplement() -> None:
+    chinese = "中" * 10_000
+    anthropic_profile = _profile(provider_adapter="anthropic")
+    anthropic_measured = anthropic_profile.measure_request(
+        _request(
+            anthropic_profile,
+            messages=[HumanMessage(id="cjk-1", content=chinese)],
+        )
+    )
+    deepseek_profile = _profile(provider_adapter="deepseek")
+    deepseek_measured = deepseek_profile.measure_request(
+        _request(
+            deepseek_profile,
+            messages=[HumanMessage(id="cjk-2", content=chinese)],
+        )
+    )
+
+    # The declared ceiling reaches ~1.5 tokens per CJK character for
+    # CJK-inefficient tokenizers and ~1.05 for the rest.
+    assert anthropic_measured.safety_bound_tokens >= 10_000 * 1.4
+    assert deepseek_measured.safety_bound_tokens >= 10_000 * 1.0
+    assert deepseek_measured.safety_bound_tokens < anthropic_measured.safety_bound_tokens
 
 
 def test_final_guard_does_not_persist_exact_provider_usage_when_tracking_is_disabled() -> None:
@@ -571,7 +623,9 @@ def test_final_guard_does_not_persist_exact_provider_usage_when_tracking_is_disa
 
 
 def test_final_guard_rejects_undeclared_visual_material() -> None:
-    profile = _profile(supports_vision=True)
+    # ``deepseek`` declares no per-image token cost, so its visual material
+    # keeps the fail-closed dispatch contract.
+    profile = _profile(supports_vision=True, provider_adapter="deepseek")
     request = _request(
         profile,
         messages=[
@@ -590,6 +644,135 @@ def test_final_guard_rejects_undeclared_visual_material() -> None:
             lambda _request: ModelResponse(result=[AIMessage(content="no")]),
         )
     assert caught.value.internal_detail == "VISUAL_TOKEN_UPPER_BOUND_UNAVAILABLE:1"
+
+
+def test_final_guard_admits_declared_visual_material_within_frozen_profile() -> None:
+    """An ephemeral image-context message dispatches under the declared bound."""
+
+    profile = _profile(supports_vision=True)
+    assert profile.visual_max_tokens_per_image == 2_048
+    state_messages = [HumanMessage(id="human-1", content="hello")]
+    image_message = HumanMessage(
+        id="view-image-context:1",
+        content=[
+            {"type": "text", "text": "Here are the images attached to the current user message:"},
+            {"type": "text", "text": "\n- Current image attachment 1 (image/png)"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 40_000}},
+        ],
+        additional_kwargs={"hide_from_ui": True},
+    )
+    request = ModelRequest(
+        model=_model(max_input_tokens=100_000),
+        messages=[*state_messages, image_message],
+        system_prompt=profile.system_prompt,
+        tools=list(profile.tools),
+        state={
+            PROVIDER_REQUEST_PROFILE_STATE_KEY: profile.snapshot(),
+            "summary_text": "durable summary",
+            "delegations": [],
+            "skill_context": [],
+            "messages": state_messages,
+        },
+        runtime=Runtime(context={"run_id": "run-1"}),
+    )
+    called = False
+
+    def handler(_request: ModelRequest) -> ModelResponse:
+        nonlocal called
+        called = True
+        return ModelResponse(result=[AIMessage(content="described")])
+
+    result = FinalProviderRequestGuard(profile).wrap_model_call(request, handler)
+
+    assert called is True
+    assert isinstance(result, ExtendedModelResponse)
+    snapshot = result.command.update[PROVIDER_REQUEST_MEASUREMENT_STATE_KEY]
+    # The 40,000-byte data URL is excluded from byte accounting and carried as
+    # one declared per-image bound instead.
+    assert snapshot["safety_bound_tokens"] >= 2_048
+    assert snapshot["safety_bound_tokens"] < 40_000 / 4
+
+
+def test_declared_visual_material_counts_against_model_capacity() -> None:
+    profile = _profile(max_input_tokens=4_096, supports_vision=True)
+    state_messages = [HumanMessage(id="human-1", content="hello")]
+    image_message = HumanMessage(
+        id="view-image-context:2",
+        content=[
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "B" * 2_000}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "C" * 2_000}},
+        ],
+    )
+    request = ModelRequest(
+        model=_model(max_input_tokens=4_096),
+        messages=[*state_messages, image_message],
+        system_prompt=profile.system_prompt,
+        tools=list(profile.tools),
+        state={
+            PROVIDER_REQUEST_PROFILE_STATE_KEY: profile.snapshot(),
+            "summary_text": "durable summary",
+            "delegations": [],
+            "skill_context": [],
+            "messages": state_messages,
+        },
+        runtime=Runtime(context={"run_id": "run-1"}),
+    )
+    called = False
+
+    def handler(_request: ModelRequest) -> ModelResponse:
+        nonlocal called
+        called = True
+        return ModelResponse(result=[AIMessage(content="must not run")])
+
+    with pytest.raises(ContextCapacityExceeded):
+        FinalProviderRequestGuard(profile).wrap_model_call(request, handler)
+    assert called is False
+
+
+def test_profile_snapshot_measurement_reserves_declared_visual_allowance() -> None:
+    vision_profile = _profile(supports_vision=True)
+    baseline_profile = _profile()
+    viewed_images = {
+        "/mnt/user-data/uploads/a.png": {"mime_type": "image/png"},
+        "/mnt/user-data/uploads/b.png": {"mime_type": "image/png"},
+    }
+    state = {
+        "messages": [HumanMessage(id="human-1", content="hello")],
+        "viewed_images": viewed_images,
+    }
+
+    vision = measure_profile_snapshot_context(vision_profile.snapshot(), state)
+    baseline = measure_profile_snapshot_context(
+        baseline_profile.snapshot(),
+        {"messages": list(state["messages"]), "viewed_images": {}},
+    )
+
+    # Two retained viewed images plus the bounded current-upload allowance,
+    # each at the declared per-image bound, plus one injected context message.
+    assert vision.safety_bound_tokens - baseline.safety_bound_tokens >= (2 + 4) * 2_048
+    assert vision.message_count == baseline.message_count + 1
+
+
+def test_profile_snapshot_measurement_rejects_undeclared_viewed_images() -> None:
+    profile = _profile(supports_vision=True, provider_adapter="deepseek")
+    state = {
+        "messages": [HumanMessage(id="human-1", content="hello")],
+        "viewed_images": {"/mnt/user-data/uploads/a.png": {"mime_type": "image/png"}},
+    }
+
+    with pytest.raises(ProviderRequestUsageUnsupported):
+        measure_profile_snapshot_context(profile.snapshot(), state)
+
+
+def test_current_upload_allowance_matches_view_image_middleware() -> None:
+    from deerflow.agents.middlewares.provider_request_usage import (
+        _MAX_CURRENT_UPLOAD_IMAGE_ALLOWANCE,
+    )
+    from deerflow.agents.middlewares.view_image_middleware import (
+        _MAX_CURRENT_UPLOAD_IMAGES,
+    )
+
+    assert _MAX_CURRENT_UPLOAD_IMAGE_ALLOWANCE == _MAX_CURRENT_UPLOAD_IMAGES
 
 
 def test_profile_snapshot_does_not_persist_prompt_or_tool_schema_plaintext() -> None:

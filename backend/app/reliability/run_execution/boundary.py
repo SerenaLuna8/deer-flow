@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
 
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.private_work.authorization import PrivateRunAuthorizationBoundary
@@ -532,6 +535,144 @@ class PrivateRunExecutionBoundary:
 
     async def before_checkpoint_write(self) -> None:
         await self._check("before_checkpoint_write")
+
+    async def before_checkpoint_cancel_settlement_write(self) -> None:
+        """Allow ordinary cancellation, never authorization revocation."""
+
+        await self._check(
+            "before_checkpoint_write",
+            allow_cancel=True,
+        )
+
+    async def lock_and_assert_checkpoint_write_in_connection(
+        self,
+        connection: AsyncConnection,
+        thread_id: str,
+        *,
+        allow_cancel_requested: bool,
+    ) -> None:
+        """Fence a raw checkpoint write on its exact psycopg transaction.
+
+        The caller owns the transaction and invokes this both immediately
+        before raw writes and immediately before commit. Locks follow the
+        canonical execution order Job -> Run -> Attempt. Project/Thread
+        governance is checked in a completed preflight transaction so no
+        second connection holds that prefix while waiting on these rows.
+        """
+
+        if not isinstance(connection, AsyncConnection) or not isinstance(thread_id, str) or not thread_id or type(allow_cancel_requested) is not bool:
+            raise AuthorizationRevoked
+        expected_worker_id = self._expected_worker_id
+        run_id = self._claim.run_id
+        if expected_worker_id is None or run_id is None:
+            self._record_checkpoint_lease_lost()
+            raise AuthorizationRevoked
+        token_hash = hashlib.sha256(
+            self._claim.lease_token.encode("utf-8"),
+        ).hexdigest()
+        try:
+            async with connection.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(
+                    """SELECT status, attempt_count, lease_owner_id,
+                              lease_token_hash, lease_expires_at,
+                              cancel_requested_at, origin_trace_id
+                       FROM jobs
+                       WHERE id = %s
+                         AND job_type IN ('private_run', 'automation_run')
+                         AND project_id = %s
+                         AND owner_user_id = %s
+                         AND run_id = %s
+                       FOR UPDATE""",
+                    (
+                        self._claim.job_id,
+                        self._context.project_id,
+                        str(self._context.user_id),
+                        run_id,
+                    ),
+                )
+                job = await cursor.fetchone()
+                await cursor.execute(
+                    """SELECT status, execution_lease_token_hash,
+                              execution_lease_expires_at,
+                              cancel_requested_at,
+                              authorization_cancel_requested_at,
+                              origin_trace_id
+                       FROM runs
+                       WHERE run_id = %s
+                         AND job_id = %s
+                         AND project_id = %s
+                         AND owner_user_id = %s
+                         AND thread_id = %s
+                       FOR UPDATE""",
+                    (
+                        run_id,
+                        self._claim.job_id,
+                        self._context.project_id,
+                        str(self._context.user_id),
+                        thread_id,
+                    ),
+                )
+                run = await cursor.fetchone()
+                attempt_number = job.get("attempt_count") if isinstance(job, dict) else None
+                await cursor.execute(
+                    """SELECT id
+                       FROM job_attempts
+                       WHERE id = %s
+                         AND job_id = %s
+                         AND attempt_number = %s
+                         AND worker_id = %s
+                         AND lease_token_hash = %s
+                         AND outcome IS NULL
+                       FOR UPDATE""",
+                    (
+                        self._claim.attempt_id,
+                        self._claim.job_id,
+                        attempt_number,
+                        expected_worker_id,
+                        token_hash,
+                    ),
+                )
+                attempt = await cursor.fetchone()
+                await cursor.execute("SELECT clock_timestamp() AS checked_at")
+                clock = await cursor.fetchone()
+            checked_at = clock.get("checked_at") if isinstance(clock, dict) else None
+            if (
+                not isinstance(job, dict)
+                or not isinstance(run, dict)
+                or not isinstance(attempt, dict)
+                or checked_at is None
+                or job.get("status") != "running"
+                or job.get("lease_owner_id") != expected_worker_id
+                or job.get("lease_token_hash") != token_hash
+                or job.get("lease_expires_at") is None
+                or job["lease_expires_at"] <= checked_at
+                or run.get("status") != "running"
+                or run.get("execution_lease_token_hash") != token_hash
+                or run.get("execution_lease_expires_at") is None
+                or run["execution_lease_expires_at"] <= checked_at
+                or job.get("origin_trace_id") != run.get("origin_trace_id")
+            ):
+                raise PrivateRunExecutionLeaseLost
+            if run.get("authorization_cancel_requested_at") is not None:
+                self._authorization_revoked = True
+                self.request_local_cancel()
+                raise AuthorizationRevoked
+            if job.get("cancel_requested_at") is not None or run.get("cancel_requested_at") is not None:
+                self.request_local_cancel()
+                if not allow_cancel_requested:
+                    raise AuthorizationRevoked
+        except asyncio.CancelledError:
+            raise
+        except AuthorizationRevoked:
+            raise
+        except Exception:
+            self._record_checkpoint_lease_lost()
+            raise AuthorizationRevoked from None
+
+    def _record_checkpoint_lease_lost(self) -> None:
+        self._lease_lost = True
+        if self._abort_event is not None:
+            self._abort_event.set()
 
     async def before_stream_publish(self) -> None:
         await self._check("before_checkpoint_write")

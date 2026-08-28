@@ -97,6 +97,9 @@ from deerflow.persistence.private_work.model import (
     PrivateFileRow,
 )
 from deerflow.persistence.run.model import RunRow
+from deerflow.runtime.checkpointer.async_provider import (
+    postgres_checkpoint_transaction,
+)
 from deerflow.runtime.context_evidence import (
     CheckpointLinkedV1,
     CompactionCommittedV1,
@@ -109,9 +112,14 @@ from deerflow.runtime.context_evidence import (
     RequestPreparedV1,
     resolve_provider_call,
 )
-from deerflow.runtime.events.models import STREAM_TERMINAL_ERROR_CODES
+from deerflow.runtime.events.models import (
+    STREAM_TERMINAL_ERROR_CODES,
+    stream_terminal_status_for_run_settlement,
+)
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 PRIVATE_SCOPE_MARKER = "deerflow_private_scope"
 _T = TypeVar("_T")
@@ -737,10 +745,10 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         self,
         thread_id: str,
         capability: Capability,
-        authorization_operation: str,
+        authorization_operation: str | None,
     ) -> AsyncIterator[AsyncSession]:
         try:
-            if self._authorization_boundary is not None:
+            if self._authorization_boundary is not None and authorization_operation is not None:
                 await getattr(self._authorization_boundary, authorization_operation)()
             async with self._session_factory() as session:
                 async with session.begin():
@@ -795,6 +803,38 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             except PrivateWorkError:
                 raise
             except ContextProviderCallAmbiguousError:
+                raise
+            except Exception:
+                raise PrivateWorkUnavailable(self._context.request_id) from None
+
+    async def aget_tuple_cancel_settlement(
+        self,
+        config: RunnableConfig,
+    ) -> CheckpointTuple | None:
+        """Read the source for one trusted ordinary-cancel terminal write."""
+
+        atomic_validator = getattr(
+            self._authorization_boundary,
+            "lock_and_assert_checkpoint_write_in_connection",
+            None,
+        )
+        if not callable(atomic_validator):
+            raise PrivateWorkUnavailable(self._context.request_id)
+        thread_id = self._thread_id(config)
+        clean_config = self._sanitize_config(config, thread_id=thread_id)
+        async with self._locked_active(
+            thread_id,
+            Capability.PRIVATE_WORK_CREATE,
+            "before_checkpoint_cancel_settlement_write",
+        ):
+            try:
+                item = await self._raw.aget_tuple(clean_config)
+                if item is not None:
+                    self._validate_marker(item, thread_id=thread_id)
+                return item
+            except PrivateWorkError:
+                raise
+            except AuthorizationRevoked:
                 raise
             except Exception:
                 raise PrivateWorkUnavailable(self._context.request_id) from None
@@ -924,6 +964,19 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
+        atomic_validator = getattr(
+            self._authorization_boundary,
+            "lock_and_assert_checkpoint_write_in_connection",
+            None,
+        )
+        if callable(atomic_validator):
+            return await self._aput_execution_atomic(
+                config,
+                checkpoint,
+                metadata,
+                new_versions,
+                atomic_validator=atomic_validator,
+            )
         thread_id = self._thread_id(config)
         written_config: RunnableConfig | None = None
         repaired_provider_call_id: str | None = None
@@ -1003,6 +1056,157 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 checkpoint_id=checkpoint_id,
             )
         return written_config
+
+    async def _aput_execution_atomic(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+        *,
+        atomic_validator: Callable[..., Awaitable[None]],
+        allow_cancel_requested: bool = False,
+    ) -> RunnableConfig:
+        """Write one execution checkpoint under its exact raw transaction."""
+
+        thread_id = self._thread_id(config)
+        clean_config = self._sanitize_config(config, thread_id=thread_id)
+        repaired_provider_call_id: str | None = None
+
+        # Complete governance/Thread preflight before the raw transaction takes
+        # Job -> Run -> Attempt locks. Holding another connection's governance
+        # prefix here would invert settlement and stream lock order.
+        preflight_operation = "before_checkpoint_cancel_settlement_write" if allow_cancel_requested else "before_checkpoint_write"
+        async with self._locked_active(
+            thread_id,
+            Capability.PRIVATE_WORK_CREATE,
+            preflight_operation,
+        ) as session:
+            source = await self._raw.aget_tuple(clean_config)
+            if source is not None:
+                self._validate_marker(source, thread_id=thread_id)
+                await self._repair_memory_archive_receipt(
+                    session,
+                    source,
+                    thread_id=thread_id,
+                )
+                await self._repair_context_compaction_receipt(
+                    session,
+                    source,
+                    thread_id=thread_id,
+                )
+                repaired_provider_call_id = await self._repair_context_provider_checkpoint(
+                    session,
+                    source,
+                    thread_id=thread_id,
+                )
+
+        try:
+            async with postgres_checkpoint_transaction(self._raw) as transaction:
+                if transaction is None:
+                    # Private production uses PostgreSQL exclusively. This path
+                    # retains isolated InMemorySaver tests and SDK embeddings.
+                    raw = self._raw
+                    written_config = await raw.aput(
+                        clean_config,
+                        checkpoint,
+                        self._sanitize_metadata(metadata),
+                        new_versions,
+                    )
+                else:
+                    await atomic_validator(
+                        transaction.connection,
+                        thread_id,
+                        allow_cancel_requested=allow_cancel_requested,
+                    )
+                    written_config = await transaction.saver.aput(
+                        clean_config,
+                        checkpoint,
+                        self._sanitize_metadata(metadata),
+                        new_versions,
+                    )
+                    item = await transaction.saver.aget_tuple(written_config)
+                    if item is None:
+                        raise PrivateWorkNotFound(self._context.request_id)
+                    self._validate_marker(item, thread_id=thread_id)
+                    await atomic_validator(
+                        transaction.connection,
+                        thread_id,
+                        allow_cancel_requested=allow_cancel_requested,
+                    )
+        except PrivateWorkError:
+            raise
+        except ContextProviderCallAmbiguousError:
+            raise
+        except AuthorizationRevoked:
+            raise
+        except Exception:
+            raise PrivateWorkUnavailable(self._context.request_id) from None
+
+        async with self._locked_active(
+            thread_id,
+            Capability.PRIVATE_WORK_CREATE,
+            None,
+        ) as session:
+            item = await self._raw.aget_tuple(written_config)
+            if item is None:
+                raise PrivateWorkNotFound(self._context.request_id)
+            self._validate_marker(item, thread_id=thread_id)
+            await self._repair_memory_archive_receipt(
+                session,
+                item,
+                thread_id=thread_id,
+            )
+            await self._repair_context_compaction_receipt(
+                session,
+                item,
+                thread_id=thread_id,
+            )
+            repaired_provider_call_id = (
+                await self._repair_context_provider_checkpoint(
+                    session,
+                    item,
+                    thread_id=thread_id,
+                )
+                or repaired_provider_call_id
+            )
+        checkpoint_id = self._checkpoint_id(written_config)
+        accept_checkpoint = getattr(
+            self._context_evidence_observer,
+            "accept_checkpoint_linked",
+            None,
+        )
+        if checkpoint_id is not None and repaired_provider_call_id is not None and callable(accept_checkpoint):
+            accept_checkpoint(
+                provider_call_id=repaired_provider_call_id,
+                checkpoint_id=checkpoint_id,
+            )
+        return written_config
+
+    async def aput_cancel_settlement(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        """Persist one trusted terminal update after ordinary Run cancellation."""
+
+        atomic_validator = getattr(
+            self._authorization_boundary,
+            "lock_and_assert_checkpoint_write_in_connection",
+            None,
+        )
+        if not callable(atomic_validator):
+            raise PrivateWorkUnavailable(self._context.request_id)
+        return await self._aput_execution_atomic(
+            config,
+            checkpoint,
+            metadata,
+            new_versions,
+            atomic_validator=atomic_validator,
+            allow_cancel_requested=True,
+        )
 
     async def aput_already_authorized(
         self,
@@ -1102,6 +1306,20 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         task_id: str,
         task_path: str = "",
     ) -> None:
+        atomic_validator = getattr(
+            self._authorization_boundary,
+            "lock_and_assert_checkpoint_write_in_connection",
+            None,
+        )
+        if callable(atomic_validator):
+            await self._aput_writes_execution_atomic(
+                config,
+                writes,
+                task_id,
+                task_path,
+                atomic_validator=atomic_validator,
+            )
+            return
         thread_id = self._thread_id(config)
         clean_config = self._sanitize_config(config, thread_id=thread_id)
         async with self._locked_active(
@@ -1125,6 +1343,90 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 raise
             except Exception:
                 raise PrivateWorkUnavailable(self._context.request_id) from None
+
+    async def _aput_writes_execution_atomic(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str,
+        *,
+        atomic_validator: Callable[..., Awaitable[None]],
+        allow_cancel_requested: bool = False,
+    ) -> None:
+        """Write pending values under the exact raw checkpoint transaction."""
+
+        thread_id = self._thread_id(config)
+        clean_config = self._sanitize_config(config, thread_id=thread_id)
+        preflight_operation = "before_checkpoint_cancel_settlement_write" if allow_cancel_requested else "before_checkpoint_write"
+        async with self._locked_active(
+            thread_id,
+            Capability.PRIVATE_WORK_CREATE,
+            preflight_operation,
+        ):
+            item = await self._raw.aget_tuple(clean_config)
+            if item is not None:
+                self._validate_marker(item, thread_id=thread_id)
+        try:
+            async with postgres_checkpoint_transaction(self._raw) as transaction:
+                if transaction is None:
+                    await self._raw.aput_writes(
+                        clean_config,
+                        writes,
+                        task_id,
+                        task_path,
+                    )
+                    return
+                await atomic_validator(
+                    transaction.connection,
+                    thread_id,
+                    allow_cancel_requested=allow_cancel_requested,
+                )
+                item = await transaction.saver.aget_tuple(clean_config)
+                if item is not None:
+                    self._validate_marker(item, thread_id=thread_id)
+                await transaction.saver.aput_writes(
+                    clean_config,
+                    writes,
+                    task_id,
+                    task_path,
+                )
+                await atomic_validator(
+                    transaction.connection,
+                    thread_id,
+                    allow_cancel_requested=allow_cancel_requested,
+                )
+        except PrivateWorkError:
+            raise
+        except AuthorizationRevoked:
+            raise
+        except Exception:
+            raise PrivateWorkUnavailable(self._context.request_id) from None
+
+    async def aput_writes_cancel_settlement(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        """Persist trusted terminal pending writes after ordinary cancellation."""
+
+        atomic_validator = getattr(
+            self._authorization_boundary,
+            "lock_and_assert_checkpoint_write_in_connection",
+            None,
+        )
+        if not callable(atomic_validator):
+            raise PrivateWorkUnavailable(self._context.request_id)
+        await self._aput_writes_execution_atomic(
+            config,
+            writes,
+            task_id,
+            task_path,
+            atomic_validator=atomic_validator,
+            allow_cancel_requested=True,
+        )
 
     async def aput_writes_already_authorized(
         self,
@@ -1364,7 +1666,6 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 if terminal_authority is not None and terminal_authority.status == "succeeded":
                     run.status = "success"
                     run.error = None
-                    stream_status = "completed"
                     stream_error_code = None
                 elif terminal_authority is not None and terminal_authority.status in {
                     "failed",
@@ -1372,13 +1673,14 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 }:
                     run.status = "error"
                     run.error = terminal_authority.public_error_code
-                    stream_status = "error"
                     stream_error_code = terminal_authority.public_error_code if terminal_authority.public_error_code in STREAM_TERMINAL_ERROR_CODES else None
                 else:
                     run.status = "interrupted"
                     run.error = (None if terminal_authority is None else terminal_authority.cancel_reason) or run.authorization_cancel_reason or run.cancel_reason
-                    stream_status = "interrupted"
                     stream_error_code = None
+                stream_status = stream_terminal_status_for_run_settlement(
+                    RunStatus(run.status),
+                )
                 try:
                     await self._run_event_store.ensure_settled_stream_terminal(
                         session,

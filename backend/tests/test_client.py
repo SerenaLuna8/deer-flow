@@ -899,7 +899,6 @@ class TestEnsureAgent:
         assert profile.subagent_enabled is True
         control_profile = binding_factory.tool_call_control_topology.profile
         assert control_profile.workload_profile == "research"
-        assert control_profile.accounting_mode == "lead_run_subagent_task"
         assert control_profile.lead.internal_tool_call_limit == 200
         assert control_profile.subagent.internal_tool_call_limit == 50
         assert isinstance(

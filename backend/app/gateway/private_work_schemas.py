@@ -83,7 +83,9 @@ def _sanitize_public_messages(value: object) -> object:
     return [message for raw in value if (message := _sanitize_public_user_message(raw)) is not None]
 
 
-def _sanitize_public_run_input(value: object) -> object:
+def public_run_input_projection(value: object) -> object:
+    """Project Run input onto the channels accepted from a public caller."""
+
     if isinstance(value, Mapping):
         # The public endpoint admits user turns, not arbitrary AgentState
         # channels. Goal, summary, promotion, delegation and runtime state are
@@ -183,7 +185,7 @@ class PrivateRunCreateRequest(StrictPrivateWorkRequest):
                 field_name,
                 strip_client_authority_fields(getattr(self, field_name)),
             )
-        self.input = _sanitize_public_run_input(self.input)
+        self.input = public_run_input_projection(self.input)
         command = _sanitize_public_run_command(self.command)
         self.command = command or None
         return self
@@ -263,5 +265,6 @@ __all__ = [
     "StrictPrivateWorkModel",
     "StrictPrivateWorkRequest",
     "StrictPrivateWorkResponse",
+    "public_run_input_projection",
     "strip_client_authority_fields",
 ]

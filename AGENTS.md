@@ -7,32 +7,17 @@ guide before changing a module:
   configuration, assets, and backend tests.
 - [frontend/AGENTS.md](frontend/AGENTS.md) — routes, client scope, data flow,
   UI ownership, and frontend tests.
+- [CONTEXT.md](CONTEXT.md) — domain vocabulary. Use its exact terms in code,
+  tests, and docs; avoid the terms it marks _Avoid_.
 
 For setup, local operation, and deployment, read [README.md](README.md) and
 [Install.md](Install.md).
 
 > The three repository `AGENTS.md` files are development-time guidance only.
 > They are not packaged or read by ActWeave at runtime. A project Agent's
-> `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are immutable database
-> fields, not these filesystem guides. Likewise, `skills/public/*/SKILL.md`
-> contains runtime Skill assets; local coding-agent skills do not.
-
-## Agent skills
-
-### Issue tracker
-
-Track issues and specs in this repository's GitHub Issues using `gh`. See
-`docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Use the five canonical triage labels without remapping. See
-`docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Use the single-context domain-doc layout: root `CONTEXT.md` and `docs/adr/`.
-See `docs/agents/domain.md`.
+> `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are database fields,
+> not these filesystem guides. Likewise, `skills/public/*/SKILL.md` contains
+> runtime Skill assets; local coding-agent skills do not.
 
 ## Architecture boundaries
 

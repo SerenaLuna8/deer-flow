@@ -130,7 +130,11 @@ def append_final_provider_request_guard(
     """
 
     from deerflow.agents.middlewares.provider_request_usage import (
+        ContextCapacityExceeded,
         FinalProviderRequestGuard,
+    )
+    from deerflow.config.summarization_config import (
+        CompactionPolicyIncompatible,
     )
 
     if not isinstance(guard, FinalProviderRequestGuard):
@@ -138,6 +142,19 @@ def append_final_provider_request_guard(
     result = list(middlewares)
     if any(isinstance(middleware, FinalProviderRequestGuard) for middleware in result):
         raise ValueError("final provider request guard is already installed")
+    from deerflow.agents.middlewares.summarization_middleware import (
+        freeze_summarization_profile,
+    )
+
+    # This is the first point where the complete frozen system/tool/overlay
+    # request profile exists. Bind compaction here so an impossible retention
+    # floor fails before the graph can dispatch a Provider request.
+    try:
+        freeze_summarization_profile(result, guard.profile)
+    except CompactionPolicyIncompatible:
+        raise ContextCapacityExceeded(
+            "context_capacity_exceeded: frozen compaction retention cannot fit the model capacity",
+        ) from None
     result.append(
         _layer(
             guard,
@@ -206,6 +223,7 @@ def assemble_agent_middlewares(
     summarization: AgentMiddleware | None = None,
     planning: AgentMiddleware | None = None,
     output_limit_recovery: AgentMiddleware | None = None,
+    output_limit_observer: AgentMiddleware | None = None,
     token_usage: AgentMiddleware | None = None,
     title: AgentMiddleware | None = None,
     after_title: Sequence[AgentMiddleware] = (),
@@ -236,6 +254,7 @@ def assemble_agent_middlewares(
             summarization,
             planning,
             output_limit_recovery,
+            output_limit_observer,
             token_usage,
             title,
             *after_title,
@@ -284,6 +303,13 @@ def assemble_agent_middlewares(
             MiddlewarePhase.RESPONSE_RECOVERY,
             10,
             "Output-limit recovery precedes accounting in registration order.",
+        ),
+        (
+            output_limit_observer,
+            "subagent_output_limit_observer",
+            MiddlewarePhase.RESPONSE_RECOVERY,
+            20,
+            "Delegated output-limit observation preserves raw Provider finish metadata.",
         ),
         (
             token_usage,
@@ -917,15 +943,42 @@ def build_subagent_runtime_middlewares(
             )
         )
 
+    from deerflow.agents.middlewares.subagent_output_limit_middleware import (
+        SubagentOutputLimitMiddleware,
+    )
+
+    middlewares.append(
+        _layer(
+            SubagentOutputLimitMiddleware(),
+            layer_id="subagent_output_limit_observer",
+            phase=MiddlewarePhase.RESPONSE_RECOVERY,
+            slot=20,
+            why=("Observe raw Provider output-limit finish reasons before the delegated Graph normalizes its terminal result."),
+        )
+    )
+
     if model_name is None and app_config.models:
         model_name = app_config.models[0].name
 
     model_config = app_config.get_model_config(model_name) if model_name else None
+    from deerflow.agents.middlewares.provider_request_usage import (
+        declared_visual_max_tokens_per_image,
+    )
     from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
     middlewares.append(
         _layer(
-            ViewImageMiddleware(enable_injection=bool(model_config is not None and model_config.supports_vision)),
+            ViewImageMiddleware(
+                enable_injection=bool(
+                    model_config is not None
+                    and model_config.supports_vision
+                    and declared_visual_max_tokens_per_image(
+                        model_config.system_provider_adapter,
+                        model_config.use,
+                    )
+                    is not None
+                )
+            ),
             layer_id="vision",
             phase=MiddlewarePhase.REQUEST_SHAPING,
             slot=10,

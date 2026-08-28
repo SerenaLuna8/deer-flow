@@ -20,6 +20,8 @@ from deerflow.runtime.events.models import (
     StreamLeaseProof,
     StreamScopeNotFound,
     StreamScopeRequired,
+    StreamTerminalAuthority,
+    StreamTerminalCandidate,
     StreamWriteAuthorityRequired,
 )
 from deerflow.runtime.events.store.db import DbRunEventStore
@@ -141,15 +143,46 @@ class PostgresStreamBridge(StreamBridge):
         *,
         status: str,
         error_code: str | None = None,
+        terminal_authority: StreamTerminalAuthority = "ordinary",
         lease: StreamLeaseProof | None = None,
     ) -> StoredStreamFrame:
         return await self.publish_frame(
             scope,
             thread_id,
             run_id,
-            StreamFrame.end(status=status, error_code=error_code),
+            StreamFrame.end(
+                status=status,
+                error_code=error_code,
+                terminal_authority=terminal_authority,
+            ),
             lease=lease,
         )
+
+    async def publish_terminal_candidate(
+        self,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        *,
+        status: str,
+        error_code: str | None,
+        lease: StreamLeaseProof,
+    ) -> StreamTerminalCandidate:
+        """Persist internal durable-response proof without closing replay."""
+
+        candidate = StreamTerminalCandidate(
+            status=status,  # type: ignore[arg-type]
+            error_code=error_code,  # type: ignore[arg-type]
+        )
+        async with self._sessions() as session, session.begin():
+            return await self._events.append_stream_terminal_candidate(
+                session,
+                scope=scope,
+                thread_id=thread_id,
+                run_id=run_id,
+                candidate=candidate,
+                lease=lease,
+            )
 
     async def ensure_settled_terminal(
         self,
@@ -188,6 +221,7 @@ class PostgresStreamBridge(StreamBridge):
         cursor: int,
         limit: int,
         run_id: str | None = None,
+        full_state_horizon: int | None = None,
     ) -> tuple[StoredStreamFrame, ...]:
         async with self._sessions() as session:
             return await self._events.list_stream_frames(
@@ -196,6 +230,24 @@ class PostgresStreamBridge(StreamBridge):
                 thread_id=thread_id,
                 cursor=cursor,
                 limit=limit,
+                run_id=run_id,
+                full_state_horizon=full_state_horizon,
+            )
+
+    async def latest_full_state_seq(
+        self,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        *,
+        run_id: str,
+    ) -> int:
+        """Newest root ``values`` sequence of the Run; the replay compaction
+        horizon for reconnect consumers. Zero disables compaction."""
+        async with self._sessions() as session:
+            return await self._events.latest_full_state_stream_seq(
+                session,
+                scope=scope,
+                thread_id=thread_id,
                 run_id=run_id,
             )
 

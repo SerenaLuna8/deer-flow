@@ -203,3 +203,28 @@ def test_tool_budget_cap_is_an_additive_completed_stop_reason() -> None:
         "Task Succeeded (capped: tool-call budget). Result: usable partial result",
         None,
     )
+
+
+def test_provider_output_truncation_preserves_partial_result_without_claiming_success() -> None:
+    payload = make_subagent_additional_kwargs(
+        "completed",
+        result="usable partial result",
+        stop_reason="output_truncated",
+    )
+
+    assert "output_truncated" in SUBAGENT_STOP_REASON_VALUES
+    assert read_subagent_result_metadata(payload) == {
+        "status": "completed",
+        "stop_reason": "output_truncated",
+        "result_brief": "usable partial result",
+        "result_sha256": payload["subagent_result_sha256"],
+    }
+    content, metadata_error = format_subagent_result_message(
+        "completed",
+        result="usable partial result",
+        stop_reason="output_truncated",
+    )
+    assert content == ("Task output was truncated by the Provider. Partial result: usable partial result")
+    assert "Succeeded" not in content
+    assert "capped" not in content
+    assert metadata_error is None

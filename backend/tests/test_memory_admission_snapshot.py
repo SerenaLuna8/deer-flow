@@ -131,7 +131,7 @@ def _policy(
     return LockedAgentRuntimePolicy(
         policy_version_id=uuid.uuid4(),
         revision=4,
-        schema_version=3,
+        schema_version=1,
         payload_checksum="a" * 64,
         value=AgentRuntimePolicyValue(
             memory={
@@ -594,8 +594,13 @@ async def test_run_admission_locks_models_before_optional_user_memory_snapshot(
                 @staticmethod
                 def one_or_none():
                     return SimpleNamespace(
-                        kwargs_json={},
-                        schema_version=3,
+                        kwargs_json={
+                            "__run_workload_profile": {
+                                "requested": {"name": "interactive"},
+                                "effective": {"name": "interactive"},
+                            }
+                        },
+                        schema_version=1,
                     )
 
             return Result()

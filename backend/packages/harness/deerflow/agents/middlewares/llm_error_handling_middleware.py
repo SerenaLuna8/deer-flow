@@ -28,7 +28,10 @@ from deerflow.error_codes import (
     CURRENT_UPLOAD_FAILURE_DETAIL,
     PublicRunError,
 )
-from deerflow.models.provider_outcome import ProviderNoResponseProvenError
+from deerflow.models.provider_outcome import (
+    ProviderFailedResponseError,
+    ProviderNoResponseProvenError,
+)
 from deerflow.public_error_codes import (
     llm_error_code_for_reason,
     normalize_llm_error_reason,
@@ -268,6 +271,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     )
 
     def _classify_error(self, exc: BaseException) -> tuple[bool, str]:
+        if isinstance(exc, ProviderFailedResponseError):
+            policy_retriable, reason = self._classify_error(exc.provider_error)
+            if exc.retry_safe:
+                return policy_retriable, reason
+            return False, reason if reason in {"auth", "quota"} else "generic"
+
         status_code = _extract_status_code(exc)
         exception_names = _exception_type_names(exc)
 
@@ -402,9 +411,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         exc: BaseException,
         reason: str,
     ) -> None:
-        provider_error_code, provider_error_type = _extract_safe_provider_classifiers(exc)
-        status_code = _extract_status_code(exc)
-        exception_class = _safe_classifier(type(exc).__name__) or "Exception"
+        diagnostic_error = _provider_response_error(exc)
+        provider_error_code, provider_error_type = _extract_safe_provider_classifiers(diagnostic_error)
+        status_code = _extract_status_code(diagnostic_error)
+        exception_class = _safe_classifier(type(diagnostic_error).__name__) or "Exception"
         logger.warning(
             "LLM call failed after %d attempt(s): error_code=%s exception_class=%s status_code=%s provider_error_code=%s provider_error_type=%s",
             attempt,
@@ -728,6 +738,7 @@ def _extract_provider_error_values(exc: BaseException) -> tuple[str, ...]:
 
 
 def _extract_status_code(exc: BaseException) -> int | None:
+    exc = _provider_response_error(exc)
     for attr in ("status_code", "status"):
         value = getattr(exc, attr, None)
         if isinstance(value, int):
@@ -743,6 +754,15 @@ def _safe_recovered_failure_subtype(
     reason: str,
 ) -> tuple[RecoveredLLMFailureSubtype, int | None]:
     """Return a closed diagnostic class without retaining exception content."""
+
+    if isinstance(exc, ProviderNoResponseProvenError):
+        if exc.failure_code in {
+            "PROVIDER_CONNECT_TIMEOUT",
+            "PROVIDER_POOL_TIMEOUT",
+        }:
+            return "timeout", None
+        if exc.failure_code == "PROVIDER_CONNECT_FAILED":
+            return "connection", None
 
     status_code = _extract_status_code(exc)
     if type(status_code) is int and 100 <= status_code <= 599:
@@ -760,6 +780,7 @@ def _safe_recovered_failure_subtype(
 
 
 def _extract_retry_after_ms(exc: BaseException) -> int | None:
+    exc = _provider_response_error(exc)
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
     if headers is None:
@@ -796,3 +817,9 @@ def _extract_error_detail(exc: BaseException) -> str:
     if isinstance(message, str) and message.strip():
         return message.strip()
     return exc.__class__.__name__
+
+
+def _provider_response_error(exc: BaseException) -> BaseException:
+    if isinstance(exc, ProviderFailedResponseError):
+        return exc.provider_error
+    return exc

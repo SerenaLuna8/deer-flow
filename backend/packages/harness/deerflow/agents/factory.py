@@ -500,10 +500,19 @@ def _assemble_from_features(
 
             token_budget_middleware = TokenBudgetMiddleware.from_config(TokenBudgetConfig())
 
+    output_limit_observer = None
+    if delegated:
+        from deerflow.agents.middlewares.subagent_output_limit_middleware import (
+            SubagentOutputLimitMiddleware,
+        )
+
+        output_limit_observer = SubagentOutputLimitMiddleware()
+
     chain = assemble_agent_middlewares(
         runtime=tuple(runtime_middlewares),
         summarization=summarization_middleware,
         planning=planning_middleware,
+        output_limit_observer=output_limit_observer,
         title=title_middleware,
         after_title=(() if memory_middleware is None else (memory_middleware,)),
         vision=vision_middleware,

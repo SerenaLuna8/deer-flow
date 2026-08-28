@@ -81,7 +81,6 @@ def resolve_run_tool_call_control_policy(
     return ResolvedRunToolCallControlPolicy(
         graph_profile=ResolvedGraphToolCallControlProfile(
             workload_profile=workload.name,
-            accounting_mode=("shared_run" if materialized.schema_version <= 5 else "lead_run_subagent_task"),
             lead=lead,
             subagent=subagent,
         ),

@@ -21,6 +21,10 @@ from pydantic import (
     model_validator,
 )
 
+from deerflow.config.summarization_config import (
+    MIN_TRIM_TOKENS_TO_SUMMARIZE,
+    resolve_effective_compaction_policy,
+)
 from deerflow.config.vision_bridge_config import (
     DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS,
 )
@@ -106,37 +110,27 @@ class InputPolishPolicy(_PolicyModel):
 
 
 class ContextSizePolicy(_PolicyModel):
-    type: Literal["fraction", "tokens", "messages"]
-    value: int | float
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_json_fraction_one(cls, value: object) -> object:
-        if isinstance(value, dict) and value.get("type") == "fraction" and type(value.get("value")) is int and value.get("value") == 1:
-            return {**value, "value": 1.0}
-        return value
-
-    @model_validator(mode="after")
-    def validate_value_for_type(self) -> ContextSizePolicy:
-        if self.type == "fraction":
-            if type(self.value) is not float or not 0 < self.value <= 1:
-                raise ValueError("fraction value must be a float in (0, 1]")
-        elif type(self.value) is not int or not 1 <= self.value <= 2_000_000:
-            raise ValueError("tokens/messages value must be an integer in range")
-        return self
+    type: Literal["tokens"] = "tokens"
+    value: int = Field(ge=1, le=2_000_000)
 
 
 class SummarizationPolicy(_PolicyModel):
     enabled: bool = True
     model_name: ModelName | None = None
-    trigger: list[ContextSizePolicy] | None = Field(
-        default_factory=lambda: [ContextSizePolicy(type="tokens", value=32_000)],
-        max_length=8,
-    )
+    # Exactly one automatic trigger: an estimated-token threshold. ``None``
+    # disables automatic summarization. Message-count and context-fraction
+    # triggers do not exist in the consolidated v1 policy schema.
+    trigger_tokens: int | None = Field(default=320_000, ge=1, le=2_000_000)
     keep: ContextSizePolicy = Field(
-        default_factory=lambda: ContextSizePolicy(type="messages", value=10),
+        default_factory=lambda: ContextSizePolicy(type="tokens", value=64_000),
     )
-    trim_tokens_to_summarize: int | None = Field(default=15_564, ge=1, le=2_000_000)
+    # The floor keeps one packaged SNIP leaf prompt plannable; see
+    # deerflow.config.summarization_config.MIN_TRIM_TOKENS_TO_SUMMARIZE.
+    trim_tokens_to_summarize: int | None = Field(
+        default=15_564,
+        ge=MIN_TRIM_TOKENS_TO_SUMMARIZE,
+        le=2_000_000,
+    )
     skill_file_read_tool_names: list[ToolName] = Field(
         default_factory=lambda: ["read_file", "read", "view", "cat"],
         min_length=1,
@@ -149,6 +143,16 @@ class SummarizationPolicy(_PolicyModel):
         if len(value) != len(set(value)):
             raise ValueError("tool names must be unique")
         return value
+
+    @model_validator(mode="after")
+    def validate_retention_below_trigger(self) -> SummarizationPolicy:
+        if self.enabled and self.trigger_tokens is not None:
+            resolve_effective_compaction_policy(
+                trigger_tokens=self.trigger_tokens,
+                keep_tokens=self.keep.value,
+                context_window_tokens=None,
+            )
+        return self
 
 
 class MemoryPolicy(_PolicyModel):

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app.private_work import context_evidence_observer as observer_module
 from app.private_work.context import PrivateWorkContext
@@ -15,6 +16,7 @@ from app.private_work.context_evidence_observer import (
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from deerflow.config.summarization_config import EffectiveCompactionPolicy
 from deerflow.persistence.context_evidence import (
     ContextEvidenceRecord,
     ContextEvidenceScope,
@@ -229,6 +231,96 @@ class _ProjectionTransaction:
         return object()
 
 
+def test_admitted_compaction_policy_cannot_be_rebound_to_current_settings() -> None:
+    observer = PrivateRunContextEvidenceObserver(
+        lambda: _Session(),  # type: ignore[arg-type]
+        context=_context(),
+        boundary=_Boundary(),
+        thread_id=THREAD_ID,
+        run_id="run-frozen-policy",
+        subject=ContextSubject.lead_thread(thread_id=THREAD_ID),
+        model_identity_digest="d" * 64,
+        context_window_tokens=300_000,
+        compaction_enabled=True,
+        compaction_threshold_tokens=240_000,
+    )
+    admitted = EffectiveCompactionPolicy(
+        trigger_tokens=220_000,
+        keep_tokens=64_000,
+        context_window_tokens=300_000,
+        fixed_noncompressible_safety_tokens=12_000,
+        summary_headroom_tokens=4_096,
+        retained_context_safety_tokens=90_000,
+    )
+    current = EffectiveCompactionPolicy(
+        trigger_tokens=180_000,
+        keep_tokens=32_000,
+        context_window_tokens=300_000,
+        fixed_noncompressible_safety_tokens=12_000,
+        summary_headroom_tokens=4_096,
+        retained_context_safety_tokens=45_000,
+    )
+
+    observer.freeze_compaction_policy(admitted)
+    with pytest.raises(ValueError, match="already frozen"):
+        observer.freeze_compaction_policy(current)
+
+    assert observer.effective_compaction_policy == admitted
+
+
+def test_bootstrap_compaction_receipt_remeasures_source_and_result_on_one_basis() -> None:
+    """A pre-Provider checkpoint never compares against a synthetic token total."""
+
+    observer = PrivateRunContextEvidenceObserver(
+        lambda: _Session(),  # type: ignore[arg-type]
+        context=_context(),
+        boundary=_Boundary(),
+        thread_id=THREAD_ID,
+        run_id="run-bootstrap-compaction",
+        subject=ContextSubject.lead_thread(thread_id=THREAD_ID),
+        model_identity_digest="d" * 64,
+        context_window_tokens=300_000,
+        compaction_enabled=True,
+        compaction_threshold_tokens=240_000,
+    )
+    archived = HumanMessage(
+        id="bootstrap-archived",
+        content="archived " * 1_000,
+        additional_kwargs={"large_server_metadata": "m" * 8_000},
+    )
+    retained = AIMessage(
+        id="bootstrap-retained",
+        content="retained tail",
+        response_metadata={"provider_metadata": "p" * 4_000},
+    )
+
+    receipt = observer.prepare_compaction_checkpoint_receipt(
+        source_checkpoint_id="checkpoint-bootstrap",
+        source_snapshot=None,
+        estimator=ContextCheckpointEstimator(
+            error_allowance_ratio=0.2,
+            provider_fixed_overhead_tokens=10,
+            provider_per_message_overhead_tokens=2,
+            provider_per_tool_overhead_tokens=3,
+            fixed_message_count=1,
+            tool_count=2,
+        ),
+        source_state_digest="a" * 64,
+        source_values={
+            "messages": [archived, retained],
+            "summary_text": None,
+        },
+        result_values={
+            "messages": [retained],
+            "summary_text": "compact continuity",
+        },
+    )
+
+    assert receipt.result_tokens < receipt.source_tokens
+    assert receipt.source_tokens > 1_000
+    assert receipt.result_tokens == (receipt.projection_snapshot.measurement.projected_tokens)
+
+
 @pytest.mark.asyncio
 async def test_worker_observer_acks_every_provider_lifecycle_fact(
     monkeypatch: pytest.MonkeyPatch,
@@ -262,6 +354,16 @@ async def test_worker_observer_acks_every_provider_lifecycle_fact(
         context_window_tokens=300_000,
         compaction_enabled=True,
         compaction_threshold_tokens=240_000,
+    )
+    observer.freeze_compaction_policy(
+        EffectiveCompactionPolicy(
+            trigger_tokens=220_000,
+            keep_tokens=64_000,
+            context_window_tokens=300_000,
+            fixed_noncompressible_safety_tokens=12_000,
+            summary_headroom_tokens=4_096,
+            retained_context_safety_tokens=90_000,
+        )
     )
     observer._revalidator = _Revalidator()  # type: ignore[assignment]
 
@@ -298,6 +400,11 @@ async def test_worker_observer_acks_every_provider_lifecycle_fact(
     ]
     prepared_payloads = _ProjectionTransaction.calls[0][1]
     assert isinstance(prepared_payloads[0], WindowOpenedV1)
+    assert prepared_payloads[0].compaction_threshold_tokens == 220_000
+    assert prepared_payloads[0].compaction_keep_tokens == 64_000
+    assert prepared_payloads[0].compaction_fixed_safety_tokens == 12_000
+    assert prepared_payloads[0].compaction_summary_headroom_tokens == 4_096
+    assert prepared_payloads[0].compaction_retained_safety_tokens == 90_000
     assert isinstance(prepared_payloads[1], RequestPreparedV1)
     assert isinstance(_ProjectionTransaction.calls[1][1][0], RequestDispatchedV1)
     assert isinstance(_ProjectionTransaction.calls[2][1][0], ProviderObservedV1)
@@ -309,6 +416,59 @@ async def test_worker_observer_acks_every_provider_lifecycle_fact(
     assert checkpoint_snapshot.provider_call_id == provider_call.provider_call_id
     assert checkpoint_snapshot.provider_subject == provider_call.subject
     assert checkpoint_snapshot.provider_response_digest == "e" * 64
+
+
+@pytest.mark.asyncio
+async def test_worker_observer_persists_adapter_proven_retry_safe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _Repository()
+    _ProjectionTransaction.calls.clear()
+    monkeypatch.setattr(
+        observer_module,
+        "ContextEvidenceRepository",
+        lambda _session: repository,
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "ContextProjectionTransaction",
+        _ProjectionTransaction,
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "PrivateThreadRepository",
+        lambda _session: SimpleNamespace(
+            get=lambda **_kwargs: _async_value(
+                SimpleNamespace(thread_id=THREAD_ID),
+            )
+        ),
+    )
+    observer = PrivateRunContextEvidenceObserver(
+        lambda: _Session(),  # type: ignore[arg-type]
+        context=_context(),
+        boundary=_Boundary(),
+        thread_id=THREAD_ID,
+        run_id="run-rate-limit",
+        subject=ContextSubject.lead_thread(thread_id=THREAD_ID),
+        model_identity_digest="d" * 64,
+        context_window_tokens=300_000,
+        compaction_enabled=True,
+        compaction_threshold_tokens=240_000,
+    )
+    observer._revalidator = _Revalidator()  # type: ignore[assignment]
+
+    provider_call = await observer.record_request_prepared(_measurement())
+    await observer.record_request_dispatched(provider_call)
+    await observer.record_provider_failed(
+        provider_call,
+        failure_code="PROVIDER_HTTP_429",
+        retry_safety=ProviderRetrySafety.FAILED_RESPONSE_RETRY_SAFE,
+    )
+
+    terminal = _ProjectionTransaction.calls[-1][1][0]
+    assert isinstance(terminal, ProviderFailedV1)
+    assert terminal.failure_code == "PROVIDER_HTTP_429"
+    assert terminal.retry_safety is ProviderRetrySafety.FAILED_RESPONSE_RETRY_SAFE
 
 
 @pytest.mark.asyncio
@@ -676,8 +836,23 @@ async def test_restarted_ambiguous_call_settles_head_without_provider_retry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_code", "retry_safety"),
+    [
+        (
+            "CONNECT_REJECTED",
+            ProviderRetrySafety.NO_RESPONSE_PROVEN,
+        ),
+        (
+            "PROVIDER_HTTP_429",
+            ProviderRetrySafety.FAILED_RESPONSE_RETRY_SAFE,
+        ),
+    ],
+)
 async def test_worker_restart_derives_ordinal_without_scanning_unrelated_history(
     monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
+    retry_safety: ProviderRetrySafety,
 ) -> None:
     context = _context()
     scope = ContextEvidenceScope.from_resource(context.resource_scope, THREAD_ID)
@@ -762,8 +937,8 @@ async def test_worker_restart_derives_ordinal_without_scanning_unrelated_history
             lead_ref,
             ProviderFailedV1(
                 provider_call_id=failed_call.provider_call_id,
-                failure_code="CONNECT_REJECTED",
-                retry_safety=ProviderRetrySafety.NO_RESPONSE_PROVEN,
+                failure_code=failure_code,
+                retry_safety=retry_safety,
             ),
             origin_run_id="run-1",
             provider_call_id=failed_call.provider_call_id,

@@ -74,7 +74,7 @@ from deerflow.persistence.execution_approvals import (
     ExecutionApprovalRequestRow,
     ExecutionApprovalResultReceiptRow,
 )
-from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
+from deerflow.persistence.jobs.model import DeadJobRow, JobAttemptRow, JobRow
 from deerflow.persistence.jobs.sql import JobClaim
 from deerflow.persistence.private_work import (
     RunAssetVersionRow,
@@ -2019,6 +2019,49 @@ class WorkerHostExecutionApprovalPort(
             ) from error
 
 
+async def _staged_approval_source_job_id(
+    session: AsyncSession,
+    *,
+    claim: JobClaim,
+) -> uuid.UUID:
+    """Resolve the immutable producing Job behind a settlement successor."""
+
+    if not claim.settlement_only:
+        return claim.job_id
+    predecessor_job_id = claim.predecessor_dead_job_id
+    if predecessor_job_id is None:
+        raise ExecutionApprovalPrivateLifecycleConflict()
+    successor = await session.get(JobRow, claim.job_id)
+    predecessor = await session.get(JobRow, predecessor_job_id)
+    dead = await session.get(DeadJobRow, predecessor_job_id)
+    if (
+        successor is None
+        or predecessor is None
+        or dead is None
+        or successor.predecessor_dead_job_id != predecessor_job_id
+        or successor.project_id != claim.scope.project_id
+        or successor.owner_user_id != claim.scope.owner_user_id
+        or successor.run_id != claim.run_id
+        or successor.job_type != claim.job_type
+        or successor.origin_trace_id != claim.origin_trace_id
+        or successor.retry_safety != "safe"
+        or predecessor.status != "dead"
+        or predecessor.project_id != successor.project_id
+        or predecessor.owner_user_id != successor.owner_user_id
+        or predecessor.run_id != successor.run_id
+        or predecessor.job_type != successor.job_type
+        or predecessor.origin_trace_id != successor.origin_trace_id
+        or dead.project_id != predecessor.project_id
+        or dead.job_type != predecessor.job_type
+        or dead.retry_safety != predecessor.retry_safety
+        or dead.attempt_count != predecessor.attempt_count
+        or dead.public_error_code != predecessor.public_error_code
+        or not ((predecessor.public_error_code == "SIDE_EFFECT_STATE_UNKNOWN" and predecessor.retry_safety != "safe") or (predecessor.public_error_code == "ATTEMPTS_EXHAUSTED" and predecessor.attempt_count >= predecessor.max_attempts))
+    ):
+        raise ExecutionApprovalPrivateLifecycleConflict()
+    return predecessor_job_id
+
+
 async def settle_staged_execution_approvals(
     session: AsyncSession,
     *,
@@ -2037,6 +2080,10 @@ async def settle_staged_execution_approvals(
         if suspended_approval_id is not None:
             raise ExecutionApprovalPrivateLifecycleConflict()
         return
+    source_job_id = await _staged_approval_source_job_id(
+        session,
+        claim=claim,
+    )
     suspended_id: uuid.UUID | None = None
     if suspended_approval_id is not None:
         try:
@@ -2058,7 +2105,7 @@ async def settle_staged_execution_approvals(
                     ExecutionApprovalRequestRow.project_id == claim.scope.project_id,
                     ExecutionApprovalRequestRow.owner_user_id == claim.scope.owner_user_id,
                     ExecutionApprovalRequestRow.source_run_id == claim.run_id,
-                    ExecutionApprovalRequestRow.source_job_id == claim.job_id,
+                    ExecutionApprovalRequestRow.source_job_id == source_job_id,
                     ExecutionApprovalRequestRow.status == "staged",
                 )
                 .with_for_update(),
@@ -2079,7 +2126,15 @@ async def settle_staged_execution_approvals(
     )
     if source_run is None:
         raise ExecutionApprovalPrivateLifecycleConflict()
-    sealed_rows = tuple(row for row in rows if staged_approval_has_exact_suspension_marker(row, source_run))
+    sealed_rows = tuple(
+        row
+        for row in rows
+        if staged_approval_has_exact_suspension_marker(
+            row,
+            source_run,
+            bound_job_id=claim.job_id,
+        )
+    )
     if sealed_rows and (not succeeded or suspended_id is None or len(sealed_rows) != 1 or sealed_rows[0].id != suspended_id):
         # The marker is a checkpoint-safe durable success proof.  A later
         # stream ACK/error/cancel cannot reinterpret that exact source result
@@ -2154,6 +2209,10 @@ async def recover_staged_execution_approval_id(
 
     if claim.run_id is None or claim.scope.owner_user_id is None:
         raise ExecutionApprovalPrivateLifecycleConflict()
+    source_job_id = await _staged_approval_source_job_id(
+        session,
+        claim=claim,
+    )
     run = await session.scalar(
         sa.select(RunRow)
         .where(
@@ -2173,7 +2232,7 @@ async def recover_staged_execution_approval_id(
         raise ExecutionApprovalPrivateLifecycleConflict() from None
     if marker is None:
         return None
-    if marker.source_job_id != claim.job_id:
+    if marker.source_job_id != source_job_id:
         raise ExecutionApprovalPrivateLifecycleConflict()
     approval = await session.scalar(
         sa.select(ExecutionApprovalRequestRow)
@@ -2183,7 +2242,7 @@ async def recover_staged_execution_approval_id(
             ExecutionApprovalRequestRow.owner_user_id == claim.scope.owner_user_id,
             ExecutionApprovalRequestRow.thread_id == run.thread_id,
             ExecutionApprovalRequestRow.source_run_id == claim.run_id,
-            ExecutionApprovalRequestRow.source_job_id == claim.job_id,
+            ExecutionApprovalRequestRow.source_job_id == source_job_id,
             ExecutionApprovalRequestRow.source_job_attempt_id == marker.producing_attempt_id,
             ExecutionApprovalRequestRow.status == "staged",
         )

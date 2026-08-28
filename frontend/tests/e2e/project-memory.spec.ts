@@ -349,10 +349,10 @@ test("a direct Memory URL shows 403 without mounting Memory queries", async ({
   const denied = page.locator('[data-error-status="403"]');
   await expect(denied).toHaveAttribute("role", "alert");
   await expect(
-    page.getByRole("heading", { name: "没有访问权限" }),
+    page.getByRole("heading", { name: "You do not have access" }),
   ).toBeVisible();
   await expect(
-    page.getByText("无权访问项目记忆", { exact: false }),
+    page.getByText("cannot access Memory", { exact: false }),
   ).toBeVisible();
   await expect(page.getByText("No historical versions yet.")).toHaveCount(0);
   expect(memoryRequests).toEqual([]);

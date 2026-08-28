@@ -1,19 +1,19 @@
 ---
-title: Why ActWeave
-description: ActWeave exists because modern agent systems need more than a chat loop. A useful agent must plan over long horizons, break work into sub-tasks, use tools, manipulate files, run code safely, and preserve enough context to stay coherent across a complex task. ActWeave was built to provide that runtime foundation.
+title: Why Fluva
+description: Fluva exists because modern agent systems need more than a chat loop. A useful agent must plan over long horizons, break work into sub-tasks, use tools, manipulate files, run code safely, and preserve enough context to stay coherent across a complex task. Fluva was built to provide that runtime foundation.
 ---
 
 import { Callout } from "nextra/components";
 
-# Why ActWeave
+# Why Fluva
 
 <Callout type="info" emoji="🦌">
-  ActWeave continues the upstream DeerFlow project's evolution from deep
+  Fluva continues the upstream DeerFlow project's evolution from deep
   research into a general runtime for long-horizon agents that need skills,
   memory, tools, and coordination.
 </Callout>
 
-ActWeave exists because modern agent systems need more than a chat loop. A useful agent must plan over long horizons, break work into sub-tasks, use tools, manipulate files, run code safely, and preserve enough context to stay coherent across a complex task. ActWeave was built to provide that runtime foundation.
+Fluva exists because modern agent systems need more than a chat loop. A useful agent must plan over long horizons, break work into sub-tasks, use tools, manipulate files, run code safely, and preserve enough context to stay coherent across a complex task. Fluva was built to provide that runtime foundation.
 
 ## It started as deep research
 
@@ -27,15 +27,15 @@ The common thread was clear: the valuable part was not only the research workflo
 
 That shift in usage led to a key conclusion: deep research should be treated as one capability inside a broader agent runtime, not as the definition of the entire product.
 
-ActWeave carries that evolution forward as a general-purpose harness for long-running agents. In this model, research is still important, but it becomes one skill among many rather than the fixed shape of the system.
+Fluva carries that evolution forward as a general-purpose harness for long-running agents. In this model, research is still important, but it becomes one skill among many rather than the fixed shape of the system.
 
-This is why ActWeave is described as a **harness** instead of only a framework or only an application.
+This is why Fluva is described as a **harness** instead of only a framework or only an application.
 
 ## Why a harness matters
 
 A harness is an opinionated runtime for agents. It does not just expose abstractions. It packages the infrastructure an agent needs to do useful work in realistic environments.
 
-For ActWeave, that means combining the core pieces required for long-horizon execution:
+For Fluva, that means combining the core pieces required for long-horizon execution:
 
 - **Skills** for task-specific capabilities that can be loaded only when needed.
 - **Sandboxed execution** so agents can work with files, run commands, and produce artifacts safely.
@@ -45,17 +45,17 @@ For ActWeave, that means combining the core pieces required for long-horizon exe
 
 These are the building blocks that make an agent useful beyond a single prompt-response exchange.
 
-## Why ActWeave moved beyond fixed multi-agent graphs
+## Why Fluva moved beyond fixed multi-agent graphs
 
 Earlier agent systems often modeled work as a fixed graph of specialized roles. That approach can work for a narrow workflow, but it becomes rigid once users want the system to handle a broader range of tasks.
 
-The upstream project moved toward a different architecture: a lead agent with middleware, tools, and dynamically invoked subagents. ActWeave continues this architecture, making the system easier to extend because new capabilities can be introduced as skills, tools, or runtime policies instead of requiring the whole orchestration graph to be redesigned.
+The upstream project moved toward a different architecture: a lead agent with middleware, tools, and dynamically invoked subagents. Fluva continues this architecture, making the system easier to extend because new capabilities can be introduced as skills, tools, or runtime policies instead of requiring the whole orchestration graph to be redesigned.
 
-That architectural shift reflects the main motivation behind ActWeave: build the reusable runtime layer first, then let many workflows sit on top of it.
+That architectural shift reflects the main motivation behind Fluva: build the reusable runtime layer first, then let many workflows sit on top of it.
 
-## ActWeave is built for long-horizon work
+## Fluva is built for long-horizon work
 
-ActWeave is motivated by a specific view of agents: the most valuable systems are not the ones that generate a single answer fastest, but the ones that can stay productive across a longer chain of actions.
+Fluva is motivated by a specific view of agents: the most valuable systems are not the ones that generate a single answer fastest, but the ones that can stay productive across a longer chain of actions.
 
 A long-horizon agent needs to do more than respond. It needs to:
 
@@ -65,13 +65,13 @@ A long-horizon agent needs to do more than respond. It needs to:
 4. recover from complexity without losing direction, and
 5. return an artifact that a human can review, refine, or continue from.
 
-That is the category of problem ActWeave is designed for.
+That is the category of problem Fluva is designed for.
 
 ## The goal
 
-The goal of ActWeave is to provide a solid foundation for building and operating agent systems that can actually do work.
+The goal of Fluva is to provide a solid foundation for building and operating agent systems that can actually do work.
 
-If you are evaluating ActWeave, the important idea is this: ActWeave is not just a research demo and not just a UI wrapper around an LLM. It is a runtime harness for agents that need skills, memory, tools, isolation, and coordination to complete real tasks.
+If you are evaluating Fluva, the important idea is this: Fluva is not just a research demo and not just a UI wrapper around an LLM. It is a runtime harness for agents that need skills, memory, tools, isolation, and coordination to complete real tasks.
 
 <Cards num={2}>
   <Cards.Card title="Core Concepts" href="/docs/introduction/core-concepts" />

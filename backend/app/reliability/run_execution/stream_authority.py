@@ -10,6 +10,7 @@ from deerflow.runtime.events.models import (
     StoredStreamFrame,
     StreamFrame,
     StreamLeaseProof,
+    StreamTerminalAuthority,
     StreamWriteAuthorizationRevoked,
     StreamWriteCancelled,
     StreamWriteLeaseLost,
@@ -46,6 +47,7 @@ class LeaseAuthorizedStreamBridge:
         thread_id: str | None = None,
         terminal_status: Callable[[], str] | None = None,
         terminal_error_code: Callable[[], str | None] | None = None,
+        terminal_authority: Callable[[], StreamTerminalAuthority] | None = None,
     ) -> None:
         self._bridge = bridge
         self._boundary = boundary
@@ -53,6 +55,7 @@ class LeaseAuthorizedStreamBridge:
         self._thread_id = thread_id
         self._terminal_status = terminal_status
         self._terminal_error_code = terminal_error_code
+        self._terminal_authority = terminal_authority
 
     @property
     def supports_cross_process(self) -> bool:
@@ -88,6 +91,29 @@ class LeaseAuthorizedStreamBridge:
         await self._bridge.publish(run_id, event, data)
 
     async def publish_end(self, run_id: str) -> None:
+        terminal_authority = self._terminal_authority() if self._terminal_authority is not None else "ordinary"
+        publish_candidate = getattr(
+            self._bridge,
+            "publish_terminal_candidate",
+            None,
+        )
+        if terminal_authority == "durable_response" and callable(publish_candidate) and self._scope is not None and self._thread_id is not None:
+            try:
+                await publish_candidate(
+                    self._scope,
+                    self._thread_id,
+                    run_id,
+                    status=(self._terminal_status() if self._terminal_status is not None else "error"),
+                    error_code=(self._terminal_error_code() if self._terminal_error_code is not None else None),
+                    lease=self._boundary.stream_lease_proof(),
+                )
+            except StreamWriteAuthorizationRevoked:
+                self._boundary.record_stream_authorization_revoked()
+                raise AuthorizationRevoked from None
+            except StreamWriteLeaseLost:
+                self._boundary.record_stream_lease_lost()
+                raise AuthorizationRevoked from None
+            return
         publish_terminal = getattr(
             self._bridge,
             "publish_terminal",
@@ -101,6 +127,7 @@ class LeaseAuthorizedStreamBridge:
                     run_id,
                     status=(self._terminal_status() if self._terminal_status is not None else "completed"),
                     error_code=(self._terminal_error_code() if self._terminal_error_code is not None else None),
+                    terminal_authority=terminal_authority,
                     lease=self._boundary.stream_lease_proof(),
                 )
             except StreamWriteAuthorizationRevoked:

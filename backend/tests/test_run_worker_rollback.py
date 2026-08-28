@@ -2,7 +2,7 @@ import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, TypedDict
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
@@ -613,6 +613,7 @@ async def test_model_output_limit_publishes_terminal_before_job_settlement() -> 
 
     assert record.status is RunStatus.error
     assert record.error == "MODEL_OUTPUT_LIMIT"
+    assert record.terminal_authority == "durable_response"
     assert not [call for call in bridge.publish.await_args_list if call.args[1] == "error"]
     bridge.publish_end.assert_awaited_once_with("output-limit-run")
 
@@ -726,6 +727,48 @@ async def test_observed_output_limit_terminal_wins_over_late_user_cancel(
     assert record.status is RunStatus.error
     assert record.error == "MODEL_OUTPUT_LIMIT"
     assert not [call for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_internal_rollback_preempts_observed_output_limit() -> None:
+    run_manager = RunManager()
+    record = await run_manager.create("output-limit-rollback-thread")
+    record.abort_action = "rollback"
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class _Graph:
+        async def astream(self, *args, **kwargs):
+            del args
+            runtime = kwargs["config"]["configurable"]["__pregel_runtime"]
+            recorder = runtime.context[RuntimeContextKeys.RUN_SEMANTIC_STOP_RECORDER]
+            recorder.record("model_output_limit")
+            record.abort_event.set()
+            if False:
+                yield  # pragma: no cover
+
+    with patch(
+        "deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint",
+        new=AsyncMock(return_value=True),
+    ) as rollback:
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: _Graph(),
+            graph_input={"messages": []},
+            config={},
+        )
+
+    assert record.status is RunStatus.error
+    assert record.error == "Rolled back by user"
+    assert record.terminal_authority == "ordinary"
+    rollback.assert_awaited_once()
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 

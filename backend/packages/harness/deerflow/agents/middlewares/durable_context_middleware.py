@@ -20,7 +20,11 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
+from deerflow.agents.middlewares.delegation_ledger import (
+    extract_delegations,
+    render_delegation_ledger,
+    stale_delegation_updates,
+)
 from deerflow.agents.middlewares.provider_request_cost_adapter import (
     MessageLaneProvenance,
     SystemPromptLaneSpan,
@@ -419,9 +423,23 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
     ) -> dict | None:
         messages = state["messages"]
         updates: dict = {}
+        existing_delegations = state.get("delegations") or []
+        scope = _runtime_delegation_scope(runtime)
+        if scope is not None and all(isinstance(scope.get(field), str) and scope[field] for field in ("project_id", "owner_user_id", "run_id")):
+            stale_updates = stale_delegation_updates(
+                existing_delegations,
+                project_id=scope["project_id"],
+                owner_user_id=scope["owner_user_id"],
+                current_run_id=scope["run_id"],
+            )
+            if stale_updates:
+                updates["delegations"] = stale_updates
         delegation_update = self._capture_delegations(state, runtime)
         if delegation_update:
-            updates.update(delegation_update)
+            updates["delegations"] = [
+                *updates.get("delegations", []),
+                *delegation_update["delegations"],
+            ]
         skills = extract_skills(messages, skills_root=self._skills_root, read_tool_names=self._skill_read_tool_names)
         if skills:
             updates["skill_context"] = skills

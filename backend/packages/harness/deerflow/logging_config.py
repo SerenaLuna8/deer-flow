@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -14,6 +15,27 @@ DEFAULT_LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 TRACE_TEXT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - [trace_id=%(trace_id)s] - %(message)s"
 _TRACE_FILTER_NAME = "deerflow_trace_context_filter"
+_STRUCTURED_LOG_FIELD_NAMES = (
+    "event",
+    "execution_id",
+    "scheduling_key",
+    "queue_wait_seconds",
+    "queue_wait_warning_threshold_seconds",
+)
+
+
+def _structured_log_fields(record: logging.LogRecord) -> dict[str, str | int | float]:
+    """Return the bounded telemetry fields supported by production formatters."""
+    fields: dict[str, str | int | float] = {}
+    for name in _STRUCTURED_LOG_FIELD_NAMES:
+        value = getattr(record, name, None)
+        if isinstance(value, str):
+            fields[name] = value
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            if isinstance(value, float) and not math.isfinite(value):
+                continue
+            fields[name] = value
+    return fields
 
 
 class TraceContextFilter(logging.Filter):
@@ -41,6 +63,7 @@ class JsonTraceFormatter(logging.Formatter):
             "trace_id": record.trace_id,
             "message": record.getMessage(),
         }
+        payload.update(_structured_log_fields(record))
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         if record.stack_info:
@@ -49,9 +72,17 @@ class JsonTraceFormatter(logging.Formatter):
 
 
 class TraceTextFormatter(logging.Formatter):
-    """Marker subclass so trace formatting can be reverted cleanly in tests."""
+    """Text formatter with explicit production telemetry fields."""
 
     _deerflow_trace_formatter = True
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        fields = _structured_log_fields(record)
+        if not fields:
+            return rendered
+        suffix = " ".join(f"{name}={json.dumps(value, ensure_ascii=False)}" for name, value in fields.items())
+        return f"{rendered} {suffix}"
 
 
 def _ensure_root_handler() -> None:
@@ -89,7 +120,7 @@ def configure_logging(config: object) -> None:
     With logging enhancement disabled this preserves the previous
     ``basicConfig + apply_logging_level`` behavior. With enhancement enabled,
     root handlers gain a trace-context filter and a formatter that includes
-    only the additional ``trace_id`` field.
+    ``trace_id`` plus an explicit allowlist of operational telemetry fields.
     """
     _ensure_root_handler()
 

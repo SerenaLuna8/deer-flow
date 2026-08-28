@@ -5,13 +5,12 @@ consumers read the structured facts carried inside
 ``ToolMessage.additional_kwargs``:
 
 - ``subagent_status``: one of ``SUBAGENT_STATUS_VALUES``.
-- ``subagent_stop_reason`` (optional): when a guardrail cap ended the run
-  early, one of ``SUBAGENT_STOP_REASON_VALUES`` (``token_capped`` /
-  ``turn_capped`` / ``loop_capped`` / ``tool_budget_capped``). Additive
-  (#3875 Phase 2): a capped run that still produced a final answer stays
-  ``status=completed`` and carries the cap here; a capped run with no usable
-  output is ``status=failed`` + ``stop_reason``. Old frontends ignore the
-  unknown field.
+- ``subagent_stop_reason`` (optional): why the run ended without a clean final
+  response, one of ``SUBAGENT_STOP_REASON_VALUES``. A guardrail-capped run or
+  Provider-truncated response that still produced usable partial work stays
+  ``status=completed`` and carries the reason here; one with no usable output
+  is ``status=failed`` + ``stop_reason``. Old frontends ignore the unknown
+  field.
 - ``subagent_error`` (optional): the human-readable error blob the
   backend recorded.
 - ``subagent_result_brief`` / ``subagent_result_sha256`` (optional):
@@ -72,11 +71,10 @@ SubagentStatusValue = Literal[
     "polling_timed_out",
 ]
 
-#: Enumeration of every value ``subagent_status`` may take. Capped runs do
-#: NOT get their own status value (#3875 Phase 2): a cap that still produced
-#: output is ``completed`` and a cap with no output is ``failed``, with the
-#: reason carried on the additive ``subagent_stop_reason`` field so old
-#: consumers keep working.
+#: Enumeration of every value ``subagent_status`` may take. Non-clean
+#: completions do NOT get their own status value: usable partial work is
+#: ``completed`` and no usable output is ``failed``, with the exact reason on
+#: the additive ``subagent_stop_reason`` field so old consumers keep working.
 SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
     "completed",
     "failed",
@@ -85,13 +83,14 @@ SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
     "polling_timed_out",
 )
 
-#: Why a guardrail cap ended a run early. Carried on the additive
+#: Why a run ended without a clean final response. Carried on the additive
 #: ``subagent_stop_reason`` field, never as a status enum value.
 SubagentStopReasonValue = Literal[
     "token_capped",
     "turn_capped",
     "loop_capped",
     "tool_budget_capped",
+    "output_truncated",
 ]
 
 SUBAGENT_STOP_REASON_VALUES: tuple[SubagentStopReasonValue, ...] = (
@@ -99,6 +98,7 @@ SUBAGENT_STOP_REASON_VALUES: tuple[SubagentStopReasonValue, ...] = (
     "turn_capped",
     "loop_capped",
     "tool_budget_capped",
+    "output_truncated",
 )
 
 #: Human-readable label folded into the model-visible result text when a cap
@@ -111,10 +111,9 @@ _STOP_REASON_LABELS: dict[SubagentStopReasonValue, str] = {
 }
 
 #: Statuses that carry a recoverable result in ``subagent_result_brief`` /
-#: ``subagent_result_sha256``. Only ``completed`` — and a capped run that
-#: produced usable partial work surfaces as ``completed`` (+ ``stop_reason``),
-#: so its work survives on the wire the same way a clean success does. Other
-#: non-completed statuses carry only ``subagent_error``.
+#: ``subagent_result_sha256``. Only ``completed`` carries usable work, including
+#: a guardrail-capped or Provider-truncated partial result (+ ``stop_reason``).
+#: Other non-completed statuses carry only ``subagent_error``.
 _RESULT_BEARING_STATUSES: frozenset[SubagentStatusValue] = frozenset({"completed"})
 
 #: Read-side normalization for status values that previously appeared in
@@ -167,7 +166,8 @@ def make_subagent_additional_kwargs(
 
     Drops the error field when blank so the JSON wire format never carries
     a misleading empty ``subagent_error: ""``. ``stop_reason`` is stamped
-    only when a guardrail cap ended the run (see :data:`SUBAGENT_STOP_REASON_VALUES`).
+    only for a recognized non-clean completion reason (see
+    :data:`SUBAGENT_STOP_REASON_VALUES`).
 
     Raises:
         ValueError: when ``status`` is not in :data:`SUBAGENT_STATUS_VALUES`,
@@ -188,8 +188,8 @@ def make_subagent_additional_kwargs(
     if status in _RESULT_BEARING_STATUSES and isinstance(result, str) and result.strip():
         payload[SUBAGENT_RESULT_BRIEF_KEY] = _bound_metadata_text(result)
         payload[SUBAGENT_RESULT_SHA256_KEY] = hashlib.sha256(result.encode("utf-8")).hexdigest()
-    # Only ``completed`` (a clean success, or a capped run whose partial work
-    # survived) suppresses the error blob; every other status carries it.
+    # Only ``completed`` (clean or with usable partial work) suppresses the
+    # error blob; every other status carries it.
     if status != "completed" and isinstance(error, str) and error.strip():
         payload[SUBAGENT_ERROR_KEY] = _bound_metadata_text(error)
     if stop_reason is not None:
@@ -291,17 +291,20 @@ def format_subagent_result_message(
 ) -> tuple[str, str | None]:
     """Return model-visible task content plus normalized metadata error.
 
-    When ``stop_reason`` is set, a short ``(capped: ...)`` note is folded into
-    the text so the lead agent sees — without parsing metadata — that the run
-    was ended by a guardrail cap. A capped run that produced usable work is
-    ``status=completed`` (+ the partial result); a capped run with no usable
-    output is ``status=failed``.
+    Guardrail caps use a short ``(capped: ...)`` note. Provider output
+    truncation uses distinct partial-result wording so the Lead cannot mistake
+    incomplete text for a successful answer.
     """
     result_text = "" if result is None else str(result)
     error_text = str(error).strip() if isinstance(error, str) else ""
     capped = _STOP_REASON_LABELS.get(stop_reason) if stop_reason is not None else None
 
     if status == "completed":
+        if stop_reason == "output_truncated":
+            return (
+                f"Task output was truncated by the Provider. Partial result: {result_text}",
+                None,
+            )
         if capped:
             return f"Task Succeeded (capped: {capped}). Result: {result_text}", None
         return f"Task Succeeded. Result: {result_text}", None
@@ -326,6 +329,13 @@ def format_subagent_result_message(
     # (``stop_reason=turn_capped``): the cap note is folded in so the lead can
     # tell a broken subagent from one that simply ran out of turn budget.
     detail = error_text or "Task failed."
+    if stop_reason == "output_truncated":
+        if detail == "Task failed.":
+            return "Task failed: Provider output was truncated before a usable result was produced.", detail
+        return (
+            f"Task failed: Provider output was truncated before a usable result was produced. Error: {detail}",
+            detail,
+        )
     if capped:
         if detail == "Task failed.":
             return f"Task failed (capped: {capped}).", detail

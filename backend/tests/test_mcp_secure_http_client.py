@@ -13,11 +13,14 @@ import httpx
 import pytest
 
 from deerflow.mcp import http_security
+from deerflow.mcp.config import McpOAuthConfig
 from deerflow.mcp.http_security import (
     _PROJECT_MCP_HTTP_LOG_FILTER,
     _install_project_mcp_http_log_filter,
     make_secure_mcp_http_client_factory,
 )
+from deerflow.mcp.oauth import OAuthTokenManager
+from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy, McpDefinitionPolicyError
 
 
 def _new_transport_logger() -> logging.Logger:
@@ -80,6 +83,92 @@ def test_secure_mcp_http_client_accepts_sdk_keyword_arguments() -> None:
         assert client.headers["X-Test"] == "value"
     finally:
         asyncio.run(client.aclose())
+
+
+@pytest.mark.anyio
+async def test_oauth_token_uses_admitted_endpoint_and_secure_client_factory() -> None:
+    token_url = "https://identity.example.test/token"
+    observed: dict[str, object] = {}
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "access_token": "access-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, url: str, *, data: dict[str, str]):
+            observed["url"] = url
+            observed["data"] = data
+            return _Response()
+
+    def factory(headers, timeout, auth):
+        observed["factory"] = (headers, timeout, auth)
+        return _Client()
+
+    manager = OAuthTokenManager(
+        {
+            "catalog": McpOAuthConfig(
+                token_url=token_url,
+                client_id="client-id",
+                client_secret="client-secret",
+            ),
+        },
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({token_url})),
+        http_client_factory=factory,
+    )
+
+    assert await manager.get_authorization_header("catalog") == "Bearer access-token"
+    assert observed["url"] == token_url
+    assert observed["data"] == {
+        "grant_type": "client_credentials",
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+    }
+    headers, timeout, auth = observed["factory"]
+    assert headers is None
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 15
+    assert auth is None
+
+
+@pytest.mark.anyio
+async def test_oauth_token_rejects_unadmitted_endpoint_before_client_creation() -> None:
+    called = False
+
+    def factory(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("client must not be created")
+
+    manager = OAuthTokenManager(
+        {
+            "catalog": McpOAuthConfig(
+                token_url="https://identity.example.test/token",
+                client_id="client-id",
+                client_secret="client-secret",
+            ),
+        },
+        endpoint_policy=ExactMcpEndpointPolicy(
+            frozenset({"https://other.example.test/token"}),
+        ),
+        http_client_factory=factory,
+    )
+
+    with pytest.raises(McpDefinitionPolicyError):
+        await manager.get_authorization_header("catalog")
+    assert called is False
 
 
 @pytest.mark.anyio

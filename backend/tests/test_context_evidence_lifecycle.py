@@ -133,3 +133,24 @@ def test_only_a_proven_no_response_failure_can_be_retried() -> None:
 
     assert safe_failure.disposition is ProviderCallDisposition.RETRY_PROVEN_SAFE_FAILURE
     assert safe_failure.failure_code == "CONNECT_REJECTED"
+
+
+def test_adapter_proven_failed_response_can_be_retried() -> None:
+    safe_failure = resolve_provider_call(
+        (
+            PREPARED,
+            DISPATCHED,
+            _event(
+                3,
+                ProviderFailedV1(
+                    provider_call_id=CALL.provider_call_id,
+                    failure_code="PROVIDER_HTTP_429",
+                    retry_safety=(ProviderRetrySafety.FAILED_RESPONSE_RETRY_SAFE),
+                ),
+            ),
+        ),
+        CALL.provider_call_id,
+    )
+
+    assert safe_failure.disposition is ProviderCallDisposition.RETRY_PROVEN_SAFE_FAILURE
+    assert safe_failure.failure_code == "PROVIDER_HTTP_429"

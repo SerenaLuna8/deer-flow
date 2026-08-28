@@ -118,6 +118,13 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     context,
   }) => {
     await context.clearCookies();
+    await context.addCookies([
+      {
+        name: "locale",
+        value: "zh-CN",
+        url: APP,
+      },
+    ]);
     const suffix = project.id.slice(0, 8);
     const displayName = `Browser secret model ${suffix}`;
     const providerModel = `browser-secret-${suffix}`;
@@ -127,7 +134,10 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     const createDialog = page.getByRole("dialog", { name: "新增模型" });
     await createDialog.getByLabel("显示名称").fill(displayName);
     await createDialog.getByRole("combobox").selectOption("patched_deepseek");
-    await createDialog.getByLabel("Provider Model ID").fill(providerModel);
+    await createDialog.getByLabel("Provider 模型 ID").fill(providerModel);
+    await createDialog
+      .getByRole("spinbutton", { name: /最大输入 Token/u })
+      .fill("64000");
     const createKeyInput = createDialog.getByLabel("API Key");
     await createKeyInput.fill(MODEL_FIRST);
     const createdResponsePromise = page.waitForResponse(

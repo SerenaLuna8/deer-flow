@@ -128,7 +128,9 @@ export function resolveThreadAvailability({
   isLoading: boolean;
   isFetching: boolean;
 }): ThreadAvailability {
-  if (isLoading || isFetching) return "loading";
+  if (isLoading || (isFetching && (data === undefined || data === null))) {
+    return "loading";
+  }
   if (error) return "error";
   if (data === null) return "not-found";
   if (data === undefined) return "loading";

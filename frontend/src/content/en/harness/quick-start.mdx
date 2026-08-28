@@ -1,6 +1,6 @@
 ---
 title: Quick Start
-description: Learn how to create and run an ActWeave agent with create_deerflow_agent, from model setup to streaming responses.
+description: Learn how to create and run an Fluva agent with create_deerflow_agent, from model setup to streaming responses.
 ---
 
 import { Callout, Steps } from "nextra/components";
@@ -8,15 +8,15 @@ import { Callout, Steps } from "nextra/components";
 # Quick Start
 
 <Callout type="info" emoji="🚀">
-  This guide shows you how to build and run an ActWeave agent in Python with
+  This guide shows you how to build and run an Fluva agent in Python with
   <code>create_deerflow_agent</code>.
 </Callout>
 
-The fastest way to understand ActWeave Harness is to create an agent directly in code. This quick start walks through model setup, agent creation, and streaming a response.
+The fastest way to understand Fluva Harness is to create an agent directly in code. This quick start walks through model setup, agent creation, and streaming a response.
 
 ## Prerequisites
 
-ActWeave Harness requires Python 3.12 or later. The package is part of the `deerflow` repository under `backend/packages/harness`.
+Fluva Harness requires Python 3.12 or later. The package is part of the `deerflow` repository under `backend/packages/harness`.
 
 If you are working from the repository clone:
 
@@ -53,13 +53,13 @@ model = ChatOpenAI(
 agent = create_deerflow_agent(model)
 ```
 
-This returns a compiled LangGraph agent with ActWeave's default middleware chain.
+This returns a compiled LangGraph agent with Fluva's default middleware chain.
 
 ### Stream a response
 
 ```python
 for event in agent.stream(
-    {"messages": [{"role": "user", "content": "Explain what ActWeave Harness is."}]},
+    {"messages": [{"role": "user", "content": "Explain what Fluva Harness is."}]},
     stream_mode=["messages", "values"],
 ):
     print(event)

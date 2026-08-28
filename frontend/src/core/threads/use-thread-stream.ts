@@ -1,7 +1,14 @@
 import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import { type InfiniteData, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -274,13 +281,44 @@ export function selectExactTerminalDisplayMessages(
     projection?.accountId === latch.authority.accountId &&
     projection.projectId === latch.authority.projectId &&
     projection.threadId === latch.authority.threadId &&
-    projection.runId === latch.authority.runId &&
+    (projection.runId === latch.authority.runId || projection.runId === null) &&
     projection.generation === latch.authority.generation &&
     scope.accountId === latch.authority.accountId &&
     scope.projectId === latch.authority.projectId &&
     threadId === latch.authority.threadId
     ? latch.messages
     : null;
+}
+
+export function terminalDisplayProjectionAcknowledged(
+  latch: TerminalDisplayLatch | null,
+  projection: ActiveRunOwnerProjection | null,
+  scope: ProjectClientScope,
+  threadId: string | null | undefined,
+  controlledThreadId: string | null | undefined,
+  projectedMessages: Message[],
+): boolean {
+  if (
+    latch === null ||
+    projection?.runId !== null ||
+    controlledThreadId !== latch.authority.threadId ||
+    selectExactTerminalDisplayMessages(latch, projection, scope, threadId) ===
+      null
+  ) {
+    return false;
+  }
+  const requiredIdentities = latch.messages
+    .map(messageIdentity)
+    .filter((identity): identity is string => identity !== undefined);
+  if (requiredIdentities.length === 0) return false;
+  const projectedIdentities = new Set(
+    projectedMessages
+      .map(messageIdentity)
+      .filter((identity): identity is string => identity !== undefined),
+  );
+  return requiredIdentities.every((identity) =>
+    projectedIdentities.has(identity),
+  );
 }
 
 export function captureTerminalLiveMessages(
@@ -572,6 +610,15 @@ export function useThreadStream({
     null,
   );
   const terminalDisplayLatchRef = useRef<TerminalDisplayLatch | null>(null);
+  const [, setTerminalDisplayLatchRevision] = useState(0);
+  const publishTerminalDisplayLatch = useCallback(
+    (latch: TerminalDisplayLatch | null) => {
+      if (terminalDisplayLatchRef.current === latch) return;
+      terminalDisplayLatchRef.current = latch;
+      setTerminalDisplayLatchRevision((revision) => revision + 1);
+    },
+    [],
+  );
   const terminalReconciliationFailureRef =
     useRef<TerminalReconciliationFailure | null>(null);
   const [terminalReconciliationFailure, setTerminalReconciliationFailure] =
@@ -591,10 +638,11 @@ export function useThreadStream({
         (projection?.accountId !== latch.authority.accountId ||
           projection.projectId !== latch.authority.projectId ||
           projection.threadId !== latch.authority.threadId ||
-          projection.runId !== latch.authority.runId ||
+          (projection.runId !== latch.authority.runId &&
+            projection.runId !== null) ||
           projection.generation !== latch.authority.generation)
       ) {
-        terminalDisplayLatchRef.current = null;
+        publishTerminalDisplayLatch(null);
       }
       const failure = terminalReconciliationFailureRef.current;
       if (
@@ -609,7 +657,7 @@ export function useThreadStream({
         setTerminalReconciliationFailure(null);
       }
     },
-    [],
+    [publishTerminalDisplayLatch],
   );
   const [activeRunReconnectStorage] = useState(() =>
     createActiveRunReconnectStorageProxy(
@@ -1846,7 +1894,7 @@ export function useThreadStream({
     runBaselinePreparedRef.current = false;
     pendingArchivedMessagesRef.current = [];
     pendingArchiveThreadIdRef.current = null;
-    terminalDisplayLatchRef.current = null;
+    publishTerminalDisplayLatch(null);
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
     preparedReplayAttemptRef.current = null;
@@ -1887,7 +1935,12 @@ export function useThreadStream({
         }
       }
     };
-  }, [attachmentUploadCoordinator, threadId, uploadScopeKey]);
+  }, [
+    attachmentUploadCoordinator,
+    publishTerminalDisplayLatch,
+    threadId,
+    uploadScopeKey,
+  ]);
 
   // Release bridge entries once canonical history has absorbed them, so the
   // buffer stays transient and never resurrects a message that history later
@@ -1988,24 +2041,12 @@ export function useThreadStream({
             },
             reconnectStorage: resolverEntry.generation.reconnectStorage,
             preserveVisibleProjection(authority) {
-              terminalDisplayLatchRef.current = {
+              publishTerminalDisplayLatch({
                 authority,
                 messages: capturedVisibleMessages,
-              };
+              });
             },
             setControlledThreadId(controlledThreadId) {
-              if (controlledThreadId !== null) {
-                const latch = terminalDisplayLatchRef.current;
-                if (
-                  latch?.authority.accountId === target.accountId &&
-                  latch.authority.projectId === target.projectId &&
-                  latch.authority.threadId === target.threadId &&
-                  latch.authority.runId === target.runId &&
-                  latch.authority.generation === target.generation
-                ) {
-                  terminalDisplayLatchRef.current = null;
-                }
-              }
               setOnStreamThreadId(controlledThreadId);
             },
             switchLocalThreadToNull() {
@@ -2066,6 +2107,7 @@ export function useThreadStream({
       commitTerminalRun,
       privateWork,
       publishActiveRunOwnerProjection,
+      publishTerminalDisplayLatch,
       refetchCanonicalRun,
       thread,
     ],
@@ -3047,12 +3089,35 @@ export function useThreadStream({
     visibleOptimisticMessages,
     historyRuns,
   });
+  // The ref is the authority: an SDK external-store notification may render
+  // synchronously before this hook's revision update commits.
+  const terminalDisplayLatch = terminalDisplayLatchRef.current;
   const terminalDisplayMessages = selectExactTerminalDisplayMessages(
-    terminalDisplayLatchRef.current,
+    terminalDisplayLatch,
     activeRunOwnerProjection,
     privateWork.scope,
     currentViewThreadId,
   );
+  const terminalDisplayAcknowledged = terminalDisplayProjectionAcknowledged(
+    terminalDisplayLatch,
+    activeRunOwnerProjection,
+    privateWork.scope,
+    currentViewThreadId,
+    onStreamThreadId,
+    visibleHistory,
+  );
+  useLayoutEffect(() => {
+    if (
+      terminalDisplayAcknowledged &&
+      terminalDisplayLatchRef.current === terminalDisplayLatch
+    ) {
+      publishTerminalDisplayLatch(null);
+    }
+  }, [
+    publishTerminalDisplayLatch,
+    terminalDisplayAcknowledged,
+    terminalDisplayLatch,
+  ]);
   const terminalDisplayLatched = terminalDisplayMessages !== null;
   const mergedMessages = terminalDisplayMessages ?? projectedMessages;
   // Terminal reconciliation synchronously clears the SDK store while durable

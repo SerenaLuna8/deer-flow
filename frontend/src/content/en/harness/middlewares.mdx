@@ -169,22 +169,14 @@ summarization:
   # A lightweight model like gpt-4o-mini is recommended to reduce latency and resource use.
   model_name: null
 
-  # Trigger conditions — summarization runs when ANY threshold is met
-  trigger:
-    - type: tokens # trigger when context exceeds N tokens
-      value: 32000
-    # - type: messages  # trigger when there are more than N messages
-    #   value: 50
-    # - type: fraction  # trigger when context exceeds X% of model max
-    #   value: 0.8
+  # Trigger — summarization runs when the estimated context token count
+  # reaches this threshold (null = no automatic trigger)
+  trigger_tokens: 320000
 
-  # How much recent history to keep after summarization
+  # How much recent history to keep after summarization (token count only)
   keep:
-    type: messages
-    value: 10 # keep the 10 most recent messages
-    # Alternative: keep by tokens
-    # type: tokens
-    # value: 3000
+    type: tokens
+    value: 64000 # keep up to 64000 tokens of recent history
 
   # Maximum tokens to trim when preparing messages for the summarizer
   trim_tokens_to_summarize: 15564
@@ -193,19 +185,7 @@ summarization:
   summary_prompt: null
 ```
 
-**Trigger types**:
-
-- `tokens`: triggers when the total token count in the conversation exceeds `value`.
-- `messages`: triggers when the number of messages exceeds `value`.
-- `fraction`: triggers when the context reaches `value` fraction of the model's maximum input token limit.
-
-Multiple triggers can be listed; summarization runs when **any** of them fires.
-
-**Keep types**:
-
-- `messages`: keep the last `value` messages after summarization.
-- `tokens`: keep up to `value` tokens of recent history.
-- `fraction`: keep up to `value` fraction of the model's max input token limit.
+**Keep policy**: `tokens` is the only supported type. After summarization the middleware preserves up to `value` tokens of the most recent history (default `64000`). The retired message-count and context-fraction measurements are no longer accepted.
 
 ## Writing a custom middleware
 

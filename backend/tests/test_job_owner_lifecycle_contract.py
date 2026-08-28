@@ -250,7 +250,7 @@ def test_owner_job_enqueue_source_inventory_has_no_silent_generation_default() -
         "app/private_work/retention_jobs.py": 4,
         "app/reliability/jobs.py": 2,
         "app/shared_assets/mcp_discovery_repository.py": 1,
-        "packages/harness/deerflow/persistence/jobs/sql.py": 1,
+        "packages/harness/deerflow/persistence/jobs/sql.py": 2,
         "packages/harness/deerflow/persistence/private_work/memory_dream_prepare_repository.py": 1,
         "packages/harness/deerflow/persistence/private_work/memory_dream_store.py": 1,
     }

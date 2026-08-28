@@ -169,6 +169,13 @@ def test_compaction_receipt_remeasures_only_retained_context_without_content() -
     receipt = compaction_checkpoint_receipt(
         source,
         source_checkpoint_id="checkpoint-source",
+        source_values={
+            "messages": [
+                HumanMessage(id="human-archived", content="archived head " * 50),
+                HumanMessage(id="human-tail", content="retained tail"),
+            ],
+            "summary_text": None,
+        },
         checkpoint_values={
             "messages": [HumanMessage(id="human-tail", content="retained tail")],
             "summary_text": "compact continuity",

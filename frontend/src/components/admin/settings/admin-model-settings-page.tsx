@@ -73,7 +73,7 @@ const MODEL_SETTINGS_COPY = {
     providerModelId: "Provider model ID",
     maximumInputTokens: "Maximum input tokens",
     maximumInputTokensHint:
-      "The model's maximum input context and the denominator for context-percentage summarization; this is not the maximum output token limit.",
+      "The model's maximum input context and the denominator for context-usage percentages; this is not the maximum output token limit.",
     providerSettings: "Provider settings",
     advancedSettings: "Advanced settings",
     providerDefault: "Provider default",
@@ -158,7 +158,7 @@ const MODEL_SETTINGS_COPY = {
     providerModelId: "Provider 模型 ID",
     maximumInputTokens: "最大输入 Token",
     maximumInputTokensHint:
-      "模型可接收的最大输入上下文，也是按上下文占比触发摘要时的分母；不是最大输出 Token。",
+      "模型可接收的最大输入上下文，也是上下文用量百分比的分母；不是最大输出 Token。",
     providerSettings: "Provider 设置",
     advancedSettings: "高级设置",
     providerDefault: "Provider 默认",

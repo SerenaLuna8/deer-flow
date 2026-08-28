@@ -86,4 +86,20 @@ describe("SubtaskCard delegated execution approval", () => {
     expect(html).toContain("子任务已完成");
     expect(html).not.toContain("子任务失败");
   });
+
+  test("shows Provider truncation beside the preserved partial result", () => {
+    const html = render({
+      ...baseTask,
+      status: "completed",
+      statusSource: "tool_result",
+      stopReason: "output_truncated",
+      result: "Useful partial research",
+      executionApproval: undefined,
+    });
+
+    expect(html).toContain('data-subtask-stop-reason="output_truncated"');
+    expect(html).toContain("Provider 截断了子任务输出");
+    expect(html).toContain("子任务已完成");
+    expect(html).not.toContain("子任务失败");
+  });
 });

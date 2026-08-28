@@ -283,12 +283,10 @@ class _SubagentGraphResult:
         status: Current status of the execution.
         result: The final result message (if completed).
         error: Error message (if failed).
-        stop_reason: Why a guardrail cap ended the run early
-            (``token_capped`` / ``turn_capped`` / ``loop_capped``), or ``None``
-            for a clean run. A capped run keeps a normal status — ``completed``
-            when it produced usable output (the partial work survives on
-            ``result``), ``failed`` when it did not — and carries the cap here
-            so the lead can tell "finished" from "capped" (#3875 Phase 2).
+        stop_reason: Why the run ended without a clean final response, or
+            ``None`` for a clean run. A guardrail-capped or Provider-truncated
+            run keeps usable partial work on ``result`` and carries the exact
+            reason here for the Lead and UI.
         started_at: When execution started.
         completed_at: When execution completed.
         ai_messages: List of complete AI messages (as dicts) generated during execution.
@@ -403,6 +401,18 @@ class _SubagentGraphResult:
             )
 
 
+def _extract_last_ai_result(final_state: Any) -> str | None:
+    """Return the last non-blank assistant text, if one exists."""
+
+    if final_state is None:
+        return None
+    for message in reversed(final_state.get("messages", [])):
+        if isinstance(message, AIMessage):
+            text = message_content_to_text(message.content)
+            return text if text.strip() else None
+    return None
+
+
 def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     """Extract a human-readable result string from the streamed subagent state.
 
@@ -425,15 +435,9 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     messages = final_state.get("messages", [])
     logger.info(f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}")
 
-    last_ai_message = None
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            last_ai_message = msg
-            break
-
-    if last_ai_message is not None:
-        text = message_content_to_text(last_ai_message.content)
-        return text if text else "No response generated"
+    last_ai_result = _extract_last_ai_result(final_state)
+    if last_ai_result is not None:
+        return last_ai_result
 
     if messages:
         last_message = messages[-1]
@@ -680,12 +684,12 @@ class _SubagentGraphRunner:
             config.disallowed_tools,
         )
         self.tools = self._base_tools
-        # ToolCallControl owns the lifecycle internal execution scope. Legacy
-        # TokenBudgetMiddleware remains a fresh per-Task instance keyed by the
-        # inherited parent run_id; the two receipts are consumed explicitly and
-        # then reduced by semantic priority after graph completion.
+        # ToolCallControl owns the lifecycle internal execution scope. Other
+        # task-local stop observers are keyed by the inherited parent run_id;
+        # their receipts are consumed and reduced by semantic priority after
+        # graph completion.
         self._tool_call_control_middleware: Any | None = None
-        self._legacy_stop_reason_middlewares: list[Any] = []
+        self._additional_stop_reason_middlewares: list[Any] = []
 
         logger.info(
             "[trace=%s] Subagent graph runner initialized: %s with %s tools",
@@ -860,7 +864,7 @@ class _SubagentGraphRunner:
                     evidence_observer=context_evidence_observer,
                 ),
             )
-        self._legacy_stop_reason_middlewares = [middleware for middleware in middlewares if middleware is not tool_call_control and hasattr(middleware, "consume_stop_reason")]
+        self._additional_stop_reason_middlewares = [middleware for middleware in middlewares if middleware is not tool_call_control and hasattr(middleware, "consume_stop_reason")]
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -873,17 +877,17 @@ class _SubagentGraphRunner:
             checkpointer=False,
         )
 
-    def _consume_guard_stop_reason(
+    def _consume_stop_reason(
         self,
         execution_id: uuid.UUID,
     ) -> SubagentStopReasonValue | None:
-        """Consume all cap receipts and return the strongest contributing one.
+        """Consume all stop receipts and return the strongest contributing one.
 
         ToolCallControl is keyed only by the lifecycle-owned internal UUID.
-        Legacy TokenBudgetMiddleware retains its existing parent ``run_id``
-        contract and is safe here because each delegated graph builds a fresh
-        instance. A later loop is stronger than token/turn caps, and every one
-        of those is stronger than scoped tool-call-budget exhaustion.
+        TokenBudgetMiddleware and the output-limit observer retain the parent
+        ``run_id`` contract and are safe here because each delegated graph
+        builds fresh instances. Direct output truncation is stronger than the
+        contributing caps because it proves the returned text is incomplete.
         """
 
         priorities: dict[str, int] = {
@@ -891,6 +895,10 @@ class _SubagentGraphRunner:
             "turn_capped": 2,
             "token_capped": 3,
             "loop_capped": 4,
+            # A raw Provider output-limit signal directly proves that the
+            # returned text is incomplete, so it wins over contributing
+            # guardrail caps when the wire can carry only one stop reason.
+            "output_truncated": 5,
         }
         reasons: list[str] = []
         if self._tool_call_control_middleware is not None:
@@ -899,7 +907,7 @@ class _SubagentGraphRunner:
             )
             if reason in priorities:
                 reasons.append(reason)
-        for middleware in self._legacy_stop_reason_middlewares:
+        for middleware in self._additional_stop_reason_middlewares:
             reason = middleware.consume_stop_reason(self.run_id)
             if reason in priorities:
                 reasons.append(reason)
@@ -1367,18 +1375,39 @@ class _SubagentGraphRunner:
                     token_usage_records=token_usage_records,
                 )
             else:
-                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
-                # Control/token caps are additive receipts; successful partial
-                # work remains completed and surfaces the strongest reason.
-                stop_reason = self._consume_guard_stop_reason(
+                stop_reason = self._consume_stop_reason(
                     result.execution_id,
                 )
-                result.try_set_terminal(
-                    _SubagentGraphStatus.COMPLETED,
-                    result=final_result,
-                    stop_reason=stop_reason,
-                    token_usage_records=token_usage_records,
-                )
+                if stop_reason == "output_truncated":
+                    partial_result = _extract_last_ai_result(final_state)
+                    if partial_result is None:
+                        result.try_set_terminal(
+                            _SubagentGraphStatus.FAILED,
+                            error="MODEL_OUTPUT_LIMIT",
+                            stop_reason=stop_reason,
+                            token_usage_records=token_usage_records,
+                        )
+                    else:
+                        result.try_set_terminal(
+                            _SubagentGraphStatus.COMPLETED,
+                            result=partial_result,
+                            stop_reason=stop_reason,
+                            token_usage_records=token_usage_records,
+                        )
+                else:
+                    final_result = _extract_final_result(
+                        final_state,
+                        trace_id=self.trace_id,
+                        name=self.config.name,
+                    )
+                    # Guardrail caps are additive receipts; successful partial
+                    # work remains completed and surfaces the strongest reason.
+                    result.try_set_terminal(
+                        _SubagentGraphStatus.COMPLETED,
+                        result=final_result,
+                        stop_reason=stop_reason,
+                        token_usage_records=token_usage_records,
+                    )
 
         except asyncio.CancelledError:
             # Lifecycle cancellation must propagate until the actual graph
@@ -1399,23 +1428,21 @@ class _SubagentGraphRunner:
             # lead can tell "out of budget" from "broken subagent" without
             # parsing result text.
             #
-            # Prefer a guard's stop reason if one already fired this run: a
-            # token-budget / loop hard-stop strips tool_calls to force a final
-            # answer, and if ``recursion_limit`` then trips on the next
-            # super-step before that answer lands, the guard was the binding
-            # constraint — not the turn budget. Consulting the guards here (same
-            # lookup as the normal-completion path above) keeps the two paths
-            # consistent and pops the reason so it is not orphaned in the dict.
+            # Prefer a stronger contributing stop reason when one was observed:
+            # output truncation proves the text itself is incomplete, while a
+            # token-budget / loop hard-stop can force a final answer whose next
+            # super-step then trips ``recursion_limit``. Consuming the same
+            # receipts as normal completion keeps both paths consistent.
             max_turns = self.config.max_turns
             logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} reached max_turns={max_turns} (GraphRecursionError); recovering partial result")
             records = collector.snapshot_records() if collector is not None else None
-            guard_stop_reason = self._consume_guard_stop_reason(
+            contributing_stop_reason = self._consume_stop_reason(
                 result.execution_id,
             )
             # Tool exhaustion never forces finalization, so a later recursion
-            # limit is the binding cap. Loop/token hard stops do force the next
-            # turn and therefore retain their stronger direct cap reason.
-            stop_reason = guard_stop_reason if guard_stop_reason in {"loop_capped", "token_capped"} else "turn_capped"
+            # limit is the binding cap. Output truncation and loop/token hard
+            # stops retain their stronger direct reason.
+            stop_reason = contributing_stop_reason if contributing_stop_reason in {"loop_capped", "token_capped", "output_truncated"} else "turn_capped"
             llm_error = _extract_llm_error_fallback(final_state)
             if llm_error is not None:
                 result.try_set_terminal(
@@ -1443,7 +1470,7 @@ class _SubagentGraphRunner:
                 else:
                     result.try_set_terminal(
                         _SubagentGraphStatus.FAILED,
-                        error=f"Reached max_turns={max_turns}",
+                        error=("MODEL_OUTPUT_LIMIT" if stop_reason == "output_truncated" else f"Reached max_turns={max_turns}"),
                         stop_reason=stop_reason,
                         token_usage_records=records,
                     )

@@ -52,7 +52,7 @@ export function WhatsNewSection({ className }: { className?: string }) {
   return (
     <Section
       className={cn("", className)}
-      title="Meet ActWeave 1.0"
+      title="Meet Fluva 1.0"
       subtitle="The first public release of a project-first, full-stack Super Agent"
     >
       <div className="flex w-full items-center justify-center">

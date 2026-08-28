@@ -9,6 +9,7 @@ import {
   selectExactActiveRunOwner,
   selectExactTerminalDisplayMessages,
   selectExactTerminalReconciliationError,
+  terminalDisplayProjectionAcknowledged,
   terminalReconciliationResultError,
   type ActiveRunOwnerProjection,
 } from "@/core/threads/use-thread-stream";
@@ -79,6 +80,25 @@ describe("useThreadStream active Run ownership", () => {
     expect(
       selectExactTerminalDisplayMessages(
         latch,
+        { ...authority, runId: null },
+        SCOPE,
+        THREAD_ID,
+      ),
+    ).toBe(messages);
+    expect(
+      selectExactTerminalDisplayMessages(
+        latch,
+        {
+          ...authority,
+          runId: "77777777-7777-4777-8777-777777777777",
+        },
+        SCOPE,
+        THREAD_ID,
+      ),
+    ).toBeNull();
+    expect(
+      selectExactTerminalDisplayMessages(
+        latch,
         { ...authority, generation: 10 },
         SCOPE,
         THREAD_ID,
@@ -100,6 +120,63 @@ describe("useThreadStream active Run ownership", () => {
         "66666666-6666-4666-8666-666666666666",
       ),
     ).toBeNull();
+
+    expect(
+      terminalDisplayProjectionAcknowledged(
+        latch,
+        authority,
+        SCOPE,
+        THREAD_ID,
+        null,
+        messages,
+      ),
+    ).toBe(false);
+    expect(
+      terminalDisplayProjectionAcknowledged(
+        latch,
+        authority,
+        SCOPE,
+        THREAD_ID,
+        THREAD_ID,
+        [],
+      ),
+    ).toBe(false);
+    expect(
+      terminalDisplayProjectionAcknowledged(
+        latch,
+        authority,
+        SCOPE,
+        THREAD_ID,
+        THREAD_ID,
+        [
+          { id: "earlier", type: "human", content: "question" } as Message,
+          ...messages,
+        ],
+      ),
+    ).toBe(false);
+    expect(
+      terminalDisplayProjectionAcknowledged(
+        latch,
+        { ...authority, runId: null },
+        SCOPE,
+        THREAD_ID,
+        THREAD_ID,
+        [],
+      ),
+    ).toBe(false);
+    expect(
+      terminalDisplayProjectionAcknowledged(
+        latch,
+        { ...authority, runId: null },
+        SCOPE,
+        THREAD_ID,
+        THREAD_ID,
+        [
+          { id: "earlier", type: "human", content: "question" } as Message,
+          ...messages,
+        ],
+      ),
+    ).toBe(true);
   });
 
   test("keeps history bound to the viewed Thread while the SDK stream detaches", () => {

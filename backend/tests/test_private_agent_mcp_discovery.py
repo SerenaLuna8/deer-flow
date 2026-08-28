@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from pydantic import BaseModel
 
@@ -17,8 +20,12 @@ from app.private_work.private_agent_runtime import PrivateAgentRuntime
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.reliability.run_execution.executor import RunAgentPrivateExecutor
 from app.shared_assets.models import AssetKind, AssetScope, ResolvedMcpSnapshot
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.config.mcp_security_config import McpSecurityConfig
+from deerflow.mcp.http_security import SecureMcpHttpClientFactory
+from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 
@@ -58,6 +65,12 @@ def _snapshot() -> ResolvedMcpSnapshot:
 def _runtime(
     tmp_path: Path,
     snapshots: tuple[ResolvedMcpSnapshot, ...],
+    *,
+    endpoint_policy: McpEndpointPolicy | None = None,
+    http_client_factory: SecureMcpHttpClientFactory | None = None,
+    discovery_timeout_seconds: int = 15,
+    tool_call_timeout_seconds: int = 60,
+    run_session_reuse: bool = False,
 ) -> PrivateAgentRuntime:
     manifest = PrivateAgentManifest(
         agent_asset_id=uuid.uuid4(),
@@ -91,8 +104,162 @@ def _runtime(
         skills=(),
         mcp_snapshots=snapshots,
         authorization_boundary=object(),
-        run_session_reuse=False,
+        endpoint_policy=endpoint_policy,
+        http_client_factory=http_client_factory,
+        discovery_timeout_seconds=discovery_timeout_seconds,
+        tool_call_timeout_seconds=tool_call_timeout_seconds,
+        run_session_reuse=run_session_reuse,
     )
+
+
+@pytest.mark.asyncio
+async def test_worker_production_mcp_security_reaches_discovery_and_proxy_invoke(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = RunAgentPrivateExecutor(
+        MagicMock(),
+        app_config=SimpleNamespace(
+            mcp_security=McpSecurityConfig(
+                project_remote_allowed_networks=("127.0.0.0/8",),
+                discovery_timeout_seconds=7,
+                tool_call_timeout_seconds=11,
+                run_session_reuse=True,
+            ),
+        ),
+        bridge=MagicMock(),
+        project_checkpointer=MagicMock(),
+        store=MagicMock(),
+        event_store=MagicMock(),
+        agent_factory=object(),
+        runner=MagicMock(),
+    )
+    asset_runtime = executor._asset_runtime  # pyright: ignore[reportPrivateUsage]
+    endpoint_policy = asset_runtime._endpoint_policy  # pyright: ignore[reportPrivateUsage]
+    http_client_factory = asset_runtime._http_client_factory  # pyright: ignore[reportPrivateUsage]
+    assert endpoint_policy is not None
+    assert http_client_factory is not None
+
+    snapshot = _snapshot()
+    snapshot = ResolvedMcpSnapshot(
+        kind=snapshot.kind,
+        scope=snapshot.scope,
+        asset_id=snapshot.asset_id,
+        version_id=snapshot.version_id,
+        checksum=snapshot.checksum,
+        catalog_generation=snapshot.catalog_generation,
+        dependency_version_ids=snapshot.dependency_version_ids,
+        definition={"transport": "http", "url": "http://127.0.0.1:8765/mcp"},
+        secret_generation_ids=snapshot.secret_generation_ids,
+        secret_digest=snapshot.secret_digest,
+    )
+    runtime = _runtime(
+        tmp_path,
+        (snapshot,),
+        endpoint_policy=endpoint_policy,
+        http_client_factory=http_client_factory,
+        discovery_timeout_seconds=asset_runtime._discovery_timeout_seconds,  # pyright: ignore[reportPrivateUsage]
+        tool_call_timeout_seconds=asset_runtime._tool_call_timeout_seconds,  # pyright: ignore[reportPrivateUsage]
+        run_session_reuse=True,
+    )
+    observed: dict[str, tuple[object, object, int, int]] = {}
+
+    async def invoke_with_material(self, _version_id, operation):  # type: ignore[no-untyped-def]
+        del self
+        return await operation(snapshot.definition, {})
+
+    async def discover_exact(
+        cls,
+        _version_id,
+        _definition,
+        _material,
+        authorization_boundary=None,
+        *,
+        endpoint_policy,
+        http_client_factory,
+        discovery_timeout_seconds,
+        **_kwargs,
+    ):  # type: ignore[no-untyped-def]
+        del cls, authorization_boundary
+        observed["discover"] = (
+            endpoint_policy,
+            http_client_factory,
+            discovery_timeout_seconds,
+            -1,
+        )
+        return (
+            DiscoveredMcpTool(
+                version_id=snapshot.version_id,
+                name=f"project_{snapshot.version_id.hex[:16]}_echo",
+                provider_name="echo",
+                description="Echo one value",
+                args_schema=_Args,
+            ),
+        )
+
+    async def invoke_exact(
+        _version_id,
+        _definition,
+        _material,
+        _tool_name,
+        arguments,
+        authorization_boundary=None,
+        *,
+        endpoint_policy,
+        http_client_factory,
+        discovery_timeout_seconds,
+        tool_call_timeout_seconds,
+        **_kwargs,
+    ):  # type: ignore[no-untyped-def]
+        del authorization_boundary
+        observed["invoke"] = (
+            endpoint_policy,
+            http_client_factory,
+            discovery_timeout_seconds,
+            tool_call_timeout_seconds,
+        )
+        return {"echo": arguments["value"]}
+
+    async def record_inventory(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "invoke_with_mcp_material",
+        invoke_with_material,
+    )
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_discover_exact_mcp",
+        classmethod(discover_exact),
+    )
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_invoke_exact_mcp",
+        staticmethod(invoke_exact),
+    )
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_record_mcp_tool_inventory",
+        record_inventory,
+    )
+
+    await runtime.discover_mcp_tools()
+    assert await runtime.mcp_tools[0].ainvoke({"value": "ready"}) == {
+        "echo": "ready",
+    }
+    assert observed == {
+        "discover": (endpoint_policy, http_client_factory, 7, -1),
+        "invoke": (endpoint_policy, http_client_factory, 7, 11),
+    }
+    assert endpoint_policy.allows("http://127.0.0.1:8765/mcp") is True
+    client = http_client_factory(None, httpx.Timeout(999), None)
+    try:
+        assert client.follow_redirects is False
+        assert client.trust_env is False
+        assert client.timeout.read == 11
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio

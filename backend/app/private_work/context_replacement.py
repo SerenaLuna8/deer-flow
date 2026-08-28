@@ -37,6 +37,7 @@ from deerflow.runtime.context_evidence import (
     VisualCostStrategy,
     VisualDetail,
     VisualMeasurementMetadata,
+    VisualTokenCostContractError,
     WindowOpenedV1,
 )
 
@@ -158,7 +159,11 @@ def _visual_url(block: Mapping[str, object]) -> str | None:
     return None
 
 
-def _visual_metadata(block: Mapping[str, object]) -> VisualMeasurementMetadata:
+def _visual_metadata(
+    block: Mapping[str, object],
+    *,
+    max_tokens_per_image: int | None,
+) -> VisualMeasurementMetadata:
     raw_url = _visual_url(block)
     declared_mime = block.get("mime_type") or block.get("media_type")
     source = block.get("source")
@@ -199,7 +204,7 @@ def _visual_metadata(block: Mapping[str, object]) -> VisualMeasurementMetadata:
         mime_type=mime_type,  # type: ignore[arg-type]
         size_bytes=(len(image_bytes) if image_bytes is not None else None),
         detail=detail,
-        strategy=VisualCostStrategy.UNMEASURED,
+        strategy=(VisualCostStrategy.MAX_PER_IMAGE if max_tokens_per_image is not None else VisualCostStrategy.UNMEASURED),
     )
 
 
@@ -374,7 +379,10 @@ def remeasure_replacement_checkpoint(
         if retained is not None:
             message_payloads.append(retained)
         for visual_index, block in enumerate(visuals):
-            metadata = _visual_metadata(block)
+            metadata = _visual_metadata(
+                block,
+                max_tokens_per_image=(estimator.visual_max_tokens_per_image),
+            )
             source_identity = _digest(
                 {
                     "generation": generation.generation_id,
@@ -395,7 +403,15 @@ def remeasure_replacement_checkpoint(
                     source_identity_digest=source_identity,
                     lane=ContextLane.VISUAL_MEDIA,
                     model_visible_bytes=0,
-                    token_estimate=TokenEstimate.unmeasured(item_count=1),
+                    token_estimate=(
+                        TokenEstimate.bounded(
+                            projected_tokens=(estimator.visual_max_tokens_per_image),
+                            lower_bound_tokens=0,
+                            safety_upper_bound_tokens=(estimator.visual_max_tokens_per_image),
+                        )
+                        if estimator.visual_max_tokens_per_image is not None
+                        else TokenEstimate.unmeasured(item_count=1)
+                    ),
                     visual=metadata,
                 )
             )
@@ -482,6 +498,7 @@ def compaction_checkpoint_receipt(
     source: ContextCheckpointProjectionSnapshot,
     *,
     source_checkpoint_id: str,
+    source_values: Mapping[str, object],
     checkpoint_values: Mapping[str, object],
     result_generation: ContextWindowGeneration,
     phase: ProjectionPhase = ProjectionPhase.IDLE,
@@ -492,6 +509,20 @@ def compaction_checkpoint_receipt(
         generation=result_generation,
         checkpoint_values=checkpoint_values,
     )
+    # The stored snapshot measures the wire projection at the previous Provider
+    # call and excludes anything appended afterwards. The size invariant is
+    # meaningful only when both sides share one basis, so the source state is
+    # re-measured exactly like the result state.
+    source_remeasured = remeasure_replacement_checkpoint(
+        source,
+        generation=source.generation,
+        checkpoint_values=source_values,
+    )
+    unmeasured_visual_items = sum(contribution.token_estimate.unmeasured_items for snapshot in (source_remeasured, result) for contribution in snapshot.measurement.contributions if contribution.lane is ContextLane.VISUAL_MEDIA)
+    if unmeasured_visual_items:
+        raise VisualTokenCostContractError(
+            unmeasured_items=unmeasured_visual_items,
+        )
     summary = checkpoint_values.get("summary_text")
     summary_digest = hashlib.sha256((summary if isinstance(summary, str) else "").encode("utf-8")).hexdigest()
     receipt_id = _digest(
@@ -506,7 +537,7 @@ def compaction_checkpoint_receipt(
         source_checkpoint_id=source_checkpoint_id,
         source_generation=source.generation,
         result_generation=result_generation,
-        source_tokens=source.measurement.projected_tokens,
+        source_tokens=source_remeasured.measurement.projected_tokens,
         result_tokens=result.measurement.projected_tokens,
         summary_digest=summary_digest,
         projection_snapshot=result,

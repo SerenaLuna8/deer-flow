@@ -119,7 +119,7 @@ export function ProjectWorkbench({
       />
       <header className="flex h-20 shrink-0 items-center justify-between gap-4 border-b px-5 sm:px-8">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="text-primary font-serif text-2xl">ActWeave</span>
+          <span className="text-primary font-serif text-2xl">Fluva</span>
           <span className="text-muted-foreground hidden text-base sm:inline">
             {copy.title}
           </span>
