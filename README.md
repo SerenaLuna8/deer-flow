@@ -125,6 +125,9 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   `inspect_image` 返回有界、不可信视觉分析；视觉调用与其他模型调用共用唯一
   `ModelRuntime` 和所选模型已有的 Provider adapter。
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
+- 可选的项目 RAG 知识库（Knowledge）：独立 `actweave-knowledge` 软件包提供文档上传、
+  摄取切分、向量召回加 Reranker 精排检索和 Agent `knowledge_search` 引用；文件存储在
+  外部 MinIO，功能由根 `config.yaml` 的 `knowledge` 块启用，默认关闭。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
   System Runtime Policy v6 在系统设置中分别配置主 Agent 每 Run 与每个 Sub-Agent Task 的

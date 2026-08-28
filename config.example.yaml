@@ -198,3 +198,23 @@ worker:
     # Wake idle SSE consumers through PostgreSQL LISTEN/NOTIFY. false disables
     # both Worker/Gateway NOTIFY writes and the Gateway listener, restoring polling.
     run_event_notify_enabled: true
+
+# Knowledge（RAG 知识库）— 可选功能，默认关闭。缺少本节等同 enabled: false。
+# 启用前提：管理员准备可达的 MinIO S3 API endpoint（host:port，非 Console 地址）
+# 并预先创建 bucket；Runtime 只检查可访问性，不会自动创建 bucket。
+# 启用时取消注释并在环境中提供三个 ACT_WEAVE_KNOWLEDGE_MINIO_* 变量；
+# Gateway 与 Worker 必须使用同一份配置并一起重启。详见 Install.md。
+knowledge:
+  enabled: false
+  # worker_concurrency: 2
+  # task_timeout_seconds: 900
+  # upload_max_bytes: 52428800
+  # max_knowledge_bases_per_project: 20
+  # max_documents_per_knowledge_base: 500
+  # max_segments_per_document: 5000
+  # minio:
+  #   endpoint: $ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT
+  #   bucket: actweave-knowledge
+  #   access_key: $ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY
+  #   secret_key: $ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY
+  #   secure: false

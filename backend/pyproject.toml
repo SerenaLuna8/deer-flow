@@ -5,6 +5,7 @@ description = "ActWeave — Weave intelligence into action. A LangGraph-based AI
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "actweave-knowledge",
     "deerflow-harness",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
@@ -55,7 +56,8 @@ markers = [
 index-url = "https://pypi.org/simple"
 
 [tool.uv.workspace]
-members = ["packages/harness"]
+members = ["packages/harness", "packages/knowledge"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
+actweave-knowledge = { workspace = true }
