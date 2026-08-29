@@ -175,6 +175,18 @@ async def run_worker(
         engine = get_engine()
         if engine is None:
             raise WorkerConfigurationUnavailable()
+        # Knowledge is startup-only: a missing/disabled `knowledge` block keeps
+        # the module absent, so no Knowledge task loop runs and retention jobs
+        # skip the Knowledge purge gate.
+        from app.knowledge.composition import (
+            create_knowledge_module_from_app_config,
+            require_knowledge_storage_ready,
+        )
+
+        knowledge_module = create_knowledge_module_from_app_config(config)
+        if knowledge_module is not None:
+            stack.push_async_callback(knowledge_module.aclose)
+            await require_knowledge_storage_ready(knowledge_module)
         sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
         try:
             run_mount_provider_ready = await asyncio.to_thread(
@@ -295,6 +307,7 @@ async def run_worker(
                 quota=quota_enforcer,
                 audit=audit_sink,
                 host_execution_domain=host_execution_domain,
+                knowledge_module=knowledge_module,
             )
             private_run_handler = PrivateRunJobHandler(
                 session_factory,
@@ -331,6 +344,7 @@ async def run_worker(
                     mount_owner_reconciler=run_skill_orphan_reaper,
                     retry_initial_seconds=(config.worker.retry_initial_seconds),
                     retry_max_seconds=config.worker.retry_max_seconds,
+                    knowledge_purge=(knowledge_module.purge_project if knowledge_module is not None else None),
                 ),
                 "mcp_discovery": McpToolDiscoveryJobHandler(
                     session_factory,
@@ -380,11 +394,31 @@ async def run_worker(
             after_claim_commit=reconcile_deferred_automation_terminals,
             execution_domain=host_execution_domain,
         )
-        await _run_service_until_subagents_close(
-            service,
-            stop_event or asyncio.Event(),
-            subagent_lifecycle or subagent_task_lifecycle,
-        )
+        effective_stop_event = stop_event or asyncio.Event()
+        effective_lifecycle = subagent_lifecycle or subagent_task_lifecycle
+        if knowledge_module is None:
+            await _run_service_until_subagents_close(
+                service,
+                effective_stop_event,
+                effective_lifecycle,
+            )
+        else:
+            from app.knowledge.worker import run_knowledge_task_worker, run_worker_loops
+
+            await run_worker_loops(
+                run_main=partial(
+                    _run_service_until_subagents_close,
+                    service,
+                    effective_stop_event,
+                    effective_lifecycle,
+                ),
+                run_knowledge=partial(
+                    run_knowledge_task_worker,
+                    knowledge_module,
+                    effective_stop_event,
+                ),
+                stop_event=effective_stop_event,
+            )
 
 
 def main() -> None:

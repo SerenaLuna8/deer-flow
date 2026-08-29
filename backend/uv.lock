@@ -23,6 +23,8 @@ version = "1.0.0"
 source = { editable = "packages/knowledge" }
 dependencies = [
     { name = "asyncpg" },
+    { name = "beautifulsoup4" },
+    { name = "ebooklib" },
     { name = "httpx" },
     { name = "minio" },
     { name = "openpyxl" },
@@ -30,12 +32,15 @@ dependencies = [
     { name = "pydantic" },
     { name = "pypdf" },
     { name = "python-docx" },
+    { name = "python-pptx" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
+    { name = "beautifulsoup4", specifier = ">=4.12" },
+    { name = "ebooklib", specifier = ">=0.18" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "minio", specifier = ">=7.2" },
     { name = "openpyxl", specifier = ">=3.1" },
@@ -43,6 +48,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pypdf", specifier = ">=5.0" },
     { name = "python-docx", specifier = ">=1.1" },
+    { name = "python-pptx", specifier = ">=1.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
 ]
 
@@ -1165,6 +1171,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d9/9b/e24eeb48fba1342f6a81e98bf6ff51622a7d5c3353a89d452623f158bcb8/e2b_code_interpreter-2.8.1.tar.gz", hash = "sha256:900bc847a4a6f90a571e0de4112531c79c550fbdb1ec94a1d2b2c9f0d058a674", size = 11467, upload-time = "2026-06-17T09:58:51.217Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/df/47/c9acfeb0a63925d5b2e782b496be1287665bb649eee48d947fc46b9bdeee/e2b_code_interpreter-2.8.1-py3-none-any.whl", hash = "sha256:8449ff1abb507e4c28134c9cbc4e59f76c09fadceab879c8c4031399b31a126a", size = 15210, upload-time = "2026-06-17T09:58:50.043Z" },
+]
+
+[[package]]
+name = "ebooklib"
+version = "0.20"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "lxml" },
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/77/85/322e8882a582d4b707220d1929cfb74c125f2ba513991edbce40dbc462de/ebooklib-0.20.tar.gz", hash = "sha256:35e2f9d7d39907be8d39ae2deb261b19848945903ae3dbb6577b187ead69e985", size = 127066, upload-time = "2025-10-26T20:56:20.968Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bf/ee/aa015c5de8b0dc42a8e507eae8c2de5d1c0e068c896858fec6d502402ed6/ebooklib-0.20-py3-none-any.whl", hash = "sha256:fff5322517a37e31c972d27be7d982cc3928c16b3dcc5fd7e8f7c0f5d7bcf42b", size = 40995, upload-time = "2025-10-26T20:56:19.104Z" },
 ]
 
 [[package]]

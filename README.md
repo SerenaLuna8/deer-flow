@@ -127,7 +127,23 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 可选的项目 RAG 知识库（Knowledge）：独立 `actweave-knowledge` 软件包提供文档上传、
   摄取切分、向量召回加 Reranker 精排检索和 Agent `knowledge_search` 引用；文件存储在
-  外部 MinIO，功能由根 `config.yaml` 的 `knowledge` 块启用，默认关闭。
+  外部 MinIO，功能由根 `config.yaml` 的 `knowledge` 块启用，默认关闭。启用后项目侧
+  提供知识库/文档管理与检索测试页面（导航按模块可用性自动显示），支持文档与分段级
+  治理：启停开关（停用即从检索与引用中排除，不删除向量）、文档重命名与批量启停/删除、
+  分段浏览页内编辑/手工新增/删除分段（内容修改同步重算向量）及字数统计；上传按
+  递归分隔符切分，可自定义分隔符（默认 `\n\n`）并选择预处理规则（压缩多余空白、
+  删除 URL 与邮箱），创建向导内置分块实时预览（所见即所得，与实际摄取一致），
+  全部分块参数上传时固化、重试沿用；支持父子分段模式（父块承载返回内容、
+  子块承载向量，命中按父块内最高子块分回卷去重）；知识库可配置检索默认参数
+  （top_k 与分数阈值，检索测试与 Agent 工具未显式传参时生效），检索自动记录
+  查询日志（含来源、命中数与最高分，检索测试页展示最近查询并可点击回填）
+  并累计分段/文档命中次数；上传支持 PDF/DOCX/TXT/MD/CSV/XLSX/HTML/PPTX/EPUB；
+  知识库可定义元数据字段（文本/数字/时间）并为文档赋值，检索测试与
+  Agent 工具支持按元数据条件过滤（等于/包含/范围，AND 组合）；
+  设置页可换绑 Embedding 模型并触发整库重建（逐文档重嵌入，
+  重建期间旧分段退出召回）；会话中的
+  最终回答下方展示知识库引用；管理员在 `/admin/settings/knowledge` 维护 Embedding 与
+  Reranker 模型配置并做连接测试。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
   System Runtime Policy v6 在系统设置中分别配置主 Agent 每 Run 与每个 Sub-Agent Task 的

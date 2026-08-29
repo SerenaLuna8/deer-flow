@@ -115,6 +115,301 @@ export interface Translations {
     copiedReference: (title: string) => string;
   };
 
+  // Knowledge bases (project pages, retrieval test, chat citations)
+  knowledge: {
+    page: {
+      eyebrow: (projectName: string) => string;
+      title: string;
+      description: string;
+    };
+    tabs: {
+      bases: string;
+      search: string;
+    };
+    common: {
+      back: string;
+      cancel: string;
+      save: string;
+      saving: string;
+      create: string;
+      creating: string;
+      delete: string;
+      deleting: string;
+      edit: string;
+    };
+    status: {
+      active: string;
+      disabled: string;
+      deleting: string;
+    };
+    documentStatus: {
+      uploading: string;
+      queued: string;
+      processing: string;
+      ready: string;
+      failed: string;
+      deleting: string;
+    };
+    bases: {
+      title: string;
+      empty: string;
+      createButton: string;
+      createTitle: string;
+      createDescription: string;
+      nameLabel: string;
+      namePlaceholder: string;
+      descriptionLabel: string;
+      descriptionPlaceholder: string;
+      modelLabel: string;
+      modelPlaceholder: string;
+      modelHint: string;
+      noModels: string;
+      editTitle: string;
+      statusLabel: string;
+      deleteTitle: string;
+      deleteDescription: (name: string) => string;
+      deleteConfirm: string;
+      deleteError: (message: string) => string;
+      documentCount: (count: number) => string;
+      updatedAt: (time: string) => string;
+      openDocuments: string;
+      noDescription: string;
+      retrievalSectionTitle: string;
+      defaultTopKLabel: string;
+      defaultTopKHint: string;
+      defaultThresholdLabel: string;
+      defaultThresholdHint: string;
+      rebuildSectionTitle: string;
+      rebuildModelLabel: string;
+      rebuildHint: string;
+      rebuildButton: string;
+      rebuildPending: string;
+      rebuildStarted: string;
+      rebuildConfirmTitle: string;
+      rebuildConfirmDescription: (name: string) => string;
+      rebuildConfirm: string;
+    };
+    wizard: {
+      heroTitle: string;
+      uploadCreateTitle: string;
+      uploadCreateHint: string;
+      orSeparator: string;
+      emptyCreateTitle: string;
+      emptyCreateHint: string;
+      steps: {
+        source: string;
+        configure: string;
+        finish: string;
+      };
+      stepBadge: (step: number) => string;
+      sourceSectionTitle: string;
+      dropzoneTitle: string;
+      removeFile: (name: string) => string;
+      filesSelected: (count: number) => string;
+      next: string;
+      previous: string;
+      saveAndProcess: string;
+      chunkSectionTitle: string;
+      infoSectionTitle: string;
+      createdTitle: string;
+      createdHint: string;
+      processingTitle: string;
+      summaryTitle: string;
+      goToDocuments: string;
+      uploadFailedNote: string;
+      previewTitle: string;
+      previewHint: (fileName: string) => string;
+      previewLoading: string;
+      previewTotal: (total: number) => string;
+      previewChunkLabel: (position: number) => string;
+      previewCharacters: (count: number) => string;
+      previewChildCount: (count: number) => string;
+      previewChildLabel: (index: number) => string;
+    };
+    detail: {
+      navLabel: string;
+      documents: string;
+      settings: string;
+      settingsSaved: string;
+      metadata: string;
+    };
+    metadata: {
+      title: string;
+      description: string;
+      empty: string;
+      addButton: string;
+      addTitle: string;
+      nameLabel: string;
+      namePlaceholder: string;
+      typeLabel: string;
+      typeString: string;
+      typeNumber: string;
+      typeTime: string;
+      columns: {
+        name: string;
+        type: string;
+        actions: string;
+      };
+      rename: string;
+      renameTitle: (name: string) => string;
+      delete: string;
+      deleteTitle: string;
+      deleteDescription: (name: string) => string;
+    };
+    documents: {
+      title: (baseName: string) => string;
+      empty: string;
+      uploadButton: string;
+      uploadTitle: string;
+      uploadDescription: string;
+      fileLabel: string;
+      displayNameLabel: string;
+      displayNamePlaceholder: string;
+      chunkSizeLabel: string;
+      chunkSizeHint: string;
+      chunkOverlapLabel: string;
+      chunkOverlapHint: string;
+      chunkSeparatorLabel: string;
+      chunkSeparatorHint: string;
+      chunkingModeLabel: string;
+      chunkingModeGeneral: string;
+      chunkingModeGeneralHint: string;
+      chunkingModeParentChild: string;
+      chunkingModeParentChildHint: string;
+      childChunkSizeLabel: string;
+      childChunkSeparatorLabel: string;
+      childChunkSeparatorHint: string;
+      preprocessingLabel: string;
+      removeExtraSpacesLabel: string;
+      removeUrlsEmailsLabel: string;
+      chunkImmutableNote: string;
+      upload: string;
+      uploading: string;
+      uploadingProgress: (done: number, total: number) => string;
+      uploadResultSuccess: (name: string) => string;
+      uploadResultFailed: (name: string, message: string) => string;
+      columns: {
+        name: string;
+        status: string;
+        enabled: string;
+        size: string;
+        segments: string;
+        words: string;
+        actions: string;
+      };
+      retry: string;
+      download: string;
+      delete: string;
+      deleteTitle: string;
+      deleteDescription: (name: string) => string;
+      viewSegments: string;
+      rename: string;
+      renameTitle: string;
+      renameLabel: string;
+      enableAria: (name: string) => string;
+      disableAria: (name: string) => string;
+      selectAllAria: string;
+      selectRowAria: (name: string) => string;
+      selectedCount: (count: number) => string;
+      batchEnable: string;
+      batchDisable: string;
+      batchDelete: string;
+      clearSelection: string;
+      batchDeleteTitle: string;
+      batchDeleteDescription: (count: number) => string;
+      metadataAction: string;
+      metadataTitle: (name: string) => string;
+      metadataEmpty: string;
+      metadataClearHint: string;
+    };
+    segments: {
+      title: (documentName: string) => string;
+      empty: string;
+      position: (position: number) => string;
+      pageInfo: (page: number, pageCount: number, total: number) => string;
+      previousPage: string;
+      nextPage: string;
+      close: string;
+      stats: (segments: number, words: number) => string;
+      add: string;
+      addTitle: string;
+      addDescription: string;
+      contentLabel: string;
+      contentPlaceholder: string;
+      edit: string;
+      editTitle: (position: number) => string;
+      delete: string;
+      deleteTitle: string;
+      deleteDescription: (position: number) => string;
+      enableAria: (position: number) => string;
+      disableAria: (position: number) => string;
+      wordCount: (count: number) => string;
+      manualBadge: string;
+    };
+    sourcePosition: {
+      page: (page: string) => string;
+      paragraph: (paragraph: string) => string;
+      row: (row: string) => string;
+      slide: (slide: string) => string;
+      chapter: (chapter: string) => string;
+    };
+    search: {
+      title: string;
+      description: string;
+      queryLabel: string;
+      queryPlaceholder: string;
+      baseFilterLabel: string;
+      allBases: string;
+      topKLabel: string;
+      topKHint: string;
+      thresholdLabel: string;
+      thresholdHint: string;
+      submit: string;
+      searching: string;
+      empty: string;
+      resultsTitle: (count: number) => string;
+      score: (score: number) => string;
+      recentTitle: string;
+      recentEmpty: string;
+      recentColumns: {
+        query: string;
+        source: string;
+        results: string;
+        topScore: string;
+        time: string;
+      };
+      recentSource: {
+        agent: string;
+        retrieval_test: string;
+      };
+      filtersLabel: string;
+      filtersHint: string;
+      addFilter: string;
+      removeFilterAria: (index: number) => string;
+      filterFieldAria: (index: number) => string;
+      filterOperatorAria: (index: number) => string;
+      filterValueAria: (index: number) => string;
+      filterValuePlaceholder: string;
+      filterNoFields: string;
+      operators: {
+        eq: string;
+        contains: string;
+        gte: string;
+        lte: string;
+      };
+    };
+    citations: {
+      summary: (count: number) => string;
+      score: (score: number) => string;
+      segmentPosition: (position: number) => string;
+    };
+    errors: {
+      generic: string;
+      network: string;
+      invalidResponse: string;
+    };
+  };
+
   // Workspace Changes
   workspaceChanges: {
     title: string;
@@ -273,6 +568,7 @@ export interface Translations {
       conversations: string;
       automations: string;
       agents: string;
+      knowledge: string;
       skills: string;
       mcp: string;
       memory: string;
@@ -601,6 +897,7 @@ export interface Translations {
       assets: string;
       systemSettings: string;
       settings: string;
+      knowledgeSettings: string;
     };
     overview: {
       title: string;

@@ -15,6 +15,7 @@ tests.
 | Schema or durable state          | PostgreSQL schema and persistence           |
 | Jobs, Runs, streams, files       | Jobs, Runs, streams, checkpoints, and files |
 | Agents, Skills, MCP, domain secrets | Governed assets                          |
+| Knowledge bases, RAG, retrieval  | Knowledge (optional RAG module)             |
 | Memory, audit, quota, retention  | Memory, audit, quota, and retention         |
 | Configuration, models, vision    | Configuration, models, and `inspect_image`  |
 | Implementation or verification   | Common change paths; Tests and code quality |
@@ -46,11 +47,15 @@ Run full-stack commands from the repository root and backend targets from
   contexts, and domain transactions.
 - `packages/harness/deerflow/<domain>/` owns reusable graph, runtime,
   persistence, sandbox, Skill, MCP, and subagent primitives.
+- `packages/knowledge/actweave_knowledge/` owns the self-contained RAG
+  Knowledge module; `app/knowledge/` owns its host adapters (config mapping,
+  Gateway routers, Worker handlers, Agent tool, bootstrap, secret adapter).
 - `scripts/` owns explicit Schema V1 setup and operator workflows.
 - `tests/` owns unit, PostgreSQL, process, and contract gates.
 
-The dependency direction is `app.* -> deerflow.*`; harness code must never
-import `app.*`.
+The dependency direction is `app.* -> deerflow.*` and
+`app.knowledge -> actweave_knowledge`; harness code must never import `app.*`,
+and `actweave_knowledge` must never import `app.*` or `deerflow.*`.
 
 ## Non-negotiable boundaries
 
@@ -457,6 +462,87 @@ recreated explicitly, never repaired in place.
   new Run admission with `PRIVATE_WORK_AGENT_ARCHIVED`. Earlier exact Run
   Snapshots keep their Definition payload; suspended Agents remain
   fail-closed, and an archived slug may be reused by a new Agent.
+
+### Knowledge (optional RAG module)
+
+- Knowledge is disabled by default and enabled only by the root `config.yaml`
+  `knowledge` block. The knowledge routes are always mounted but answer 404
+  `KNOWLEDGE_DISABLED` while the module is absent; a disabled module also means
+  the Worker registers no knowledge task handlers and no Run receives the
+  `knowledge_search` tool. When enabled, Gateway and Worker startup verify the
+  configured MinIO bucket is reachable and fail fast otherwise; the bucket is
+  administrator-provisioned and never auto-created. Members lacking a knowledge
+  capability receive 403 `KNOWLEDGE_FORBIDDEN`; outsiders and missing projects
+  collapse to 404.
+- `actweave_knowledge` stays host-agnostic: the host supplies engine, secret
+  cipher, and configuration through `app/knowledge/` adapters. Do not import
+  `app.*` or `deerflow.*` from the package.
+- The eight `knowledge_*` tables are ordinary Schema V1 members: ORM,
+  `full_schema.sql`, catalog digest, Chinese comments, and schema tests change
+  together, and `public.vector` (pgvector) must exist before install.
+  PostgreSQL owns all metadata, task, and segment authority; MinIO owns only
+  document bytes, keyed by database-issued storage keys.
+- Embedding/Reranker model configurations are PostgreSQL-administered with
+  independently encrypted API keys (shared secret-envelope infrastructure).
+  Keys are write-only through the admin API and never appear in responses,
+  logs, or the browser; a configuration referenced by knowledge bases cannot
+  be disabled or deleted. Admin routes require `system_admin`; project routes
+  require membership plus `shared_assets.read` for reads and
+  `shared_assets.edit` for writes; the search API and Agent tool return only
+  segments of the caller's project.
+- Ingestion, document deletion, base deletion, and project purge run as
+  `knowledge_tasks` claimed by the Worker under lease semantics. Extraction
+  covers PDF, DOCX, TXT, MD, CSV, XLSX, HTML, PPTX, and EPUB (source
+  positions mark page/paragraph/row/slide/chapter) and enforces a total
+  character budget and archive pre-checks. Splitting is
+  recursive-separator based: the user separator (escaped form, default
+  `\n\n`) leads a fixed fallback sequence, optional pre-processing rules
+  (`remove_extra_spaces`, `remove_urls_emails`) clean text before splitting,
+  and all chunk parameters freeze on the document row at upload so retry
+  reuses them. The `parent_child` chunking mode second-splits each parent
+  into `knowledge_segment_children` rows: only children carry embeddings
+  (parent rows store NULL), publish is single-transaction and
+  version-checked, and segment governance re-splits children on edit/add.
+  Chunk preview runs synchronously in the Gateway through the
+  same extract→clean→split path (stateless, no rows, no queue, temp file
+  removed per request) and nests child contents in parent_child mode. Deletion removes MinIO objects
+  before releasing database rows, records `delete_error` for operator-visible
+  retry, and project retention purges knowledge dependencies without
+  broadening scope.
+- Segment and document governance runs synchronously in the Gateway: document
+  rename and batch enable/disable/delete (all-or-nothing, bounded batch), plus
+  segment edit/add/toggle/delete on `ready` documents. Content edits and
+  manual additions re-embed with the base's model configuration before the
+  write transaction, which re-checks the document version and answers
+  `KNOWLEDGE_CONFLICT` when a re-ingest or delete won the race. A disabled
+  document or segment is excluded from retrieval candidates without touching
+  its vectors; `word_count` tracks segment characters and aggregates onto the
+  document row. Per-base metadata field definitions
+  (`knowledge_metadata_fields`, string/number/time) validate typed values
+  written into `knowledge_documents.doc_metadata` (JSONB, GIN-indexed);
+  field rename and delete rewrite document keys in the same transaction.
+  Base rebuild synchronously rebinds the model configuration, then bumps
+  every document version and requeues it through the normal ingest task, so
+  stale-version tasks no-op and old segments leave recall until re-ingest
+  completes.
+- Retrieval is two-stage and never single-stage: pgvector exact cosine recall
+  selects candidates, the Reranker orders them, and results carry rerank
+  scores. Recall merges two paths: general segments carry their own vectors;
+  parent_child documents recall through child chunks whose best score rolls
+  up to the parent (one candidate per parent, deduplicated). `top_k` and
+  `score_threshold` omitted by the caller resolve from the per-base defaults
+  stored on `knowledge_bases`. Optional `metadata_filters`
+  (eq/contains/gte/lte against defined fields, AND-combined, max 10) gate
+  both recall paths and are validated against the base's field definitions
+  before SQL. Every completed search appends a
+  `knowledge_queries` row (source `agent` or `retrieval_test`) and increments
+  segment/document hit counters as best-effort side effects. The
+  `knowledge_search` tool binds `project_id` from the Run context
+  (never model arguments) and persists citations in the ToolMessage's
+  `additional_kwargs.knowledge_citations`, which stream, values, and journal
+  paths all preserve for replay.
+- Knowledge tests live under `backend/tests/knowledge/` and require the
+  development PostgreSQL plus local MinIO from the root `.env`.
 
 ### Memory, audit, quota, and retention
 

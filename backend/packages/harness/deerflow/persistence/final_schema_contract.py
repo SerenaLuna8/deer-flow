@@ -15,7 +15,23 @@ import deerflow.persistence.models  # noqa: F401 -- populate final metadata
 from deerflow.persistence.base import Base
 from deerflow.persistence.final_schema_digest import SCHEMA_V1_CANONICAL_DIGEST
 
-FINAL_APP_TABLES = frozenset(Base.metadata.tables)
+# The Knowledge Package owns these rows through its own isolated ORM metadata;
+# the harness never imports that package, so the Schema V1 snapshot contributes
+# their names to the catalog statically.
+KNOWLEDGE_APP_TABLES = frozenset(
+    {
+        "knowledge_model_configurations",
+        "knowledge_bases",
+        "knowledge_documents",
+        "knowledge_metadata_fields",
+        "knowledge_segments",
+        "knowledge_segment_children",
+        "knowledge_queries",
+        "knowledge_tasks",
+    }
+)
+
+FINAL_APP_TABLES = frozenset(Base.metadata.tables) | KNOWLEDGE_APP_TABLES
 COMMENTED_ROOT_TABLES = FINAL_APP_TABLES | {"alembic_version"}
 LANGGRAPH_TABLES = frozenset(
     {
@@ -112,32 +128,32 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=98,
-        digest="a5548130a5b56424e164ed2016e0f0b33e6a8b95a14050f50da7b4bd57b5f951",
+        count=106,
+        digest="af719c9046b36b3df31fa7f453feb0ac6937c4506f0ff29cbc7582ebed608891",
     ),
     "columns": CatalogInvariant(
-        count=1228,
-        digest="aae70af4b94711437371a9b42179a7c2712a2f174d88a3e59f7f74fb80fd430f",
+        count=1332,
+        digest="0556e4ce3179f3a494808bad7da0e541b5337050328ed919cec199a0ae60ca60",
     ),
     "table_comments": CatalogInvariant(
-        count=99,
-        digest="576c0ede117265cb11aeed9cce6a42f682696ba757b0701b2798b38c1d51d684",
+        count=107,
+        digest="ae4033bb1a6a8b90d97cf21567912198671d3cb6842d0e44d42fa5b4dbef4084",
     ),
     "column_comments": CatalogInvariant(
-        count=1229,
-        digest="b5a7ca294ee3a98eef8c287b7a747f2288441a40dd4a4172c5bc9a6951b43465",
+        count=1333,
+        digest="fede80f800a3fcf70c9ed92974b265d09c66a20de19cd0e630bee44c6915df06",
     ),
     "sequences": CatalogInvariant(
         count=4,
         digest="73cb0d46bc3afc9585d0959b1d57d093621113408f2629dad9a6b027550af894",
     ),
     "constraints": CatalogInvariant(
-        count=911,
-        digest="3bc571bde965b67979c0b4d40ba74e7df88ed77dee97dc7105886097abeb2f34",
+        count=987,
+        digest="249f30f19565e450a9dc09b41725f2f804c88a79e2dbcf6f9968d77f6dd7eb37",
     ),
     "indexes": CatalogInvariant(
-        count=329,
-        digest="d1999b66cf743a8de3433d603a20500f093c12bb7148d2473ea09fc3883b6537",
+        count=356,
+        digest="13cd03695804b90e63c7080cb80764b32186982ab8c46b78691e1bb1c39d1988",
     ),
     "functions": CatalogInvariant(
         count=28,

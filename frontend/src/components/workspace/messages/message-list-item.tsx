@@ -44,9 +44,11 @@ import {
   resolveSlashSkillDisplay,
 } from "@/core/skills";
 import { SafeReasoningContent } from "@/core/streamdown/components";
+import { readKnowledgeCitations } from "@/core/threads/message-projection";
 import { cn } from "@/lib/utils";
 
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
+import { KnowledgeCitationsPanel } from "../citations/knowledge-citations-panel";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
@@ -329,6 +331,10 @@ function MessageContent_({
     () => (isHuman ? [] : extractCitationSources(contentToDisplay)),
     [contentToDisplay, isHuman],
   );
+  const knowledgeCitations = useMemo(
+    () => readKnowledgeCitations(message),
+    [message],
+  );
 
   const filesList =
     files && files.length > 0 ? (
@@ -469,6 +475,7 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
+      <KnowledgeCitationsPanel citations={knowledgeCitations} />
     </AIElementMessageContent>
   );
 }

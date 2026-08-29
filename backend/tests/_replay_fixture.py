@@ -147,7 +147,7 @@ async def replay_gateway_user(request: Request):
     return await get_current_user_from_request(request)
 
 
-def build_config_yaml(*, home: Path) -> str:
+def build_config_yaml(*, home: Path, knowledge_block: str = "") -> str:
     """Build the current, non-database process config for record/replay.
 
     Everything that shapes the system prompt is pinned so record, replay, and CI
@@ -158,6 +158,9 @@ def build_config_yaml(*, home: Path) -> str:
       prompt. Project MCP assets are absent from the admitted test Run.
     - model catalog / memory / summarization — PostgreSQL-owned and prepared by
       ``prepare_replay_runtime_catalog`` for replay.
+
+    ``knowledge_block`` optionally appends the Knowledge feature block built by
+    ``replay_knowledge.build_knowledge_config_block`` for the knowledge gate.
     """
     return f"""\
 log_level: warning
@@ -190,7 +193,7 @@ worker:
   shutdown_grace_seconds: 5
   retry_initial_seconds: 1
   retry_max_seconds: 5
-"""
+{knowledge_block}"""
 
 
 def _validated_replay_database_url(

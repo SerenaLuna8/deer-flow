@@ -472,16 +472,25 @@ class DeerFlowClient:
 
     @staticmethod
     def _tool_message_event(msg: ToolMessage) -> "StreamEvent":
-        """Build a ``messages-tuple`` tool-result event from a ToolMessage."""
+        """Build a ``messages-tuple`` tool-result event from a ToolMessage.
+
+        ``additional_kwargs`` must survive this normalization like it does on
+        the values and journal paths — Knowledge Citations ride there.
+        """
+        data: dict[str, Any] = {
+            "type": "tool",
+            "content": DeerFlowClient._extract_text(msg.content),
+            "name": msg.name,
+            "tool_call_id": msg.tool_call_id,
+            "id": msg.id,
+        }
+        if getattr(msg, "status", None) == "error":
+            data["status"] = "error"
+        if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+            data["additional_kwargs"] = additional_kwargs
         return StreamEvent(
             type="messages-tuple",
-            data={
-                "type": "tool",
-                "content": DeerFlowClient._extract_text(msg.content),
-                "name": msg.name,
-                "tool_call_id": msg.tool_call_id,
-                "id": msg.id,
-            },
+            data=data,
         )
 
     @staticmethod

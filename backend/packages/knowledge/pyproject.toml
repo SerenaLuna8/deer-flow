@@ -5,6 +5,8 @@ description = "ActWeave Knowledge Package — project knowledge bases, ingestion
 requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.29",
+    "beautifulsoup4>=4.12",
+    "ebooklib>=0.18",
     "httpx>=0.28.0",
     "minio>=7.2",
     "openpyxl>=3.1",
@@ -12,6 +14,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "pypdf>=5.0",
     "python-docx>=1.1",
+    "python-pptx>=1.0",
     "sqlalchemy[asyncio]>=2.0,<3.0",
 ]
 

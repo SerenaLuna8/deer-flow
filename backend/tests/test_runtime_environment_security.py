@@ -34,7 +34,7 @@ def test_runtime_environment_drops_bootstrap_model_key_from_file_and_ambient(
 ) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY=file-bootstrap-key\n",
+        "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY=file-bootstrap-key\nACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY=file-knowledge-key\n",
         encoding="utf-8",
     )
 
@@ -42,6 +42,7 @@ def test_runtime_environment_drops_bootstrap_model_key_from_file_and_ambient(
         env_file,
         base_environment={
             "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY": "ambient-bootstrap-key",
+            "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY": "ambient-knowledge-key",
             "RUNTIME_MARKER": "preserved",
         },
     )

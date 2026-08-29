@@ -1,5 +1,9 @@
 # RAG 摄取管道技术设计（MVP）
 
+> 现状：本文为 MVP 基线存档。M8 后切分改为递归分隔符策略并支持预处理规则
+> （压缩空白、删 URL/邮箱）与父子分块，新增 Gateway 同步分块预览，
+> 文件格式扩展 html/htm/pptx/epub。以《RAG知识库MVP执行计划》M8 小节为准。
+
 ## 1. 目标
 
 把用户上传的文件稳定转换为可检索的 Knowledge Segment 和 embedding，并把处理状态显示在 Knowledge Document 上。

@@ -1,0 +1,467 @@
+"""Package-owned ORM rows for the eight ``knowledge_*`` tables.
+
+The DDL authority is the host Schema V1 snapshot (``full_schema.sql``); these
+mappings mirror it exactly. The runtime never emits DDL from this metadata.
+Foreign keys to host tables (``projects``) exist only in the SQL snapshot so
+this metadata stays self-contained.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Any
+
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Double,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    LargeBinary,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class KnowledgeOrmBase(DeclarativeBase):
+    """Isolated metadata; never merged into the host declarative Base."""
+
+
+class KnowledgeModelConfigurationRow(KnowledgeOrmBase):
+    __tablename__ = "knowledge_model_configurations"
+    __table_args__ = (
+        CheckConstraint("btrim(display_name) <> ''", name="ck_knowledge_model_configurations_name"),
+        CheckConstraint("status IN ('active', 'disabled')", name="ck_knowledge_model_configurations_status"),
+        CheckConstraint("btrim(base_url) <> ''", name="ck_knowledge_model_configurations_base_url"),
+        CheckConstraint("btrim(embedding_model) <> ''", name="ck_knowledge_model_configurations_embedding_model"),
+        CheckConstraint("embedding_dimension BETWEEN 1 AND 16000", name="ck_knowledge_model_configurations_dimension"),
+        CheckConstraint("embedding_max_batch BETWEEN 1 AND 2048", name="ck_knowledge_model_configurations_batch"),
+        CheckConstraint("btrim(reranker_model) <> ''", name="ck_knowledge_model_configurations_reranker_model"),
+        CheckConstraint("reranker_max_batch BETWEEN 1 AND 256", name="ck_knowledge_model_configurations_reranker_batch"),
+        CheckConstraint("request_timeout_seconds BETWEEN 1 AND 300", name="ck_knowledge_model_configurations_timeout"),
+        CheckConstraint(
+            "octet_length(api_key_nonce) = 12 AND octet_length(api_key_ciphertext) >= 16",
+            name="ck_knowledge_model_configurations_secret",
+        ),
+        Index("uq_knowledge_model_configurations_name", text("lower(display_name)"), unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
+    base_url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding_max_batch: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("64"))
+    reranker_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    reranker_max_batch: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("32"))
+    request_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("30"))
+    api_key_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    api_key_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeBaseRow(KnowledgeOrmBase):
+    __tablename__ = "knowledge_bases"
+    __table_args__ = (
+        UniqueConstraint("project_id", "id", name="uq_knowledge_bases_project_id_id"),
+        CheckConstraint("btrim(name) <> ''", name="ck_knowledge_bases_name"),
+        CheckConstraint("status IN ('active', 'disabled', 'deleting')", name="ck_knowledge_bases_status"),
+        CheckConstraint("default_top_k BETWEEN 1 AND 20", name="ck_knowledge_bases_default_top_k"),
+        CheckConstraint(
+            "default_score_threshold >= 0 AND default_score_threshold <= 1",
+            name="ck_knowledge_bases_default_score_threshold",
+        ),
+        Index("uq_knowledge_bases_project_name", "project_id", text("lower(name)"), unique=True),
+        Index("ix_knowledge_bases_project_status", "project_id", "status", text("updated_at DESC"), "id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False, server_default=text("''"))
+    model_configuration_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_model_configurations.id", name="fk_knowledge_bases_model", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
+    # Per-base retrieval defaults: used when a search request omits the value
+    # (retrieval test prefill and the Agent tool without explicit arguments).
+    default_top_k: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("4"))
+    default_score_threshold: Mapped[float] = mapped_column(Double, nullable=False, server_default=text("0.2"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeDocumentRow(KnowledgeOrmBase):
+    __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        UniqueConstraint("project_id", "knowledge_base_id", "id", name="uq_knowledge_documents_project_base_id"),
+        CheckConstraint("btrim(name) <> '' AND btrim(original_name) <> ''", name="ck_knowledge_documents_name"),
+        CheckConstraint("btrim(storage_key) <> ''", name="ck_knowledge_documents_storage_key"),
+        CheckConstraint("size_bytes >= 0", name="ck_knowledge_documents_size"),
+        CheckConstraint(
+            "status IN ('uploading', 'queued', 'processing', 'ready', 'failed', 'deleting')",
+            name="ck_knowledge_documents_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_knowledge_documents_version"),
+        CheckConstraint("chunk_size BETWEEN 200 AND 4000", name="ck_knowledge_documents_chunk_size"),
+        CheckConstraint(
+            "chunk_overlap BETWEEN 0 AND 500 AND chunk_overlap < chunk_size",
+            name="ck_knowledge_documents_chunk_overlap",
+        ),
+        CheckConstraint(
+            "char_length(chunk_separator) BETWEEN 1 AND 64",
+            name="ck_knowledge_documents_chunk_separator",
+        ),
+        CheckConstraint(
+            "chunking_mode IN ('general', 'parent_child')",
+            name="ck_knowledge_documents_chunking_mode",
+        ),
+        CheckConstraint(
+            "child_chunk_size BETWEEN 100 AND 2000",
+            name="ck_knowledge_documents_child_chunk_size",
+        ),
+        # The child parameters are meaningful only in parent_child mode;
+        # general-mode rows keep the column defaults whatever chunk_size is.
+        CheckConstraint(
+            "chunking_mode = 'general' OR child_chunk_size < chunk_size",
+            name="ck_knowledge_documents_child_chunk_ratio",
+        ),
+        CheckConstraint(
+            "char_length(child_chunk_separator) BETWEEN 1 AND 64",
+            name="ck_knowledge_documents_child_chunk_separator",
+        ),
+        CheckConstraint("segment_count >= 0", name="ck_knowledge_documents_segment_count"),
+        CheckConstraint("word_count >= 0", name="ck_knowledge_documents_word_count"),
+        CheckConstraint("hit_count >= 0", name="ck_knowledge_documents_hit_count"),
+        CheckConstraint("jsonb_typeof(doc_metadata) = 'object'", name="ck_knowledge_documents_doc_metadata"),
+        CheckConstraint(
+            "(status = 'failed' AND error_message IS NOT NULL) OR (status <> 'failed' AND error_message IS NULL)",
+            name="ck_knowledge_documents_error",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "knowledge_base_id"],
+            ["knowledge_bases.project_id", "knowledge_bases.id"],
+            name="fk_knowledge_documents_base",
+            ondelete="RESTRICT",
+        ),
+        Index("uq_knowledge_documents_storage_key", "storage_key", unique=True),
+        Index(
+            "ix_knowledge_documents_base_status",
+            "project_id",
+            "knowledge_base_id",
+            "status",
+            text("updated_at DESC"),
+            "id",
+        ),
+        # Accelerates the search-path equality filter (doc_metadata @> {...}).
+        Index("ix_knowledge_documents_doc_metadata", "doc_metadata", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    media_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'uploading'"))
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    chunk_size: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1000"))
+    chunk_overlap: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("100"))
+    # Escaped form as typed by the user (e.g. the four characters "\n\n");
+    # the splitter decodes \n/\t/\r at use time.
+    chunk_separator: Mapped[str] = mapped_column(String(64), nullable=False, server_default=text(r"'\n\n'"))
+    remove_extra_spaces: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    remove_urls_emails: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # parent_child mode: parents use the chunk_* parameters above, children
+    # split within each parent by the child parameters (overlap always 0).
+    chunking_mode: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'general'"))
+    child_chunk_size: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("500"))
+    child_chunk_separator: Mapped[str] = mapped_column(String(64), nullable=False, server_default=text(r"'\n'"))
+    segment_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    word_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    # Historical sum of the per-query segment hit increments; deleting a
+    # segment does not rewrite history.
+    hit_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    # Values keyed by the base's metadata-field NAME ({name: string|number}).
+    # Field rename/delete rewrites these keys in the same transaction.
+    doc_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeMetadataFieldRow(KnowledgeOrmBase):
+    """Base-scoped custom metadata field definition (string/number/time).
+
+    Document values live in ``knowledge_documents.doc_metadata`` keyed by the
+    field name; renaming or deleting a field rewrites those keys across the
+    base's documents in the same transaction. ``time`` values are stored as
+    epoch seconds (JSON numbers), so range filters compare numerically.
+    """
+
+    __tablename__ = "knowledge_metadata_fields"
+    __table_args__ = (
+        CheckConstraint("btrim(name) <> ''", name="ck_knowledge_metadata_fields_name"),
+        CheckConstraint(
+            "field_type IN ('string', 'number', 'time')",
+            name="ck_knowledge_metadata_fields_type",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "knowledge_base_id"],
+            ["knowledge_bases.project_id", "knowledge_bases.id"],
+            name="fk_knowledge_metadata_fields_base",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "uq_knowledge_metadata_fields_base_name",
+            "knowledge_base_id",
+            text("lower(name)"),
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    field_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeSegmentRow(KnowledgeOrmBase):
+    __tablename__ = "knowledge_segments"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_document_id",
+            "document_version",
+            "position",
+            name="uq_knowledge_segments_document_version_position",
+        ),
+        CheckConstraint("document_version >= 1", name="ck_knowledge_segments_version"),
+        CheckConstraint("position >= 1", name="ck_knowledge_segments_position"),
+        CheckConstraint("content <> ''", name="ck_knowledge_segments_content"),
+        CheckConstraint("word_count >= 0", name="ck_knowledge_segments_word_count"),
+        CheckConstraint("hit_count >= 0", name="ck_knowledge_segments_hit_count"),
+        CheckConstraint("jsonb_typeof(source_position) = 'object'", name="ck_knowledge_segments_source_position"),
+        # NULL for parent_child-mode parents: their vectors live on the child
+        # rows and general-mode recall filters on ``embedding IS NOT NULL``.
+        CheckConstraint(
+            "embedding IS NULL OR public.vector_dims(embedding) BETWEEN 1 AND 16000",
+            name="ck_knowledge_segments_embedding",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "knowledge_base_id", "knowledge_document_id"],
+            [
+                "knowledge_documents.project_id",
+                "knowledge_documents.knowledge_base_id",
+                "knowledge_documents.id",
+            ],
+            name="fk_knowledge_segments_document",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_knowledge_segments_document",
+            "project_id",
+            "knowledge_base_id",
+            "knowledge_document_id",
+            "document_version",
+            "position",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    document_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    word_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    source_position: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    embedding: Mapped[Any | None] = mapped_column(Vector(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeSegmentChildRow(KnowledgeOrmBase):
+    """parent_child mode's vector carrier: one embedded child chunk per row.
+
+    Children never surface in views or citations; retrieval joins them back to
+    the parent segment, which owns content, position, and the enabled switch.
+    The FK cascades so re-ingests and segment deletions drop children with
+    their parents.
+    """
+
+    __tablename__ = "knowledge_segment_children"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_segment_id",
+            "position",
+            name="uq_knowledge_segment_children_segment_position",
+        ),
+        CheckConstraint("document_version >= 1", name="ck_knowledge_segment_children_version"),
+        CheckConstraint("position >= 1", name="ck_knowledge_segment_children_position"),
+        CheckConstraint("content <> ''", name="ck_knowledge_segment_children_content"),
+        CheckConstraint("word_count >= 0", name="ck_knowledge_segment_children_word_count"),
+        CheckConstraint(
+            "public.vector_dims(embedding) BETWEEN 1 AND 16000",
+            name="ck_knowledge_segment_children_embedding",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_segment_id"],
+            ["knowledge_segments.id"],
+            name="fk_knowledge_segment_children_segment",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_knowledge_segment_children_document",
+            "project_id",
+            "knowledge_base_id",
+            "knowledge_document_id",
+            "document_version",
+            "position",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_segment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    document_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    word_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    embedding: Mapped[Any] = mapped_column(Vector(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeQueryRow(KnowledgeOrmBase):
+    """Append-only retrieval log: one row per search on either path.
+
+    ``knowledge_base_ids`` stores the resolved active bases the search really
+    targeted (JSONB array of UUID strings). Rows are history: base deletion
+    keeps them, project purge removes them.
+    """
+
+    __tablename__ = "knowledge_queries"
+    __table_args__ = (
+        CheckConstraint("btrim(query) <> ''", name="ck_knowledge_queries_query"),
+        CheckConstraint("source IN ('agent', 'retrieval_test')", name="ck_knowledge_queries_source"),
+        CheckConstraint(
+            "jsonb_typeof(knowledge_base_ids) = 'array'",
+            name="ck_knowledge_queries_base_ids",
+        ),
+        CheckConstraint("result_count >= 0", name="ck_knowledge_queries_result_count"),
+        CheckConstraint(
+            "top_score IS NULL OR (top_score >= 0 AND top_score <= 1)",
+            name="ck_knowledge_queries_top_score",
+        ),
+        Index("ix_knowledge_queries_project_created", "project_id", text("created_at DESC"), "id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_ids: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    query: Mapped[str] = mapped_column(String(2000), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    result_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    top_score: Mapped[float | None] = mapped_column(Double, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeTaskRow(KnowledgeOrmBase):
+    __tablename__ = "knowledge_tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('ingest_document', 'delete_document', 'delete_knowledge_base')",
+            name="ck_knowledge_tasks_kind",
+        ),
+        CheckConstraint(
+            "(kind = 'ingest_document' AND target_version IS NOT NULL AND target_version >= 1) OR (kind <> 'ingest_document' AND target_version IS NULL)",
+            name="ck_knowledge_tasks_target_version",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'retry_wait', 'succeeded', 'failed')",
+            name="ck_knowledge_tasks_status",
+        ),
+        CheckConstraint(
+            "attempt_count BETWEEN 0 AND max_attempts AND max_attempts = 3",
+            name="ck_knowledge_tasks_attempts",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND claim_token IS NOT NULL AND lease_until IS NOT NULL) OR (status <> 'running' AND claim_token IS NULL AND lease_until IS NULL)",
+            name="ck_knowledge_tasks_claim",
+        ),
+        CheckConstraint(
+            "(status IN ('succeeded', 'failed') AND finished_at IS NOT NULL) OR (status NOT IN ('succeeded', 'failed') AND finished_at IS NULL)",
+            name="ck_knowledge_tasks_finished",
+        ),
+        Index(
+            "ix_knowledge_tasks_claim",
+            "available_at",
+            "created_at",
+            "id",
+            postgresql_where=text("status IN ('queued', 'retry_wait')"),
+        ),
+        Index(
+            "ix_knowledge_tasks_expired",
+            "lease_until",
+            "id",
+            postgresql_where=text("status = 'running'"),
+        ),
+        Index(
+            "uq_knowledge_tasks_open_ingest",
+            "resource_id",
+            "target_version",
+            unique=True,
+            postgresql_where=text("kind = 'ingest_document' AND status IN ('queued', 'running', 'retry_wait')"),
+        ),
+        Index(
+            "uq_knowledge_tasks_open_document_delete",
+            "resource_id",
+            unique=True,
+            postgresql_where=text("kind = 'delete_document' AND status IN ('queued', 'running', 'retry_wait')"),
+        ),
+        Index(
+            "uq_knowledge_tasks_open_base_delete",
+            "resource_id",
+            unique=True,
+            postgresql_where=text("kind = 'delete_knowledge_base' AND status IN ('queued', 'running', 'retry_wait')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'queued'"))
+    attempt_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
+    max_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("3"))
+    available_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)

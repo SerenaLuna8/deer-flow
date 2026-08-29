@@ -111,12 +111,20 @@ A Project-shared collection of Knowledge Documents that selects one Knowledge Mo
 _Avoid_: Dataset, vector table
 
 **Knowledge Document**:
-A source file uploaded to one Knowledge Base. It owns the stored file location, processing status, segments, and embeddings.
+A source file uploaded to one Knowledge Base. It owns the stored file location, processing status, metadata values, segments, and embeddings.
 _Avoid_: Source Blob, upload row
 
 **Knowledge Segment**:
 A stable, ordered text chunk derived from one version of a Knowledge Document.
 _Avoid_: random chunk
+
+**Knowledge Segment Child**:
+A finer-grained chunk derived from one Knowledge Segment in parent-child mode. Children carry the vectors used for recall; a hit rolls up to its parent Segment for reranking and citation.
+_Avoid_: child segment, sub-document
+
+**Knowledge Metadata Field**:
+A Knowledge Base–scoped custom field definition typed as string, number, or time. Knowledge Documents hold typed values for these fields, and retrieval filters on them.
+_Avoid_: tag, label, free-form attribute
 
 **Knowledge Task**:
 A durable background work item for document ingestion or deletion.
@@ -125,6 +133,10 @@ _Avoid_: Run, Job, fire-and-forget background task
 **Knowledge Citation**:
 A reference to the Knowledge Base, Knowledge Document, and Knowledge Segment that supplied one search result.
 _Avoid_: complete source document
+
+**Knowledge Query**:
+A logged retrieval request against a Project's Knowledge Bases, recording its source, result count, and top score for hit statistics.
+_Avoid_: chat message, Run
 
 **Knowledge Model Configuration**:
 A platform-administered retrieval profile that binds one Embedding model and one Reranker model to the same provider endpoint and Configuration Secret. A Knowledge Base selects one Knowledge Model Configuration for indexing, candidate retrieval, and reranking. It is distinct from the System Model Configuration used for Agent model execution.

@@ -11,18 +11,29 @@ used. This is the ``playwright.real-backend.config.ts`` web server::
 ``tests/`` is put on the path so the test-only replay provider resolves;
 ``GATEWAY_CORS_ORIGINS`` is set for the task-local frontend. The derived
 database is always named ``deerflow_test_replay_*`` and is dropped in ``finally``.
+
+When the three ``ACT_WEAVE_KNOWLEDGE_MINIO_*`` variables are present, the
+script also enables the Knowledge module for real: pgvector in the disposable
+database, one disposable MinIO bucket, a deterministic mock SiliconFlow
+provider on an ephemeral loopback port, a seeded model configuration pointing
+at that mock, and the ``/api/test-only/replay-knowledge`` control router (see
+``tests/replay_knowledge.py``). Without those variables the Knowledge feature
+stays off and the gate behaves exactly as before.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import contextlib
 import json
 import os
 import signal
 import sys
 import tempfile
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
@@ -84,12 +95,15 @@ def main() -> int:
         replay_gateway_user,
         replay_test_database_from_development,
     )
+    from replay_knowledge import knowledge_minio_environment_ready
 
     development_database_url = os.environ.get("DATABASE_URL")
     worker_mode = _replay_worker_mode()
+    knowledge_enabled = knowledge_minio_environment_ready()
     readback: dict[str, object] = {
         "schema_version": 1,
         "worker_mode": worker_mode,
+        "knowledge_enabled": knowledge_enabled,
         "database_created": False,
         "database_dropped": False,
         "gateway_outcome": "not_started",
@@ -104,10 +118,58 @@ def main() -> int:
             readback["database_created"] = True
             os.environ["DATABASE_URL"] = database.database_url
 
-            with tempfile.TemporaryDirectory(prefix="replay-gw-") as raw_home:
+            with tempfile.TemporaryDirectory(prefix="replay-gw-") as raw_home, contextlib.ExitStack() as knowledge_resources:
                 home = Path(raw_home)
                 cfg = home / "config.yaml"
-                cfg.write_text(build_config_yaml(home=home), encoding="utf-8")
+                knowledge_block = ""
+                knowledge_state = None
+                knowledge_provider = None
+                knowledge_objects = None
+                if knowledge_enabled:
+                    from replay_knowledge import (
+                        KnowledgeReplayState,
+                        ReplayKnowledgeProviderServer,
+                        build_knowledge_config_block,
+                        create_replay_knowledge_bucket,
+                        drop_replay_knowledge_bucket,
+                        list_replay_knowledge_objects,
+                        prepare_pgvector_extension,
+                        replay_minio_settings_from_environment,
+                    )
+
+                    prepare_pgvector_extension(database.database_url)
+                    # The disposable database never outlives this process, so
+                    # an ephemeral master key is enough when none is provided.
+                    os.environ.setdefault(
+                        "ACT_WEAVE_SECRET_KEY",
+                        base64.b64encode(os.urandom(32)).decode("ascii"),
+                    )
+                    os.environ["ACT_WEAVE_REPLAY_KNOWLEDGE_FAST_RETRY"] = "1"
+                    minio_settings = replay_minio_settings_from_environment()
+                    knowledge_bucket = create_replay_knowledge_bucket(minio_settings)
+                    knowledge_resources.callback(
+                        drop_replay_knowledge_bucket,
+                        minio_settings,
+                        knowledge_bucket,
+                    )
+                    knowledge_state = KnowledgeReplayState()
+                    knowledge_provider = ReplayKnowledgeProviderServer(knowledge_state)
+                    knowledge_provider.start()
+                    knowledge_resources.callback(knowledge_provider.stop)
+                    knowledge_block = build_knowledge_config_block(bucket=knowledge_bucket)
+                    knowledge_objects = partial(
+                        list_replay_knowledge_objects,
+                        minio_settings,
+                        knowledge_bucket,
+                    )
+                    readback["knowledge"] = {
+                        "bucket": knowledge_bucket,
+                        "provider_port": knowledge_provider.port,
+                    }
+                cfg.write_text(
+                    build_config_yaml(home=home, knowledge_block=knowledge_block),
+                    encoding="utf-8",
+                )
 
                 # The replay process owns all prompt-affecting paths and never
                 # inherits a developer's Skill tree.
@@ -128,6 +190,17 @@ def main() -> int:
                 )
                 install_replay_model_adapter()
                 asyncio.run(bootstrap_replay_test_database(database.database_url))
+                if knowledge_provider is not None:
+                    from replay_knowledge import (
+                        seed_replay_knowledge_model_configuration,
+                    )
+
+                    asyncio.run(
+                        seed_replay_knowledge_model_configuration(
+                            database.database_url,
+                            base_url=knowledge_provider.base_url,
+                        )
+                    )
                 asyncio.run(prepare_replay_runtime_catalog(database.database_url))
 
                 import uvicorn
@@ -147,13 +220,22 @@ def main() -> int:
                 )
                 gateway_app.dependency_overrides[get_current_user_from_request] = replay_gateway_user
                 gateway_app.include_router(replay_agent_router)
+                if knowledge_state is not None and knowledge_objects is not None:
+                    from replay_knowledge import build_replay_knowledge_router
+
+                    gateway_app.include_router(
+                        build_replay_knowledge_router(
+                            knowledge_state,
+                            list_objects=knowledge_objects,
+                        )
+                    )
                 if worker_mode == "delayed":
                     gateway_app.include_router(build_replay_worker_router(controller))
                 else:
                     controller.start()
 
                 print(
-                    f"[replay-gw] database=disposable worker_mode={worker_mode} port={args.port}",
+                    f"[replay-gw] database=disposable worker_mode={worker_mode} knowledge={'on' if knowledge_enabled else 'off'} port={args.port}",
                     flush=True,
                 )
                 readback["gateway_outcome"] = "running"

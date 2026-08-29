@@ -11,6 +11,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.knowledge.bootstrap import (
+    KnowledgeBootstrapConfigurationInvalid,
+    prepare_knowledge_bootstrap,
+)
 from app.system_settings.bootstrap import (
     DefaultSystemModelBootstrapConfigurationInvalid,
     prepare_default_system_model_bootstrap,
@@ -25,6 +29,9 @@ from scripts.setup_postgres import (
 )
 from scripts.setup_postgres import (
     _complete_bootstrap_lock as complete_bootstrap_lock,
+)
+from scripts.setup_postgres import (
+    _ensure_vector_extension as ensure_vector_extension,
 )
 
 
@@ -44,11 +51,18 @@ async def reset_and_initialize(
     database_url: str,
     *,
     expected_database: str,
+    admin_url: str,
 ) -> SetupResult:
     target = parse_target(database_url)
     _require_resettable_database(target.database)
     if target.database != expected_database:
         raise PostgresResetError("确认数据库名与 DATABASE_URL 不一致")
+    # The maintenance URL is consumed only after the destructive DROP (to
+    # reinstall pgvector), so validate it before any DDL runs.
+    try:
+        parse_target(admin_url, maintenance=True)
+    except ValueError:
+        raise PostgresResetError("数据库重置预检失败；POSTGRES_ADMIN_URL 必须指向 postgres 维护数据库") from None
 
     try:
         default_model_bootstrap = prepare_default_system_model_bootstrap()
@@ -56,6 +70,12 @@ async def reset_and_initialize(
         raise PostgresResetError("数据库重置预检失败；请检查 bootstrap Secret 和模型 Key 配置") from None
     except Exception:
         raise PostgresResetError("数据库重置预检失败；请检查 bootstrap Secret 和模型 Key 配置") from None
+    try:
+        knowledge_bootstrap = prepare_knowledge_bootstrap()
+    except KnowledgeBootstrapConfigurationInvalid:
+        raise PostgresResetError("数据库重置预检失败；请检查 Knowledge bootstrap Key 和 Secret 配置") from None
+    except Exception:
+        raise PostgresResetError("数据库重置预检失败；请检查 Knowledge bootstrap Key 和 Secret 配置") from None
 
     try:
         engine = create_async_engine(
@@ -80,9 +100,13 @@ async def reset_and_initialize(
                 await connection.execute(text("DROP SCHEMA public CASCADE"))
                 await connection.execute(text("CREATE SCHEMA public AUTHORIZATION CURRENT_USER"))
             schema_rebuilt = True
+            # Dropping the public schema removed the pgvector extension with
+            # it; re-prepare it with maintenance authority before staging.
+            await ensure_vector_extension(admin_url, target.database)
             revision = await bootstrap_empty_schema_under_lock(
                 database_url,
                 default_model_bootstrap=default_model_bootstrap,
+                knowledge_bootstrap=knowledge_bootstrap,
                 force_public_schema=True,
             )
             bootstrap_completed = True
@@ -157,11 +181,17 @@ def main(argv: list[str] | None = None) -> int:
         print("错误: 确认数据库名与 DATABASE_URL 不一致", file=sys.stderr)
         return 2
 
+    admin_url = os.getenv("POSTGRES_ADMIN_URL")
+    if not admin_url:
+        print("错误: reset-db 必须显式设置 POSTGRES_ADMIN_URL（重建后需要以管理员身份准备 pgvector 扩展）", file=sys.stderr)
+        return 2
+
     try:
         result = asyncio.run(
             reset_and_initialize(
                 database_url,
                 expected_database=target.database,
+                admin_url=admin_url,
             )
         )
     except PostgresResetError as exc:

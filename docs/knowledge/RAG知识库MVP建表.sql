@@ -6,6 +6,11 @@
 -- Runtime 不执行本文件。
 -- 初始 SiliconFlow Embedding + Reranker 配置由 setup-db 的代码 bootstrap
 -- 在 DDL 完成后写入；本文件不 INSERT 模型、密文或明文 API Key。
+--
+-- 现状：本文件为 MVP 五张表设计存档，未随 M8 更新。M8 后 knowledge_* 表
+-- 共八张（新增 knowledge_segment_children、knowledge_queries、
+-- knowledge_metadata_fields，并扩展 documents/segments/bases 列）。
+-- 权威 DDL 见 backend/packages/harness/deerflow/persistence/full_schema.sql。
 
 DO $$
 BEGIN

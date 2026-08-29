@@ -3,6 +3,7 @@
 import {
   ActivityIcon,
   ArrowLeftIcon,
+  BookOpenIcon,
   BotIcon,
   BoxesIcon,
   BriefcaseBusinessIcon,
@@ -47,6 +48,7 @@ interface NavigationLabels {
   assets: string;
   systemSettings: string;
   settings: string;
+  knowledgeSettings: string;
 }
 
 interface NavigationGroupLabels {
@@ -63,6 +65,7 @@ const DEFAULT_NAVIGATION_LABELS: NavigationLabels = {
   assets: "Assets",
   systemSettings: "System settings",
   settings: "Model settings",
+  knowledgeSettings: "Knowledge models",
 };
 
 export const ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY =
@@ -198,6 +201,11 @@ export function AdminOperationsNavigation({
           href: "/admin/settings/models",
           label: labels.settings,
           icon: BotIcon,
+        },
+        {
+          href: "/admin/settings/knowledge",
+          label: labels.knowledgeSettings,
+          icon: BookOpenIcon,
         },
       ],
     },
@@ -401,11 +409,14 @@ export function AdminOperationsShell({
             : pathname === "/admin/settings/system" ||
                 pathname.startsWith("/admin/settings/system/")
               ? t.adminOperations.navigation.systemSettings
-              : pathname === "/admin/settings" ||
-                  pathname === "/admin/settings/models" ||
-                  pathname.startsWith("/admin/settings/models/")
-                ? t.adminOperations.navigation.settings
-                : t.adminOperations.navigation.overview;
+              : pathname === "/admin/settings/knowledge" ||
+                  pathname.startsWith("/admin/settings/knowledge/")
+                ? t.adminOperations.navigation.knowledgeSettings
+                : pathname === "/admin/settings" ||
+                    pathname === "/admin/settings/models" ||
+                    pathname.startsWith("/admin/settings/models/")
+                  ? t.adminOperations.navigation.settings
+                  : t.adminOperations.navigation.overview;
 
   return (
     <div

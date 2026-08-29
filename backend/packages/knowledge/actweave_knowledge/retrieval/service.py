@@ -1,0 +1,671 @@
+"""Two-stage semantic retrieval: exact cosine recall, then reranker ordering.
+
+The vector score only widens the candidate pool and stabilizes ties; the
+reranker's ``relevance_score`` decides the final order and becomes the
+Citation score. Bases are grouped by model configuration so vectors of
+different dimensions never enter the same distance computation, and a
+reranker failure fails the whole search — never a silent cosine-only result.
+
+Recall runs two paths per group: general-mode segments carry their own
+vectors, parent_child-mode documents recall through child chunks whose best
+score rolls up to the parent segment (one candidate per parent). The reranker
+always scores the text a citation would return — the parent content.
+
+``top_k``/``score_threshold`` omitted by the caller resolve to the per-base
+defaults stored on the knowledge bases. Every completed search appends one
+``knowledge_queries`` row and increments segment/document hit counters —
+best-effort side effects that never fail the search itself.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from dataclasses import dataclass
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import Numeric, case, cast, func, null, select, update
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..contracts import (
+    KNOWLEDGE_INVALID_REQUEST,
+    KNOWLEDGE_MAX_METADATA_FILTERS,
+    KNOWLEDGE_MAX_METADATA_NAME_LENGTH,
+    KNOWLEDGE_MAX_METADATA_STRING_LENGTH,
+    KNOWLEDGE_MAX_TOP_K,
+    KNOWLEDGE_MODEL_UNAVAILABLE,
+    KNOWLEDGE_NOT_FOUND,
+    KNOWLEDGE_SEARCH_FAILED,
+    KnowledgeCitation,
+    KnowledgeError,
+    KnowledgeMetadataFilter,
+    KnowledgeQueryView,
+    KnowledgeSearchRequest,
+    KnowledgeSearchResult,
+    KnowledgeSecretPort,
+)
+from ..models.client import KnowledgeModelClient, KnowledgeModelMaterial
+from ..models.service import materialize_model_material
+from ..persistence.models import (
+    KnowledgeBaseRow,
+    KnowledgeDocumentRow,
+    KnowledgeModelConfigurationRow,
+    KnowledgeQueryRow,
+    KnowledgeSegmentChildRow,
+    KnowledgeSegmentRow,
+)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_TOP_K = 4
+MAX_TOP_K = KNOWLEDGE_MAX_TOP_K
+MAX_QUERY_CHARS = 2000
+# Calibrated once against the real provider during M2 integration; 0 disables
+# the filter entirely. Kept as the ultimate fallback; per-base defaults are
+# the normal source when the request omits the value.
+DEFAULT_SCORE_THRESHOLD = 0.2
+SNIPPET_MAX_CHARS = 320
+
+MAX_QUERY_PAGE_SIZE = 100
+
+_CANDIDATE_K_FLOOR = 20
+_CANDIDATE_K_CEILING = 100
+
+
+def calculate_candidate_k(top_k: int) -> int:
+    """Per-group recall size: ``min(100, max(20, top_k * 5))``."""
+
+    return min(_CANDIDATE_K_CEILING, max(_CANDIDATE_K_FLOOR, top_k * 5))
+
+
+def _invalid(message: str) -> KnowledgeError:
+    return KnowledgeError(KNOWLEDGE_INVALID_REQUEST, message)
+
+
+# The retrieval contract surfaces database faults as search failures
+# (KNOWLEDGE_SEARCH_FAILED), never as zero hits and never as the object-store
+# code used by upload/download paths.
+def _search_failed() -> KnowledgeError:
+    return KnowledgeError(KNOWLEDGE_SEARCH_FAILED, "检索暂时不可用，请稍后重试")
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedSearch:
+    """Range-checked request values; ``None`` means "use the base defaults"."""
+
+    query: str
+    top_k: int | None
+    score_threshold: float | None
+    metadata_filters: tuple[KnowledgeMetadataFilter, ...]
+
+
+def _validated_metadata_filters(
+    filters: tuple[KnowledgeMetadataFilter, ...] | None,
+) -> tuple[KnowledgeMetadataFilter, ...]:
+    """Bound and type-check manual metadata conditions (AND semantics).
+
+    Field names are not resolved against definitions here: a condition on a
+    name no targeted base defines simply matches no document of that base,
+    mirroring the "missing key never matches" rule.
+    """
+
+    if filters is None:
+        return ()
+    if not isinstance(filters, (tuple, list)):
+        raise _invalid("metadata_filters 必须是条件数组")
+    if len(filters) > KNOWLEDGE_MAX_METADATA_FILTERS:
+        raise _invalid(f"metadata_filters 最多 {KNOWLEDGE_MAX_METADATA_FILTERS} 个条件")
+    validated: list[KnowledgeMetadataFilter] = []
+    for item in filters:
+        name = item.name.strip() if isinstance(item.name, str) else ""
+        if not name or len(name) > KNOWLEDGE_MAX_METADATA_NAME_LENGTH:
+            raise _invalid(f"过滤条件的 name 必须是 1-{KNOWLEDGE_MAX_METADATA_NAME_LENGTH} 个字符的非空文本")
+        if item.operator not in ("eq", "contains", "gte", "lte"):
+            raise _invalid("过滤条件的 operator 只能是 eq、contains、gte 或 lte")
+        value = item.value
+        if item.operator == "contains":
+            if not isinstance(value, str) or not 1 <= len(value) <= KNOWLEDGE_MAX_METADATA_STRING_LENGTH:
+                raise _invalid("contains 条件的 value 必须是非空字符串")
+        elif item.operator in ("gte", "lte"):
+            if type(value) not in (int, float) or (isinstance(value, float) and not math.isfinite(value)):
+                raise _invalid(f"{item.operator} 条件的 value 必须是有限数字")
+        elif isinstance(value, str):
+            if len(value) > KNOWLEDGE_MAX_METADATA_STRING_LENGTH:
+                raise _invalid(f"eq 条件的字符串 value 最多 {KNOWLEDGE_MAX_METADATA_STRING_LENGTH} 个字符")
+        elif type(value) not in (int, float) or (isinstance(value, float) and not math.isfinite(value)):
+            raise _invalid("eq 条件的 value 必须是字符串或有限数字")
+        validated.append(KnowledgeMetadataFilter(name=name, operator=item.operator, value=value))
+    return tuple(validated)
+
+
+def _metadata_filter_conditions(filters: tuple[KnowledgeMetadataFilter, ...]) -> tuple[Any, ...]:
+    """Translate validated conditions into document-row SQL predicates.
+
+    ``eq`` uses GIN-indexable JSONB containment (type-exact). ``contains``
+    and the range operators guard on ``jsonb_typeof`` first — inside CASE so
+    a string value can never reach the numeric cast — making a mismatched
+    type a non-match instead of a query error.
+    """
+
+    conditions: list[Any] = []
+    for item in filters:
+        value_json = KnowledgeDocumentRow.doc_metadata[item.name]
+        if item.operator == "eq":
+            conditions.append(KnowledgeDocumentRow.doc_metadata.contains(func.jsonb_build_object(item.name, item.value)))
+        elif item.operator == "contains":
+            conditions.append(func.jsonb_typeof(value_json) == "string")
+            conditions.append(func.strpos(value_json.astext, item.value) > 0)
+        else:
+            numeric_value = case(
+                (func.jsonb_typeof(value_json) == "number", cast(value_json.astext, Numeric)),
+                else_=null(),
+            )
+            if item.operator == "gte":
+                conditions.append(numeric_value >= item.value)
+            else:
+                conditions.append(numeric_value <= item.value)
+    return tuple(conditions)
+
+
+def _validated_search(request: KnowledgeSearchRequest) -> _ValidatedSearch:
+    query = request.query.strip()
+    if not query:
+        raise _invalid("query 不能为空")
+    if len(query) > MAX_QUERY_CHARS:
+        raise _invalid(f"query 不能超过 {MAX_QUERY_CHARS} 字符")
+    top_k = request.top_k
+    # type() checks reject bool, which is an int subclass.
+    if top_k is not None and (type(top_k) is not int or not 1 <= top_k <= MAX_TOP_K):
+        raise _invalid(f"top_k 必须是 1..{MAX_TOP_K} 的整数")
+    threshold = request.score_threshold
+    if threshold is not None:
+        if type(threshold) not in (int, float) or not 0 <= float(threshold) <= 1:
+            raise _invalid("score_threshold 必须在 0..1 之间")
+        threshold = float(threshold)
+    if request.source not in ("agent", "retrieval_test"):
+        raise _invalid("source 只能是 agent 或 retrieval_test")
+    return _ValidatedSearch(
+        query=query,
+        top_k=top_k,
+        score_threshold=threshold,
+        metadata_filters=_validated_metadata_filters(request.metadata_filters),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _BaseDefaults:
+    top_k: int
+    score_threshold: float
+
+
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    """One recalled segment with its display fields and recall-stage score.
+
+    For parent_child documents this is the parent segment and
+    ``vector_score`` is the best of its child-chunk scores.
+    """
+
+    segment_id: UUID
+    position: int
+    content: str
+    source_position: dict[str, Any]
+    document_id: UUID
+    document_name: str
+    knowledge_base_id: UUID
+    knowledge_base_name: str
+    vector_score: float
+
+
+@dataclass(frozen=True, slots=True)
+class _Ranked:
+    rerank_score: float
+    candidate: _Candidate
+
+
+def _stable_sort_key(item: _Ranked) -> tuple[float, float, UUID, UUID, int, UUID]:
+    candidate = item.candidate
+    return (
+        -item.rerank_score,
+        -candidate.vector_score,
+        candidate.knowledge_base_id,
+        candidate.document_id,
+        candidate.position,
+        candidate.segment_id,
+    )
+
+
+def _candidate_sort_key(candidate: _Candidate) -> tuple[float, UUID, UUID, int, UUID]:
+    return (
+        -candidate.vector_score,
+        candidate.knowledge_base_id,
+        candidate.document_id,
+        candidate.position,
+        candidate.segment_id,
+    )
+
+
+class KnowledgeSearchService:
+    """Reusable search pipeline shared by the HTTP API and the Agent tool."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        client: KnowledgeModelClient,
+        secret_port: KnowledgeSecretPort,
+    ) -> None:
+        self._session_factory = session_factory
+        self._client = client
+        self._secret_port = secret_port
+
+    async def search(self, request: KnowledgeSearchRequest) -> KnowledgeSearchResult:
+        validated = _validated_search(request)
+        groups, defaults = await self._searchable_groups(request.project_id, request.knowledge_base_ids)
+        if not groups:
+            return KnowledgeSearchResult(citations=())
+
+        # An omitted top_k widens to the largest per-base default among the
+        # targeted bases, so no base's configured expectation is truncated.
+        top_k = validated.top_k if validated.top_k is not None else max(item.top_k for item in defaults.values())
+        candidate_k = calculate_candidate_k(top_k)
+        ranked: list[_Ranked] = []
+        for material, base_ids in groups:
+            # Provider failures surface as bare KnowledgeError to callers, so
+            # log the stage and code here (never the query or provider body) —
+            # otherwise a production embedding/reranker outage is invisible.
+            try:
+                query_vector = (await self._client.embed(material, [validated.query]))[0]
+            except KnowledgeError as error:
+                logger.warning(
+                    "knowledge search embed failed for configuration %s: %s",
+                    material.configuration_id,
+                    error.code,
+                )
+                raise
+            candidates = await self._recalled_candidates(
+                project_id=request.project_id,
+                configuration_id=material.configuration_id,
+                base_ids=base_ids,
+                query_vector=query_vector,
+                candidate_k=candidate_k,
+                metadata_filters=validated.metadata_filters,
+            )
+            if not candidates:
+                continue
+            try:
+                scores = await self._client.rerank(
+                    material,
+                    validated.query,
+                    [candidate.content for candidate in candidates],
+                    top_n=top_k,
+                )
+            except KnowledgeError as error:
+                logger.warning(
+                    "knowledge search rerank failed for configuration %s: %s",
+                    material.configuration_id,
+                    error.code,
+                )
+                raise
+            group_ranked = []
+            for score in scores:
+                candidate = candidates[score.index]
+                threshold = validated.score_threshold if validated.score_threshold is not None else defaults[candidate.knowledge_base_id].score_threshold
+                if threshold > 0 and score.score < threshold:
+                    continue
+                group_ranked.append(_Ranked(rerank_score=score.score, candidate=candidate))
+            # The client already caps each group at ``top_n`` (descending by
+            # score); keep the per-group cap here too so a diagnostics-friendly
+            # client change can never widen a group beyond top_k.
+            ranked.extend(group_ranked[:top_k])
+
+        ranked.sort(key=_stable_sort_key)
+        citations: list[KnowledgeCitation] = []
+        seen_segments: set[UUID] = set()
+        for item in ranked:
+            candidate = item.candidate
+            if candidate.segment_id in seen_segments:
+                continue
+            seen_segments.add(candidate.segment_id)
+            citations.append(
+                KnowledgeCitation(
+                    knowledge_base_id=candidate.knowledge_base_id,
+                    knowledge_base_name=candidate.knowledge_base_name,
+                    document_id=candidate.document_id,
+                    document_name=candidate.document_name,
+                    segment_id=candidate.segment_id,
+                    segment_position=candidate.position,
+                    snippet=candidate.content[:SNIPPET_MAX_CHARS],
+                    score=item.rerank_score,
+                    source_position=dict(candidate.source_position),
+                )
+            )
+            if len(citations) == top_k:
+                break
+        result = KnowledgeSearchResult(citations=tuple(citations))
+        await self._record_search(
+            project_id=request.project_id,
+            searched_base_ids=sorted(base_id for _, base_ids in groups for base_id in base_ids),
+            query=validated.query,
+            source=request.source,
+            citations=result.citations,
+        )
+        return result
+
+    async def list_recent_queries(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[KnowledgeQueryView], int]:
+        """Latest query-log rows that targeted ``base_id``, newest first."""
+
+        if type(page) is not int or page < 1:
+            raise _invalid("page 必须是不小于 1 的整数")
+        if type(page_size) is not int or not 1 <= page_size <= MAX_QUERY_PAGE_SIZE:
+            raise _invalid(f"page_size 必须是 1-{MAX_QUERY_PAGE_SIZE} 之间的整数")
+        # JSONB containment: the row's base-id array holds this base's id.
+        base_filter = (
+            KnowledgeQueryRow.project_id == project_id,
+            KnowledgeQueryRow.knowledge_base_ids.contains([str(base_id)]),
+        )
+        try:
+            async with self._session_factory() as session:
+                exists = await session.scalar(select(KnowledgeBaseRow.id).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id))
+                if exists is None:
+                    raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
+                total = await session.scalar(select(func.count()).select_from(KnowledgeQueryRow).where(*base_filter))
+                rows = (await session.scalars(select(KnowledgeQueryRow).where(*base_filter).order_by(KnowledgeQueryRow.created_at.desc(), KnowledgeQueryRow.id.desc()).offset((page - 1) * page_size).limit(page_size))).all()
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            logger.warning("knowledge recent-query listing failed", exc_info=True)
+            raise _search_failed() from None
+        views = [
+            KnowledgeQueryView(
+                id=row.id,
+                knowledge_base_ids=tuple(UUID(value) for value in row.knowledge_base_ids),
+                query=row.query,
+                source=row.source,  # type: ignore[arg-type]
+                result_count=row.result_count,
+                top_score=row.top_score,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+        return views, int(total or 0)
+
+    async def _record_search(
+        self,
+        *,
+        project_id: UUID,
+        searched_base_ids: list[UUID],
+        query: str,
+        source: str,
+        citations: tuple[KnowledgeCitation, ...],
+    ) -> None:
+        """Append the query-log row and bump hit counters; never fails the search."""
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                session.add(
+                    KnowledgeQueryRow(
+                        id=uuid4(),
+                        project_id=project_id,
+                        knowledge_base_ids=[str(base_id) for base_id in searched_base_ids],
+                        query=query,
+                        source=source,
+                        result_count=len(citations),
+                        top_score=(max(citation.score for citation in citations) if citations else None),
+                    )
+                )
+                if citations:
+                    segment_ids = [citation.segment_id for citation in citations]
+                    await session.execute(update(KnowledgeSegmentRow).where(KnowledgeSegmentRow.id.in_(segment_ids)).values(hit_count=KnowledgeSegmentRow.hit_count + 1))
+                    hits_per_document: dict[UUID, int] = {}
+                    for citation in citations:
+                        hits_per_document[citation.document_id] = hits_per_document.get(citation.document_id, 0) + 1
+                    for document_id, hits in hits_per_document.items():
+                        await session.execute(update(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == document_id).values(hit_count=KnowledgeDocumentRow.hit_count + hits))
+        except SQLAlchemyError:
+            logger.warning("knowledge query log write failed", exc_info=True)
+
+    async def _searchable_groups(
+        self,
+        project_id: UUID,
+        base_ids: tuple[UUID, ...] | None,
+    ) -> tuple[list[tuple[KnowledgeModelMaterial, list[UUID]]], dict[UUID, _BaseDefaults]]:
+        """Group the project's searchable bases by model configuration.
+
+        Explicit base ids narrow to their active subset; an explicitly empty
+        selection searches nothing. A disabled configuration fails the whole
+        request — its bases cannot silently vanish from results. The second
+        return value carries each base's retrieval defaults.
+        """
+
+        if base_ids is not None and len(base_ids) == 0:
+            return [], {}
+        statement = select(
+            KnowledgeBaseRow.id,
+            KnowledgeBaseRow.model_configuration_id,
+            KnowledgeBaseRow.default_top_k,
+            KnowledgeBaseRow.default_score_threshold,
+        ).where(
+            KnowledgeBaseRow.project_id == project_id,
+            KnowledgeBaseRow.status == "active",
+        )
+        if base_ids is not None:
+            statement = statement.where(KnowledgeBaseRow.id.in_(base_ids))
+        try:
+            async with self._session_factory() as session:
+                rows = (await session.execute(statement.order_by(KnowledgeBaseRow.id))).all()
+                if not rows:
+                    return [], {}
+                bases_by_configuration: dict[UUID, list[UUID]] = {}
+                defaults: dict[UUID, _BaseDefaults] = {}
+                for base_id, configuration_id, default_top_k, default_score_threshold in rows:
+                    bases_by_configuration.setdefault(configuration_id, []).append(base_id)
+                    defaults[base_id] = _BaseDefaults(top_k=default_top_k, score_threshold=float(default_score_threshold))
+                configurations = (await session.scalars(select(KnowledgeModelConfigurationRow).where(KnowledgeModelConfigurationRow.id.in_(bases_by_configuration)))).all()
+        except SQLAlchemyError:
+            logger.warning("knowledge search failed to load searchable bases", exc_info=True)
+            raise _search_failed() from None
+        groups: list[tuple[KnowledgeModelMaterial, list[UUID]]] = []
+        for configuration in sorted(configurations, key=lambda row: row.id):
+            if configuration.status != "active":
+                raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "Knowledge 模型配置已被禁用，无法执行检索")
+            try:
+                material = materialize_model_material(configuration, self._secret_port)
+            except KnowledgeError as error:
+                # The shared materialization layer reports decrypt failures as a
+                # storage problem; inside the search contract that is a model
+                # availability failure — keep the five-code error surface.
+                logger.warning(
+                    "knowledge search materialization failed: configuration=%s code=%s",
+                    configuration.id,
+                    error.code,
+                )
+                raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "Knowledge 模型配置不可用，无法执行检索") from None
+            groups.append((material, bases_by_configuration[configuration.id]))
+        return groups, defaults
+
+    async def _recalled_candidates(
+        self,
+        *,
+        project_id: UUID,
+        configuration_id: UUID,
+        base_ids: list[UUID],
+        query_vector: list[float],
+        candidate_k: int,
+        metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+    ) -> list[_Candidate]:
+        """Merge general-segment recall with parent_child child-chunk rollup.
+
+        Both paths run per group; the merged pool is re-sorted by vector score
+        and capped at ``candidate_k`` so mixed-mode bases compete fairly.
+        """
+
+        general = await self._general_candidates(
+            project_id=project_id,
+            configuration_id=configuration_id,
+            base_ids=base_ids,
+            query_vector=query_vector,
+            candidate_k=candidate_k,
+            metadata_filters=metadata_filters,
+        )
+        parents = await self._parent_child_candidates(
+            project_id=project_id,
+            configuration_id=configuration_id,
+            base_ids=base_ids,
+            query_vector=query_vector,
+            candidate_k=candidate_k,
+            metadata_filters=metadata_filters,
+        )
+        merged = sorted(general + parents, key=_candidate_sort_key)
+        return merged[:candidate_k]
+
+    def _candidate_filters(
+        self,
+        project_id: UUID,
+        configuration_id: UUID,
+        base_ids: list[UUID],
+        metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+    ) -> tuple[Any, ...]:
+        return (
+            KnowledgeBaseRow.project_id == project_id,
+            KnowledgeBaseRow.id.in_(base_ids),
+            KnowledgeBaseRow.status == "active",
+            KnowledgeDocumentRow.status == "ready",
+            # Governance switches: a disabled document or segment keeps its
+            # vectors but never enters recall (nor Agent citations).
+            KnowledgeDocumentRow.enabled.is_(True),
+            KnowledgeSegmentRow.enabled.is_(True),
+            KnowledgeSegmentRow.document_version == KnowledgeDocumentRow.version,
+            KnowledgeBaseRow.model_configuration_id == configuration_id,
+            # Manual metadata conditions AND onto both recall paths, so a
+            # non-matching document never reaches the reranker on either.
+            *_metadata_filter_conditions(metadata_filters),
+        )
+
+    async def _general_candidates(
+        self,
+        *,
+        project_id: UUID,
+        configuration_id: UUID,
+        base_ids: list[UUID],
+        query_vector: list[float],
+        candidate_k: int,
+        metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+    ) -> list[_Candidate]:
+        """Exact cosine recall over segments that carry their own vectors."""
+
+        distance = KnowledgeSegmentRow.embedding.cosine_distance(query_vector)
+        vector_score = (1 - distance).label("vector_score")
+        statement = (
+            select(
+                KnowledgeSegmentRow.id,
+                KnowledgeSegmentRow.position,
+                KnowledgeSegmentRow.content,
+                KnowledgeSegmentRow.source_position,
+                KnowledgeDocumentRow.id.label("document_id"),
+                KnowledgeDocumentRow.name.label("document_name"),
+                KnowledgeBaseRow.id.label("knowledge_base_id"),
+                KnowledgeBaseRow.name.label("knowledge_base_name"),
+                vector_score,
+            )
+            .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
+            .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
+            .where(
+                *self._candidate_filters(project_id, configuration_id, base_ids, metadata_filters),
+                # parent_child parents store NULL embeddings and are recalled
+                # through their children instead.
+                KnowledgeSegmentRow.embedding.is_not(None),
+            )
+            .order_by(
+                vector_score.desc(),
+                KnowledgeBaseRow.id.asc(),
+                KnowledgeDocumentRow.id.asc(),
+                KnowledgeSegmentRow.position.asc(),
+                KnowledgeSegmentRow.id.asc(),
+            )
+            .limit(candidate_k)
+        )
+        return await self._execute_recall(statement)
+
+    async def _parent_child_candidates(
+        self,
+        *,
+        project_id: UUID,
+        configuration_id: UUID,
+        base_ids: list[UUID],
+        query_vector: list[float],
+        candidate_k: int,
+        metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+    ) -> list[_Candidate]:
+        """Child-chunk recall rolled up to parents before the reranker.
+
+        The best child score inside each parent becomes the parent's recall
+        score (the plan's 回卷 rule), so a parent never appears twice no
+        matter how many of its children match.
+        """
+
+        child_distance = KnowledgeSegmentChildRow.embedding.cosine_distance(query_vector)
+        vector_score = func.max(1 - child_distance).label("vector_score")
+        statement = (
+            select(
+                KnowledgeSegmentRow.id,
+                KnowledgeSegmentRow.position,
+                KnowledgeSegmentRow.content,
+                KnowledgeSegmentRow.source_position,
+                KnowledgeDocumentRow.id.label("document_id"),
+                KnowledgeDocumentRow.name.label("document_name"),
+                KnowledgeBaseRow.id.label("knowledge_base_id"),
+                KnowledgeBaseRow.name.label("knowledge_base_name"),
+                vector_score,
+            )
+            .select_from(KnowledgeSegmentChildRow)
+            .join(KnowledgeSegmentRow, KnowledgeSegmentRow.id == KnowledgeSegmentChildRow.knowledge_segment_id)
+            .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
+            .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
+            .where(*self._candidate_filters(project_id, configuration_id, base_ids, metadata_filters))
+            .group_by(
+                KnowledgeSegmentRow.id,
+                KnowledgeDocumentRow.id,
+                KnowledgeBaseRow.id,
+            )
+            .order_by(
+                vector_score.desc(),
+                KnowledgeBaseRow.id.asc(),
+                KnowledgeDocumentRow.id.asc(),
+                KnowledgeSegmentRow.position.asc(),
+                KnowledgeSegmentRow.id.asc(),
+            )
+            .limit(candidate_k)
+        )
+        return await self._execute_recall(statement)
+
+    async def _execute_recall(self, statement: Any) -> list[_Candidate]:
+        try:
+            async with self._session_factory() as session:
+                rows = (await session.execute(statement)).all()
+        except SQLAlchemyError:
+            logger.warning("knowledge cosine recall failed", exc_info=True)
+            raise _search_failed() from None
+        return [
+            _Candidate(
+                segment_id=row.id,
+                position=row.position,
+                content=row.content,
+                source_position=dict(row.source_position),
+                document_id=row.document_id,
+                document_name=row.document_name,
+                knowledge_base_id=row.knowledge_base_id,
+                knowledge_base_name=row.knowledge_base_name,
+                vector_score=float(row.vector_score),
+            )
+            for row in rows
+        ]

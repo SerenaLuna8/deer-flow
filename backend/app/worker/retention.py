@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -44,11 +45,23 @@ from deerflow.persistence.jobs.sql import JobClaim, JobRepository
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
 RepositoryBuilder = Callable[[AsyncSession], JobRepository]
+KnowledgePurge = Callable[[UUID], Awaitable[bool]]
 _ACTIVE_JOB_STATUSES = ("queued", "leased", "running", "retry_wait")
+
+
+class KnowledgePurgeIncomplete(RuntimeError):
+    """Knowledge cleanup must complete before the project purge proceeds."""
+
+    def __init__(self, project_id: UUID) -> None:
+        super().__init__(f"knowledge purge incomplete for project {project_id}")
 
 
 class RetentionPurgeJobHandler:
     """Revalidate governance authority and atomically purge + settle."""
+
+    # Class-level default keeps the Knowledge gate optional: a handler built
+    # without ``__init__`` (partial doubles in host tests) has no hook either.
+    _knowledge_purge: KnowledgePurge | None = None
 
     def __init__(
         self,
@@ -63,6 +76,7 @@ class RetentionPurgeJobHandler:
         clock: Callable[[], datetime] | None = None,
         retry_initial_seconds: int = 2,
         retry_max_seconds: int = 300,
+        knowledge_purge: KnowledgePurge | None = None,
     ) -> None:
         if type(audit) is not TrustedOperationAuditSink:
             raise TypeError("retention Worker handler requires trusted audit authority")
@@ -87,6 +101,9 @@ class RetentionPurgeJobHandler:
         self._clock = clock
         self._retry_initial_seconds = retry_initial_seconds
         self._retry_max_seconds = retry_max_seconds
+        # Optional Knowledge Module hook: project purges must clear Knowledge
+        # objects and rows before the final governance transaction runs.
+        self._knowledge_purge = knowledge_purge
 
     async def _candidate(
         self,
@@ -323,6 +340,57 @@ class RetentionPurgeJobHandler:
             row.available_at = max(row.available_at, deferred_until)
             row.updated_at = now
 
+    async def _knowledge_purge_admitted(self, claim: JobClaim) -> bool:
+        """Re-check project-purge eligibility before irreversible Knowledge work.
+
+        The Knowledge purge deletes MinIO objects outside the governance
+        transaction, so unlike the row purge it cannot be rolled back when
+        ``commit()`` later finds the claim cancelled or not eligible. This
+        gate mirrors ``_candidate``'s project checks and fails closed on any
+        sign the purge will not proceed: cancellation, restore, generation
+        drift, or a changed deadline.
+
+        The project row is read FOR SHARE so the check serializes against a
+        concurrent restore's FOR UPDATE; the lock is released with this short
+        transaction before the purge runs. The remaining window is closed on
+        the restore side, which refuses while a purge job is leased/running
+        (``lock_recoverable_admin_project``) — together the two checks make a
+        restored project and an executed Knowledge purge mutually exclusive.
+        """
+
+        async with self._sessions() as session:
+            job = (
+                await session.execute(
+                    select(
+                        JobRow.retention_resource_kind,
+                        JobRow.cancel_requested_at,
+                        JobRow.retention_effective_at,
+                        JobRow.owner_private_generation,
+                        JobRow.idempotency_key,
+                    ).where(JobRow.id == claim.job_id)
+                )
+            ).one_or_none()
+            if job is None or job.retention_resource_kind != "project" or job.cancel_requested_at is not None:
+                return False
+            effective_at = job.retention_effective_at
+            generation = job.owner_private_generation
+            if type(generation) is not int or generation < 1 or not isinstance(effective_at, datetime) or effective_at.tzinfo is None:
+                return False
+            project = (
+                await session.execute(
+                    select(
+                        ProjectRow.status,
+                        ProjectRow.deletion_effective_at,
+                        ProjectRow.membership_version,
+                    )
+                    .where(ProjectRow.id == claim.scope.project_id)
+                    .with_for_update(read=True, of=ProjectRow)
+                )
+            ).one_or_none()
+            if project is None or project.status != "pending_deletion" or project.deletion_effective_at is None or project.membership_version != generation or project.deletion_effective_at.astimezone(UTC) != effective_at.astimezone(UTC):
+                return False
+            return job.idempotency_key == project_retention_key(claim.scope.project_id, project.deletion_effective_at)
+
     async def __call__(
         self,
         claim: JobClaim,
@@ -340,6 +408,15 @@ class RetentionPurgeJobHandler:
         # still performs the authoritative durable-root absence check after
         # locking the exact Job -> Run -> Attempt suffix.
         await self._mount_owner_reconciler.reconcile_once()
+
+        # Knowledge cleanup (MinIO objects plus knowledge_* rows) is slow
+        # external I/O, so it also runs before the governance transaction. An
+        # incomplete purge raises, which settles this claim through the
+        # ordinary Worker retry budget — the project purge never completes
+        # while Knowledge resources remain.
+        if self._knowledge_purge is not None and await self._knowledge_purge_admitted(claim):
+            if not await self._knowledge_purge(claim.scope.project_id):
+                raise KnowledgePurgeIncomplete(claim.scope.project_id)
 
         async def commit() -> None:
             async with self._sessions() as session, session.begin():
@@ -464,4 +541,4 @@ class RetentionPurgeJobHandler:
         return commit
 
 
-__all__ = ["RetentionPurgeJobHandler"]
+__all__ = ["KnowledgePurgeIncomplete", "RetentionPurgeJobHandler"]

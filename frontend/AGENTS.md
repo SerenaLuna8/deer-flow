@@ -285,6 +285,63 @@ generator; a necessary local patch needs focused coverage and an explanation.
   metadata provide a valid server-owned execution UUID; the Tool Call ID is
   never substituted as Context authority.
 
+#### Knowledge bases
+
+- Knowledge is a deployment-level optional module. The project navigation entry
+  renders only when the per-project health probe succeeds; a 404
+  `KNOWLEDGE_DISABLED` (or any probe failure) hides it. Reading pages requires
+  `shared_assets.read`; create, edit, upload, retry, and delete controls
+  require `shared_assets.edit`. UX gates never replace scoped API
+  authorization.
+- `core/knowledge/` owns the strict contracts, query keys, and hooks; the
+  knowledge root is registered in `scope-registry.ts`. Base and document lists
+  poll every 2 seconds only while a row is in an active status; a `deleting`
+  row with a recorded `delete_error` parks (stops polling, shows the reason)
+  until the user explicitly re-deletes.
+- All chunk parameters (size, overlap, separator, pre-processing rules,
+  chunking mode with child size/separator) are
+  immutable after upload and retry reuses them; the wizard's step 2 and the
+  upload dialog expose the same controls, and the wizard renders a debounced
+  live chunk preview of the first selected file via the stateless
+  `chunk-preview` endpoint (failures surface inline, recovery re-renders;
+  parent_child mode nests child chunks under each parent). Child fields
+  render only in parent_child mode and are omitted from general-mode
+  requests. The separator inputs hold the escaped form the backend decodes
+  (`\n\n` and `\n` by default). The upload dialog submits multiple files
+  sequentially and reports one verdict per file. Search labels scores as
+  Reranker relevance, never vector similarity.
+- The retrieval test's top_k and threshold inputs are optional: empty inputs
+  omit the field so the backend resolves the base defaults (placeholders show
+  them), which are edited in the base settings panel. Metadata filter rows
+  (field/operator/typed value; operators follow the field type) are built
+  client-side and sent as `metadata_filters` only when present; with no
+  defined fields the section explains why none can be added. Below the
+  results, the recent-queries table (`useKnowledgeBaseQueries`) pages the
+  query log with source labels; clicking a logged query backfills the search
+  input, and each finished search invalidates the log.
+- The base detail's Metadata section (edit capability only) manages the
+  per-base field definitions (add with type, rename, delete with confirm);
+  each document row's Metadata dialog assigns typed values (text, number,
+  datetime-local mapped to epoch seconds) where an emptied stored value
+  sends an explicit null and untouched fields are omitted. The settings
+  panel's rebuild block confirms before POSTing the selected model
+  configuration; documents then repoll back to ready.
+- The documents table carries per-row enabled switches, rename, a characters
+  column, and (with `shared_assets.edit`) row checkboxes with a batch bar for
+  enable/disable/delete; rows in `deleting` are not selectable. "View
+  segments" replaces the table in place with the segment browser
+  (`knowledge-segments-browser.tsx`): list with word counts and manual badges,
+  enable toggles, edit and add dialogs (4000-character ceiling mirroring the
+  backend), and delete. Read-only members get the browser without any
+  mutation controls.
+- Admin knowledge model configurations live at `/admin/settings/knowledge`.
+  API keys are write-only imperative requests that never enter query caches; a
+  configuration referenced by bases (`in_use`) cannot be disabled or deleted.
+- Chat citations render only from the thread projection's validated
+  `knowledge_citations` payload on the Run's final AI text message; the
+  renderer re-validates and degrades to "no citations" rather than trusting an
+  arbitrary payload.
+
 ### Admin and Automation
 
 - Admin queries mount only after authenticated `system_admin` state. Strict

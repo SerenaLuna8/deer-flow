@@ -114,14 +114,40 @@ def test_settings_require_minio_when_enabled() -> None:
             "minio": {
                 "endpoint": "127.0.0.1:9000",
                 "bucket": "actweave-knowledge",
-                "access_key": "ak",
-                "secret_key": "sk",
+                "access_key": "minio-access-value",
+                "secret_key": "minio-secret-value",
                 "secure": False,
             },
         }
     )
     assert settings.minio is not None
     assert settings.minio.endpoint == "127.0.0.1:9000"
+    assert settings.minio.secret_key.get_secret_value() == "minio-secret-value"
+
+    # Credentials must never surface through repr or non-secret dumps.
+    rendered = repr(settings) + str(settings.minio) + str(settings.minio.model_dump())
+    assert "minio-secret-value" not in rendered
+    assert "minio-access-value" not in repr(settings.minio)
+
+
+def test_model_configuration_dtos_hide_api_key_from_repr() -> None:
+    from actweave_knowledge import (
+        KnowledgeModelConfigurationCreate,
+        KnowledgeModelConfigurationUpdate,
+    )
+
+    create = KnowledgeModelConfigurationCreate(
+        display_name="Retrieval",
+        base_url="https://api.siliconflow.cn/v1",
+        embedding_model="embed",
+        embedding_dimension=1024,
+        reranker_model="rerank",
+        api_key="plain-create-key",
+    )
+    update = KnowledgeModelConfigurationUpdate(api_key="plain-update-key")
+
+    assert "plain-create-key" not in repr(create)
+    assert "plain-update-key" not in repr(update)
 
 
 def test_settings_reject_console_style_endpoint_with_scheme() -> None:
@@ -187,3 +213,36 @@ def test_search_request_is_frozen_and_defaults_are_unset() -> None:
     assert request.score_threshold is None
     with pytest.raises(Exception):
         request.query = "changed"  # type: ignore[misc]
+
+
+def _stub_module_with_health(*, storage_ok: bool):
+    from actweave_knowledge import KnowledgeHealth
+
+    class _Module:
+        async def health(self) -> KnowledgeHealth:
+            return KnowledgeHealth(
+                enabled=True,
+                database_ok=True,
+                storage_ok=storage_ok,
+                message="" if storage_ok else "对象存储 bucket 不可访问",
+            )
+
+    return _Module()
+
+
+@pytest.mark.asyncio
+async def test_startup_storage_check_fails_fast_when_bucket_unreachable() -> None:
+    from app.knowledge.composition import (
+        KnowledgeStorageNotReady,
+        require_knowledge_storage_ready,
+    )
+
+    with pytest.raises(KnowledgeStorageNotReady, match="对象存储"):
+        await require_knowledge_storage_ready(_stub_module_with_health(storage_ok=False))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_startup_storage_check_passes_when_bucket_reachable() -> None:
+    from app.knowledge.composition import require_knowledge_storage_ready
+
+    await require_knowledge_storage_ready(_stub_module_with_health(storage_ok=True))  # type: ignore[arg-type]

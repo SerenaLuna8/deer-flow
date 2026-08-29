@@ -2,6 +2,13 @@
 
 > 状态：MVP 开发基线
 > 原则：独立软件包、直接实现功能、不提前建设通用平台能力。
+>
+> 现状：M8（检索与治理增强）后，`knowledge_*` 表由五张扩展到八张（新增
+> `knowledge_segment_children`、`knowledge_queries`、`knowledge_metadata_fields`），
+> Package 新增 `metadata/` 子模块，Knowledge Base 可通过重建换绑模型配置；
+> 第 9 节"后续功能"中父子分段、自定义分隔符、Segment 治理、模型迁移已交付。
+> 权威 DDL 见 `backend/packages/harness/deerflow/persistence/full_schema.sql`，
+> 交付明细见《RAG知识库MVP执行计划》M8 小节。本文其余内容保持基线原样。
 
 ## 1. 架构决策
 

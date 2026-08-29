@@ -1,6 +1,6 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 
-import { isHiddenFromUIMessage } from "../messages/utils";
+import { hasToolCalls, isHiddenFromUIMessage } from "../messages/utils";
 import type { ReadyPromptInputFile } from "../uploads/prompt-input-files";
 
 import { textOfMessage } from "./utils";
@@ -871,6 +871,182 @@ export function resolvePreservedHistory(
   return [...visibleHistory, ...missing];
 }
 
+export const KNOWLEDGE_SEARCH_TOOL_NAME = "knowledge_search";
+
+export type KnowledgeCitation = {
+  knowledge_base_id: string;
+  knowledge_base_name: string;
+  document_id: string;
+  document_name: string;
+  segment_id: string;
+  segment_position: number;
+  snippet: string;
+  score: number;
+  source_position: Record<string, unknown>;
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Strictly validate a ToolMessage's `additional_kwargs.knowledge_citations`.
+ * Any malformed entry invalidates the whole payload so a corrupted message can
+ * never surface a partial or fabricated citation list.
+ */
+function parseKnowledgeCitations(
+  value: unknown,
+): KnowledgeCitation[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const citations: KnowledgeCitation[] = [];
+  for (const candidate of value) {
+    if (!isPlainObject(candidate)) return undefined;
+    const knowledgeBaseId = candidate.knowledge_base_id;
+    const knowledgeBaseName = candidate.knowledge_base_name;
+    const documentId = candidate.document_id;
+    const documentName = candidate.document_name;
+    const segmentId = candidate.segment_id;
+    const segmentPosition = candidate.segment_position;
+    const snippet = candidate.snippet;
+    const score = candidate.score;
+    const sourcePosition = candidate.source_position;
+    if (
+      typeof knowledgeBaseId !== "string" ||
+      knowledgeBaseId.length === 0 ||
+      typeof knowledgeBaseName !== "string" ||
+      typeof documentId !== "string" ||
+      documentId.length === 0 ||
+      typeof documentName !== "string" ||
+      typeof segmentId !== "string" ||
+      segmentId.length === 0 ||
+      typeof segmentPosition !== "number" ||
+      !Number.isSafeInteger(segmentPosition) ||
+      typeof snippet !== "string" ||
+      typeof score !== "number" ||
+      !Number.isFinite(score) ||
+      !isPlainObject(sourcePosition)
+    ) {
+      return undefined;
+    }
+    citations.push({
+      knowledge_base_id: knowledgeBaseId,
+      knowledge_base_name: knowledgeBaseName,
+      document_id: documentId,
+      document_name: documentName,
+      segment_id: segmentId,
+      segment_position: segmentPosition,
+      snippet,
+      score,
+      source_position: sourcePosition,
+    });
+  }
+  return citations;
+}
+
+function isSuccessfulKnowledgeSearchMessage(message: Message): boolean {
+  return (
+    message.type === "tool" &&
+    Reflect.get(message, "name") === KNOWLEDGE_SEARCH_TOOL_NAME &&
+    Reflect.get(message, "status") !== "error"
+  );
+}
+
+/**
+ * Renderer-side reader for the citations this projection attached. Re-runs the
+ * strict parse so a renderer fed unprojected messages degrades to "no
+ * citations" instead of trusting an arbitrary payload.
+ */
+export function readKnowledgeCitations(message: Message): KnowledgeCitation[] {
+  if (message.type !== "ai") return [];
+  return (
+    parseKnowledgeCitations(message.additional_kwargs?.knowledge_citations) ??
+    []
+  );
+}
+
+/**
+ * Attach the Run-merged Knowledge Citations to each Run's final visible AI
+ * text message. Runs without a valid citation-carrying `knowledge_search`
+ * ToolMessage, or without a final visible non-empty AI text message, are left
+ * untouched. Both the live stream and history replay flow through this
+ * projection, so refresh renders identical citations.
+ */
+export function attachKnowledgeCitationsToFinalAiMessages(
+  messages: Message[],
+): Message[] {
+  const citationsByRun = new Map<string, KnowledgeCitation[]>();
+  const seenSegmentsByRun = new Map<string, Set<string>>();
+  for (const message of messages) {
+    if (!isSuccessfulKnowledgeSearchMessage(message)) continue;
+    const runId = messageRunId(message);
+    if (!runId) continue;
+    const parsed = parseKnowledgeCitations(
+      message.additional_kwargs?.knowledge_citations,
+    );
+    if (!parsed) continue;
+    const merged = citationsByRun.get(runId) ?? [];
+    const seen = seenSegmentsByRun.get(runId) ?? new Set<string>();
+    for (const citation of parsed) {
+      if (seen.has(citation.segment_id)) continue;
+      seen.add(citation.segment_id);
+      merged.push(citation);
+    }
+    citationsByRun.set(runId, merged);
+    seenSegmentsByRun.set(runId, seen);
+  }
+  const finalAiIndexByRun = new Map<string, number>();
+  messages.forEach((message, index) => {
+    if (message.type !== "ai" || isHiddenFromUIMessage(message)) return;
+    // Text on a tool-calling AI message is process output, not the final
+    // answer; skipping it also keeps citations from momentarily attaching to
+    // an intermediate message while the Run is still streaming.
+    if (hasToolCalls(message)) return;
+    const runId = messageRunId(message);
+    if (!runId || !citationsByRun.has(runId)) return;
+    const text = textOfMessage(message);
+    if (typeof text !== "string" || text.trim().length === 0) return;
+    finalAiIndexByRun.set(runId, index);
+  });
+
+  const citationsByMessageIndex = new Map<number, KnowledgeCitation[]>();
+  for (const [runId, index] of finalAiIndexByRun) {
+    const citations = citationsByRun.get(runId);
+    if (citations && citations.length > 0) {
+      citationsByMessageIndex.set(index, citations);
+    }
+  }
+
+  // This projection is the sole writer of `knowledge_citations` on AI
+  // messages: strip the key from any AI message it did not select so a
+  // pre-seeded, unvalidated payload can never reach the renderer.
+  let changed = false;
+  const projected = messages.map((message, index) => {
+    const citations = citationsByMessageIndex.get(index);
+    if (citations) {
+      changed = true;
+      return {
+        ...message,
+        additional_kwargs: {
+          ...message.additional_kwargs,
+          knowledge_citations: citations,
+        },
+      } as Message;
+    }
+    if (
+      message.type === "ai" &&
+      message.additional_kwargs !== undefined &&
+      "knowledge_citations" in message.additional_kwargs
+    ) {
+      changed = true;
+      const rest = { ...message.additional_kwargs };
+      delete rest.knowledge_citations;
+      return { ...message, additional_kwargs: rest } as Message;
+    }
+    return message;
+  });
+  return changed ? projected : messages;
+}
+
 export type ThreadMessageProjectionInput = {
   threadId: string | null | undefined;
   visibleHistory: Message[];
@@ -921,11 +1097,13 @@ export function projectThreadMessages({
     runScopedPersistedMessages,
     pendingSupersededRunIds,
   );
-  return mergeMessages(
-    effectiveHistory,
-    visibleRunScopedPersistedMessages,
-    visibleOptimisticMessages,
-    historyRuns,
+  return attachKnowledgeCitationsToFinalAiMessages(
+    mergeMessages(
+      effectiveHistory,
+      visibleRunScopedPersistedMessages,
+      visibleOptimisticMessages,
+      historyRuns,
+    ),
   );
 }
 

@@ -22,6 +22,7 @@ from app.projects.errors import (
 from app.projects.models import ProjectRole, ProjectView
 from app.projects.quota_summary import load_project_quota_summary
 from deerflow.config.quota_config import QuotaConfig
+from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
 if TYPE_CHECKING:
@@ -232,6 +233,24 @@ class ProjectLifecycleRepository:
             )
         ).scalar_one_or_none()
         if actor is None or project.is_suspended or project.status != "pending_deletion" or project.deletion_effective_at is None or now >= project.deletion_effective_at:
+            raise ProjectDeletionStateConflict()
+        # A claimed retention purge may already be deleting external Knowledge
+        # data, which no rollback can restore. The purge Worker re-reads the
+        # project FOR SHARE (serializing with this row lock) before that
+        # irreversible work, so refusing here makes restore and a claimed
+        # purge mutually exclusive; a still-queued job is cancelled terminally
+        # by the restore flow instead.
+        claimed_purge = await self.session.scalar(
+            select(JobRow.id)
+            .where(
+                JobRow.job_type == "retention_purge",
+                JobRow.project_id == project_id,
+                JobRow.retention_resource_kind == "project",
+                JobRow.status.in_(("leased", "running")),
+            )
+            .limit(1)
+        )
+        if claimed_purge is not None:
             raise ProjectDeletionStateConflict()
         return project, actor
 
