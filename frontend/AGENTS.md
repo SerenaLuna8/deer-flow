@@ -297,19 +297,26 @@ generator; a necessary local patch needs focused coverage and an explanation.
   knowledge root is registered in `scope-registry.ts`. Base and document lists
   poll every 2 seconds only while a row is in an active status; a `deleting`
   row with a recorded `delete_error` parks (stops polling, shows the reason)
-  until the user explicitly re-deletes.
+  until the user explicitly re-deletes. A recoverable background document-list
+  refresh failure keeps the last account/project-scoped rows with an explicit
+  retry, while `401`, `403`, and not-found authority failures remove and hide
+  those cached rows.
 - All chunk parameters (size, overlap, separator, pre-processing rules,
   chunking mode with child size/separator) are
   immutable after upload and retry reuses them; the wizard's step 2 and the
-  upload dialog expose the same controls, and the wizard renders a debounced
-  live chunk preview of the first selected file via the stateless
-  `chunk-preview` endpoint (failures surface inline, recovery re-renders;
-  parent_child mode nests child chunks under each parent). Child fields
+  upload dialog expose the same controls, and the wizard renders one initial
+  chunk preview of the first selected file via the stateless `chunk-preview`
+  endpoint when the user enters that step. Later parameter edits keep the last
+  preview visible as stale and require an explicit refresh, so the browser does
+  not repeatedly upload the complete file (failures surface inline; a refresh
+  retries; parent_child mode nests child chunks under each parent). Child fields
   render only in parent_child mode and are omitted from general-mode
   requests. The separator inputs hold the escaped form the backend decodes
   (`\n\n` and `\n` by default). The upload dialog submits multiple files
-  sequentially and reports one verdict per file. Search labels scores as
-  Reranker relevance, never vector similarity.
+  sequentially and reports one verdict per file. Search labels scores with the
+  neutral "Retrieval score" wording: a base with a bound reranker shows
+  reranker relevance (which may be negative and renders as-is), while a base
+  without one shows cosine similarity, so the label promises neither.
 - The retrieval test's top_k and threshold inputs are optional: empty inputs
   omit the field so the backend resolves the base defaults (placeholders show
   them), which are edited in the base settings panel. Metadata filter rows
@@ -324,8 +331,10 @@ generator; a necessary local patch needs focused coverage and an explanation.
   each document row's Metadata dialog assigns typed values (text, number,
   datetime-local mapped to epoch seconds) where an emptied stored value
   sends an explicit null and untouched fields are omitted. The settings
-  panel's rebuild block confirms before POSTing the selected model
-  configuration; documents then repoll back to ready.
+  panel binds or clears the optional reranker model (effective on save, no
+  rebuild; the search panel drops stale results on the change), and its
+  rebuild block confirms before POSTing the selected embedding model;
+  documents then repoll back to ready.
 - The documents table carries per-row enabled switches, rename, a characters
   column, and (with `shared_assets.edit`) row checkboxes with a batch bar for
   enable/disable/delete; rows in `deleting` are not selectable. "View
@@ -334,9 +343,11 @@ generator; a necessary local patch needs focused coverage and an explanation.
   enable toggles, edit and add dialogs (4000-character ceiling mirroring the
   backend), and delete. Read-only members get the browser without any
   mutation controls.
-- Admin knowledge model configurations live at `/admin/settings/knowledge`.
-  API keys are write-only imperative requests that never enter query caches; a
-  configuration referenced by bases (`in_use`) cannot be disabled or deleted.
+- The admin retrieval model registry shares `/admin/settings/models` with
+  language model settings (`core/admin-settings/model-registry/` and
+  `admin-model-registry-page.tsx`): providers own write-only API keys sent as
+  imperative requests that never enter query caches, and a provider or model
+  referenced by knowledge bases (`in_use`) cannot be disabled or deleted.
 - Chat citations render only from the thread projection's validated
   `knowledge_citations` payload on the Run's final AI text message; the
   renderer re-validates and degrades to "no citations" rather than trusting an

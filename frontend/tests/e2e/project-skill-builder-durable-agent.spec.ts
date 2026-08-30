@@ -414,6 +414,18 @@ async function mockSkillBuilderDurableAgent(page: Page) {
         202,
       );
     }
+    if (
+      path === `/api/projects/${PROJECT_ID}/knowledge/health` &&
+      method === "GET"
+    ) {
+      return json(route, {
+        enabled: false,
+        database_ok: false,
+        storage_ok: false,
+        message: "Knowledge module disabled for this deployment.",
+        request_id: "request-knowledge-health",
+      });
+    }
 
     unexpectedRequests.push(`${method} ${path}${url.search}`);
     return json(route, { detail: "unexpected browser-test request" }, 599);

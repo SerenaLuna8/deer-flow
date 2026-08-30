@@ -1,7 +1,7 @@
 """Segment governance on a ready document's current version.
 
 Content edits and manual additions re-embed synchronously with the base's
-model configuration, so the vector never lags the text. The embedding call
+bound embedding model, so the vector never lags the text. The embedding call
 happens outside any transaction; the write transaction re-checks the document
 version and fails with ``KNOWLEDGE_CONFLICT`` when a re-ingest or delete won
 the race — a stale vector is never published.
@@ -18,16 +18,17 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..authority import KnowledgeProjectAuthority, revalidate_project_authority
 from ..contracts import (
     KNOWLEDGE_CONFLICT,
     KNOWLEDGE_INVALID_REQUEST,
-    KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_NOT_FOUND,
     KNOWLEDGE_QUOTA_EXCEEDED,
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeDocumentView,
+    KnowledgeEmbeddingMaterial,
     KnowledgeError,
-    KnowledgeSecretPort,
+    KnowledgeModelPort,
     KnowledgeSegmentCreate,
     KnowledgeSegmentUpdate,
     KnowledgeSegmentView,
@@ -35,13 +36,11 @@ from ..contracts import (
 )
 from ..documents.service import document_view
 from ..ingestion.splitter import split_child_chunks
-from ..models.client import KnowledgeModelClient, KnowledgeModelMaterial
-from ..models.service import materialize_model_material
-from ..persistence.derivations import delete_error_expression
+from ..models.client import KnowledgeModelClient
+from ..persistence.derivations import document_delete_error_expression
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
-    KnowledgeModelConfigurationRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
 )
@@ -67,6 +66,13 @@ def _storage_unavailable() -> KnowledgeError:
     if sys.exc_info()[0] is not None:
         logger.warning("knowledge database operation failed", exc_info=True)
     return KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "Knowledge 存储暂时不可用")
+
+
+def _quota_exceeded(limit: int) -> KnowledgeError:
+    return KnowledgeError(
+        KNOWLEDGE_QUOTA_EXCEEDED,
+        f"Document 内向量条目数量超过上限 {limit}",
+    )
 
 
 def _validated_content(content: str) -> str:
@@ -110,18 +116,20 @@ class KnowledgeSegmentService:
         session_factory: async_sessionmaker[AsyncSession],
         settings: KnowledgeSettings,
         client: KnowledgeModelClient,
-        secret_port: KnowledgeSecretPort,
+        model_port: KnowledgeModelPort,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._client = client
-        self._secret_port = secret_port
+        self._model_port = model_port
 
     async def update_segment(
         self,
         project_id: UUID,
         segment_id: UUID,
         update: KnowledgeSegmentUpdate,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> KnowledgeSegmentView:
         """Edit content (with synchronous re-embedding) and/or flip ``enabled``."""
 
@@ -134,17 +142,44 @@ class KnowledgeSegmentService:
         vector: list[float] | None = None
         embedded: _EmbeddedContent | None = None
         if content is not None:
-            document, _segment = await self._load_segment_snapshot(project_id, segment_id)
-            material = await self._embedding_material(document.knowledge_base_id)
-            embedded = await self._embed_for_document(document, content, material)
+            document, _segment, other_vector_entries = await self._load_segment_snapshot(
+                project_id,
+                segment_id,
+                authority=authority,
+            )
+            material = await self._embedding_material(
+                project_id,
+                document.knowledge_base_id,
+                authority=authority,
+            )
+            embedded = await self._embed_for_document(
+                document,
+                content,
+                material,
+                available_vector_entries=(self._settings.max_segments_per_document - other_vector_entries),
+            )
             vector = embedded.parent_vector
 
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 # After the embedding call any drift is a lost race, not a bad
                 # request: surface it as a refresh-and-retry conflict.
                 document, segment = await self._lock_segment(session, project_id, segment_id, as_conflict=content is not None)
                 if content is not None and embedded is not None:
+                    other_vector_entries = await self._vector_entry_count(
+                        session,
+                        document,
+                        excluding_segment_id=segment.id,
+                    )
+                    if other_vector_entries + _embedded_vector_entry_count(embedded) > self._settings.max_segments_per_document:
+                        raise _quota_exceeded(
+                            self._settings.max_segments_per_document,
+                        )
                     word_count = len(content)
                     document.word_count = document.word_count - segment.word_count + word_count
                     document.updated_at = func.now()  # type: ignore[assignment]
@@ -168,18 +203,38 @@ class KnowledgeSegmentService:
         project_id: UUID,
         document_id: UUID,
         create: KnowledgeSegmentCreate,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> KnowledgeSegmentView:
         """Append one manual segment to the document's current version."""
 
         content = _validated_content(create.content)
-        document = await self._load_document_snapshot(project_id, document_id)
-        material = await self._embedding_material(document.knowledge_base_id)
-        embedded = await self._embed_for_document(document, content, material)
+        document, current_vector_entries = await self._load_document_snapshot(
+            project_id,
+            document_id,
+            authority=authority,
+        )
+        material = await self._embedding_material(
+            project_id,
+            document.knowledge_base_id,
+            authority=authority,
+        )
+        embedded = await self._embed_for_document(
+            document,
+            content,
+            material,
+            available_vector_entries=(self._settings.max_segments_per_document - current_vector_entries),
+        )
         vector = embedded.parent_vector
         snapshot_version = document.version
 
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id).with_for_update())
                 if document is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
@@ -189,11 +244,13 @@ class KnowledgeSegmentService:
                     KnowledgeSegmentRow.knowledge_document_id == document.id,
                     KnowledgeSegmentRow.document_version == document.version,
                 )
-                total = int(await session.scalar(select(func.count()).select_from(KnowledgeSegmentRow).where(*current)) or 0)
-                if total >= self._settings.max_segments_per_document:
-                    raise KnowledgeError(
-                        KNOWLEDGE_QUOTA_EXCEEDED,
-                        f"Document 内分段数量已达上限 {self._settings.max_segments_per_document}",
+                current_vector_entries = await self._vector_entry_count(
+                    session,
+                    document,
+                )
+                if current_vector_entries + _embedded_vector_entry_count(embedded) > self._settings.max_segments_per_document:
+                    raise _quota_exceeded(
+                        self._settings.max_segments_per_document,
                     )
                 next_position = int(await session.scalar(select(func.max(KnowledgeSegmentRow.position)).where(*current)) or 0) + 1
                 word_count = len(content)
@@ -224,11 +281,22 @@ class KnowledgeSegmentService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def delete_segment(self, project_id: UUID, segment_id: UUID) -> KnowledgeDocumentView:
+    async def delete_segment(
+        self,
+        project_id: UUID,
+        segment_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeDocumentView:
         """Delete the row (its vector goes with it) and return the updated document."""
 
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 document, segment = await self._lock_segment(session, project_id, segment_id, as_conflict=False)
                 await session.delete(segment)
                 document.segment_count = document.segment_count - 1
@@ -236,7 +304,7 @@ class KnowledgeSegmentService:
                 document.updated_at = func.now()  # type: ignore[assignment]
                 await session.flush()
                 await session.refresh(document)
-                delete_error = await session.scalar(select(delete_error_expression("delete_document", KnowledgeDocumentRow.id)).where(KnowledgeDocumentRow.id == document.id))
+                delete_error = await session.scalar(select(document_delete_error_expression(KnowledgeDocumentRow.id)).where(KnowledgeDocumentRow.id == document.id))
                 return document_view(document, delete_error=delete_error)
         except KnowledgeError:
             raise
@@ -247,11 +315,18 @@ class KnowledgeSegmentService:
         self,
         project_id: UUID,
         segment_id: UUID,
-    ) -> tuple[KnowledgeDocumentRow, KnowledgeSegmentRow]:
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> tuple[KnowledgeDocumentRow, KnowledgeSegmentRow, int]:
         """Pre-embedding read: the segment must sit on a ready current version."""
 
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 result = (
                     await session.execute(
                         select(KnowledgeDocumentRow, KnowledgeSegmentRow)
@@ -259,25 +334,47 @@ class KnowledgeSegmentService:
                         .where(KnowledgeSegmentRow.project_id == project_id, KnowledgeSegmentRow.id == segment_id)
                     )
                 ).one_or_none()
+                if result is not None:
+                    document, segment = result
+                    _require_current_ready(document, segment)
+                    other_vector_entries = await self._vector_entry_count(
+                        session,
+                        document,
+                        excluding_segment_id=segment.id,
+                    )
         except SQLAlchemyError:
             raise _storage_unavailable() from None
         if result is None:
             raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Segment 不存在")
-        document, segment = result
-        _require_current_ready(document, segment)
-        return document, segment
+        return document, segment, other_vector_entries
 
-    async def _load_document_snapshot(self, project_id: UUID, document_id: UUID) -> KnowledgeDocumentRow:
+    async def _load_document_snapshot(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> tuple[KnowledgeDocumentRow, int]:
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id))
+                if document is not None:
+                    if document.status != "ready":
+                        raise _invalid("仅 ready 状态的文档支持维护分段")
+                    vector_entries = await self._vector_entry_count(
+                        session,
+                        document,
+                    )
         except SQLAlchemyError:
             raise _storage_unavailable() from None
         if document is None:
             raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
-        if document.status != "ready":
-            raise _invalid("仅 ready 状态的文档支持维护分段")
-        return document
+        return document, vector_entries
 
     async def _lock_segment(
         self,
@@ -313,7 +410,9 @@ class KnowledgeSegmentService:
         self,
         document: KnowledgeDocumentRow,
         content: str,
-        material: KnowledgeModelMaterial,
+        material: KnowledgeEmbeddingMaterial,
+        *,
+        available_vector_entries: int,
     ) -> _EmbeddedContent:
         """Embed per the document's frozen chunking mode.
 
@@ -323,6 +422,10 @@ class KnowledgeSegmentService:
         """
 
         if document.chunking_mode != "parent_child":
+            if available_vector_entries < 1:
+                raise _quota_exceeded(
+                    self._settings.max_segments_per_document,
+                )
             return _EmbeddedContent(
                 parent_vector=(await self._client.embed(material, [content]))[0],
                 children=(),
@@ -335,6 +438,10 @@ class KnowledgeSegmentService:
         )
         if not children:  # pragma: no cover - non-empty content always splits
             raise _invalid("内容未能切分出子块")
+        if len(children) > available_vector_entries:
+            raise _quota_exceeded(
+                self._settings.max_segments_per_document,
+            )
         child_vectors = await self._client.embed(material, list(children))
         return _EmbeddedContent(parent_vector=None, children=children, child_vectors=tuple(child_vectors))
 
@@ -368,31 +475,81 @@ class KnowledgeSegmentService:
             ]
         )
 
-    async def _embedding_material(self, base_id: UUID) -> KnowledgeModelMaterial:
-        """The base's model configuration, required active, key decrypted."""
+    async def _embedding_material(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeEmbeddingMaterial:
+        """The base's bound embedding model materialized through the host port."""
 
         try:
-            async with self._session_factory() as session:
-                row = (
-                    await session.execute(
-                        select(KnowledgeBaseRow.status, KnowledgeModelConfigurationRow)
-                        .join(
-                            KnowledgeModelConfigurationRow,
-                            KnowledgeModelConfigurationRow.id == KnowledgeBaseRow.model_configuration_id,
-                        )
-                        .where(KnowledgeBaseRow.id == base_id)
-                    )
-                ).one_or_none()
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                row = (await session.execute(select(KnowledgeBaseRow.status, KnowledgeBaseRow.embedding_model_id).where(KnowledgeBaseRow.id == base_id))).one_or_none()
+                if row is not None:
+                    base_status, embedding_model_id = row
+                    if base_status != "active":
+                        raise _invalid("仅 active 状态的 Knowledge Base 支持维护分段")
+                    # The port validates type and active status and raises
+                    # KNOWLEDGE_MODEL_UNAVAILABLE for anything unresolvable.
+                    return await self._model_port.embedding_material(session, embedding_model_id)
+        except KnowledgeError:
+            raise
         except SQLAlchemyError:
             raise _storage_unavailable() from None
-        if row is None:  # pragma: no cover - RESTRICT FK keeps the base alive
-            raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
-        base_status, configuration = row
-        if base_status != "active":
-            raise _invalid("仅 active 状态的 Knowledge Base 支持维护分段")
-        if configuration.status != "active":
-            raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "模型配置已停用，无法生成向量")
-        return materialize_model_material(configuration, self._secret_port)
+        # pragma: no cover - RESTRICT FK keeps the base alive
+        raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
+
+    @staticmethod
+    async def _vector_entry_count(
+        session: AsyncSession,
+        document: KnowledgeDocumentRow,
+        *,
+        excluding_segment_id: UUID | None = None,
+    ) -> int:
+        """Count vector-bearing rows for the current Document version."""
+
+        if document.chunking_mode == "parent_child":
+            statement = (
+                select(func.count())
+                .select_from(
+                    KnowledgeSegmentChildRow,
+                )
+                .where(
+                    KnowledgeSegmentChildRow.knowledge_document_id == document.id,
+                    KnowledgeSegmentChildRow.document_version == document.version,
+                )
+            )
+            if excluding_segment_id is not None:
+                statement = statement.where(
+                    KnowledgeSegmentChildRow.knowledge_segment_id != excluding_segment_id,
+                )
+        else:
+            statement = (
+                select(func.count())
+                .select_from(
+                    KnowledgeSegmentRow,
+                )
+                .where(
+                    KnowledgeSegmentRow.knowledge_document_id == document.id,
+                    KnowledgeSegmentRow.document_version == document.version,
+                )
+            )
+            if excluding_segment_id is not None:
+                statement = statement.where(
+                    KnowledgeSegmentRow.id != excluding_segment_id,
+                )
+        return int(await session.scalar(statement) or 0)
+
+
+def _embedded_vector_entry_count(embedded: _EmbeddedContent) -> int:
+    return 1 if embedded.parent_vector is not None else len(embedded.child_vectors)
 
 
 def _require_current_ready(document: KnowledgeDocumentRow, segment: KnowledgeSegmentRow) -> None:

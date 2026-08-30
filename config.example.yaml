@@ -201,14 +201,19 @@ worker:
 
 # Knowledge（RAG 知识库）— 可选功能，默认关闭。缺少本节等同 enabled: false。
 # 启用前提：管理员准备可达的 MinIO S3 API endpoint（host:port，非 Console 地址）
-# 并预先创建 bucket；Runtime 只检查可访问性，不会自动创建 bucket。
+# 并预先创建未启用 versioning/Object Lock 的 bucket；凭据需允许对象读写删除、
+# GetBucketVersioning 及列举 Knowledge Project prefix。Runtime 不会自动创建 bucket，
+# 启用或暂停 versioning 都会让启动检查和删除路径失败关闭。
 # 启用时取消注释并在环境中提供三个 ACT_WEAVE_KNOWLEDGE_MINIO_* 变量；
 # Gateway 与 Worker 必须使用同一份配置并一起重启。详见 Install.md。
+# 曾经启用后即使改回 enabled: false，也要保留原 MinIO 配置，直到所有 Document
+# 与 exact-key 对象清理完成；仍有 Document 或非 succeeded 对象清理 Task 时提前移除，
+# Project purge 会失败并重试。
 knowledge:
   enabled: false
   # worker_concurrency: 2
   # task_timeout_seconds: 900
-  # upload_max_bytes: 52428800
+  # upload_max_bytes: 52428800  # 最大 52428800（50 MiB，单 PUT 内存上限）
   # max_knowledge_bases_per_project: 20
   # max_documents_per_knowledge_base: 500
   # max_segments_per_document: 5000

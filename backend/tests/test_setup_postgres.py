@@ -32,8 +32,8 @@ def _default_model_bootstrap_environment(monkeypatch) -> None:
         "unit-bootstrap-secret",
     )
     monkeypatch.setenv(
-        "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY",
-        "unit-knowledge-bootstrap-secret",
+        "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY",
+        "unit-model-provider-bootstrap-secret",
     )
 
 
@@ -290,9 +290,9 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     async def runtime_policy(_engine):
         calls.append("runtime-policy")
 
-    async def knowledge_model(_engine, seed):
-        assert seed is knowledge_seed
-        calls.append("knowledge-model")
+    async def model_registry(_engine, seed):
+        assert seed is registry_seed
+        calls.append("model-registry")
 
     async def projects(_engine):
         calls.append("projects")
@@ -303,8 +303,8 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     bootstrap_material = MagicMock(
         spec=setup_postgres.DefaultSystemModelBootstrapMaterial,
     )
-    knowledge_seed = MagicMock(
-        spec=setup_postgres.KnowledgeModelConfigurationSeed,
+    registry_seed = MagicMock(
+        spec=setup_postgres.ModelRegistrySeed,
     )
     monkeypatch.setattr(setup_postgres, "stage_schema_for_setup", bootstrap)
     monkeypatch.setattr(setup_postgres, "finalize_staged_schema", finalize)
@@ -321,8 +321,8 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     )
     monkeypatch.setattr(
         setup_postgres,
-        "_bootstrap_knowledge_model_schema",
-        knowledge_model,
+        "_bootstrap_model_registry_schema",
+        model_registry,
     )
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", langgraph)
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_project_schema", projects)
@@ -331,7 +331,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
         await setup_postgres._bootstrap_existing(
             "postgresql://owner:private-password@localhost/deerflow_test_1_abc",
             default_model_bootstrap=bootstrap_material,
-            knowledge_bootstrap=knowledge_seed,
+            model_registry_bootstrap=registry_seed,
         )
         == setup_postgres.CURRENT_SCHEMA_REVISION
     )
@@ -342,7 +342,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
         "builtin",
         "default-model",
         "runtime-policy",
-        "knowledge-model",
+        "model-registry",
         "langgraph",
         "projects",
         "finalize",
@@ -373,7 +373,7 @@ async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) ->
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_model_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_runtime_policy_schema", AsyncMock())
-    monkeypatch.setattr(setup_postgres, "_bootstrap_knowledge_model_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_model_registry_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
     monkeypatch.setattr(
         setup_postgres,
@@ -473,7 +473,7 @@ async def test_bootstrap_existing_cleanup_failure_does_not_override_bootstrap_co
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_model_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_runtime_policy_schema", AsyncMock())
-    monkeypatch.setattr(setup_postgres, "_bootstrap_knowledge_model_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_model_registry_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
     monkeypatch.setattr(
         setup_postgres,

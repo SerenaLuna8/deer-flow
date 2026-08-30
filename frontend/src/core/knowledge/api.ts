@@ -29,7 +29,7 @@ import {
   type KnowledgeDocumentListResponse,
   type KnowledgeHealthResponse,
   type KnowledgeMetadataFieldItem,
-  type KnowledgeModelOption,
+  type KnowledgeModelOptions,
   type KnowledgeQueryListResponse,
   type KnowledgeSearchInput,
   type KnowledgeSearchResponse,
@@ -81,6 +81,21 @@ export function isKnowledgeConflictError(error: unknown): boolean {
   return (
     error instanceof KnowledgeApiError &&
     error.knowledgeCode === "KNOWLEDGE_CONFLICT"
+  );
+}
+
+/**
+ * Cached project data is no longer readable after authentication, capability,
+ * or object-scope authority disappears. Recoverable network/5xx failures do
+ * not cross this boundary and may continue showing the last safe response.
+ */
+export function isKnowledgeAuthorityBoundaryError(error: unknown): boolean {
+  return (
+    error instanceof KnowledgeApiError &&
+    (error.status === 401 ||
+      error.status === 403 ||
+      error.status === 404 ||
+      error.knowledgeCode === "KNOWLEDGE_NOT_FOUND")
   );
 }
 
@@ -319,10 +334,7 @@ function chunkSettingsFormData(input: {
   if (input.chunk_overlap !== undefined) {
     formData.append("chunk_overlap", String(input.chunk_overlap));
   }
-  if (
-    input.chunk_separator !== undefined &&
-    input.chunk_separator.length > 0
-  ) {
+  if (input.chunk_separator !== undefined && input.chunk_separator.length > 0) {
     formData.append("chunk_separator", input.chunk_separator);
   }
   if (input.remove_extra_spaces !== undefined) {
@@ -557,7 +569,7 @@ export async function fetchKnowledgeHealth(
 export async function listKnowledgeModelOptions(
   projectId: string,
   signal?: AbortSignal,
-): Promise<KnowledgeModelOption[]> {
+): Promise<KnowledgeModelOptions> {
   const response = await requestKnowledge(
     `${knowledgeBaseURL(projectId)}/model-options`,
     signal ? { signal } : undefined,
@@ -566,7 +578,10 @@ export async function listKnowledgeModelOptions(
     response,
     knowledgeModelOptionsResponseSchema,
   );
-  return parsed.items;
+  return {
+    embedding_models: parsed.embedding_models,
+    reranker_models: parsed.reranker_models,
+  };
 }
 
 /** Recent retrieval queries that targeted this base, newest first. */
@@ -610,20 +625,16 @@ export async function searchKnowledge(
   return readKnowledgeResponse(response, knowledgeSearchResponseSchema);
 }
 
-/** Rebinds the base's model configuration and queues every document for re-embedding. */
+/** Rebinds the base's embedding model and queues every document for re-embedding. */
 export async function rebuildKnowledgeBase(
   projectId: string,
   baseId: string,
-  modelConfigurationId: string,
+  embeddingModelId: string,
   signal?: AbortSignal,
 ): Promise<KnowledgeBaseItem> {
   const response = await requestKnowledge(
     `${knowledgeBaseURL(projectId)}/bases/${encodeURIComponent(baseId)}/rebuild`,
-    jsonRequestInit(
-      "POST",
-      { model_configuration_id: modelConfigurationId },
-      signal,
-    ),
+    jsonRequestInit("POST", { embedding_model_id: embeddingModelId }, signal),
   );
   const parsed = await readKnowledgeResponse(
     response,

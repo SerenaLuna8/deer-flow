@@ -1,4 +1,4 @@
-"""SiliconFlow Embedding and Reranker HTTP client.
+"""SiliconFlow-compatible Embedding and Reranker HTTP client.
 
 The client speaks exactly two contracts — ``POST {base_url}/embeddings`` and
 ``POST {base_url}/rerank`` — and validates every response before anything
@@ -13,9 +13,8 @@ malformed payloads become ``KNOWLEDGE_EMBEDDING_FAILED`` or
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any
-from uuid import UUID
 
 import httpx
 
@@ -23,7 +22,9 @@ from ..contracts import (
     KNOWLEDGE_EMBEDDING_FAILED,
     KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_RERANK_FAILED,
+    KnowledgeEmbeddingMaterial,
     KnowledgeError,
+    KnowledgeRerankMaterial,
 )
 
 EMBEDDING_PROBE_TEXT = "ActWeave knowledge embedding connection test"
@@ -39,25 +40,6 @@ PROBE_TIMEOUT_SECONDS_CAP = 30
 
 
 @dataclass(frozen=True, slots=True)
-class KnowledgeModelMaterial:
-    """One configuration materialized for provider calls, plaintext key included.
-
-    Instances live only in memory for the duration of a call; the plaintext
-    ``api_key`` never reaches logs (``repr=False``) or storage.
-    """
-
-    configuration_id: UUID
-    base_url: str
-    embedding_model: str
-    embedding_dimension: int
-    embedding_max_batch: int
-    reranker_model: str
-    reranker_max_batch: int
-    request_timeout_seconds: int
-    api_key: str = field(repr=False)
-
-
-@dataclass(frozen=True, slots=True)
 class RerankScore:
     """Reranker relevance for the candidate at ``index`` in the original list."""
 
@@ -70,7 +52,7 @@ def _is_finite_number(value: object) -> bool:
 
 
 class KnowledgeModelClient:
-    """Batched, validated access to one SiliconFlow-compatible endpoint pair."""
+    """Batched, validated access to SiliconFlow-compatible endpoints."""
 
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
         # trust_env=False: ambient HTTP(S)_PROXY must never reroute requests
@@ -81,21 +63,23 @@ class KnowledgeModelClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def embed(self, material: KnowledgeModelMaterial, texts: list[str]) -> list[list[float]]:
-        """Embed ``texts`` in input order, batching by ``embedding_max_batch``."""
+    async def embed(self, material: KnowledgeEmbeddingMaterial, texts: list[str]) -> list[list[float]]:
+        """Embed ``texts`` in input order, batching by ``max_batch``."""
 
         if not texts:
             return []
         vectors: list[list[float]] = []
-        for start in range(0, len(texts), material.embedding_max_batch):
-            batch = texts[start : start + material.embedding_max_batch]
+        for start in range(0, len(texts), material.max_batch):
+            batch = texts[start : start + material.max_batch]
             payload = await self._post_with_retry(
-                material,
+                base_url=material.base_url,
+                api_key=material.api_key,
+                request_timeout_seconds=material.request_timeout_seconds,
                 path="/embeddings",
                 body={
-                    "model": material.embedding_model,
+                    "model": material.model_name,
                     "input": batch,
-                    "dimensions": material.embedding_dimension,
+                    "dimensions": material.dimension,
                     "encoding_format": "float",
                 },
                 failure_code=KNOWLEDGE_EMBEDDING_FAILED,
@@ -104,21 +88,21 @@ class KnowledgeModelClient:
                 _validated_embedding_batch(
                     payload,
                     batch_size=len(batch),
-                    dimension=material.embedding_dimension,
+                    dimension=material.dimension,
                 )
             )
         return vectors
 
     async def rerank(
         self,
-        material: KnowledgeModelMaterial,
+        material: KnowledgeRerankMaterial,
         query: str,
         documents: list[str],
         top_n: int,
     ) -> list[RerankScore]:
         """Score ``documents`` against ``query`` and return the best ``top_n``.
 
-        Candidates are batched by ``reranker_max_batch`` with per-batch
+        Candidates are batched by ``max_batch`` with per-batch
         ``top_n = min(top_n, batch size)``; batch-local indexes are mapped back
         through the batch offset and batches merge by ``relevance_score``.
         """
@@ -126,14 +110,16 @@ class KnowledgeModelClient:
         if not documents or top_n < 1:
             return []
         merged: list[RerankScore] = []
-        for start in range(0, len(documents), material.reranker_max_batch):
-            batch = documents[start : start + material.reranker_max_batch]
+        for start in range(0, len(documents), material.max_batch):
+            batch = documents[start : start + material.max_batch]
             batch_top_n = min(top_n, len(batch))
             payload = await self._post_with_retry(
-                material,
+                base_url=material.base_url,
+                api_key=material.api_key,
+                request_timeout_seconds=material.request_timeout_seconds,
                 path="/rerank",
                 body={
-                    "model": material.reranker_model,
+                    "model": material.model_name,
                     "query": query,
                     "documents": batch,
                     "top_n": batch_top_n,
@@ -154,14 +140,13 @@ class KnowledgeModelClient:
         merged.sort(key=lambda item: item.score, reverse=True)
         return merged[:top_n]
 
-    async def verify_connection(self, material: KnowledgeModelMaterial) -> None:
-        """Probe ``/embeddings`` then ``/rerank`` with fixed texts; raise on failure.
+    async def verify_embedding(self, material: KnowledgeEmbeddingMaterial) -> None:
+        """Probe ``/embeddings`` with a fixed text; raise on failure.
 
-        The probes never create business data, and their timeout is clamped to
+        The probe never creates business data, and its timeout is clamped to
         :data:`PROBE_TIMEOUT_SECONDS_CAP` so a black-holed provider cannot pin
-        an admin request (or the update flow's row lock) for the full
-        production timeout. A provider that answers the rerank probe without
-        any result is treated as a rerank failure.
+        an admin request (or the registry update flow) for the full
+        production timeout.
         """
 
         probe_material = replace(
@@ -169,6 +154,18 @@ class KnowledgeModelClient:
             request_timeout_seconds=min(material.request_timeout_seconds, PROBE_TIMEOUT_SECONDS_CAP),
         )
         await self.embed(probe_material, [EMBEDDING_PROBE_TEXT])
+
+    async def verify_rerank(self, material: KnowledgeRerankMaterial) -> None:
+        """Probe ``/rerank`` with fixed candidates; raise on failure.
+
+        A provider that answers the probe without any result is treated as a
+        rerank failure. The timeout clamp matches :meth:`verify_embedding`.
+        """
+
+        probe_material = replace(
+            material,
+            request_timeout_seconds=min(material.request_timeout_seconds, PROBE_TIMEOUT_SECONDS_CAP),
+        )
         scores = await self.rerank(
             probe_material,
             RERANK_PROBE_QUERY,
@@ -180,17 +177,19 @@ class KnowledgeModelClient:
 
     async def _post_with_retry(
         self,
-        material: KnowledgeModelMaterial,
         *,
+        base_url: str,
+        api_key: str,
+        request_timeout_seconds: int,
         path: str,
         body: dict[str, Any],
         failure_code: str,
     ) -> Any:
         """POST once, retrying a single time on transport errors, 429 and 5xx."""
 
-        url = material.base_url.rstrip("/") + path
-        headers = {"Authorization": f"Bearer {material.api_key}"}
-        timeout = httpx.Timeout(material.request_timeout_seconds)
+        url = base_url.rstrip("/") + path
+        headers = {"Authorization": f"Bearer {api_key}"}
+        timeout = httpx.Timeout(request_timeout_seconds)
         for attempt in (1, 2):
             try:
                 response = await self._http.post(url, json=body, headers=headers, timeout=timeout)
@@ -269,13 +268,21 @@ def _validated_rerank_batch(
     top_n: int,
     offset: int,
 ) -> list[RerankScore]:
-    """Validate one ``/rerank`` response and map indexes back through ``offset``."""
+    """Validate one ``/rerank`` response and map indexes back through ``offset``.
+
+    Relevance scores must be finite and within ``[0, 1]``; out-of-range values
+    are rejected rather than clamped, because downstream thresholds and the
+    query log treat rerank scores as bounded relevance. The result count must
+    equal the requested ``top_n`` exactly: retrieval asks for every candidate
+    to be scored, so a provider that truncates or filters internally would
+    otherwise drop candidates before thresholds and the global ranking run.
+    """
 
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         raise KnowledgeError(KNOWLEDGE_RERANK_FAILED, "Reranker 响应缺少 results 数组")
     results = payload["results"]
-    if len(results) > top_n:
-        raise KnowledgeError(KNOWLEDGE_RERANK_FAILED, "Reranker 响应结果数量超过 top_n")
+    if len(results) != top_n:
+        raise KnowledgeError(KNOWLEDGE_RERANK_FAILED, "Reranker 响应结果数量与请求的 top_n 不一致")
     seen: set[int] = set()
     scores: list[RerankScore] = []
     previous_score: float | None = None
@@ -286,8 +293,8 @@ def _validated_rerank_batch(
         if type(index) is not int or not 0 <= index < batch_size or index in seen:
             raise KnowledgeError(KNOWLEDGE_RERANK_FAILED, "Reranker 响应 index 重复或越界")
         score = item.get("relevance_score")
-        if not _is_finite_number(score):
-            raise KnowledgeError(KNOWLEDGE_RERANK_FAILED, "Reranker 分数包含非法数值")
+        if not _is_finite_number(score) or not 0 <= score <= 1:
+            raise KnowledgeError(KNOWLEDGE_RERANK_FAILED, "Reranker 分数包含非法数值或超出 [0,1] 范围")
         score_value = float(score)
         if previous_score is not None and score_value > previous_score:
             raise KnowledgeError(KNOWLEDGE_RERANK_FAILED, "Reranker 响应未按分数降序返回")

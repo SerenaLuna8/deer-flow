@@ -13,33 +13,33 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
-from actweave_knowledge.bootstrap import (
-    KnowledgeModelConfigurationSeed,
-    install_default_model_configuration,
-)
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
-    KnowledgeModelConfigurationRow,
     KnowledgeOrmBase,
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
 )
 from actweave_knowledge.persistence.tasks import claim_next_task
+from registry_helpers import seed_registry_models
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.knowledge.bootstrap import (
-    KNOWLEDGE_DEFAULT_MODEL_CONFIGURATION_ID,
-    KnowledgeBootstrapConfigurationInvalid,
-    KnowledgeBootstrapSkipped,
-    prepare_knowledge_bootstrap,
+from app.model_registry.bootstrap import (
+    DEFAULT_EMBEDDING_MODEL_ID,
+    DEFAULT_MODEL_PROVIDER_ID,
+    DEFAULT_RERANK_MODEL_ID,
+    ModelRegistryBootstrapConfigurationInvalid,
+    ModelRegistryBootstrapSkipped,
+    ModelRegistrySeed,
+    bootstrap_default_model_registry,
+    prepare_model_registry_bootstrap,
 )
 from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.final_schema_contract import FINAL_APP_TABLES
+from deerflow.persistence.model_registry import ModelProviderModelRow, ModelProviderRow
 
 KNOWLEDGE_TABLES = (
-    "knowledge_model_configurations",
     "knowledge_bases",
     "knowledge_documents",
     "knowledge_metadata_fields",
@@ -49,29 +49,38 @@ KNOWLEDGE_TABLES = (
     "knowledge_tasks",
 )
 
+# 宿主级模型注册表表（M9）：无 knowledge_ 前缀，knowledge_bases 通过 FK 绑定。
+MODEL_REGISTRY_TABLES = (
+    "model_providers",
+    "model_provider_models",
+)
+
 _SECRET_KEY = b64encode(b"k" * 32).decode("ascii")
 
 
 @pytest.fixture
-def knowledge_bootstrap_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def model_registry_bootstrap_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", _SECRET_KEY)
     monkeypatch.setenv(
-        "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY",
-        "unit-knowledge-plaintext-key",
+        "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY",
+        "unit-registry-plaintext-key",
     )
+    monkeypatch.delenv("ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP", raising=False)
 
 
-def _seed(configuration_id: uuid.UUID | None = None) -> KnowledgeModelConfigurationSeed:
-    return KnowledgeModelConfigurationSeed(
-        configuration_id=configuration_id or uuid.uuid4(),
-        display_name="SiliconFlow Qwen3-VL Retrieval",
+def _seed() -> ModelRegistrySeed:
+    return ModelRegistrySeed(
+        provider_id=uuid.uuid4(),
+        provider_name="SiliconFlow",
         base_url="https://api.siliconflow.cn/v1",
-        embedding_model="Qwen/Qwen3-VL-Embedding-8B",
+        request_timeout_seconds=30,
+        embedding_model_id=uuid.uuid4(),
+        embedding_model_name="Qwen/Qwen3-VL-Embedding-8B",
         embedding_dimension=4096,
         embedding_max_batch=64,
-        reranker_model="Qwen/Qwen3-VL-Reranker-8B",
-        reranker_max_batch=32,
-        request_timeout_seconds=30,
+        rerank_model_id=uuid.uuid4(),
+        rerank_model_name="Qwen/Qwen3-VL-Reranker-8B",
+        rerank_max_batch=32,
         api_key_nonce=b"n" * 12,
         api_key_ciphertext=b"c" * 24,
     )
@@ -117,14 +126,14 @@ async def _seed_base(
     session: AsyncSession,
     *,
     project_id: uuid.UUID,
-    configuration_id: uuid.UUID,
+    embedding_model_id: uuid.UUID,
     name: str = "Handbook",
 ) -> KnowledgeBaseRow:
     base = KnowledgeBaseRow(
         id=uuid.uuid4(),
         project_id=project_id,
         name=name,
-        model_configuration_id=configuration_id,
+        embedding_model_id=embedding_model_id,
     )
     session.add(base)
     await session.flush()
@@ -183,6 +192,7 @@ def _task(
     claim_token: uuid.UUID | None = None,
     lease_until: datetime | None = None,
     finished_at: datetime | None = None,
+    storage_key: str | None = None,
 ) -> KnowledgeTaskRow:
     now = datetime.now(UTC)
     return KnowledgeTaskRow(
@@ -196,6 +206,7 @@ def _task(
         available_at=available_at or now,
         claim_token=claim_token,
         lease_until=lease_until,
+        storage_key=storage_key,
         created_at=created_at or now,
         finished_at=finished_at,
     )
@@ -206,17 +217,22 @@ async def test_orm_metadata_matches_installed_catalog(postgres_database_url: str
     """ORM 列集合与 full_schema.sql 安装出的目录一致（Task 8 契约）。"""
 
     assert set(KNOWLEDGE_TABLES) <= FINAL_APP_TABLES
+    assert set(MODEL_REGISTRY_TABLES) <= FINAL_APP_TABLES
     assert set(KnowledgeOrmBase.metadata.tables) == set(KNOWLEDGE_TABLES)
 
     from scripts.check_postgres import REQUIRED_TABLES
 
     assert set(KNOWLEDGE_TABLES) <= set(REQUIRED_TABLES)
+    assert set(MODEL_REGISTRY_TABLES) <= set(REQUIRED_TABLES)
 
     engine = create_async_engine(postgres_database_url)
     try:
         await _install_full_schema(engine)
+        # The registry rows live on the host harness metadata, not the
+        # package-isolated KnowledgeOrmBase.
+        host_metadata = ModelProviderRow.metadata
         async with engine.connect() as connection:
-            for table_name in KNOWLEDGE_TABLES:
+            for table_name in (*KNOWLEDGE_TABLES, *MODEL_REGISTRY_TABLES):
                 rows = (
                     await connection.execute(
                         text(
@@ -229,7 +245,8 @@ async def test_orm_metadata_matches_installed_catalog(postgres_database_url: str
                     )
                 ).all()
                 catalog_columns = {name: nullable == "YES" for name, nullable in rows}
-                orm_table = KnowledgeOrmBase.metadata.tables[table_name]
+                orm_metadata = KnowledgeOrmBase.metadata if table_name in KNOWLEDGE_TABLES else host_metadata
+                orm_table = orm_metadata.tables[table_name]
                 orm_columns = {column.name: bool(column.nullable) for column in orm_table.columns}
                 assert catalog_columns == orm_columns, table_name
     finally:
@@ -237,94 +254,113 @@ async def test_orm_metadata_matches_installed_catalog(postgres_database_url: str
 
 
 @pytest.mark.asyncio
-async def test_default_configuration_bootstrap_roundtrip_and_conflict(
+async def test_default_registry_bootstrap_roundtrip_and_conflict(
     postgres_database_url: str,
-    knowledge_bootstrap_environment: None,
+    model_registry_bootstrap_environment: None,
 ) -> None:
-    """Task 9：预检加密材料 → 安装唯一默认配置 → 重复安装冲突。"""
+    """Task 9：预检加密材料 → 安装唯一默认 Provider 与模型 → 重复安装不再写入。"""
 
-    seed = prepare_knowledge_bootstrap()
-    assert seed.configuration_id == KNOWLEDGE_DEFAULT_MODEL_CONFIGURATION_ID
+    seed = prepare_model_registry_bootstrap()
+    assert isinstance(seed, ModelRegistrySeed)
+    assert seed.provider_id == DEFAULT_MODEL_PROVIDER_ID
+    assert seed.embedding_model_id == DEFAULT_EMBEDDING_MODEL_ID
+    assert seed.rerank_model_id == DEFAULT_RERANK_MODEL_ID
     assert len(seed.api_key_nonce) == 12
     assert len(seed.api_key_ciphertext) >= 16
-    assert b"unit-knowledge-plaintext-key" not in seed.api_key_ciphertext
-    assert "unit-knowledge-plaintext-key" not in repr(seed)
+    assert b"unit-registry-plaintext-key" not in seed.api_key_ciphertext
+    assert "unit-registry-plaintext-key" not in repr(seed)
 
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         await _install_full_schema(engine)
-        assert await install_default_model_configuration(factory, seed) is True
+        assert await bootstrap_default_model_registry(factory, seed) is True
 
         async with factory() as session:
-            rows = (await session.execute(sa.select(KnowledgeModelConfigurationRow))).scalars().all()
-            assert len(rows) == 1
-            row = rows[0]
-            assert row.id == KNOWLEDGE_DEFAULT_MODEL_CONFIGURATION_ID
-            assert row.display_name == "SiliconFlow Qwen3-VL Retrieval"
-            assert row.status == "active"
-            assert row.base_url == "https://api.siliconflow.cn/v1"
-            assert row.embedding_model == "Qwen/Qwen3-VL-Embedding-8B"
-            assert row.embedding_dimension == 4096
-            assert row.embedding_max_batch == 64
-            assert row.reranker_model == "Qwen/Qwen3-VL-Reranker-8B"
-            assert row.reranker_max_batch == 32
-            assert row.request_timeout_seconds == 30
+            providers = (await session.execute(sa.select(ModelProviderRow))).scalars().all()
+            assert len(providers) == 1
+            provider = providers[0]
+            assert provider.id == DEFAULT_MODEL_PROVIDER_ID
+            assert provider.name == "SiliconFlow"
+            assert provider.base_url == "https://api.siliconflow.cn/v1"
+            assert provider.request_timeout_seconds == 30
+            models = {row.model_type: row for row in (await session.execute(sa.select(ModelProviderModelRow))).scalars().all()}
+            assert set(models) == {"embedding", "rerank"}
+            embedding = models["embedding"]
+            assert embedding.id == DEFAULT_EMBEDDING_MODEL_ID
+            assert embedding.model_name == "Qwen/Qwen3-VL-Embedding-8B"
+            assert embedding.embedding_dimension == 4096
+            assert embedding.max_batch == 64
+            assert embedding.status == "active"
+            rerank = models["rerank"]
+            assert rerank.id == DEFAULT_RERANK_MODEL_ID
+            assert rerank.model_name == "Qwen/Qwen3-VL-Reranker-8B"
+            assert rerank.embedding_dimension is None
+            assert rerank.max_batch == 32
+            assert rerank.status == "active"
 
-        # A lost bootstrap race validates the winner's row without writing.
-        assert await install_default_model_configuration(factory, _seed()) is False
+        # A lost bootstrap race finds the winner's rows and must not write.
+        assert await bootstrap_default_model_registry(factory, _seed()) is False
         async with factory() as session:
-            count = await session.scalar(sa.select(sa.func.count()).select_from(KnowledgeModelConfigurationRow))
-            assert count == 1
+            provider_count = await session.scalar(sa.select(sa.func.count()).select_from(ModelProviderRow))
+            model_count = await session.scalar(sa.select(sa.func.count()).select_from(ModelProviderModelRow))
+            assert provider_count == 1
+            assert model_count == 2
 
         async with factory() as session, session.begin():
-            stored = await session.get(KnowledgeModelConfigurationRow, KNOWLEDGE_DEFAULT_MODEL_CONFIGURATION_ID)
+            stored = await session.get(ModelProviderRow, DEFAULT_MODEL_PROVIDER_ID)
             assert stored is not None
-            stored.display_name = "Renamed Retrieval"
-            stored.status = "disabled"
+            stored.name = "Renamed Provider"
+            embedding_row = await session.get(ModelProviderModelRow, DEFAULT_EMBEDDING_MODEL_ID)
+            assert embedding_row is not None
+            embedding_row.status = "disabled"
         async with factory() as session:
-            renamed = await session.get(KnowledgeModelConfigurationRow, KNOWLEDGE_DEFAULT_MODEL_CONFIGURATION_ID)
+            renamed = await session.get(ModelProviderRow, DEFAULT_MODEL_PROVIDER_ID)
             assert renamed is not None
-            assert (renamed.display_name, renamed.status) == ("Renamed Retrieval", "disabled")
+            assert renamed.name == "Renamed Provider"
+            disabled = await session.get(ModelProviderModelRow, DEFAULT_EMBEDDING_MODEL_ID)
+            assert disabled is not None
+            assert disabled.status == "disabled"
     finally:
         await engine.dispose()
 
 
-def test_prepare_knowledge_bootstrap_fails_fast_without_material(
+def test_prepare_model_registry_bootstrap_fails_fast_without_material(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Task 9：缺 bootstrap Key 或主密钥时，在任何 DDL 前失败。"""
 
     monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", _SECRET_KEY)
-    monkeypatch.delenv("ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY", raising=False)
-    with pytest.raises(KnowledgeBootstrapConfigurationInvalid):
-        prepare_knowledge_bootstrap()
+    monkeypatch.delenv("ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY", raising=False)
+    monkeypatch.delenv("ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP", raising=False)
+    with pytest.raises(ModelRegistryBootstrapConfigurationInvalid):
+        prepare_model_registry_bootstrap()
 
-    monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY", "   ")
-    with pytest.raises(KnowledgeBootstrapConfigurationInvalid):
-        prepare_knowledge_bootstrap()
+    monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY", "   ")
+    with pytest.raises(ModelRegistryBootstrapConfigurationInvalid):
+        prepare_model_registry_bootstrap()
 
-    monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY", "plain-key")
+    monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY", "plain-key")
     monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", "not-a-valid-key")
-    with pytest.raises(KnowledgeBootstrapConfigurationInvalid):
-        prepare_knowledge_bootstrap()
+    with pytest.raises(ModelRegistryBootstrapConfigurationInvalid):
+        prepare_model_registry_bootstrap()
 
 
-def test_prepare_knowledge_bootstrap_honors_explicit_skip(
+def test_prepare_model_registry_bootstrap_honors_explicit_skip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_SKIP=1 skips the seed without any key material."""
+    """ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP=1 skips the seed without any key material."""
 
-    monkeypatch.delenv("ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY", raising=False)
+    monkeypatch.delenv("ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY", raising=False)
     monkeypatch.delenv("ACT_WEAVE_SECRET_KEY", raising=False)
 
-    monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_SKIP", "1")
-    assert isinstance(prepare_knowledge_bootstrap(), KnowledgeBootstrapSkipped)
+    monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP", "1")
+    assert isinstance(prepare_model_registry_bootstrap(), ModelRegistryBootstrapSkipped)
 
     # Only the exact documented value skips; anything else keeps the preflight.
-    monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_SKIP", "yes")
-    with pytest.raises(KnowledgeBootstrapConfigurationInvalid):
-        prepare_knowledge_bootstrap()
+    monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP", "yes")
+    with pytest.raises(ModelRegistryBootstrapConfigurationInvalid):
+        prepare_model_registry_bootstrap()
 
 
 @pytest.mark.asyncio
@@ -335,33 +371,32 @@ async def test_base_names_unique_per_project_and_model_restrict(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         await _install_full_schema(engine)
-        seed = _seed()
-        await install_default_model_configuration(factory, seed)
+        embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "uniq")
             other_project_id = await _seed_project(session, "uniqother")
-            await _seed_base(session, project_id=project_id, configuration_id=seed.configuration_id, name="Docs")
+            await _seed_base(session, project_id=project_id, embedding_model_id=embedding_model_id, name="Docs")
 
             with pytest.raises(sa.exc.IntegrityError):
                 async with session.begin_nested():
                     await _seed_base(
                         session,
                         project_id=project_id,
-                        configuration_id=seed.configuration_id,
+                        embedding_model_id=embedding_model_id,
                         name="dOCS",
                     )
 
             await _seed_base(
                 session,
                 project_id=other_project_id,
-                configuration_id=seed.configuration_id,
+                embedding_model_id=embedding_model_id,
                 name="Docs",
             )
 
-            # An in-use configuration must not be deletable (RESTRICT).
+            # An in-use model must not be deletable (RESTRICT).
             with pytest.raises(sa.exc.IntegrityError):
                 async with session.begin_nested():
-                    await session.execute(sa.delete(KnowledgeModelConfigurationRow).where(KnowledgeModelConfigurationRow.id == seed.configuration_id))
+                    await session.execute(sa.delete(ModelProviderModelRow).where(ModelProviderModelRow.id == embedding_model_id))
     finally:
         await engine.dispose()
 
@@ -376,11 +411,10 @@ async def test_project_delete_restricted_until_knowledge_rows_removed(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         await _install_full_schema(engine)
-        seed = _seed()
-        await install_default_model_configuration(factory, seed)
+        embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "purge")
-            base = await _seed_base(session, project_id=project_id, configuration_id=seed.configuration_id)
+            base = await _seed_base(session, project_id=project_id, embedding_model_id=embedding_model_id)
 
             with pytest.raises(sa.exc.IntegrityError):
                 async with session.begin_nested():
@@ -406,11 +440,10 @@ async def test_document_status_error_and_storage_key_rules(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         await _install_full_schema(engine)
-        seed = _seed()
-        await install_default_model_configuration(factory, seed)
+        embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "docs")
-            base = await _seed_base(session, project_id=project_id, configuration_id=seed.configuration_id)
+            base = await _seed_base(session, project_id=project_id, embedding_model_id=embedding_model_id)
 
             document = _document(base)
             session.add(document)
@@ -456,11 +489,10 @@ async def test_segment_vector_roundtrip_and_cascade_delete(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         await _install_full_schema(engine)
-        seed = _seed()
-        await install_default_model_configuration(factory, seed)
+        embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "vec")
-            base = await _seed_base(session, project_id=project_id, configuration_id=seed.configuration_id)
+            base = await _seed_base(session, project_id=project_id, embedding_model_id=embedding_model_id)
             document = _document(base, status="ready")
             session.add(document)
             await session.flush()
@@ -540,6 +572,46 @@ async def test_open_task_partial_uniques_and_kind_rules(
                             resource_id=delete_resource,
                             kind="delete_document",
                             target_version=None,
+                        )
+                    )
+                    await session.flush()
+
+            # Object-only cleanup is a separate durable work kind. It must be
+            # able to coexist with the still-running ordinary delete that
+            # removed the Document row before a late upload put completed.
+            orphan_key = f"projects/{project_id}/knowledge/{uuid.uuid4()}/{delete_resource}.pdf"
+            session.add(
+                _task(
+                    project_id=project_id,
+                    resource_id=delete_resource,
+                    kind="delete_document_object",
+                    target_version=None,
+                    storage_key=orphan_key,
+                )
+            )
+            await session.flush()
+
+            # Exact object authority is mandatory only for this task kind.
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    session.add(
+                        _task(
+                            project_id=project_id,
+                            resource_id=uuid.uuid4(),
+                            kind="delete_document_object",
+                            target_version=None,
+                        )
+                    )
+                    await session.flush()
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    session.add(
+                        _task(
+                            project_id=project_id,
+                            resource_id=uuid.uuid4(),
+                            kind="delete_document",
+                            target_version=None,
+                            storage_key=orphan_key,
                         )
                     )
                     await session.flush()
@@ -683,11 +755,11 @@ async def test_claim_reclaims_expired_lease_only_while_attempts_remain(
 
 
 @pytest.mark.asyncio
-async def test_missing_knowledge_seed_fails_bootstrap_without_marker(
+async def test_missing_registry_seed_fails_bootstrap_without_marker(
     postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Task 9：Knowledge 配置写入失败时 Schema V1 marker 不发布。"""
+    """Task 9：模型注册表预检材料缺失时 Schema V1 marker 不发布。"""
 
     monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", _SECRET_KEY)
     monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY", "unit-model-key")
@@ -697,20 +769,20 @@ async def test_missing_knowledge_seed_fails_bootstrap_without_marker(
 
     default_model_bootstrap = prepare_default_system_model_bootstrap()
 
-    with pytest.raises(setup_postgres.PostgresSetupError, match="KNOWLEDGE_BOOTSTRAP_SEED_MISSING"):
+    with pytest.raises(setup_postgres.PostgresSetupError, match="MODEL_REGISTRY_BOOTSTRAP_SEED_MISSING"):
         await setup_postgres._bootstrap_empty_schema_under_lock(
             postgres_database_url,
             default_model_bootstrap=default_model_bootstrap,
-            knowledge_bootstrap=None,
+            model_registry_bootstrap=None,
         )
 
     engine = create_async_engine(postgres_database_url)
     try:
         async with engine.connect() as connection:
             marker_count = await connection.scalar(text("SELECT count(*) FROM alembic_version"))
-            configuration_count = await connection.scalar(text("SELECT count(*) FROM knowledge_model_configurations"))
+            provider_count = await connection.scalar(text("SELECT count(*) FROM model_providers"))
         assert marker_count == 0
-        assert configuration_count == 0
+        assert provider_count == 0
     finally:
         await engine.dispose()
 
@@ -720,7 +792,7 @@ async def test_bootstrap_with_explicit_skip_installs_schema_without_seed(
     postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The explicit skip installs full Schema V1 with zero seeded configurations."""
+    """The explicit skip installs full Schema V1 with zero seeded providers."""
 
     monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", _SECRET_KEY)
     monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY", "unit-model-key")
@@ -731,7 +803,7 @@ async def test_bootstrap_with_explicit_skip_installs_schema_without_seed(
     revision = await setup_postgres._bootstrap_empty_schema_under_lock(
         postgres_database_url,
         default_model_bootstrap=prepare_default_system_model_bootstrap(),
-        knowledge_bootstrap=KnowledgeBootstrapSkipped(),
+        model_registry_bootstrap=ModelRegistryBootstrapSkipped(),
     )
     assert revision == setup_postgres.CURRENT_SCHEMA_REVISION
 
@@ -739,8 +811,8 @@ async def test_bootstrap_with_explicit_skip_installs_schema_without_seed(
     try:
         async with engine.connect() as connection:
             marker_count = await connection.scalar(text("SELECT count(*) FROM alembic_version"))
-            configuration_count = await connection.scalar(text("SELECT count(*) FROM knowledge_model_configurations"))
+            provider_count = await connection.scalar(text("SELECT count(*) FROM model_providers"))
         assert marker_count == 1
-        assert configuration_count == 0
+        assert provider_count == 0
     finally:
         await engine.dispose()

@@ -16,17 +16,10 @@ OPENAI_CHAT_WIRE_ADAPTERS = frozenset(
     {
         "deepseek",
         "openai",
-        "patched_deepseek",
-        "patched_openai",
         "vllm",
     }
 )
-OPENAI_RESPONSES_WIRE_ADAPTERS = frozenset(
-    {
-        "openai_responses",
-        "patched_openai_responses",
-    }
-)
+OPENAI_RESPONSES_WIRE_ADAPTERS = frozenset({"openai_responses"})
 SUPPORTED_PROVIDER_WIRE_ADAPTERS = frozenset(
     {
         *OPENAI_CHAT_WIRE_ADAPTERS,
@@ -48,16 +41,12 @@ def _openai_wire_message_payload(
         raise TypeError("OpenAI-family message conversion returned a non-mapping")
     if not isinstance(message, AIMessage):
         return payload
-    if provider_adapter == "patched_deepseek":
+    if provider_adapter == "deepseek":
         from deerflow.models.assistant_payload_replay import (
             restore_reasoning_content,
         )
 
         restore_reasoning_content(payload, message)
-    elif provider_adapter == "patched_openai":
-        from deerflow.models.patched_openai import _restore_tool_call_signatures
-
-        _restore_tool_call_signatures(payload, message)
     elif provider_adapter == "vllm":
         from deerflow.models.vllm_provider import _restore_reasoning_field
 

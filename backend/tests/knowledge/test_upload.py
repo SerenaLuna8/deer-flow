@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from actweave_knowledge import (
+    KNOWLEDGE_CONFLICT,
     KNOWLEDGE_DISABLED,
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_NOT_FOUND,
@@ -35,14 +36,28 @@ from actweave_knowledge.documents import ALLOWED_DOCUMENT_EXTENSIONS, KnowledgeD
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
-    KnowledgeModelConfigurationRow,
     KnowledgeTaskRow,
 )
+from actweave_knowledge.persistence.tasks import (
+    claim_next_task,
+    settle_task_failure,
+    settle_task_success,
+)
+from actweave_knowledge.tasks import (
+    KnowledgeDocumentDeletionHandler,
+    KnowledgeDocumentObjectDeletionHandler,
+    KnowledgeTaskClaim,
+)
 from fastapi import FastAPI
+from registry_helpers import seed_embedding_model, seed_provider
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.knowledge import gateway
+from app.projects.capabilities import Capability
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
 from deerflow.persistence.bootstrap import _install_full_schema
 
 # ---------------------------------------------------------------------------
@@ -58,6 +73,7 @@ class _FakeObjectStore:
         self.uploads: list[tuple[str, str | None]] = []
         self.deletes: list[str] = []
         self.fail_upload: KnowledgeError | None = None
+        self.fail_delete = False
 
     async def upload_from(self, key: str, source_path: Path, *, media_type: str | None = None) -> None:
         if self.fail_upload is not None:
@@ -71,6 +87,11 @@ class _FakeObjectStore:
         Path(target_path).write_bytes(self.objects[key])
 
     async def delete(self, key: str) -> None:
+        if self.fail_delete:
+            raise KnowledgeError(
+                KNOWLEDGE_STORAGE_UNAVAILABLE,
+                "对象存储暂时不可用",
+            )
         self.deletes.append(key)
         self.objects.pop(key, None)
 
@@ -81,6 +102,21 @@ class _UploadHarness:
         self.factory = factory
         self.store = store
         self.service = service
+
+
+class _RevokedAfterFirstTransaction:
+    """Authority that is revoked after the upload-reservation transaction."""
+
+    def __init__(self, project_id: uuid.UUID) -> None:
+        self.project_id = project_id
+        self.actor_user_id = uuid.uuid4()
+        self.calls = 0
+
+    async def revalidate(self, session: AsyncSession) -> None:
+        del session
+        self.calls += 1
+        if self.calls > 1:
+            raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "资源不存在")
 
 
 async def _harness(postgres_database_url: str, **settings_overrides: object) -> _UploadHarness:
@@ -123,38 +159,20 @@ async def _seed_project(session: AsyncSession, label: str) -> uuid.UUID:
 
 
 async def _seed_base(harness: _UploadHarness, *, status: str = "active") -> tuple[uuid.UUID, uuid.UUID]:
-    """Create project + configuration + base; returns (project_id, base_id)."""
+    """Create project + registry embedding model + base; returns (project_id, base_id)."""
 
-    configuration_id = uuid.uuid4()
+    provider_id = await seed_provider(harness.factory)
+    embedding_model_id = await seed_embedding_model(harness.factory, provider_id)
     base_id = uuid.uuid4()
     async with harness.factory() as session, session.begin():
         project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-        session.add(
-            KnowledgeModelConfigurationRow(
-                id=configuration_id,
-                display_name=f"cfg-{configuration_id.hex[:12]}",
-                status="active",
-                base_url="https://provider.invalid/v1",
-                embedding_model="embed-model",
-                embedding_dimension=1024,
-                embedding_max_batch=64,
-                reranker_model="rerank-model",
-                reranker_max_batch=32,
-                request_timeout_seconds=30,
-                api_key_nonce=b"n" * 12,
-                api_key_ciphertext=b"c" * 16,
-            )
-        )
-        # The base row references the configuration; flush so the configuration
-        # insert is emitted first (the tables carry no ORM relationship).
-        await session.flush()
         session.add(
             KnowledgeBaseRow(
                 id=base_id,
                 project_id=project_id,
                 name=f"kb-{base_id.hex[:8]}",
                 description="",
-                model_configuration_id=configuration_id,
+                embedding_model_id=embedding_model_id,
                 status=status,
             )
         )
@@ -226,6 +244,32 @@ async def test_upload_creates_queued_document_and_ingest_task(postgres_database_
         assert view.chunk_separator == "\\n\\n"
         assert view.remove_extra_spaces is False
         assert view.remove_urls_emails is False
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_upload_revocation_after_object_put_does_not_publish_document(
+    postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        authority = _RevokedAfterFirstTransaction(project_id)
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.upload_document(
+                project_id,
+                base_id,
+                _upload(tmp_path),
+                authority=authority,
+            )
+
+        assert error.value.code == KNOWLEDGE_NOT_FOUND
+        assert authority.calls == 2
+        assert harness.store.objects == {}
+        assert await _table_counts(harness) == (0, 0)
     finally:
         await harness.engine.dispose()
 
@@ -475,6 +519,217 @@ async def test_failed_task_creation_deletes_the_written_object_and_row(postgres_
         await harness.engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_delete_wins_while_document_upload_is_in_flight(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deleting Document cannot be revived when its object upload finishes."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        upload_started = asyncio.Event()
+        allow_upload_to_finish = asyncio.Event()
+        original_upload = harness.store.upload_from
+
+        async def _paused_upload(key: str, source_path: Path, *, media_type: str | None = None) -> None:
+            upload_started.set()
+            await allow_upload_to_finish.wait()
+            await original_upload(key, source_path, media_type=media_type)
+
+        monkeypatch.setattr(harness.store, "upload_from", _paused_upload)
+        upload_task = asyncio.create_task(harness.service.upload_document(project_id, base_id, _upload(tmp_path)))
+        await asyncio.wait_for(upload_started.wait(), timeout=5)
+
+        uploading, total = await harness.service.list_documents(project_id, base_id)
+        assert total == 1
+        assert uploading[0].status == "uploading"
+        deleted = await harness.service.delete_document(project_id, uploading[0].id)
+        assert deleted.status == "deleting"
+
+        allow_upload_to_finish.set()
+        with pytest.raises(KnowledgeError) as error:
+            await upload_task
+        assert error.value.code == KNOWLEDGE_CONFLICT
+
+        remaining, total = await harness.service.list_documents(project_id, base_id)
+        assert remaining == []
+        assert total == 0
+        assert harness.store.objects == {}
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_upload_cleanup_persists_orphan_delete_after_worker_removed_the_row(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late put survives no gap even while the original delete is running.
+
+    The orphan cleanup has its own task kind and exact storage key, so its
+    permanent failure is visible on the recreated tombstone and a user can
+    retry through the ordinary Document-delete interface.
+    """
+
+    harness = await _harness(postgres_database_url)
+    allow_upload_to_finish = asyncio.Event()
+    try:
+        project_id, base_id = await _seed_base(harness)
+        upload_started = asyncio.Event()
+        original_upload = harness.store.upload_from
+
+        async def _paused_upload(
+            key: str,
+            source_path: Path,
+            *,
+            media_type: str | None = None,
+        ) -> None:
+            upload_started.set()
+            await allow_upload_to_finish.wait()
+            await original_upload(key, source_path, media_type=media_type)
+
+        monkeypatch.setattr(harness.store, "upload_from", _paused_upload)
+        upload_task = asyncio.create_task(
+            harness.service.upload_document(
+                project_id,
+                base_id,
+                _upload(tmp_path),
+            )
+        )
+        await asyncio.wait_for(upload_started.wait(), timeout=5)
+        uploading, _ = await harness.service.list_documents(project_id, base_id)
+        document_id = uploading[0].id
+        await harness.service.delete_document(project_id, document_id)
+
+        async with harness.factory() as session, session.begin():
+            delete_task = await claim_next_task(session, lease_seconds=60)
+            assert delete_task is not None
+            assert delete_task.kind == "delete_document"
+        handler = KnowledgeDocumentDeletionHandler(
+            session_factory=harness.factory,
+            object_store=harness.store,  # type: ignore[arg-type]
+        )
+        await handler(
+            KnowledgeTaskClaim(
+                id=delete_task.id,
+                project_id=project_id,
+                resource_id=document_id,
+                kind="delete_document",
+                target_version=None,
+                storage_key=None,
+                claim_token=delete_task.claim_token,  # type: ignore[arg-type]
+                attempt_count=delete_task.attempt_count,
+                max_attempts=3,
+            )
+        )
+
+        harness.store.fail_delete = True
+        allow_upload_to_finish.set()
+        with pytest.raises(KnowledgeError) as error:
+            await upload_task
+        assert error.value.code == KNOWLEDGE_CONFLICT
+        assert len(harness.store.objects) == 1
+
+        async with harness.factory() as session:
+            cleanup_task = await session.scalar(
+                select(KnowledgeTaskRow).where(
+                    KnowledgeTaskRow.resource_id == document_id,
+                    KnowledgeTaskRow.kind == "delete_document_object",
+                    KnowledgeTaskRow.status == "queued",
+                )
+            )
+            original_task = await session.get(KnowledgeTaskRow, delete_task.id)
+            tombstone = await session.get(KnowledgeDocumentRow, document_id)
+        assert cleanup_task is not None
+        assert cleanup_task.storage_key in harness.store.objects
+        assert original_task is not None and original_task.status == "running"
+        assert tombstone is not None
+        assert tombstone.status == "deleting"
+        assert tombstone.storage_key == cleanup_task.storage_key
+
+        # Exhaust the orphan cleanup and expose its error on the tombstone.
+        async with harness.factory() as session, session.begin():
+            cleanup_claim = await claim_next_task(session, lease_seconds=60)
+            assert cleanup_claim is not None
+            assert cleanup_claim.id == cleanup_task.id
+            cleanup_claim.attempt_count = 3
+        object_handler = KnowledgeDocumentObjectDeletionHandler(
+            session_factory=harness.factory,
+            object_store=harness.store,  # type: ignore[arg-type]
+        )
+        object_claim = KnowledgeTaskClaim(
+            id=cleanup_claim.id,
+            project_id=project_id,
+            resource_id=document_id,
+            kind="delete_document_object",
+            target_version=None,
+            storage_key=cleanup_claim.storage_key,
+            claim_token=cleanup_claim.claim_token,  # type: ignore[arg-type]
+            attempt_count=3,
+            max_attempts=3,
+        )
+        with pytest.raises(KnowledgeError) as cleanup_error:
+            await object_handler(object_claim)
+        async with harness.factory() as session, session.begin():
+            outcome = await settle_task_failure(
+                session,
+                cleanup_claim.id,
+                cleanup_claim.claim_token,  # type: ignore[arg-type]
+                error_message=cleanup_error.value.message,
+                retry_delay_seconds=0,
+            )
+        assert outcome == "failed"
+        async with harness.factory() as session, session.begin():
+            assert await settle_task_success(
+                session,
+                delete_task.id,
+                delete_task.claim_token,  # type: ignore[arg-type]
+            )
+        stuck = await harness.service.get_document(project_id, document_id)
+        assert stuck.status == "deleting"
+        assert stuck.delete_error == cleanup_error.value.message
+
+        # The first delete work has finished. A normal user retry opens the
+        # ordinary task kind and remains recoverable through existing UI/API.
+        retried = await harness.service.delete_document(project_id, document_id)
+        assert retried.status == "deleting"
+        assert retried.delete_error is None
+        async with harness.factory() as session:
+            retry_task = await session.scalar(
+                select(KnowledgeTaskRow).where(
+                    KnowledgeTaskRow.resource_id == document_id,
+                    KnowledgeTaskRow.kind == "delete_document",
+                    KnowledgeTaskRow.status == "queued",
+                )
+            )
+        assert retry_task is not None
+
+        harness.store.fail_delete = False
+        await handler(
+            KnowledgeTaskClaim(
+                id=retry_task.id,
+                project_id=project_id,
+                resource_id=document_id,
+                kind="delete_document",
+                target_version=None,
+                storage_key=None,
+                claim_token=uuid.uuid4(),
+                attempt_count=1,
+                max_attempts=3,
+            )
+        )
+        assert harness.store.objects == {}
+        async with harness.factory() as session:
+            assert await session.get(KnowledgeDocumentRow, document_id) is None
+    finally:
+        allow_upload_to_finish.set()
+        await harness.engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # List, get, download
 # ---------------------------------------------------------------------------
@@ -611,6 +866,83 @@ async def test_download_round_trips_bytes_and_gates_statuses(postgres_database_u
         await harness.engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_download_revalidates_authority_after_object_io_before_returning(
+    postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    """Revocation while MinIO copies bytes suppresses the document response."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        content = b"copied before final authority rejection"
+        uploaded = await harness.service.upload_document(
+            project_id,
+            base_id,
+            _upload(tmp_path, content),
+        )
+        authority = _RevokedAfterFirstTransaction(project_id)
+        target = tmp_path / "revoked-download.txt"
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.download_document(
+                project_id,
+                uploaded.id,
+                target,
+                authority=authority,
+            )
+
+        assert error.value.code == KNOWLEDGE_NOT_FOUND
+        assert authority.calls == 2
+        assert target.read_bytes() == content
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_download_final_guard_database_failure_maps_to_storage_unavailable(
+    postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    """A DB outage after MinIO copy never escapes as a raw SQLAlchemy error."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        uploaded = await harness.service.upload_document(
+            project_id,
+            base_id,
+            _upload(tmp_path, b"copied before database outage"),
+        )
+
+        class _DiesOnFinalGuard:
+            def __init__(self, inner) -> None:  # noqa: ANN001
+                self._inner = inner
+                self._calls = 0
+
+            def __call__(self):  # noqa: ANN204
+                self._calls += 1
+                if self._calls > 1:
+                    raise SQLAlchemyError("pool failed after object copy")
+                return self._inner()
+
+        service = KnowledgeDocumentService(
+            session_factory=_DiesOnFinalGuard(harness.factory),  # type: ignore[arg-type]
+            settings=KnowledgeSettings(),
+            object_store=harness.store,  # type: ignore[arg-type]
+        )
+        target = tmp_path / "db-failed-download.txt"
+
+        with pytest.raises(KnowledgeError) as error:
+            await service.download_document(project_id, uploaded.id, target)
+
+        assert error.value.code == KNOWLEDGE_STORAGE_UNAVAILABLE
+        assert target.read_bytes() == b"copied before database outage"
+    finally:
+        await harness.engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # HTTP contract: bases, upload, download, health
 # ---------------------------------------------------------------------------
@@ -665,7 +997,8 @@ class _FakeModule:
         self.staged_content: bytes | None = None
         self.download_payload = b"original file bytes"
 
-    async def upload_document(self, project_id: uuid.UUID, base_id: uuid.UUID, upload: KnowledgeDocumentUpload):
+    async def upload_document(self, project_id: uuid.UUID, base_id: uuid.UUID, upload: KnowledgeDocumentUpload, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self.calls.append(("upload", (project_id, base_id, upload)))
         # The staged temp file must exist while the module runs.
         self.staged_content = Path(upload.source_path).read_bytes()
@@ -683,7 +1016,8 @@ class _FakeModule:
             remove_urls_emails=upload.remove_urls_emails,
         )
 
-    async def preview_document_chunks(self, request: KnowledgeChunkPreviewRequest):
+    async def preview_document_chunks(self, request: KnowledgeChunkPreviewRequest, *, authority):  # noqa: ANN001
+        assert authority.project_id == _PROJECT_ID
         self.calls.append(("preview", request))
         self.staged_content = Path(request.source_path).read_bytes()
         if self.preview_error is not None:
@@ -701,14 +1035,16 @@ class _FakeModule:
             ),
         )
 
-    async def download_document(self, project_id: uuid.UUID, document_id: uuid.UUID, target_path: Path):
+    async def download_document(self, project_id: uuid.UUID, document_id: uuid.UUID, target_path: Path, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self.calls.append(("download", (project_id, document_id)))
         if self.download_error is not None:
             raise self.download_error
         await asyncio.to_thread(target_path.write_bytes, self.download_payload)
         return _document_view(original_name="下载报告.pdf")
 
-    async def health(self):
+    async def health(self, *, authority):  # noqa: ANN001
+        assert authority.project_id == _PROJECT_ID
         self.calls.append(("health", None))
         return KnowledgeHealth(enabled=True, database_ok=True, storage_ok=False, message="对象存储 bucket 不可访问")
 
@@ -716,7 +1052,15 @@ class _FakeModule:
 def _app(module: _FakeModule) -> FastAPI:
     app = FastAPI()
     app.include_router(gateway.project_router)
-    context = SimpleNamespace(project_id=_PROJECT_ID, request_id=_REQUEST_ID)
+    context = ProjectContext(
+        user_id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
+        project_id=_PROJECT_ID,
+        membership_id=uuid.UUID("99999999-9999-4999-8999-999999999999"),
+        role=ProjectRole.ADMIN,
+        capabilities=frozenset(Capability),
+        membership_version=1,
+        request_id=_REQUEST_ID,
+    )
     app.dependency_overrides[gateway.require_project_knowledge_read] = lambda: context
     app.dependency_overrides[gateway.require_project_knowledge_edit] = lambda: context
     app.state.knowledge_module = module
@@ -1003,7 +1347,8 @@ async def test_http_base_routes_round_trip_the_module_views() -> None:
         project_id=_PROJECT_ID,
         name="产品手册",
         description="",
-        model_configuration_id=uuid.uuid4(),
+        embedding_model_id=uuid.uuid4(),
+        reranker_model_id=None,
         status="active",
         document_count=2,
         default_top_k=4,
@@ -1014,32 +1359,37 @@ async def test_http_base_routes_round_trip_the_module_views() -> None:
     )
 
     class _BaseModule(_FakeModule):
-        async def create_knowledge_base(self, project_id, create):  # noqa: ANN001
+        async def create_knowledge_base(self, project_id, create, *, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             self.calls.append(("create_base", (project_id, create)))
             return base_view
 
-        async def list_knowledge_bases(self, project_id, *, page=1, page_size=20):  # noqa: ANN001
+        async def list_knowledge_bases(self, project_id, *, page=1, page_size=20, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             self.calls.append(("list_bases", (project_id, page, page_size)))
             return [base_view], 1
 
-        async def get_knowledge_base(self, project_id, base_id):  # noqa: ANN001
+        async def get_knowledge_base(self, project_id, base_id, *, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             self.calls.append(("get_base", (project_id, base_id)))
             return base_view
 
-        async def update_knowledge_base(self, project_id, base_id, update):  # noqa: ANN001
+        async def update_knowledge_base(self, project_id, base_id, update, *, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             self.calls.append(("update_base", (project_id, base_id, update)))
             return base_view
 
-        async def rebuild_knowledge_base(self, project_id, base_id, *, model_configuration_id):  # noqa: ANN001
-            self.calls.append(("rebuild_base", (project_id, base_id, model_configuration_id)))
+        async def rebuild_knowledge_base(self, project_id, base_id, *, embedding_model_id, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
+            self.calls.append(("rebuild_base", (project_id, base_id, embedding_model_id)))
             return base_view
 
     module = _BaseModule()
-    rebuild_configuration_id = uuid.uuid4()
+    rebuild_embedding_model_id = uuid.uuid4()
     async with _client(_app(module)) as client:
         created = await client.post(
             f"/api/projects/{_PROJECT_ID}/knowledge/bases",
-            json={"name": "产品手册", "model_configuration_id": str(base_view.model_configuration_id)},
+            json={"name": "产品手册", "embedding_model_id": str(base_view.embedding_model_id)},
         )
         listed = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/bases", params={"page_size": 5})
         fetched = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}")
@@ -1049,7 +1399,7 @@ async def test_http_base_routes_round_trip_the_module_views() -> None:
         )
         rebuilt = await client.post(
             f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/rebuild",
-            json={"model_configuration_id": str(rebuild_configuration_id)},
+            json={"embedding_model_id": str(rebuild_embedding_model_id)},
         )
         rebuild_missing_body = await client.post(
             f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/rebuild",
@@ -1081,7 +1431,7 @@ async def test_http_base_routes_round_trip_the_module_views() -> None:
     assert update_dto.default_score_threshold == 0.35
     _, (_, rebuild_base_id, rebuild_dto) = module.calls[4]
     assert rebuild_base_id == _BASE_ID
-    assert rebuild_dto == rebuild_configuration_id
+    assert rebuild_dto == rebuild_embedding_model_id
     assert isinstance(rebuild_dto, uuid.UUID)
 
 
@@ -1094,7 +1444,8 @@ async def test_http_m4_routes_round_trip_delete_retry_and_segments() -> None:
         project_id=_PROJECT_ID,
         name="产品手册",
         description="",
-        model_configuration_id=uuid.uuid4(),
+        embedding_model_id=uuid.uuid4(),
+        reranker_model_id=None,
         status="deleting",
         document_count=1,
         default_top_k=4,
@@ -1116,19 +1467,23 @@ async def test_http_m4_routes_round_trip_delete_retry_and_segments() -> None:
     )
 
     class _M4Module(_FakeModule):
-        async def delete_knowledge_base(self, project_id, base_id):  # noqa: ANN001
+        async def delete_knowledge_base(self, project_id, base_id, *, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             self.calls.append(("delete_base", (project_id, base_id)))
             return base_view
 
-        async def delete_document(self, project_id, document_id):  # noqa: ANN001
+        async def delete_document(self, project_id, document_id, *, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             self.calls.append(("delete_document", (project_id, document_id)))
             return _document_view(status="deleting", version=2)
 
-        async def retry_document(self, project_id, document_id):  # noqa: ANN001
+        async def retry_document(self, project_id, document_id, *, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             self.calls.append(("retry", (project_id, document_id)))
             return _document_view(status="queued", version=3)
 
-        async def list_document_segments(self, project_id, document_id, *, page=1, page_size=20):  # noqa: ANN001
+        async def list_document_segments(self, project_id, document_id, *, page=1, page_size=20, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             self.calls.append(("segments", (project_id, document_id, page, page_size)))
             return [segment_view], 1
 
@@ -1163,10 +1518,12 @@ async def test_http_m4_routes_round_trip_delete_retry_and_segments() -> None:
 @pytest.mark.asyncio
 async def test_http_m4_routes_map_knowledge_errors_to_status_codes() -> None:
     class _FailingModule(_FakeModule):
-        async def retry_document(self, project_id, document_id):  # noqa: ANN001
+        async def retry_document(self, project_id, document_id, *, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             raise KnowledgeError(KNOWLEDGE_INVALID_REQUEST, "仅 failed 状态的文档支持重试")
 
-        async def list_document_segments(self, project_id, document_id, *, page=1, page_size=20):  # noqa: ANN001
+        async def list_document_segments(self, project_id, document_id, *, page=1, page_size=20, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
             raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
 
     module = _FailingModule()
@@ -1237,10 +1594,11 @@ async def test_upload_cleanup_defers_to_the_delete_worker_when_the_object_delete
             document = await session.scalar(select(KnowledgeDocumentRow))
             assert document is not None
             assert document.status == "deleting"
-            task = await session.scalar(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind == "delete_document"))
+            task = await session.scalar(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind == "delete_document_object"))
             assert task is not None
             assert task.status == "queued"
             assert task.resource_id == document.id
+            assert task.storage_key == document.storage_key
     finally:
         await harness.engine.dispose()
 
@@ -1320,7 +1678,15 @@ async def test_http_upload_precheck_rejects_declared_oversized_bodies_before_sta
 async def test_http_routes_answer_disabled_when_the_module_is_absent() -> None:
     app = FastAPI()
     app.include_router(gateway.project_router)
-    context = SimpleNamespace(project_id=_PROJECT_ID, request_id=_REQUEST_ID)
+    context = ProjectContext(
+        user_id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
+        project_id=_PROJECT_ID,
+        membership_id=uuid.UUID("99999999-9999-4999-8999-999999999999"),
+        role=ProjectRole.ADMIN,
+        capabilities=frozenset(Capability),
+        membership_version=1,
+        request_id=_REQUEST_ID,
+    )
     app.dependency_overrides[gateway.require_project_knowledge_read] = lambda: context
     app.dependency_overrides[gateway.require_project_knowledge_edit] = lambda: context
 

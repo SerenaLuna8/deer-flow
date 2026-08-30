@@ -47,6 +47,14 @@ export const zhCN: Translations = {
         : seconds === 0
           ? "已思考（用时不足 1 秒）"
           : `已思考（用时 ${seconds} 秒）`,
+    reasoningSummaryInProgress: (seconds?: number) =>
+      seconds === undefined ? "生成推理摘要中…" : `生成推理摘要中…（${seconds} 秒）`,
+    reasoningSummaryFor: (seconds?: number) =>
+      seconds === undefined
+        ? "推理摘要"
+        : seconds === 0
+          ? "推理摘要（用时不足 1 秒）"
+          : `推理摘要（用时 ${seconds} 秒）`,
     artifacts: "文件",
     public: "公共",
     custom: "自定义",
@@ -181,10 +189,11 @@ export const zhCN: Translations = {
       namePlaceholder: "例如：产品手册",
       descriptionLabel: "描述（可选）",
       descriptionPlaceholder: "该知识库的用途说明",
-      modelLabel: "模型配置",
-      modelPlaceholder: "选择模型配置",
-      modelHint: "创建后不可更换。",
-      noModels: "暂无可用模型配置，请联系系统管理员在平台管理中添加。",
+      modelLabel: "Embedding 模型",
+      modelPlaceholder: "选择 Embedding 模型",
+      modelHint: "创建后更换需要重建全部文档。",
+      noModels: "暂无可用 Embedding 模型，请联系系统管理员在模型管理中添加。",
+      modelsLoadFailed: "模型列表加载失败，请稍后重试。",
       editTitle: "编辑知识库",
       statusLabel: "状态",
       deleteTitle: "删除知识库",
@@ -201,16 +210,19 @@ export const zhCN: Translations = {
       defaultTopKHint: "检索未指定 top_k 时使用，范围 1-20。",
       defaultThresholdLabel: "默认分数阈值",
       defaultThresholdHint: "检索未指定阈值时使用；0 表示不过滤。",
+      rerankerLabel: "重排序模型",
+      rerankerNone: "不使用重排序",
+      rerankerHint: "可选。保存后立即生效，不需要重建。",
       rebuildSectionTitle: "嵌入模型",
-      rebuildModelLabel: "模型配置",
+      rebuildModelLabel: "Embedding 模型",
       rebuildHint:
-        "更换模型配置并重建后，所有文档将逐个重新嵌入；期间文档暂不参与检索，完成后自动恢复。",
+        "更换 Embedding 模型并重建后，所有文档将逐个重新嵌入；期间文档暂不参与检索，完成后自动恢复。",
       rebuildButton: "重建嵌入",
       rebuildPending: "重建中…",
       rebuildStarted: "已开始重建，文档将逐个重新处理。",
       rebuildConfirmTitle: "重建知识库嵌入",
       rebuildConfirmDescription: (name) =>
-        `将把「${name}」绑定到所选模型配置，并重新嵌入全部文档。重建期间文档暂不参与检索。`,
+        `将把「${name}」绑定到所选 Embedding 模型，并重新嵌入全部文档。重建期间文档暂不参与检索。`,
       rebuildConfirm: "确认重建",
     },
     wizard: {
@@ -245,6 +257,9 @@ export const zhCN: Translations = {
       previewTitle: "分段预览",
       previewHint: (fileName) => `预览第一个文件：${fileName}`,
       previewLoading: "正在生成预览…",
+      previewRefresh: "刷新预览",
+      previewStale: "预览已过期，请刷新以应用当前分段设置。",
+      previewInvalid: "请先修正无效的分段设置，再刷新预览。",
       previewTotal: (total) => `预计共 ${total} 个分段`,
       previewChunkLabel: (position) =>
         `Chunk-${String(position).padStart(2, "0")}`,
@@ -336,6 +351,7 @@ export const zhCN: Translations = {
       rename: "重命名",
       renameTitle: "重命名文档",
       renameLabel: "显示名称",
+      actionsAria: (name) => `${name} 的操作`,
       enableAria: (name) => `启用 ${name}`,
       disableAria: (name) => `停用 ${name}`,
       selectAllAria: "选择全部文档",
@@ -367,7 +383,7 @@ export const zhCN: Translations = {
       add: "新增分段",
       addTitle: "新增分段",
       addDescription:
-        "分段将使用本知识库的模型配置生成向量，保存后立即可被检索。",
+        "分段将使用本知识库绑定的 Embedding 模型生成向量，保存后立即可被检索。",
       contentLabel: "内容",
       contentPlaceholder: "输入分段内容",
       edit: "编辑",
@@ -390,7 +406,8 @@ export const zhCN: Translations = {
     },
     search: {
       title: "检索测试",
-      description: "对当前知识库执行两阶段检索，验证召回效果。",
+      description:
+        "对当前知识库执行检索，验证召回效果。绑定重排序模型时结果按重排分排序（0-1），未绑定时按向量余弦相似度排序（-1 到 1）。",
       queryLabel: "查询内容",
       queryPlaceholder: "输入要检索的问题或关键词",
       baseFilterLabel: "限定知识库（可选）",
@@ -398,19 +415,19 @@ export const zhCN: Translations = {
       topKLabel: "返回条数 (top_k)",
       topKHint: "留空使用知识库默认值。",
       thresholdLabel: "分数阈值",
-      thresholdHint: "留空使用知识库默认阈值。",
+      thresholdHint: "留空使用知识库默认阈值；0 表示不过滤。",
       submit: "检索",
       searching: "检索中…",
       empty: "未找到相关内容",
       resultsTitle: (count) => `命中 ${count} 条`,
-      score: (score) => `相关度 ${score.toFixed(3)}`,
+      score: (score) => `检索分数 ${score.toFixed(3)}`,
       recentTitle: "最近查询",
       recentEmpty: "还没有查询记录。",
       recentColumns: {
         query: "查询内容",
         source: "来源",
         results: "命中",
-        topScore: "最高分",
+        topScore: "最高检索分数",
         time: "时间",
       },
       recentSource: {
@@ -435,7 +452,7 @@ export const zhCN: Translations = {
     },
     citations: {
       summary: (count) => `引用了 ${count} 条知识库内容`,
-      score: (score) => `相关度 ${score.toFixed(3)}`,
+      score: (score) => `检索分数 ${score.toFixed(3)}`,
       segmentPosition: (position) => `分段 #${position}`,
     },
     errors: {
@@ -998,8 +1015,7 @@ export const zhCN: Translations = {
       audit: "日志",
       assets: "资产",
       systemSettings: "系统配置",
-      settings: "模型设置",
-      knowledgeSettings: "知识模型",
+      settings: "模型管理",
     },
     overview: {
       title: "运维概览",

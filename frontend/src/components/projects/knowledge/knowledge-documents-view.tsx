@@ -3,6 +3,7 @@
 import {
   DownloadIcon,
   ListTreeIcon,
+  MoreHorizontalIcon,
   PencilIcon,
   RotateCcwIcon,
   TagsIcon,
@@ -21,11 +22,25 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useI18n } from "@/core/i18n/hooks";
-import { knowledgeDocumentDownloadURL } from "@/core/knowledge/api";
+import {
+  isKnowledgeAuthorityBoundaryError,
+  knowledgeDocumentDownloadURL,
+} from "@/core/knowledge/api";
 import {
   isChildChunkSizeValid,
   isChunkOverlapValid,
@@ -84,6 +99,30 @@ function formatSizeBytes(sizeBytes: number): string {
     return `${(sizeBytes / 1024).toFixed(1)} KB`;
   }
   return `${sizeBytes} B`;
+}
+
+function DocumentErrorMessage({ message }: { message: string }) {
+  return (
+    <div role="status" aria-live="polite" aria-atomic="true">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="text-destructive mt-1 line-clamp-2 w-full max-w-56 cursor-help text-left text-xs leading-4 break-words"
+          >
+            {message}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="bottom"
+          align="start"
+          className="max-w-sm text-left break-words whitespace-normal"
+        >
+          {message}
+        </TooltipContent>
+      </Tooltip>
+    </div>
+  );
 }
 
 export function KnowledgeDocumentsView({
@@ -165,6 +204,16 @@ function DocumentsTable({
   const allSelected =
     selectableIds.length > 0 && selectedIds.length === selectableIds.length;
   const batchPending = toggleDocuments.isPending || batchDelete.isPending;
+  const authorityBoundaryError = isKnowledgeAuthorityBoundaryError(
+    documents.error,
+  );
+  const recoverableRefreshError =
+    documents.error !== null &&
+    documents.data !== undefined &&
+    !authorityBoundaryError;
+  const blockingDocumentsError =
+    documents.error !== null &&
+    (documents.data === undefined || authorityBoundaryError);
 
   const toggleRow = (documentId: string, checked: boolean) => {
     setSelected((current) => {
@@ -211,6 +260,25 @@ function DocumentsTable({
         <p role="alert" className="text-destructive text-sm">
           {knowledgeErrorMessage(toggleDocuments.error, labels.errors)}
         </p>
+      ) : null}
+      {recoverableRefreshError ? (
+        <div
+          role="alert"
+          className="border-destructive/30 bg-destructive/5 flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 text-sm"
+        >
+          <span className="text-destructive min-w-0 flex-1">
+            {knowledgeErrorMessage(documents.error, labels.errors)}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={documents.isFetching}
+            onClick={() => void documents.refetch()}
+          >
+            {t.common.retry}
+          </Button>
+        </div>
       ) : null}
 
       {canEdit && selectedIds.length > 0 ? (
@@ -276,7 +344,7 @@ function DocumentsTable({
 
       {documents.isLoading ? (
         <Skeleton className="h-40 rounded-xl" />
-      ) : documents.error ? (
+      ) : blockingDocumentsError ? (
         <p role="alert" className="text-destructive text-sm">
           {knowledgeErrorMessage(documents.error, labels.errors)}
         </p>
@@ -285,12 +353,15 @@ function DocumentsTable({
           {labels.documents.empty}
         </p>
       ) : (
-        <div className="border-border overflow-x-auto rounded-xl border">
-          <table className="w-full text-left text-sm">
+        <div
+          className="border-border overflow-x-auto rounded-xl border"
+          data-testid="knowledge-documents-table"
+        >
+          <table className="w-full min-w-[680px] table-fixed text-left text-sm">
             <thead className="bg-muted/60">
               <tr>
                 {canEdit ? (
-                  <th className="w-10 px-4 py-3">
+                  <th className="w-10 px-3 py-3">
                     <input
                       type="checkbox"
                       className="accent-primary size-4 align-middle"
@@ -306,26 +377,36 @@ function DocumentsTable({
                     />
                   </th>
                 ) : null}
-                <th className="px-4 py-3">{labels.documents.columns.name}</th>
-                <th className="px-4 py-3">{labels.documents.columns.status}</th>
-                <th className="px-4 py-3">
+                <th className="w-36 px-3 py-3">
+                  {labels.documents.columns.name}
+                </th>
+                <th className="w-36 px-3 py-3">
+                  {labels.documents.columns.status}
+                </th>
+                <th className="w-20 px-3 py-3">
                   {labels.documents.columns.enabled}
                 </th>
-                <th className="px-4 py-3">{labels.documents.columns.size}</th>
-                <th className="px-4 py-3">
+                <th className="w-16 px-2 py-3">
+                  {labels.documents.columns.size}
+                </th>
+                <th className="w-20 px-3 py-3">
                   {labels.documents.columns.segments}
                 </th>
-                <th className="px-4 py-3">{labels.documents.columns.words}</th>
-                <th className="px-4 py-3 text-right">
-                  {labels.documents.columns.actions}
+                <th className="w-24 px-3 py-3">
+                  {labels.documents.columns.words}
+                </th>
+                <th className="bg-muted/95 sticky right-0 z-10 w-12 px-2 py-3 text-right shadow-[-8px_0_12px_-12px_rgba(0,0,0,0.45)]">
+                  <span className="sr-only">
+                    {labels.documents.columns.actions}
+                  </span>
                 </th>
               </tr>
             </thead>
             <tbody data-testid="knowledge-document-rows">
               {items.map((document) => (
-                <tr key={document.id} className="border-t align-top">
+                <tr key={document.id} className="group border-t align-top">
                   {canEdit ? (
-                    <td className="px-4 py-3">
+                    <td className="px-3 py-3">
                       <input
                         type="checkbox"
                         className="accent-primary size-4 align-middle"
@@ -340,32 +421,34 @@ function DocumentsTable({
                       />
                     </td>
                   ) : null}
-                  <td className="max-w-64 px-4 py-3">
-                    <span className="text-foreground block truncate font-medium">
+                  <td className="px-3 py-3">
+                    <span
+                      title={document.name}
+                      className="text-foreground block truncate font-medium"
+                    >
                       {document.name}
                     </span>
                     {document.original_name !== document.name ? (
-                      <span className="text-muted-foreground block truncate text-xs">
+                      <span
+                        title={document.original_name}
+                        className="text-muted-foreground block truncate text-xs"
+                      >
                         {document.original_name}
                       </span>
                     ) : null}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-3">
                     <Badge variant={documentStatusVariant(document.status)}>
                       {labels.documentStatus[document.status]}
                     </Badge>
                     {document.status === "failed" && document.error_message ? (
-                      <span className="text-destructive mt-1 block max-w-56 text-xs">
-                        {document.error_message}
-                      </span>
+                      <DocumentErrorMessage message={document.error_message} />
                     ) : null}
                     {document.delete_error ? (
-                      <span className="text-destructive mt-1 block max-w-56 text-xs">
-                        {document.delete_error}
-                      </span>
+                      <DocumentErrorMessage message={document.delete_error} />
                     ) : null}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-3">
                     <Switch
                       checked={document.enabled}
                       disabled={
@@ -387,95 +470,108 @@ function DocumentsTable({
                       }
                     />
                   </td>
-                  <td className="text-muted-foreground px-4 py-3">
+                  <td className="text-muted-foreground px-2 py-3">
                     {formatSizeBytes(document.size_bytes)}
                   </td>
-                  <td className="text-muted-foreground px-4 py-3 tabular-nums">
+                  <td className="text-muted-foreground px-3 py-3 tabular-nums">
                     {document.segment_count}
                   </td>
-                  <td className="text-muted-foreground px-4 py-3 tabular-nums">
+                  <td className="text-muted-foreground px-3 py-3 tabular-nums">
                     {document.word_count.toLocaleString()}
                   </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center justify-end gap-1.5">
-                      {document.status === "ready" ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => onBrowse(document)}
-                        >
-                          <ListTreeIcon aria-hidden className="size-4" />
-                          {labels.documents.viewSegments}
-                        </Button>
-                      ) : null}
-                      {document.status !== "uploading" &&
-                      document.status !== "deleting" ? (
-                        <Button type="button" variant="ghost" size="sm" asChild>
-                          <a
-                            href={knowledgeDocumentDownloadURL(
-                              scope.projectId,
-                              document.id,
-                            )}
-                            download={document.original_name}
-                          >
-                            <DownloadIcon aria-hidden className="size-4" />
-                            {labels.documents.download}
-                          </a>
-                        </Button>
-                      ) : null}
-                      {canEdit && document.status === "failed" ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          disabled={retryDocument.isPending}
-                          onClick={() =>
-                            retryDocument.mutate({
-                              documentId: document.id,
-                              baseId: base.id,
-                            })
-                          }
-                        >
-                          <RotateCcwIcon aria-hidden className="size-4" />
-                          {labels.documents.retry}
-                        </Button>
-                      ) : null}
-                      {canEdit && document.status !== "deleting" ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setRenaming(document)}
-                        >
-                          <PencilIcon aria-hidden className="size-4" />
-                          {labels.documents.rename}
-                        </Button>
-                      ) : null}
-                      {canEdit && document.status !== "deleting" ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setEditingMetadata(document)}
-                        >
-                          <TagsIcon aria-hidden className="size-4" />
-                          {labels.documents.metadataAction}
-                        </Button>
-                      ) : null}
-                      {canEdit ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="text-destructive"
-                          onClick={() => setDeleting(document)}
-                        >
-                          <Trash2Icon aria-hidden className="size-4" />
-                          {labels.documents.delete}
-                        </Button>
-                      ) : null}
-                    </div>
+                  <td className="bg-background group-hover:bg-muted/20 sticky right-0 z-10 px-2 py-2.5 shadow-[-8px_0_12px_-12px_rgba(0,0,0,0.45)]">
+                    {document.status === "ready" ||
+                    (document.status !== "uploading" &&
+                      document.status !== "deleting") ||
+                    canEdit ? (
+                      <div className="flex justify-end">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="size-8"
+                              aria-label={labels.documents.actionsAria(
+                                document.name,
+                              )}
+                            >
+                              <MoreHorizontalIcon
+                                aria-hidden
+                                className="size-4"
+                              />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-48">
+                            {document.status === "ready" ? (
+                              <DropdownMenuItem
+                                onSelect={() => onBrowse(document)}
+                              >
+                                <ListTreeIcon aria-hidden className="size-4" />
+                                {labels.documents.viewSegments}
+                              </DropdownMenuItem>
+                            ) : null}
+                            {document.status !== "uploading" &&
+                            document.status !== "deleting" ? (
+                              <DropdownMenuItem asChild>
+                                <a
+                                  href={knowledgeDocumentDownloadURL(
+                                    scope.projectId,
+                                    document.id,
+                                  )}
+                                  download={document.original_name}
+                                >
+                                  <DownloadIcon
+                                    aria-hidden
+                                    className="size-4"
+                                  />
+                                  {labels.documents.download}
+                                </a>
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canEdit && document.status === "failed" ? (
+                              <DropdownMenuItem
+                                disabled={retryDocument.isPending}
+                                onSelect={() =>
+                                  retryDocument.mutate({
+                                    documentId: document.id,
+                                    baseId: base.id,
+                                  })
+                                }
+                              >
+                                <RotateCcwIcon aria-hidden className="size-4" />
+                                {labels.documents.retry}
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canEdit && document.status !== "deleting" ? (
+                              <DropdownMenuItem
+                                onSelect={() => setRenaming(document)}
+                              >
+                                <PencilIcon aria-hidden className="size-4" />
+                                {labels.documents.rename}
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canEdit && document.status !== "deleting" ? (
+                              <DropdownMenuItem
+                                onSelect={() => setEditingMetadata(document)}
+                              >
+                                <TagsIcon aria-hidden className="size-4" />
+                                {labels.documents.metadataAction}
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canEdit ? (
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onSelect={() => setDeleting(document)}
+                              >
+                                <Trash2Icon aria-hidden className="size-4" />
+                                {labels.documents.delete}
+                              </DropdownMenuItem>
+                            ) : null}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    ) : null}
                   </td>
                 </tr>
               ))}
@@ -746,9 +842,7 @@ function DocumentMetadataDialog({
     metadataInputText(field, document.doc_metadata[field.name]);
 
   const invalidNames = fieldItems
-    .filter(
-      (field) => metadataInputValue(field, textFor(field)) === undefined,
-    )
+    .filter((field) => metadataInputValue(field, textFor(field)) === undefined)
     .map((field) => field.name);
 
   const submit = () => {
@@ -814,13 +908,15 @@ function DocumentMetadataDialog({
                 <span className="font-medium">
                   {field.name}
                   <span className="text-muted-foreground ml-2 text-xs font-normal">
-                    {labels.metadata[
-                      field.field_type === "string"
-                        ? "typeString"
-                        : field.field_type === "number"
-                          ? "typeNumber"
-                          : "typeTime"
-                    ]}
+                    {
+                      labels.metadata[
+                        field.field_type === "string"
+                          ? "typeString"
+                          : field.field_type === "number"
+                            ? "typeNumber"
+                            : "typeTime"
+                      ]
+                    }
                   </span>
                 </span>
                 <Input
@@ -897,9 +993,7 @@ function UploadDocumentDialog({
   const [displayName, setDisplayName] = useState("");
   const [chunkSize, setChunkSize] = useState("1000");
   const [chunkOverlap, setChunkOverlap] = useState("100");
-  const [chunkSeparator, setChunkSeparator] = useState(
-    DEFAULT_CHUNK_SEPARATOR,
-  );
+  const [chunkSeparator, setChunkSeparator] = useState(DEFAULT_CHUNK_SEPARATOR);
   const [chunkingMode, setChunkingMode] =
     useState<KnowledgeChunkingMode>("general");
   const [childChunkSize, setChildChunkSize] = useState("500");
@@ -1174,9 +1268,7 @@ function UploadDocumentDialog({
                 type="checkbox"
                 className="accent-primary size-4"
                 checked={removeExtraSpaces}
-                onChange={(event) =>
-                  setRemoveExtraSpaces(event.target.checked)
-                }
+                onChange={(event) => setRemoveExtraSpaces(event.target.checked)}
               />
               {labels.documents.removeExtraSpacesLabel}
             </label>

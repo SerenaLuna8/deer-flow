@@ -834,7 +834,15 @@ class RoleChangedAuditMetadata(_AuditMetadata):
 
 
 class AssetAuditMetadata(_AuditMetadata):
-    asset_kind: Literal["agent", "skill", "mcp", "model", "channel"]
+    asset_kind: Literal[
+        "agent",
+        "skill",
+        "mcp",
+        "model",
+        "channel",
+        "model_provider",
+        "provider_model",
+    ]
     operation: Literal[
         "agent.create",
         "agent.definition.update",
@@ -882,6 +890,15 @@ class AssetAuditMetadata(_AuditMetadata):
         "channel.secret.configure",
         "channel.secret.replace",
         "channel.secret.clear",
+        "model_provider.create",
+        "model_provider.update",
+        "model_provider.secret.replace",
+        "model_provider.delete",
+        "provider_model.create",
+        "provider_model.enable",
+        "provider_model.disable",
+        "provider_model.delete",
+        "provider_model.test",
     ]
     version_number: StrictInt | None = Field(default=None, ge=1)
     definition_revision: StrictInt | None = Field(default=None, ge=1)
@@ -909,7 +926,7 @@ class AssetAuditMetadata(_AuditMetadata):
     @model_validator(mode="after")
     def validate_asset_operation(self) -> Self:
         operation_domain = self.operation.partition(".")[0]
-        if operation_domain in {"agent", "skill", "mcp", "model", "channel"} and operation_domain != self.asset_kind:
+        if operation_domain in {"agent", "skill", "mcp", "model", "channel", "model_provider", "provider_model"} and operation_domain != self.asset_kind:
             raise ValueError("asset audit operation does not match the asset kind")
         if (self.operation == "skill.delete") != (self.affected_agent_count is not None):
             raise ValueError("affected Agent count is required only for Skill deletion")
@@ -960,6 +977,12 @@ class AssetAuditMetadata(_AuditMetadata):
         if not secret_operation:
             if any(value is not None for value in secret_coordinates):
                 raise ValueError("non-secret asset audit contains secret coordinates")
+            return self
+        if self.asset_kind == "model_provider":
+            # A Provider API Key is one sealed envelope without generations,
+            # revisions, or slots; the operation itself is the full statement.
+            if any(value is not None for value in secret_coordinates):
+                raise ValueError("model provider secret audit carries no coordinates")
             return self
         if self.revision is None or self.result is None or self.reason is None or self.readiness is None:
             raise ValueError("secret audit lifecycle metadata is incomplete")

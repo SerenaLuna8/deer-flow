@@ -15,8 +15,9 @@ database is always named ``deerflow_test_replay_*`` and is dropped in ``finally`
 When the three ``ACT_WEAVE_KNOWLEDGE_MINIO_*`` variables are present, the
 script also enables the Knowledge module for real: pgvector in the disposable
 database, one disposable MinIO bucket, a deterministic mock SiliconFlow
-provider on an ephemeral loopback port, a seeded model configuration pointing
-at that mock, and the ``/api/test-only/replay-knowledge`` control router (see
+provider on an ephemeral loopback port, a seeded model registry (one Provider
+plus embedding/rerank models) pointing at that mock, and the
+``/api/test-only/replay-knowledge`` control router (see
 ``tests/replay_knowledge.py``). Without those variables the Knowledge feature
 stays off and the gate behaves exactly as before.
 """
@@ -191,12 +192,10 @@ def main() -> int:
                 install_replay_model_adapter()
                 asyncio.run(bootstrap_replay_test_database(database.database_url))
                 if knowledge_provider is not None:
-                    from replay_knowledge import (
-                        seed_replay_knowledge_model_configuration,
-                    )
+                    from replay_knowledge import seed_replay_model_registry
 
                     asyncio.run(
-                        seed_replay_knowledge_model_configuration(
+                        seed_replay_model_registry(
                             database.database_url,
                             base_url=knowledge_provider.base_url,
                         )

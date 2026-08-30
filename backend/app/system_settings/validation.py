@@ -150,11 +150,17 @@ class ProviderAdapterSpec:
     api_key_required: bool
     fields: tuple[ProviderSettingFieldSpec, ...] = ()
     default_base_url: str | None = None
+    # Constructor settings fixed by the adapter identity itself (for example
+    # the OpenAI Responses protocol switch). They are not authoring fields:
+    # admins never see or edit them, and materialization always pins them.
+    pinned_settings: tuple[tuple[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         names = [field.name for field in self.fields]
         if len(set(names)) != len(names):
             raise ValueError("Provider setting fields must be unique")
+        if any(pinned in names for pinned, _value in self.pinned_settings):
+            raise ValueError("Provider pinned settings must not shadow authoring fields")
         if self.default_base_url is not None:
             try:
                 parsed = urlsplit(self.default_base_url)
@@ -421,6 +427,16 @@ _DEEPSEEK_REASONING_EFFORT_FIELD = replace(
     options=_DEEPSEEK_REASONING_EFFORTS,
     normalizer=_validate_deepseek_reasoning_effort,
 )
+# Responses-only: the endpoint returns reasoning summaries only when the
+# request opts in through ``reasoning.summary``. Omitted (Provider default)
+# means no summary is requested; the factory folds a configured value into
+# the single ``reasoning`` object next to the effective reasoning effort.
+_REASONING_SUMMARY_FIELD = ProviderSettingFieldSpec(
+    "reasoning_summary",
+    "Reasoning summary",
+    "enum",
+    options=("auto", "concise", "detailed"),
+)
 _THINKING_FIELD = ProviderSettingFieldSpec(
     "thinking",
     "Thinking configuration",
@@ -441,17 +457,6 @@ _THINKING_DISABLED_FIELD = ProviderSettingFieldSpec(
     "json",
     form_control="preserve",
     normalizer=_validate_thinking_disabled,
-)
-_OUTPUT_VERSION_FIELD = ProviderSettingFieldSpec(
-    "output_version",
-    "Output version",
-    "enum",
-    options=("responses/v1",),
-)
-_USE_RESPONSES_API_FIELD = ProviderSettingFieldSpec(
-    "use_responses_api",
-    "Use Responses API",
-    "boolean",
 )
 _CUMULATIVE_STREAM_USAGE_FIELD = ProviderSettingFieldSpec(
     "cumulative_stream_usage",
@@ -523,31 +528,11 @@ BUILTIN_PROVIDER_ADAPTERS: Mapping[str, ProviderAdapterSpec] = MappingProxyType(
             ),
             default_base_url="https://api.anthropic.com",
         ),
+        # The single DeepSeek entry points at the reasoning-replay implementation:
+        # per the official thinking-mode guide, requests carrying tools must echo
+        # historical assistant reasoning_content back, and requests without tools
+        # ignore it, so the full replay is always safe.
         "deepseek": ProviderAdapterSpec(
-            "langchain_deepseek:ChatDeepSeek",
-            True,
-            fields=_fields_with_platform_defaults(
-                _DEEPSEEK_OPENAI_COMPATIBLE_FIELDS,
-                base_url="https://api.deepseek.com/v1",
-                additional={
-                    "stream_chunk_timeout": _OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS,
-                },
-            ),
-            default_base_url="https://api.deepseek.com/v1",
-        ),
-        "openai": ProviderAdapterSpec(
-            "langchain_openai:ChatOpenAI",
-            True,
-            fields=_fields_with_platform_defaults(
-                _OPENAI_COMPATIBLE_FIELDS + (_OUTPUT_VERSION_FIELD, _USE_RESPONSES_API_FIELD),
-                base_url="https://api.openai.com/v1",
-                additional={
-                    "stream_chunk_timeout": _OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS,
-                },
-            ),
-            default_base_url="https://api.openai.com/v1",
-        ),
-        "patched_deepseek": ProviderAdapterSpec(
             "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
             True,
             fields=_fields_with_platform_defaults(
@@ -559,17 +544,40 @@ BUILTIN_PROVIDER_ADAPTERS: Mapping[str, ProviderAdapterSpec] = MappingProxyType(
             ),
             default_base_url="https://api.deepseek.com/v1",
         ),
-        "patched_openai": ProviderAdapterSpec(
-            "deerflow.models.patched_openai:PatchedChatOpenAI",
+        # Two fixed protocol entries share the native ChatOpenAI implementation.
+        # The wire protocol is decided by the adapter identity, never by a
+        # user-editable switch: ``openai`` speaks Chat Completions and
+        # ``openai_responses`` pins the Responses API.
+        "openai": ProviderAdapterSpec(
+            "langchain_openai:ChatOpenAI",
             True,
             fields=_fields_with_platform_defaults(
-                _OPENAI_COMPATIBLE_FIELDS + (_OUTPUT_VERSION_FIELD, _USE_RESPONSES_API_FIELD),
+                _OPENAI_COMPATIBLE_FIELDS,
                 base_url="https://api.openai.com/v1",
                 additional={
                     "stream_chunk_timeout": _OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS,
                 },
             ),
             default_base_url="https://api.openai.com/v1",
+            # Chat Completions is fixed: never leave the protocol switch None,
+            # or the SDK would auto-select Responses for some model names.
+            pinned_settings=(("use_responses_api", False),),
+        ),
+        "openai_responses": ProviderAdapterSpec(
+            "langchain_openai:ChatOpenAI",
+            True,
+            fields=_fields_with_platform_defaults(
+                _OPENAI_COMPATIBLE_FIELDS + (_REASONING_SUMMARY_FIELD,),
+                base_url="https://api.openai.com/v1",
+                additional={
+                    "stream_chunk_timeout": _OPENAI_COMPATIBLE_STREAM_CHUNK_TIMEOUT_SECONDS,
+                },
+            ),
+            default_base_url="https://api.openai.com/v1",
+            pinned_settings=(
+                ("use_responses_api", True),
+                ("output_version", "responses/v1"),
+            ),
         ),
         "vllm": ProviderAdapterSpec(
             "deerflow.models.vllm_provider:VllmChatModel",
@@ -727,6 +735,10 @@ def materialize_effective_model_settings(
                 field.name,
                 _validate_setting_field(field, field.default_value),
             )
+    # Protocol constants owned by the adapter identity always win; they are
+    # not authoring fields, so validated settings can never carry them.
+    for pinned_name, pinned_value in descriptor.pinned_settings:
+        result[pinned_name] = pinned_value
     if "base_url" not in result:
         if descriptor.api_key_required and descriptor.default_base_url is None:
             raise ModelSettingsInvalid()

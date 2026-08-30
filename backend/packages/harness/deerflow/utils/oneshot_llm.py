@@ -31,6 +31,7 @@ from deerflow.models.runtime import (
     ModelRuntimeProfile,
 )
 from deerflow.utils.llm_text import extract_response_text
+from deerflow.utils.messages import reasoning_block_text
 
 _REASONING_FLUSH_SECONDS = 0.075
 _REASONING_FLUSH_BYTES = 4096
@@ -92,16 +93,11 @@ def _structured_reasoning(message: BaseMessage) -> str:
         return ""
     result: list[str] = []
     for block in content:
-        if not isinstance(block, Mapping) or block.get("type") not in {
-            "thinking",
-            "reasoning",
-        }:
+        if not isinstance(block, Mapping):
             continue
-        for key in ("thinking", "reasoning", "text", "content"):
-            value = block.get(key)
-            if isinstance(value, str):
-                result.append(value)
-                break
+        text = reasoning_block_text(block)
+        if text:
+            result.append(text)
     return "".join(result)
 
 

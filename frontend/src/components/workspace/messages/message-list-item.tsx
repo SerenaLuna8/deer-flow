@@ -30,6 +30,7 @@ import {
   extractContentFromMessage,
   getReasoningDurationSeconds,
   extractReasoningContentFromMessage,
+  reasoningPresentationKind,
   getMessageCopyData,
   parseUploadedFiles,
   stripUploadedFilesTag,
@@ -300,6 +301,7 @@ function MessageContent_({
 
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
+  const reasoningKind = reasoningPresentationKind(message) ?? "full";
   const reasoningDuration = getReasoningDurationSeconds(message);
 
   const files = useMemo(() => {
@@ -364,6 +366,7 @@ function MessageContent_({
         <ThinkingDisclosure
           duration={reasoningDuration}
           isStreaming={isLoading}
+          kind={reasoningKind}
         >
           <SafeReasoningContent className="border-border/70 text-foreground/75 mt-2 ml-1.5 border-l py-1 pr-0 pl-5 leading-6">
             {reasoningContent}
@@ -461,6 +464,7 @@ function MessageContent_({
           className="mb-3"
           duration={reasoningDuration}
           isStreaming={isLoading}
+          kind={reasoningKind}
         >
           <SafeReasoningContent className="border-border/70 text-foreground/75 mt-2 ml-1.5 border-l py-1 pr-0 pl-5 leading-6">
             {reasoningContent}

@@ -1,8 +1,9 @@
-"""M2 gates: knowledge admin/project HTTP contracts and error mapping.
+"""M2/M9 gates: registry admin and project knowledge HTTP contracts.
 
-Routes are exercised over ASGI with the authorization dependencies overridden,
-mirroring the other admin HTTP contract suites; project-context authorization
-is unit-tested against the real dependency with a stubbed resolver.
+The retrieval model registry admin surface (``app/model_registry/gateway.py``)
+is exercised over ASGI with the authorization dependency overridden and the
+service faked; the project ``model-options`` route and the project-context
+dependencies are tested against the knowledge gateway the same way.
 """
 
 from __future__ import annotations
@@ -28,16 +29,22 @@ from actweave_knowledge import (
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KNOWLEDGE_TASK_FAILED,
     KnowledgeError,
-    KnowledgeModelConfigurationView,
-    KnowledgeModelConnectionResult,
-    KnowledgeModelOption,
 )
 from fastapi import FastAPI, HTTPException
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.audit.models import AuditAuthorityRejected
 from app.final_schema import FinalSchemaUnavailable
+from app.gateway.deps import project_session
 from app.knowledge import gateway
+from app.model_registry import gateway as registry_gateway
+from app.model_registry.service import (
+    ModelProviderView,
+    ProviderModelTestResult,
+    ProviderModelView,
+    RetrievalModelOption,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.errors import (
@@ -47,33 +54,48 @@ from app.projects.errors import (
 from app.projects.models import ProjectRole
 from app.reliability.error_mapping import ReliabilityHTTPException
 
-_REQUEST_ID = "knowledge-admin-contract"
+_REQUEST_ID = "model-registry-contract"
 _PROJECT_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
-_CONFIGURATION_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
-_NOW = datetime(2026, 8, 29, 3, 0, tzinfo=UTC)
+_PROVIDER_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
+_MODEL_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
+_NOW = datetime(2026, 8, 30, 3, 0, tzinfo=UTC)
 
 
-def _view(**overrides: object) -> KnowledgeModelConfigurationView:
+def _provider_view(**overrides: object) -> ModelProviderView:
     values: dict[str, object] = {
-        "id": _CONFIGURATION_ID,
-        "display_name": "Retrieval",
-        "status": "active",
+        "id": _PROVIDER_ID,
+        "name": "SiliconFlow",
         "base_url": "https://provider.invalid/v1",
-        "embedding_model": "embed-model",
-        "embedding_dimension": 1024,
-        "embedding_max_batch": 64,
-        "reranker_model": "rerank-model",
-        "reranker_max_batch": 32,
         "request_timeout_seconds": 30,
+        "api_key_configured": True,
+        "model_count": 2,
+        "active_model_count": 1,
+        "endpoint_frozen": True,
+        "created_at": _NOW,
+        "updated_at": _NOW,
+    }
+    values.update(overrides)
+    return ModelProviderView(**values)  # type: ignore[arg-type]
+
+
+def _model_view(**overrides: object) -> ProviderModelView:
+    values: dict[str, object] = {
+        "id": _MODEL_ID,
+        "provider_id": _PROVIDER_ID,
+        "model_type": "embedding",
+        "model_name": "embed-model",
+        "embedding_dimension": 1024,
+        "max_batch": 64,
+        "status": "active",
         "in_use": False,
         "created_at": _NOW,
         "updated_at": _NOW,
     }
     values.update(overrides)
-    return KnowledgeModelConfigurationView(**values)  # type: ignore[arg-type]
+    return ProviderModelView(**values)  # type: ignore[arg-type]
 
 
-class _FakeKnowledgeModule:
+class _FakeRegistryService:
     def __init__(self, *, error: KnowledgeError | None = None) -> None:
         self.error = error
         self.calls: list[tuple[str, object]] = []
@@ -82,51 +104,60 @@ class _FakeKnowledgeModule:
         if self.error is not None:
             raise self.error
 
-    async def list_model_configurations(self, *, page: int = 1, page_size: int = 20):
-        self.calls.append(("list", (page, page_size)))
+    async def list_providers(self, context):  # noqa: ANN001
+        self.calls.append(("list_providers", None))
         self._maybe_fail()
-        return [_view()], 1
+        return [_provider_view()]
 
-    async def create_model_configuration(self, create):  # noqa: ANN001
-        self.calls.append(("create", create))
+    async def create_provider(self, context, *, name, base_url, request_timeout_seconds, api_key):  # noqa: ANN001
+        self.calls.append(("create_provider", (name, base_url, request_timeout_seconds, api_key)))
         self._maybe_fail()
-        return _view()
+        return _provider_view(name=name, model_count=0)
 
-    async def update_model_configuration(self, configuration_id, update):  # noqa: ANN001
-        self.calls.append(("update", (configuration_id, update)))
+    async def update_provider(self, context, provider_id, *, name, base_url, request_timeout_seconds, api_key):  # noqa: ANN001
+        self.calls.append(("update_provider", (provider_id, name, base_url, request_timeout_seconds, api_key)))
         self._maybe_fail()
-        return _view(display_name="Renamed")
+        return _provider_view(name="Renamed")
 
-    async def delete_model_configuration(self, configuration_id) -> None:  # noqa: ANN001
-        self.calls.append(("delete", configuration_id))
+    async def delete_provider(self, context, provider_id) -> None:  # noqa: ANN001
+        self.calls.append(("delete_provider", provider_id))
         self._maybe_fail()
 
-    async def test_model_configuration(self, configuration_id):  # noqa: ANN001
-        self.calls.append(("test", configuration_id))
+    async def list_models(self, context, provider_id):  # noqa: ANN001
+        self.calls.append(("list_models", provider_id))
         self._maybe_fail()
-        return KnowledgeModelConnectionResult(ok=True, message="通过")
+        return [_model_view()]
 
-    async def list_active_model_options(self):
-        self.calls.append(("options", None))
+    async def create_model(self, context, provider_id, *, model_type, model_name, embedding_dimension, max_batch):  # noqa: ANN001
+        self.calls.append(("create_model", (provider_id, model_type, model_name, embedding_dimension, max_batch)))
         self._maybe_fail()
-        return [
-            KnowledgeModelOption(
-                id=_CONFIGURATION_ID,
-                display_name="Retrieval",
-                embedding_model="embed-model",
-                embedding_dimension=1024,
-                reranker_model="rerank-model",
-            )
-        ]
+        return _model_view(model_type=model_type, model_name=model_name)
+
+    async def set_model_status(self, context, model_id, status):  # noqa: ANN001
+        self.calls.append(("set_model_status", (model_id, status)))
+        self._maybe_fail()
+        return _model_view(status=status)
+
+    async def delete_model(self, context, model_id) -> None:  # noqa: ANN001
+        self.calls.append(("delete_model", model_id))
+        self._maybe_fail()
+
+    async def test_model(self, context, model_id):  # noqa: ANN001
+        self.calls.append(("test_model", model_id))
+        self._maybe_fail()
+        return ProviderModelTestResult(ok=True, message="通过")
 
 
-def _app(module: _FakeKnowledgeModule | None) -> FastAPI:
+def _registry_app(service: _FakeRegistryService | None) -> FastAPI:
+    """Admin registry app; ``service=None`` leaves the Knowledge switch off."""
+
     app = FastAPI()
-    app.include_router(gateway.admin_router)
-    app.include_router(gateway.project_router)
-    app.dependency_overrides[gateway.require_knowledge_admin_context] = lambda: SimpleNamespace(request_id=_REQUEST_ID)
-    app.dependency_overrides[gateway.require_project_knowledge_read] = lambda: SimpleNamespace(request_id=_REQUEST_ID)
-    app.state.knowledge_module = module
+    app.include_router(registry_gateway.router)
+    app.dependency_overrides[registry_gateway.require_model_registry_admin_context] = lambda: SimpleNamespace(request_id=_REQUEST_ID)
+    if service is None:
+        app.state.knowledge_module = None
+    else:
+        app.dependency_overrides[registry_gateway.get_model_registry_service] = lambda: service
     return app
 
 
@@ -134,83 +165,153 @@ def _client(app: FastAPI) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
 
 
+# ---------------------------------------------------------------------------
+# Admin registry: provider routes
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_admin_list_returns_items_and_forwards_pagination() -> None:
-    module = _FakeKnowledgeModule()
-    async with _client(_app(module)) as client:
-        response = await client.get("/api/admin/knowledge/models", params={"page": 2, "page_size": 5})
+async def test_admin_provider_list_returns_items_without_key_material() -> None:
+    service = _FakeRegistryService()
+    async with _client(_registry_app(service)) as client:
+        response = await client.get("/api/admin/settings/model-providers")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["request_id"] == _REQUEST_ID
-    assert payload["total"] == 1
-    assert payload["page"] == 2
-    assert payload["page_size"] == 5
     item = payload["items"][0]
-    assert item["id"] == str(_CONFIGURATION_ID)
-    assert item["in_use"] is False
+    assert item["id"] == str(_PROVIDER_ID)
+    assert item["api_key_configured"] is True
+    assert item["model_count"] == 2
+    assert item["active_model_count"] == 1
+    assert item["endpoint_frozen"] is True
     assert "api_key" not in item
-    assert module.calls == [("list", (2, 5))]
+    assert service.calls == [("list_providers", None)]
 
 
 @pytest.mark.asyncio
-async def test_admin_create_passes_secret_api_key_to_the_module() -> None:
-    module = _FakeKnowledgeModule()
-    async with _client(_app(module)) as client:
+async def test_admin_provider_create_passes_the_secret_key_and_defaults() -> None:
+    service = _FakeRegistryService()
+    async with _client(_registry_app(service)) as client:
         response = await client.post(
-            "/api/admin/knowledge/models",
+            "/api/admin/settings/model-providers",
             json={
-                "display_name": "Retrieval",
+                "name": "SiliconFlow",
                 "base_url": "https://provider.invalid/v1",
-                "embedding_model": "embed-model",
-                "embedding_dimension": 1024,
-                "reranker_model": "rerank-model",
                 "api_key": "top-secret-key",
             },
         )
 
     assert response.status_code == 200
-    assert response.json()["item"]["display_name"] == "Retrieval"
-    verb, create = module.calls[0]
-    assert verb == "create"
-    assert create.api_key == "top-secret-key"
-    assert create.embedding_max_batch == 64
-    assert create.reranker_max_batch == 32
-    assert create.request_timeout_seconds == 30
+    assert response.json()["item"]["name"] == "SiliconFlow"
+    verb, (name, base_url, timeout, api_key) = service.calls[0]
+    assert verb == "create_provider"
+    assert name == "SiliconFlow"
+    assert base_url == "https://provider.invalid/v1"
+    assert timeout == 30
+    assert api_key == "top-secret-key"
 
 
 @pytest.mark.asyncio
-async def test_admin_update_sends_only_provided_fields() -> None:
-    module = _FakeKnowledgeModule()
-    async with _client(_app(module)) as client:
+async def test_admin_provider_update_sends_only_provided_fields() -> None:
+    service = _FakeRegistryService()
+    async with _client(_registry_app(service)) as client:
         response = await client.patch(
-            f"/api/admin/knowledge/models/{_CONFIGURATION_ID}",
-            json={"display_name": "Renamed", "api_key": "rotated-key"},
+            f"/api/admin/settings/model-providers/{_PROVIDER_ID}",
+            json={"name": "Renamed", "api_key": "rotated-key"},
         )
 
     assert response.status_code == 200
-    verb, (configuration_id, update) = module.calls[0]
-    assert verb == "update"
-    assert configuration_id == _CONFIGURATION_ID
-    assert update.display_name == "Renamed"
-    assert update.api_key == "rotated-key"
-    assert update.status is None
-    assert update.base_url is None
-    assert update.embedding_dimension is None
+    assert response.json()["item"]["name"] == "Renamed"
+    verb, (provider_id, name, base_url, timeout, api_key) = service.calls[0]
+    assert verb == "update_provider"
+    assert provider_id == _PROVIDER_ID
+    assert name == "Renamed"
+    assert base_url is None
+    assert timeout is None
+    assert api_key == "rotated-key"
 
 
 @pytest.mark.asyncio
-async def test_admin_delete_and_test_round_trip() -> None:
-    module = _FakeKnowledgeModule()
-    async with _client(_app(module)) as client:
-        deleted = await client.delete(f"/api/admin/knowledge/models/{_CONFIGURATION_ID}")
-        tested = await client.post(f"/api/admin/knowledge/models/{_CONFIGURATION_ID}/test")
+async def test_admin_provider_delete_round_trips() -> None:
+    service = _FakeRegistryService()
+    async with _client(_registry_app(service)) as client:
+        response = await client.delete(f"/api/admin/settings/model-providers/{_PROVIDER_ID}")
 
+    assert response.status_code == 200
+    assert response.json() == {"request_id": _REQUEST_ID}
+    assert service.calls == [("delete_provider", _PROVIDER_ID)]
+
+
+# ---------------------------------------------------------------------------
+# Admin registry: model routes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_admin_model_list_is_scoped_to_the_provider() -> None:
+    service = _FakeRegistryService()
+    async with _client(_registry_app(service)) as client:
+        response = await client.get(f"/api/admin/settings/model-providers/{_PROVIDER_ID}/models")
+
+    assert response.status_code == 200
+    payload = response.json()
+    item = payload["items"][0]
+    assert item["provider_id"] == str(_PROVIDER_ID)
+    assert item["model_type"] == "embedding"
+    assert item["in_use"] is False
+    assert service.calls == [("list_models", _PROVIDER_ID)]
+
+
+@pytest.mark.asyncio
+async def test_admin_model_create_defaults_max_batch_by_type() -> None:
+    service = _FakeRegistryService()
+    async with _client(_registry_app(service)) as client:
+        embedding = await client.post(
+            f"/api/admin/settings/model-providers/{_PROVIDER_ID}/models",
+            json={"model_type": "embedding", "model_name": "embed-model", "embedding_dimension": 1024},
+        )
+        rerank = await client.post(
+            f"/api/admin/settings/model-providers/{_PROVIDER_ID}/models",
+            json={"model_type": "rerank", "model_name": "rerank-model"},
+        )
+        explicit = await client.post(
+            f"/api/admin/settings/model-providers/{_PROVIDER_ID}/models",
+            json={"model_type": "rerank", "model_name": "rerank-model", "max_batch": 8},
+        )
+
+    assert embedding.status_code == 200
+    assert rerank.status_code == 200
+    assert explicit.status_code == 200
+    assert service.calls == [
+        ("create_model", (_PROVIDER_ID, "embedding", "embed-model", 1024, 64)),
+        ("create_model", (_PROVIDER_ID, "rerank", "rerank-model", None, 32)),
+        ("create_model", (_PROVIDER_ID, "rerank", "rerank-model", None, 8)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_admin_model_status_delete_and_test_round_trip() -> None:
+    service = _FakeRegistryService()
+    async with _client(_registry_app(service)) as client:
+        disabled = await client.patch(
+            f"/api/admin/settings/provider-models/{_MODEL_ID}",
+            json={"status": "disabled"},
+        )
+        deleted = await client.delete(f"/api/admin/settings/provider-models/{_MODEL_ID}")
+        tested = await client.post(f"/api/admin/settings/provider-models/{_MODEL_ID}/test")
+
+    assert disabled.status_code == 200
+    assert disabled.json()["item"]["status"] == "disabled"
     assert deleted.status_code == 200
     assert deleted.json() == {"request_id": _REQUEST_ID}
     assert tested.status_code == 200
     assert tested.json() == {"ok": True, "message": "通过", "request_id": _REQUEST_ID}
-    assert module.calls == [("delete", _CONFIGURATION_ID), ("test", _CONFIGURATION_ID)]
+    assert service.calls == [
+        ("set_model_status", (_MODEL_ID, "disabled")),
+        ("delete_model", _MODEL_ID),
+        ("test_model", _MODEL_ID),
+    ]
 
 
 @pytest.mark.asyncio
@@ -232,9 +333,9 @@ async def test_admin_delete_and_test_round_trip() -> None:
     ],
 )
 async def test_admin_routes_map_knowledge_errors_to_stable_codes(code: str, status: int) -> None:
-    module = _FakeKnowledgeModule(error=KnowledgeError(code, "显示给管理员的消息"))
-    async with _client(_app(module)) as client:
-        response = await client.get("/api/admin/knowledge/models")
+    service = _FakeRegistryService(error=KnowledgeError(code, "显示给管理员的消息"))
+    async with _client(_registry_app(service)) as client:
+        response = await client.get("/api/admin/settings/model-providers")
 
     assert response.status_code == status
     detail = response.json()["detail"]
@@ -242,78 +343,52 @@ async def test_admin_routes_map_knowledge_errors_to_stable_codes(code: str, stat
 
 
 @pytest.mark.asyncio
-async def test_disabled_feature_answers_knowledge_disabled_everywhere() -> None:
-    async with _client(_app(None)) as client:
-        admin = await client.get("/api/admin/knowledge/models")
-        options = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/model-options")
+async def test_disabled_feature_answers_knowledge_disabled_on_the_admin_surface() -> None:
+    async with _client(_registry_app(None)) as client:
+        response = await client.get("/api/admin/settings/model-providers")
 
-    for response in (admin, options):
-        assert response.status_code == 404
-        assert response.json()["detail"]["code"] == KNOWLEDGE_DISABLED
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == KNOWLEDGE_DISABLED
 
 
-@pytest.mark.asyncio
-async def test_project_model_options_return_active_options() -> None:
-    module = _FakeKnowledgeModule()
-    async with _client(_app(module)) as client:
-        response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/model-options")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["request_id"] == _REQUEST_ID
-    assert payload["items"] == [
-        {
-            "id": str(_CONFIGURATION_ID),
-            "display_name": "Retrieval",
-            "embedding_model": "embed-model",
-            "embedding_dimension": 1024,
-            "reranker_model": "rerank-model",
-        }
-    ]
+# ---------------------------------------------------------------------------
+# Admin registry: request DTO strictness and secret hygiene
+# ---------------------------------------------------------------------------
 
 
-def test_create_request_dto_is_strict_and_requires_api_key() -> None:
+def test_provider_create_request_is_strict_and_requires_api_key() -> None:
     with pytest.raises(ValidationError):
-        gateway.KnowledgeModelCreateRequest.model_validate(
+        registry_gateway.ModelProviderCreateRequest.model_validate(
             {
-                "display_name": "Retrieval",
+                "name": "SiliconFlow",
                 "base_url": "https://provider.invalid/v1",
-                "embedding_model": "embed-model",
-                "embedding_dimension": 1024,
-                "reranker_model": "rerank-model",
                 "api_key": "key",
                 "unexpected": True,
             }
         )
     with pytest.raises(ValidationError):
-        gateway.KnowledgeModelCreateRequest.model_validate(
+        registry_gateway.ModelProviderCreateRequest.model_validate(
             {
-                "display_name": "Retrieval",
+                "name": "SiliconFlow",
                 "base_url": "https://provider.invalid/v1",
-                "embedding_model": "embed-model",
-                "embedding_dimension": 1024,
-                "reranker_model": "rerank-model",
                 "api_key": "",
             }
         )
     # The update DTO mirrors the same rule: absent is fine, empty is not.
     with pytest.raises(ValidationError):
-        gateway.KnowledgeModelUpdateRequest.model_validate({"api_key": ""})
-    assert gateway.KnowledgeModelUpdateRequest.model_validate({}).api_key is None
+        registry_gateway.ModelProviderUpdateRequest.model_validate({"api_key": ""})
+    assert registry_gateway.ModelProviderUpdateRequest.model_validate({}).api_key is None
 
 
-def test_request_dtos_never_reveal_the_api_key() -> None:
-    create = gateway.KnowledgeModelCreateRequest.model_validate(
+def test_provider_request_dtos_never_reveal_the_api_key() -> None:
+    create = registry_gateway.ModelProviderCreateRequest.model_validate(
         {
-            "display_name": "Retrieval",
+            "name": "SiliconFlow",
             "base_url": "https://provider.invalid/v1",
-            "embedding_model": "embed-model",
-            "embedding_dimension": 1024,
-            "reranker_model": "rerank-model",
             "api_key": "top-secret-key",
         }
     )
-    update = gateway.KnowledgeModelUpdateRequest.model_validate({"api_key": "rotated-key"})
+    update = registry_gateway.ModelProviderUpdateRequest.model_validate({"api_key": "rotated-key"})
 
     rendered = repr(create) + str(create.model_dump()) + repr(update) + str(update.model_dump())
     assert "top-secret-key" not in rendered
@@ -350,10 +425,10 @@ async def test_admin_context_returns_the_resolved_audit_context(monkeypatch: pyt
     async def _resolve(session, user_id, request_id):  # noqa: ANN001
         return expected
 
-    monkeypatch.setattr(gateway, "resolve_current_system_audit_context", _resolve)
-    monkeypatch.setattr(gateway, "FinalSchemaProbe", _ReadyProbe)
+    monkeypatch.setattr(registry_gateway, "resolve_current_system_audit_context", _resolve)
+    monkeypatch.setattr(registry_gateway, "FinalSchemaProbe", _ReadyProbe)
 
-    resolved = await gateway.require_knowledge_admin_context(
+    resolved = await registry_gateway.require_model_registry_admin_context(
         (uuid.uuid4(), _REQUEST_ID),
         session=_FakeSession(),  # type: ignore[arg-type]
     )
@@ -365,11 +440,11 @@ async def test_admin_context_hides_non_admin_identities_as_not_found(monkeypatch
     async def _resolve(session, user_id, request_id):  # noqa: ANN001
         raise AuditAuthorityRejected
 
-    monkeypatch.setattr(gateway, "resolve_current_system_audit_context", _resolve)
-    monkeypatch.setattr(gateway, "FinalSchemaProbe", _ReadyProbe)
+    monkeypatch.setattr(registry_gateway, "resolve_current_system_audit_context", _resolve)
+    monkeypatch.setattr(registry_gateway, "FinalSchemaProbe", _ReadyProbe)
 
     with pytest.raises(ReliabilityHTTPException) as error:
-        await gateway.require_knowledge_admin_context(
+        await registry_gateway.require_model_registry_admin_context(
             (uuid.uuid4(), _REQUEST_ID),
             session=_FakeSession(),  # type: ignore[arg-type]
         )
@@ -389,16 +464,178 @@ async def test_admin_context_maps_schema_and_database_failures_to_unavailable(
         async def require_ready(self, session: object) -> None:
             raise FinalSchemaUnavailable
 
-    monkeypatch.setattr(gateway, "resolve_current_system_audit_context", _resolve)
-    monkeypatch.setattr(gateway, "FinalSchemaProbe", _BrokenProbe)
+    monkeypatch.setattr(registry_gateway, "resolve_current_system_audit_context", _resolve)
+    monkeypatch.setattr(registry_gateway, "FinalSchemaProbe", _BrokenProbe)
 
     with pytest.raises(ReliabilityHTTPException) as error:
-        await gateway.require_knowledge_admin_context(
+        await registry_gateway.require_model_registry_admin_context(
             (uuid.uuid4(), _REQUEST_ID),
             session=_FakeSession(),  # type: ignore[arg-type]
         )
     assert error.value.status_code == 503
     assert error.value.body["code"] == "DATABASE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_registry_routes_fail_closed_without_the_audit_service() -> None:
+    """Registry writes are governed asset changes: a missing audit sink must
+    answer 503 instead of assembling a service that drops the trail."""
+
+    app = FastAPI()
+    app.include_router(registry_gateway.router)
+    app.dependency_overrides[registry_gateway.require_model_registry_admin_context] = lambda: SimpleNamespace(request_id=_REQUEST_ID)
+    app.state.knowledge_module = SimpleNamespace(model_client=object(), model_in_use=object())
+    # ``project_audit_service`` is deliberately absent from app.state.
+
+    async with _client(app) as client:
+        response = await client.get("/api/admin/settings/model-providers")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Project audit service not available"
+
+
+# ---------------------------------------------------------------------------
+# Project model-options route
+# ---------------------------------------------------------------------------
+
+
+class _FakeAuthority:
+    """Stands in for ProjectKnowledgeAuthority inside the route module."""
+
+    def __init__(self, *, error: KnowledgeError | None = None, calls: list[str] | None = None) -> None:
+        self.error = error
+        self.calls = calls if calls is not None else []
+        self.capability: object | None = None
+
+    def __call__(self, context, capability):  # noqa: ANN001 - mirrors the class constructor
+        self.capability = capability
+        return self
+
+    async def revalidate(self, session) -> None:  # noqa: ANN001
+        self.calls.append("revalidate")
+        if self.error is not None:
+            raise self.error
+
+
+def _project_app(*, module: object | None) -> FastAPI:
+    app = FastAPI()
+    app.include_router(gateway.project_router)
+    context = ProjectContext(
+        user_id=uuid.UUID("33333333-3333-4333-8333-333333333333"),
+        project_id=_PROJECT_ID,
+        membership_id=uuid.UUID("44444444-4444-4444-8444-444444444444"),
+        role=ProjectRole.ADMIN,
+        capabilities=frozenset(Capability),
+        membership_version=1,
+        request_id=_REQUEST_ID,
+    )
+    app.dependency_overrides[gateway.require_project_knowledge_read] = lambda: context
+    app.dependency_overrides[project_session] = lambda: _FakeSession()
+    app.state.knowledge_module = module
+    return app
+
+
+@pytest.mark.asyncio
+async def test_project_model_options_return_active_models_split_by_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    embedding_option = RetrievalModelOption(
+        id=_MODEL_ID,
+        provider_name="SiliconFlow",
+        model_name="embed-model",
+        embedding_dimension=1024,
+    )
+    rerank_option = RetrievalModelOption(
+        id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
+        provider_name="SiliconFlow",
+        model_name="rerank-model",
+        embedding_dimension=None,
+    )
+
+    async def _options(session):  # noqa: ANN001
+        return [embedding_option], [rerank_option]
+
+    monkeypatch.setattr(gateway, "ProjectKnowledgeAuthority", _FakeAuthority())
+    monkeypatch.setattr(gateway, "list_active_retrieval_model_options", _options)
+
+    async with _client(_project_app(module=object())) as client:
+        response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/model-options")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["request_id"] == _REQUEST_ID
+    assert payload["embedding_models"] == [
+        {
+            "id": str(_MODEL_ID),
+            "provider_name": "SiliconFlow",
+            "model_name": "embed-model",
+            "embedding_dimension": 1024,
+        }
+    ]
+    assert payload["reranker_models"] == [
+        {
+            "id": "66666666-6666-4666-8666-666666666666",
+            "provider_name": "SiliconFlow",
+            "model_name": "rerank-model",
+            "embedding_dimension": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_project_model_options_revalidate_membership_before_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read transaction re-checks membership: a member revoked between
+    context issuance and use gets 404 and never reads the registry list."""
+
+    calls: list[str] = []
+    passing = _FakeAuthority(calls=calls)
+    monkeypatch.setattr(gateway, "ProjectKnowledgeAuthority", passing)
+
+    async def _options(session):  # noqa: ANN001
+        calls.append("options")
+        return [], []
+
+    monkeypatch.setattr(gateway, "list_active_retrieval_model_options", _options)
+
+    async with _client(_project_app(module=object())) as client:
+        response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/model-options")
+    assert response.status_code == 200
+    assert calls == ["revalidate", "options"]
+    assert passing.capability is Capability.SHARED_ASSETS_READ
+
+    revoked = _FakeAuthority(error=KnowledgeError(KNOWLEDGE_NOT_FOUND, "资源不存在"))
+    monkeypatch.setattr(gateway, "ProjectKnowledgeAuthority", revoked)
+
+    async with _client(_project_app(module=object())) as client:
+        response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/model-options")
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == KNOWLEDGE_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_project_model_options_map_storage_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _options(session):  # noqa: ANN001
+        raise SQLAlchemyError("boom")
+
+    monkeypatch.setattr(gateway, "ProjectKnowledgeAuthority", _FakeAuthority())
+    monkeypatch.setattr(gateway, "list_active_retrieval_model_options", _options)
+
+    async with _client(_project_app(module=object())) as client:
+        response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/model-options")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == KNOWLEDGE_STORAGE_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_disabled_feature_answers_knowledge_disabled_on_the_project_surface() -> None:
+    async with _client(_project_app(module=None)) as client:
+        response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/model-options")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == KNOWLEDGE_DISABLED
 
 
 # ---------------------------------------------------------------------------

@@ -664,7 +664,7 @@ def _reasoning_capture_model(
     )
 
 
-@pytest.mark.parametrize("provider_adapter", ["deepseek", "patched_deepseek"])
+@pytest.mark.parametrize("provider_adapter", ["deepseek"])
 @pytest.mark.parametrize(
     ("canonical_effort", "provider_effort"),
     [("low", "low"), ("medium", "high"), ("high", "max")],
@@ -719,7 +719,7 @@ def test_shared_factory_deepseek_effort_reaches_openai_wire_payload(
             "extra_body": {"thinking": {"type": "disabled"}},
         },
     )
-    model._system_provider_adapter = "patched_deepseek"
+    model._system_provider_adapter = "deepseek"
     app_config = AppConfig(
         models=[model],
         sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
@@ -758,7 +758,7 @@ def test_shared_factory_deepseek_flash_reaches_disabled_wire_payload() -> None:
             "extra_body": {"thinking": {"type": "disabled"}},
         },
     )
-    model._system_provider_adapter = "patched_deepseek"
+    model._system_provider_adapter = "deepseek"
     app_config = AppConfig(
         models=[model],
         sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
@@ -776,7 +776,7 @@ def test_shared_factory_deepseek_flash_reaches_disabled_wire_payload() -> None:
     assert payload["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
-@pytest.mark.parametrize("provider_adapter", ["deepseek", "patched_deepseek"])
+@pytest.mark.parametrize("provider_adapter", ["deepseek"])
 def test_shared_factory_run_flash_clears_deepseek_catalog_reasoning_default(
     monkeypatch: pytest.MonkeyPatch,
     provider_adapter: str,
@@ -798,7 +798,7 @@ def test_shared_factory_run_flash_clears_deepseek_catalog_reasoning_default(
     assert "reasoning_effort" not in instance.kwargs
 
 
-@pytest.mark.parametrize("provider_adapter", ["deepseek", "patched_deepseek"])
+@pytest.mark.parametrize("provider_adapter", ["deepseek"])
 def test_shared_factory_preserves_deepseek_provider_effort_without_run_override(
     monkeypatch: pytest.MonkeyPatch,
     provider_adapter: str,
@@ -819,7 +819,7 @@ def test_shared_factory_preserves_deepseek_provider_effort_without_run_override(
     assert instance.kwargs["reasoning_effort"] == "max"
 
 
-@pytest.mark.parametrize("provider_adapter", ["deepseek", "patched_deepseek"])
+@pytest.mark.parametrize("provider_adapter", ["deepseek"])
 @pytest.mark.parametrize("canonical_effort", ["none", "minimal"])
 def test_shared_factory_rejects_unsupported_run_reasoning_for_deepseek(
     monkeypatch: pytest.MonkeyPatch,

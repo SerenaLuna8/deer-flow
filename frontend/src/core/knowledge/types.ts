@@ -36,7 +36,8 @@ export const knowledgeBaseItemSchema = z
     project_id: z.string().uuid(),
     name: z.string(),
     description: z.string(),
-    model_configuration_id: z.string().uuid(),
+    embedding_model_id: z.string().uuid(),
+    reranker_model_id: z.string().uuid().nullable(),
     status: knowledgeBaseStatusSchema,
     document_count: z.number().int(),
     default_top_k: z.number().int(),
@@ -135,23 +136,28 @@ export const knowledgeDocumentBatchResponseSchema = z
   })
   .strict();
 
+/** One active registry model a member may bind to a Knowledge Base. */
 export const knowledgeModelOptionSchema = z
   .object({
     id: z.string().uuid(),
-    display_name: z.string(),
-    embedding_model: z.string(),
-    embedding_dimension: z.number().int(),
-    reranker_model: z.string(),
+    provider_name: z.string(),
+    model_name: z.string(),
+    embedding_dimension: z.number().int().nullable(),
   })
   .strict();
 export type KnowledgeModelOption = z.infer<typeof knowledgeModelOptionSchema>;
 
 export const knowledgeModelOptionsResponseSchema = z
   .object({
-    items: z.array(knowledgeModelOptionSchema),
+    embedding_models: z.array(knowledgeModelOptionSchema),
+    reranker_models: z.array(knowledgeModelOptionSchema),
     request_id: z.string(),
   })
   .strict();
+export type KnowledgeModelOptions = {
+  embedding_models: KnowledgeModelOption[];
+  reranker_models: KnowledgeModelOption[];
+};
 
 export const knowledgeSegmentItemSchema = z
   .object({
@@ -230,7 +236,8 @@ export type KnowledgeSearchResponse = z.infer<
 
 export type CreateKnowledgeBaseInput = {
   name: string;
-  model_configuration_id: string;
+  embedding_model_id: string;
+  reranker_model_id?: string;
   description?: string;
 };
 
@@ -240,6 +247,9 @@ export type UpdateKnowledgeBaseInput = {
   status?: "active" | "disabled";
   default_top_k?: number;
   default_score_threshold?: number;
+  /** Rebind the optional reranker, or clear the binding entirely. */
+  reranker_model_id?: string;
+  clear_reranker_model?: boolean;
 };
 
 export type UploadKnowledgeDocumentInput = {
@@ -347,7 +357,7 @@ export type SetKnowledgeDocumentMetadataInput = {
 };
 
 export type RebuildKnowledgeBaseInput = {
-  model_configuration_id: string;
+  embedding_model_id: string;
 };
 
 export const knowledgeMetadataFilterOperatorSchema = z.enum([

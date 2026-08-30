@@ -55,6 +55,9 @@ import { KnowledgeSearchPanel } from "./knowledge-search-panel";
 
 type DetailSection = "documents" | "search" | "metadata" | "settings";
 
+/** Sentinel for the unbound reranker; Radix Select items cannot be "". */
+const RERANKER_NONE = "none";
+
 /**
  * In-base layout: a secondary menu (documents / retrieval test / settings)
  * beside the section content, mirroring Dify's in-knowledge-base navigation.
@@ -178,6 +181,7 @@ function KnowledgeBaseSettingsPanel({
   const { t } = useI18n();
   const labels = t.knowledge;
   const updateBase = useUpdateKnowledgeBase(scope);
+  const modelOptions = useKnowledgeModelOptions(scope, true);
   const [name, setName] = useState(base.name);
   const [description, setDescription] = useState(base.description);
   const [status, setStatus] = useState<"active" | "disabled">(
@@ -186,6 +190,10 @@ function KnowledgeBaseSettingsPanel({
   const [defaultTopK, setDefaultTopK] = useState(String(base.default_top_k));
   const [defaultThreshold, setDefaultThreshold] = useState(
     String(base.default_score_threshold),
+  );
+  // Radix Select cannot represent "" as an item value; use a sentinel.
+  const [rerankerModelId, setRerankerModelId] = useState(
+    base.reranker_model_id ?? RERANKER_NONE,
   );
   // Editing again after a save clears the "saved" note.
   const touch = () => {
@@ -218,6 +226,11 @@ function KnowledgeBaseSettingsPanel({
               status,
               default_top_k: parsedTopK,
               default_score_threshold: parsedThreshold,
+              // The reranker binding is stated explicitly on every save:
+              // either the selected model or an explicit clear.
+              ...(rerankerModelId === RERANKER_NONE
+                ? { clear_reranker_model: true }
+                : { reranker_model_id: rerankerModelId }),
             },
           });
         }}
@@ -311,6 +324,41 @@ function KnowledgeBaseSettingsPanel({
             </label>
           </div>
         </fieldset>
+        <div className="grid gap-1.5 text-sm">
+          <span className="font-medium">{labels.bases.rerankerLabel}</span>
+          {modelOptions.isLoading ? (
+            <Skeleton className="h-9 rounded-md" />
+          ) : modelOptions.error ? (
+            <p role="alert" className="text-destructive text-sm">
+              {labels.bases.modelsLoadFailed}
+            </p>
+          ) : (
+            <Select
+              value={rerankerModelId}
+              onValueChange={(value) => {
+                touch();
+                setRerankerModelId(value);
+              }}
+            >
+              <SelectTrigger aria-label={labels.bases.rerankerLabel}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={RERANKER_NONE}>
+                  {labels.bases.rerankerNone}
+                </SelectItem>
+                {modelOptions.data?.reranker_models.map((option) => (
+                  <SelectItem key={option.id} value={option.id}>
+                    {option.provider_name} · {option.model_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          <span className="text-muted-foreground text-xs">
+            {labels.bases.rerankerHint}
+          </span>
+        </div>
         {updateBase.error ? (
           <p role="alert" className="text-destructive text-sm">
             {knowledgeErrorMessage(updateBase.error, labels.errors)}
@@ -347,12 +395,12 @@ function KnowledgeRebuildSection({
   const labels = t.knowledge;
   const modelOptions = useKnowledgeModelOptions(scope, true);
   const rebuild = useRebuildKnowledgeBase(scope);
-  const [configurationId, setConfigurationId] = useState(
-    base.model_configuration_id,
+  const [embeddingModelId, setEmbeddingModelId] = useState(
+    base.embedding_model_id,
   );
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const options = modelOptions.data ?? [];
+  const options = modelOptions.data?.embedding_models ?? [];
 
   return (
     <section
@@ -368,10 +416,10 @@ function KnowledgeRebuildSection({
       <div className="grid gap-1.5 text-sm">
         <span className="font-medium">{labels.bases.rebuildModelLabel}</span>
         <Select
-          value={configurationId}
+          value={embeddingModelId}
           onValueChange={(value) => {
             rebuild.reset();
-            setConfigurationId(value);
+            setEmbeddingModelId(value);
           }}
         >
           <SelectTrigger aria-label={labels.bases.rebuildModelLabel}>
@@ -380,7 +428,7 @@ function KnowledgeRebuildSection({
           <SelectContent>
             {options.map((option) => (
               <SelectItem key={option.id} value={option.id}>
-                {option.display_name} · {option.embedding_model}
+                {option.provider_name} · {option.model_name}
               </SelectItem>
             ))}
           </SelectContent>
@@ -437,7 +485,7 @@ function KnowledgeRebuildSection({
                 setConfirmOpen(false);
                 rebuild.mutate({
                   baseId: base.id,
-                  modelConfigurationId: configurationId,
+                  embeddingModelId,
                 });
               }}
             >

@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import KnowledgeDocumentRow, KnowledgeTaskRow
@@ -21,6 +21,7 @@ TASK_OPEN_STATUSES = ("queued", "running", "retry_wait")
 
 _CLAIMABLE_STATUSES = ("queued", "retry_wait")
 _EXPIRED_LEASE_MESSAGE = "任务租约到期，Worker 可能已中断"
+DEFAULT_INACTIVE_PROJECT_PAUSE_SECONDS = 60
 
 
 async def claim_next_task(
@@ -97,6 +98,35 @@ async def extend_task_lease(
         .values(lease_until=moment + timedelta(seconds=lease_seconds), updated_at=moment)
     )
     return result.rowcount == 1
+
+
+async def defer_task_claim_for_inactive_project(
+    session: AsyncSession,
+    row: KnowledgeTaskRow,
+    *,
+    pause_seconds: int = DEFAULT_INACTIVE_PROJECT_PAUSE_SECONDS,
+) -> None:
+    """Return a just-claimed task to retry_wait without spending an attempt.
+
+    The caller owns ``row`` through the claim transaction and has already
+    established that its Project is not active. PostgreSQL stamps the bounded
+    pause consistently with the durable queue state.
+    """
+
+    if type(pause_seconds) is not int or not 1 <= pause_seconds <= 3600:
+        raise ValueError("inactive Project pause must be between 1 and 3600 seconds")
+    if row.status != "running" or row.claim_token is None or row.lease_until is None or row.attempt_count < 1:
+        raise RuntimeError("inactive Project deferral requires a freshly claimed task")
+    database_now = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(database_now, datetime) or database_now.tzinfo is None:
+        raise RuntimeError("database task clock is unavailable")
+    row.status = "retry_wait"
+    row.attempt_count -= 1
+    row.available_at = database_now + timedelta(seconds=pause_seconds)
+    row.claim_token = None
+    row.lease_until = None
+    row.finished_at = None
+    row.updated_at = database_now
 
 
 def settle_task_row_success(row: KnowledgeTaskRow, *, now: datetime) -> None:
@@ -196,6 +226,7 @@ async def settle_task_failure(
 async def recover_expired_tasks(
     session: AsyncSession,
     *,
+    project_id: UUID | None = None,
     now: datetime | None = None,
 ) -> int:
     """Settle expired ``running`` leases left behind by interrupted Workers.
@@ -206,7 +237,13 @@ async def recover_expired_tasks(
     """
 
     moment = now or datetime.now(UTC)
-    expired = (await session.execute(select(KnowledgeTaskRow).where(KnowledgeTaskRow.status == "running", KnowledgeTaskRow.lease_until <= moment).with_for_update(skip_locked=True))).scalars().all()
+    filters = [
+        KnowledgeTaskRow.status == "running",
+        KnowledgeTaskRow.lease_until <= moment,
+    ]
+    if project_id is not None:
+        filters.append(KnowledgeTaskRow.project_id == project_id)
+    expired = (await session.execute(select(KnowledgeTaskRow).where(*filters).with_for_update(skip_locked=True))).scalars().all()
     for row in expired:
         row.claim_token = None
         row.lease_until = None

@@ -1,4 +1,3 @@
-import { AdminKnowledgeApiError } from "@/core/admin-settings/knowledge/api";
 import type { Translations } from "@/core/i18n/locales/types";
 import { KnowledgeApiError } from "@/core/knowledge/api";
 
@@ -10,10 +9,7 @@ export function knowledgeErrorMessage(
   error: unknown,
   messages: Translations["knowledge"]["errors"],
 ): string {
-  if (
-    error instanceof KnowledgeApiError ||
-    error instanceof AdminKnowledgeApiError
-  ) {
+  if (error instanceof KnowledgeApiError) {
     if (error.serverMessage) return error.serverMessage;
     if (error.code === "NETWORK_ERROR") return messages.network;
     if (error.code === "INVALID_RESPONSE") return messages.invalidResponse;

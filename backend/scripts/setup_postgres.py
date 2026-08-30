@@ -12,11 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import asyncpg
-from actweave_knowledge.bootstrap import (
-    KnowledgeBootstrapConflict,
-    KnowledgeBootstrapStorageUnavailable,
-    KnowledgeModelConfigurationSeed,
-)
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg import AsyncConnection, sql
@@ -25,11 +20,14 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.knowledge.bootstrap import (
-    KnowledgeBootstrapConfigurationInvalid,
-    KnowledgeBootstrapSkipped,
-    bootstrap_default_knowledge_model_configuration,
-    prepare_knowledge_bootstrap,
+from app.model_registry.bootstrap import (
+    ModelRegistryBootstrapConfigurationInvalid,
+    ModelRegistryBootstrapConflict,
+    ModelRegistryBootstrapSkipped,
+    ModelRegistryBootstrapStorageUnavailable,
+    ModelRegistrySeed,
+    bootstrap_default_model_registry,
+    prepare_model_registry_bootstrap,
 )
 from app.projects.errors import ProjectBootstrapFailed
 from app.system_runtime_settings.bootstrap import (
@@ -487,14 +485,14 @@ async def _bootstrap_existing(
     database_url: str,
     *,
     default_model_bootstrap: (DefaultSystemModelBootstrapMaterial | None) = None,
-    knowledge_bootstrap: (KnowledgeModelConfigurationSeed | KnowledgeBootstrapSkipped | None) = None,
+    model_registry_bootstrap: (ModelRegistrySeed | ModelRegistryBootstrapSkipped | None) = None,
 ) -> str:
     try:
         async with _complete_bootstrap_lock(database_url):
             return await _bootstrap_empty_schema_under_lock(
                 database_url,
                 default_model_bootstrap=default_model_bootstrap,
-                knowledge_bootstrap=knowledge_bootstrap,
+                model_registry_bootstrap=model_registry_bootstrap,
             )
     except PostgresSetupError:
         raise
@@ -506,7 +504,7 @@ async def _bootstrap_empty_schema_under_lock(
     database_url: str,
     *,
     default_model_bootstrap: (DefaultSystemModelBootstrapMaterial | None) = None,
-    knowledge_bootstrap: (KnowledgeModelConfigurationSeed | KnowledgeBootstrapSkipped | None) = None,
+    model_registry_bootstrap: (ModelRegistrySeed | ModelRegistryBootstrapSkipped | None) = None,
     force_public_schema: bool = False,
 ) -> str:
     """Initialize an empty target while the caller owns the bootstrap lock."""
@@ -531,8 +529,8 @@ async def _bootstrap_empty_schema_under_lock(
         )
         bootstrap_stage = "runtime_policies"
         await _bootstrap_runtime_policy_schema(engine)
-        bootstrap_stage = "knowledge_models"
-        await _bootstrap_knowledge_model_schema(engine, knowledge_bootstrap)
+        bootstrap_stage = "model_registry"
+        await _bootstrap_model_registry_schema(engine, model_registry_bootstrap)
         bootstrap_stage = "langgraph"
         if force_public_schema:
             await _bootstrap_langgraph_schemas(
@@ -554,8 +552,8 @@ async def _bootstrap_empty_schema_under_lock(
         DefaultSystemModelBootstrapStorageUnavailable,
         SystemRuntimePolicyBootstrapConflict,
         SystemRuntimePolicyBootstrapStorageUnavailable,
-        KnowledgeBootstrapConflict,
-        KnowledgeBootstrapStorageUnavailable,
+        ModelRegistryBootstrapConflict,
+        ModelRegistryBootstrapStorageUnavailable,
     ) as exc:
         primary_error = exc
         raise PostgresSetupError(str(exc)) from None
@@ -624,22 +622,22 @@ async def _bootstrap_runtime_policy_schema(engine: AsyncEngine) -> None:
     )
 
 
-async def _bootstrap_knowledge_model_schema(
+async def _bootstrap_model_registry_schema(
     engine: AsyncEngine,
-    seed: KnowledgeModelConfigurationSeed | KnowledgeBootstrapSkipped | None,
+    seed: ModelRegistrySeed | ModelRegistryBootstrapSkipped | None,
 ) -> None:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     if seed is None:
         # A programming error in the caller, not a storage conflict: every
         # empty-schema bootstrap must have prepared the seed during preflight.
-        raise PostgresSetupError("KNOWLEDGE_BOOTSTRAP_SEED_MISSING: 空库初始化缺少 Knowledge 预检材料")
-    if isinstance(seed, KnowledgeBootstrapSkipped):
-        # Explicit operator decision (ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_SKIP=1):
-        # the knowledge tables install with Schema V1, only the seeded default
-        # model configuration is omitted.
+        raise PostgresSetupError("MODEL_REGISTRY_BOOTSTRAP_SEED_MISSING: 空库初始化缺少模型注册表预检材料")
+    if isinstance(seed, ModelRegistryBootstrapSkipped):
+        # Explicit operator decision (ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP=1):
+        # the registry and knowledge tables install with Schema V1, only the
+        # seeded default Provider and its models are omitted.
         return
-    await bootstrap_default_knowledge_model_configuration(
+    await bootstrap_default_model_registry(
         async_sessionmaker(engine, expire_on_commit=False),
         seed,
     )
@@ -716,8 +714,8 @@ async def setup_postgres(
     except DefaultSystemModelBootstrapConfigurationInvalid as exc:
         raise PostgresSetupError(str(exc)) from None
     try:
-        knowledge_bootstrap = prepare_knowledge_bootstrap()
-    except KnowledgeBootstrapConfigurationInvalid as exc:
+        model_registry_bootstrap = prepare_model_registry_bootstrap()
+    except ModelRegistryBootstrapConfigurationInvalid as exc:
         raise PostgresSetupError(str(exc)) from None
     created = await ensure_database(
         admin_url,
@@ -728,7 +726,7 @@ async def setup_postgres(
     revision = await _bootstrap_existing(
         database_url,
         default_model_bootstrap=default_model_bootstrap,
-        knowledge_bootstrap=knowledge_bootstrap,
+        model_registry_bootstrap=model_registry_bootstrap,
     )
     return SetupResult(
         host=target.host,

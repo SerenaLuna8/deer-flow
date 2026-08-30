@@ -49,9 +49,9 @@ def test_default_model_bootstrap_prepares_three_independent_deepseek_models(
         "deepseek-v4-flash-vision-exp",
     ]
     assert [entry.command.provider_adapter for entry in material.models] == [
-        "patched_deepseek",
-        "patched_deepseek",
-        "patched_deepseek",
+        "deepseek",
+        "deepseek",
+        "deepseek",
     ]
     assert [entry.command.settings["max_tokens"] for entry in material.models] == [
         51_200,

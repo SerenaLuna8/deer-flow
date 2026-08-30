@@ -45,7 +45,7 @@ def _material() -> tuple[
     command = CreateSystemModel(
         display_name="DeepSeek Flash",
         status="active",
-        provider_adapter="patched_deepseek",
+        provider_adapter="deepseek",
         provider_model="deepseek-v4-flash",
         max_input_tokens=64_000,
         settings={"base_url": "https://api.deepseek.com"},
@@ -120,18 +120,18 @@ def test_provider_default_origin_is_pinned_for_recipient_and_execution() -> None
     model_id = uuid.uuid4()
     assert model_secret_recipient(
         model_id,
-        "patched_deepseek",
+        "deepseek",
         {},
     ) == model_secret_recipient(
         model_id,
-        "patched_deepseek",
+        "deepseek",
         {"base_url": "https://api.deepseek.com"},
     )
 
     runtime = SystemModelExecutionAdapter().materialize_connection_test(
         ConnectionTestSystemModelMaterial(
             command=SystemModelConnectionCheck(
-                provider_adapter="patched_deepseek",
+                provider_adapter="deepseek",
                 provider_model="deepseek-v4-flash",
                 max_input_tokens=64_000,
                 settings={},

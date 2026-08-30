@@ -16,16 +16,17 @@ APP_SRC = BACKEND_ROOT / "app"
 
 PUBLIC_EXPORTS = [
     "create_knowledge_module",
+    "create_knowledge_project_purger",
+    "purge_knowledge_query_history",
     "KnowledgeModule",
+    "KnowledgeProjectPurger",
+    "KnowledgeProjectAuthority",
     "KnowledgeSettings",
-    "KnowledgeSecretPort",
-    "KnowledgeProtectedSecret",
+    "KnowledgeModelPort",
+    "KnowledgeModelType",
+    "KnowledgeEmbeddingMaterial",
+    "KnowledgeRerankMaterial",
     "KnowledgeError",
-    "KnowledgeModelConfigurationCreate",
-    "KnowledgeModelConfigurationUpdate",
-    "KnowledgeModelConfigurationView",
-    "KnowledgeModelOption",
-    "KnowledgeModelConnectionResult",
     "KnowledgeBaseCreate",
     "KnowledgeBaseUpdate",
     "KnowledgeBaseView",
@@ -102,6 +103,27 @@ def test_settings_default_to_disabled_with_documented_quotas() -> None:
     assert settings.minio is None
 
 
+def test_settings_cap_the_per_document_vector_entry_budget() -> None:
+    """Operators cannot re-enable an unbounded ingestion through config."""
+
+    from actweave_knowledge import KnowledgeSettings
+
+    assert KnowledgeSettings(max_segments_per_document=5000).max_segments_per_document == 5000
+    with pytest.raises(ValidationError):
+        KnowledgeSettings(max_segments_per_document=5001)
+
+
+def test_settings_cap_uploads_at_the_bounded_single_put_limit() -> None:
+    """Operators cannot configure a single PUT above the process memory budget."""
+
+    from actweave_knowledge import KnowledgeSettings
+
+    maximum = 50 * 1024**2
+    assert KnowledgeSettings(upload_max_bytes=maximum).upload_max_bytes == maximum
+    with pytest.raises(ValidationError):
+        KnowledgeSettings(upload_max_bytes=maximum + 1)
+
+
 def test_settings_require_minio_when_enabled() -> None:
     from actweave_knowledge import KnowledgeSettings
 
@@ -130,24 +152,29 @@ def test_settings_require_minio_when_enabled() -> None:
     assert "minio-access-value" not in repr(settings.minio)
 
 
-def test_model_configuration_dtos_hide_api_key_from_repr() -> None:
-    from actweave_knowledge import (
-        KnowledgeModelConfigurationCreate,
-        KnowledgeModelConfigurationUpdate,
-    )
+def test_model_materials_hide_api_key_from_repr() -> None:
+    from actweave_knowledge import KnowledgeEmbeddingMaterial, KnowledgeRerankMaterial
 
-    create = KnowledgeModelConfigurationCreate(
-        display_name="Retrieval",
+    embedding = KnowledgeEmbeddingMaterial(
+        model_id=uuid4(),
         base_url="https://api.siliconflow.cn/v1",
-        embedding_model="embed",
-        embedding_dimension=1024,
-        reranker_model="rerank",
-        api_key="plain-create-key",
+        model_name="embed",
+        dimension=1024,
+        max_batch=64,
+        request_timeout_seconds=30,
+        api_key="plain-embedding-key",
     )
-    update = KnowledgeModelConfigurationUpdate(api_key="plain-update-key")
+    rerank = KnowledgeRerankMaterial(
+        model_id=uuid4(),
+        base_url="https://api.siliconflow.cn/v1",
+        model_name="rerank",
+        max_batch=32,
+        request_timeout_seconds=30,
+        api_key="plain-rerank-key",
+    )
 
-    assert "plain-create-key" not in repr(create)
-    assert "plain-update-key" not in repr(update)
+    assert "plain-embedding-key" not in repr(embedding)
+    assert "plain-rerank-key" not in repr(rerank)
 
 
 def test_settings_reject_console_style_endpoint_with_scheme() -> None:
@@ -175,23 +202,27 @@ def test_settings_reject_unknown_fields() -> None:
 
 
 def test_create_knowledge_module_binds_host_resources() -> None:
-    from actweave_knowledge import (
-        KnowledgeProtectedSecret,
-        KnowledgeSettings,
-        create_knowledge_module,
-    )
+    from actweave_knowledge import KnowledgeSettings, create_knowledge_module
 
-    class _MemorySecretPort:
-        def protect_api_key(self, configuration_id, api_key):  # pragma: no cover - shape only
-            return KnowledgeProtectedSecret(nonce=b"0" * 12, ciphertext=api_key.encode())
+    class _MemoryModelPort:
+        async def lock_model_for_binding(self, session, model_id, model_type):  # pragma: no cover - shape only
+            del session, model_id, model_type
 
-        def materialize_api_key(self, configuration_id, secret):  # pragma: no cover - shape only
-            return secret.ciphertext.decode()
+        async def embedding_material(self, session, model_id):  # pragma: no cover - shape only
+            raise NotImplementedError
+
+        async def rerank_material(self, session, model_id):  # pragma: no cover - shape only
+            raise NotImplementedError
+
+    async def _project_active(session, project_id):  # pragma: no cover - shape only
+        del session, project_id
+        return True
 
     module = create_knowledge_module(
         settings=KnowledgeSettings(),
         session_factory=object(),  # type: ignore[arg-type]  # shape-only for M0
-        secret_port=_MemorySecretPort(),
+        model_port=_MemoryModelPort(),
+        project_active_check=_project_active,
     )
     assert module.settings.enabled is False
 
@@ -207,7 +238,11 @@ def test_knowledge_error_carries_code_and_message() -> None:
 def test_search_request_is_frozen_and_defaults_are_unset() -> None:
     from actweave_knowledge import KnowledgeSearchRequest
 
-    request = KnowledgeSearchRequest(project_id=uuid4(), query="hello")
+    request = KnowledgeSearchRequest(
+        project_id=uuid4(),
+        owner_user_id=uuid4(),
+        query="hello",
+    )
     assert request.knowledge_base_ids is None
     assert request.top_k is None
     assert request.score_threshold is None

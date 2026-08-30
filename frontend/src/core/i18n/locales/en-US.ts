@@ -47,6 +47,16 @@ export const enUS: Translations = {
         : seconds === 0
           ? "Thought (under 1 second)"
           : `Thought (${seconds} ${seconds === 1 ? "second" : "seconds"})`,
+    reasoningSummaryInProgress: (seconds?: number) =>
+      seconds === undefined
+        ? "Summarizing reasoning…"
+        : `Summarizing reasoning… (${seconds}s)`,
+    reasoningSummaryFor: (seconds?: number) =>
+      seconds === undefined
+        ? "Reasoning summary"
+        : seconds === 0
+          ? "Reasoning summary (under 1 second)"
+          : `Reasoning summary (${seconds} ${seconds === 1 ? "second" : "seconds"})`,
     artifacts: "Artifacts",
     public: "Public",
     custom: "Custom",
@@ -186,11 +196,12 @@ export const enUS: Translations = {
       namePlaceholder: "e.g. Product handbook",
       descriptionLabel: "Description (optional)",
       descriptionPlaceholder: "What this base is for",
-      modelLabel: "Model configuration",
-      modelPlaceholder: "Select a model configuration",
-      modelHint: "Cannot be changed after creation.",
+      modelLabel: "Embedding model",
+      modelPlaceholder: "Select an embedding model",
+      modelHint: "Changing it later requires rebuilding every document.",
       noModels:
-        "No model configurations available. Ask a system administrator to add one in platform administration.",
+        "No embedding models available. Ask a system administrator to add one in model management.",
+      modelsLoadFailed: "Models could not be loaded. Try again later.",
       editTitle: "Edit knowledge base",
       statusLabel: "Status",
       deleteTitle: "Delete knowledge base",
@@ -209,16 +220,19 @@ export const enUS: Translations = {
       defaultThresholdLabel: "Default score threshold",
       defaultThresholdHint:
         "Used when a search omits the threshold; 0 disables filtering.",
+      rerankerLabel: "Reranker model",
+      rerankerNone: "No reranking",
+      rerankerHint: "Optional. Takes effect on save; no rebuild required.",
       rebuildSectionTitle: "Embedding model",
-      rebuildModelLabel: "Model configuration",
+      rebuildModelLabel: "Embedding model",
       rebuildHint:
-        "Rebuilding rebinds the model configuration and re-embeds every document one by one; documents are excluded from retrieval until they finish.",
+        "Rebuilding rebinds the embedding model and re-embeds every document one by one; documents are excluded from retrieval until they finish.",
       rebuildButton: "Rebuild embeddings",
       rebuildPending: "Rebuilding…",
       rebuildStarted: "Rebuild started; documents will reprocess one by one.",
       rebuildConfirmTitle: "Rebuild knowledge base embeddings",
       rebuildConfirmDescription: (name) =>
-        `This rebinds "${name}" to the selected model configuration and re-embeds every document. Documents are excluded from retrieval while rebuilding.`,
+        `This rebinds "${name}" to the selected embedding model and re-embeds every document. Documents are excluded from retrieval while rebuilding.`,
       rebuildConfirm: "Rebuild",
     },
     wizard: {
@@ -256,6 +270,11 @@ export const enUS: Translations = {
       previewTitle: "Chunk preview",
       previewHint: (fileName) => `Previewing the first file: ${fileName}`,
       previewLoading: "Generating preview…",
+      previewRefresh: "Refresh preview",
+      previewStale:
+        "Preview is out of date. Refresh to apply the current settings.",
+      previewInvalid:
+        "Fix the invalid chunk settings before refreshing the preview.",
       previewTotal: (total) => `${total} chunks in total`,
       previewChunkLabel: (position) =>
         `Chunk-${String(position).padStart(2, "0")}`,
@@ -326,8 +345,7 @@ export const enUS: Translations = {
       childChunkSeparatorHint:
         "Children are split inside each parent at this delimiter (default \\n).",
       preprocessingLabel: "Text pre-processing rules",
-      removeExtraSpacesLabel:
-        "Replace consecutive spaces, newlines and tabs",
+      removeExtraSpacesLabel: "Replace consecutive spaces, newlines and tabs",
       removeUrlsEmailsLabel: "Delete all URLs and email addresses",
       chunkImmutableNote:
         "Chunk settings cannot be changed after upload; retry reuses the original settings.",
@@ -355,6 +373,7 @@ export const enUS: Translations = {
       rename: "Rename",
       renameTitle: "Rename document",
       renameLabel: "Display name",
+      actionsAria: (name) => `Actions for ${name}`,
       enableAria: (name) => `Enable ${name}`,
       disableAria: (name) => `Disable ${name}`,
       selectAllAria: "Select all documents",
@@ -388,7 +407,7 @@ export const enUS: Translations = {
       add: "Add segment",
       addTitle: "Add segment",
       addDescription:
-        "The segment is embedded with this base's model configuration and becomes retrievable immediately.",
+        "The segment is embedded with this base's embedding model and becomes retrievable immediately.",
       contentLabel: "Content",
       contentPlaceholder: "Enter the segment content",
       edit: "Edit",
@@ -412,7 +431,7 @@ export const enUS: Translations = {
     search: {
       title: "Retrieval test",
       description:
-        "Run two-stage retrieval against this knowledge base to verify recall.",
+        "Run retrieval against this knowledge base to verify recall. With a reranker bound, results are ordered by rerank scores (0 to 1); otherwise by cosine similarity (-1 to 1).",
       queryLabel: "Query",
       queryPlaceholder: "Enter a question or keywords",
       baseFilterLabel: "Limit to bases (optional)",
@@ -420,19 +439,19 @@ export const enUS: Translations = {
       topKLabel: "Results (top_k)",
       topKHint: "Leave empty to use the base default.",
       thresholdLabel: "Score threshold",
-      thresholdHint: "Leave empty to use the base default.",
+      thresholdHint: "Leave empty to use the base default; 0 disables filtering.",
       submit: "Search",
       searching: "Searching…",
       empty: "No matching content found",
       resultsTitle: (count) => `${count} ${count === 1 ? "match" : "matches"}`,
-      score: (score) => `Relevance ${score.toFixed(3)}`,
+      score: (score) => `Retrieval score ${score.toFixed(3)}`,
       recentTitle: "Recent queries",
       recentEmpty: "No queries recorded yet.",
       recentColumns: {
         query: "Query",
         source: "Source",
         results: "Matches",
-        topScore: "Top score",
+        topScore: "Top retrieval score",
         time: "Time",
       },
       recentSource: {
@@ -460,7 +479,7 @@ export const enUS: Translations = {
     citations: {
       summary: (count) =>
         `Cited ${count} knowledge ${count === 1 ? "source" : "sources"}`,
-      score: (score) => `Relevance ${score.toFixed(3)}`,
+      score: (score) => `Retrieval score ${score.toFixed(3)}`,
       segmentPosition: (position) => `Segment #${position}`,
     },
     errors: {
@@ -1055,8 +1074,7 @@ export const enUS: Translations = {
       audit: "Logs",
       assets: "Assets",
       systemSettings: "System settings",
-      settings: "Model settings",
-      knowledgeSettings: "Knowledge models",
+      settings: "Model management",
     },
     overview: {
       title: "Operations overview",

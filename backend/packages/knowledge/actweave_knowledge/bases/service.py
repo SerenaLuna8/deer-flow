@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..authority import KnowledgeProjectAuthority, revalidate_project_authority
 from ..contracts import (
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_MAX_TOP_K,
@@ -28,13 +29,13 @@ from ..contracts import (
     KnowledgeBaseUpdate,
     KnowledgeBaseView,
     KnowledgeError,
+    KnowledgeModelPort,
     KnowledgeSettings,
 )
 from ..persistence.derivations import delete_error_expression, document_count_expression
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
-    KnowledgeModelConfigurationRow,
     KnowledgeTaskRow,
 )
 from ..persistence.tasks import TASK_OPEN_STATUSES
@@ -92,7 +93,8 @@ def _view(row: KnowledgeBaseRow, *, document_count: int, delete_error: str | Non
         project_id=row.project_id,
         name=row.name,
         description=row.description,
-        model_configuration_id=row.model_configuration_id,
+        embedding_model_id=row.embedding_model_id,
+        reranker_model_id=row.reranker_model_id,
         status=row.status,  # type: ignore[arg-type]
         document_count=document_count,
         default_top_k=row.default_top_k,
@@ -119,15 +121,28 @@ class KnowledgeBaseService:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         settings: KnowledgeSettings,
+        model_port: KnowledgeModelPort,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
+        self._model_port = model_port
 
-    async def create_knowledge_base(self, project_id: UUID, create: KnowledgeBaseCreate) -> KnowledgeBaseView:
+    async def create_knowledge_base(
+        self,
+        project_id: UUID,
+        create: KnowledgeBaseCreate,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeBaseView:
         name = _validated_name(create.name)
         description = _validated_description(create.description)
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 await session.execute(
                     select(
                         func.pg_advisory_xact_lock(
@@ -142,15 +157,24 @@ class KnowledgeBaseService:
                         KNOWLEDGE_QUOTA_EXCEEDED,
                         f"Project 内 Knowledge Base 数量已达上限 {self._settings.max_knowledge_bases_per_project}",
                     )
-                configuration = await _configuration_for_binding(session, create.model_configuration_id)
-                if configuration is None or configuration.status != "active":
-                    raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "模型配置不存在或已停用")
+                if not isinstance(create.embedding_model_id, UUID):
+                    raise _invalid("embedding_model_id 必须是 UUID")
+                if create.reranker_model_id is not None and not isinstance(create.reranker_model_id, UUID):
+                    raise _invalid("reranker_model_id 必须是 UUID 或 null")
+                # FOR SHARE (Provider then Model, inside the port) serializes
+                # with the registry's FOR UPDATE disable/delete paths, so the
+                # active check can never pass on a stale snapshot.
+                await self._model_port.lock_model_for_binding(session, create.embedding_model_id, "embedding")
+                reranker_model_id = create.reranker_model_id
+                if reranker_model_id is not None:
+                    await self._model_port.lock_model_for_binding(session, reranker_model_id, "rerank")
                 row = KnowledgeBaseRow(
                     id=uuid4(),
                     project_id=project_id,
                     name=name,
                     description=description,
-                    model_configuration_id=configuration.id,
+                    embedding_model_id=create.embedding_model_id,
+                    reranker_model_id=reranker_model_id,
                     status="active",
                 )
                 session.add(row)
@@ -160,9 +184,9 @@ class KnowledgeBaseService:
         except IntegrityError as exc:
             if "uq_knowledge_bases_project_name" in str(exc):
                 raise KnowledgeError(KNOWLEDGE_NAME_CONFLICT, "同一 Project 内已存在同名 Knowledge Base") from None
-            # The RESTRICT foreign key caught a configuration deleted between
-            # the active check and the insert.
-            raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "模型配置不存在或已停用") from None
+            # The RESTRICT foreign key caught a model deleted between the
+            # binding lock and the insert.
+            raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "检索模型不存在或已停用") from None
         except KnowledgeError:
             raise
         except SQLAlchemyError:
@@ -174,10 +198,16 @@ class KnowledgeBaseService:
         *,
         page: int = 1,
         page_size: int = 20,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> tuple[list[KnowledgeBaseView], int]:
         page, page_size = _validated_page(page, page_size)
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 total = await session.scalar(select(func.count()).select_from(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id))
                 rows = await session.execute(_base_with_derivations(project_id).order_by(KnowledgeBaseRow.updated_at.desc(), KnowledgeBaseRow.id.desc()).offset((page - 1) * page_size).limit(page_size))
                 views = [_view(row, document_count=int(document_count), delete_error=delete_error) for row, document_count, delete_error in rows.all()]
@@ -185,9 +215,20 @@ class KnowledgeBaseService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def get_knowledge_base(self, project_id: UUID, base_id: UUID) -> KnowledgeBaseView:
+    async def get_knowledge_base(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeBaseView:
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 result = (await session.execute(_base_with_derivations(project_id).where(KnowledgeBaseRow.id == base_id))).one_or_none()
         except SQLAlchemyError:
             raise _storage_unavailable() from None
@@ -196,8 +237,15 @@ class KnowledgeBaseService:
         row, document_count, delete_error = result
         return _view(row, document_count=int(document_count), delete_error=delete_error)
 
-    async def update_knowledge_base(self, project_id: UUID, base_id: UUID, update: KnowledgeBaseUpdate) -> KnowledgeBaseView:
-        changes: dict[str, str | int | float] = {}
+    async def update_knowledge_base(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        update: KnowledgeBaseUpdate,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeBaseView:
+        changes: dict[str, str | int | float | UUID | None] = {}
         if update.name is not None:
             changes["name"] = _validated_name(update.name)
         if update.description is not None:
@@ -216,14 +264,30 @@ class KnowledgeBaseService:
             if type(threshold) not in (int, float) or not 0 <= float(threshold) <= 1:
                 raise _invalid("default_score_threshold 必须在 0..1 之间")
             changes["default_score_threshold"] = float(threshold)
+        if update.reranker_model_id is not None and update.clear_reranker_model:
+            raise _invalid("reranker_model_id 与 clear_reranker_model 不能同时设置")
+        if update.reranker_model_id is not None and not isinstance(update.reranker_model_id, UUID):
+            raise _invalid("reranker_model_id 必须是 UUID")
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 row = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
                 if row.status == "deleting":
                     raise _invalid("Knowledge Base 正在删除，不能修改")
                 effective = {name: value for name, value in changes.items() if value != getattr(row, name)}
+                # Rerank rebinding never rebuilds and never bumps document
+                # versions: only which reranker (if any) scores recall changes.
+                if update.reranker_model_id is not None and update.reranker_model_id != row.reranker_model_id:
+                    await self._model_port.lock_model_for_binding(session, update.reranker_model_id, "rerank")
+                    effective["reranker_model_id"] = update.reranker_model_id
+                if update.clear_reranker_model and row.reranker_model_id is not None:
+                    effective["reranker_model_id"] = None
                 if effective:
                     for name, value in effective.items():
                         setattr(row, name, value)
@@ -251,33 +315,37 @@ class KnowledgeBaseService:
         project_id: UUID,
         base_id: UUID,
         *,
-        model_configuration_id: UUID,
+        embedding_model_id: UUID,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> KnowledgeBaseView:
-        """Rebind the base to a model configuration and re-embed every document.
+        """Rebind the base to an embedding model and re-embed every document.
 
-        All in one transaction: the base points at the new configuration and
+        All in one transaction: the base points at the new embedding model and
         each document is version-bumped back to ``queued`` with a fresh ingest
         task, so a still-running old ingest becomes a late result that never
         publishes. Old segments stop matching recall immediately (their
         document is no longer ``ready``), which keeps mixed-dimension vectors
         out of the query path; each document returns to retrieval as soon as
-        its re-ingestion publishes. Re-running with the same configuration is
+        its re-ingestion publishes. Re-running with the same model is
         allowed — it is a plain re-embed of the whole base.
         """
 
-        if not isinstance(model_configuration_id, UUID):
-            raise _invalid("model_configuration_id 必须是 UUID")
+        if not isinstance(embedding_model_id, UUID):
+            raise _invalid("embedding_model_id 必须是 UUID")
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 row = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
                 if row.status == "deleting":
                     raise _invalid("Knowledge Base 正在删除，不能重建")
-                configuration = await _configuration_for_binding(session, model_configuration_id)
-                if configuration is None or configuration.status != "active":
-                    raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "模型配置不存在或已停用")
-                row.model_configuration_id = configuration.id
+                await self._model_port.lock_model_for_binding(session, embedding_model_id, "embedding")
+                row.embedding_model_id = embedding_model_id
                 row.updated_at = func.now()  # type: ignore[assignment]
                 documents = (
                     await session.scalars(
@@ -322,15 +390,21 @@ class KnowledgeBaseService:
                 ).one()
                 return _view(row, document_count=int(document_count), delete_error=delete_error)
         except IntegrityError:
-            # The RESTRICT foreign key caught a configuration deleted between
-            # the active check and the commit.
-            raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "模型配置不存在或已停用") from None
+            # The RESTRICT foreign key caught a model deleted between the
+            # binding lock and the commit.
+            raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "检索模型不存在或已停用") from None
         except KnowledgeError:
             raise
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def delete_knowledge_base(self, project_id: UUID, base_id: UUID) -> KnowledgeBaseView:
+    async def delete_knowledge_base(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeBaseView:
         """Mark the base ``deleting`` and ensure one open delete task exists.
 
         The Worker deletes every document object and row, then the base row.
@@ -340,6 +414,11 @@ class KnowledgeBaseService:
 
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 row = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
@@ -372,18 +451,6 @@ class KnowledgeBaseService:
             raise
         except SQLAlchemyError:
             raise _storage_unavailable() from None
-
-
-async def _configuration_for_binding(session: AsyncSession, configuration_id: UUID) -> KnowledgeModelConfigurationRow | None:
-    """Read the configuration under FOR SHARE before binding a base to it.
-
-    The admin disable path re-checks ``in_use`` while holding FOR UPDATE on
-    the configuration row; taking FOR SHARE here serializes with it, so the
-    ``active`` check below can never pass on a stale snapshot and commit a
-    base that references a just-disabled configuration.
-    """
-
-    return await session.scalar(select(KnowledgeModelConfigurationRow).where(KnowledgeModelConfigurationRow.id == configuration_id).with_for_update(read=True))
 
 
 def _base_delete_task(project_id: UUID, base_id: UUID) -> KnowledgeTaskRow:

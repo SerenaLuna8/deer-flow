@@ -1,12 +1,17 @@
 """Claim-execute-settle loop over ``knowledge_tasks``.
 
 Each loop iteration recovers expired leases, claims one due task with
-``FOR UPDATE SKIP LOCKED``, runs the kind's handler under the configured
+``FOR UPDATE SKIP LOCKED``, revalidates Project-active eligibility through the
+host in that same transaction, runs the kind's handler under the configured
 timeout while a heartbeat extends the lease, and settles the claim by token.
+An inactive Project claim returns to retry_wait without spending an attempt.
 Handlers may settle their own claim inside a publish transaction (the ingest
 handler does); the worker's success settlement then finds no running claim
-and is a no-op. Setting the stop event stops new claims; the running handler
-finishes within the task timeout.
+and is a no-op. Setting the stop event stops new claims. A timeout cancels the
+handler, but Knowledge's blocking-call adapter joins already-started parser or
+object-store work before cancellation completes, so settlement and retry never
+overlap that work. A permanently stuck synchronous dependency can therefore
+hold the claim beyond the nominal timeout instead of spawning unsafe retries.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from ..contracts import KNOWLEDGE_TASK_FAILED, KnowledgeError
 from ..persistence.models import KnowledgeTaskRow
 from ..persistence.tasks import (
     claim_next_task,
+    defer_task_claim_for_inactive_project,
     extend_task_lease,
     recover_expired_tasks,
     settle_task_failure,
@@ -51,9 +57,11 @@ class KnowledgeTaskClaim:
     claim_token: UUID
     attempt_count: int
     max_attempts: int
+    storage_key: str | None = None
 
 
 TaskHandler = Callable[[KnowledgeTaskClaim], Awaitable[None]]
+ProjectActiveCheck = Callable[[AsyncSession, UUID], Awaitable[bool]]
 
 
 class KnowledgeTaskWorker:
@@ -64,6 +72,7 @@ class KnowledgeTaskWorker:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         handlers: dict[str, TaskHandler],
+        project_active_check: ProjectActiveCheck,
         concurrency: int,
         task_timeout_seconds: int,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
@@ -72,6 +81,7 @@ class KnowledgeTaskWorker:
     ) -> None:
         self._session_factory = session_factory
         self._handlers = dict(handlers)
+        self._project_active_check = project_active_check
         self._concurrency = concurrency
         self._task_timeout_seconds = task_timeout_seconds
         self._lease_seconds = lease_seconds
@@ -99,10 +109,22 @@ class KnowledgeTaskWorker:
     async def _run_once(self) -> bool:
         """Claim and execute at most one task; False when nothing was due."""
 
+        claimed_or_deferred = False
         try:
             async with self._session_factory() as session, session.begin():
                 await recover_expired_tasks(session)
                 row = await claim_next_task(session, lease_seconds=self._lease_seconds)
+                claimed_or_deferred = row is not None
+                if row is not None and not await self._project_active_check(
+                    session,
+                    row.project_id,
+                ):
+                    # Project deletion admission is an execution fence. Return
+                    # the task without spending its attempt in this same claim
+                    # transaction, so restore can resume it but no handler can
+                    # start with a pending-deletion Project snapshot.
+                    await defer_task_claim_for_inactive_project(session, row)
+                    row = None
                 claim = (
                     KnowledgeTaskClaim(
                         id=row.id,
@@ -113,6 +135,7 @@ class KnowledgeTaskWorker:
                         claim_token=row.claim_token,  # type: ignore[arg-type]
                         attempt_count=row.attempt_count,
                         max_attempts=row.max_attempts,
+                        storage_key=row.storage_key,
                     )
                     if row is not None
                     else None
@@ -121,7 +144,7 @@ class KnowledgeTaskWorker:
             logger.warning("knowledge task claim failed; database unavailable", exc_info=True)
             return False
         if claim is None:
-            return False
+            return claimed_or_deferred
         await self._execute(claim)
         return True
 
@@ -134,6 +157,9 @@ class KnowledgeTaskWorker:
         heartbeat = asyncio.create_task(self._heartbeat(claim, stop_heartbeat), name=f"knowledge-task-heartbeat-{claim.id}")
         error: KnowledgeError | None = None
         try:
+            # wait_for waits for handler cancellation to finish. Knowledge
+            # handlers settle started blocking calls before propagating that
+            # cancellation, so the heartbeat covers the complete drain.
             await asyncio.wait_for(handler(claim), timeout=self._task_timeout_seconds)
         except TimeoutError:
             error = KnowledgeError(KNOWLEDGE_TASK_FAILED, f"任务执行超过 {self._task_timeout_seconds} 秒")

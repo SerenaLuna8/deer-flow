@@ -16,11 +16,24 @@ from types import SimpleNamespace
 
 import pytest
 from actweave_knowledge import KNOWLEDGE_PARSE_FAILED, KnowledgeError
-from actweave_knowledge.persistence.models import KnowledgeTaskRow
-from actweave_knowledge.tasks import KnowledgeTaskClaim, KnowledgeTaskWorker
-from sqlalchemy import text
+from actweave_knowledge.persistence.models import (
+    KnowledgeBaseRow,
+    KnowledgeDocumentRow,
+    KnowledgeMetadataFieldRow,
+    KnowledgeQueryRow,
+    KnowledgeSegmentChildRow,
+    KnowledgeSegmentRow,
+    KnowledgeTaskRow,
+)
+from actweave_knowledge.tasks import KnowledgeTaskClaim, KnowledgeTaskWorker, purge_project_knowledge
+from registry_helpers import seed_registry_models
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.knowledge.composition import (
+    create_knowledge_worker_resources_from_app_config,
+    is_knowledge_project_active,
+)
 from app.knowledge.worker import run_worker_loops
 from app.private_work.retention_jobs import project_retention_key
 from app.projects.errors import ProjectDeletionStateConflict
@@ -73,10 +86,107 @@ async def _seed_project(session: AsyncSession, label: str) -> uuid.UUID:
     return project_id
 
 
+async def _seed_retained_knowledge_graph(
+    harness: _Harness,
+    *,
+    label: str,
+) -> tuple[uuid.UUID, str]:
+    """Seed every Project-owned Knowledge relation plus one stored-object key."""
+
+    embedding_model_id, _ = await seed_registry_models(harness.factory, dimension=8)
+    async with harness.factory() as session, session.begin():
+        project_id = await _seed_project(session, label)
+        project = await session.get(ProjectRow, project_id)
+        assert project is not None
+        base_id = uuid.uuid4()
+        document_id = uuid.uuid4()
+        segment_id = uuid.uuid4()
+        storage_key = f"projects/{project_id}/knowledge/{base_id}/{document_id}.md"
+        session.add(
+            KnowledgeBaseRow(
+                id=base_id,
+                project_id=project_id,
+                name=f"base-{label}",
+                embedding_model_id=embedding_model_id,
+            )
+        )
+        await session.flush()
+        session.add_all(
+            [
+                KnowledgeMetadataFieldRow(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    knowledge_base_id=base_id,
+                    name="department",
+                    field_type="string",
+                ),
+                KnowledgeDocumentRow(
+                    id=document_id,
+                    project_id=project_id,
+                    knowledge_base_id=base_id,
+                    name="retained.md",
+                    original_name="retained.md",
+                    storage_key=storage_key,
+                    size_bytes=8,
+                    status="ready",
+                ),
+            ]
+        )
+        await session.flush()
+        session.add(
+            KnowledgeSegmentRow(
+                id=segment_id,
+                project_id=project_id,
+                knowledge_base_id=base_id,
+                knowledge_document_id=document_id,
+                document_version=1,
+                position=1,
+                content="retained",
+                embedding=None,
+            )
+        )
+        await session.flush()
+        session.add_all(
+            [
+                KnowledgeSegmentChildRow(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    knowledge_base_id=base_id,
+                    knowledge_document_id=document_id,
+                    knowledge_segment_id=segment_id,
+                    document_version=1,
+                    position=1,
+                    content="retained",
+                    embedding=[0.1] * 8,
+                ),
+                KnowledgeTaskRow(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    resource_id=document_id,
+                    kind="ingest_document",
+                    target_version=1,
+                ),
+                KnowledgeQueryRow(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    owner_user_id=project.created_by_user_id,
+                    knowledge_base_ids=[str(base_id)],
+                    query="retained query",
+                    source="retrieval_test",
+                ),
+            ]
+        )
+    return project_id, storage_key
+
+
 async def _seed_task(
     harness: _Harness,
     project_id: uuid.UUID,
     *,
+    resource_id: uuid.UUID | None = None,
+    kind: str = "ingest_document",
+    target_version: int | None = 1,
+    storage_key: str | None = None,
     status: str = "queued",
     attempt_count: int = 0,
     claim_token: uuid.UUID | None = None,
@@ -88,9 +198,10 @@ async def _seed_task(
             KnowledgeTaskRow(
                 id=task_id,
                 project_id=project_id,
-                resource_id=uuid.uuid4(),
-                kind="ingest_document",
-                target_version=1,
+                resource_id=resource_id or uuid.uuid4(),
+                kind=kind,
+                target_version=target_version,
+                storage_key=storage_key,
                 status=status,
                 attempt_count=attempt_count,
                 claim_token=claim_token,
@@ -126,6 +237,7 @@ def _worker(
     return KnowledgeTaskWorker(
         session_factory=harness.factory,
         handlers=handlers,
+        project_active_check=is_knowledge_project_active,
         concurrency=concurrency,
         task_timeout_seconds=task_timeout_seconds,
         poll_interval_seconds=0.05,
@@ -176,6 +288,211 @@ async def test_worker_executes_a_queued_task_and_settles_success(postgres_databa
         row = await _task_row(harness, task_id)
         assert row.claim_token is None and row.lease_until is None
         assert row.finished_at is not None
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_pauses_pending_project_task_and_runs_after_restore(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+            project = await session.get(ProjectRow, project_id)
+            assert project is not None
+            project.status = "pending_deletion"
+            project.deletion_requested_at = datetime.now(UTC)
+            project.deletion_effective_at = datetime.now(UTC) + timedelta(days=30)
+        task_id = await _seed_task(harness, project_id)
+        seen: list[KnowledgeTaskClaim] = []
+
+        async def handler(claim: KnowledgeTaskClaim) -> None:
+            seen.append(claim)
+
+        async def paused() -> bool:
+            return (await _task_row(harness, task_id)).status == "retry_wait"
+
+        await _run_worker_until(
+            _worker(harness, {"ingest_document": handler}),
+            paused,
+        )
+
+        assert seen == []
+        row = await _task_row(harness, task_id)
+        assert row.attempt_count == 0
+        assert row.claim_token is None and row.lease_until is None
+        assert row.finished_at is None
+
+        # Simulate the bounded pause elapsing after the user restores Project.
+        async with harness.factory() as session, session.begin():
+            project = await session.get(ProjectRow, project_id)
+            task = await session.get(KnowledgeTaskRow, task_id)
+            assert project is not None and task is not None
+            project.status = "active"
+            project.deletion_requested_at = None
+            project.deletion_effective_at = None
+            task.available_at = datetime.now(UTC) - timedelta(seconds=1)
+
+        async def settled() -> bool:
+            return (await _task_row(harness, task_id)).status == "succeeded"
+
+        await _run_worker_until(
+            _worker(harness, {"ingest_document": handler}),
+            settled,
+        )
+
+        assert [claim.id for claim in seen] == [task_id]
+        assert (await _task_row(harness, task_id)).attempt_count == 1
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_purge_waits_for_running_task_before_deleting_storage(
+    postgres_database_url: str,
+) -> None:
+    """A live handler and Project physical purge cannot overlap destructively."""
+
+    class _ProjectStore:
+        def __init__(self, key: str) -> None:
+            self.objects = {key}
+            self.deleted: list[str] = []
+
+        async def require_unversioned_bucket(self) -> None:
+            return None
+
+        async def delete_many(self, keys: list[str]) -> None:
+            for key in keys:
+                self.objects.discard(key)
+                self.deleted.append(key)
+
+        async def delete_project_objects(self, project_id: uuid.UUID) -> None:
+            prefix = f"projects/{project_id}/knowledge/"
+            for key in tuple(self.objects):
+                if key.startswith(prefix):
+                    self.objects.remove(key)
+                    self.deleted.append(key)
+
+    harness = await _harness(postgres_database_url)
+    stop_event = asyncio.Event()
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+    run: asyncio.Task[None] | None = None
+    try:
+        project_id, storage_key = await _seed_retained_knowledge_graph(
+            harness,
+            label=uuid.uuid4().hex[:8],
+        )
+        queued_task_id = await _seed_task(
+            harness,
+            project_id,
+            resource_id=uuid.uuid4(),
+        )
+        store = _ProjectStore(storage_key)
+
+        async def handler(claim: KnowledgeTaskClaim) -> None:
+            del claim
+            handler_started.set()
+            await release_handler.wait()
+
+        worker = _worker(harness, {"ingest_document": handler})
+        run = asyncio.create_task(worker.run(stop_event))
+        await asyncio.wait_for(handler_started.wait(), timeout=5)
+
+        async with harness.factory() as session, session.begin():
+            project = await session.get(ProjectRow, project_id)
+            assert project is not None
+            project.status = "pending_deletion"
+            project.deletion_requested_at = datetime.now(UTC)
+            project.deletion_effective_at = datetime.now(UTC)
+
+        completed = await purge_project_knowledge(
+            harness.factory,
+            store,  # type: ignore[arg-type] - external object-store boundary
+            project_id=project_id,
+        )
+
+        assert completed is False
+        assert store.deleted == []
+        async with harness.factory() as session:
+            assert await session.get(KnowledgeTaskRow, queued_task_id) is None
+            running = await session.scalar(
+                select(KnowledgeTaskRow.status).where(
+                    KnowledgeTaskRow.project_id == project_id,
+                    KnowledgeTaskRow.kind == "ingest_document",
+                )
+            )
+            remaining_documents = await session.scalar(select(func.count()).select_from(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id))
+        assert running == "running"
+        assert int(remaining_documents or 0) == 1
+
+        release_handler.set()
+
+        async def handler_settled() -> bool:
+            async with harness.factory() as session:
+                status = await session.scalar(
+                    select(KnowledgeTaskRow.status).where(
+                        KnowledgeTaskRow.project_id == project_id,
+                        KnowledgeTaskRow.kind == "ingest_document",
+                    )
+                )
+            return status == "succeeded"
+
+        await _wait_until(handler_settled)
+        stop_event.set()
+        await asyncio.wait_for(run, timeout=10)
+        run = None
+
+        assert await purge_project_knowledge(
+            harness.factory,
+            store,  # type: ignore[arg-type] - external object-store boundary
+            project_id=project_id,
+        )
+        assert store.objects == set()
+    finally:
+        release_handler.set()
+        stop_event.set()
+        if run is not None:
+            await asyncio.gather(run, return_exceptions=True)
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_claim_carries_exact_object_cleanup_key(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        document_id = uuid.uuid4()
+        storage_key = f"projects/{project_id}/knowledge/{uuid.uuid4()}/{document_id}.pdf"
+        task_id = await _seed_task(
+            harness,
+            project_id,
+            resource_id=document_id,
+            kind="delete_document_object",
+            target_version=None,
+            storage_key=storage_key,
+        )
+        seen: list[KnowledgeTaskClaim] = []
+
+        async def handler(claim: KnowledgeTaskClaim) -> None:
+            seen.append(claim)
+
+        async def settled() -> bool:
+            return (await _task_row(harness, task_id)).status == "succeeded"
+
+        await _run_worker_until(
+            _worker(harness, {"delete_document_object": handler}),
+            settled,
+        )
+
+        assert len(seen) == 1
+        assert seen[0].resource_id == document_id
+        assert seen[0].storage_key == storage_key
     finally:
         await harness.engine.dispose()
 
@@ -498,6 +815,264 @@ async def test_retention_purge_stops_when_knowledge_purge_is_incomplete() -> Non
 
     with pytest.raises(KnowledgePurgeIncomplete):
         await handler(_retention_claim(project_id), authority=None)
+
+
+@pytest.mark.asyncio
+async def test_retention_purge_fails_closed_when_knowledge_cleanup_is_unavailable() -> None:
+    """Project retention must never infer that a disabled feature has no data."""
+
+    sequence: list[str] = []
+    project_id = uuid.uuid4()
+    rows: list[object] = [_gate_job_row(project_id), _gate_project_row()]
+    handler, _ = _gate_handler(rows=rows, sequence=sequence, purge_results=[])
+    handler._knowledge_purge = None  # noqa: SLF001 - exercise the public handler's fail-closed seam
+
+    with pytest.raises(KnowledgePurgeIncomplete):
+        await handler(_retention_claim(project_id), authority=None)
+
+
+@pytest.mark.asyncio
+async def test_disabled_worker_retention_with_preserved_storage_removes_project_knowledge(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabling product surfaces must retain the Project cleanup capability."""
+
+    harness = await _harness(postgres_database_url)
+    bucket = "retained-knowledge"
+    objects: set[tuple[str, str]] = set()
+
+    class _FakeMinio:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def remove_object(self, object_bucket: str, key: str) -> None:
+            objects.discard((object_bucket, key))
+
+        def bucket_exists(self, object_bucket: str) -> bool:
+            return object_bucket == bucket
+
+        def get_bucket_versioning(self, object_bucket: str) -> SimpleNamespace:
+            assert object_bucket == bucket
+            return SimpleNamespace(status=None)
+
+        def list_objects(
+            self,
+            object_bucket: str,
+            *,
+            prefix: str,
+            recursive: bool,
+        ) -> list[SimpleNamespace]:
+            assert recursive is True
+            return [SimpleNamespace(object_name=key) for bucket_name, key in objects if bucket_name == object_bucket and key.startswith(prefix)]
+
+    try:
+        label = uuid.uuid4().hex[:8]
+        project_id, storage_key = await _seed_retained_knowledge_graph(
+            harness,
+            label=label,
+        )
+        objects.add((bucket, storage_key))
+
+        import actweave_knowledge.storage.minio_store as minio_store_module
+
+        import deerflow.persistence.engine as engine_module
+
+        monkeypatch.setattr(minio_store_module, "Minio", _FakeMinio)
+        monkeypatch.setattr(engine_module, "get_session_factory", lambda: harness.factory)
+        resources = create_knowledge_worker_resources_from_app_config(
+            SimpleNamespace(
+                model_extra={
+                    "knowledge": {
+                        "enabled": False,
+                        "minio": {
+                            "endpoint": "minio.invalid:9000",
+                            "bucket": bucket,
+                            "access_key": "retained-access",
+                            "secret_key": "retained-secret",
+                        },
+                    }
+                }
+            )
+        )
+        assert resources.feature_module is None
+
+        sequence: list[str] = []
+        rows: list[object] = [_gate_job_row(project_id), _gate_project_row()]
+        handler, _ = _gate_handler(rows=rows, sequence=sequence, purge_results=[])
+        handler._knowledge_purge = resources.project_purge  # noqa: SLF001
+
+        settlement = await handler(_retention_claim(project_id), authority=None)
+
+        assert isinstance(settlement, JobSettlement)
+        assert objects == set()
+        async with harness.factory() as session:
+            for model in (
+                KnowledgeBaseRow,
+                KnowledgeDocumentRow,
+                KnowledgeMetadataFieldRow,
+                KnowledgeSegmentRow,
+                KnowledgeSegmentChildRow,
+                KnowledgeTaskRow,
+                KnowledgeQueryRow,
+            ):
+                remaining = await session.scalar(select(func.count()).select_from(model).where(model.project_id == project_id))
+                assert int(remaining or 0) == 0, model.__name__
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_disabled_worker_retention_without_storage_retries_when_documents_remain(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing cleanup config cannot turn historical documents into success."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, _ = await _seed_retained_knowledge_graph(
+            harness,
+            label=uuid.uuid4().hex[:8],
+        )
+        import deerflow.persistence.engine as engine_module
+
+        monkeypatch.setattr(engine_module, "get_session_factory", lambda: harness.factory)
+        resources = create_knowledge_worker_resources_from_app_config(SimpleNamespace(model_extra={"knowledge": {"enabled": False}}))
+        assert resources.feature_module is None
+
+        sequence: list[str] = []
+        rows: list[object] = [_gate_job_row(project_id), _gate_project_row()]
+        handler, _ = _gate_handler(rows=rows, sequence=sequence, purge_results=[])
+        handler._knowledge_purge = resources.project_purge  # noqa: SLF001
+
+        with pytest.raises(KnowledgePurgeIncomplete):
+            await handler(_retention_claim(project_id), authority=None)
+
+        async with harness.factory() as session:
+            remaining_documents = await session.scalar(select(func.count()).select_from(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id))
+            assert int(remaining_documents or 0) == 1
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_disabled_worker_retention_without_historical_documents_can_continue(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default-disabled deployments must not block ordinary Project retention."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        import deerflow.persistence.engine as engine_module
+
+        monkeypatch.setattr(engine_module, "get_session_factory", lambda: harness.factory)
+        resources = create_knowledge_worker_resources_from_app_config(SimpleNamespace(model_extra={"knowledge": {"enabled": False}}))
+
+        sequence: list[str] = []
+        rows: list[object] = [_gate_job_row(project_id), _gate_project_row()]
+        handler, _ = _gate_handler(rows=rows, sequence=sequence, purge_results=[])
+        handler._knowledge_purge = resources.project_purge  # noqa: SLF001
+
+        settlement = await handler(_retention_claim(project_id), authority=None)
+
+        assert isinstance(settlement, JobSettlement)
+        assert sequence == ["reconcile"]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_disabled_worker_without_storage_fails_closed_for_object_cleanup_task(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact-key orphan task proves bytes may remain even without a row."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+            document_id = uuid.uuid4()
+            session.add(
+                KnowledgeTaskRow(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    resource_id=document_id,
+                    kind="delete_document_object",
+                    target_version=None,
+                    storage_key=(f"projects/{project_id}/knowledge/{uuid.uuid4()}/{document_id}.pdf"),
+                )
+            )
+
+        import deerflow.persistence.engine as engine_module
+
+        monkeypatch.setattr(
+            engine_module,
+            "get_session_factory",
+            lambda: harness.factory,
+        )
+        resources = create_knowledge_worker_resources_from_app_config(SimpleNamespace(model_extra={"knowledge": {"enabled": False}}))
+
+        assert await resources.project_purge(project_id) is False
+        async with harness.factory() as session:
+            remaining = await session.scalar(
+                select(func.count())
+                .select_from(KnowledgeTaskRow)
+                .where(
+                    KnowledgeTaskRow.project_id == project_id,
+                    KnowledgeTaskRow.kind == "delete_document_object",
+                )
+            )
+        assert int(remaining or 0) == 1
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_disabled_worker_without_storage_accepts_succeeded_object_cleanup_proof(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A succeeded exact-key cleanup no longer represents possibly retained bytes."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+            document_id = uuid.uuid4()
+            session.add(
+                KnowledgeTaskRow(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    resource_id=document_id,
+                    kind="delete_document_object",
+                    target_version=None,
+                    storage_key=(f"projects/{project_id}/knowledge/{uuid.uuid4()}/{document_id}.pdf"),
+                    status="succeeded",
+                    attempt_count=1,
+                    finished_at=datetime.now(UTC),
+                )
+            )
+
+        import deerflow.persistence.engine as engine_module
+
+        monkeypatch.setattr(
+            engine_module,
+            "get_session_factory",
+            lambda: harness.factory,
+        )
+        resources = create_knowledge_worker_resources_from_app_config(SimpleNamespace(model_extra={"knowledge": {"enabled": False}}))
+
+        assert await resources.project_purge(project_id) is True
+        async with harness.factory() as session:
+            remaining = await session.scalar(select(func.count()).select_from(KnowledgeTaskRow).where(KnowledgeTaskRow.project_id == project_id))
+        assert int(remaining or 0) == 0
+    finally:
+        await harness.engine.dispose()
 
 
 @pytest.mark.asyncio

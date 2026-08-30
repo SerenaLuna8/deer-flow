@@ -20,7 +20,6 @@ from deerflow.persistence.final_schema_digest import SCHEMA_V1_CANONICAL_DIGEST
 # their names to the catalog statically.
 KNOWLEDGE_APP_TABLES = frozenset(
     {
-        "knowledge_model_configurations",
         "knowledge_bases",
         "knowledge_documents",
         "knowledge_metadata_fields",
@@ -128,40 +127,40 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=106,
-        digest="af719c9046b36b3df31fa7f453feb0ac6937c4506f0ff29cbc7582ebed608891",
+        count=107,
+        digest="454c40a567936dfdb6184fd7a5216180645476c9d067349a424a234992c9164b",
     ),
     "columns": CatalogInvariant(
-        count=1332,
-        digest="0556e4ce3179f3a494808bad7da0e541b5337050328ed919cec199a0ae60ca60",
+        count=1338,
+        digest="a7ae5ca37e593ade13ea0a9478c6374f45bcb041f5fc1d9ce124aa8ab77972c6",
     ),
     "table_comments": CatalogInvariant(
-        count=107,
-        digest="ae4033bb1a6a8b90d97cf21567912198671d3cb6842d0e44d42fa5b4dbef4084",
+        count=108,
+        digest="3eb676471a0c5a0bd591a34cc901501b81240937c329120d25150c3a0e1e87d5",
     ),
     "column_comments": CatalogInvariant(
-        count=1333,
-        digest="fede80f800a3fcf70c9ed92974b265d09c66a20de19cd0e630bee44c6915df06",
+        count=1339,
+        digest="ec555d1ed3869c5adba089a6b690e08bc6aacd2ff23128ff5abc72158016dee4",
     ),
     "sequences": CatalogInvariant(
         count=4,
         digest="73cb0d46bc3afc9585d0959b1d57d093621113408f2629dad9a6b027550af894",
     ),
     "constraints": CatalogInvariant(
-        count=987,
-        digest="249f30f19565e450a9dc09b41725f2f804c88a79e2dbcf6f9968d77f6dd7eb37",
+        count=991,
+        digest="1854a833328e3f556844d8bce6163b50000803e93a12a8e0130a648141850f47",
     ),
     "indexes": CatalogInvariant(
-        count=356,
-        digest="13cd03695804b90e63c7080cb80764b32186982ab8c46b78691e1bb1c39d1988",
+        count=361,
+        digest="4142433394bcc0a480af37aa7fccc93d53fa468626680370bf44aa18b82bfea8",
     ),
     "functions": CatalogInvariant(
         count=28,
         digest="26cf8a3f9b44939be8dad8d0af748deb4acadc76c4d05f9743f31702ec683450",
     ),
     "triggers": CatalogInvariant(
-        count=91,
-        digest="8f1c29386ad736573416de316c741213ef0db094bf572d4943d0de96ab328425",
+        count=93,
+        digest="b6c803065de194838d5a692266e5a969e1108239d351c9c6f64c6b96f9669fd7",
     ),
 }
 

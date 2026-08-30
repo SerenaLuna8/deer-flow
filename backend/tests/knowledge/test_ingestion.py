@@ -1,9 +1,9 @@
 """M4 gates: extraction, splitting, and the ingest pipeline.
 
 Extractor and splitter tests are pure fixtures; pipeline tests run against the
-installed Schema V1 snapshot with a fake object store, fake model client, and
-fake secret port, so every database effect (processing flip, publish
-transaction, late no-op) is exercised for real.
+installed Schema V1 snapshot with a fake object store, a fake model client, and
+the production registry model port, so every database effect (processing flip,
+publish transaction, late no-op) is exercised for real.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import ast
 import asyncio
 import codecs
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 
@@ -49,19 +50,20 @@ from actweave_knowledge.ingestion.splitter import (
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
-    KnowledgeModelConfigurationRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
 )
 from actweave_knowledge.persistence.tasks import claim_next_task
-from actweave_knowledge.tasks import KnowledgeTaskClaim
+from actweave_knowledge.tasks import KnowledgeTaskClaim, KnowledgeTaskWorker
 from actweave_knowledge.tasks import deletion as deletion_module
 from actweave_knowledge.tasks import worker as worker_module
+from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from deerflow.persistence.bootstrap import _install_full_schema
+from deerflow.persistence.model_registry import ModelProviderModelRow
 
 # ---------------------------------------------------------------------------
 # Format fixtures
@@ -709,16 +711,6 @@ async def test_preview_of_empty_document_surfaces_parse_failed(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 
-class _FakeSecretPort:
-    def protect_api_key(self, configuration_id: uuid.UUID, api_key: str):  # noqa: ANN201
-        from actweave_knowledge import KnowledgeProtectedSecret
-
-        return KnowledgeProtectedSecret(nonce=b"n" * 12, ciphertext=b"c" * 16)
-
-    def materialize_api_key(self, configuration_id: uuid.UUID, secret) -> str:  # noqa: ANN001
-        return "sk-test"
-
-
 class _FakeIngestStore:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
@@ -782,7 +774,7 @@ async def _pipeline_harness(postgres_database_url: str, **settings_overrides: ob
         settings=settings,
         object_store=store,  # type: ignore[arg-type]
         model_client=client,  # type: ignore[arg-type]
-        secret_port=_FakeSecretPort(),
+        model_port=registry_model_port(),
     )
     return _PipelineHarness(engine, factory, store, client, handler)
 
@@ -826,35 +818,19 @@ async def _seed_stack(
     original_name: str = "note.md",
     content: bytes = "# 标题\n\n知识库摄取测试文本。".encode(),
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
-    """Seed project, configuration, base, one document, and its object bytes."""
+    """Seed project, registry embedding model, base, one document, and its object bytes."""
 
+    provider_id = await seed_provider(harness.factory)
+    embedding_model_id = await seed_embedding_model(harness.factory, provider_id, dimension=8)
     async with harness.factory() as session, session.begin():
         project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-        configuration_id = uuid.uuid4()
-        session.add(
-            KnowledgeModelConfigurationRow(
-                id=configuration_id,
-                display_name=f"cfg-{configuration_id.hex[:12]}",
-                status="active",
-                base_url="https://provider.invalid/v1",
-                embedding_model="embed-model",
-                embedding_dimension=8,
-                embedding_max_batch=64,
-                reranker_model="rerank-model",
-                reranker_max_batch=32,
-                request_timeout_seconds=30,
-                api_key_nonce=b"n" * 12,
-                api_key_ciphertext=b"c" * 16,
-            )
-        )
-        await session.flush()
         base_id = uuid.uuid4()
         session.add(
             KnowledgeBaseRow(
                 id=base_id,
                 project_id=project_id,
                 name=f"base-{base_id.hex[:8]}",
-                model_configuration_id=configuration_id,
+                embedding_model_id=embedding_model_id,
             )
         )
         await session.flush()
@@ -1335,18 +1311,44 @@ async def test_ingest_fails_when_segment_count_exceeds_quota(postgres_database_u
 
 
 @pytest.mark.asyncio
-async def test_ingest_refuses_a_disabled_model_configuration(postgres_database_url: str) -> None:
-    """Disabling a configuration halts provider usage for queued/retried ingests."""
+async def test_parent_child_ingest_rejects_excess_child_vectors_before_embedding(postgres_database_url: str) -> None:
+    """Parent count can fit while the vector-carrying child count exceeds quota."""
+
+    harness = await _pipeline_harness(postgres_database_url, max_segments_per_document=2)
+    try:
+        project_id, _, document_id = await _seed_stack(
+            harness,
+            content=("甲" * 250).encode(),
+            chunking_mode="parent_child",
+            chunk_size=400,
+            chunk_overlap=0,
+            child_chunk_size=100,
+        )
+        await _queue_ingest_task(harness, project_id, document_id)
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.handler(await _claim(harness))
+        assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
+        assert "子块" in error.value.message
+        assert "上限 2" in error.value.message
+        assert harness.client.calls == []
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ingest_refuses_a_disabled_embedding_model(postgres_database_url: str) -> None:
+    """Disabling a registry model halts provider usage for queued/retried ingests."""
 
     harness = await _pipeline_harness(postgres_database_url)
     try:
         project_id, base_id, document_id = await _seed_stack(harness)
         await _queue_ingest_task(harness, project_id, document_id)
         async with harness.factory() as session, session.begin():
-            configuration_id = await session.scalar(select(KnowledgeBaseRow.model_configuration_id).where(KnowledgeBaseRow.id == base_id))
-            configuration = await session.get(KnowledgeModelConfigurationRow, configuration_id)
-            assert configuration is not None
-            configuration.status = "disabled"
+            embedding_model_id = await session.scalar(select(KnowledgeBaseRow.embedding_model_id).where(KnowledgeBaseRow.id == base_id))
+            model = await session.get(ModelProviderModelRow, embedding_model_id)
+            assert model is not None
+            model.status = "disabled"
         claim = await _claim(harness)
 
         with pytest.raises(KnowledgeError) as error:
@@ -1354,7 +1356,7 @@ async def test_ingest_refuses_a_disabled_model_configuration(postgres_database_u
         assert error.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
         assert harness.client.calls == []
         # The transaction rolled back, so the document is still queued and a
-        # re-enabled configuration plus retry resumes normally.
+        # re-enabled model plus retry resumes normally.
         assert (await _document_row(harness, document_id)).status == "queued"
     finally:
         await harness.engine.dispose()
@@ -1433,6 +1435,98 @@ async def test_ingest_cancellation_still_cleans_the_temp_directory(postgres_data
 
         assert temp_dir_tracker and not any(path.exists() for path in temp_dir_tracker)
     finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_timeout_waits_for_blocking_parser_before_retry_and_cleanup(
+    postgres_database_url: str,
+    temp_dir_tracker: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out Knowledge Task must not orphan its parser thread.
+
+    The task remains claimed, and its temporary source remains available,
+    until the already-started synchronous parser has returned. Only then may
+    cancellation cleanup and retry settlement finish.
+    """
+
+    harness = await _pipeline_harness(postgres_database_url)
+    parser_started = threading.Event()
+    release_parser = threading.Event()
+    parser_calls = 0
+    active_parsers = 0
+    max_active_parsers = 0
+    counter_lock = threading.Lock()
+    real_extract_and_split = pipeline_module._extract_and_split
+
+    def _blocking_extract_and_split(*args: object, **kwargs: object) -> list[SegmentDraft]:
+        nonlocal parser_calls, active_parsers, max_active_parsers
+        with counter_lock:
+            parser_calls += 1
+            active_parsers += 1
+            max_active_parsers = max(max_active_parsers, active_parsers)
+        parser_started.set()
+        try:
+            if not release_parser.wait(timeout=10):
+                raise AssertionError("test did not release the parser")
+            return real_extract_and_split(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            with counter_lock:
+                active_parsers -= 1
+
+    monkeypatch.setattr(pipeline_module, "_extract_and_split", _blocking_extract_and_split)
+    stop_event = asyncio.Event()
+    run: asyncio.Task[None] | None = None
+    try:
+        project_id, _, document_id = await _seed_stack(harness)
+        task_id = await _queue_ingest_task(harness, project_id, document_id)
+
+        async def _project_active(
+            session: AsyncSession,
+            claimed_project_id: uuid.UUID,
+        ) -> bool:
+            del session
+            return claimed_project_id == project_id
+
+        worker = KnowledgeTaskWorker(
+            session_factory=harness.factory,
+            handlers={"ingest_document": harness.handler},
+            project_active_check=_project_active,
+            concurrency=1,
+            task_timeout_seconds=1,
+            poll_interval_seconds=0.05,
+            retry_delay_seconds=60,
+        )
+        run = asyncio.create_task(worker.run(stop_event))
+
+        async with asyncio.timeout(5):
+            while not parser_started.is_set():
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(1.1)
+
+        during_timeout = await _task_row(harness, task_id)
+        assert during_timeout.status == "running"
+        assert during_timeout.attempt_count == 1
+        assert parser_calls == 1
+        assert max_active_parsers == 1
+        assert temp_dir_tracker and all(path.exists() for path in temp_dir_tracker)
+
+        release_parser.set()
+        async with asyncio.timeout(5):
+            while (await _task_row(harness, task_id)).status != "retry_wait":
+                await asyncio.sleep(0.01)
+
+        settled = await _task_row(harness, task_id)
+        assert settled.attempt_count == 1
+        assert "超过 1 秒" in (settled.error_message or "")
+        assert active_parsers == 0
+        assert not any(path.exists() for path in temp_dir_tracker)
+    finally:
+        release_parser.set()
+        stop_event.set()
+        if run is not None:
+            await asyncio.wait_for(run, timeout=10)
         await harness.engine.dispose()
 
 

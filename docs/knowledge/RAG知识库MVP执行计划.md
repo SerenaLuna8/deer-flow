@@ -43,6 +43,8 @@ backend/tests/knowledge/
 | M6 | Agent `knowledge_search` 与 Citation |
 | M7 | Project/Admin 页面和端到端验收 |
 | M8 | 检索与治理增强（Dify 对齐）：治理、分块质量、检索质量、元数据/重建/新格式 |
+| M9 | 模型注册表（已交付）：供应商级凭据、Embedding/Reranker 拆分、rerank 可选、管理端合并、DeepSeek 收敛、OpenAI 双协议入口与补丁退役 |
+| M10 | 检索质量与知识维护工作区（计划中）：完整模型正文、安全重处理、文档定位与检索诊断、真实进度、元数据批量维护、混合召回与多库排序 |
 
 ## 4. 任务拆分
 
@@ -98,12 +100,14 @@ knowledge_tasks
 
 - 实现 Knowledge Base 创建、列表、详情和更新 API。
 - 本机开发环境的 MinIO S3 API 使用 `127.0.0.1:9000`，`http://127.0.0.1:9001` 仅为 Console；应用不得把 9001 当作对象存储 endpoint。
-- `actweave-knowledge` bucket 由管理员预先创建；Gateway/Worker 启动检查实际 endpoint 和 bucket 可访问性，不自动建 bucket。
+- `actweave-knowledge` bucket 由管理员预先创建；Gateway/Worker 启动检查实际 endpoint、bucket 可访问性和 versioning 为未配置/`Off`，不自动建 bucket 或修改 bucket 策略。
 - Compose 内不得使用容器自身的 `127.0.0.1` 访问宿主 MinIO，实施时配置两个进程均可达的 S3 API 地址。
-- 实现 Package 内部唯一 `MinioObjectStore`：`upload_from/download_to/delete`，直接包装官方 MinIO client 的 `fput_object/fget_object/remove_object` 并通过 `asyncio.to_thread` 执行。
-- 新增上传 API：创建 `uploading` Document、保存文件、置为 `queued`、创建 Task。
+- 实现 Package 内部唯一 `MinioObjectStore`：`upload_from/download_to/delete`，直接包装官方 MinIO client 的 `fput_object/fget_object/remove_object` 并通过 cancellation-settling blocking adapter 执行。
+- 新增上传 API：创建 `uploading` Document、保存文件，并仅在初始 version 和 `uploading` 状态仍成立时置为 `queued`、创建 Task；并发删除获胜且上传完成后不得复活 Document。删除 Worker 先删行、put 后完成且请求内对象清理失败的组合路径必须留下携带精确 storage key 的独立 `delete_document_object` Task，并在 Base 尚存时恢复 deleting tombstone。Project purge 对近期 uploading 本轮失败关闭；超过一天的遗留上传先转 deleting/入队并延迟一轮，再按可信 prefix 兜底清扫无行对象。
+- MinIO bucket 仅支持 versioning/Object Lock 关闭状态；启动、每次上传取得单槽 PUT 许可后和所有 MinIO-backed 删除路径必须先读取 versioning，凭据需要 GetBucketVersioning、prefix list 和 object delete 权限。
+- 所有上传强制单 PUT；`upload_max_bytes` 默认值和硬上限均为 50 MiB，每个 `MinioObjectStore` 串行 `fput_object`，限制 SDK 整 part 内存并避免崩溃遗留普通 prefix sweep 不可见的 incomplete multipart upload。
 - 支持 50 MiB 默认上限和六种扩展名。
-- Gateway 把请求写入单次请求临时 Path，上传成功、失败或取消后都清理；上传失败同时清理 MinIO 对象和 `uploading` Document。
+- Gateway 把请求写入单次请求临时 Path，上传成功、失败或取消后都清理；上传失败先清理 MinIO 对象，成功后才删除残留 Document；对象删除失败则保留 exact-key Task 和可选 tombstone。
 - 只有 active Base 接受上传；创建 Base 与上传分别执行 `max_knowledge_bases_per_project` 和 `max_documents_per_knowledge_base` 配额检查。
 - 新增原文下载 API：Gateway 经请求临时 Path 从 MinIO 读回，并按原始文件名和媒体类型返回。
 
@@ -112,11 +116,12 @@ knowledge_tasks
 ### M4 — 摄取与删除
 
 - 实现 PDF、DOCX、TXT、Markdown、CSV、XLSX extractor。
-- Worker 把 MinIO 对象下载到临时 Path 后调用 Extractor，结束后清理临时文件；MinIO I/O 和同步 parser 均通过 `asyncio.to_thread` 执行。
+- Worker 把 MinIO 对象下载到临时 Path 后调用 Extractor，结束后清理临时文件；MinIO I/O 和同步 parser 均通过 cancellation-settling blocking adapter 执行。
 - 实现基础空白清洗、字符切分和 overlap。
-- 切分数量超过 `max_segments_per_document` 时摄取失败并记录超限错误。
+- `max_segments_per_document` 作为不可配置超过 5000 的单文档向量条目预算：general 按 Segment 计数，parent-child 按 Knowledge Segment Child 计数；超限时在调用 Embedding 前失败并记录超限错误。
 - 实现 Task claim、超时恢复和最多三次自动尝试。
-- Task 直接保存 `target_version`、`claim_token` 和 `lease_until`。
+- Task 直接保存 `target_version`、`claim_token`、`lease_until`，并仅为
+  `delete_document_object` 保存精确 `storage_key`。
 - 在一次事务中写入当前 Document version 的 Segment+embedding，并将 Document 置为 `ready`。
 - 发布前检查 Document version 和状态，避免旧任务覆盖重试或删除。
 - 实现 Document/Base 删除任务和 `purge_project`。
@@ -182,7 +187,8 @@ ORM、`full_schema.sql`、catalog digest、Schema 测试同批次一起改。
 分四批交付：
 
 1. 分段与文档治理：分段启停/编辑/手工新增/删除（编辑同步重算 embedding、
-   version 冲突返回 `KNOWLEDGE_CONFLICT`）、文档启停/重命名/批量启停删除、
+   version 冲突返回 `KNOWLEDGE_CONFLICT`，手工新增/编辑在 Embedding 前与最终
+   Document 锁内都重算单文档向量条目预算）、文档启停/重命名/批量启停删除、
    分段与文档字数统计；禁用不删向量，重新启用即恢复可检索；
    前端分段浏览页取代预览弹窗。
 2. 分块质量：递归分隔符切分（自定义分隔符默认 `\n\n`，回退序列与 Dify
@@ -192,8 +198,9 @@ ORM、`full_schema.sql`、catalog digest、Schema 测试同批次一起改。
 3. 检索质量：父子分块模式（父块承载返回内容、子块承载向量存
    `knowledge_segment_children`，命中按父块内最高子块分回卷去重进精排）、
    库级检索默认参数（top_k 与分数阈值，检索测试与 Agent 工具未传参时生效）、
-   查询日志 `knowledge_queries`（来源/结果数/最高分，检索测试页最近查询
-   可点击回填）与分段/文档命中计数。
+   查询日志 `knowledge_queries`（可信 owner、来源/结果数/最高分；检索测试页只列
+   当前用户自己的最近查询并可点击回填）与分段/文档命中计数；Provider 工作完成
+   后再次重验证权限，中途撤权不得返回结果或写查询历史。
 4. 按需扩展（前三项已完成）：
    - 元数据过滤：库级字段定义（string/number/time，存
      `knowledge_metadata_fields`），文档 `doc_metadata` JSONB+GIN；
@@ -218,18 +225,204 @@ Notion 导入与整站爬取、外部知识库 API、库级 only_me 权限与标
 逐字节一致、子块命中回卷单一父块引用、库级默认生效、元数据过滤仅命中
 匹配文档、重建后新版本可检索）。
 
+### M9 — 模型注册表与检索模型拆分（B1 + DeepSeek/OpenAI 适配器精简）
+
+> 状态：已交付（2026-08-30 立项，同日审查修订并实施完成）。动机：管理端"模型设置/知识
+> 模型"双菜单并存；一条知识模型配置把 Embedding 与 Reranker 捆绑在同一
+> 行、共用同一把 API Key——跨供应商组合不可能、重排被迫强制、组合爆炸
+> 伴随密钥副本、只换重排也要全量重嵌入。对齐 Dify 的信息架构（供应商级
+> 凭据 + 类型化模型 + 消费侧独立选择），不引入其插件体系。本次另纳入
+> DeepSeek 单入口/单实现收敛，以及“OpenAI 兼容（Chat Completions）”/
+> “OpenAI Responses”两个固定协议入口，共用原生 SDK 并删除 `patched_openai`；
+> 不将签名补丁迁入其他实现。LLM 的 `system_model_configs` 不迁入新
+> 注册表，快照校验与密钥世代机制仍保留。用户已确认 M9 可以重置数据库，
+> 因此按重新初始化交付，不保留旧适配器别名或旧 checkpoint 兼容。
+> 已审查：LLM 消费点均走 system
+> 目录/快照/策略链，与知识零耦合；全库 pgvector 仅知识两表，无其他
+> embedding 消费者。LLM 目录整体整合仍留 B2。任务拆分见
+> `docs/superpowers/plans/2026-08-30-rag-knowledge-m9-model-registry.md`。
+
+数据模型：宿主新增 `model_providers`（名称、base_url、超时、行内加密
+Key，B1 无整体停用状态）与 `model_provider_models`（model_type ∈
+embedding|rerank、模型名、维度、批量、active|disabled）；
+`knowledge_bases.model_configuration_id` 改为
+`embedding_model_id`（必填）+ `reranker_model_id`（可空），外键只写 SQL
+快照（沿用 projects 先例）；`knowledge_model_configurations` 退役，
+`knowledge_*` 由八张变七张；`knowledge_queries.top_score` 约束放宽为
+`[-1,1]` 或 NULL，同步 ORM、SQL、digest、注释与测试。M9 不提供旧数据
+迁移路径；已有数据库需由操作者确认准确目标、停服和数据处置后执行
+`make reset-db`。该命令清理整个应用 `public` Schema，不仅是 Knowledge，
+旧模型、密钥世代、Run 与 checkpoint 不作为 M9 可恢复数据；本次计划
+修订不执行命令，reset 不得隐藏在普通启动中。MinIO 文件不随 SQL reset
+自动删除，其保留/清理另行确认。
+
+包边界：`actweave_knowledge` 让出模型配置所有权——删除 models CRUD、
+`KnowledgeSecretPort` 与包内 seed；新增 `KnowledgeModelPort`（端口方法
+接收调用方 session，建库/重建/换绑按 Provider → Model 取 FOR SHARE，
+与注册表写路径的 FOR UPDATE 串行化）；`model_in_use(session, model_id)`
+只在调用方事务内做非锁定引用查询，不反向锁 Project/Base。HTTP 客户端
+拆 Embedding/Rerank 两份物化材料，保留在包内供宿主探活复用；构造器与
+工厂继续注入 `project_active_check`，保留任务认领时的删除/恢复保护和
+功能关闭时仍独立装配的 Project purge，不因替换模型端口而删减这些能力。
+
+行为语义：reranker 为库级可选设置，换绑/关闭即时生效不重建；无 rerank
+时最终分＝原始余弦 `[-1,1]`，rerank 明确限定 `[0,1]` 并补客户端越界
+校验；阈值仍 `[0,1]` 且 0=不过滤（含负分），日志与最终引用分数同源。
+Query embedding 按 embedding 模型复用，候选预算按 `(embedding_model_id,
+reranker_model_id)`（含 NULL）独立分配；重排对组内全部候选评分，先按
+各 Base 阈值过滤，再稳定排序/去重/取全局 top_k。跨模型/余弦原始分混排
+仍是 B1 接受的质量限制，不宣称已校准，不增加评分融合框架。
+
+换 embedding 才走 rebuild（version bump 重入队）；模型行所属 Provider、
+type/名称/维度建后不可变。有被引用 embedding 子模型时 Provider 的
+`base_url` 冻结，换端点必须新建 Provider/模型后显式 rebuild，不能凭
+同名、同维度、探活成功绕过；允许的地址更新仍须重新提交 API Key。
+Key/超时可改，但遵守“冻结材料和子模型集合 → 事务外探活 → 重新锁定复核
+并提交”，不持事务调用模型、不用旧探活结论覆盖并发更新。被引用模型
+不可停用/删除，有子模型的 Provider 不可删除；注册表与 knowledge 同门控，
+Admin 路由并入 `/api/admin/settings/*`，沿用系统审计上下文。
+
+引导改名覆盖 setup/check/reset、Compose、Install 及 `run_runtime.py`：
+新 `ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY`/`ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP`
+和残留旧名称均须被运行时过滤，分别测试 `.env` 与父进程来源。replay seed
+和 Gateway 启动调用同批迁为 Provider＋独立模型，不再导入退役模块。
+
+前端覆盖统一模型管理、创建向导、“创建空知识库”独立对话框、库设置与
+检索测试页；无 rerank 不阻止建库，Provider 无停用开关，被引用 embedding
+冻结地址但不冻结 Key/超时编辑。检索及历史统一使用中性分数标签，说明
+余弦/重排范围和 0 不过滤，不按当前库设置反推历史分数来源，不新增
+score_kind；更换重排后清除旧搜索结果。
+
+DeepSeek 专项（Task 9）：按 [官方思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)
+与 [多轮对话指南](https://api-docs.deepseek.com/zh-cn/guides/multi_round_chat/)，
+保留 patched 实现的历史 reasoning 完整回传：带 tools 时必需（即使没有
+实际 tool_calls），不带 tools 时传入会被忽略，不新增 tools 条件分支。
+唯一适配器 ID 为 `deepseek`，直接使用保留完整回注的 `PatchedChatDeepSeek`
+实现；删除 `patched_deepseek` 描述器与运行时标识分支，不保留 alias。
+管理端创建/编辑均只显示一个“DeepSeek”并提交 `deepseek`，无需旧记录
+特殊处理。默认三个模型在新库统一按 `deepseek` seed，模型 UUID/名称及
+Flash/Pro/Vision 独立身份不变；安装时按新 ID 重新生成 checksum、Secret
+recipient 和加密世代，不直接改旧行或复用旧密文。DeepSeek 引导 Key 与
+检索 Provider 引导 Key 仍独立，thinking/Run 模式/effort 映射不变。
+
+DeepSeek 收敛须同改 `provider_wire.py`，使实际请求、Context lane、Profile、
+cost fingerprint 和压缩容量估计一致；两个共享计量 revision 从当前 v6
+递增到 v7。旧 v6 checkpoint 随数据库 reset 清理，不编写旧 Profile
+重冻结或双版本兼容机制。新 Run 从新 revision 建立 Profile，仍验收
+同版本普通/人工 `Command` 恢复和其他 Provider 计量；旧/未知版本、坏
+指纹仍拒绝，保留现有 payload/checksum 和密钥校验，不放宽恢复权限。
+
+OpenAI 专项（Task 10）：按 [官方协议说明](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+提供两个公开描述器，共用 `langchain_openai:ChatOpenAI`，不复制客户端：
+
+- “OpenAI 兼容（Chat Completions）”：ID `openai`，固定
+  `use_responses_api=false`，只调用 `{base_url}/chat/completions`，请求 messages。
+- “OpenAI Responses”：ID `openai_responses`，固定
+  `use_responses_api=true` / `output_version="responses/v1"`，只调用
+  `{base_url}/responses`，请求 input items。
+
+两者 Base URL 均可配置，端点必须支持所选协议；不根据模型名/URL猜测，
+不在失败后跨协议 fallback。协议字段由后端派生，不再提供独立布尔开关
+或 Output version 下拉；authoring、探活、冻结材料物化与最终 factory
+都验证选择一致，拒绝手写协议字段/冲突覆盖，不能仅设置可被覆盖的默认值。
+固定字段仅在验证后输出 ModelConfig 时派生，不写持久化 settings/Admin DTO
+或增加 Run 快照字段；编辑往返仍只有业务参数，避免隐藏字段造成契约冲突。
+协议 ID 随 System Model/Run payload 冻结并参与现有密钥绑定，切换入口
+须按改适配器流程重新提交 Key；同入口普通编辑仍可留空保留。
+
+`openai_responses` 从内部计量分类成为可选择的协议 ID，wire/Profile/
+fingerprint/outcome/vision 必须与最终 SDK 请求一致，不能因共用类名误判
+或重复追加后缀。直接删除 `patched_openai`/`PatchedChatOpenAI` 与
+`patched_openai_responses` 专属分支，不保留旧兼容、不移植签名补丁；
+DeepSeek 的公共恢复 helper 和 vLLM 自身回放保留，与 Task 9 共用 M9
+计量 revision 提升。
+
+Responses 补齐标准输出/流式工具回放及已返回 summary 的识别、计时和
+前端“推理摘要”展示，保留原始 AIMessage 和工具关联，支持历史刷新；
+不展示/解释 encrypted_content，不构造完整思维链。仍使用应用侧历史，
+不自动引入 previous_response_id、服务端 Conversations、内置搜索或新 MCP
+执行能力；双协议入口不等于扩大工具授权。
+
+实施分三个内部阶段：① 准备契约与回归，先补新增客户端/端口再接注册表
+② 功能分支内原子切换 Schema、包、宿主、引导/replay 与前端，Task 9/10
+与语言模型表单同阶段联调，最后删旧 RAG 契约、`patched_deepseek` 标识和
+`patched_openai` 实现/标识 ③ Task 11 完整验收和文档更新后整体合并。
+Task 1–11 是工作项而非独立发布批次；不先合并破坏性
+删表，不单独发布不兼容的后端/前端契约，也不增加长期双写或旧数据兼容层。
+
+验收（计划）：后端 `tests/model_registry/` 与包套件、Schema 契约与脚本
+测试、运行环境安全及 replay 引导测试；重点覆盖端点冻结/绑定竞争、
+stale probe、负分日志与命中计数、候选预算、阈值先于 top_k、Worker
+删除/恢复。mock Playwright 覆盖模型管理、分型探活、引用保护、向导与
+空库两个入口、关闭重排、负分与设置切换、重建确认及导航合并；
+real-backend Playwright 验证换 rerank 不重嵌、关闭 rerank 仍可检索、
+重建后新版本可检索，隔离 query embedding 对计数断言的影响。mock 与
+real-backend 分开报告，Knowledge 用例不得因引导失败而 skip。
+还需通过 DeepSeek 流式/非流式、跨轮工具 reasoning、统一 wire/计量、
+重新 seed/密钥解密/新 Run 准入及同版本恢复、管理端单一描述器入口回归，
+确认旧标识不再受支持；不要求旧数据兼容验收。mock 与真实 DeepSeek
+联通证据分开报告。OpenAI 另验两个描述器对应各自 HTTP 路径/body、冲突
+字段拒绝/无自动协议切换、工具多轮/流式/图像/summary 与历史刷新、计量
+一致及新 Run 恢复；补丁模块无生产引用，不再验收自定义签名
+回传能力。完成实施
+后同步 CONTEXT.md、架构/模型/检索/需求设计、README/Install 和两份
+AGENTS.md；本次计划修订不提前改写当前实现事实或标记已完成。
+
+### M10 — 检索质量与知识维护工作区（计划中）
+
+详细规范：[M10 设计方案](../superpowers/specs/2026-08-30-rag-knowledge-m10-quality-workbench-design.md)。
+执行拆分：[M10 执行计划](../superpowers/plans/2026-08-30-rag-knowledge-m10-quality-workbench.md)。
+
+前置为 M9 前后端契约切换和完整验收，不把当前工作树中的 M9 修改视为已完成。
+M10 参考 Dify 的功能和操作逻辑，在现有 Knowledge Package、Project authority、
+Worker、PostgreSQL 与 MinIO 内实现，不复制 Dify 代码/资产或引入平行平台。
+
+本期十项增量：
+
+1. 完整 Segment 正文供模型使用，短 Citation 用于展示；以64KiB UTF-8正文预算整段选择。
+2. 库级重嵌入保留人工内容、UUID、启停和历史；文档原文件重新解析单独预览、确认和执行。
+3. 创建向导选择预览文件，并隔离参数变化与迟到响应。
+4. 文档关键词、状态筛选、排序和完整列表分页。
+5. 安全深链接、Segment定位和返回恢复，不将业务内容写入URL或持久浏览器存储。
+6. 检索原段落、真实命中Child、分数来源、实际参数、候选计数与耗时诊断。
+7. 按当前Task attempt报告真实阶段/批次进度，失败不显示成功。
+8. 元数据字段发现、只读内建字段、同库有界批量赋值。
+9. PostgreSQL词法派生索引和显式hybrid召回，保留semantic默认值。
+10. 分库/全局候选预算和分数域排序，原生阈值与最终融合分分离。
+
+不纳入 URL/Notion 同步、外部知识库、Q&A、OCR/多模态、Pipeline、独立Child编辑
+或新任务系统。混合召回/跨库排序必须通过真实质量评测，不因确定性接口测试通过
+就宣称检索质量改善。
+
+T0–T14 分为前置与契约、内容保护、检索核心、前端工作区、验证与交付五阶段，
+前后端和Schema整体放行。新增Schema仍走显式空库安装契约；已有数据库是否可
+重建须另行确认，M9 reset授权不延伸到M10，Runtime不补列/改marker。
+若必须保留旧库而无受支持升级路径，部署保持阻塞，不自行实施迁移或重置。
+
+验收（计划）：人工增改删和禁用内容在重嵌入后保持；完整正文/短引用一致；
+claim/版本/权限竞态关闭；预览、深链接、过期详情、进度、批量元数据和只读界面
+全链路覆盖。真实PostgreSQL/MinIO、mock/replay浏览器和真实模型分别报告。
+至少60条脱敏标注问题及1万检索单元验证召回、排序、性能与费用，达到方案约定
+门槛；全部十项、质量门、部署确认和文档同步完成后才标记M10完成。
+
 ## 5. 实施顺序
 
 ```text
 M0 -> M1 -> M2
             |
             v
-           M3 -> M4 -> M5 -> M6 -> M7 -> M8
+           M3 -> M4 -> M5 -> M6 -> M7 -> M8 -> M9 -> M10
 ```
 
 不并行开发跨里程碑业务逻辑。每个里程碑先合并数据契约和测试，再进入下一个里程碑。
 M8 内部四批按治理 → 分块 → 检索 → 扩展顺序交付，第三批父子分块依赖第二批的
-切分器改造；第四批各项相互独立、按需启动。
+切分器改造；第四批各项相互独立、按需启动。M9 按“准备 → 原子切换 → 验收”
+三个内部阶段推进，新增包契约/客户端先于注册表消费，旧表/接口最后退役；
+DeepSeek/OpenAI 专项与语言模型 UI 同步精简为 `deepseek`、`openai` 和
+`openai_responses`（OpenAI 双协议共享原生实现），前后端、空库安装/
+reset、replay 与新 Run 恢复契约通过 M9 放行门后整体合并，不把中间阶段独立交付。
+M10 在 M9 验收后启动，内部可按详细计划并行准备，但内容发布、模型正文、
+词法索引、排名来源和前端严格契约必须联调，最终通过真实质量及Schema交付确认门。
 
 ## 6. 开发验收命令
 
@@ -259,5 +452,7 @@ Knowledge Playwright flow
 6. 前端可查看状态、重试和删除；
 7. Project 删除能清理对应 MinIO 对象和 Knowledge 数据。
 
-M8 为 MVP 之后的增强里程碑，以其小节内的验收条目为完成标准
-（已完成，未启动项在小节内明确记录）。
+M8、M9、M10 为 MVP 之后的增强里程碑，以各自小节内的验收条目为完成标准
+（M8、M9 已完成，未启动项在小节内明确记录；M10 计划中）。任务拆分见
+[M9 执行计划](../superpowers/plans/2026-08-30-rag-knowledge-m9-model-registry.md)与
+[M10 执行计划](../superpowers/plans/2026-08-30-rag-knowledge-m10-quality-workbench.md)。

@@ -38,11 +38,15 @@ INSTALLATION_ONLY_ENV_NAMES = frozenset(
         # setup-db consumes this once to create encrypted model-owned copies.
         # Runtime roles must never inherit the bootstrap plaintext.
         "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY",
-        # setup-db encrypts this once into the default Knowledge model
-        # configuration; runtime roles must never inherit the plaintext.
-        "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY",
+        # setup-db encrypts this once into the default Model Provider row;
+        # runtime roles must never inherit the plaintext.
+        "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY",
         # The matching install-time skip switch is equally installation-only:
         # runtime behavior is governed by config.yaml, not bootstrap decisions.
+        "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP",
+        # Retired M8-era bootstrap names: still filtered so stale .env entries
+        # never reach Gateway/Worker/Scheduler, but no bootstrap reads them.
+        "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY",
         "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_SKIP",
         # This superuser connection is admitted only by setup/upgrade entry
         # points. Gateway, Worker, Scheduler, and maintenance runtime commands

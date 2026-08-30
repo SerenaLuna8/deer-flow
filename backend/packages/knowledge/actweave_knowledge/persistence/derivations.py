@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import case, func, null, select
@@ -12,7 +13,10 @@ from .models import KnowledgeDocumentRow, KnowledgeTaskRow
 OPEN_TASK_STATUSES = ("queued", "running", "retry_wait")
 
 
-def delete_error_expression(kind: str, resource_id_column: ColumnElement[Any]) -> ColumnElement[str | None]:
+def delete_error_expression(
+    kind: str | Sequence[str],
+    resource_id_column: ColumnElement[Any],
+) -> ColumnElement[str | None]:
     """Latest failed delete-task message, hidden while a retry is open.
 
     While an open delete task exists the deletion is still in progress, so the
@@ -20,10 +24,12 @@ def delete_error_expression(kind: str, resource_id_column: ColumnElement[Any]) -
     ``kind`` explains why the resource is stuck.
     """
 
+    kinds = (kind,) if isinstance(kind, str) else tuple(kind)
+    kind_filter = KnowledgeTaskRow.kind.in_(kinds)
     open_delete_exists = (
         select(KnowledgeTaskRow.id)
         .where(
-            KnowledgeTaskRow.kind == kind,
+            kind_filter,
             KnowledgeTaskRow.resource_id == resource_id_column,
             KnowledgeTaskRow.status.in_(OPEN_TASK_STATUSES),
         )
@@ -32,7 +38,7 @@ def delete_error_expression(kind: str, resource_id_column: ColumnElement[Any]) -
     latest_failed_error = (
         select(KnowledgeTaskRow.error_message)
         .where(
-            KnowledgeTaskRow.kind == kind,
+            kind_filter,
             KnowledgeTaskRow.resource_id == resource_id_column,
             KnowledgeTaskRow.status == "failed",
         )
@@ -41,6 +47,17 @@ def delete_error_expression(kind: str, resource_id_column: ColumnElement[Any]) -
         .scalar_subquery()
     )
     return case((open_delete_exists, null()), else_=latest_failed_error)
+
+
+def document_delete_error_expression(
+    resource_id_column: ColumnElement[Any],
+) -> ColumnElement[str | None]:
+    """Derive one Document's error across normal and orphan-object cleanup."""
+
+    return delete_error_expression(
+        ("delete_document", "delete_document_object"),
+        resource_id_column,
+    )
 
 
 def document_count_expression(base_id_column: ColumnElement[Any]) -> ColumnElement[int]:

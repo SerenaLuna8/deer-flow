@@ -2,7 +2,12 @@
 
 > 现状：本文为 MVP 基线存档。M8 后新增父子分块命中回卷、库级检索默认参数
 > （top_k 与分数阈值）、查询日志与分段/文档命中计数、元数据过滤条件。
-> 以《RAG知识库MVP执行计划》M8 小节为准。
+> M9 后 rerank 为库级可选：检索按（Embedding 模型, Reranker 模型）对分组，
+> 每组按召回预算 `candidate_k = min(100, max(20, top_k*5))` 召回；有
+> Reranker 的组以其相关性分（`[0,1]`）为最终分且 Reranker 失败即整体失败，
+> 无 Reranker 的组以原始余弦相似度（`[-1,1]`）为最终分；阈值 0 表示不过滤
+> （含负分）。正文"两阶段检索"按 MVP 基线保留。
+> 以《RAG知识库MVP执行计划》M8/M9 小节为准。
 
 ## 1. 目标
 
@@ -23,6 +28,7 @@ query embedding
 @dataclass
 class KnowledgeSearchRequest:
     project_id: UUID
+    owner_user_id: UUID
     query: str
     knowledge_base_ids: tuple[UUID, ...] | None = None
     top_k: int | None = None
@@ -45,7 +51,9 @@ class KnowledgeSearchResult:
     citations: tuple[KnowledgeCitation, ...]
 ```
 
-`project_id` 由宿主上下文提供。HTTP body 和 Agent 参数只提交 query、可选 Base ids 和 top-k。
+`project_id` 与 `owner_user_id` 都由宿主的可信请求/Run 上下文提供。HTTP body
+和 Agent 参数只提交 query、可选 Base ids 和 top-k；调用者不能指定查询历史
+归属人。
 
 `KnowledgeCitation.score` 是 Reranker 返回的 `relevance_score`，不是 cosine score。
 
@@ -194,6 +202,18 @@ class SearchService:
 
 Project HTTP 检索和 Agent 工具必须复用同一个 `SearchService.search()`。Embedding 与 Reranker 的 Provider 细节都留在 Knowledge 软件包内部。
 
+查询开始前，宿主 authority 在数据库事务内重验证当前成员关系与能力；Provider
+工作完成后，写入查询历史与命中计数的事务再次重验证。若调用期间权限被撤销，
+最终重验证失败，已经计算出的 Citation 不得返回。纯数据库的查询日志或命中计数
+写入故障仍按 best-effort 处理，不把一次已授权检索伪装成失败。
+
+`knowledge_queries` 按 `project_id + owner_user_id` 记录原始 query。最近查询接口
+只能读取当前可信 actor 自己的行；同一 Project 的其他成员（包括管理员）不能借由
+Knowledge 页面读取该原始文本。该表也服从 owner-private retention：former-owner
+和 account 的 Phase B 只删除精确 `project_id + owner_user_id` 的查询历史，不删除
+Project 共享的 Knowledge Base、Document、Segment 或对象；Project 最终清理删除该
+Project 下全部 owner 的查询历史。
+
 ## 9. Agent 工具
 
 工具签名：
@@ -254,4 +274,6 @@ KNOWLEDGE_SEARCH_FAILED
 - embedding/数据库失败；
 - query embedding 全零；
 - HTTP 检索与 Agent 工具结果一致；
+- HTTP 与 Agent 查询历史都绑定可信 actor，Project 内其他成员看不到原始 query；
+- Provider 工作期间撤销权限时，最终重验证拒绝 Citation、查询日志和命中计数；
 - Citation 的 Base、Document、Segment 和来源位置正确。

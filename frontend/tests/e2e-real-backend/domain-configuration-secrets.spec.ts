@@ -133,7 +133,7 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     await page.getByRole("button", { name: "新增模型" }).click();
     const createDialog = page.getByRole("dialog", { name: "新增模型" });
     await createDialog.getByLabel("显示名称").fill(displayName);
-    await createDialog.getByRole("combobox").selectOption("patched_deepseek");
+    await createDialog.getByRole("combobox").selectOption("deepseek");
     await createDialog.getByLabel("Provider 模型 ID").fill(providerModel);
     await createDialog
       .getByRole("spinbutton", { name: /最大输入 Token/u })

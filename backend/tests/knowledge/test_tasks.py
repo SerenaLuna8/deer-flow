@@ -24,7 +24,6 @@ from actweave_knowledge.documents import KnowledgeDocumentService
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
-    KnowledgeModelConfigurationRow,
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
 )
@@ -38,9 +37,11 @@ from actweave_knowledge.persistence.tasks import (
 from actweave_knowledge.tasks import (
     KnowledgeBaseDeletionHandler,
     KnowledgeDocumentDeletionHandler,
+    KnowledgeDocumentObjectDeletionHandler,
     KnowledgeTaskClaim,
     purge_project_knowledge,
 )
+from registry_helpers import registry_model_port, seed_registry_models
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -56,6 +57,21 @@ class _FakeStore:
         self.objects: dict[str, bytes] = {}
         self.deleted: list[str] = []
         self.fail_delete_keys: set[str] = set()
+        self.fail_versioning_check = False
+        self.versioning_checks = 0
+
+    async def require_unversioned_bucket(self) -> None:
+        self.versioning_checks += 1
+        if self.fail_versioning_check:
+            raise KnowledgeError(
+                KNOWLEDGE_STORAGE_UNAVAILABLE,
+                "Knowledge bucket 必须关闭版本控制",
+            )
+
+    async def delete_many(self, keys: list[str]) -> None:
+        await self.require_unversioned_bucket()
+        for key in keys:
+            await self.delete(key)
 
     async def delete(self, key: str) -> None:
         if key in self.fail_delete_keys:
@@ -65,6 +81,12 @@ class _FakeStore:
 
     async def download_to(self, key: str, target_path: Path) -> None:  # pragma: no cover - unused
         raise AssertionError("not used in these tests")
+
+    async def delete_project_objects(self, project_id: uuid.UUID) -> None:
+        prefix = f"projects/{project_id}/knowledge/"
+        for key in list(self.objects):
+            if key.startswith(prefix):
+                await self.delete(key)
 
 
 class _Harness:
@@ -110,32 +132,15 @@ async def _seed_base(
     *,
     status: str = "active",
 ) -> uuid.UUID:
+    embedding_model_id, _ = await seed_registry_models(harness.factory, dimension=8)
     async with harness.factory() as session, session.begin():
-        configuration_id = uuid.uuid4()
-        session.add(
-            KnowledgeModelConfigurationRow(
-                id=configuration_id,
-                display_name=f"cfg-{configuration_id.hex[:12]}",
-                status="active",
-                base_url="https://provider.invalid/v1",
-                embedding_model="embed-model",
-                embedding_dimension=8,
-                embedding_max_batch=64,
-                reranker_model="rerank-model",
-                reranker_max_batch=32,
-                request_timeout_seconds=30,
-                api_key_nonce=b"n" * 12,
-                api_key_ciphertext=b"c" * 16,
-            )
-        )
-        await session.flush()
         base_id = uuid.uuid4()
         session.add(
             KnowledgeBaseRow(
                 id=base_id,
                 project_id=project_id,
                 name=f"base-{base_id.hex[:8]}",
-                model_configuration_id=configuration_id,
+                embedding_model_id=embedding_model_id,
                 status=status,
             )
         )
@@ -256,7 +261,11 @@ def _documents_service(harness: _Harness, **settings_overrides: object) -> Knowl
 
 def _bases_service(harness: _Harness) -> KnowledgeBaseService:
     settings = KnowledgeSettings.model_validate({"enabled": False})
-    return KnowledgeBaseService(session_factory=harness.factory, settings=settings)
+    return KnowledgeBaseService(
+        session_factory=harness.factory,
+        settings=settings,
+        model_port=registry_model_port(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +442,14 @@ async def test_recover_expired_tasks_requeues_or_fails_by_remaining_budget(postg
 # ---------------------------------------------------------------------------
 
 
-def _handler_claim(task_id: uuid.UUID, project_id: uuid.UUID, resource_id: uuid.UUID, kind: str) -> KnowledgeTaskClaim:
+def _handler_claim(
+    task_id: uuid.UUID,
+    project_id: uuid.UUID,
+    resource_id: uuid.UUID,
+    kind: str,
+    *,
+    storage_key: str | None = None,
+) -> KnowledgeTaskClaim:
     return KnowledgeTaskClaim(
         id=task_id,
         project_id=project_id,
@@ -443,6 +459,7 @@ def _handler_claim(task_id: uuid.UUID, project_id: uuid.UUID, resource_id: uuid.
         claim_token=uuid.uuid4(),
         attempt_count=1,
         max_attempts=3,
+        storage_key=storage_key,
     )
 
 
@@ -485,6 +502,93 @@ async def test_delete_document_handler_skips_documents_not_marked_deleting(postg
         assert harness.store.deleted == []
         async with harness.factory() as session:
             assert await session.get(KnowledgeDocumentRow, document_id) is not None
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_delete_document_object_handler_uses_exact_key_and_removes_tombstone(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        base_id = await _seed_base(harness, project_id)
+        document_id = await _seed_document(
+            harness,
+            project_id,
+            base_id,
+            status="deleting",
+        )
+        orphan_key = await _document_key(harness, document_id)
+        same_document_other_key = f"projects/{project_id}/knowledge/{uuid.uuid4()}/{document_id}.pdf"
+        harness.store.objects[orphan_key] = b"late put"
+        harness.store.objects[same_document_other_key] = b"must remain"
+        handler = KnowledgeDocumentObjectDeletionHandler(
+            session_factory=harness.factory,
+            object_store=harness.store,  # type: ignore[arg-type]
+        )
+
+        await handler(
+            _handler_claim(
+                uuid.uuid4(),
+                project_id,
+                document_id,
+                "delete_document_object",
+                storage_key=orphan_key,
+            )
+        )
+
+        assert orphan_key not in harness.store.objects
+        assert same_document_other_key in harness.store.objects
+        async with harness.factory() as session:
+            assert await session.get(KnowledgeDocumentRow, document_id) is None
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "forged_key",
+    (
+        "projects/00000000-0000-4000-8000-000000000001/knowledge/00000000-0000-4000-8000-000000000002/{document_id}.pdf",
+        "projects/{project_id}/knowledge/not-a-base/{document_id}.pdf",
+        "projects/{project_id}/knowledge/00000000-0000-4000-8000-000000000002/00000000-0000-4000-8000-000000000003.pdf",
+    ),
+)
+@pytest.mark.asyncio
+async def test_document_object_delete_rejects_forged_storage_authority(
+    postgres_database_url: str,
+    forged_key: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        document_id = uuid.uuid4()
+        key = forged_key.format(
+            project_id=project_id,
+            document_id=document_id,
+        )
+        harness.store.objects[key] = b"must not be deleted"
+        handler = KnowledgeDocumentObjectDeletionHandler(
+            session_factory=harness.factory,
+            object_store=harness.store,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(KnowledgeError):
+            await handler(
+                _handler_claim(
+                    uuid.uuid4(),
+                    project_id,
+                    document_id,
+                    "delete_document_object",
+                    storage_key=key,
+                )
+            )
+
+        assert harness.store.objects[key] == b"must not be deleted"
+        assert harness.store.deleted == []
     finally:
         await harness.engine.dispose()
 
@@ -547,6 +651,37 @@ async def test_delete_base_handler_storage_failure_keeps_the_base_for_retry(post
         await harness.engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_empty_base_delete_checks_bucket_versioning_before_row_delete(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        base_id = await _seed_base(harness, project_id, status="deleting")
+        harness.store.fail_versioning_check = True
+        handler = KnowledgeBaseDeletionHandler(
+            session_factory=harness.factory,
+            object_store=harness.store,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(KnowledgeError):
+            await handler(
+                _handler_claim(
+                    uuid.uuid4(),
+                    project_id,
+                    base_id,
+                    "delete_knowledge_base",
+                )
+            )
+
+        async with harness.factory() as session:
+            assert await session.get(KnowledgeBaseRow, base_id) is not None
+    finally:
+        await harness.engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # Project purge
 # ---------------------------------------------------------------------------
@@ -566,6 +701,8 @@ async def test_purge_project_knowledge_removes_everything_and_is_idempotent(post
             await _seed_task(harness, project_id, document_id)
         other_base = await _seed_base(harness, other_project)
         other_document = await _seed_document(harness, other_project, other_base, segments=1)
+        orphan_key = f"projects/{project_id}/knowledge/{uuid.uuid4()}/{uuid.uuid4()}.pdf"
+        harness.store.objects[orphan_key] = b"orphan"
 
         await purge_project_knowledge(harness.factory, harness.store, project_id=project_id)  # type: ignore[arg-type]
 
@@ -581,6 +718,127 @@ async def test_purge_project_knowledge_removes_everything_and_is_idempotent(post
 
         # Idempotent: purging again with nothing left succeeds.
         await purge_project_knowledge(harness.factory, harness.store, project_id=project_id)  # type: ignore[arg-type]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_purge_defers_recent_upload_without_touching_storage_or_rows(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        base_id = await _seed_base(harness, project_id)
+        document_id = await _seed_document(
+            harness,
+            project_id,
+            base_id,
+            status="uploading",
+        )
+
+        completed = await purge_project_knowledge(
+            harness.factory,
+            harness.store,  # type: ignore[arg-type]
+            project_id=project_id,
+        )
+
+        assert completed is False
+        assert harness.store.deleted == []
+        assert harness.store.versioning_checks == 0
+        async with harness.factory() as session:
+            document = await session.get(KnowledgeDocumentRow, document_id)
+            assert document is not None and document.status == "uploading"
+            assert await session.get(KnowledgeBaseRow, base_id) is not None
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_purge_converts_stale_upload_then_cleans_on_next_attempt(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        base_id = await _seed_base(harness, project_id)
+        document_id = await _seed_document(
+            harness,
+            project_id,
+            base_id,
+            status="uploading",
+        )
+        async with harness.factory() as session, session.begin():
+            document = await session.get(KnowledgeDocumentRow, document_id)
+            assert document is not None
+            document.updated_at = datetime.now(UTC) - timedelta(days=2)
+
+        first = await purge_project_knowledge(
+            harness.factory,
+            harness.store,  # type: ignore[arg-type]
+            project_id=project_id,
+        )
+
+        assert first is False
+        assert harness.store.deleted == []
+        assert harness.store.versioning_checks == 0
+        async with harness.factory() as session:
+            document = await session.get(KnowledgeDocumentRow, document_id)
+            task = await session.scalar(
+                select(KnowledgeTaskRow).where(
+                    KnowledgeTaskRow.project_id == project_id,
+                    KnowledgeTaskRow.resource_id == document_id,
+                    KnowledgeTaskRow.kind == "delete_document_object",
+                    KnowledgeTaskRow.status == "queued",
+                )
+            )
+            assert document is not None
+            assert document.status == "deleting"
+            assert document.version == 2
+            assert task is not None
+            assert task.storage_key == document.storage_key
+
+        second = await purge_project_knowledge(
+            harness.factory,
+            harness.store,  # type: ignore[arg-type]
+            project_id=project_id,
+        )
+
+        assert second is True
+        assert harness.store.objects == {}
+        async with harness.factory() as session:
+            assert await session.get(KnowledgeDocumentRow, document_id) is None
+            assert await session.get(KnowledgeBaseRow, base_id) is None
+            tasks = await session.scalar(select(func.count()).select_from(KnowledgeTaskRow).where(KnowledgeTaskRow.project_id == project_id))
+            assert int(tasks or 0) == 0
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_purge_project_checks_bucket_versioning_before_deleting_rows(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        base_id = await _seed_base(harness, project_id)
+        harness.store.fail_versioning_check = True
+
+        with pytest.raises(KnowledgeError) as error:
+            await purge_project_knowledge(
+                harness.factory,
+                harness.store,  # type: ignore[arg-type]
+                project_id=project_id,
+            )
+
+        assert error.value.code == KNOWLEDGE_STORAGE_UNAVAILABLE
+        assert harness.store.versioning_checks == 1
+        async with harness.factory() as session:
+            assert await session.get(KnowledgeBaseRow, base_id) is not None
     finally:
         await harness.engine.dispose()
 

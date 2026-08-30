@@ -23,6 +23,7 @@ from actweave_knowledge import (
     KNOWLEDGE_QUOTA_EXCEEDED,
     KnowledgeDocumentView,
     KnowledgeError,
+    KnowledgeModule,
     KnowledgeSegmentCreate,
     KnowledgeSegmentUpdate,
     KnowledgeSegmentView,
@@ -32,7 +33,6 @@ from actweave_knowledge.documents import KnowledgeDocumentService
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
-    KnowledgeModelConfigurationRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
@@ -40,25 +40,19 @@ from actweave_knowledge.persistence.models import (
 from actweave_knowledge.segments import KnowledgeSegmentService
 from actweave_knowledge.segments.service import MAX_SEGMENT_CONTENT_CHARS
 from fastapi import FastAPI
+from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.knowledge import gateway
+from app.projects.capabilities import Capability
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
 from deerflow.persistence.bootstrap import _install_full_schema
 
 # ---------------------------------------------------------------------------
 # Fakes and harness
 # ---------------------------------------------------------------------------
-
-
-class _FakeSecretPort:
-    def protect_api_key(self, configuration_id: uuid.UUID, api_key: str):  # noqa: ANN201
-        from actweave_knowledge import KnowledgeProtectedSecret
-
-        return KnowledgeProtectedSecret(nonce=b"n" * 12, ciphertext=b"c" * 16)
-
-    def materialize_api_key(self, configuration_id: uuid.UUID, secret) -> str:  # noqa: ANN001
-        return "sk-test"
 
 
 class _ScriptedEmbedClient:
@@ -79,6 +73,22 @@ class _ScriptedEmbedClient:
         raise AssertionError("segment governance never reranks")
 
 
+class _RevokedAfterProviderAuthority:
+    """Trusted request authority that is revoked before the write transaction."""
+
+    def __init__(self, project_id: uuid.UUID) -> None:
+        self.project_id = project_id
+        self.actor_user_id = uuid.uuid4()
+        self.calls = 0
+        self.revoked = False
+
+    async def revalidate(self, session: AsyncSession) -> None:
+        del session
+        self.calls += 1
+        if self.revoked:
+            raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "资源不存在")
+
+
 class _Harness:
     def __init__(self, engine, factory, client: _ScriptedEmbedClient, service: KnowledgeSegmentService) -> None:  # noqa: ANN001
         self.engine = engine
@@ -97,7 +107,7 @@ async def _harness(postgres_database_url: str, **settings_overrides: object) -> 
         session_factory=factory,
         settings=settings,
         client=client,  # type: ignore[arg-type]
-        secret_port=_FakeSecretPort(),
+        model_port=registry_model_port(),
     )
     return _Harness(engine, factory, client, service)
 
@@ -130,28 +140,10 @@ async def _seed_project(session: AsyncSession, label: str) -> uuid.UUID:
     return project_id
 
 
-def _configuration_row(*, status: str = "active") -> KnowledgeModelConfigurationRow:
-    configuration_id = uuid.uuid4()
-    return KnowledgeModelConfigurationRow(
-        id=configuration_id,
-        display_name=f"cfg-{configuration_id.hex[:12]}",
-        status=status,
-        base_url="https://provider.invalid/v1",
-        embedding_model="embed-model",
-        embedding_dimension=3,
-        embedding_max_batch=64,
-        reranker_model="rerank-model",
-        reranker_max_batch=32,
-        request_timeout_seconds=30,
-        api_key_nonce=b"n" * 12,
-        api_key_ciphertext=b"c" * 16,
-    )
-
-
 class _Seeded(SimpleNamespace):
     project_id: uuid.UUID
     base_id: uuid.UUID
-    configuration_id: uuid.UUID
+    embedding_model_id: uuid.UUID
     document_id: uuid.UUID
     segment_ids: list[uuid.UUID]
 
@@ -161,30 +153,29 @@ async def _seed_ready_document(
     *,
     segments: list[str],
     base_status: str = "active",
-    configuration_status: str = "active",
+    model_status: str = "active",
     document_status: str = "ready",
     project_id: uuid.UUID | None = None,
     chunking_mode: str = "general",
     child_chunk_size: int = 500,
     child_chunk_separator: str = "\\n",
 ) -> _Seeded:
-    """Project + configuration + base + one document with ``segments`` on v1.
+    """Project + registry embedding model + base + one document with ``segments`` on v1.
 
     In ``parent_child`` mode parents get NULL embeddings and one seeded child
     row each, mirroring what the ingestion pipeline publishes.
     """
 
+    provider_id = await seed_provider(harness.factory)
+    embedding_model_id = await seed_embedding_model(harness.factory, provider_id, status=model_status, dimension=3)
     async with harness.factory() as session, session.begin():
         if project_id is None:
             project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-        configuration = _configuration_row(status=configuration_status)
-        session.add(configuration)
-        await session.flush()
         base = KnowledgeBaseRow(
             id=uuid.uuid4(),
             project_id=project_id,
             name=f"base-{uuid.uuid4().hex[:6]}",
-            model_configuration_id=configuration.id,
+            embedding_model_id=embedding_model_id,
             status=base_status,
         )
         session.add(base)
@@ -246,7 +237,7 @@ async def _seed_ready_document(
     return _Seeded(
         project_id=project_id,
         base_id=base.id,
-        configuration_id=configuration.id,
+        embedding_model_id=embedding_model_id,
         document_id=document_id,
         segment_ids=segment_ids,
     )
@@ -388,6 +379,54 @@ async def test_update_segment_conflicts_when_version_moves_during_embedding(post
         await harness.engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_update_segment_revalidates_authority_after_embedding_before_commit(postgres_database_url: str) -> None:
+    """Revocation during Provider I/O must prevent the edited content from publishing."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        seeded = await _seed_ready_document(harness, segments=["第一段"])
+        authority = _RevokedAfterProviderAuthority(seeded.project_id)
+        module = KnowledgeModule(
+            settings=KnowledgeSettings.model_validate(
+                {
+                    "enabled": True,
+                    "minio": {
+                        "endpoint": "127.0.0.1:9000",
+                        "bucket": "authority-test",
+                        "access_key": "test-access",
+                        "secret_key": "test-secret",
+                    },
+                }
+            ),
+            session_factory=harness.factory,
+            model_port=registry_model_port(),
+            model_client=harness.client,  # type: ignore[arg-type]
+        )
+
+        async def _revoke_during_embedding() -> None:
+            authority.revoked = True
+
+        harness.client.before_embed = _revoke_during_embedding
+
+        with pytest.raises(KnowledgeError) as error:
+            await module.update_segment(
+                seeded.project_id,
+                seeded.segment_ids[0],
+                KnowledgeSegmentUpdate(content="不应发布的内容"),
+                authority=authority,
+            )
+
+        assert error.value.code == KNOWLEDGE_NOT_FOUND
+        assert authority.calls == 3
+        assert harness.client.embed_calls == [["不应发布的内容"]]
+        segment = await _segment_row_of(harness, seeded.segment_ids[0])
+        assert segment is not None
+        assert segment.content == "第一段"
+    finally:
+        await harness.engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # Manual segments
 # ---------------------------------------------------------------------------
@@ -430,7 +469,7 @@ async def test_create_segment_enforces_document_quota(postgres_database_url: str
 
 
 @pytest.mark.asyncio
-async def test_create_segment_requires_active_base_and_configuration(postgres_database_url: str) -> None:
+async def test_create_segment_requires_active_base_and_model(postgres_database_url: str) -> None:
     harness = await _harness(postgres_database_url)
     try:
         disabled_base = await _seed_ready_document(harness, segments=["第一段"], base_status="disabled")
@@ -438,9 +477,9 @@ async def test_create_segment_requires_active_base_and_configuration(postgres_da
             await harness.service.create_segment(disabled_base.project_id, disabled_base.document_id, KnowledgeSegmentCreate(content="内容"))
         assert error.value.code == KNOWLEDGE_INVALID_REQUEST
 
-        disabled_configuration = await _seed_ready_document(harness, segments=["第一段"], configuration_status="disabled")
+        disabled_model = await _seed_ready_document(harness, segments=["第一段"], model_status="disabled")
         with pytest.raises(KnowledgeError) as error:
-            await harness.service.create_segment(disabled_configuration.project_id, disabled_configuration.document_id, KnowledgeSegmentCreate(content="内容"))
+            await harness.service.create_segment(disabled_model.project_id, disabled_model.document_id, KnowledgeSegmentCreate(content="内容"))
         assert error.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
         assert harness.client.embed_calls == []
     finally:
@@ -518,6 +557,124 @@ async def test_create_segment_in_parent_child_document_embeds_children_only(post
         assert harness.client.embed_calls == [[child.content for child in children]]
         document = await _document_row_of(harness, seeded.document_id)
         assert document.segment_count == 2
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_create_parent_child_segment_enforces_vector_entry_budget_before_embedding(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(
+        postgres_database_url,
+        max_segments_per_document=2,
+    )
+    try:
+        seeded = await _seed_ready_document(
+            harness,
+            segments=["既有父块"],
+            chunking_mode="parent_child",
+            child_chunk_size=100,
+        )
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.create_segment(
+                seeded.project_id,
+                seeded.document_id,
+                KnowledgeSegmentCreate(content="新" * 250),
+            )
+
+        assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
+        assert "向量条目" in error.value.message
+        assert harness.client.embed_calls == []
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_update_parent_child_segment_enforces_total_vector_budget_before_embedding(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(
+        postgres_database_url,
+        max_segments_per_document=2,
+    )
+    try:
+        seeded = await _seed_ready_document(
+            harness,
+            segments=["父块一", "父块二"],
+            chunking_mode="parent_child",
+            child_chunk_size=100,
+        )
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.update_segment(
+                seeded.project_id,
+                seeded.segment_ids[0],
+                KnowledgeSegmentUpdate(content="替换" * 80),
+            )
+
+        assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
+        assert "向量条目" in error.value.message
+        assert harness.client.embed_calls == []
+        segment = await _segment_row_of(harness, seeded.segment_ids[0])
+        assert segment is not None and segment.content == "父块一"
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_update_parent_child_segment_rechecks_vector_budget_after_embedding(
+    postgres_database_url: str,
+) -> None:
+    """A concurrent manual edit cannot consume the budget during Provider I/O."""
+
+    harness = await _harness(
+        postgres_database_url,
+        max_segments_per_document=3,
+    )
+    try:
+        seeded = await _seed_ready_document(
+            harness,
+            segments=["父块一", "父块二"],
+            chunking_mode="parent_child",
+            child_chunk_size=100,
+        )
+
+        async def _consume_last_entry() -> None:
+            async with harness.factory() as session, session.begin():
+                sibling = await session.get(
+                    KnowledgeSegmentRow,
+                    seeded.segment_ids[1],
+                )
+                assert sibling is not None
+                session.add(
+                    KnowledgeSegmentChildRow(
+                        id=uuid.uuid4(),
+                        project_id=seeded.project_id,
+                        knowledge_base_id=seeded.base_id,
+                        knowledge_document_id=seeded.document_id,
+                        knowledge_segment_id=sibling.id,
+                        document_version=1,
+                        position=2,
+                        content="并发新增子块",
+                        word_count=len("并发新增子块"),
+                        embedding=[1.0, 0.0, 0.0],
+                    )
+                )
+
+        harness.client.before_embed = _consume_last_entry
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.update_segment(
+                seeded.project_id,
+                seeded.segment_ids[0],
+                KnowledgeSegmentUpdate(content="新" * 150),
+            )
+
+        assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
+        assert len(harness.client.embed_calls) == 1
+        segment = await _segment_row_of(harness, seeded.segment_ids[0])
+        assert segment is not None and segment.content == "父块一"
     finally:
         await harness.engine.dispose()
 
@@ -741,30 +898,36 @@ class _FakeModule:
         if self.error is not None:
             raise self.error
 
-    async def rename_document(self, project_id, document_id, name):  # noqa: ANN001
+    async def rename_document(self, project_id, document_id, name, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("rename", (project_id, document_id, name))
         return _document_view(name=name)
 
-    async def set_documents_enabled(self, project_id, document_ids, enabled):  # noqa: ANN001
+    async def set_documents_enabled(self, project_id, document_ids, enabled, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("batch_status", (project_id, list(document_ids), enabled))
         return [_document_view(id=document_id, enabled=enabled) for document_id in document_ids]
 
-    async def delete_documents(self, project_id, document_ids):  # noqa: ANN001
+    async def delete_documents(self, project_id, document_ids, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("batch_delete", (project_id, list(document_ids)))
         return [_document_view(id=document_id, status="deleting", version=2) for document_id in document_ids]
 
-    async def create_segment(self, project_id, document_id, create):  # noqa: ANN001
+    async def create_segment(self, project_id, document_id, create, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("create_segment", (project_id, document_id, create))
         return _segment_view(content=create.content, position=9)
 
-    async def update_segment(self, project_id, segment_id, update):  # noqa: ANN001
+    async def update_segment(self, project_id, segment_id, update, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("update_segment", (project_id, segment_id, update))
         return _segment_view(
             content=update.content if update.content is not None else "分段内容",
             enabled=update.enabled if update.enabled is not None else True,
         )
 
-    async def delete_segment(self, project_id, segment_id):  # noqa: ANN001
+    async def delete_segment(self, project_id, segment_id, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("delete_segment", (project_id, segment_id))
         return _document_view(segment_count=0, word_count=0)
 
@@ -772,7 +935,15 @@ class _FakeModule:
 def _app(module: _FakeModule) -> FastAPI:
     app = FastAPI()
     app.include_router(gateway.project_router)
-    context = SimpleNamespace(project_id=_PROJECT_ID, request_id=_REQUEST_ID)
+    context = ProjectContext(
+        user_id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
+        project_id=_PROJECT_ID,
+        membership_id=uuid.UUID("99999999-9999-4999-8999-999999999999"),
+        role=ProjectRole.ADMIN,
+        capabilities=frozenset(Capability),
+        membership_version=1,
+        request_id=_REQUEST_ID,
+    )
     app.dependency_overrides[gateway.require_project_knowledge_read] = lambda: context
     app.dependency_overrides[gateway.require_project_knowledge_edit] = lambda: context
     app.state.knowledge_module = module

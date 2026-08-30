@@ -107,7 +107,7 @@ _Avoid_: Backup, lifecycle archive
 ## Knowledge assets
 
 **Knowledge Base**:
-A Project-shared collection of Knowledge Documents that selects one Knowledge Model Configuration for indexing and search.
+A Project-shared collection of Knowledge Documents that binds one embedding Provider Model for indexing and search, and optionally one reranker Provider Model for result ordering.
 _Avoid_: Dataset, vector table
 
 **Knowledge Document**:
@@ -138,9 +138,13 @@ _Avoid_: complete source document
 A logged retrieval request against a Project's Knowledge Bases, recording its source, result count, and top score for hit statistics.
 _Avoid_: chat message, Run
 
-**Knowledge Model Configuration**:
-A platform-administered retrieval profile that binds one Embedding model and one Reranker model to the same provider endpoint and Configuration Secret. A Knowledge Base selects one Knowledge Model Configuration for indexing, candidate retrieval, and reranking. It is distinct from the System Model Configuration used for Agent model execution.
-_Avoid_: System Model Configuration, embedding provider row, reranker provider row
+**Model Provider**:
+A platform-administered retrieval-model vendor in the host model registry: a display name, an OpenAI-compatible endpoint, and one write-only API key held as its Configuration Secret. It owns Provider Models. It is not a System Model Configuration and carries no `provider_adapter`; those concepts belong to Agent model execution.
+_Avoid_: Knowledge Model Configuration, provider adapter, System Model Configuration
+
+**Provider Model**:
+One typed model under a Model Provider: embedding (with a fixed vector dimension) or reranker. A Knowledge Base binds exactly one embedding Provider Model — changed only through rebuild — and at most one reranker Provider Model, effective on save. A Provider Model referenced by any Knowledge Base is in use, and neither it nor its Model Provider can be disabled or deleted.
+_Avoid_: Knowledge Model Configuration, model configuration row
 
 ## Configuration secrets
 

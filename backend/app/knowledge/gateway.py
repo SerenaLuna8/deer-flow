@@ -1,9 +1,11 @@
-"""Knowledge HTTP adapters: admin model management and project model options.
+"""Knowledge HTTP adapters: project routes over the Knowledge module.
 
-Admin routes reuse the platform system-admin gate; the project route reuses
-server-resolved project context with ``shared_assets.read``. Handlers stay
-thin: authorization first, then one :class:`KnowledgeModule` call, then a
-``{code, message, request_id}`` error body on :class:`KnowledgeError`.
+Every route reuses server-resolved project context with ``shared_assets.read``
+or ``shared_assets.edit``. Handlers stay thin: authorization first, then one
+:class:`KnowledgeModule` call, then a ``{code, message, request_id}`` error
+body on :class:`KnowledgeError`. Retrieval model administration lives in
+``app.model_registry.gateway``; the project surface here only reads the
+registry's active options for binding.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from actweave_knowledge import (
     KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR,
     KNOWLEDGE_DISABLED,
     KNOWLEDGE_EMBEDDING_FAILED,
+    KNOWLEDGE_FORBIDDEN,
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_NAME_CONFLICT,
@@ -42,10 +45,6 @@ from actweave_knowledge import (
     KnowledgeError,
     KnowledgeMetadataFieldView,
     KnowledgeMetadataFilter,
-    KnowledgeModelConfigurationCreate,
-    KnowledgeModelConfigurationUpdate,
-    KnowledgeModelConfigurationView,
-    KnowledgeModelOption,
     KnowledgeModule,
     KnowledgeQueryView,
     KnowledgeSearchRequest,
@@ -55,20 +54,15 @@ from actweave_knowledge import (
 )
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
-from sqlalchemy.exc import DBAPIError
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit.models import AuditAuthorityRejected, SystemAuditContext
-from app.final_schema import (
-    FinalSchemaProbe,
-    FinalSchemaRequired,
-    FinalSchemaUnavailable,
-)
 from app.gateway.deps import get_current_user_from_request, project_session
-from app.gateway.routers.admin_operations import (
-    AdminOperationsRoute,
-    authenticated_system_identity,
+from app.knowledge.authority import ProjectKnowledgeAuthority
+from app.model_registry.service import (
+    RetrievalModelOption,
+    list_active_retrieval_model_options,
 )
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext, resolve_project_context
@@ -77,27 +71,12 @@ from app.projects.errors import (
     ProjectForbidden,
     ProjectNotFound,
 )
-from app.reliability.error_mapping import reliability_http_exception
-from app.reliability.errors import (
-    ReliabilityDatabaseUnavailable,
-    ReliabilityNotFound,
-)
-from app.reliability.operations import resolve_current_system_audit_context
 from deerflow.trace_context import generate_trace_id, get_current_trace_id, normalize_trace_id
 
-admin_router = APIRouter(
-    prefix="/api/admin/knowledge/models",
-    tags=["admin-knowledge-models"],
-    route_class=AdminOperationsRoute,
-)
 project_router = APIRouter(
     prefix="/api/projects/{project_id}/knowledge",
     tags=["project-knowledge"],
 )
-
-# Capability gaps are a host authorization concern, so this code lives with
-# the Gateway adapter rather than the host-agnostic package error catalog.
-KNOWLEDGE_FORBIDDEN = "KNOWLEDGE_FORBIDDEN"
 
 _HTTP_STATUS_BY_CODE = {
     KNOWLEDGE_DISABLED: 404,
@@ -148,28 +127,12 @@ def get_knowledge_module(request: Request) -> KnowledgeModule:
     return module
 
 
-async def require_knowledge_admin_context(
-    identity: Annotated[
-        tuple[uuid.UUID, str],
-        Depends(authenticated_system_identity),
-    ],
-    session: Annotated[AsyncSession, Depends(project_session)],
-) -> SystemAuditContext:
-    """Authorize a platform system admin exactly like other admin settings."""
+def _knowledge_read_authority(context: ProjectContext) -> ProjectKnowledgeAuthority:
+    return ProjectKnowledgeAuthority(context, Capability.SHARED_ASSETS_READ)
 
-    try:
-        async with session.begin():
-            context = await resolve_current_system_audit_context(
-                session,
-                identity[0],
-                identity[1],
-            )
-            await FinalSchemaProbe().require_ready(session)
-            return context
-    except AuditAuthorityRejected:
-        raise reliability_http_exception(ReliabilityNotFound(identity[1])) from None
-    except (DBAPIError, FinalSchemaRequired, FinalSchemaUnavailable, RuntimeError):
-        raise reliability_http_exception(ReliabilityDatabaseUnavailable(identity[1])) from None
+
+def _knowledge_edit_authority(context: ProjectContext) -> ProjectKnowledgeAuthority:
+    return ProjectKnowledgeAuthority(context, Capability.SHARED_ASSETS_EDIT)
 
 
 async def _authenticated_identity(
@@ -326,101 +289,26 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class KnowledgeModelCreateRequest(_StrictModel):
-    display_name: str
-    base_url: str
-    embedding_model: str
-    embedding_dimension: int
-    embedding_max_batch: int = 64
-    reranker_model: str
-    reranker_max_batch: int = 32
-    request_timeout_seconds: int = 30
-    api_key: SecretStr
-
-    @field_validator("api_key")
-    @classmethod
-    def require_non_empty_api_key(cls, value: SecretStr) -> SecretStr:
-        if not value.get_secret_value():
-            raise ValueError("api_key must not be empty")
-        return value
-
-
-class KnowledgeModelUpdateRequest(_StrictModel):
-    display_name: str | None = None
-    status: Literal["active", "disabled"] | None = None
-    base_url: str | None = None
-    embedding_model: str | None = None
-    embedding_dimension: int | None = None
-    embedding_max_batch: int | None = None
-    reranker_model: str | None = None
-    reranker_max_batch: int | None = None
-    request_timeout_seconds: int | None = None
-    api_key: SecretStr | None = None
-
-    @field_validator("api_key")
-    @classmethod
-    def require_non_empty_api_key(cls, value: SecretStr | None) -> SecretStr | None:
-        if value is not None and not value.get_secret_value():
-            raise ValueError("api_key must not be empty")
-        return value
-
-
-class KnowledgeModelItemResponse(_StrictModel):
-    id: uuid.UUID
-    display_name: str
-    status: Literal["active", "disabled"]
-    base_url: str
-    embedding_model: str
-    embedding_dimension: int
-    embedding_max_batch: int
-    reranker_model: str
-    reranker_max_batch: int
-    request_timeout_seconds: int
-    in_use: bool
-    created_at: datetime
-    updated_at: datetime
-
-
-class KnowledgeModelListResponse(_StrictModel):
-    items: list[KnowledgeModelItemResponse]
-    total: int
-    page: int
-    page_size: int
-    request_id: str
-
-
-class KnowledgeModelMutationResponse(_StrictModel):
-    item: KnowledgeModelItemResponse
-    request_id: str
-
-
-class KnowledgeModelDeleteResponse(_StrictModel):
-    request_id: str
-
-
-class KnowledgeModelTestResponse(_StrictModel):
-    ok: bool
-    message: str
-    request_id: str
-
-
 class KnowledgeModelOptionResponse(_StrictModel):
+    """One active registry model a member may bind to a Knowledge Base."""
+
     id: uuid.UUID
-    display_name: str
-    embedding_model: str
-    embedding_dimension: int
-    reranker_model: str
+    provider_name: str
+    model_name: str
+    embedding_dimension: int | None
 
 
 class KnowledgeModelOptionsResponse(_StrictModel):
-    items: list[KnowledgeModelOptionResponse]
+    embedding_models: list[KnowledgeModelOptionResponse]
+    reranker_models: list[KnowledgeModelOptionResponse]
     request_id: str
 
 
 class KnowledgeBaseCreateRequest(_StrictModel):
     name: str
     # UUIDs arrive as JSON strings; strict mode would reject the coercion.
-    model_configuration_id: Annotated[uuid.UUID, Field(strict=False)]
+    embedding_model_id: Annotated[uuid.UUID, Field(strict=False)]
+    reranker_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
     description: str = ""
 
 
@@ -431,13 +319,16 @@ class KnowledgeBaseUpdateRequest(_StrictModel):
     default_top_k: int | None = None
     # Integers (e.g. 0) are valid thresholds; strict float would reject them.
     default_score_threshold: Annotated[float, Field(strict=False)] | None = None
+    # Optional reranker rebinding: set an ID, or clear the binding entirely.
+    reranker_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
+    clear_reranker_model: bool = False
 
 
 class KnowledgeBaseRebuildRequest(_StrictModel):
-    """Rebind the base to a model configuration and re-embed every document."""
+    """Rebind the base to an embedding model and re-embed every document."""
 
     # UUIDs arrive as JSON strings; strict mode would reject the coercion.
-    model_configuration_id: Annotated[uuid.UUID, Field(strict=False)]
+    embedding_model_id: Annotated[uuid.UUID, Field(strict=False)]
 
 
 class KnowledgeBaseItemResponse(_StrictModel):
@@ -445,7 +336,8 @@ class KnowledgeBaseItemResponse(_StrictModel):
     project_id: uuid.UUID
     name: str
     description: str
-    model_configuration_id: uuid.UUID
+    embedding_model_id: uuid.UUID
+    reranker_model_id: uuid.UUID | None
     status: Literal["active", "disabled", "deleting"]
     document_count: int
     default_top_k: int
@@ -710,31 +602,12 @@ class KnowledgeHealthResponse(_StrictModel):
     request_id: str
 
 
-def _item_response(view: KnowledgeModelConfigurationView) -> KnowledgeModelItemResponse:
-    return KnowledgeModelItemResponse(
-        id=view.id,
-        display_name=view.display_name,
-        status=view.status,
-        base_url=view.base_url,
-        embedding_model=view.embedding_model,
-        embedding_dimension=view.embedding_dimension,
-        embedding_max_batch=view.embedding_max_batch,
-        reranker_model=view.reranker_model,
-        reranker_max_batch=view.reranker_max_batch,
-        request_timeout_seconds=view.request_timeout_seconds,
-        in_use=view.in_use,
-        created_at=view.created_at,
-        updated_at=view.updated_at,
-    )
-
-
-def _option_response(option: KnowledgeModelOption) -> KnowledgeModelOptionResponse:
+def _option_response(option: RetrievalModelOption) -> KnowledgeModelOptionResponse:
     return KnowledgeModelOptionResponse(
         id=option.id,
-        display_name=option.display_name,
-        embedding_model=option.embedding_model,
+        provider_name=option.provider_name,
+        model_name=option.model_name,
         embedding_dimension=option.embedding_dimension,
-        reranker_model=option.reranker_model,
     )
 
 
@@ -744,7 +617,8 @@ def _base_response(view: KnowledgeBaseView) -> KnowledgeBaseItemResponse:
         project_id=view.project_id,
         name=view.name,
         description=view.description,
-        model_configuration_id=view.model_configuration_id,
+        embedding_model_id=view.embedding_model_id,
+        reranker_model_id=view.reranker_model_id,
         status=view.status,
         document_count=view.document_count,
         default_top_k=view.default_top_k,
@@ -797,116 +671,32 @@ def _metadata_field_response(view: KnowledgeMetadataFieldView) -> KnowledgeMetad
     )
 
 
-@admin_router.get("", response_model=KnowledgeModelListResponse)
-async def list_knowledge_models(
-    context: Annotated[SystemAuditContext, Depends(require_knowledge_admin_context)],
-    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
-    page: Annotated[int, Query(ge=1)] = 1,
-    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
-) -> KnowledgeModelListResponse:
-    try:
-        views, total = await module.list_model_configurations(page=page, page_size=page_size)
-    except KnowledgeError as error:
-        raise knowledge_http_exception(error, context.request_id) from None
-    return KnowledgeModelListResponse(
-        items=[_item_response(view) for view in views],
-        total=total,
-        page=page,
-        page_size=page_size,
-        request_id=context.request_id,
-    )
-
-
-@admin_router.post("", response_model=KnowledgeModelMutationResponse)
-async def create_knowledge_model(
-    body: KnowledgeModelCreateRequest,
-    context: Annotated[SystemAuditContext, Depends(require_knowledge_admin_context)],
-    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
-) -> KnowledgeModelMutationResponse:
-    try:
-        view = await module.create_model_configuration(
-            KnowledgeModelConfigurationCreate(
-                display_name=body.display_name,
-                base_url=body.base_url,
-                embedding_model=body.embedding_model,
-                embedding_dimension=body.embedding_dimension,
-                embedding_max_batch=body.embedding_max_batch,
-                reranker_model=body.reranker_model,
-                reranker_max_batch=body.reranker_max_batch,
-                request_timeout_seconds=body.request_timeout_seconds,
-                api_key=body.api_key.get_secret_value(),
-            )
-        )
-    except KnowledgeError as error:
-        raise knowledge_http_exception(error, context.request_id) from None
-    return KnowledgeModelMutationResponse(item=_item_response(view), request_id=context.request_id)
-
-
-@admin_router.patch("/{configuration_id}", response_model=KnowledgeModelMutationResponse)
-async def update_knowledge_model(
-    configuration_id: uuid.UUID,
-    body: KnowledgeModelUpdateRequest,
-    context: Annotated[SystemAuditContext, Depends(require_knowledge_admin_context)],
-    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
-) -> KnowledgeModelMutationResponse:
-    try:
-        view = await module.update_model_configuration(
-            configuration_id,
-            KnowledgeModelConfigurationUpdate(
-                display_name=body.display_name,
-                status=body.status,
-                base_url=body.base_url,
-                embedding_model=body.embedding_model,
-                embedding_dimension=body.embedding_dimension,
-                embedding_max_batch=body.embedding_max_batch,
-                reranker_model=body.reranker_model,
-                reranker_max_batch=body.reranker_max_batch,
-                request_timeout_seconds=body.request_timeout_seconds,
-                api_key=(body.api_key.get_secret_value() if body.api_key is not None else None),
-            ),
-        )
-    except KnowledgeError as error:
-        raise knowledge_http_exception(error, context.request_id) from None
-    return KnowledgeModelMutationResponse(item=_item_response(view), request_id=context.request_id)
-
-
-@admin_router.delete("/{configuration_id}", response_model=KnowledgeModelDeleteResponse)
-async def delete_knowledge_model(
-    configuration_id: uuid.UUID,
-    context: Annotated[SystemAuditContext, Depends(require_knowledge_admin_context)],
-    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
-) -> KnowledgeModelDeleteResponse:
-    try:
-        await module.delete_model_configuration(configuration_id)
-    except KnowledgeError as error:
-        raise knowledge_http_exception(error, context.request_id) from None
-    return KnowledgeModelDeleteResponse(request_id=context.request_id)
-
-
-@admin_router.post("/{configuration_id}/test", response_model=KnowledgeModelTestResponse)
-async def test_knowledge_model(
-    configuration_id: uuid.UUID,
-    context: Annotated[SystemAuditContext, Depends(require_knowledge_admin_context)],
-    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
-) -> KnowledgeModelTestResponse:
-    try:
-        result = await module.test_model_configuration(configuration_id)
-    except KnowledgeError as error:
-        raise knowledge_http_exception(error, context.request_id) from None
-    return KnowledgeModelTestResponse(ok=result.ok, message=result.message, request_id=context.request_id)
-
-
 @project_router.get("/model-options", response_model=KnowledgeModelOptionsResponse)
 async def list_knowledge_model_options(
     context: Annotated[ProjectContext, Depends(require_project_knowledge_read)],
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+    session: Annotated[AsyncSession, Depends(project_session)],
 ) -> KnowledgeModelOptionsResponse:
+    """Active registry models members may bind; admin metadata stays hidden."""
+
+    del module  # Resolved only to 404 when the Knowledge feature is disabled.
+    authority = _knowledge_read_authority(context)
     try:
-        options = await module.list_active_model_options()
+        async with session.begin():
+            # Same-transaction membership re-check: a member revoked between
+            # context issuance and use must not keep reading this surface.
+            await authority.revalidate(session)
+            embedding, rerank = await list_active_retrieval_model_options(session)
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
+    except SQLAlchemyError:
+        raise knowledge_http_exception(
+            KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "Knowledge 存储暂时不可用"),
+            context.request_id,
+        ) from None
     return KnowledgeModelOptionsResponse(
-        items=[_option_response(option) for option in options],
+        embedding_models=[_option_response(option) for option in embedding],
+        reranker_models=[_option_response(option) for option in rerank],
         request_id=context.request_id,
     )
 
@@ -917,7 +707,7 @@ async def knowledge_health(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeHealthResponse:
     try:
-        health = await module.health()
+        health = await module.health(authority=_knowledge_read_authority(context))
     except KnowledgeError as error:  # pragma: no cover - health() reports, not raises
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeHealthResponse(
@@ -940,9 +730,11 @@ async def create_knowledge_base(
             context.project_id,
             KnowledgeBaseCreate(
                 name=body.name,
-                model_configuration_id=body.model_configuration_id,
+                embedding_model_id=body.embedding_model_id,
+                reranker_model_id=body.reranker_model_id,
                 description=body.description,
             ),
+            authority=_knowledge_edit_authority(context),
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
@@ -957,7 +749,12 @@ async def list_knowledge_bases(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> KnowledgeBaseListResponse:
     try:
-        views, total = await module.list_knowledge_bases(context.project_id, page=page, page_size=page_size)
+        views, total = await module.list_knowledge_bases(
+            context.project_id,
+            page=page,
+            page_size=page_size,
+            authority=_knowledge_read_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeBaseListResponse(
@@ -976,7 +773,11 @@ async def get_knowledge_base(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeBaseMutationResponse:
     try:
-        view = await module.get_knowledge_base(context.project_id, base_id)
+        view = await module.get_knowledge_base(
+            context.project_id,
+            base_id,
+            authority=_knowledge_read_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeBaseMutationResponse(item=_base_response(view), request_id=context.request_id)
@@ -999,7 +800,10 @@ async def update_knowledge_base(
                 status=body.status,
                 default_top_k=body.default_top_k,
                 default_score_threshold=body.default_score_threshold,
+                reranker_model_id=body.reranker_model_id,
+                clear_reranker_model=body.clear_reranker_model,
             ),
+            authority=_knowledge_edit_authority(context),
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
@@ -1013,13 +817,14 @@ async def rebuild_knowledge_base(
     context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeBaseMutationResponse:
-    """Rebind the model configuration and queue every document for re-embedding."""
+    """Rebind the embedding model and queue every document for re-embedding."""
 
     try:
         view = await module.rebuild_knowledge_base(
             context.project_id,
             base_id,
-            model_configuration_id=body.model_configuration_id,
+            embedding_model_id=body.embedding_model_id,
+            authority=_knowledge_edit_authority(context),
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
@@ -1033,7 +838,11 @@ async def list_knowledge_metadata_fields(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeMetadataFieldListResponse:
     try:
-        views = await module.list_metadata_fields(context.project_id, base_id)
+        views = await module.list_metadata_fields(
+            context.project_id,
+            base_id,
+            authority=_knowledge_read_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeMetadataFieldListResponse(
@@ -1055,6 +864,7 @@ async def create_knowledge_metadata_field(
             base_id,
             name=body.name,
             field_type=body.field_type,
+            authority=_knowledge_edit_authority(context),
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
@@ -1071,7 +881,12 @@ async def rename_knowledge_metadata_field(
     """Rename the field; document metadata keys follow in the same transaction."""
 
     try:
-        view = await module.rename_metadata_field(context.project_id, field_id, name=body.name)
+        view = await module.rename_metadata_field(
+            context.project_id,
+            field_id,
+            name=body.name,
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeMetadataFieldMutationResponse(item=_metadata_field_response(view), request_id=context.request_id)
@@ -1086,7 +901,11 @@ async def delete_knowledge_metadata_field(
     """Drop the field and strip its key from the base's documents."""
 
     try:
-        await module.delete_metadata_field(context.project_id, field_id)
+        await module.delete_metadata_field(
+            context.project_id,
+            field_id,
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeMetadataFieldDeleteResponse(request_id=context.request_id)
@@ -1100,7 +919,12 @@ async def set_knowledge_document_metadata(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeDocumentMutationResponse:
     try:
-        view = await module.set_document_metadata(context.project_id, document_id, dict(body.values))
+        view = await module.set_document_metadata(
+            context.project_id,
+            document_id,
+            dict(body.values),
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
@@ -1158,6 +982,7 @@ async def upload_knowledge_document(
                 child_chunk_size=child_chunk_size,
                 child_chunk_separator=child_chunk_separator,
             ),
+            authority=_knowledge_edit_authority(context),
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
@@ -1208,7 +1033,8 @@ async def preview_knowledge_chunks(
                 chunking_mode=chunking_mode,  # type: ignore[arg-type]  # validated by the package
                 child_chunk_size=child_chunk_size,
                 child_chunk_separator=child_chunk_separator,
-            )
+            ),
+            authority=_knowledge_edit_authority(context),
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
@@ -1238,7 +1064,13 @@ async def list_knowledge_documents(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> KnowledgeDocumentListResponse:
     try:
-        views, total = await module.list_documents(context.project_id, base_id, page=page, page_size=page_size)
+        views, total = await module.list_documents(
+            context.project_id,
+            base_id,
+            page=page,
+            page_size=page_size,
+            authority=_knowledge_read_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentListResponse(
@@ -1257,7 +1089,11 @@ async def get_knowledge_document(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeDocumentMutationResponse:
     try:
-        view = await module.get_document(context.project_id, document_id)
+        view = await module.get_document(
+            context.project_id,
+            document_id,
+            authority=_knowledge_read_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
@@ -1271,7 +1107,12 @@ async def download_knowledge_document(
 ) -> FileResponse:
     target_path = await _new_request_temp_path()
     try:
-        view = await module.download_document(context.project_id, document_id, target_path)
+        view = await module.download_document(
+            context.project_id,
+            document_id,
+            target_path,
+            authority=_knowledge_read_authority(context),
+        )
     except KnowledgeError as error:
         await _remove_request_temp_path(target_path)
         raise knowledge_http_exception(error, context.request_id) from None
@@ -1292,7 +1133,11 @@ async def delete_knowledge_base(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeBaseMutationResponse:
     try:
-        view = await module.delete_knowledge_base(context.project_id, base_id)
+        view = await module.delete_knowledge_base(
+            context.project_id,
+            base_id,
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeBaseMutationResponse(item=_base_response(view), request_id=context.request_id)
@@ -1305,7 +1150,11 @@ async def delete_knowledge_document(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeDocumentMutationResponse:
     try:
-        view = await module.delete_document(context.project_id, document_id)
+        view = await module.delete_document(
+            context.project_id,
+            document_id,
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
@@ -1318,7 +1167,11 @@ async def retry_knowledge_document(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeDocumentMutationResponse:
     try:
-        view = await module.retry_document(context.project_id, document_id)
+        view = await module.retry_document(
+            context.project_id,
+            document_id,
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
@@ -1332,7 +1185,12 @@ async def rename_knowledge_document(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeDocumentMutationResponse:
     try:
-        view = await module.rename_document(context.project_id, document_id, body.name)
+        view = await module.rename_document(
+            context.project_id,
+            document_id,
+            body.name,
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
@@ -1345,7 +1203,12 @@ async def set_knowledge_documents_enabled(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeDocumentBatchResponse:
     try:
-        views = await module.set_documents_enabled(context.project_id, list(body.document_ids), body.enabled)
+        views = await module.set_documents_enabled(
+            context.project_id,
+            list(body.document_ids),
+            body.enabled,
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentBatchResponse(
@@ -1361,7 +1224,11 @@ async def delete_knowledge_documents(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeDocumentBatchResponse:
     try:
-        views = await module.delete_documents(context.project_id, list(body.document_ids))
+        views = await module.delete_documents(
+            context.project_id,
+            list(body.document_ids),
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentBatchResponse(
@@ -1378,7 +1245,12 @@ async def create_knowledge_segment(
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
 ) -> KnowledgeSegmentMutationResponse:
     try:
-        view = await module.create_segment(context.project_id, document_id, KnowledgeSegmentCreate(content=body.content))
+        view = await module.create_segment(
+            context.project_id,
+            document_id,
+            KnowledgeSegmentCreate(content=body.content),
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeSegmentMutationResponse(item=_segment_response(view), request_id=context.request_id)
@@ -1396,6 +1268,7 @@ async def update_knowledge_segment(
             context.project_id,
             segment_id,
             KnowledgeSegmentUpdate(content=body.content, enabled=body.enabled),
+            authority=_knowledge_edit_authority(context),
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
@@ -1411,7 +1284,11 @@ async def delete_knowledge_segment(
     """Remove one segment; the response carries the updated parent document."""
 
     try:
-        view = await module.delete_segment(context.project_id, segment_id)
+        view = await module.delete_segment(
+            context.project_id,
+            segment_id,
+            authority=_knowledge_edit_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
@@ -1426,7 +1303,13 @@ async def list_knowledge_document_segments(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> KnowledgeSegmentListResponse:
     try:
-        views, total = await module.list_document_segments(context.project_id, document_id, page=page, page_size=page_size)
+        views, total = await module.list_document_segments(
+            context.project_id,
+            document_id,
+            page=page,
+            page_size=page_size,
+            authority=_knowledge_read_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeSegmentListResponse(
@@ -1464,13 +1347,15 @@ async def search_knowledge(
         result = await module.search(
             KnowledgeSearchRequest(
                 project_id=context.project_id,
+                owner_user_id=context.user_id,
                 query=body.query,
                 knowledge_base_ids=(tuple(body.knowledge_base_ids) if body.knowledge_base_ids is not None else None),
                 top_k=body.top_k,
                 score_threshold=body.score_threshold,
                 source="retrieval_test",
                 metadata_filters=(tuple(KnowledgeMetadataFilter(name=item.name, operator=item.operator, value=item.value) for item in body.metadata_filters) if body.metadata_filters is not None else None),
-            )
+            ),
+            authority=_knowledge_read_authority(context),
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
@@ -1491,7 +1376,14 @@ async def list_knowledge_base_queries(
     """Recent retrieval queries that targeted this base, newest first."""
 
     try:
-        views, total = await module.list_recent_queries(context.project_id, base_id, page=page, page_size=page_size)
+        views, total = await module.list_recent_queries(
+            context.project_id,
+            context.user_id,
+            base_id,
+            page=page,
+            page_size=page_size,
+            authority=_knowledge_read_authority(context),
+        )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeQueryListResponse(
@@ -1552,14 +1444,8 @@ __all__ = [
     "KnowledgeMetadataFieldMutationResponse",
     "KnowledgeMetadataFieldRenameRequest",
     "KnowledgeMetadataFilterBody",
-    "KnowledgeModelCreateRequest",
-    "KnowledgeModelDeleteResponse",
-    "KnowledgeModelItemResponse",
-    "KnowledgeModelListResponse",
-    "KnowledgeModelMutationResponse",
+    "KnowledgeModelOptionResponse",
     "KnowledgeModelOptionsResponse",
-    "KnowledgeModelTestResponse",
-    "KnowledgeModelUpdateRequest",
     "KnowledgeQueryItemResponse",
     "KnowledgeQueryListResponse",
     "KnowledgeSearchRequestBody",
@@ -1570,11 +1456,9 @@ __all__ = [
     "KnowledgeSegmentListResponse",
     "KnowledgeSegmentMutationResponse",
     "KnowledgeSegmentUpdateRequest",
-    "admin_router",
     "get_knowledge_module",
     "knowledge_http_exception",
     "project_router",
-    "require_knowledge_admin_context",
     "require_project_knowledge_edit",
     "require_project_knowledge_read",
 ]

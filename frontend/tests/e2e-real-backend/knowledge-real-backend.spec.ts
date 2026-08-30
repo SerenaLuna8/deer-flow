@@ -101,12 +101,30 @@ async function createBaseThroughUI(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: "New base" }).click();
   await page.getByRole("button", { name: "Create an empty base" }).click();
   await page.getByLabel("Name").fill(name);
-  await page.getByLabel("Model configuration").click();
-  await page.getByRole("option", { name: "Replay Knowledge Model" }).click();
+  await page.getByLabel("Embedding model").click();
+  await page
+    .getByRole("option", { name: "Replay Knowledge Model · replay/embedding" })
+    .click();
   await page.getByRole("button", { name: "Create", exact: true }).click();
   await expect(
     page.getByTestId("knowledge-base-list").getByText(name),
   ).toBeVisible();
+}
+
+// M9: the wizard binds only the embedding model, so a fresh base retrieves by
+// raw cosine similarity — and the marker segment embeds far from every query,
+// below the 0.2 default threshold. Rerank-contract scenarios therefore bind
+// the replay reranker through the settings panel first (a plain PATCH,
+// effective on save, no rebuild). Callers navigate away afterwards.
+async function setRerankerThroughUI(
+  page: Page,
+  optionName: "Replay Knowledge Model · replay/reranker" | "No reranking",
+): Promise<void> {
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("Reranker model").click();
+  await page.getByRole("option", { name: optionName }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
 }
 
 async function uploadDocumentThroughUI(
@@ -121,6 +139,17 @@ async function uploadDocumentThroughUI(
     buffer: Buffer.from(contents, "utf-8"),
   });
   await page.getByRole("button", { name: "Upload", exact: true }).click();
+}
+
+async function openDocumentActions(page: Page, documentName: string) {
+  const row = page
+    .getByTestId("knowledge-document-rows")
+    .getByRole("row")
+    .filter({ hasText: documentName });
+  await row
+    .getByRole("button", { name: `Actions for ${documentName}` })
+    .click();
+  return page.getByRole("menu");
 }
 
 test("the real Worker ingests an upload to ready, rerank owns the final order, and download returns the exact bytes", async ({
@@ -150,7 +179,9 @@ test("the real Worker ingests an upload to ready, rerank owns the final order, a
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
 
   // Segment browsing returns the real pgvector-stored segment contents.
-  await rows.getByRole("button", { name: "View segments" }).click();
+  await (await openDocumentActions(page, "manual.txt"))
+    .getByRole("menuitem", { name: "View segments" })
+    .click();
   const browser = page.getByTestId("knowledge-segment-browser");
   await expect(
     browser
@@ -161,27 +192,63 @@ test("the real Worker ingests an upload to ready, rerank owns the final order, a
   await expect(rows.getByText("manual.txt").first()).toBeVisible();
 
   // The stored object round-trips byte-identically through MinIO.
+  const downloadMenu = await openDocumentActions(page, "manual.txt");
   const [download] = await Promise.all([
     page.waitForEvent("download"),
-    rows.getByRole("link", { name: "Download original" }).click(),
+    downloadMenu.getByRole("menuitem", { name: "Download original" }).click(),
   ]);
   const downloadPath = await download.path();
   expect(readFileSync(downloadPath, "utf-8")).toBe(documentText);
 
-  // Two-stage search: cosine ranks the marker segment last (axis embeddings),
-  // the mock reranker puts it first at 0.95 — the page must show rerank order.
-  // The retrieval test lives in the in-base secondary menu.
+  // A fresh base has no reranker: search returns cosine-ordered results, and
+  // the marker segment (far from every query, under the 0.2 threshold) is
+  // absent. The retrieval test lives in the in-base secondary menu.
   await page.getByRole("button", { name: "Retrieval test" }).click();
   await page.getByLabel("Query").fill("如何联系应急值班团队");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   const results = page.getByTestId("knowledge-search-results");
   const items = results.getByRole("listitem");
+  await expect(items.first()).toContainText("Retrieval score 1.000", {
+    timeout: 30_000,
+  });
+  await expect(results.getByText(MARKER_PHONE, { exact: false })).toHaveCount(
+    0,
+  );
+
+  // Binding the reranker is a plain settings PATCH: provider embedding calls
+  // must not grow (no re-embed). Sampling right before the change isolates
+  // the assertion from ingestion and search query embeddings.
+  const beforeBinding = await providerCounters(context);
+  await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
+  expect((await providerCounters(context)).embedding_calls).toBe(
+    beforeBinding.embedding_calls,
+  );
+
+  // Two-stage search: cosine ranks the marker segment last (axis embeddings),
+  // the replay reranker puts it first at 0.95 — the page must show rerank
+  // order.
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill("如何联系应急值班团队");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(items.first()).toContainText(MARKER_PHONE, {
     timeout: 30_000,
   });
-  await expect(items.first()).toContainText("Relevance 0.950");
+  await expect(items.first()).toContainText("Retrieval score 0.950");
   expect(await items.count()).toBeGreaterThanOrEqual(2);
   await expect(items.nth(1)).not.toContainText(MARKER_PHONE);
+
+  // Clearing the binding walks retrieval back to cosine order: results stay
+  // non-empty and the marker segment drops out again.
+  await setRerankerThroughUI(page, "No reranking");
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill("如何联系应急值班团队");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(items.first()).toContainText("Retrieval score 1.000", {
+    timeout: 30_000,
+  });
+  await expect(results.getByText(MARKER_PHONE, { exact: false })).toHaveCount(
+    0,
+  );
 
   // Both provider stages really ran: ingestion + query embeddings, one rerank.
   const counters = await providerCounters(context);
@@ -206,7 +273,9 @@ test("deleting the document and the base removes their MinIO objects", async ({
   expect(await listProjectObjects(context, project)).toHaveLength(1);
 
   // Document deletion is a real worker task; the object must be gone after.
-  await rows.getByRole("button", { name: "Delete" }).click();
+  await (await openDocumentActions(page, "first.txt"))
+    .getByRole("menuitem", { name: "Delete" })
+    .click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Delete", exact: true })
@@ -257,6 +326,8 @@ test("segment edits re-embed for retrieval and disables exclude content at both 
   await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
   await createBaseThroughUI(page, "治理知识库");
   await page.getByRole("button", { name: "View documents" }).click();
+  await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
+  await page.getByRole("button", { name: "Documents" }).click();
   await uploadDocumentThroughUI(page, "govern.txt", buildDocumentText());
 
   const rows = page.getByTestId("knowledge-document-rows");
@@ -274,7 +345,9 @@ test("segment edits re-embed for retrieval and disables exclude content at both 
   // Edit a filler segment to carry the marker plus a fresh token: the
   // synchronous re-embed must make the new content retrievable immediately.
   await page.getByRole("button", { name: "Documents" }).click();
-  await rows.getByRole("button", { name: "View segments" }).click();
+  await (await openDocumentActions(page, "govern.txt"))
+    .getByRole("menuitem", { name: "View segments" })
+    .click();
   const browser = page.getByTestId("knowledge-segment-browser");
   const list = browser.getByTestId("knowledge-segment-list");
   await list
@@ -372,13 +445,20 @@ test("wizard chunk preview matches the segments the real pipeline ingests", asyn
     .check();
   await page.getByLabel("Delete all URLs and email addresses").check();
   await page.getByLabel("Name").fill("预览一致性");
-  await page.getByLabel("Model configuration").click();
-  await page.getByRole("option", { name: "Replay Knowledge Model" }).click();
+  await page.getByLabel("Embedding model").click();
+  await page
+    .getByRole("option", { name: "Replay Knowledge Model · replay/embedding" })
+    .click();
 
-  // Wait for a render that carries every final-parameter effect at once:
-  // one chunk per sentence, the URL cleaned away, whitespace runs compressed.
-  // Interim debounced renders (e.g. rules still off) cannot satisfy all three.
+  // Parameter edits do not re-upload the full file. One explicit refresh
+  // generates the final-parameter preview used for parity below.
   const previewPanel = page.getByTestId("chunk-preview-panel");
+  await expect(
+    previewPanel.getByText(
+      "Preview is out of date. Refresh to apply the current settings.",
+    ),
+  ).toBeVisible();
+  await previewPanel.getByRole("button", { name: "Refresh preview" }).click();
   const chunkParagraphs = previewPanel.locator("ul li p:last-child");
   let previewChunks: string[] = [];
   await expect
@@ -405,8 +485,9 @@ test("wizard chunk preview matches the segments the real pipeline ingests", asyn
   });
   await page.getByRole("button", { name: "Go to documents" }).click();
 
-  const rows = page.getByTestId("knowledge-document-rows");
-  await rows.getByRole("button", { name: "View segments" }).click();
+  await (await openDocumentActions(page, "preview.txt"))
+    .getByRole("menuitem", { name: "View segments" })
+    .click();
   const list = page
     .getByTestId("knowledge-segment-browser")
     .getByTestId("knowledge-segment-list");
@@ -435,12 +516,16 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   const lineA = `${RERANK_MARKER}项目组的应急联系电话是 ${MARKER_PHONE}，${"电话台账在值班簿首页登记，".repeat(8)}保持畅通。`;
   const lineB = `${RERANK_MARKER}项目组的夜间值班室位于三号楼一层，${"值班室钥匙由当班组长保管，".repeat(8)}凭工牌进入。`;
   const filler =
-    "巡检班组在夜间进入车辆段，逐一记录道岔状态、信号机显示与接触网电压，并将异常条目同步到当班调度台。".repeat(19);
+    "巡检班组在夜间进入车辆段，逐一记录道岔状态、信号机显示与接触网电压，并将异常条目同步到当班调度台。".repeat(
+      19,
+    );
   const documentText = `${lineA}\n${lineB}\n\n${filler}`;
 
   await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
   await createBaseThroughUI(page, "父子知识库");
   await page.getByRole("button", { name: "View documents" }).click();
+  await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
+  await page.getByRole("button", { name: "Documents" }).click();
 
   // Upload in parent-child mode with an explicit child size and no overlap.
   await page.getByRole("button", { name: "Upload document" }).click();
@@ -459,7 +544,9 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
 
   // The segment browser lists parents: both lines live in segment #1.
-  await rows.getByRole("button", { name: "View segments" }).click();
+  await (await openDocumentActions(page, "parent-child.txt"))
+    .getByRole("menuitem", { name: "View segments" })
+    .click();
   const browser = page.getByTestId("knowledge-segment-browser");
   const list = browser.getByTestId("knowledge-segment-list");
   await expect(browser.getByText(/2 segments/u)).toBeVisible();
@@ -479,7 +566,7 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   await expect(items.first()).toContainText(MARKER_PHONE, {
     timeout: 30_000,
   });
-  await expect(items.first()).toContainText("Relevance 0.950");
+  await expect(items.first()).toContainText("Retrieval score 0.950");
   // The citation returns the parent content: both child lines are present.
   await expect(items.first()).toContainText("夜间值班室位于三号楼一层");
   // Two marker children recalled, but their shared parent cites only once.
@@ -536,7 +623,9 @@ test("exhausted embedding retries fail the document and a retry after recovery r
 
   // Recovery: clear the fault, retry through the UI, reach ready for real.
   await setEmbeddingFailures(context, project, 0);
-  await rows.getByRole("button", { name: "Retry" }).click();
+  await (await openDocumentActions(page, "flaky.txt"))
+    .getByRole("menuitem", { name: "Retry" })
+    .click();
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
 });
 
@@ -550,6 +639,8 @@ test("metadata field values gate retrieval to the matching document", async ({
   await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
   await createBaseThroughUI(page, "元数据知识库");
   await page.getByRole("button", { name: "View documents" }).click();
+  await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
+  await page.getByRole("button", { name: "Documents" }).click();
 
   // Two byte-identical documents: only metadata can tell them apart, so a
   // narrowed result proves the JSONB predicate ran inside real recall SQL.
@@ -578,10 +669,8 @@ test("metadata field values gate retrieval to the matching document", async ({
     ["safety.txt", "安全部"],
     ["ops.txt", "运营部"],
   ] as const) {
-    await rows
-      .getByRole("row")
-      .filter({ hasText: fileName })
-      .getByRole("button", { name: "Metadata" })
+    await (await openDocumentActions(page, fileName))
+      .getByRole("menuitem", { name: "Metadata" })
       .click();
     const dialog = page.getByRole("dialog");
     await dialog.getByLabel(/dept/u).fill(value);
@@ -623,6 +712,8 @@ test("rebuild re-embeds the documents and retrieval serves the new version", asy
   await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
   await createBaseThroughUI(page, "重建知识库");
   await page.getByRole("button", { name: "View documents" }).click();
+  await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
+  await page.getByRole("button", { name: "Documents" }).click();
   await uploadDocumentThroughUI(page, "rebuild.txt", buildDocumentText());
   const rows = page.getByTestId("knowledge-document-rows");
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });

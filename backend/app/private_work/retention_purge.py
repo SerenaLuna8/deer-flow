@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from actweave_knowledge import purge_knowledge_query_history
 from sqlalchemy import delete, exists, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1041,6 +1042,15 @@ async def purge_private_scope(
         request_id=request_id,
         quota=quota,
         audit=approval_audit,
+    )
+
+    # Knowledge Queries contain owner-private raw search text even though the
+    # Knowledge Bases they target are Project-shared. Delete only the exact
+    # Phase-B scope; owner retention must never cascade into shared Knowledge.
+    await purge_knowledge_query_history(
+        session,
+        project_id=project_id,
+        owner_user_id=owner_user_id,
     )
 
     # Jobs are immutable governance shells, so retention does not delete them.

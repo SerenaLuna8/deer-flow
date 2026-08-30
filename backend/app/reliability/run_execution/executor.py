@@ -608,11 +608,18 @@ class RunAgentPrivateExecutor:
             )
         if self._knowledge_module is None:
             return base_factory
+        from app.knowledge.authority import PrivateWorkKnowledgeAuthority
         from app.knowledge.run_tool import create_knowledge_lead_agent_factory
+        from app.projects.capabilities import Capability
 
         return create_knowledge_lead_agent_factory(
             module=self._knowledge_module,
             project_id=execution.context.project_id,
+            owner_user_id=execution.context.user_id,
+            authority=PrivateWorkKnowledgeAuthority(
+                execution.context,
+                Capability.SHARED_ASSETS_EXECUTE,
+            ),
             base_factory=base_factory,
         )
 

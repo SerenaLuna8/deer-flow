@@ -4190,6 +4190,59 @@ CREATE TRIGGER trg_run_memory_context_snapshots_sections_immutable BEFORE UPDATE
 
 
 
+-- Host-owned retrieval model registry: one OpenAI-compatible endpoint per
+-- Provider row plus its encrypted API Key, and one typed embedding or rerank
+-- model per model row. Knowledge Bases below bind the model rows by UUID.
+CREATE TABLE model_providers (
+    id UUID NOT NULL,
+    name VARCHAR(120) NOT NULL,
+    base_url VARCHAR(1024) NOT NULL,
+    request_timeout_seconds INTEGER DEFAULT 30 NOT NULL,
+    api_key_nonce BYTEA NOT NULL,
+    api_key_ciphertext BYTEA NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_model_providers_name CHECK (btrim(name) <> ''),
+    CONSTRAINT ck_model_providers_base_url CHECK (btrim(base_url) <> ''),
+    CONSTRAINT ck_model_providers_timeout CHECK (request_timeout_seconds BETWEEN 1 AND 300),
+    CONSTRAINT ck_model_providers_secret CHECK (
+        octet_length(api_key_nonce) = 12 AND octet_length(api_key_ciphertext) >= 16
+    )
+);
+
+CREATE UNIQUE INDEX uq_model_providers_name ON model_providers (lower(name));
+
+CREATE TABLE model_provider_models (
+    id UUID NOT NULL,
+    provider_id UUID NOT NULL,
+    model_type VARCHAR(16) NOT NULL,
+    model_name VARCHAR(255) NOT NULL,
+    embedding_dimension INTEGER,
+    max_batch INTEGER NOT NULL,
+    status VARCHAR(16) DEFAULT 'active' NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT uq_model_provider_models_identity UNIQUE (provider_id, model_type, model_name),
+    CONSTRAINT ck_model_provider_models_type CHECK (model_type IN ('embedding', 'rerank')),
+    CONSTRAINT ck_model_provider_models_model_name CHECK (btrim(model_name) <> ''),
+    CONSTRAINT ck_model_provider_models_dimension CHECK (
+        (model_type = 'embedding') = (embedding_dimension IS NOT NULL)
+        AND (embedding_dimension IS NULL OR embedding_dimension BETWEEN 1 AND 16000)
+    ),
+    CONSTRAINT ck_model_provider_models_max_batch CHECK (
+        (model_type = 'embedding' AND max_batch BETWEEN 1 AND 2048)
+        OR (model_type = 'rerank' AND max_batch BETWEEN 1 AND 256)
+    ),
+    CONSTRAINT ck_model_provider_models_status CHECK (status IN ('active', 'disabled')),
+    FOREIGN KEY(provider_id) REFERENCES model_providers (id) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER trg_model_providers_updated_at BEFORE UPDATE ON model_providers FOR EACH ROW EXECUTE FUNCTION set_schema_v1_updated_at();
+
+CREATE TRIGGER trg_model_provider_models_updated_at BEFORE UPDATE ON model_provider_models FOR EACH ROW EXECUTE FUNCTION set_schema_v1_updated_at();
+
 -- Knowledge Package tables (ActWeave Knowledge). pgvector is an administrator
 -- preparation step performed by setup/reset with maintenance authority; this
 -- snapshot only refuses to install without the extension type present.
@@ -4201,45 +4254,13 @@ BEGIN
 END
 $$;
 
-CREATE TABLE knowledge_model_configurations (
-    id UUID NOT NULL,
-    display_name VARCHAR(120) NOT NULL,
-    status VARCHAR(16) DEFAULT 'active' NOT NULL,
-    base_url VARCHAR(1024) NOT NULL,
-    embedding_model VARCHAR(255) NOT NULL,
-    embedding_dimension INTEGER NOT NULL,
-    embedding_max_batch INTEGER DEFAULT 64 NOT NULL,
-    reranker_model VARCHAR(255) NOT NULL,
-    reranker_max_batch INTEGER DEFAULT 32 NOT NULL,
-    request_timeout_seconds INTEGER DEFAULT 30 NOT NULL,
-    api_key_nonce BYTEA NOT NULL,
-    api_key_ciphertext BYTEA NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
-    CONSTRAINT pk_knowledge_model_configurations PRIMARY KEY (id),
-    CONSTRAINT ck_knowledge_model_configurations_name CHECK (btrim(display_name) <> ''),
-    CONSTRAINT ck_knowledge_model_configurations_status CHECK (status IN ('active', 'disabled')),
-    CONSTRAINT ck_knowledge_model_configurations_base_url CHECK (btrim(base_url) <> ''),
-    CONSTRAINT ck_knowledge_model_configurations_embedding_model CHECK (btrim(embedding_model) <> ''),
-    CONSTRAINT ck_knowledge_model_configurations_dimension CHECK (embedding_dimension BETWEEN 1 AND 16000),
-    CONSTRAINT ck_knowledge_model_configurations_batch CHECK (embedding_max_batch BETWEEN 1 AND 2048),
-    CONSTRAINT ck_knowledge_model_configurations_reranker_model CHECK (btrim(reranker_model) <> ''),
-    CONSTRAINT ck_knowledge_model_configurations_reranker_batch CHECK (reranker_max_batch BETWEEN 1 AND 256),
-    CONSTRAINT ck_knowledge_model_configurations_timeout CHECK (request_timeout_seconds BETWEEN 1 AND 300),
-    CONSTRAINT ck_knowledge_model_configurations_secret CHECK (
-        octet_length(api_key_nonce) = 12 AND octet_length(api_key_ciphertext) >= 16
-    )
-);
-
-CREATE UNIQUE INDEX uq_knowledge_model_configurations_name
-    ON knowledge_model_configurations (lower(display_name));
-
 CREATE TABLE knowledge_bases (
     id UUID NOT NULL,
     project_id UUID NOT NULL,
     name VARCHAR(120) NOT NULL,
     description VARCHAR(500) DEFAULT '' NOT NULL,
-    model_configuration_id UUID NOT NULL,
+    embedding_model_id UUID NOT NULL,
+    reranker_model_id UUID,
     status VARCHAR(16) DEFAULT 'active' NOT NULL,
     default_top_k INTEGER DEFAULT 4 NOT NULL,
     default_score_threshold DOUBLE PRECISION DEFAULT 0.2 NOT NULL,
@@ -4255,8 +4276,10 @@ CREATE TABLE knowledge_bases (
     ),
     CONSTRAINT fk_knowledge_bases_project FOREIGN KEY (project_id)
         REFERENCES projects (id) ON DELETE RESTRICT,
-    CONSTRAINT fk_knowledge_bases_model FOREIGN KEY (model_configuration_id)
-        REFERENCES knowledge_model_configurations (id) ON DELETE RESTRICT
+    CONSTRAINT fk_knowledge_bases_embedding_model FOREIGN KEY (embedding_model_id)
+        REFERENCES model_provider_models (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_knowledge_bases_reranker_model FOREIGN KEY (reranker_model_id)
+        REFERENCES model_provider_models (id) ON DELETE RESTRICT
 );
 
 CREATE UNIQUE INDEX uq_knowledge_bases_project_name
@@ -4264,6 +4287,12 @@ CREATE UNIQUE INDEX uq_knowledge_bases_project_name
 
 CREATE INDEX ix_knowledge_bases_project_status
     ON knowledge_bases (project_id, status, updated_at DESC, id);
+
+CREATE INDEX ix_knowledge_bases_embedding_model
+    ON knowledge_bases (embedding_model_id);
+
+CREATE INDEX ix_knowledge_bases_reranker_model
+    ON knowledge_bases (reranker_model_id);
 
 CREATE TABLE knowledge_documents (
     id UUID NOT NULL,
@@ -4449,6 +4478,7 @@ CREATE INDEX ix_knowledge_segment_children_document
 CREATE TABLE knowledge_queries (
     id UUID NOT NULL,
     project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
     knowledge_base_ids JSONB DEFAULT '[]'::jsonb NOT NULL,
     query VARCHAR(2000) NOT NULL,
     source VARCHAR(16) NOT NULL,
@@ -4461,14 +4491,14 @@ CREATE TABLE knowledge_queries (
     CONSTRAINT ck_knowledge_queries_base_ids CHECK (jsonb_typeof(knowledge_base_ids) = 'array'),
     CONSTRAINT ck_knowledge_queries_result_count CHECK (result_count >= 0),
     CONSTRAINT ck_knowledge_queries_top_score CHECK (
-        top_score IS NULL OR (top_score >= 0 AND top_score <= 1)
+        top_score IS NULL OR (top_score >= -1 AND top_score <= 1)
     ),
     CONSTRAINT fk_knowledge_queries_project FOREIGN KEY (project_id)
         REFERENCES projects (id) ON DELETE CASCADE
 );
 
-CREATE INDEX ix_knowledge_queries_project_created
-    ON knowledge_queries (project_id, created_at DESC, id);
+CREATE INDEX ix_knowledge_queries_owner_created
+    ON knowledge_queries (project_id, owner_user_id, created_at DESC, id);
 
 CREATE TABLE knowledge_tasks (
     id UUID NOT NULL,
@@ -4476,6 +4506,7 @@ CREATE TABLE knowledge_tasks (
     resource_id UUID NOT NULL,
     kind VARCHAR(32) NOT NULL,
     target_version INTEGER,
+    storage_key VARCHAR(1024),
     status VARCHAR(16) DEFAULT 'queued' NOT NULL,
     attempt_count SMALLINT DEFAULT 0 NOT NULL,
     max_attempts SMALLINT DEFAULT 3 NOT NULL,
@@ -4488,11 +4519,15 @@ CREATE TABLE knowledge_tasks (
     finished_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT pk_knowledge_tasks PRIMARY KEY (id),
     CONSTRAINT ck_knowledge_tasks_kind CHECK (
-        kind IN ('ingest_document', 'delete_document', 'delete_knowledge_base')
+        kind IN ('ingest_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')
     ),
     CONSTRAINT ck_knowledge_tasks_target_version CHECK (
         (kind = 'ingest_document' AND target_version IS NOT NULL AND target_version >= 1)
         OR (kind <> 'ingest_document' AND target_version IS NULL)
+    ),
+    CONSTRAINT ck_knowledge_tasks_storage_key CHECK (
+        (kind = 'delete_document_object' AND storage_key IS NOT NULL AND btrim(storage_key) <> '')
+        OR (kind <> 'delete_document_object' AND storage_key IS NULL)
     ),
     CONSTRAINT ck_knowledge_tasks_status CHECK (
         status IN ('queued', 'running', 'retry_wait', 'succeeded', 'failed')
@@ -4528,6 +4563,10 @@ CREATE UNIQUE INDEX uq_knowledge_tasks_open_document_delete
     ON knowledge_tasks (resource_id)
     WHERE kind = 'delete_document' AND status IN ('queued', 'running', 'retry_wait');
 
+CREATE UNIQUE INDEX uq_knowledge_tasks_open_document_object_delete
+    ON knowledge_tasks (storage_key)
+    WHERE kind = 'delete_document_object' AND status IN ('queued', 'running', 'retry_wait');
+
 CREATE UNIQUE INDEX uq_knowledge_tasks_open_base_delete
     ON knowledge_tasks (resource_id)
     WHERE kind = 'delete_knowledge_base' AND status IN ('queued', 'running', 'retry_wait');
@@ -4547,7 +4586,7 @@ INSERT INTO alembic_version (version_num) VALUES ('schema_v1');
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 107 static tables and 1333 columns.
+-- Coverage: 108 static tables and 1339 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE project_invitation_rate_limits IS '记录项目邀请码失败尝试的限流窗口。';
@@ -5977,28 +6016,34 @@ COMMENT ON COLUMN execution_approval_output_delivery_candidates.created_at IS '�
 COMMENT ON TABLE alembic_version IS '记录当前数据库采用的 Alembic 架构版本。';
 COMMENT ON COLUMN alembic_version.version_num IS '数据库迁移版本：数据库迁移版本号。';
 
-COMMENT ON TABLE knowledge_model_configurations IS '保存 Knowledge 使用的 Embedding 与 Reranker 模型配置及二者共用的当前加密 API Key。';
-COMMENT ON COLUMN knowledge_model_configurations.id IS '知识检索模型配置：主键标识。';
-COMMENT ON COLUMN knowledge_model_configurations.display_name IS '知识检索模型配置：管理页面显示名称。';
-COMMENT ON COLUMN knowledge_model_configurations.status IS '知识检索模型配置：配置状态（active 或 disabled）。';
-COMMENT ON COLUMN knowledge_model_configurations.base_url IS '知识检索模型配置：不含凭据的 OpenAI 兼容 API 基础地址。';
-COMMENT ON COLUMN knowledge_model_configurations.embedding_model IS '知识检索模型配置：Provider 接受的 Embedding 模型名称。';
-COMMENT ON COLUMN knowledge_model_configurations.embedding_dimension IS '知识检索模型配置：该配置返回的固定向量维度。';
-COMMENT ON COLUMN knowledge_model_configurations.embedding_max_batch IS '知识检索模型配置：单次 Embedding 请求最多包含的文本数量。';
-COMMENT ON COLUMN knowledge_model_configurations.reranker_model IS '知识检索模型配置：Provider 接受的 Reranker 模型名称。';
-COMMENT ON COLUMN knowledge_model_configurations.reranker_max_batch IS '知识检索模型配置：单次 Rerank 请求最多包含的候选数量。';
-COMMENT ON COLUMN knowledge_model_configurations.request_timeout_seconds IS '知识检索模型配置：单次 Provider 请求超时秒数。';
-COMMENT ON COLUMN knowledge_model_configurations.api_key_nonce IS '知识检索模型配置：当前 API Key Secret Envelope 的 12 字节 nonce。';
-COMMENT ON COLUMN knowledge_model_configurations.api_key_ciphertext IS '知识检索模型配置：当前 API Key Secret Envelope 的密文。';
-COMMENT ON COLUMN knowledge_model_configurations.created_at IS '知识检索模型配置：记录创建时间。';
-COMMENT ON COLUMN knowledge_model_configurations.updated_at IS '知识检索模型配置：记录最近更新时间。';
+COMMENT ON TABLE model_providers IS '保存宿主管理的 OpenAI 兼容检索模型端点、请求超时与当前加密 API Key。';
+COMMENT ON COLUMN model_providers.id IS '模型供应商：主键标识。';
+COMMENT ON COLUMN model_providers.name IS '模型供应商：全局唯一（忽略大小写）的供应商名称。';
+COMMENT ON COLUMN model_providers.base_url IS '模型供应商：不含凭据的 OpenAI 兼容 API 基础地址。';
+COMMENT ON COLUMN model_providers.request_timeout_seconds IS '模型供应商：单次 Provider 请求超时秒数。';
+COMMENT ON COLUMN model_providers.api_key_nonce IS '模型供应商：当前 API Key Secret Envelope 的 12 字节 nonce。';
+COMMENT ON COLUMN model_providers.api_key_ciphertext IS '模型供应商：当前 API Key Secret Envelope 的密文。';
+COMMENT ON COLUMN model_providers.created_at IS '模型供应商：记录创建时间。';
+COMMENT ON COLUMN model_providers.updated_at IS '模型供应商：记录最近更新时间。';
 
-COMMENT ON TABLE knowledge_bases IS '保存项目内使用同一检索模型配置的知识文档集合。';
+COMMENT ON TABLE model_provider_models IS '保存供应商下的 embedding 或 rerank 具体模型及其维度、批量与状态；知识库按标识绑定。';
+COMMENT ON COLUMN model_provider_models.id IS '供应商模型：主键标识。';
+COMMENT ON COLUMN model_provider_models.provider_id IS '供应商模型：所属模型供应商标识。';
+COMMENT ON COLUMN model_provider_models.model_type IS '供应商模型：模型类型（embedding 或 rerank）；建后不可变。';
+COMMENT ON COLUMN model_provider_models.model_name IS '供应商模型：Provider 接受的模型名称；建后不可变。';
+COMMENT ON COLUMN model_provider_models.embedding_dimension IS '供应商模型：embedding 模型返回的固定向量维度；rerank 行为空。';
+COMMENT ON COLUMN model_provider_models.max_batch IS '供应商模型：单次请求最多包含的文本或候选数量。';
+COMMENT ON COLUMN model_provider_models.status IS '供应商模型：模型状态（active 或 disabled）。';
+COMMENT ON COLUMN model_provider_models.created_at IS '供应商模型：记录创建时间。';
+COMMENT ON COLUMN model_provider_models.updated_at IS '供应商模型：记录最近更新时间。';
+
+COMMENT ON TABLE knowledge_bases IS '保存项目内绑定同一 Embedding 模型（可选 Reranker 模型）的知识文档集合。';
 COMMENT ON COLUMN knowledge_bases.id IS '知识库：主键标识。';
 COMMENT ON COLUMN knowledge_bases.project_id IS '知识库：所属项目标识。';
 COMMENT ON COLUMN knowledge_bases.name IS '知识库：项目内唯一的知识库名称。';
 COMMENT ON COLUMN knowledge_bases.description IS '知识库：知识库描述。';
-COMMENT ON COLUMN knowledge_bases.model_configuration_id IS '知识库：固定使用的 Embedding 与 Reranker 配置标识。';
+COMMENT ON COLUMN knowledge_bases.embedding_model_id IS '知识库：固定使用的 Embedding 模型标识（指向供应商模型行）。';
+COMMENT ON COLUMN knowledge_bases.reranker_model_id IS '知识库：可选的 Reranker 模型标识；为空表示检索不重排序。';
 COMMENT ON COLUMN knowledge_bases.status IS '知识库：知识库状态（active、disabled 或 deleting）。';
 COMMENT ON COLUMN knowledge_bases.default_top_k IS '知识库：检索未显式传参时使用的默认返回条数。';
 COMMENT ON COLUMN knowledge_bases.default_score_threshold IS '知识库：检索未显式传参时使用的默认相关性分数阈值（0 表示不过滤）。';
@@ -6054,7 +6099,7 @@ COMMENT ON COLUMN knowledge_segments.word_count IS '知识片段：内容字符�
 COMMENT ON COLUMN knowledge_segments.enabled IS '知识片段：是否参与检索；停用不删除向量，重新启用即恢复可检索。';
 COMMENT ON COLUMN knowledge_segments.hit_count IS '知识片段：检索最终结果命中该片段的累计次数。';
 COMMENT ON COLUMN knowledge_segments.source_position IS '知识片段：页码、sheet 或行号等来源位置 JSON。';
-COMMENT ON COLUMN knowledge_segments.embedding IS '知识片段：与知识库模型配置维度一致的 pgvector 向量；parent_child 模式的父级片段为空。';
+COMMENT ON COLUMN knowledge_segments.embedding IS '知识片段：与知识库 Embedding 模型维度一致的 pgvector 向量；parent_child 模式的父级片段为空。';
 COMMENT ON COLUMN knowledge_segments.created_at IS '知识片段：记录创建时间。';
 
 COMMENT ON TABLE knowledge_segment_children IS '保存父子分块模式下父级片段内的二级子块及其向量；检索命中回卷到父级片段。';
@@ -6067,25 +6112,27 @@ COMMENT ON COLUMN knowledge_segment_children.document_version IS '知识子块�
 COMMENT ON COLUMN knowledge_segment_children.position IS '知识子块：子块在父级片段内从 1 开始的位置。';
 COMMENT ON COLUMN knowledge_segment_children.content IS '知识子块：参与向量召回的子块文本（属于私有内容）。';
 COMMENT ON COLUMN knowledge_segment_children.word_count IS '知识子块：内容字符数。';
-COMMENT ON COLUMN knowledge_segment_children.embedding IS '知识子块：与知识库模型配置维度一致的 pgvector 向量。';
+COMMENT ON COLUMN knowledge_segment_children.embedding IS '知识子块：与知识库 Embedding 模型维度一致的 pgvector 向量。';
 COMMENT ON COLUMN knowledge_segment_children.created_at IS '知识子块：记录创建时间。';
 
-COMMENT ON TABLE knowledge_queries IS '按项目追加记录每次知识检索（检索测试与 Agent 工具）的查询、目标库与结果概要。';
+COMMENT ON TABLE knowledge_queries IS '按项目和查询发起者追加记录每次知识检索（检索测试与 Agent 工具）的查询、目标库与结果概要。';
 COMMENT ON COLUMN knowledge_queries.id IS '知识检索查询日志：主键标识。';
 COMMENT ON COLUMN knowledge_queries.project_id IS '知识检索查询日志：所属项目标识。';
+COMMENT ON COLUMN knowledge_queries.owner_user_id IS '知识检索查询日志：发起本次检索并唯一有权读取原始查询文本的用户标识。';
 COMMENT ON COLUMN knowledge_queries.knowledge_base_ids IS '知识检索查询日志：本次检索实际命中的目标知识库标识 JSON 数组。';
 COMMENT ON COLUMN knowledge_queries.query IS '知识检索查询日志：检索查询文本（属于私有内容）。';
 COMMENT ON COLUMN knowledge_queries.source IS '知识检索查询日志：查询来源（agent 工具或 retrieval_test 检索测试）。';
 COMMENT ON COLUMN knowledge_queries.result_count IS '知识检索查询日志：最终返回的引用数量。';
-COMMENT ON COLUMN knowledge_queries.top_score IS '知识检索查询日志：最终结果中的最高 Reranker 相关性分数；无结果时为空。';
+COMMENT ON COLUMN knowledge_queries.top_score IS '知识检索查询日志：最终返回引用的最高检索分数，可为负；无结果时为空。';
 COMMENT ON COLUMN knowledge_queries.created_at IS '知识检索查询日志：记录创建时间。';
 
-COMMENT ON TABLE knowledge_tasks IS '保存知识摄取和删除后台任务；领取、租约与尝试次数直接保存在任务行。';
+COMMENT ON TABLE knowledge_tasks IS '保存知识摄取、资源删除和晚到对象清理任务；领取、租约、精确存储标识与尝试次数直接保存在任务行。';
 COMMENT ON COLUMN knowledge_tasks.id IS '知识后台任务：主键标识。';
 COMMENT ON COLUMN knowledge_tasks.project_id IS '知识后台任务：所属项目标识。';
 COMMENT ON COLUMN knowledge_tasks.resource_id IS '知识后台任务：按任务类型指向知识文档或知识库的业务标识。';
-COMMENT ON COLUMN knowledge_tasks.kind IS '知识后台任务：任务类型（摄取文档、删除文档或删除知识库）。';
+COMMENT ON COLUMN knowledge_tasks.kind IS '知识后台任务：任务类型（摄取文档、删除文档、清理晚到文档对象或删除知识库）。';
 COMMENT ON COLUMN knowledge_tasks.target_version IS '知识后台任务：ingest_document 任务允许发布的文档版本号。';
+COMMENT ON COLUMN knowledge_tasks.storage_key IS '知识后台任务：仅 delete_document_object 使用的精确 MinIO object key；属于受保护存储定位符。';
 COMMENT ON COLUMN knowledge_tasks.status IS '知识后台任务：任务状态（queued、running、retry_wait、succeeded 或 failed）。';
 COMMENT ON COLUMN knowledge_tasks.attempt_count IS '知识后台任务：已经开始执行的次数。';
 COMMENT ON COLUMN knowledge_tasks.max_attempts IS '知识后台任务：允许执行的最大次数（MVP 固定为 3）。';

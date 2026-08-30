@@ -2,7 +2,7 @@
 
 Pipeline per claim: flip the matching-version document to ``processing``,
 download the object into a per-task temporary directory, extract and split in
-a worker thread, embed through the Base's model configuration, then publish
+a worker thread, embed through the Base's bound embedding model, then publish
 in one transaction (delete old segments, insert new ones, document ``ready``,
 task ``succeeded``). A missing, deleting, or version-mismatched document makes
 the claim a successful no-op — late results are never published.
@@ -10,7 +10,6 @@ the claim a successful no-op — late results are never published.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import shutil
 import sys
@@ -24,21 +23,21 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..asyncio_utils import run_sync_to_completion
 from ..contracts import (
     KNOWLEDGE_EMBEDDING_FAILED,
-    KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_PARSE_FAILED,
     KNOWLEDGE_QUOTA_EXCEEDED,
     KNOWLEDGE_STORAGE_UNAVAILABLE,
+    KnowledgeEmbeddingMaterial,
     KnowledgeError,
-    KnowledgeSecretPort,
+    KnowledgeModelPort,
     KnowledgeSettings,
 )
-from ..models import KnowledgeModelClient, KnowledgeModelMaterial, materialize_model_material
+from ..models import KnowledgeModelClient
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
-    KnowledgeModelConfigurationRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
@@ -72,7 +71,7 @@ class _PreparedIngest:
     chunking_mode: str
     child_chunk_size: int
     child_chunk_separator: str
-    material: KnowledgeModelMaterial
+    material: KnowledgeEmbeddingMaterial
 
 
 def _extract_and_split(
@@ -81,7 +80,7 @@ def _extract_and_split(
     *,
     max_total_chars: int,
 ) -> list[SegmentDraft]:
-    """Blocking extraction, cleaning, and splitting; runs inside ``asyncio.to_thread``.
+    """Blocking extraction, cleaning, and splitting; runs off the event loop.
 
     Parameters come from the document row, so retries and the chunk preview
     reproduce the first ingestion exactly.
@@ -109,6 +108,12 @@ def _extract_and_split(
     return drafts
 
 
+def _remove_temp_dir(path: str | Path) -> None:
+    """Best-effort cleanup for a directory created during cancellation."""
+
+    shutil.rmtree(path, ignore_errors=True)
+
+
 class KnowledgeIngestionHandler:
     """Process one ``ingest_document`` claim end to end."""
 
@@ -119,23 +124,29 @@ class KnowledgeIngestionHandler:
         settings: KnowledgeSettings,
         object_store: MinioObjectStore,
         model_client: KnowledgeModelClient,
-        secret_port: KnowledgeSecretPort,
+        model_port: KnowledgeModelPort,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._object_store = object_store
         self._model_client = model_client
-        self._secret_port = secret_port
+        self._model_port = model_port
 
     async def __call__(self, claim: KnowledgeTaskClaim) -> None:
         prepared = await self._begin_processing(claim)
         if prepared is None:
             return
-        temp_dir = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="actweave-knowledge-ingest-"))
+        temp_dir = Path(
+            await run_sync_to_completion(
+                tempfile.mkdtemp,
+                prefix="actweave-knowledge-ingest-",
+                cleanup_on_cancel=_remove_temp_dir,
+            )
+        )
         try:
             source_path = temp_dir / f"source{Path(prepared.original_name).suffix.lower()}"
             await self._object_store.download_to(prepared.storage_key, source_path)
-            drafts = await asyncio.to_thread(
+            drafts = await run_sync_to_completion(
                 _extract_and_split,
                 source_path,
                 prepared,
@@ -151,6 +162,12 @@ class KnowledgeIngestionHandler:
             if prepared.chunking_mode == "parent_child":
                 # Only children carry vectors; parents publish with NULL
                 # embedding and retrieval rolls child hits up to them.
+                child_count = sum(len(draft.children) for draft in drafts)
+                if child_count > self._settings.max_segments_per_document:
+                    raise KnowledgeError(
+                        KNOWLEDGE_QUOTA_EXCEEDED,
+                        f"父子分块产生 {child_count} 个子块向量条目，超过上限 {self._settings.max_segments_per_document}",
+                    )
                 child_contents = [content for draft in drafts for content in draft.children]
                 child_vectors = await self._model_client.embed(prepared.material, child_contents)
                 if len(child_vectors) != len(child_contents):  # the client validates per batch; belt and braces
@@ -162,8 +179,10 @@ class KnowledgeIngestionHandler:
                     raise KnowledgeError(KNOWLEDGE_EMBEDDING_FAILED, "Embedding 返回数量与分段数量不一致")
                 await self._publish(claim, drafts, parent_vectors=vectors, child_vectors=None)
         finally:
-            # Cleanup must survive success, failure, and cancellation alike.
-            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+            # Blocking adapters join started work before propagating
+            # cancellation, so cleanup cannot race a thread that is still
+            # using this directory.
+            await run_sync_to_completion(shutil.rmtree, temp_dir, ignore_errors=True)
 
     async def _begin_processing(self, claim: KnowledgeTaskClaim) -> _PreparedIngest | None:
         """Flip the matching document to ``processing`` and snapshot its inputs.
@@ -177,21 +196,13 @@ class KnowledgeIngestionHandler:
                 document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == claim.resource_id).with_for_update())
                 if document is None or document.version != claim.target_version or document.status not in ("queued", "processing"):
                     return None
-                configuration = await session.scalar(
-                    select(KnowledgeModelConfigurationRow)
-                    .join(
-                        KnowledgeBaseRow,
-                        KnowledgeBaseRow.model_configuration_id == KnowledgeModelConfigurationRow.id,
-                    )
-                    .where(KnowledgeBaseRow.id == document.knowledge_base_id)
-                )
-                if configuration is None:  # pragma: no cover - RESTRICT FK keeps it alive
-                    raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "Knowledge Base 的模型配置不存在")
-                if configuration.status != "active":
-                    # Disabling a configuration halts provider usage, not just
-                    # new bases; re-enable plus user retry resumes ingestion.
-                    raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "模型配置已停用，无法生成向量")
-                material = materialize_model_material(configuration, self._secret_port)
+                embedding_model_id = await session.scalar(select(KnowledgeBaseRow.embedding_model_id).where(KnowledgeBaseRow.id == document.knowledge_base_id))
+                if embedding_model_id is None:  # pragma: no cover - FK keeps the base alive
+                    raise _storage_unavailable()
+                # The port validates type and active status inside this locked
+                # transaction; a disabled model halts provider usage, not just
+                # new bases — re-enable plus user retry resumes ingestion.
+                material = await self._model_port.embedding_material(session, embedding_model_id)
                 document.status = "processing"
                 document.updated_at = func.now()  # type: ignore[assignment]
                 return _PreparedIngest(

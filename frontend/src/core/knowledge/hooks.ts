@@ -5,7 +5,9 @@ import {
   useQuery,
   useQueryClient,
   type Query,
+  type QueryClient,
 } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 
 import type { ProjectClientScope } from "@/core/private-work/types";
 
@@ -19,6 +21,7 @@ import {
   deleteKnowledgeMetadataField,
   deleteKnowledgeSegment,
   fetchKnowledgeHealth,
+  isKnowledgeAuthorityBoundaryError,
   isKnowledgeConflictError,
   listKnowledgeBaseQueries,
   listKnowledgeBases,
@@ -128,18 +131,93 @@ function documentsNeedPolling(
     : false;
 }
 
+export function removeKnowledgeDocumentsCacheForAuthorityError(
+  queryClient: QueryClient,
+  scope: ProjectClientScope,
+  baseId: string | null,
+  error: unknown,
+): boolean {
+  if (baseId === null || !isKnowledgeAuthorityBoundaryError(error)) {
+    return false;
+  }
+  queryClient.removeQueries({
+    queryKey: knowledgeQueryKey(scope, "documents", "list", baseId),
+    exact: true,
+  });
+  return true;
+}
+
 export function useKnowledgeDocuments(
   scope: ProjectClientScope,
   baseId: string | null,
 ) {
-  return useQuery({
+  const queryClient = useQueryClient();
+  const { accountId, projectId } = scope;
+  const authorityKey =
+    baseId === null ? null : `${accountId}:${projectId}:${baseId}`;
+  const [authorityBlock, setAuthorityBlock] = useState<{
+    key: string;
+    error: Error;
+  } | null>(null);
+  const authorityBlockedForCurrentKey = authorityBlock?.key === authorityKey;
+  const query = useQuery({
     queryKey: knowledgeQueryKey(scope, "documents", "list", baseId),
     queryFn: ({ signal }) =>
       listKnowledgeDocuments(scope.projectId, baseId ?? "", signal),
-    enabled: baseId !== null,
+    enabled: baseId !== null && !authorityBlockedForCurrentKey,
+    retry: (failureCount, error) =>
+      !isKnowledgeAuthorityBoundaryError(error) && failureCount < 3,
     refetchOnWindowFocus: false,
     refetchInterval: documentsNeedPolling,
   });
+
+  // An authority boundary is terminal for this exact account/project/base
+  // identity. Disable the active observer first; removing an enabled query can
+  // immediately recreate and refetch it, leaking requests in a tight loop.
+  useEffect(() => {
+    const error = query.error;
+    if (
+      authorityKey !== null &&
+      !authorityBlockedForCurrentKey &&
+      error !== null &&
+      isKnowledgeAuthorityBoundaryError(error)
+    ) {
+      setAuthorityBlock({ key: authorityKey, error });
+    }
+  }, [authorityBlockedForCurrentKey, authorityKey, query.error]);
+
+  // This runs on the render after the observer became disabled. Keep the
+  // boundary error in local state while clearing the now-inaccessible rows.
+  useEffect(() => {
+    if (!authorityBlockedForCurrentKey || authorityBlock === null) return;
+    removeKnowledgeDocumentsCacheForAuthorityError(
+      queryClient,
+      { accountId, projectId },
+      baseId,
+      authorityBlock.error,
+    );
+  }, [
+    accountId,
+    authorityBlock,
+    authorityBlockedForCurrentKey,
+    baseId,
+    projectId,
+    queryClient,
+  ]);
+
+  const immediateAuthorityError =
+    query.error !== null && isKnowledgeAuthorityBoundaryError(query.error)
+      ? query.error
+      : null;
+  const visibleAuthorityError = authorityBlockedForCurrentKey
+    ? authorityBlock?.error
+    : immediateAuthorityError;
+  if (visibleAuthorityError == null) return query;
+  return {
+    ...query,
+    data: undefined,
+    error: visibleAuthorityError,
+  };
 }
 
 function useInvalidateKnowledge(scope: ProjectClientScope) {
@@ -200,18 +278,18 @@ export function useDeleteKnowledgeBase(scope: ProjectClientScope) {
   });
 }
 
-/** Rebind the model configuration; every document re-embeds through the queue. */
+/** Rebind the embedding model; every document re-embeds through the queue. */
 export function useRebuildKnowledgeBase(scope: ProjectClientScope) {
   const invalidate = useInvalidateKnowledge(scope);
   return useMutation({
     mutationKey: knowledgeQueryKey(scope, "mutation", "rebuild-base"),
     mutationFn: ({
       baseId,
-      modelConfigurationId,
+      embeddingModelId,
     }: {
       baseId: string;
-      modelConfigurationId: string;
-    }) => rebuildKnowledgeBase(scope.projectId, baseId, modelConfigurationId),
+      embeddingModelId: string;
+    }) => rebuildKnowledgeBase(scope.projectId, baseId, embeddingModelId),
     onSuccess: async (_item, variables) => {
       await Promise.all([
         invalidate.bases(),
@@ -314,12 +392,8 @@ export function useDeleteKnowledgeDocuments(scope: ProjectClientScope) {
   const invalidate = useInvalidateKnowledge(scope);
   return useMutation({
     mutationKey: knowledgeQueryKey(scope, "mutation", "documents-delete"),
-    mutationFn: ({
-      documentIds,
-    }: {
-      documentIds: string[];
-      baseId: string;
-    }) => deleteKnowledgeDocuments(scope.projectId, documentIds),
+    mutationFn: ({ documentIds }: { documentIds: string[]; baseId: string }) =>
+      deleteKnowledgeDocuments(scope.projectId, documentIds),
     onSuccess: async (_items, variables) => {
       await Promise.all([
         invalidate.documents(variables.baseId),

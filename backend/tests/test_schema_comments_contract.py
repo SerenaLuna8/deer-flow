@@ -58,8 +58,8 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         comments,
         re.MULTILINE,
     )
-    assert len(table_comments) == 107
-    assert len(column_comments) == 1333
+    assert len(table_comments) == 108
+    assert len(column_comments) == 1339
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
@@ -120,20 +120,21 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("system_asset_upgrade_audit", "after_checksum"),
         ("system_asset_upgrade_audit", "package_digest"),
         ("system_asset_upgrade_audit", "operator_identity"),
-        ("knowledge_model_configurations", "display_name"),
-        ("knowledge_model_configurations", "status"),
-        ("knowledge_model_configurations", "base_url"),
-        ("knowledge_model_configurations", "embedding_model"),
-        ("knowledge_model_configurations", "embedding_dimension"),
-        ("knowledge_model_configurations", "embedding_max_batch"),
-        ("knowledge_model_configurations", "reranker_model"),
-        ("knowledge_model_configurations", "reranker_max_batch"),
-        ("knowledge_model_configurations", "request_timeout_seconds"),
-        ("knowledge_model_configurations", "api_key_nonce"),
-        ("knowledge_model_configurations", "api_key_ciphertext"),
+        ("model_providers", "name"),
+        ("model_providers", "base_url"),
+        ("model_providers", "request_timeout_seconds"),
+        ("model_providers", "api_key_nonce"),
+        ("model_providers", "api_key_ciphertext"),
+        ("model_provider_models", "provider_id"),
+        ("model_provider_models", "model_type"),
+        ("model_provider_models", "model_name"),
+        ("model_provider_models", "embedding_dimension"),
+        ("model_provider_models", "max_batch"),
+        ("model_provider_models", "status"),
         ("knowledge_bases", "name"),
         ("knowledge_bases", "description"),
-        ("knowledge_bases", "model_configuration_id"),
+        ("knowledge_bases", "embedding_model_id"),
+        ("knowledge_bases", "reranker_model_id"),
         ("knowledge_bases", "status"),
         ("knowledge_bases", "default_top_k"),
         ("knowledge_bases", "default_score_threshold"),
@@ -180,6 +181,7 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_segment_children", "content"),
         ("knowledge_segment_children", "word_count"),
         ("knowledge_segment_children", "embedding"),
+        ("knowledge_queries", "owner_user_id"),
         ("knowledge_queries", "knowledge_base_ids"),
         ("knowledge_queries", "query"),
         ("knowledge_queries", "source"),
@@ -188,6 +190,7 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_tasks", "resource_id"),
         ("knowledge_tasks", "kind"),
         ("knowledge_tasks", "target_version"),
+        ("knowledge_tasks", "storage_key"),
         ("knowledge_tasks", "status"),
         ("knowledge_tasks", "attempt_count"),
         ("knowledge_tasks", "max_attempts"),

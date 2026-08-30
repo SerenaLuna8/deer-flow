@@ -59,8 +59,8 @@ class KnowledgePurgeIncomplete(RuntimeError):
 class RetentionPurgeJobHandler:
     """Revalidate governance authority and atomically purge + settle."""
 
-    # Class-level default keeps the Knowledge gate optional: a handler built
-    # without ``__init__`` (partial doubles in host tests) has no hook either.
+    # A handler built without ``__init__`` (partial doubles in host tests)
+    # still fails closed for Project retention instead of skipping cleanup.
     _knowledge_purge: KnowledgePurge | None = None
 
     def __init__(
@@ -101,8 +101,8 @@ class RetentionPurgeJobHandler:
         self._clock = clock
         self._retry_initial_seconds = retry_initial_seconds
         self._retry_max_seconds = retry_max_seconds
-        # Optional Knowledge Module hook: project purges must clear Knowledge
-        # objects and rows before the final governance transaction runs.
+        # Project cleanup capability is independent from the optional feature
+        # module. A missing hook remains fail-closed in ``__call__``.
         self._knowledge_purge = knowledge_purge
 
     async def _candidate(
@@ -414,8 +414,11 @@ class RetentionPurgeJobHandler:
         # incomplete purge raises, which settles this claim through the
         # ordinary Worker retry budget — the project purge never completes
         # while Knowledge resources remain.
-        if self._knowledge_purge is not None and await self._knowledge_purge_admitted(claim):
-            if not await self._knowledge_purge(claim.scope.project_id):
+        if await self._knowledge_purge_admitted(claim):
+            # Knowledge can be runtime-disabled while historical rows and
+            # objects still exist.  Missing cleanup capability therefore
+            # means "not proven clean", never "nothing to purge".
+            if self._knowledge_purge is None or not await self._knowledge_purge(claim.scope.project_id):
                 raise KnowledgePurgeIncomplete(claim.scope.project_id)
 
         async def commit() -> None:

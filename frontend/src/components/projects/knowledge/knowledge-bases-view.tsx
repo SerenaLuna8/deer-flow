@@ -279,14 +279,14 @@ function CreateBaseDialog({
   const createBase = useCreateKnowledgeBase(scope);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [modelConfigurationId, setModelConfigurationId] = useState("");
+  const [embeddingModelId, setEmbeddingModelId] = useState("");
 
   const close = (nextOpen: boolean) => {
     onOpenChange(nextOpen);
     if (!nextOpen) {
       setName("");
       setDescription("");
-      setModelConfigurationId("");
+      setEmbeddingModelId("");
       createBase.reset();
     }
   };
@@ -304,11 +304,12 @@ function CreateBaseDialog({
           className="grid gap-4"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!name.trim() || !modelConfigurationId) return;
+            if (!name.trim() || !embeddingModelId) return;
+            // The optional reranker starts unbound; it lives in base settings.
             createBase.mutate(
               {
                 name: name.trim(),
-                model_configuration_id: modelConfigurationId,
+                embedding_model_id: embeddingModelId,
                 description: description.trim(),
               },
               { onSuccess: () => close(false) },
@@ -338,22 +339,26 @@ function CreateBaseDialog({
             <span className="font-medium">{labels.bases.modelLabel}</span>
             {options.isLoading ? (
               <Skeleton className="h-9 rounded-md" />
-            ) : (options.data?.length ?? 0) === 0 ? (
+            ) : options.error ? (
+              <p role="alert" className="text-destructive text-sm">
+                {labels.bases.modelsLoadFailed}
+              </p>
+            ) : (options.data?.embedding_models.length ?? 0) === 0 ? (
               <p className="text-muted-foreground text-sm">
                 {labels.bases.noModels}
               </p>
             ) : (
               <Select
-                value={modelConfigurationId}
-                onValueChange={setModelConfigurationId}
+                value={embeddingModelId}
+                onValueChange={setEmbeddingModelId}
               >
                 <SelectTrigger aria-label={labels.bases.modelLabel}>
                   <SelectValue placeholder={labels.bases.modelPlaceholder} />
                 </SelectTrigger>
                 <SelectContent>
-                  {options.data?.map((option) => (
+                  {options.data?.embedding_models.map((option) => (
                     <SelectItem key={option.id} value={option.id}>
-                      {option.display_name}
+                      {option.provider_name} · {option.model_name}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -379,7 +384,7 @@ function CreateBaseDialog({
             <Button
               type="submit"
               disabled={
-                createBase.isPending || !name.trim() || !modelConfigurationId
+                createBase.isPending || !name.trim() || !embeddingModelId
               }
             >
               {createBase.isPending

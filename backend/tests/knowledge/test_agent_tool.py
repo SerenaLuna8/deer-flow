@@ -42,12 +42,28 @@ from app.knowledge.run_tool import (
     create_knowledge_lead_agent_factory,
     create_knowledge_search_tool,
 )
+from app.private_work.context import PrivateWorkContext
+from app.projects.capabilities import Capability
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
 from deerflow.agents.lead_agent.agent import TrustedLeadAgentExtension
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 
 PROJECT_ID = uuid.UUID("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa")
+OWNER_USER_ID = uuid.UUID("dddddddd-4444-4444-8444-dddddddddddd")
 MODEL_NAME = "88888888-8888-4888-8888-888888888888"
+
+
+class _FakeAuthority:
+    project_id = PROJECT_ID
+    actor_user_id = OWNER_USER_ID
+
+    async def revalidate(self, session) -> None:  # noqa: ANN001
+        del session
+
+
+_AUTHORITY = _FakeAuthority()
 
 
 def _citation(*, position: int = 1, score: float = 0.91) -> KnowledgeCitation:
@@ -74,14 +90,25 @@ class _FakeKnowledgeModule:
         error: KnowledgeError | None = None,
     ) -> None:
         self.requests: list[object] = []
+        self.authorities: list[object] = []
         self._result = result or KnowledgeSearchResult(citations=())
         self._error = error
 
-    async def search(self, request):  # noqa: ANN001
+    async def search(self, request, *, authority):  # noqa: ANN001
         self.requests.append(request)
+        self.authorities.append(authority)
         if self._error is not None:
             raise self._error
         return self._result
+
+
+def _search_tool(module: _FakeKnowledgeModule):
+    return create_knowledge_search_tool(
+        module,
+        PROJECT_ID,
+        OWNER_USER_ID,
+        _AUTHORITY,
+    )
 
 
 async def _invoke(
@@ -123,8 +150,19 @@ def _tool_message(command: Command) -> ToolMessage:
 
 
 class TestKnowledgeSearchTool:
+    @pytest.mark.asyncio
+    async def test_trusted_owner_is_bound_in_the_tool_closure_not_model_arguments(self) -> None:
+        module = _FakeKnowledgeModule()
+        tool_obj = _search_tool(module)
+
+        await _invoke(tool_obj, query="私有 Run 查询")
+
+        assert module.requests[0].owner_user_id == OWNER_USER_ID
+        assert "owner_user_id" not in tool_obj.tool_call_schema.model_fields
+        assert "owner_user_id" not in json.dumps(tool_obj.args)
+
     def test_model_sees_only_query_top_k_and_metadata_filters(self) -> None:
-        tool_obj = create_knowledge_search_tool(_FakeKnowledgeModule(), PROJECT_ID)
+        tool_obj = _search_tool(_FakeKnowledgeModule())
 
         assert tool_obj.name == KNOWLEDGE_SEARCH_TOOL_NAME
         assert set(tool_obj.tool_call_schema.model_fields) == {"query", "top_k", "metadata_filters"}
@@ -135,7 +173,7 @@ class TestKnowledgeSearchTool:
         first = _citation(position=1, score=0.93)
         second = _citation(position=2, score=0.61)
         module = _FakeKnowledgeModule(result=KnowledgeSearchResult(citations=(first, second)))
-        tool_obj = create_knowledge_search_tool(module, PROJECT_ID)
+        tool_obj = _search_tool(module)
 
         command = await _invoke(tool_obj, query="量子计算的原理", top_k=6, call_id="call-9")
 
@@ -170,9 +208,27 @@ class TestKnowledgeSearchTool:
         assert citations[0]["score"] == first.score
 
     @pytest.mark.asyncio
+    async def test_negative_rerank_scores_pass_through_items_and_citations(self) -> None:
+        """Cross-encoder rerankers legally emit negative scores; the tool
+        adapter must forward them untouched instead of clamping or erroring."""
+
+        negative = _citation(position=1, score=-0.37)
+        module = _FakeKnowledgeModule(result=KnowledgeSearchResult(citations=(negative,)))
+        tool_obj = _search_tool(module)
+
+        command = await _invoke(tool_obj, query="负分命中", call_id="call-neg")
+
+        message = _tool_message(command)
+        assert message.status != "error"
+        items = json.loads(message.content)["items"]
+        assert items[0]["score"] == -0.37
+        citations = message.additional_kwargs[KNOWLEDGE_CITATIONS_KEY]
+        assert citations[0]["score"] == -0.37
+
+    @pytest.mark.asyncio
     async def test_omitted_top_k_defers_to_base_defaults_and_labels_agent_source(self) -> None:
         module = _FakeKnowledgeModule()
-        tool_obj = create_knowledge_search_tool(module, PROJECT_ID)
+        tool_obj = _search_tool(module)
 
         await _invoke(tool_obj, query="默认参数")
 
@@ -185,7 +241,7 @@ class TestKnowledgeSearchTool:
         from actweave_knowledge import KnowledgeMetadataFilter
 
         module = _FakeKnowledgeModule()
-        tool_obj = create_knowledge_search_tool(module, PROJECT_ID)
+        tool_obj = _search_tool(module)
 
         await _invoke(
             tool_obj,
@@ -208,7 +264,7 @@ class TestKnowledgeSearchTool:
         from actweave_knowledge import KnowledgeMetadataFilter
 
         module = _FakeKnowledgeModule()
-        tool_obj = create_knowledge_search_tool(module, PROJECT_ID)
+        tool_obj = _search_tool(module)
 
         await _invoke(tool_obj, query="问", metadata_filters=[{"operator": "eq", "value": "x"}])
 
@@ -216,7 +272,7 @@ class TestKnowledgeSearchTool:
 
     @pytest.mark.asyncio
     async def test_no_hits_returns_empty_items(self) -> None:
-        tool_obj = create_knowledge_search_tool(_FakeKnowledgeModule(), PROJECT_ID)
+        tool_obj = _search_tool(_FakeKnowledgeModule())
 
         message = _tool_message(await _invoke(tool_obj, query="冷门问题"))
 
@@ -237,7 +293,7 @@ class TestKnowledgeSearchTool:
     )
     async def test_knowledge_errors_become_error_toolmessages_without_citations(self, code: str) -> None:
         module = _FakeKnowledgeModule(error=KnowledgeError(code, "检索失败了"))
-        tool_obj = create_knowledge_search_tool(module, PROJECT_ID)
+        tool_obj = _search_tool(module)
 
         message = _tool_message(await _invoke(tool_obj, query="任何问题"))
 
@@ -249,7 +305,7 @@ class TestKnowledgeSearchTool:
     async def test_tool_citation_payload_matches_the_http_search_response(self) -> None:
         citation = _citation(position=3, score=0.77)
         module = _FakeKnowledgeModule(result=KnowledgeSearchResult(citations=(citation,)))
-        tool_obj = create_knowledge_search_tool(module, PROJECT_ID)
+        tool_obj = _search_tool(module)
 
         message = _tool_message(await _invoke(tool_obj, query="一致性"))
 
@@ -356,6 +412,8 @@ class TestKnowledgeLeadAgentFactory:
         factory = create_knowledge_lead_agent_factory(
             module=_FakeKnowledgeModule(),
             project_id=PROJECT_ID,
+            owner_user_id=OWNER_USER_ID,
+            authority=_AUTHORITY,
         )
 
         graph = factory.private_runtime_factory(
@@ -381,6 +439,8 @@ class TestKnowledgeLeadAgentFactory:
         factory = create_knowledge_lead_agent_factory(
             module=_FakeKnowledgeModule(),
             project_id=PROJECT_ID,
+            owner_user_id=OWNER_USER_ID,
+            authority=_AUTHORITY,
         )
 
         with pytest.raises(ValueError, match="trusted extension"):
@@ -397,6 +457,8 @@ class TestKnowledgeLeadAgentFactory:
         factory = create_knowledge_lead_agent_factory(
             module=_FakeKnowledgeModule(),
             project_id=PROJECT_ID,
+            owner_user_id=OWNER_USER_ID,
+            authority=_AUTHORITY,
         )
 
         canonical = inspect.signature(lead_agent_module._make_lead_agent_with_private_runtime)
@@ -414,6 +476,8 @@ class TestKnowledgeLeadAgentFactory:
         factory = create_knowledge_lead_agent_factory(
             module=_FakeKnowledgeModule(),
             project_id=PROJECT_ID,
+            owner_user_id=OWNER_USER_ID,
+            authority=_AUTHORITY,
             base_factory=base_factory,
         )
 
@@ -431,6 +495,8 @@ class TestKnowledgeLeadAgentFactory:
             create_knowledge_lead_agent_factory(
                 module=_FakeKnowledgeModule(),
                 project_id=PROJECT_ID,
+                owner_user_id=OWNER_USER_ID,
+                authority=_AUTHORITY,
                 base_factory=base_factory,
             )
 
@@ -450,9 +516,18 @@ def _executor_with(knowledge_module: object | None):
 
 
 def _execution(runtime_kind: str = "chat") -> SimpleNamespace:
+    context = ProjectContext(
+        user_id=OWNER_USER_ID,
+        project_id=PROJECT_ID,
+        membership_id=uuid.UUID("eeeeeeee-5555-4555-8555-eeeeeeeeeeee"),
+        role=ProjectRole.ADMIN,
+        capabilities=frozenset(Capability),
+        membership_version=1,
+        request_id="req-knowledge-agent-tool",
+    )
     return SimpleNamespace(
         runtime_kind=runtime_kind,
-        context=SimpleNamespace(project_id=PROJECT_ID),
+        context=PrivateWorkContext.from_project(context),
     )
 
 
@@ -482,6 +557,7 @@ class TestExecutorFactoryResolution:
 
         await _invoke(tools[KNOWLEDGE_SEARCH_TOOL_NAME], query="接线验证")
         assert module.requests[0].project_id == PROJECT_ID
+        assert module.requests[0].owner_user_id == OWNER_USER_ID
 
     def test_skill_builder_run_never_receives_the_knowledge_tool(
         self,

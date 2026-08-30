@@ -30,6 +30,8 @@ export interface Translations {
     thinkingProcess: string;
     thinkingInProgress: (seconds?: number) => string;
     thoughtFor: (seconds?: number) => string;
+    reasoningSummaryInProgress: (seconds?: number) => string;
+    reasoningSummaryFor: (seconds?: number) => string;
     artifacts: string;
     public: string;
     custom: string;
@@ -164,6 +166,7 @@ export interface Translations {
       modelPlaceholder: string;
       modelHint: string;
       noModels: string;
+      modelsLoadFailed: string;
       editTitle: string;
       statusLabel: string;
       deleteTitle: string;
@@ -179,6 +182,9 @@ export interface Translations {
       defaultTopKHint: string;
       defaultThresholdLabel: string;
       defaultThresholdHint: string;
+      rerankerLabel: string;
+      rerankerNone: string;
+      rerankerHint: string;
       rebuildSectionTitle: string;
       rebuildModelLabel: string;
       rebuildHint: string;
@@ -220,6 +226,9 @@ export interface Translations {
       previewTitle: string;
       previewHint: (fileName: string) => string;
       previewLoading: string;
+      previewRefresh: string;
+      previewStale: string;
+      previewInvalid: string;
       previewTotal: (total: number) => string;
       previewChunkLabel: (position: number) => string;
       previewCharacters: (count: number) => string;
@@ -306,6 +315,7 @@ export interface Translations {
       rename: string;
       renameTitle: string;
       renameLabel: string;
+      actionsAria: (name: string) => string;
       enableAria: (name: string) => string;
       disableAria: (name: string) => string;
       selectAllAria: string;
@@ -897,7 +907,6 @@ export interface Translations {
       assets: string;
       systemSettings: string;
       settings: string;
-      knowledgeSettings: string;
     };
     overview: {
       title: string;

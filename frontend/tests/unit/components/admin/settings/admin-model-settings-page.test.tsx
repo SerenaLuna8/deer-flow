@@ -82,7 +82,7 @@ describe("admin model settings domain-owned API Key", () => {
   test("provides a complete English governance surface without Chinese fallbacks", () => {
     const copy = adminModelSettingsCopy("en-US");
 
-    expect(copy.pageTitle).toBe("Model settings");
+    expect(copy.pageTitle).toBe("Model management");
     expect(copy.addModel).toBe("Add model");
     expect(copy.clearDialogTitle).toBe("Clear API Key?");
     expect(copy.testConnection).toBe("Test connection");

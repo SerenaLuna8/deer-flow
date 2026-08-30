@@ -3,9 +3,10 @@
 Owns everything the replay Gateway needs to run the Knowledge module for
 real — deterministic mock SiliconFlow provider (``/v1/embeddings`` +
 ``/v1/rerank``) on an ephemeral loopback port, one disposable MinIO bucket,
-the pgvector extension, the seeded model configuration pointing at the mock,
-and the ``/api/test-only/replay-knowledge`` control router used by the
-Playwright specs to inject provider faults and verify object-store contents.
+the pgvector extension, the seeded model registry (one Provider plus one
+embedding and one rerank model) pointing at the mock, and the
+``/api/test-only/replay-knowledge`` control router used by the Playwright
+specs to inject provider faults and verify object-store contents.
 
 Determinism contract shared with ``frontend/tests/e2e-real-backend``:
 
@@ -135,44 +136,76 @@ knowledge:
 """
 
 
-async def seed_replay_knowledge_model_configuration(database_url: str, *, base_url: str) -> uuid.UUID:
-    """Insert the mock-backed model configuration into the replay database."""
+async def seed_replay_model_registry(database_url: str, *, base_url: str) -> tuple[uuid.UUID, uuid.UUID]:
+    """Insert the mock-backed Provider plus its embedding and rerank models.
 
-    from actweave_knowledge.bootstrap import (
-        KnowledgeModelConfigurationSeed,
-        install_default_model_configuration,
-    )
+    Direct ORM inserts into the empty disposable database, with the API Key
+    encrypted exactly like the host registry stores it (the replay process
+    always exports ``ACT_WEAVE_SECRET_KEY``). Returns
+    ``(embedding_model_id, rerank_model_id)``.
+    """
+
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from app.knowledge.secret_adapter import EnvelopeKnowledgeSecretAdapter
-
-    configuration_id = uuid.uuid5(_REPLAY_KNOWLEDGE_NAMESPACE, "replay-knowledge-model-configuration")
-    protected = EnvelopeKnowledgeSecretAdapter.from_environment().protect_api_key(
-        configuration_id,
-        REPLAY_KNOWLEDGE_MODEL_API_KEY,
+    from app.model_registry.secrets import protect_provider_api_key
+    from deerflow.persistence.model_registry import (
+        ModelProviderModelRow,
+        ModelProviderRow,
     )
-    seed = KnowledgeModelConfigurationSeed(
-        configuration_id=configuration_id,
-        display_name=REPLAY_KNOWLEDGE_MODEL_DISPLAY_NAME,
+    from deerflow.secrets import SecretKey
+
+    provider_id = uuid.uuid5(_REPLAY_KNOWLEDGE_NAMESPACE, "replay-model-provider")
+    embedding_model_id = uuid.uuid5(_REPLAY_KNOWLEDGE_NAMESPACE, "replay-embedding-model")
+    rerank_model_id = uuid.uuid5(_REPLAY_KNOWLEDGE_NAMESPACE, "replay-rerank-model")
+    envelope = protect_provider_api_key(
+        provider_id=provider_id,
         base_url=base_url,
-        embedding_model="replay/embedding",
-        embedding_dimension=REPLAY_EMBEDDING_DIMENSION,
-        embedding_max_batch=8,
-        reranker_model="replay/reranker",
-        reranker_max_batch=8,
-        request_timeout_seconds=10,
-        api_key_nonce=protected.nonce,
-        api_key_ciphertext=protected.ciphertext,
+        api_key=REPLAY_KNOWLEDGE_MODEL_API_KEY,
+        key=SecretKey.from_environment(),
     )
     engine = create_async_engine(database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await install_default_model_configuration(
-            async_sessionmaker(engine, expire_on_commit=False),
-            seed,
-        )
+        async with factory() as session, session.begin():
+            session.add(
+                ModelProviderRow(
+                    id=provider_id,
+                    name=REPLAY_KNOWLEDGE_MODEL_DISPLAY_NAME,
+                    base_url=base_url,
+                    request_timeout_seconds=10,
+                    api_key_nonce=envelope.nonce,
+                    api_key_ciphertext=envelope.ciphertext,
+                )
+            )
+            # No relationship() links the registry mappers, so the unit of
+            # work will not order these inserts by the FK; flush the Provider
+            # before its models.
+            await session.flush()
+            session.add(
+                ModelProviderModelRow(
+                    id=embedding_model_id,
+                    provider_id=provider_id,
+                    model_type="embedding",
+                    model_name="replay/embedding",
+                    embedding_dimension=REPLAY_EMBEDDING_DIMENSION,
+                    max_batch=8,
+                    status="active",
+                )
+            )
+            session.add(
+                ModelProviderModelRow(
+                    id=rerank_model_id,
+                    provider_id=provider_id,
+                    model_type="rerank",
+                    model_name="replay/reranker",
+                    embedding_dimension=None,
+                    max_batch=8,
+                    status="active",
+                )
+            )
     finally:
         await engine.dispose()
-    return configuration_id
+    return embedding_model_id, rerank_model_id
 
 
 # ---------------------------------------------------------------------------

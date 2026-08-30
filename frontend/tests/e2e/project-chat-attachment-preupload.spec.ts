@@ -2568,7 +2568,7 @@ test("renders knowledge citations under the final answer and restores them after
   await expect(panel.getByRole("listitem")).toHaveCount(2);
   const firstCitation = panel.getByRole("listitem").first();
   await expect(firstCitation).toContainText("发布说明.pdf");
-  await expect(firstCitation).toContainText("Relevance 0.930");
+  await expect(firstCitation).toContainText("Retrieval score 0.930");
   await expect(firstCitation).toContainText("Segment #7");
   await expect(firstCitation).toContainText("Page 7");
   await expect(panel.getByRole("listitem").nth(1)).toContainText(

@@ -5,6 +5,7 @@ import type { Capability, Project } from "@/core/projects/types";
 const ACCOUNT_ID = "90000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const MODEL_ID = "30000000-0000-4000-8000-000000000001";
+const RERANK_MODEL_ID = "30000000-0000-4000-8000-000000000002";
 const TIMESTAMP = "2026-08-29T00:00:00Z";
 
 const READ_CAPABILITIES: Capability[] = [
@@ -68,10 +69,7 @@ function knowledgeError(
 
 /** Read one text field out of a multipart/form-data request body. */
 function multipartField(body: string, name: string): string | null {
-  const pattern = new RegExp(
-    `name="${name}"\\r\\n\\r\\n([^\\r]*)\\r\\n`,
-    "u",
-  );
+  const pattern = new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r]*)\\r\\n`, "u");
   return pattern.exec(body)?.[1] ?? null;
 }
 
@@ -84,6 +82,7 @@ type MockBase = {
   delete_error: string | null;
   default_top_k?: number;
   default_score_threshold?: number;
+  reranker_model_id?: string | null;
   /** deleting bases disappear after this many further list polls */
   pollsUntilGone?: number;
 };
@@ -145,7 +144,8 @@ function baseView(base: MockBase) {
     project_id: PROJECT_ID,
     name: base.name,
     description: base.description,
-    model_configuration_id: MODEL_ID,
+    embedding_model_id: MODEL_ID,
+    reranker_model_id: base.reranker_model_id ?? null,
     status: base.status,
     document_count: base.document_count,
     default_top_k: base.default_top_k ?? 4,
@@ -241,6 +241,17 @@ type KnowledgeMockOptions = {
   featureDisabled?: boolean;
   bases?: MockBase[];
   documents?: MockDocument[];
+  /** Keep the create response in flight after the mock server accepted it. */
+  createBaseResponseGate?: Promise<void>;
+  /** Keep an upload response in flight after the mock server accepted it. */
+  uploadResponseGate?: Promise<void>;
+  documentListFailure?: {
+    baseId?: string;
+    afterRequest: number;
+    status: number;
+    code: string;
+    message: string;
+  };
   /** explicit stateful segments per document id (enables segment CRUD) */
   segments?: Record<string, MockSegment[]>;
   /** seeded query log, newest first; searches prepend to it */
@@ -272,6 +283,7 @@ async function mockKnowledgeRoutes(
     queryCounter: 0,
     fieldCounter: 0,
     documentListRequests: 0,
+    documentListFailure: options.documentListFailure ?? null,
     searchRequests: [] as Array<Record<string, unknown>>,
     previewRequests: [] as Array<Record<string, string>>,
     baseUpdates: [] as Array<Record<string, unknown>>,
@@ -279,7 +291,7 @@ async function mockKnowledgeRoutes(
     metadataUpdates: [] as Array<Record<string, unknown>>,
   };
 
-  await page.route("**/api/**", (route) => {
+  await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
@@ -329,13 +341,20 @@ async function mockKnowledgeRoutes(
     }
     if (path === `${knowledgeBase}/model-options` && method === "GET") {
       return json(route, {
-        items: [
+        embedding_models: [
           {
             id: MODEL_ID,
-            display_name: "SiliconFlow bge-m3",
-            embedding_model: "BAAI/bge-m3",
+            provider_name: "SiliconFlow",
+            model_name: "BAAI/bge-m3",
             embedding_dimension: 1024,
-            reranker_model: "BAAI/bge-reranker-v2-m3",
+          },
+        ],
+        reranker_models: [
+          {
+            id: RERANK_MODEL_ID,
+            provider_name: "SiliconFlow",
+            model_name: "BAAI/bge-reranker-v2-m3",
+            embedding_dimension: null,
           },
         ],
         request_id: "req-options",
@@ -367,6 +386,7 @@ async function mockKnowledgeRoutes(
         delete_error: null,
       };
       state.bases.push(created);
+      await options.createBaseResponseGate;
       return json(route, { item: baseView(created), request_id: "req-create" });
     }
 
@@ -386,6 +406,8 @@ async function mockKnowledgeRoutes(
         status?: "active" | "disabled";
         default_top_k?: number;
         default_score_threshold?: number;
+        reranker_model_id?: string;
+        clear_reranker_model?: boolean;
       };
       state.baseUpdates.push(body);
       if (body.name !== undefined) base.name = body.name;
@@ -396,6 +418,11 @@ async function mockKnowledgeRoutes(
       }
       if (body.default_score_threshold !== undefined) {
         base.default_score_threshold = body.default_score_threshold;
+      }
+      if (body.clear_reranker_model) {
+        base.reranker_model_id = null;
+      } else if (body.reranker_model_id !== undefined) {
+        base.reranker_model_id = body.reranker_model_id;
       }
       return json(route, { item: baseView(base), request_id: "req-update" });
     }
@@ -420,7 +447,10 @@ async function mockKnowledgeRoutes(
 
     const queriesMatch = /\/bases\/([0-9a-f-]{36})\/queries$/u.exec(path);
     if (queriesMatch && method === "GET") {
-      const pageNumber = Number.parseInt(url.searchParams.get("page") ?? "1", 10);
+      const pageNumber = Number.parseInt(
+        url.searchParams.get("page") ?? "1",
+        10,
+      );
       const pageSize = Number.parseInt(
         url.searchParams.get("page_size") ?? "10",
         10,
@@ -539,9 +569,8 @@ async function mockKnowledgeRoutes(
       return json(route, { item: baseView(base), request_id: "req-rebuild" });
     }
 
-    const documentMetadataMatch = /\/documents\/([0-9a-f-]{36})\/metadata$/u.exec(
-      path,
-    );
+    const documentMetadataMatch =
+      /\/documents\/([0-9a-f-]{36})\/metadata$/u.exec(path);
     if (documentMetadataMatch && method === "PATCH") {
       const target = state.documents.find(
         (item) => item.id === documentMetadataMatch[1],
@@ -567,6 +596,19 @@ async function mockKnowledgeRoutes(
     const documentsMatch = /\/bases\/([0-9a-f-]{36})\/documents$/u.exec(path);
     if (documentsMatch && method === "GET") {
       state.documentListRequests += 1;
+      if (
+        state.documentListFailure &&
+        (state.documentListFailure.baseId === undefined ||
+          state.documentListFailure.baseId === documentsMatch[1]) &&
+        state.documentListRequests >= state.documentListFailure.afterRequest
+      ) {
+        return knowledgeError(
+          route,
+          state.documentListFailure.status,
+          state.documentListFailure.code,
+          state.documentListFailure.message,
+        );
+      }
       const items = state.documents.filter(
         (item) => item.knowledge_base_id === documentsMatch[1],
       );
@@ -599,7 +641,8 @@ async function mockKnowledgeRoutes(
           multipartField(form, "remove_extra_spaces") === "true",
         remove_urls_emails:
           multipartField(form, "remove_urls_emails") === "true",
-        chunking_mode: uploadedMode === "parent_child" ? "parent_child" : "general",
+        chunking_mode:
+          uploadedMode === "parent_child" ? "parent_child" : "general",
         child_chunk_size:
           uploadedChildSize === null
             ? undefined
@@ -613,6 +656,7 @@ async function mockKnowledgeRoutes(
       state.documents.push(uploaded);
       const base = state.bases.find((item) => item.id === documentsMatch[1]);
       if (base) base.document_count += 1;
+      await options.uploadResponseGate;
       return json(route, {
         item: documentView(uploaded),
         request_id: "req-upload",
@@ -922,11 +966,25 @@ async function mockKnowledgeRoutes(
           score: 0.41,
           source_position: { row: 12 },
         },
+        // Cross-encoder rerankers legally emit negative scores; the panel
+        // must render them verbatim instead of clamping or hiding the hit.
+        {
+          knowledge_base_id: "40000000-0000-4000-8000-000000000001",
+          knowledge_base_name: "产品手册",
+          document_id: "50000000-0000-4000-8000-000000000001",
+          document_name: "发布说明.pdf",
+          segment_id: "60000000-0000-4000-8000-000000000013",
+          segment_position: 5,
+          snippet: "重排给出负分、阈值为 0 时仍需展示的内容",
+          score: -0.12,
+          source_position: { page: 9 },
+        },
       ];
-      // Mirrors the backend contract: segments scoring below the requested
-      // threshold are dropped after reranking, never replaced by an error.
+      // Mirrors the backend contract: a positive threshold drops segments
+      // scoring below it after reranking, while 0 disables filtering
+      // entirely so negative rerank scores still pass through.
       const citations =
-        typeof body.score_threshold === "number"
+        typeof body.score_threshold === "number" && body.score_threshold > 0
           ? rerankedCitations.filter(
               (citation) => citation.score >= body.score_threshold!,
             )
@@ -946,6 +1004,17 @@ async function mockKnowledgeRoutes(
   });
 
   return state;
+}
+
+async function openDocumentActions(page: Page, documentName: string) {
+  const row = page
+    .getByTestId("knowledge-document-rows")
+    .getByRole("row")
+    .filter({ hasText: documentName });
+  await row
+    .getByRole("button", { name: `Actions for ${documentName}` })
+    .click();
+  return page.getByRole("menu");
 }
 
 test("hides the Knowledge navigation entry when the feature is disabled", async ({
@@ -1001,7 +1070,7 @@ test("creates a base through the wizard and watches the upload reach ready", asy
   // Step 2: chunk settings and model; the name prefills from the file.
   await expect(page.getByLabel("Name")).toHaveValue("handbook");
 
-  // The preview panel loads with the default parameters after the debounce.
+  // Entering step 2 generates the initial preview once.
   const previewPanel = page.getByTestId("chunk-preview-panel");
   await expect(
     previewPanel.getByText("Previewing the first file: handbook.txt"),
@@ -1010,9 +1079,68 @@ test("creates a base through the wizard and watches the upload reach ready", asy
     previewPanel.getByText("预览分段一 size=1000 sep=\\n\\n"),
   ).toBeVisible();
   await expect(previewPanel.getByText("7 chunks in total")).toBeVisible();
+  expect(state.previewRequests).toHaveLength(1);
 
-  // Editing the delimiter and rules refreshes the preview with new params.
+  // Returning to the same file and unchanged settings keeps the first result;
+  // step navigation is not an implicit retry of a full-file preview request.
+  await page.getByRole("button", { name: "Previous" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(
+    previewPanel.getByText("预览分段一 size=1000 sep=\\n\\n"),
+  ).toBeVisible();
+  expect(state.previewRequests).toHaveLength(1);
+
+  // Invalid values never trigger a request and keep refresh disabled. Revert
+  // to the submitted value and the existing preview is authoritative again.
+  const chunkSize = page.getByLabel("Chunk size (characters)");
+  await chunkSize.fill("100");
+  await expect(
+    previewPanel.getByText(
+      "Fix the invalid chunk settings before refreshing the preview.",
+    ),
+  ).toBeVisible();
+  await expect(
+    previewPanel.getByRole("button", { name: "Refresh preview" }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "Previous" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(
+    previewPanel.getByText("预览分段一 size=1000 sep=\\n\\n"),
+  ).toBeVisible();
+  await expect(
+    previewPanel.getByText(
+      "Fix the invalid chunk settings before refreshing the preview.",
+    ),
+  ).toBeVisible();
+  expect(state.previewRequests).toHaveLength(1);
+  await chunkSize.fill("1000");
+  await expect(
+    previewPanel.getByText(
+      "Preview is out of date. Refresh to apply the current settings.",
+    ),
+  ).toHaveCount(0);
+
+  // Editing parameters keeps the last preview visible but marks it stale;
+  // the complete file is not uploaded again until the user asks.
   await page.getByLabel("Delimiter").fill("。");
+  await expect(
+    previewPanel.getByText(
+      "Preview is out of date. Refresh to apply the current settings.",
+    ),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Previous" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(
+    previewPanel.getByText("预览分段一 size=1000 sep=\\n\\n"),
+  ).toBeVisible();
+  await expect(
+    previewPanel.getByText(
+      "Preview is out of date. Refresh to apply the current settings.",
+    ),
+  ).toBeVisible();
+  await page.waitForTimeout(600);
+  expect(state.previewRequests).toHaveLength(1);
+  await previewPanel.getByRole("button", { name: "Refresh preview" }).click();
   await expect(
     previewPanel.getByText("预览分段一 size=1000 sep=。"),
   ).toBeVisible();
@@ -1020,22 +1148,35 @@ test("creates a base through the wizard and watches the upload reach ready", asy
     .getByLabel("Replace consecutive spaces, newlines and tabs")
     .check();
   await expect(
+    previewPanel.getByText(
+      "Preview is out of date. Refresh to apply the current settings.",
+    ),
+  ).toBeVisible();
+  expect(state.previewRequests).toHaveLength(2);
+  await previewPanel.getByRole("button", { name: "Refresh preview" }).click();
+  await expect(
     previewPanel.getByText("预览分段二 spaces=true urls=false"),
   ).toBeVisible();
 
-  // A backend preview failure surfaces inline and recovery re-renders chunks.
+  // A requested backend failure surfaces inline; correcting the parameter
+  // marks that failed request stale and explicit refresh recovers.
   await page.getByLabel("Delimiter").fill("BOOM");
-  await expect(
-    previewPanel.getByText("文件没有可提取的文本"),
-  ).toBeVisible();
+  await previewPanel.getByRole("button", { name: "Refresh preview" }).click();
+  await expect(previewPanel.getByText("文件没有可提取的文本")).toBeVisible();
   await page.getByLabel("Delimiter").fill("。");
+  await expect(
+    previewPanel.getByText(
+      "Preview is out of date. Refresh to apply the current settings.",
+    ),
+  ).toBeVisible();
+  await previewPanel.getByRole("button", { name: "Refresh preview" }).click();
   await expect(
     previewPanel.getByText("预览分段一 size=1000 sep=。"),
   ).toBeVisible();
 
   await page.getByLabel("Name").fill("产品手册");
-  await page.getByLabel("Model configuration").click();
-  await page.getByRole("option", { name: "SiliconFlow bge-m3" }).click();
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
   await page.getByRole("button", { name: "Save & process" }).click();
 
   // Step 3: the base exists and embedding progress advances to ready.
@@ -1069,6 +1210,128 @@ test("creates a base through the wizard and watches the upload reach ready", asy
   });
 });
 
+test("freezes wizard controls and submitted settings while base creation is pending", async ({
+  page,
+}) => {
+  let releaseCreate!: () => void;
+  const createBaseResponseGate = new Promise<void>((resolve) => {
+    releaseCreate = resolve;
+  });
+  let releaseUpload!: () => void;
+  const uploadResponseGate = new Promise<void>((resolve) => {
+    releaseUpload = resolve;
+  });
+  const state = await mockKnowledgeRoutes(page, {
+    createBaseResponseGate,
+    uploadResponseGate,
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+  await page.getByLabel("File").setInputFiles({
+    name: "frozen.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("冻结提交参数验收内容"),
+  });
+  await page.getByRole("button", { name: "Next" }).click();
+
+  await page.getByRole("radio", { name: /Parent-child/u }).check();
+  await page.getByLabel("Chunk overlap (characters)").fill("0");
+  await page.getByLabel(/^Delimiter/u).fill("。");
+  await page.getByLabel("Child chunk size (characters)").fill("300");
+  await page
+    .getByLabel("Replace consecutive spaces, newlines and tabs")
+    .check();
+  await page.getByLabel("Name").fill("冻结设置");
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  await page.getByRole("button", { name: "Save & process" }).click();
+
+  // The mock has accepted the create, but the browser still awaits its reply.
+  await expect.poll(() => state.bases.length).toBe(1);
+  try {
+    await expect(page.getByRole("button", { name: "Back" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Previous" })).toBeDisabled();
+    await expect(page.getByLabel("Name")).toBeDisabled();
+    await expect(page.getByLabel("Description")).toBeDisabled();
+    await expect(page.getByLabel("Embedding model")).toBeDisabled();
+    await expect(page.getByRole("radio", { name: /General/u })).toBeDisabled();
+    await expect(
+      page.getByRole("radio", { name: /Parent-child/u }),
+    ).toBeDisabled();
+    await expect(page.getByLabel(/^Chunk size \(characters\)/u)).toBeDisabled();
+    await expect(page.getByLabel("Chunk overlap (characters)")).toBeDisabled();
+    await expect(page.getByLabel(/^Delimiter/u)).toBeDisabled();
+    await expect(
+      page.getByLabel("Child chunk size (characters)"),
+    ).toBeDisabled();
+    await expect(page.getByLabel("Child delimiter")).toBeDisabled();
+    await expect(
+      page.getByLabel("Replace consecutive spaces, newlines and tabs"),
+    ).toBeDisabled();
+    await expect(
+      page.getByLabel("Delete all URLs and email addresses"),
+    ).toBeDisabled();
+    releaseCreate();
+    await expect.poll(() => state.uploadCounter).toBe(1);
+    await expect(page.getByRole("button", { name: "Back" })).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Go to documents" }),
+    ).toBeDisabled();
+  } finally {
+    releaseCreate();
+    releaseUpload();
+  }
+
+  await expect(page.getByText("Knowledge base created")).toBeVisible();
+  expect(state.documents.at(-1)).toMatchObject({
+    chunk_separator: "。",
+    remove_extra_spaces: true,
+    chunking_mode: "parent_child",
+    child_chunk_size: 300,
+  });
+  const summary = page.getByRole("heading", { name: "Settings" }).locator("..");
+  await expect(summary).toContainText("Parent-child");
+  await expect(summary).toContainText("300");
+  await expect(summary).toContainText("。");
+});
+
+test("does not continue document uploads after the create wizard unmounts", async ({
+  page,
+}) => {
+  let releaseCreate!: () => void;
+  const createBaseResponseGate = new Promise<void>((resolve) => {
+    releaseCreate = resolve;
+  });
+  const state = await mockKnowledgeRoutes(page, { createBaseResponseGate });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+  await page.getByLabel("File").setInputFiles({
+    name: "leave-before-upload.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("离开向导后不得继续上传"),
+  });
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByLabel("Name").fill("卸载保护");
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  await page.getByRole("button", { name: "Save & process" }).click();
+  await expect.poll(() => state.bases.length).toBe(1);
+
+  try {
+    await page
+      .getByRole("navigation", { name: "Project navigation" })
+      .getByRole("link", { name: "Overview" })
+      .first()
+      .click();
+    await expect(page).toHaveURL(/\/projects\/alpha$/u);
+  } finally {
+    releaseCreate();
+  }
+  // Give the accepted create response and its async continuation time to run.
+  await page.waitForTimeout(500);
+  expect(state.uploadCounter).toBe(0);
+});
+
 test("creates an empty base from the wizard escape hatch", async ({ page }) => {
   await mockKnowledgeRoutes(page);
   await page.goto("/projects/alpha/knowledge");
@@ -1076,8 +1339,8 @@ test("creates an empty base from the wizard escape hatch", async ({ page }) => {
   await page.getByRole("button", { name: "New base" }).click();
   await page.getByRole("button", { name: "Create an empty base" }).click();
   await page.getByLabel("Name").fill("空知识库");
-  await page.getByLabel("Model configuration").click();
-  await page.getByRole("option", { name: "SiliconFlow bge-m3" }).click();
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
   const baseList = page.getByTestId("knowledge-base-list");
@@ -1122,11 +1385,15 @@ test("failed document shows the error, retry re-queues it, and the segment brows
     rows.getByText("Embedding 请求连续失败已耗尽重试"),
   ).toBeVisible();
 
-  await rows.getByRole("button", { name: "Retry" }).click();
+  await (await openDocumentActions(page, "broken.pdf"))
+    .getByRole("menuitem", { name: "Retry" })
+    .click();
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 15_000 });
 
   // The segment browser replaces the documents table in place.
-  await rows.getByRole("button", { name: "View segments" }).click();
+  await (await openDocumentActions(page, "broken.pdf"))
+    .getByRole("menuitem", { name: "View segments" })
+    .click();
   const browser = page.getByTestId("knowledge-segment-browser");
   await expect(
     browser.getByTestId("knowledge-segment-list").getByText("分段 1 的内容"),
@@ -1136,6 +1403,273 @@ test("failed document shows the error, retry re-queues it, and the segment brows
   // The back entry returns to the documents table of the same base.
   await browser.getByRole("button", { name: "Documents" }).click();
   await expect(page.getByTestId("knowledge-document-rows")).toBeVisible();
+});
+
+test("keeps document actions reachable at 1280px and reveals a bounded error in full", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const longDisplayName =
+    "broken-reference-manual-with-a-long-visible-name.pdf";
+  const longOriginalName =
+    "original-broken-reference-manual-source-file-name.pdf";
+  const longError =
+    "Embedding provider rejected this document after every retry because the configured model is temporarily unavailable for this project.";
+  await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "产品手册",
+        description: "",
+        status: "active",
+        document_count: 2,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-000000000001",
+        knowledge_base_id: BASE_ID,
+        name: "guide.txt",
+        original_name: "guide.txt",
+        status: "ready",
+        segment_count: 2,
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: "50000000-0000-4000-8000-000000000002",
+        knowledge_base_id: BASE_ID,
+        name: longDisplayName,
+        original_name: longOriginalName,
+        status: "failed",
+        segment_count: 0,
+        error_message: longError,
+        delete_error: null,
+      },
+    ],
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  const table = page.getByTestId("knowledge-documents-table");
+  const guideRow = table.getByRole("row").filter({ hasText: "guide.txt" });
+  const actions = guideRow.getByRole("button", {
+    name: "Actions for guide.txt",
+  });
+  await expect(actions).toBeVisible();
+  const tableWidth = await table.evaluate((element) => ({
+    client: element.clientWidth,
+    scroll: element.scrollWidth,
+  }));
+  expect(tableWidth.scroll).toBe(tableWidth.client);
+  expect(await table.evaluate((element) => element.scrollLeft)).toBe(0);
+
+  await actions.click();
+  await expect(
+    page.getByRole("menuitem", { name: "View segments" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Download original" }),
+  ).toBeVisible();
+  expect(await table.evaluate((element) => element.scrollLeft)).toBe(0);
+  await page.keyboard.press("Escape");
+
+  const failedRow = table.getByRole("row").filter({ hasText: longDisplayName });
+  await expect(failedRow.getByText(longDisplayName)).toHaveAttribute(
+    "title",
+    longDisplayName,
+  );
+  await expect(failedRow.getByText(longOriginalName)).toHaveAttribute(
+    "title",
+    longOriginalName,
+  );
+  const errorStatus = failedRow.getByRole("status");
+  await expect(errorStatus).toHaveAttribute("aria-live", "polite");
+  await expect(errorStatus).toContainText(longError);
+  const boundedError = failedRow.getByText(longError);
+  const errorBox = await boundedError.boundingBox();
+  expect(errorBox?.height).toBeLessThanOrEqual(36);
+  await boundedError.hover();
+  await expect(page.getByRole("tooltip")).toHaveText(longError);
+});
+
+test("keeps cached document rows visible when a background refresh fails and retries", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "产品手册",
+        description: "",
+        status: "active",
+        document_count: 1,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-000000000003",
+        knowledge_base_id: BASE_ID,
+        name: "cached.txt",
+        original_name: "cached.txt",
+        status: "ready",
+        segment_count: 2,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("cached.txt")).toBeVisible();
+  state.documentListFailure = {
+    afterRequest: state.documentListRequests + 1,
+    status: 500,
+    code: "KNOWLEDGE_UNAVAILABLE",
+    message: "Document refresh is temporarily unavailable.",
+  };
+  await rows.getByRole("switch", { name: "Disable cached.txt" }).click();
+
+  const refreshAlert = page.getByRole("alert").filter({
+    hasText: "Document refresh is temporarily unavailable.",
+  });
+  await expect(refreshAlert).toBeVisible({ timeout: 15_000 });
+  await expect(rows.getByText("cached.txt")).toBeVisible();
+
+  state.documentListFailure = null;
+  await refreshAlert.getByRole("button", { name: "Retry" }).click();
+  await expect(refreshAlert).toHaveCount(0);
+  await expect(rows.getByText("cached.txt")).toBeVisible();
+});
+
+test("hides an open segment browser after authority loss and recovers on another base", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const OTHER_BASE_ID = "40000000-0000-4000-8000-000000000002";
+  const REVOKED_DOCUMENT_ID = "50000000-0000-4000-8000-000000000004";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "产品手册 A",
+        description: "",
+        status: "active",
+        document_count: 1,
+        delete_error: null,
+      },
+      {
+        id: OTHER_BASE_ID,
+        name: "产品手册 B",
+        description: "",
+        status: "active",
+        document_count: 1,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: REVOKED_DOCUMENT_ID,
+        knowledge_base_id: BASE_ID,
+        name: "revoked.txt",
+        original_name: "revoked.txt",
+        status: "ready",
+        segment_count: 2,
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: "50000000-0000-4000-8000-000000000005",
+        knowledge_base_id: OTHER_BASE_ID,
+        name: "other-base.txt",
+        original_name: "other-base.txt",
+        status: "ready",
+        segment_count: 1,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+    segments: {
+      [REVOKED_DOCUMENT_ID]: [
+        {
+          id: "60000000-0000-4000-8000-000000000004",
+          position: 1,
+          content: "撤权前可见的第一段",
+          enabled: true,
+          source_position: { page: 1 },
+        },
+        {
+          id: "60000000-0000-4000-8000-000000000005",
+          position: 2,
+          content: "撤权前可见的第二段",
+          enabled: true,
+          source_position: { page: 2 },
+        },
+      ],
+    },
+  });
+  await page.goto("/projects/alpha/knowledge");
+  const baseList = page.getByTestId("knowledge-base-list");
+  await baseList
+    .getByRole("listitem")
+    .filter({ hasText: "产品手册 A" })
+    .getByRole("button", { name: "View documents" })
+    .click();
+
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("revoked.txt")).toBeVisible();
+  await (await openDocumentActions(page, "revoked.txt"))
+    .getByRole("menuitem", { name: "View segments" })
+    .click();
+  const browser = page.getByTestId("knowledge-segment-browser");
+  await expect(browser).toBeVisible();
+
+  const requestsBeforeRevocation = state.documentListRequests;
+  state.documentListFailure = {
+    baseId: BASE_ID,
+    afterRequest: requestsBeforeRevocation + 1,
+    status: 403,
+    code: "KNOWLEDGE_FORBIDDEN",
+    message: "Document access was revoked.",
+  };
+  await browser.getByRole("switch", { name: "Disable segment #1" }).click();
+  await expect(
+    page.getByRole("alert").filter({
+      hasText: "Document access was revoked.",
+    }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(browser).toHaveCount(0);
+  await expect(page.getByTestId("knowledge-document-rows")).toHaveCount(0);
+  expect(state.documentListRequests).toBe(requestsBeforeRevocation + 1);
+  const requestsAfterAuthorityBoundary = state.documentListRequests;
+  // Once authority is revoked this exact scoped list is terminal. It must not
+  // poll, retry, or recreate a removed active query in the background.
+  await page.waitForTimeout(2_500);
+  expect(state.documentListRequests).toBe(requestsAfterAuthorityBoundary);
+
+  // The block belongs only to base A. A different base gets a fresh request
+  // and renders its own scoped rows.
+  await page.getByRole("button", { name: "Back" }).click();
+  await baseList
+    .getByRole("listitem")
+    .filter({ hasText: "产品手册 B" })
+    .getByRole("button", { name: "View documents" })
+    .click();
+  await expect(
+    page.getByTestId("knowledge-document-rows").getByText("other-base.txt"),
+  ).toBeVisible();
+  expect(state.documentListRequests).toBeGreaterThan(
+    requestsAfterAuthorityBoundary,
+  );
+  const requestsAfterOtherBase = state.documentListRequests;
+  await page.waitForTimeout(2_500);
+  expect(state.documentListRequests).toBe(requestsAfterOtherBase);
 });
 
 test("deletes ready and failed documents after confirmation", async ({
@@ -1181,16 +1715,19 @@ test("deletes ready and failed documents after confirmation", async ({
 
   const rows = page.getByTestId("knowledge-document-rows");
   await expect(rows.getByText("old.txt")).toBeVisible();
-  const downloadLink = rows
-    .getByRole("row")
-    .filter({ hasText: "old.txt" })
-    .getByRole("link", { name: "Download original" });
+  const downloadLink = (await openDocumentActions(page, "old.txt")).getByRole(
+    "menuitem",
+    { name: "Download original" },
+  );
   await expect(downloadLink).toHaveAttribute("download", "old.txt");
+  await page.keyboard.press("Escape");
 
   // A failed document is deletable without a prior retry.
   const failedRow = rows.getByRole("row").filter({ hasText: "bad.pdf" });
   await expect(failedRow.getByText("文件解析失败")).toBeVisible();
-  await failedRow.getByRole("button", { name: "Delete" }).click();
+  await (await openDocumentActions(page, "bad.pdf"))
+    .getByRole("menuitem", { name: "Delete" })
+    .click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Delete", exact: true })
@@ -1198,7 +1735,9 @@ test("deletes ready and failed documents after confirmation", async ({
   await expect(rows.getByText("bad.pdf")).toHaveCount(0);
   await expect(rows.getByText("old.txt")).toBeVisible();
 
-  await rows.getByRole("button", { name: "Delete" }).click();
+  await (await openDocumentActions(page, "old.txt"))
+    .getByRole("menuitem", { name: "Delete" })
+    .click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Delete", exact: true })
@@ -1241,7 +1780,9 @@ test("parks a failed document delete with the reason, stops polling, and re-dele
 
   const rows = page.getByTestId("knowledge-document-rows");
   const row = rows.getByRole("row").filter({ hasText: "stuck-notes.txt" });
-  await row.getByRole("button", { name: "Delete" }).click();
+  await (await openDocumentActions(page, "stuck-notes.txt"))
+    .getByRole("menuitem", { name: "Delete" })
+    .click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Delete", exact: true })
@@ -1257,7 +1798,9 @@ test("parks a failed document delete with the reason, stops polling, and re-dele
   expect(state.documentListRequests).toBe(requestsAfterPark);
 
   // An explicit re-delete clears the error and completes.
-  await row.getByRole("button", { name: "Delete" }).click();
+  await (await openDocumentActions(page, "stuck-notes.txt"))
+    .getByRole("menuitem", { name: "Delete" })
+    .click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Delete", exact: true })
@@ -1292,15 +1835,19 @@ test("renders reranked search results, backend errors, and the empty state", asy
   await page.getByLabel("Query").fill("发布流程");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   const results = page.getByTestId("knowledge-search-results");
-  await expect(results.getByRole("listitem")).toHaveCount(2);
+  await expect(results.getByRole("listitem")).toHaveCount(3);
   await expect(results.getByRole("listitem").first()).toContainText(
     "重排后应当排在第一位的内容",
   );
   await expect(results.getByRole("listitem").first()).toContainText(
-    "Relevance 0.930",
+    "Retrieval score 0.930",
   );
   await expect(results.getByRole("listitem").first()).toContainText("Page 7");
   await expect(results.getByRole("listitem").nth(1)).toContainText("Row 12");
+  // A negative rerank score renders as-is at the end of the ranking.
+  await expect(results.getByRole("listitem").nth(2)).toContainText(
+    "Retrieval score -0.120",
+  );
 
   // The scoped panel always narrows the request to the open base.
   expect(state.searchRequests.at(-1)?.knowledge_base_ids).toEqual([BASE_ID]);
@@ -1346,9 +1893,19 @@ test("sends the score threshold and shows the empty state when it filters every 
   const results = page.getByTestId("knowledge-search-results");
   await expect(results.getByRole("listitem")).toHaveCount(1);
   await expect(results.getByRole("listitem").first()).toContainText(
-    "Relevance 0.930",
+    "Retrieval score 0.930",
   );
   expect(state.searchRequests.at(-1)?.score_threshold).toBe(0.5);
+
+  // An explicit 0 threshold means "no filtering": negative rerank scores
+  // must come back and render instead of being silently dropped.
+  await page.getByLabel("Score threshold").fill("0");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(results.getByRole("listitem")).toHaveCount(3);
+  await expect(results.getByRole("listitem").nth(2)).toContainText(
+    "Retrieval score -0.120",
+  );
+  expect(state.searchRequests.at(-1)?.score_threshold).toBe(0);
 
   // A strict threshold filters everything: the page must land in the explicit
   // empty state rather than an error or stale results.
@@ -1461,11 +2018,16 @@ test("read-only members see lists but no write controls", async ({ page }) => {
   await expect(rows.getByText("guide.txt")).toBeVisible();
   await expect(rows.getByRole("checkbox")).toHaveCount(0);
   await expect(rows.getByRole("switch")).toBeDisabled();
-  await expect(rows.getByRole("button", { name: "Rename" })).toHaveCount(0);
-  await expect(rows.getByRole("button", { name: "Delete" })).toHaveCount(0);
+  const readOnlyMenu = await openDocumentActions(page, "guide.txt");
+  await expect(
+    readOnlyMenu.getByRole("menuitem", { name: "Rename" }),
+  ).toHaveCount(0);
+  await expect(
+    readOnlyMenu.getByRole("menuitem", { name: "Delete" }),
+  ).toHaveCount(0);
 
   // The segment browser is reachable but exposes no mutation controls.
-  await rows.getByRole("button", { name: "View segments" }).click();
+  await readOnlyMenu.getByRole("menuitem", { name: "View segments" }).click();
   const browser = page.getByTestId("knowledge-segment-browser");
   await expect(
     browser.getByTestId("knowledge-segment-list").getByText("分段 1 的内容"),
@@ -1521,7 +2083,9 @@ test("toggles a document's retrieval switch and renames it from the list", async
   ).toBeVisible();
 
   // Rename keeps the original file name visible as secondary text.
-  await rows.getByRole("button", { name: "Rename" }).click();
+  await (await openDocumentActions(page, "guide.txt"))
+    .getByRole("menuitem", { name: "Rename" })
+    .click();
   await page.getByLabel("Display name").fill("规范手册");
   await page
     .getByRole("dialog")
@@ -1614,6 +2178,7 @@ test("wizard parent-child mode nests preview children and freezes child params o
     previewPanel.getByText("预览分段一 size=1000 sep=\\n\\n"),
   ).toBeVisible();
   await expect(previewPanel.getByText(/child chunks/u)).toHaveCount(0);
+  expect(state.previewRequests).toHaveLength(1);
 
   // Switching to parent-child reveals the child parameters with defaults.
   await page.getByRole("radio", { name: /Parent-child/u }).check();
@@ -1621,14 +2186,32 @@ test("wizard parent-child mode nests preview children and freezes child params o
   await expect(childSize).toHaveValue("500");
   await expect(page.getByLabel("Child delimiter")).toHaveValue("\\n");
 
-  // The preview re-runs in parent-child mode and nests children per parent.
+  // Mode changes mark the old preview stale without uploading the file again.
+  await expect(
+    previewPanel.getByText(
+      "Preview is out of date. Refresh to apply the current settings.",
+    ),
+  ).toBeVisible();
+  expect(state.previewRequests).toHaveLength(1);
+  await previewPanel.getByRole("button", { name: "Refresh preview" }).click();
+
+  // Explicit refresh nests children per parent.
   await expect(
     previewPanel.getByText("父块1子块一 child=500 csep=\\n"),
   ).toBeVisible();
-  await expect(previewPanel.getByText("2 child chunks · ", { exact: false }).first()).toBeVisible();
+  await expect(
+    previewPanel.getByText("2 child chunks · ", { exact: false }).first(),
+  ).toBeVisible();
 
-  // Tuning the child size refreshes the nested preview.
+  // Tuning the child size also waits for an explicit refresh.
   await childSize.fill("300");
+  await expect(
+    previewPanel.getByText(
+      "Preview is out of date. Refresh to apply the current settings.",
+    ),
+  ).toBeVisible();
+  expect(state.previewRequests).toHaveLength(2);
+  await previewPanel.getByRole("button", { name: "Refresh preview" }).click();
   await expect(
     previewPanel.getByText("父块1子块一 child=300 csep=\\n"),
   ).toBeVisible();
@@ -1639,17 +2222,15 @@ test("wizard parent-child mode nests preview children and freezes child params o
   });
 
   await page.getByLabel("Name").fill("父子手册");
-  await page.getByLabel("Model configuration").click();
-  await page.getByRole("option", { name: "SiliconFlow bge-m3" }).click();
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
   await page.getByRole("button", { name: "Save & process" }).click();
 
   // The summary reports the mode and the child parameters.
   await expect(page.getByText("Knowledge base created")).toBeVisible();
   await expect(page.getByText("Chunking mode")).toBeVisible();
   await expect(page.getByText("Parent-child", { exact: true })).toBeVisible();
-  await expect(
-    page.getByText("Child chunk size (characters)"),
-  ).toBeVisible();
+  await expect(page.getByText("Child chunk size (characters)")).toBeVisible();
 
   // The upload froze the parent-child parameters.
   expect(state.documents.at(-1)?.chunking_mode).toBe("parent_child");
@@ -1735,7 +2316,9 @@ test("retrieval test lists recent queries, refreshes after a search, and backfil
   await expect(recent.getByText("agent 侧历史查询")).toBeVisible();
   await expect(recent.getByText("Agent call")).toBeVisible();
   await expect(recent.getByText("0.870")).toBeVisible();
-  const emptyRow = recent.getByRole("row").filter({ hasText: "零结果历史查询" });
+  const emptyRow = recent
+    .getByRole("row")
+    .filter({ hasText: "零结果历史查询" });
   await expect(emptyRow.getByText("Retrieval test")).toBeVisible();
   await expect(emptyRow.getByText("—")).toBeVisible();
 
@@ -1812,6 +2395,73 @@ test("base settings save retrieval defaults and empty search inputs defer to the
   expect(lastSearch).not.toHaveProperty("score_threshold");
 });
 
+test("base settings bind and clear the optional reranker without rebuilding, dropping stale results", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "产品手册",
+        description: "",
+        status: "active",
+        document_count: 1,
+        delete_error: null,
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  // Search first: these results must not survive a reranker change.
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill("发布流程");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByTestId("knowledge-search-results")).toBeVisible();
+
+  // Binding a reranker saves through the base PATCH route: effective
+  // immediately, no rebuild, and the embedding binding stays untouched.
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("Reranker model").click();
+  await page
+    .getByRole("option", { name: "SiliconFlow · BAAI/bge-reranker-v2-m3" })
+    .click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
+  expect(state.baseUpdates.at(-1)).toMatchObject({
+    reranker_model_id: RERANK_MODEL_ID,
+  });
+  expect(state.baseUpdates.at(-1)).not.toHaveProperty("clear_reranker_model");
+  expect(state.baseUpdates.at(-1)).not.toHaveProperty("embedding_model_id");
+  expect(state.rebuildRequests).toHaveLength(0);
+
+  // The old results are gone; a fresh search works under the new binding.
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await expect(page.getByTestId("knowledge-search-results")).toHaveCount(0);
+  await page.getByLabel("Query").fill("发布流程");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByTestId("knowledge-search-results")).toBeVisible();
+
+  // "No reranking" is an explicit clear, not an omitted field.
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("Reranker model").click();
+  await page.getByRole("option", { name: "No reranking" }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
+  expect(state.baseUpdates.at(-1)).toMatchObject({
+    clear_reranker_model: true,
+  });
+  expect(state.baseUpdates.at(-1)).not.toHaveProperty("reranker_model_id");
+
+  // Retrieval still returns results with reranking off.
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await expect(page.getByTestId("knowledge-search-results")).toHaveCount(0);
+  await page.getByLabel("Query").fill("发布流程");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByTestId("knowledge-search-results")).toBeVisible();
+});
+
 test("segment browser edits, toggles, adds, and deletes segments", async ({
   page,
 }) => {
@@ -1862,9 +2512,8 @@ test("segment browser edits, toggles, adds, and deletes segments", async ({
   });
   await page.goto("/projects/alpha/knowledge");
   await page.getByRole("button", { name: "View documents" }).click();
-  await page
-    .getByTestId("knowledge-document-rows")
-    .getByRole("button", { name: "View segments" })
+  await (await openDocumentActions(page, "guide.txt"))
+    .getByRole("menuitem", { name: "View segments" })
     .click();
 
   const browser = page.getByTestId("knowledge-segment-browser");
@@ -2032,8 +2681,9 @@ test("document metadata dialog saves typed values and clears emptied fields", as
   await page.goto("/projects/alpha/knowledge");
   await page.getByRole("button", { name: "View documents" }).click();
 
-  const rows = page.getByTestId("knowledge-document-rows");
-  await rows.getByRole("button", { name: "Metadata" }).click();
+  await (await openDocumentActions(page, "guide.txt"))
+    .getByRole("menuitem", { name: "Metadata" })
+    .click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("Edit metadata · guide.txt")).toBeVisible();
 
@@ -2049,7 +2699,9 @@ test("document metadata dialog saves typed values and clears emptied fields", as
   });
 
   // Emptying a stored value sends an explicit null and leaves the rest alone.
-  await rows.getByRole("button", { name: "Metadata" }).click();
+  await (await openDocumentActions(page, "guide.txt"))
+    .getByRole("menuitem", { name: "Metadata" })
+    .click();
   const reopened = page.getByRole("dialog");
   await expect(reopened.getByLabel(/priority/u)).toHaveValue("5");
   await reopened.getByLabel(/author/u).fill("");
@@ -2159,8 +2811,8 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
   // The rebuild block sits under the settings form with its own confirm.
   const rebuildSection = page.getByRole("region", { name: "Embedding model" });
   await expect(rebuildSection).toBeVisible();
-  await rebuildSection.getByLabel("Model configuration").click();
-  await page.getByRole("option", { name: "SiliconFlow bge-m3" }).click();
+  await rebuildSection.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
   await rebuildSection
     .getByRole("button", { name: "Rebuild embeddings" })
     .click();
@@ -2173,7 +2825,7 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
     page.getByText("Rebuild started; documents will reprocess one by one."),
   ).toBeVisible();
   expect(state.rebuildRequests.at(-1)).toEqual({
-    model_configuration_id: MODEL_ID,
+    embedding_model_id: MODEL_ID,
   });
 
   // Every document re-queues and walks back to ready on subsequent polls.

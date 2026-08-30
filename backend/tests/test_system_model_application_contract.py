@@ -147,7 +147,7 @@ def test_admin_model_api_is_write_only_and_has_no_credential_or_version_contract
         {
             "display_name": "DeepSeek Flash",
             "status": "active",
-            "provider_adapter": "patched_deepseek",
+            "provider_adapter": "deepseek",
             "provider_model": "deepseek-v4-flash",
             "max_input_tokens": 64_000,
             "settings": {"base_url": "https://api.deepseek.com"},
@@ -182,7 +182,7 @@ def test_admin_model_api_is_write_only_and_has_no_credential_or_version_contract
     with pytest.raises(ValidationError):
         AdminModelConnectionTestRequest.model_validate(
             {
-                "provider_adapter": "patched_deepseek",
+                "provider_adapter": "deepseek",
                 "provider_model": "deepseek-v4-flash",
                 "max_input_tokens": 64_000,
                 "settings": {"base_url": "https://api.deepseek.com"},
@@ -192,7 +192,7 @@ def test_admin_model_api_is_write_only_and_has_no_credential_or_version_contract
     with pytest.raises(ValidationError):
         AdminModelConnectionTestRequest.model_validate(
             {
-                "provider_adapter": "patched_deepseek",
+                "provider_adapter": "deepseek",
                 "provider_model": "deepseek-v4-flash",
                 "max_input_tokens": 64_000,
                 "settings": {"base_url": "https://api.deepseek.com"},
@@ -206,7 +206,7 @@ def test_admin_model_max_input_tokens_is_required_and_bounded() -> None:
     payload = {
         "display_name": "DeepSeek Flash",
         "status": "active",
-        "provider_adapter": "patched_deepseek",
+        "provider_adapter": "deepseek",
         "provider_model": "deepseek-v4-flash",
         "settings": {"base_url": "https://api.deepseek.com"},
         "max_input_tokens": 64_000,
@@ -242,7 +242,7 @@ async def test_unready_active_model_is_not_auto_selected_or_accepted_as_default(
         id=model_id,
         display_name="Unready model",
         status="suspended",
-        provider_adapter="patched_deepseek",
+        provider_adapter="deepseek",
         provider_model="deepseek-v4-flash",
         max_input_tokens=64_000,
         settings={"base_url": "https://api.deepseek.com"},

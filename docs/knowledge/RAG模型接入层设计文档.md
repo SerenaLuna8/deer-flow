@@ -1,5 +1,12 @@
 # RAG 模型接入层设计（MVP）
 
+> 现状：本文为 MVP 基线存档，HTTP 客户端契约（/embeddings、/rerank、
+> 批量/重试/校验）仍然有效。M9 已交付：模型配置 CRUD、seed 与凭据迁至
+> 宿主模型注册表（`model_providers` / `model_provider_models`），
+> Embedding/Reranker 拆分为独立类型化模型，rerank 为库级可选设置；
+> 正文中 `knowledge_model_configurations` 数据模型与包内配置 CRUD 的
+> 描述仅作历史存档。见《RAG知识库MVP执行计划》M9 小节。
+
 ## 1. 范围
 
 MVP 固定实现 SiliconFlow 的文本 Embedding 与 Reranker：

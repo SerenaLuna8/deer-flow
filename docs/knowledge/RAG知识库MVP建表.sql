@@ -178,6 +178,7 @@ CREATE TABLE knowledge_tasks (
     resource_id UUID NOT NULL,
     kind VARCHAR(32) NOT NULL,
     target_version INTEGER,
+    storage_key VARCHAR(1024),
     status VARCHAR(16) DEFAULT 'queued' NOT NULL,
     attempt_count SMALLINT DEFAULT 0 NOT NULL,
     max_attempts SMALLINT DEFAULT 3 NOT NULL,
@@ -190,11 +191,15 @@ CREATE TABLE knowledge_tasks (
     finished_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT pk_knowledge_tasks PRIMARY KEY (id),
     CONSTRAINT ck_knowledge_tasks_kind CHECK (
-        kind IN ('ingest_document', 'delete_document', 'delete_knowledge_base')
+        kind IN ('ingest_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')
     ),
     CONSTRAINT ck_knowledge_tasks_target_version CHECK (
         (kind = 'ingest_document' AND target_version IS NOT NULL AND target_version >= 1)
         OR (kind <> 'ingest_document' AND target_version IS NULL)
+    ),
+    CONSTRAINT ck_knowledge_tasks_storage_key CHECK (
+        (kind = 'delete_document_object' AND storage_key IS NOT NULL AND btrim(storage_key) <> '')
+        OR (kind <> 'delete_document_object' AND storage_key IS NULL)
     ),
     CONSTRAINT ck_knowledge_tasks_status CHECK (
         status IN ('queued', 'running', 'retry_wait', 'succeeded', 'failed')
@@ -230,6 +235,10 @@ CREATE UNIQUE INDEX uq_knowledge_tasks_open_document_delete
     ON knowledge_tasks (resource_id)
     WHERE kind = 'delete_document' AND status IN ('queued', 'running', 'retry_wait');
 
+CREATE UNIQUE INDEX uq_knowledge_tasks_open_document_object_delete
+    ON knowledge_tasks (storage_key)
+    WHERE kind = 'delete_document_object' AND status IN ('queued', 'running', 'retry_wait');
+
 CREATE UNIQUE INDEX uq_knowledge_tasks_open_base_delete
     ON knowledge_tasks (resource_id)
     WHERE kind = 'delete_knowledge_base' AND status IN ('queued', 'running', 'retry_wait');
@@ -238,7 +247,7 @@ COMMENT ON TABLE knowledge_model_configurations IS 'Knowledge Package 使用的�
 COMMENT ON TABLE knowledge_bases IS 'Project 内使用同一 Knowledge Model Configuration 的 Knowledge Document 集合。';
 COMMENT ON TABLE knowledge_documents IS '上传文件、MinIO object key、切分参数、处理版本和当前处理状态。';
 COMMENT ON TABLE knowledge_segments IS 'Knowledge Document 当前已发布 version 的有序文本块及其 embedding。';
-COMMENT ON TABLE knowledge_tasks IS '摄取和删除后台任务；claim、lease 与尝试次数直接保存在任务行。';
+COMMENT ON TABLE knowledge_tasks IS '摄取、删除和晚到对象清理后台任务；claim、lease、精确存储标识与尝试次数直接保存在任务行。';
 
 COMMENT ON COLUMN knowledge_model_configurations.id IS 'Knowledge 模型配置标识。';
 COMMENT ON COLUMN knowledge_model_configurations.display_name IS '管理页面显示名称。';
@@ -295,8 +304,9 @@ COMMENT ON COLUMN knowledge_segments.created_at IS 'Knowledge Segment 创建时�
 COMMENT ON COLUMN knowledge_tasks.id IS 'Knowledge Task 标识。';
 COMMENT ON COLUMN knowledge_tasks.project_id IS '所属 Project 标识。';
 COMMENT ON COLUMN knowledge_tasks.resource_id IS '按 kind 指向 Knowledge Document 或 Knowledge Base 的业务 id。';
-COMMENT ON COLUMN knowledge_tasks.kind IS '任务类型：摄取 Document、删除 Document 或删除 Base。';
+COMMENT ON COLUMN knowledge_tasks.kind IS '任务类型：摄取 Document、删除 Document、清理晚到对象或删除 Base。';
 COMMENT ON COLUMN knowledge_tasks.target_version IS 'ingest_document 任务允许发布的 Document version。';
+COMMENT ON COLUMN knowledge_tasks.storage_key IS '仅 delete_document_object 使用的精确 MinIO object key。';
 COMMENT ON COLUMN knowledge_tasks.status IS '任务状态：queued、running、retry_wait、succeeded 或 failed。';
 COMMENT ON COLUMN knowledge_tasks.attempt_count IS '已经开始执行的次数。';
 COMMENT ON COLUMN knowledge_tasks.max_attempts IS '允许执行的最大次数，MVP 固定为 3。';

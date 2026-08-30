@@ -19,6 +19,7 @@ from deerflow.persistence.shared_assets import (
     SkillDesignActivityRow,
     SkillDesignOperationRow,
 )
+from deerflow.utils.messages import reasoning_block_text
 
 MAX_SKILL_DESIGN_ACTIVITY_BYTES_PER_OPERATION = 4 * 1024 * 1024
 _TERMINAL_RESERVE_BYTES = 1_024
@@ -379,16 +380,11 @@ def reasoning_text(value: Any) -> str:
         return ""
     parts: list[str] = []
     for block in content:
-        if not isinstance(block, dict) or block.get("type") not in {
-            "thinking",
-            "reasoning",
-        }:
+        if not isinstance(block, dict):
             continue
-        for key in ("thinking", "reasoning", "text", "content"):
-            selected = block.get(key)
-            if isinstance(selected, str) and selected:
-                parts.append(selected)
-                break
+        selected = reasoning_block_text(block)
+        if selected:
+            parts.append(selected)
     return "".join(parts)
 
 

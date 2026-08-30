@@ -1,10 +1,17 @@
-"""Two-stage semantic retrieval: exact cosine recall, then reranker ordering.
+"""Semantic retrieval: exact cosine recall, then optional reranker ordering.
 
-The vector score only widens the candidate pool and stabilizes ties; the
-reranker's ``relevance_score`` decides the final order and becomes the
-Citation score. Bases are grouped by model configuration so vectors of
-different dimensions never enter the same distance computation, and a
-reranker failure fails the whole search — never a silent cosine-only result.
+Bases are grouped by their ``(embedding_model_id, reranker_model_id)`` pair —
+a ``NULL`` reranker forms its own group — so vectors of different dimensions
+never enter the same distance computation and each group spends its own
+``candidate_k`` recall budget. Groups sharing an embedding model reuse one
+query embedding per search. In a reranked group the reranker scores every
+recalled candidate (``top_n = len(candidates)``) and its ``relevance_score``
+(``[0,1]``) becomes the final score; a reranker failure fails the whole
+search — never a silent cosine-only result. In a rerank-free group the final
+score is the raw cosine similarity (``[-1,1]``). Groups apply their
+thresholds first, then merge into one stable global ordering cut at
+``top_k``; mixed rerank/cosine scores are deliberately comparable only as an
+accepted quality limitation, not a calibration promise.
 
 Recall runs two paths per group: general-mode segments carry their own
 vectors, parent_child-mode documents recall through child chunks whose best
@@ -12,9 +19,12 @@ score rolls up to the parent segment (one candidate per parent). The reranker
 always scores the text a citation would return — the parent content.
 
 ``top_k``/``score_threshold`` omitted by the caller resolve to the per-base
-defaults stored on the knowledge bases. Every completed search appends one
-``knowledge_queries`` row and increments segment/document hit counters —
-best-effort side effects that never fail the search itself.
+defaults stored on the knowledge bases; a positive threshold filters final
+scores below it and ``0`` disables filtering entirely (negative cosine scores
+pass). Every completed search appends one ``knowledge_queries`` row and
+increments segment/document hit counters. A database-only metrics failure
+stays best-effort, but a final authority revalidation failure aborts the
+search so revoked callers never receive the already-computed citations.
 """
 
 from __future__ import annotations
@@ -29,29 +39,29 @@ from sqlalchemy import Numeric, case, cast, func, null, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..authority import KnowledgeProjectAuthority, revalidate_project_authority
 from ..contracts import (
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_MAX_METADATA_FILTERS,
     KNOWLEDGE_MAX_METADATA_NAME_LENGTH,
     KNOWLEDGE_MAX_METADATA_STRING_LENGTH,
     KNOWLEDGE_MAX_TOP_K,
-    KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_NOT_FOUND,
     KNOWLEDGE_SEARCH_FAILED,
     KnowledgeCitation,
+    KnowledgeEmbeddingMaterial,
     KnowledgeError,
     KnowledgeMetadataFilter,
+    KnowledgeModelPort,
     KnowledgeQueryView,
+    KnowledgeRerankMaterial,
     KnowledgeSearchRequest,
     KnowledgeSearchResult,
-    KnowledgeSecretPort,
 )
-from ..models.client import KnowledgeModelClient, KnowledgeModelMaterial
-from ..models.service import materialize_model_material
+from ..models.client import KnowledgeModelClient
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
-    KnowledgeModelConfigurationRow,
     KnowledgeQueryRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
@@ -201,6 +211,19 @@ class _BaseDefaults:
 
 
 @dataclass(frozen=True, slots=True)
+class _SearchGroup:
+    """Bases sharing one ``(embedding model, reranker model)`` pair.
+
+    ``rerank`` is ``None`` for the NULL-reranker group: its candidates keep
+    their cosine similarity as the final score.
+    """
+
+    embedding: KnowledgeEmbeddingMaterial
+    rerank: KnowledgeRerankMaterial | None
+    base_ids: list[UUID]
+
+
+@dataclass(frozen=True, slots=True)
 class _Candidate:
     """One recalled segment with its display fields and recall-stage score.
 
@@ -221,14 +244,16 @@ class _Candidate:
 
 @dataclass(frozen=True, slots=True)
 class _Ranked:
-    rerank_score: float
+    """One candidate with its final score (rerank relevance or raw cosine)."""
+
+    final_score: float
     candidate: _Candidate
 
 
 def _stable_sort_key(item: _Ranked) -> tuple[float, float, UUID, UUID, int, UUID]:
     candidate = item.candidate
     return (
-        -item.rerank_score,
+        -item.final_score,
         -candidate.vector_score,
         candidate.knowledge_base_id,
         candidate.document_id,
@@ -255,15 +280,26 @@ class KnowledgeSearchService:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         client: KnowledgeModelClient,
-        secret_port: KnowledgeSecretPort,
+        model_port: KnowledgeModelPort,
     ) -> None:
         self._session_factory = session_factory
         self._client = client
-        self._secret_port = secret_port
+        self._model_port = model_port
 
-    async def search(self, request: KnowledgeSearchRequest) -> KnowledgeSearchResult:
+    async def search(
+        self,
+        request: KnowledgeSearchRequest,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeSearchResult:
+        if authority is not None and (authority.project_id != request.project_id or authority.actor_user_id != request.owner_user_id):
+            raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "资源不存在")
         validated = _validated_search(request)
-        groups, defaults = await self._searchable_groups(request.project_id, request.knowledge_base_ids)
+        groups, defaults = await self._searchable_groups(
+            request.project_id,
+            request.knowledge_base_ids,
+            authority=authority,
+        )
         if not groups:
             return KnowledgeSearchResult(citations=())
 
@@ -271,55 +307,90 @@ class KnowledgeSearchService:
         # targeted bases, so no base's configured expectation is truncated.
         top_k = validated.top_k if validated.top_k is not None else max(item.top_k for item in defaults.values())
         candidate_k = calculate_candidate_k(top_k)
+        # Groups sharing an embedding model reuse one query embedding per
+        # search while keeping their own candidate_k recall budgets.
+        query_vectors: dict[UUID, list[float]] = {}
         ranked: list[_Ranked] = []
-        for material, base_ids in groups:
-            # Provider failures surface as bare KnowledgeError to callers, so
-            # log the stage and code here (never the query or provider body) —
-            # otherwise a production embedding/reranker outage is invisible.
-            try:
-                query_vector = (await self._client.embed(material, [validated.query]))[0]
-            except KnowledgeError as error:
-                logger.warning(
-                    "knowledge search embed failed for configuration %s: %s",
-                    material.configuration_id,
-                    error.code,
+        for group in groups:
+            embedding = group.embedding
+            if embedding.model_id not in query_vectors:
+                # Each model may target a different Provider endpoint and
+                # incur a separate request. Revalidate before every provider
+                # call so revocation after an earlier group cannot cause
+                # later spend.
+                await self._revalidate_authority(
+                    project_id=request.project_id,
+                    authority=authority,
                 )
-                raise
+                # Provider failures surface as bare KnowledgeError to callers,
+                # so log the stage and code here (never the query or provider
+                # body) — otherwise a production embedding/reranker outage is
+                # invisible.
+                try:
+                    query_vectors[embedding.model_id] = (await self._client.embed(embedding, [validated.query]))[0]
+                except KnowledgeError as error:
+                    logger.warning(
+                        "knowledge search embed failed for model %s: %s",
+                        embedding.model_id,
+                        error.code,
+                    )
+                    raise
             candidates = await self._recalled_candidates(
                 project_id=request.project_id,
-                configuration_id=material.configuration_id,
-                base_ids=base_ids,
-                query_vector=query_vector,
+                embedding_model_id=embedding.model_id,
+                base_ids=group.base_ids,
+                query_vector=query_vectors[embedding.model_id],
                 candidate_k=candidate_k,
                 metadata_filters=validated.metadata_filters,
+                authority=authority,
             )
             if not candidates:
                 continue
-            try:
-                scores = await self._client.rerank(
-                    material,
-                    validated.query,
-                    [candidate.content for candidate in candidates],
-                    top_n=top_k,
+            group_ranked: list[_Ranked] = []
+            if group.rerank is None:
+                # Rerank-free group: the final score stays the raw cosine
+                # similarity in [-1,1]; a 0 threshold filters nothing.
+                for candidate in candidates:
+                    group_ranked.append(_Ranked(final_score=candidate.vector_score, candidate=candidate))
+            else:
+                # Recall freezes the exact Segment text under one
+                # authority-checked database snapshot. A second short guard
+                # immediately before the external Reranker narrows the
+                # remaining handoff window without holding a database
+                # transaction across Provider I/O.
+                await self._revalidate_authority(
+                    project_id=request.project_id,
+                    authority=authority,
                 )
-            except KnowledgeError as error:
-                logger.warning(
-                    "knowledge search rerank failed for configuration %s: %s",
-                    material.configuration_id,
-                    error.code,
-                )
-                raise
-            group_ranked = []
-            for score in scores:
-                candidate = candidates[score.index]
-                threshold = validated.score_threshold if validated.score_threshold is not None else defaults[candidate.knowledge_base_id].score_threshold
-                if threshold > 0 and score.score < threshold:
+                try:
+                    # Score every candidate: per-base thresholds must filter
+                    # before any top_k truncation, or a qualified candidate of
+                    # a stricter base could be cut by a laxer base's hits.
+                    scores = await self._client.rerank(
+                        group.rerank,
+                        validated.query,
+                        [candidate.content for candidate in candidates],
+                        top_n=len(candidates),
+                    )
+                except KnowledgeError as error:
+                    logger.warning(
+                        "knowledge search rerank failed for model %s: %s",
+                        group.rerank.model_id,
+                        error.code,
+                    )
+                    raise
+                for score in scores:
+                    group_ranked.append(_Ranked(final_score=score.score, candidate=candidates[score.index]))
+            filtered = []
+            for item in group_ranked:
+                threshold = validated.score_threshold if validated.score_threshold is not None else defaults[item.candidate.knowledge_base_id].score_threshold
+                if threshold > 0 and item.final_score < threshold:
                     continue
-                group_ranked.append(_Ranked(rerank_score=score.score, candidate=candidate))
-            # The client already caps each group at ``top_n`` (descending by
-            # score); keep the per-group cap here too so a diagnostics-friendly
-            # client change can never widen a group beyond top_k.
-            ranked.extend(group_ranked[:top_k])
+                filtered.append(item)
+            # Thresholds are applied above on the full candidate set; the cap
+            # only bounds what this group can contribute to the global top_k
+            # (both paths are already sorted by final score descending).
+            ranked.extend(filtered[:top_k])
 
         ranked.sort(key=_stable_sort_key)
         citations: list[KnowledgeCitation] = []
@@ -338,7 +409,7 @@ class KnowledgeSearchService:
                     segment_id=candidate.segment_id,
                     segment_position=candidate.position,
                     snippet=candidate.content[:SNIPPET_MAX_CHARS],
-                    score=item.rerank_score,
+                    score=item.final_score,
                     source_position=dict(candidate.source_position),
                 )
             )
@@ -347,20 +418,24 @@ class KnowledgeSearchService:
         result = KnowledgeSearchResult(citations=tuple(citations))
         await self._record_search(
             project_id=request.project_id,
-            searched_base_ids=sorted(base_id for _, base_ids in groups for base_id in base_ids),
+            owner_user_id=request.owner_user_id,
+            searched_base_ids=sorted(base_id for group in groups for base_id in group.base_ids),
             query=validated.query,
             source=request.source,
             citations=result.citations,
+            authority=authority,
         )
         return result
 
     async def list_recent_queries(
         self,
         project_id: UUID,
+        owner_user_id: UUID,
         base_id: UUID,
         *,
         page: int = 1,
         page_size: int = 20,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> tuple[list[KnowledgeQueryView], int]:
         """Latest query-log rows that targeted ``base_id``, newest first."""
 
@@ -368,13 +443,21 @@ class KnowledgeSearchService:
             raise _invalid("page 必须是不小于 1 的整数")
         if type(page_size) is not int or not 1 <= page_size <= MAX_QUERY_PAGE_SIZE:
             raise _invalid(f"page_size 必须是 1-{MAX_QUERY_PAGE_SIZE} 之间的整数")
+        if authority is not None and (authority.project_id != project_id or authority.actor_user_id != owner_user_id):
+            raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "资源不存在")
         # JSONB containment: the row's base-id array holds this base's id.
         base_filter = (
             KnowledgeQueryRow.project_id == project_id,
+            KnowledgeQueryRow.owner_user_id == str(owner_user_id),
             KnowledgeQueryRow.knowledge_base_ids.contains([str(base_id)]),
         )
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 exists = await session.scalar(select(KnowledgeBaseRow.id).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id))
                 if exists is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
@@ -403,19 +486,34 @@ class KnowledgeSearchService:
         self,
         *,
         project_id: UUID,
+        owner_user_id: UUID,
         searched_base_ids: list[UUID],
         query: str,
         source: str,
         citations: tuple[KnowledgeCitation, ...],
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> None:
-        """Append the query-log row and bump hit counters; never fails the search."""
+        """Append query history and counters after the final authority check.
 
+        Database failures remain best-effort observability failures. Authority
+        failures deliberately propagate so a caller revoked during provider
+        work does not receive the computed citations.
+        """
+
+        authority_checked = authority is None
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                authority_checked = True
                 session.add(
                     KnowledgeQueryRow(
                         id=uuid4(),
                         project_id=project_id,
+                        owner_user_id=str(owner_user_id),
                         knowledge_base_ids=[str(base_id) for base_id in searched_base_ids],
                         query=query,
                         source=source,
@@ -432,26 +530,38 @@ class KnowledgeSearchService:
                     for document_id, hits in hits_per_document.items():
                         await session.execute(update(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == document_id).values(hit_count=KnowledgeDocumentRow.hit_count + hits))
         except SQLAlchemyError:
+            if not authority_checked:
+                logger.warning("knowledge final authority revalidation failed", exc_info=True)
+                raise _search_failed() from None
             logger.warning("knowledge query log write failed", exc_info=True)
 
     async def _searchable_groups(
         self,
         project_id: UUID,
         base_ids: tuple[UUID, ...] | None,
-    ) -> tuple[list[tuple[KnowledgeModelMaterial, list[UUID]]], dict[UUID, _BaseDefaults]]:
-        """Group the project's searchable bases by model configuration.
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> tuple[list[_SearchGroup], dict[UUID, _BaseDefaults]]:
+        """Group the project's searchable bases by (embedding, reranker) pair.
 
         Explicit base ids narrow to their active subset; an explicitly empty
-        selection searches nothing. A disabled configuration fails the whole
-        request — its bases cannot silently vanish from results. The second
-        return value carries each base's retrieval defaults.
+        selection searches nothing. An unresolvable bound model — missing,
+        disabled, or with undecryptable material — fails the whole request
+        (``KNOWLEDGE_MODEL_UNAVAILABLE`` from the port): its bases cannot
+        silently vanish from results. The second return value carries each
+        base's retrieval defaults.
         """
 
         if base_ids is not None and len(base_ids) == 0:
+            await self._revalidate_authority(
+                project_id=project_id,
+                authority=authority,
+            )
             return [], {}
         statement = select(
             KnowledgeBaseRow.id,
-            KnowledgeBaseRow.model_configuration_id,
+            KnowledgeBaseRow.embedding_model_id,
+            KnowledgeBaseRow.reranker_model_id,
             KnowledgeBaseRow.default_top_k,
             KnowledgeBaseRow.default_score_threshold,
         ).where(
@@ -461,47 +571,59 @@ class KnowledgeSearchService:
         if base_ids is not None:
             statement = statement.where(KnowledgeBaseRow.id.in_(base_ids))
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 rows = (await session.execute(statement.order_by(KnowledgeBaseRow.id))).all()
                 if not rows:
                     return [], {}
-                bases_by_configuration: dict[UUID, list[UUID]] = {}
+                bases_by_pair: dict[tuple[UUID, UUID | None], list[UUID]] = {}
                 defaults: dict[UUID, _BaseDefaults] = {}
-                for base_id, configuration_id, default_top_k, default_score_threshold in rows:
-                    bases_by_configuration.setdefault(configuration_id, []).append(base_id)
+                for base_id, embedding_model_id, reranker_model_id, default_top_k, default_score_threshold in rows:
+                    bases_by_pair.setdefault((embedding_model_id, reranker_model_id), []).append(base_id)
                     defaults[base_id] = _BaseDefaults(top_k=default_top_k, score_threshold=float(default_score_threshold))
-                configurations = (await session.scalars(select(KnowledgeModelConfigurationRow).where(KnowledgeModelConfigurationRow.id.in_(bases_by_configuration)))).all()
+                # Materialize each distinct model once through the host port,
+                # inside this authority-checked transaction. The port owns
+                # type/active validation and decryption; every unresolvable
+                # model raises KNOWLEDGE_MODEL_UNAVAILABLE.
+                embedding_materials: dict[UUID, KnowledgeEmbeddingMaterial] = {}
+                rerank_materials: dict[UUID, KnowledgeRerankMaterial] = {}
+                for embedding_model_id, reranker_model_id in bases_by_pair:
+                    if embedding_model_id not in embedding_materials:
+                        embedding_materials[embedding_model_id] = await self._model_port.embedding_material(session, embedding_model_id)
+                    if reranker_model_id is not None and reranker_model_id not in rerank_materials:
+                        rerank_materials[reranker_model_id] = await self._model_port.rerank_material(session, reranker_model_id)
+        except KnowledgeError:
+            raise
         except SQLAlchemyError:
             logger.warning("knowledge search failed to load searchable bases", exc_info=True)
             raise _search_failed() from None
-        groups: list[tuple[KnowledgeModelMaterial, list[UUID]]] = []
-        for configuration in sorted(configurations, key=lambda row: row.id):
-            if configuration.status != "active":
-                raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "Knowledge 模型配置已被禁用，无法执行检索")
-            try:
-                material = materialize_model_material(configuration, self._secret_port)
-            except KnowledgeError as error:
-                # The shared materialization layer reports decrypt failures as a
-                # storage problem; inside the search contract that is a model
-                # availability failure — keep the five-code error surface.
-                logger.warning(
-                    "knowledge search materialization failed: configuration=%s code=%s",
-                    configuration.id,
-                    error.code,
-                )
-                raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "Knowledge 模型配置不可用，无法执行检索") from None
-            groups.append((material, bases_by_configuration[configuration.id]))
+        groups = [
+            _SearchGroup(
+                embedding=embedding_materials[embedding_model_id],
+                rerank=rerank_materials[reranker_model_id] if reranker_model_id is not None else None,
+                base_ids=pair_base_ids,
+            )
+            for (embedding_model_id, reranker_model_id), pair_base_ids in sorted(
+                bases_by_pair.items(),
+                key=lambda entry: (entry[0][0], entry[0][1] or UUID(int=0)),
+            )
+        ]
         return groups, defaults
 
     async def _recalled_candidates(
         self,
         *,
         project_id: UUID,
-        configuration_id: UUID,
+        embedding_model_id: UUID,
         base_ids: list[UUID],
         query_vector: list[float],
         candidate_k: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> list[_Candidate]:
         """Merge general-segment recall with parent_child child-chunk rollup.
 
@@ -509,29 +631,66 @@ class KnowledgeSearchService:
         and capped at ``candidate_k`` so mixed-mode bases compete fairly.
         """
 
-        general = await self._general_candidates(
-            project_id=project_id,
-            configuration_id=configuration_id,
-            base_ids=base_ids,
-            query_vector=query_vector,
-            candidate_k=candidate_k,
-            metadata_filters=metadata_filters,
-        )
-        parents = await self._parent_child_candidates(
-            project_id=project_id,
-            configuration_id=configuration_id,
-            base_ids=base_ids,
-            query_vector=query_vector,
-            candidate_k=candidate_k,
-            metadata_filters=metadata_filters,
-        )
+        # Both recall paths share the same short transaction. Authority is
+        # revalidated before either query can load Segment content, so a
+        # revocation during query embedding prevents that content from being
+        # handed to the external Reranker.
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                general = await self._general_candidates(
+                    project_id=project_id,
+                    embedding_model_id=embedding_model_id,
+                    base_ids=base_ids,
+                    query_vector=query_vector,
+                    candidate_k=candidate_k,
+                    metadata_filters=metadata_filters,
+                    session=session,
+                )
+                parents = await self._parent_child_candidates(
+                    project_id=project_id,
+                    embedding_model_id=embedding_model_id,
+                    base_ids=base_ids,
+                    query_vector=query_vector,
+                    candidate_k=candidate_k,
+                    metadata_filters=metadata_filters,
+                    session=session,
+                )
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            logger.warning("knowledge cosine recall failed", exc_info=True)
+            raise _search_failed() from None
         merged = sorted(general + parents, key=_candidate_sort_key)
         return merged[:candidate_k]
+
+    async def _revalidate_authority(
+        self,
+        *,
+        project_id: UUID,
+        authority: KnowledgeProjectAuthority | None,
+    ) -> None:
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            logger.warning("knowledge search authority revalidation failed", exc_info=True)
+            raise _search_failed() from None
 
     def _candidate_filters(
         self,
         project_id: UUID,
-        configuration_id: UUID,
+        embedding_model_id: UUID,
         base_ids: list[UUID],
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
     ) -> tuple[Any, ...]:
@@ -545,7 +704,10 @@ class KnowledgeSearchService:
             KnowledgeDocumentRow.enabled.is_(True),
             KnowledgeSegmentRow.enabled.is_(True),
             KnowledgeSegmentRow.document_version == KnowledgeDocumentRow.version,
-            KnowledgeBaseRow.model_configuration_id == configuration_id,
+            # A base rebound to another embedding model between group load and
+            # recall drops out here: its vectors no longer match this query
+            # embedding's dimension/space.
+            KnowledgeBaseRow.embedding_model_id == embedding_model_id,
             # Manual metadata conditions AND onto both recall paths, so a
             # non-matching document never reaches the reranker on either.
             *_metadata_filter_conditions(metadata_filters),
@@ -555,11 +717,12 @@ class KnowledgeSearchService:
         self,
         *,
         project_id: UUID,
-        configuration_id: UUID,
+        embedding_model_id: UUID,
         base_ids: list[UUID],
         query_vector: list[float],
         candidate_k: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+        session: AsyncSession | None = None,
     ) -> list[_Candidate]:
         """Exact cosine recall over segments that carry their own vectors."""
 
@@ -580,7 +743,7 @@ class KnowledgeSearchService:
             .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
             .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
             .where(
-                *self._candidate_filters(project_id, configuration_id, base_ids, metadata_filters),
+                *self._candidate_filters(project_id, embedding_model_id, base_ids, metadata_filters),
                 # parent_child parents store NULL embeddings and are recalled
                 # through their children instead.
                 KnowledgeSegmentRow.embedding.is_not(None),
@@ -594,17 +757,18 @@ class KnowledgeSearchService:
             )
             .limit(candidate_k)
         )
-        return await self._execute_recall(statement)
+        return await self._execute_recall(statement, session=session)
 
     async def _parent_child_candidates(
         self,
         *,
         project_id: UUID,
-        configuration_id: UUID,
+        embedding_model_id: UUID,
         base_ids: list[UUID],
         query_vector: list[float],
         candidate_k: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+        session: AsyncSession | None = None,
     ) -> list[_Candidate]:
         """Child-chunk recall rolled up to parents before the reranker.
 
@@ -631,7 +795,7 @@ class KnowledgeSearchService:
             .join(KnowledgeSegmentRow, KnowledgeSegmentRow.id == KnowledgeSegmentChildRow.knowledge_segment_id)
             .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
             .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
-            .where(*self._candidate_filters(project_id, configuration_id, base_ids, metadata_filters))
+            .where(*self._candidate_filters(project_id, embedding_model_id, base_ids, metadata_filters))
             .group_by(
                 KnowledgeSegmentRow.id,
                 KnowledgeDocumentRow.id,
@@ -646,11 +810,19 @@ class KnowledgeSearchService:
             )
             .limit(candidate_k)
         )
-        return await self._execute_recall(statement)
+        return await self._execute_recall(statement, session=session)
 
-    async def _execute_recall(self, statement: Any) -> list[_Candidate]:
+    async def _execute_recall(
+        self,
+        statement: Any,
+        *,
+        session: AsyncSession | None = None,
+    ) -> list[_Candidate]:
         try:
-            async with self._session_factory() as session:
+            if session is None:
+                async with self._session_factory() as owned_session:
+                    rows = (await owned_session.execute(statement)).all()
+            else:
                 rows = (await session.execute(statement)).all()
         except SQLAlchemyError:
             logger.warning("knowledge cosine recall failed", exc_info=True)

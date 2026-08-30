@@ -176,14 +176,16 @@ async def run_worker(
         if engine is None:
             raise WorkerConfigurationUnavailable()
         # Knowledge is startup-only: a missing/disabled `knowledge` block keeps
-        # the module absent, so no Knowledge task loop runs and retention jobs
-        # skip the Knowledge purge gate.
+        # the feature module absent, so no Knowledge task loop runs. Project
+        # cleanup remains independently composed because historical Knowledge
+        # data can outlive a later feature-disable configuration change.
         from app.knowledge.composition import (
-            create_knowledge_module_from_app_config,
+            create_knowledge_worker_resources_from_app_config,
             require_knowledge_storage_ready,
         )
 
-        knowledge_module = create_knowledge_module_from_app_config(config)
+        knowledge_resources = create_knowledge_worker_resources_from_app_config(config)
+        knowledge_module = knowledge_resources.feature_module
         if knowledge_module is not None:
             stack.push_async_callback(knowledge_module.aclose)
             await require_knowledge_storage_ready(knowledge_module)
@@ -344,7 +346,7 @@ async def run_worker(
                     mount_owner_reconciler=run_skill_orphan_reaper,
                     retry_initial_seconds=(config.worker.retry_initial_seconds),
                     retry_max_seconds=config.worker.retry_max_seconds,
-                    knowledge_purge=(knowledge_module.purge_project if knowledge_module is not None else None),
+                    knowledge_purge=knowledge_resources.project_purge,
                 ),
                 "mcp_discovery": McpToolDiscoveryJobHandler(
                     session_factory,

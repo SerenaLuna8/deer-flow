@@ -40,9 +40,16 @@ MinioObjectStore.delete(key)
 - 官方 MinIO client 的 endpoint 使用 `host:port`，不带 URL path；是否启用 TLS 由 `secure` 单独决定；
 - Gateway 与 Worker 必须使用同一 endpoint 和 bucket；
 - `upload_from` 使用官方 MinIO client 的 `fput_object`，完成后对象才可下载；
+- 每个合法文件强制单 PUT：part_size 取文件大小与 5 MiB 的较大值、并行数为 1；
+  `upload_max_bytes` 默认值和硬上限均为 50 MiB，每个 `MinioObjectStore` 只允许一个并发
+  `fput_object`，约束 SDK 整 part 内存并避免不可见的 incomplete multipart；
 - `download_to` 把对象写入调用方提供的任务临时 Path；
 - `delete` 在对象不存在时仍返回成功；
-- `download_to` 和 `delete` 分别使用 `fget_object` 和 `remove_object`；所有同步 MinIO client 调用通过 `asyncio.to_thread` 执行，不阻塞事件循环。
+- bucket 必须关闭 versioning/Object Lock；`check_bucket` 和所有删除操作先调用
+  `GetBucketVersioning`，Enabled、Suspended 或权限不足都失败关闭，避免只写 delete marker；
+- `upload_from` 获取单槽 PUT 许可后也必须重新调用 `GetBucketVersioning`，运行期漂移时不得
+  调用 `fput_object`；
+- `download_to` 和 `delete` 分别使用 `fget_object` 和 `remove_object`；所有同步 MinIO client 调用通过基于 `asyncio.to_thread` 的 cancellation-settling adapter 执行，不阻塞事件循环，且取消后等待已启动调用结束。
 - Gateway 的请求临时目录创建、文件写入和清理使用异步文件操作或 `asyncio.to_thread`。
 
 文件 key 使用服务端生成的 Document id 和原始扩展名：
@@ -118,6 +125,8 @@ Document view 包含名称、原始文件名、媒体类型、大小、状态、
 - 0 byte、正常文件和超过上限；
 - 上传成功后 Document+Task 状态；
 - MinIO 写入失败和数据库写入失败后的对象清理；
+- startup 后 bucket versioning 漂移时上传在 `fput_object` 前失败；
+- 配置超过 50 MiB 时拒绝，同一 `MinioObjectStore` 的并发 PUT 峰值为 1；
 - 删除不存在对象的幂等行为；
 - 请求临时文件在成功、失败和取消后均清理；
 - blocking-I/O 静态门确认事件循环内没有直接同步文件或 MinIO I/O；

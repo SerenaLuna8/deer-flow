@@ -148,7 +148,7 @@ def _install_successful_preflight(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         reset_postgres,
-        "prepare_knowledge_bootstrap",
+        "prepare_model_registry_bootstrap",
         lambda: object(),
         raising=False,
     )
@@ -227,7 +227,7 @@ async def test_reset_rejects_invalid_admin_url_before_ddl(
 
 
 @pytest.mark.asyncio
-async def test_reset_rejects_missing_knowledge_bootstrap_before_ddl(
+async def test_reset_rejects_missing_model_registry_bootstrap_before_ddl(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -238,8 +238,8 @@ async def test_reset_rejects_missing_knowledge_bootstrap_before_ddl(
     )
     monkeypatch.setattr(
         reset_postgres,
-        "prepare_knowledge_bootstrap",
-        lambda: (_ for _ in ()).throw(reset_postgres.KnowledgeBootstrapConfigurationInvalid()),
+        "prepare_model_registry_bootstrap",
+        lambda: (_ for _ in ()).throw(reset_postgres.ModelRegistryBootstrapConfigurationInvalid()),
         raising=False,
     )
     monkeypatch.setattr(
@@ -248,7 +248,7 @@ async def test_reset_rejects_missing_knowledge_bootstrap_before_ddl(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("DDL engine must not be created")),
     )
 
-    with pytest.raises(reset_postgres.PostgresResetError, match="Knowledge bootstrap"):
+    with pytest.raises(reset_postgres.PostgresResetError, match="模型供应商 bootstrap"):
         await reset_postgres.reset_and_initialize(
             "postgresql://owner:secret@127.0.0.1:9432/deerflow",
             expected_database="deerflow",
@@ -287,11 +287,11 @@ async def test_reset_rebuilds_public_schema_then_runs_schema_v1_setup(
         "prepare_default_system_model_bootstrap",
         lambda: bootstrap_material,
     )
-    knowledge_material = object()
+    registry_material = object()
     monkeypatch.setattr(
         reset_postgres,
-        "prepare_knowledge_bootstrap",
-        lambda: knowledge_material,
+        "prepare_model_registry_bootstrap",
+        lambda: registry_material,
     )
 
     async def prepare_vector(admin_url: str, database: str) -> None:
@@ -310,11 +310,11 @@ async def test_reset_rebuilds_public_schema_then_runs_schema_v1_setup(
         _database_url: str,
         *,
         default_model_bootstrap,
-        knowledge_bootstrap,
+        model_registry_bootstrap,
         force_public_schema: bool,
     ) -> str:
         assert default_model_bootstrap is bootstrap_material
-        assert knowledge_bootstrap is knowledge_material
+        assert model_registry_bootstrap is registry_material
         assert force_public_schema is True
         lock_events.append("bootstrap")
         return "schema_v1"

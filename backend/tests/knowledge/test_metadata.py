@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -30,13 +29,16 @@ from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
     KnowledgeMetadataFieldRow,
-    KnowledgeModelConfigurationRow,
 )
 from fastapi import FastAPI
+from registry_helpers import seed_registry_models
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.knowledge import gateway
+from app.projects.capabilities import Capability
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
 from deerflow.persistence.bootstrap import _install_full_schema
 
 # ---------------------------------------------------------------------------
@@ -81,24 +83,6 @@ async def _seed_project(session: AsyncSession, label: str) -> uuid.UUID:
     return project_id
 
 
-def _configuration_row() -> KnowledgeModelConfigurationRow:
-    configuration_id = uuid.uuid4()
-    return KnowledgeModelConfigurationRow(
-        id=configuration_id,
-        display_name=f"cfg-{configuration_id.hex[:12]}",
-        status="active",
-        base_url="https://provider.invalid/v1",
-        embedding_model="embed-model",
-        embedding_dimension=3,
-        embedding_max_batch=64,
-        reranker_model="rerank-model",
-        reranker_max_batch=32,
-        request_timeout_seconds=30,
-        api_key_nonce=b"n" * 12,
-        api_key_ciphertext=b"c" * 16,
-    )
-
-
 def _document_row(project_id: uuid.UUID, base_id: uuid.UUID, *, name: str, status: str = "ready") -> KnowledgeDocumentRow:
     document_id = uuid.uuid4()
     return KnowledgeDocumentRow(
@@ -117,18 +101,16 @@ def _document_row(project_id: uuid.UUID, base_id: uuid.UUID, *, name: str, statu
 
 
 async def _seed_base(harness: _Harness) -> tuple[uuid.UUID, uuid.UUID]:
-    """Project + configuration + one active base. Returns (project_id, base_id)."""
+    """Project + registry embedding model + one active base. Returns (project_id, base_id)."""
 
+    embedding_model_id, _ = await seed_registry_models(harness.factory)
     async with harness.factory() as session, session.begin():
         project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-        configuration = _configuration_row()
-        session.add(configuration)
-        await session.flush()
         base = KnowledgeBaseRow(
             id=uuid.uuid4(),
             project_id=project_id,
             name=f"base-{uuid.uuid4().hex[:6]}",
-            model_configuration_id=configuration.id,
+            embedding_model_id=embedding_model_id,
             status="active",
         )
         session.add(base)
@@ -180,15 +162,13 @@ async def test_field_names_are_unique_per_base_case_insensitively(postgres_datab
         assert error.value.code == KNOWLEDGE_NAME_CONFLICT
 
         # The same name in another base is a separate namespace.
+        sibling_model_id, _ = await seed_registry_models(harness.factory)
         async with harness.factory() as session, session.begin():
-            configuration = _configuration_row()
-            session.add(configuration)
-            await session.flush()
             sibling = KnowledgeBaseRow(
                 id=uuid.uuid4(),
                 project_id=project_id,
                 name=f"base-{uuid.uuid4().hex[:6]}",
-                model_configuration_id=configuration.id,
+                embedding_model_id=sibling_model_id,
                 status="active",
             )
             session.add(sibling)
@@ -396,7 +376,6 @@ _PROJECT_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 _BASE_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 _DOCUMENT_ID = uuid.UUID("33333333-3333-4333-8333-333333333333")
 _FIELD_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
-_CONFIGURATION_ID = uuid.UUID("66666666-6666-4666-8666-666666666666")
 _NOW = datetime(2026, 8, 29, 3, 0, tzinfo=UTC)
 
 
@@ -456,22 +435,27 @@ class _FakeModule:
         if self.error is not None:
             raise self.error
 
-    async def list_metadata_fields(self, project_id, base_id):  # noqa: ANN001
+    async def list_metadata_fields(self, project_id, base_id, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("list", (project_id, base_id))
         return [_field_view()]
 
-    async def create_metadata_field(self, project_id, base_id, *, name, field_type):  # noqa: ANN001
+    async def create_metadata_field(self, project_id, base_id, *, name, field_type, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("create", (project_id, base_id, name, field_type))
         return _field_view(name=name, field_type=field_type)
 
-    async def rename_metadata_field(self, project_id, field_id, *, name):  # noqa: ANN001
+    async def rename_metadata_field(self, project_id, field_id, *, name, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("rename", (project_id, field_id, name))
         return _field_view(name=name)
 
-    async def delete_metadata_field(self, project_id, field_id):  # noqa: ANN001
+    async def delete_metadata_field(self, project_id, field_id, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("delete", (project_id, field_id))
 
-    async def set_document_metadata(self, project_id, document_id, values):  # noqa: ANN001
+    async def set_document_metadata(self, project_id, document_id, values, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
         self._record("set_metadata", (project_id, document_id, values))
         applied = {key: value for key, value in values.items() if value is not None}
         return _document_view(doc_metadata=applied)
@@ -480,7 +464,15 @@ class _FakeModule:
 def _app(module: _FakeModule) -> FastAPI:
     app = FastAPI()
     app.include_router(gateway.project_router)
-    context = SimpleNamespace(project_id=_PROJECT_ID, request_id=_REQUEST_ID)
+    context = ProjectContext(
+        user_id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
+        project_id=_PROJECT_ID,
+        membership_id=uuid.UUID("99999999-9999-4999-8999-999999999999"),
+        role=ProjectRole.ADMIN,
+        capabilities=frozenset(Capability),
+        membership_version=1,
+        request_id=_REQUEST_ID,
+    )
     app.dependency_overrides[gateway.require_project_knowledge_read] = lambda: context
     app.dependency_overrides[gateway.require_project_knowledge_edit] = lambda: context
     app.state.knowledge_module = module

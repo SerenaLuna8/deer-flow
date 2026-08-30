@@ -25,6 +25,7 @@ from actweave_knowledge import (
     KnowledgeError,
     KnowledgeMetadataFilter,
     KnowledgeModule,
+    KnowledgeProjectAuthority,
     KnowledgeSearchRequest,
 )
 from langchain.tools import InjectedToolCallId, tool
@@ -69,8 +70,13 @@ def _citation_payload(citation: KnowledgeCitation) -> dict[str, Any]:
     }
 
 
-def create_knowledge_search_tool(module: KnowledgeModule, project_id: UUID):
-    """Build the ``knowledge_search`` tool for exactly one Project."""
+def create_knowledge_search_tool(
+    module: KnowledgeModule,
+    project_id: UUID,
+    owner_user_id: UUID,
+    authority: KnowledgeProjectAuthority,
+):
+    """Build ``knowledge_search`` for one trusted Project and Run owner."""
 
     @tool(KNOWLEDGE_SEARCH_TOOL_NAME, parse_docstring=True)
     async def knowledge_search(
@@ -101,11 +107,13 @@ def create_knowledge_search_tool(module: KnowledgeModule, project_id: UUID):
             result = await module.search(
                 KnowledgeSearchRequest(
                     project_id=project_id,
+                    owner_user_id=owner_user_id,
                     query=query,
                     top_k=top_k,
                     source="agent",
                     metadata_filters=_parsed_metadata_filters(metadata_filters),
-                )
+                ),
+                authority=authority,
             )
         except KnowledgeError as error:
             # The model may keep answering after a failed search, but an error
@@ -152,6 +160,8 @@ def create_knowledge_lead_agent_factory(
     *,
     module: KnowledgeModule,
     project_id: UUID,
+    owner_user_id: UUID,
+    authority: KnowledgeProjectAuthority,
     base_factory: Any | None = None,
 ):
     """Wrap the lead-agent factory so private chat Runs carry ``knowledge_search``.
@@ -170,7 +180,14 @@ def create_knowledge_lead_agent_factory(
     )
 
     extension = TrustedLeadAgentExtension(
-        extra_tools=(create_knowledge_search_tool(module, project_id),),
+        extra_tools=(
+            create_knowledge_search_tool(
+                module,
+                project_id,
+                owner_user_id,
+                authority,
+            ),
+        ),
     )
     base = base_factory if base_factory is not None else make_lead_agent
     # The wrapper below pins the canonical private-runtime path. Silently

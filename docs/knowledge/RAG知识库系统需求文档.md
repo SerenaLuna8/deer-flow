@@ -4,8 +4,14 @@
 >
 > 现状：本文为 MVP 基线存档。M8（检索与治理增强）已交付下方"不包含"中的
 > 部分能力——父子分段、自定义分隔符、Segment 停用/编辑、查询日志与命中统计，
-> 以及元数据过滤、模型重建、html/htm/pptx/epub 新格式。当前功能范围以
-> 《RAG知识库MVP执行计划》M8 小节为准。
+> 以及元数据过滤、模型重建、html/htm/pptx/epub 新格式。M9 已交付：检索
+> 模型改由宿主模型注册表管理（Model Provider / Provider Model），
+> Knowledge Base 绑定一个 Embedding 模型（换绑走重建）并可选绑定
+> Reranker（换绑/解绑即时生效）；无 Reranker 时最终分为余弦相似度
+> （`[-1,1]`），有 Reranker 时为其相关性分（`[0,1]`），阈值 0 表示不过滤，
+> 召回候选预算为 `min(100, max(20, top_k*5))`。正文的
+> `model_configuration_id` 与"知识模型配置"管理界面描述仅作历史存档。
+> 当前功能范围以《RAG知识库MVP执行计划》M8/M9 小节为准。
 
 ## 1. 产品目标
 
@@ -125,7 +131,7 @@ uploading -> queued -> processing -> ready
 
 ### Knowledge Task
 
-后台执行摄取和删除的持久任务。Task 最多尝试 3 次，失败后允许用户再次触发。
+后台执行摄取和删除的持久任务。Task 最多尝试 3 次，失败后允许用户再次触发。`delete_document_object` 使用不依赖 Document 外键的精确 `storage_key`，因此可在原 Document 行已消失时继续清理，并可与普通 Document 删除 Task 并存。
 
 ### Knowledge Citation
 
@@ -168,7 +174,9 @@ Project 用户可以：
 ### FR-03 上传文档
 
 - 支持单文件上传；批量上传由前端逐文件调用。
-- 默认最大文件大小 50 MiB，可通过配置调整。
+- 默认最大文件大小和配置硬上限均为 50 MiB。
+- 所有合法文件强制单 PUT，每个对象存储实例只执行一个并发 PUT，以限制 MinIO SDK 的
+  整 part 内存，并禁止产生普通对象列表和删除接口不可见的 incomplete multipart upload。
 - 允许扩展名：`.pdf`、`.docx`、`.txt`、`.md`、`.csv`、`.xlsx`。
 - 每次上传创建新的 Knowledge Document，不做内容去重。
 - Gateway 先把请求写入单次请求临时文件并校验大小；Package 生成 MinIO object key，再把临时文件上传到配置的唯一 bucket。
@@ -177,6 +185,10 @@ Project 用户可以：
 - `overlap` 必须小于切分长度。
 - 切分参数按 Document 在上传时设置并一次性固定；重试沿用原参数，调整参数需删除后重新上传（可先下载原始文件）。MVP 只生成一层平铺 Segment。
 - 只有 active Base 接受上传；Base 内 Document 数量达到 `max_documents_per_knowledge_base`（默认 500）时上传返回 `KNOWLEDGE_QUOTA_EXCEEDED`。
+- 上传期间并发删除必须获胜；即使删除 Worker 先移除 Document 行、put 随后完成且
+  即时对象清理失败，也必须保留携带精确 storage key、可与原删除任务并存的
+  `delete_document_object` 任务。Base 尚存时恢复 deleting tombstone，使最终错误可见并
+  支持用户通过普通删除入口重试，不能产生无行无任务孤儿。
 
 上传完成后立即进入异步摄取，页面显示当前状态。
 
@@ -191,7 +203,9 @@ Project 用户可以：
 - TXT/Markdown 首先尝试 UTF-8；失败时尝试 GB18030；有 UTF-16 BOM 时按 BOM 解码。
 - PDF 保留页码；CSV/XLSX 保留 sheet 和行号；其他格式来源位置可以为空。
 - 空文本进入 `failed`。
-- 切分数量超过 `max_segments_per_document`（默认 5000）时进入 `failed`，错误信息说明超限。
+- `max_segments_per_document` 是单文档向量条目预算，默认值和可配置硬上限均为 5000：general 模式按 Segment 数量计，parent-child 模式按携带向量的 Knowledge Segment Child 数量计；超限时在调用 Embedding 前进入 `failed` 并说明超限。
+- 同一预算适用于摄取和后续手工 Segment 新增/编辑；手工路径在调用 Embedding 前
+  检查一次，并在 Provider 返回后持有 Document 锁再次检查，防止并发修改超额。
 - embedding 返回数量、维度、有限数值或非零校验不通过时进入 `failed`。
 - 成功发布时，同一事务替换该 Document version 的 Segment 和 embedding。
 - 旧 version 的任务不得覆盖新 version 或已删除的 Document。
@@ -220,6 +234,10 @@ Project 用户可以：
 - 精排后丢弃低于 `score_threshold` 的候选；全部低于阈值时返回空结果；
 - Reranker 超时、返回非法 index/score 或 Provider 失败时整次搜索失败，不静默退回 cosine-only；
 - 返回结果包含 snippet 与 Knowledge Citation。
+- 每次有可搜索 Base 的完成检索把原始 query 记录到当前可信用户自己的历史；
+  最近查询只能由同一用户读取，不作为 Project 共享内容向其他成员或管理员展示；
+- 搜索在 Provider 工作前后重验证成员关系和 `shared_assets.read`；中途撤权时不得
+  返回已经计算出的 Citation，也不得写入该用户的查询历史或命中计数。
 
 ### FR-07 Agent 搜索
 
@@ -230,6 +248,7 @@ knowledge_search(query: str, top_k: int = 4)
 ```
 
 - Project id 由宿主当前 Run 上下文提供；
+- 查询历史 owner 由同一 Run 的可信用户上下文提供，不暴露为模型工具参数；
 - 搜索当前时刻 active 的 Knowledge Base 和 ready Document；
 - 不向模型暴露 `score_threshold`，内部使用与检索测试相同的默认阈值；
 - 没有命中或全部候选低于阈值时返回空结果，而不是报错；
@@ -242,6 +261,19 @@ knowledge_search(query: str, top_k: int = 4)
 - 删除 Document 后不再参与检索，并异步删除其 MinIO 对象、Segment 和 embedding。
 - 删除 Base 后不再接受操作，并异步删除其全部 Document 和 MinIO 对象。
 - Project 删除前调用 `purge_project` 清理该 Project 的 Knowledge 数据。
+- Project purge 先按 Document 行执行对象优先清理，再清扫数据库签发的 Knowledge
+  Project 对象 prefix，确保无行晚到对象也被删除，最后删除其余 Knowledge 行；MinIO
+  列举或删除失败时不得继续最终 Project 删除。
+- Project purge 遇到近期 uploading 行时，本轮不得删除任何 Knowledge 对象或关系行；
+  超过一天 settlement grace 的遗留上传仅转为 deleting 并创建 exact-key 清理任务，
+  下一轮才执行对象优先清理。时效判断使用 PostgreSQL 时钟；一天远大于正常 MinIO
+  传输/重试窗口且远小于 Project 固定 30 天 retention。
+- MinIO bucket 必须关闭 versioning 和 Object Lock。启动健康检查以及 MinIO-backed
+  Document、Base、Project 删除在删除对象及其关系行前读取 bucket versioning；Enabled、
+  Suspended 或缺少 GetBucketVersioning 权限均失败关闭。
+- `knowledge.enabled=false` 只停用路由、Agent 工具和 Knowledge Task worker，不停用独立
+  Project purger。未配置 MinIO 时，只要仍有 Document 行或状态不是 `succeeded` 的
+  `delete_document_object` Task，Project purge 必须返回未完成；纯元数据状态才可直接清理。
 - 删除任务失败时自动重试；最终失败时资源保持 `deleting` 并显示 Task 错误。用户再次触发删除后，新 Task 处理期间不再显示旧错误。
 
 ### FR-09 页面
@@ -345,4 +377,4 @@ KNOWLEDGE_TASK_FAILED
 
 Gateway 继续使用现有 Project 上下文和能力判断。Knowledge 的启用、Worker、上传、配额和 MinIO 参数来自根 `config.yaml`，由 `backend/app/knowledge/` 校验后传给 Package，不进入 System Runtime Settings。Knowledge Model Configuration 只保存一个供两个模型共用的当前 API Key 加密值，复用宿主 `SecretKey`/`SecretEnvelope`，不建立独立历史体系。
 
-本机当前已确认 MinIO S3 API 为 `127.0.0.1:9000`，Console 为 `http://127.0.0.1:9001`。程序 endpoint 必须使用 S3 API 的 `host:port`，不能使用 Console 地址。启用前由管理员创建 `actweave-knowledge` bucket；Runtime 不自动建 bucket。Gateway/Worker 直接运行在宿主机时可使用 `127.0.0.1:9000`；运行在 Compose 容器内时不能使用容器自身的 `127.0.0.1`，必须配置两个进程都可达的 S3 API 地址。
+本机当前已确认 MinIO S3 API 为 `127.0.0.1:9000`，Console 为 `http://127.0.0.1:9001`。程序 endpoint 必须使用 S3 API 的 `host:port`，不能使用 Console 地址。启用前由管理员创建 `actweave-knowledge` bucket；Runtime 不自动建 bucket 或修改其策略。bucket 必须关闭 versioning/Object Lock，凭据必须允许 `GetBucketVersioning`、对象读写删除和 Knowledge Project prefix 列举；Gateway/Worker 启动及所有 MinIO-backed 删除路径据此失败关闭。Gateway/Worker 直接运行在宿主机时可使用 `127.0.0.1:9000`；运行在 Compose 容器内时不能使用容器自身的 `127.0.0.1`，必须配置两个进程都可达的 S3 API 地址。

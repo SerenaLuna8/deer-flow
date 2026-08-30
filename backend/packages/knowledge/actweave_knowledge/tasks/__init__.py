@@ -3,15 +3,23 @@
 from .deletion import (
     KnowledgeBaseDeletionHandler,
     KnowledgeDocumentDeletionHandler,
+    KnowledgeDocumentObjectDeletionHandler,
     purge_project_knowledge,
 )
-from .worker import KnowledgeTaskClaim, KnowledgeTaskWorker, TaskHandler
+from .worker import (
+    KnowledgeTaskClaim,
+    KnowledgeTaskWorker,
+    ProjectActiveCheck,
+    TaskHandler,
+)
 
 __all__ = [
     "KnowledgeBaseDeletionHandler",
     "KnowledgeDocumentDeletionHandler",
+    "KnowledgeDocumentObjectDeletionHandler",
     "KnowledgeTaskClaim",
     "KnowledgeTaskWorker",
+    "ProjectActiveCheck",
     "TaskHandler",
     "purge_project_knowledge",
 ]

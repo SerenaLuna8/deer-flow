@@ -69,6 +69,36 @@ def message_to_text(message: Any, *, text_attribute_fallback: bool = False) -> s
     return ""
 
 
+def reasoning_block_text(block: Mapping[str, Any]) -> str:
+    """Extract provider-supplied reasoning text from one content block.
+
+    Covers direct text keys used by Anthropic/DeepSeek-style blocks and the
+    OpenAI Responses shape ``{"type": "reasoning", "summary": [{"type":
+    "summary_text", "text": ...}]}`` (streamed chunks carry the same nesting).
+    Returns an empty string when the block is not reasoning or carries none.
+    """
+    if block.get("type") not in {"thinking", "reasoning"}:
+        return ""
+    for key in ("thinking", "reasoning", "text", "content"):
+        value = block.get(key)
+        if isinstance(value, str) and value:
+            return value
+    summary = block.get("summary")
+    if not isinstance(summary, list):
+        return ""
+    parts: list[str] = []
+    for item in summary:
+        if not isinstance(item, Mapping) or item.get("type") != "summary_text":
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    # Settled summary entries are complete paragraphs (streaming deltas are
+    # aggregated per entry upstream), so join with a paragraph break instead
+    # of gluing the last word of one paragraph to the first of the next.
+    return "\n\n".join(parts)
+
+
 def get_original_user_content_text(content: Any, additional_kwargs: Mapping[str, Any] | None) -> str:
     """Return pre-middleware user text when available, otherwise content text."""
     original_content = (additional_kwargs or {}).get(ORIGINAL_USER_CONTENT_KEY)

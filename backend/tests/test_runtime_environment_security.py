@@ -32,9 +32,16 @@ def test_runtime_environment_drops_installation_admin_credentials(
 def test_runtime_environment_drops_bootstrap_model_key_from_file_and_ambient(
     tmp_path: Path,
 ) -> None:
+    # Current bootstrap names (DeepSeek System Model plus the M9 default Model
+    # Provider key/skip pair) and the retired M8 knowledge names must all stay
+    # installation-only: runtime roles never inherit them from file or ambient.
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY=file-bootstrap-key\nACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY=file-knowledge-key\n",
+        "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY=file-bootstrap-key\n"
+        "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY=file-provider-key\n"
+        "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP=1\n"
+        "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY=file-knowledge-key\n"
+        "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_SKIP=1\n",
         encoding="utf-8",
     )
 
@@ -42,7 +49,10 @@ def test_runtime_environment_drops_bootstrap_model_key_from_file_and_ambient(
         env_file,
         base_environment={
             "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY": "ambient-bootstrap-key",
+            "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY": "ambient-provider-key",
+            "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP": "1",
             "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY": "ambient-knowledge-key",
+            "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_SKIP": "1",
             "RUNTIME_MARKER": "preserved",
         },
     )

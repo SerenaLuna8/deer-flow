@@ -20,7 +20,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..authority import KnowledgeProjectAuthority, revalidate_project_authority
 from ..contracts import (
+    KNOWLEDGE_CONFLICT,
     KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR,
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_NOT_FOUND,
@@ -33,7 +35,7 @@ from ..contracts import (
     KnowledgeSegmentView,
     KnowledgeSettings,
 )
-from ..persistence.derivations import delete_error_expression
+from ..persistence.derivations import document_delete_error_expression
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
@@ -41,7 +43,7 @@ from ..persistence.models import (
     KnowledgeTaskRow,
 )
 from ..persistence.tasks import TASK_OPEN_STATUSES
-from ..storage import MinioObjectStore, document_storage_key
+from ..storage import DOCUMENT_STORAGE_EXTENSIONS, MinioObjectStore, document_storage_key
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ MAX_PAGE_SIZE = 100
 
 # Frozen by the system requirements; changing this set is a product decision,
 # not a configuration knob.
-ALLOWED_DOCUMENT_EXTENSIONS = frozenset({".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".html", ".htm", ".pptx", ".epub"})
+ALLOWED_DOCUMENT_EXTENSIONS = DOCUMENT_STORAGE_EXTENSIONS
 
 _MAX_NAME_LENGTH = 255
 _MAX_MEDIA_TYPE_LENGTH = 255
@@ -232,7 +234,7 @@ def document_view(row: KnowledgeDocumentRow, *, delete_error: str | None) -> Kno
 def _document_with_derivations(project_id: UUID):  # noqa: ANN202 - SQLAlchemy select
     return select(
         KnowledgeDocumentRow,
-        delete_error_expression("delete_document", KnowledgeDocumentRow.id).label("delete_error"),
+        document_delete_error_expression(KnowledgeDocumentRow.id).label("delete_error"),
     ).where(KnowledgeDocumentRow.project_id == project_id)
 
 
@@ -255,24 +257,45 @@ class KnowledgeDocumentService:
         project_id: UUID,
         base_id: UUID,
         upload: KnowledgeDocumentUpload,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> KnowledgeDocumentView:
         validated = _validated_upload(upload, self._settings)
         document_id = uuid4()
         storage_key = document_storage_key(project_id, base_id, document_id, validated.original_name)
 
-        await self._create_uploading_row(project_id, base_id, document_id, storage_key, validated)
+        await self._create_uploading_row(
+            project_id,
+            base_id,
+            document_id,
+            storage_key,
+            validated,
+            authority=authority,
+        )
         try:
             await self._object_store.upload_from(
                 storage_key,
                 validated.source_path,
                 media_type=validated.media_type,
             )
-            return await self._publish_queued_document(project_id, document_id)
+            return await self._publish_queued_document(
+                project_id,
+                document_id,
+                authority=authority,
+            )
         except BaseException:
             # Cancellation (client disconnect) and unexpected bugs must roll
             # back exactly like KnowledgeError; the shield keeps a second
             # cancellation from interrupting the cleanup itself.
-            await asyncio.shield(self._cleanup_failed_upload(project_id, document_id, storage_key))
+            await asyncio.shield(
+                self._cleanup_failed_upload(
+                    project_id,
+                    base_id,
+                    document_id,
+                    storage_key,
+                    validated,
+                )
+            )
             raise
 
     async def _create_uploading_row(
@@ -282,11 +305,18 @@ class KnowledgeDocumentService:
         document_id: UUID,
         storage_key: str,
         validated: KnowledgeDocumentUpload,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> None:
         """Reserve the document under the base lock: status gate, quota, row insert."""
 
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 base = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id).with_for_update())
                 if base is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
@@ -325,14 +355,37 @@ class KnowledgeDocumentService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def _publish_queued_document(self, project_id: UUID, document_id: UUID) -> KnowledgeDocumentView:
-        """Flip the row to ``queued`` and create the ingest task in one transaction."""
+    async def _publish_queued_document(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeDocumentView:
+        """Flip an unchanged ``uploading`` row to ``queued`` with its task.
+
+        Deletion increments the Document version while the object put is in
+        flight.  Requiring the original state here makes that deletion win;
+        the caller's rollback path then removes the just-written object.
+        """
 
         try:
             async with self._session_factory() as session, session.begin():
-                row = await session.get(KnowledgeDocumentRow, document_id, with_for_update=True)
-                if row is None:  # pragma: no cover - row was created moments ago
-                    raise _storage_unavailable()
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                row = await session.scalar(
+                    select(KnowledgeDocumentRow)
+                    .where(
+                        KnowledgeDocumentRow.project_id == project_id,
+                        KnowledgeDocumentRow.id == document_id,
+                    )
+                    .with_for_update()
+                )
+                if row is None or row.status != "uploading" or row.version != 1:
+                    raise KnowledgeError(KNOWLEDGE_CONFLICT, "Document 上传期间已被删除")
                 row.status = "queued"
                 row.updated_at = func.now()  # type: ignore[assignment]
                 session.add(
@@ -353,7 +406,14 @@ class KnowledgeDocumentService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def _cleanup_failed_upload(self, project_id: UUID, document_id: UUID, storage_key: str) -> None:
+    async def _cleanup_failed_upload(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        document_id: UUID,
+        storage_key: str,
+        validated: KnowledgeDocumentUpload,
+    ) -> None:
         """Roll back a failed upload without ever orphaning the object.
 
         The object delete is attempted unconditionally: a put whose response
@@ -370,7 +430,13 @@ class KnowledgeDocumentService:
             # Log the document id, not the storage key: object keys are
             # storage locators and must stay out of logs.
             logger.warning("failed-upload object delete failed, deferring to delete task: %s", document_id)
-            await self._enqueue_delete_for_failed_upload(project_id, document_id)
+            await self._enqueue_delete_for_failed_upload(
+                project_id,
+                base_id,
+                document_id,
+                storage_key,
+                validated,
+            )
             return
         try:
             async with self._session_factory() as session, session.begin():
@@ -378,17 +444,70 @@ class KnowledgeDocumentService:
         except SQLAlchemyError:
             logger.warning("uploading document row left behind after failed upload: %s", document_id, exc_info=True)
 
-    async def _enqueue_delete_for_failed_upload(self, project_id: UUID, document_id: UUID) -> None:
-        """Flip the leftover ``uploading`` row to ``deleting`` with a delete task."""
+    async def _enqueue_delete_for_failed_upload(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        document_id: UUID,
+        storage_key: str,
+        validated: KnowledgeDocumentUpload,
+    ) -> None:
+        """Persist exact-key cleanup and retain a user-retry tombstone when possible."""
 
         try:
             async with self._session_factory() as session, session.begin():
                 row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == document_id).with_for_update())
                 if row is None:
-                    return
-                row.status = "deleting"
-                row.updated_at = func.now()  # type: ignore[assignment]
-                session.add(_delete_task(project_id, document_id, "delete_document"))
+                    base = await session.scalar(
+                        select(KnowledgeBaseRow)
+                        .where(
+                            KnowledgeBaseRow.project_id == project_id,
+                            KnowledgeBaseRow.id == base_id,
+                        )
+                        .with_for_update()
+                    )
+                    if base is not None:
+                        session.add(
+                            KnowledgeDocumentRow(
+                                id=document_id,
+                                project_id=project_id,
+                                knowledge_base_id=base_id,
+                                name=validated.name,
+                                original_name=validated.original_name,
+                                storage_key=storage_key,
+                                media_type=validated.media_type,
+                                size_bytes=validated.size_bytes,
+                                status="deleting",
+                                version=2,
+                                chunk_size=validated.chunk_size,
+                                chunk_overlap=validated.chunk_overlap,
+                                chunk_separator=validated.chunk_separator,
+                                remove_extra_spaces=validated.remove_extra_spaces,
+                                remove_urls_emails=validated.remove_urls_emails,
+                                chunking_mode=validated.chunking_mode,
+                                child_chunk_size=validated.child_chunk_size,
+                                child_chunk_separator=validated.child_chunk_separator,
+                            )
+                        )
+                else:
+                    if row.status != "deleting":
+                        row.version = row.version + 1
+                    row.status = "deleting"
+                    row.error_message = None
+                    row.updated_at = func.now()  # type: ignore[assignment]
+                if not await _open_delete_task_exists(
+                    session,
+                    "delete_document_object",
+                    document_id,
+                ):
+                    session.add(
+                        _delete_task(
+                            project_id,
+                            document_id,
+                            "delete_document_object",
+                            storage_key=storage_key,
+                        )
+                    )
         except SQLAlchemyError:
             logger.warning("uploading document row left behind after failed upload: %s", document_id, exc_info=True)
 
@@ -399,10 +518,16 @@ class KnowledgeDocumentService:
         *,
         page: int = 1,
         page_size: int = 20,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> tuple[list[KnowledgeDocumentView], int]:
         page, page_size = _validated_page(page, page_size)
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 base_exists = await session.scalar(select(KnowledgeBaseRow.id).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id))
                 if base_exists is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
@@ -421,20 +546,60 @@ class KnowledgeDocumentService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def get_document(self, project_id: UUID, document_id: UUID) -> KnowledgeDocumentView:
-        row, delete_error = await self._load_document(project_id, document_id)
+    async def get_document(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeDocumentView:
+        row, delete_error = await self._load_document(
+            project_id,
+            document_id,
+            authority=authority,
+        )
         return document_view(row, delete_error=delete_error)
 
-    async def download_document(self, project_id: UUID, document_id: UUID, target_path: Path) -> KnowledgeDocumentView:
+    async def download_document(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        target_path: Path,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeDocumentView:
         """Fetch the original file into ``target_path`` and return the document view."""
 
-        row, delete_error = await self._load_document(project_id, document_id)
+        row, delete_error = await self._load_document(
+            project_id,
+            document_id,
+            authority=authority,
+        )
         if row.status not in _DOWNLOADABLE_STATUSES:
             raise _invalid("文档当前状态不支持下载")
         await self._object_store.download_to(row.storage_key, target_path)
+        # Object I/O runs outside PostgreSQL. Revalidate in a fresh, short
+        # transaction before the copied bytes can be returned by the host.
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            raise _storage_unavailable() from None
         return document_view(row, delete_error=delete_error)
 
-    async def retry_document(self, project_id: UUID, document_id: UUID) -> KnowledgeDocumentView:
+    async def retry_document(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeDocumentView:
         """Re-queue a failed document under a new version, in one transaction.
 
         The version bump makes any still-running old ingest a late result: its
@@ -443,6 +608,11 @@ class KnowledgeDocumentService:
 
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
@@ -478,7 +648,14 @@ class KnowledgeDocumentService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def rename_document(self, project_id: UUID, document_id: UUID, name: str) -> KnowledgeDocumentView:
+    async def rename_document(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        name: str,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeDocumentView:
         """Change the display ``name``; ``original_name`` and the object stay."""
 
         cleaned = name.strip() if isinstance(name, str) else ""
@@ -486,6 +663,11 @@ class KnowledgeDocumentService:
             raise _invalid(f"name 必须是 1-{_MAX_NAME_LENGTH} 个字符的非空文本")
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
@@ -507,6 +689,8 @@ class KnowledgeDocumentService:
         project_id: UUID,
         document_ids: list[UUID],
         enabled: bool,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> list[KnowledgeDocumentView]:
         """Flip retrieval visibility for the batch, all-or-nothing.
 
@@ -519,6 +703,11 @@ class KnowledgeDocumentService:
             raise _invalid("enabled 必须是布尔值")
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 rows = (await session.scalars(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id.in_(ids)).order_by(KnowledgeDocumentRow.id).with_for_update())).all()
                 by_id = {row.id: row for row in rows}
                 if len(by_id) != len(ids):
@@ -537,12 +726,23 @@ class KnowledgeDocumentService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def delete_documents(self, project_id: UUID, document_ids: list[UUID]) -> list[KnowledgeDocumentView]:
+    async def delete_documents(
+        self,
+        project_id: UUID,
+        document_ids: list[UUID],
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> list[KnowledgeDocumentView]:
         """Mark the batch ``deleting`` with delete tasks, all-or-nothing."""
 
         ids = _validated_document_ids(document_ids)
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 rows = (await session.scalars(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id.in_(ids)).order_by(KnowledgeDocumentRow.id).with_for_update())).all()
                 by_id = {row.id: row for row in rows}
                 if len(by_id) != len(ids):
@@ -575,12 +775,18 @@ class KnowledgeDocumentService:
         *,
         page: int = 1,
         page_size: int = 20,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> tuple[list[KnowledgeSegmentView], int]:
         """Published segments of the document's current version, by position."""
 
         page, page_size = _validated_page(page, page_size)
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 document = (await session.execute(select(KnowledgeDocumentRow.id, KnowledgeDocumentRow.version).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id))).one_or_none()
                 if document is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
@@ -611,7 +817,13 @@ class KnowledgeDocumentService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def delete_document(self, project_id: UUID, document_id: UUID) -> KnowledgeDocumentView:
+    async def delete_document(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeDocumentView:
         """Mark the document ``deleting`` and ensure one open delete task exists.
 
         Calling delete again after a finally-failed deletion creates a fresh
@@ -620,6 +832,11 @@ class KnowledgeDocumentService:
 
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
@@ -634,11 +851,22 @@ class KnowledgeDocumentService:
             raise _storage_unavailable() from None
 
     async def _derived_delete_error(self, session: AsyncSession, document_id: UUID) -> str | None:
-        return await session.scalar(select(delete_error_expression("delete_document", KnowledgeDocumentRow.id)).where(KnowledgeDocumentRow.id == document_id))
+        return await session.scalar(select(document_delete_error_expression(KnowledgeDocumentRow.id)).where(KnowledgeDocumentRow.id == document_id))
 
-    async def _load_document(self, project_id: UUID, document_id: UUID) -> tuple[KnowledgeDocumentRow, str | None]:
+    async def _load_document(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> tuple[KnowledgeDocumentRow, str | None]:
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 result = (await session.execute(_document_with_derivations(project_id).where(KnowledgeDocumentRow.id == document_id))).one_or_none()
         except SQLAlchemyError:
             raise _storage_unavailable() from None
@@ -677,13 +905,20 @@ async def _mark_document_deleting(session: AsyncSession, project_id: UUID, row: 
         session.add(_delete_task(project_id, row.id, "delete_document"))
 
 
-def _delete_task(project_id: UUID, resource_id: UUID, kind: str) -> KnowledgeTaskRow:
+def _delete_task(
+    project_id: UUID,
+    resource_id: UUID,
+    kind: str,
+    *,
+    storage_key: str | None = None,
+) -> KnowledgeTaskRow:
     return KnowledgeTaskRow(
         id=uuid4(),
         project_id=project_id,
         resource_id=resource_id,
         kind=kind,
         target_version=None,
+        storage_key=storage_key,
         status="queued",
     )
 

@@ -39,7 +39,7 @@ from deerflow.runtime.context_evidence import (
     VisualMeasurementMetadata,
 )
 
-MODEL_REQUEST_COST_ADAPTER_REVISION = "provider-wire-request-cost-v6"
+MODEL_REQUEST_COST_ADAPTER_REVISION = "provider-wire-request-cost-v7"
 # Additional safety allowance per non-ASCII UTF-8 byte, on top of the base
 # bytes/4 estimate and its ratio allowance. The base grants a 3-byte CJK
 # character only ~0.90-0.94 Tokens, which is not an upper bound for
@@ -53,9 +53,6 @@ PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE: dict[str, float] = {
     "deepseek": 0.05,
     "openai": 0.05,
     "openai_responses": 0.05,
-    "patched_deepseek": 0.05,
-    "patched_openai": 0.05,
-    "patched_openai_responses": 0.05,
     "vllm": 0.19,
 }
 _SERIALIZATION_FRAMING_UTF8_BYTES = 1_024

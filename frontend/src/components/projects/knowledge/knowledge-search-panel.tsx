@@ -1,7 +1,7 @@
 "use client";
 
 import { PlusIcon, SearchIcon, XIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -85,6 +85,14 @@ export function KnowledgeSearchPanel({
   const [threshold, setThreshold] = useState("");
   const [filters, setFilters] = useState<FilterDraft[]>([]);
   const [nextFilterKey, setNextFilterKey] = useState(1);
+
+  // Rebinding or clearing the reranker changes what the scores mean; stale
+  // results must not sit next to the new setting. Search again to compare.
+  const rerankerBinding = base.reranker_model_id ?? null;
+  const resetSearch = search.reset;
+  useEffect(() => {
+    resetSearch();
+  }, [rerankerBinding, resetSearch]);
 
   const parsedTopK = topK.trim() === "" ? undefined : Number.parseInt(topK, 10);
   const topKValid =

@@ -28,8 +28,8 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
-_EXPECTED_TABLE_COUNT = 107
-_EXPECTED_COLUMN_COUNT = 1333
+_EXPECTED_TABLE_COUNT = 108
+_EXPECTED_COLUMN_COUNT = 1339
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -50,11 +50,15 @@ class TableDefinition:
 # so a new table cannot silently receive a vague generated description.
 _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "alembic_version": ("数据库迁移版本", "记录当前数据库采用的 Alembic 架构版本。"),
-    "knowledge_model_configurations": (
-        "知识检索模型配置",
-        "保存 Knowledge 使用的 Embedding 与 Reranker 模型配置及二者共用的当前加密 API Key。",
+    "model_providers": (
+        "模型供应商",
+        "保存宿主管理的 OpenAI 兼容检索模型端点、请求超时与当前加密 API Key。",
     ),
-    "knowledge_bases": ("知识库", "保存项目内使用同一检索模型配置的知识文档集合。"),
+    "model_provider_models": (
+        "供应商模型",
+        "保存供应商下的 embedding 或 rerank 具体模型及其维度、批量与状态；知识库按标识绑定。",
+    ),
+    "knowledge_bases": ("知识库", "保存项目内绑定同一 Embedding 模型（可选 Reranker 模型）的知识文档集合。"),
     "knowledge_documents": (
         "知识文档",
         "保存上传文件、MinIO object key、切分参数、处理版本和当前处理状态。",
@@ -73,11 +77,11 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     ),
     "knowledge_queries": (
         "知识检索查询日志",
-        "按项目追加记录每次知识检索（检索测试与 Agent 工具）的查询、目标库与结果概要。",
+        "按项目和查询发起者追加记录每次知识检索（检索测试与 Agent 工具）的查询、目标库与结果概要。",
     ),
     "knowledge_tasks": (
         "知识后台任务",
-        "保存知识摄取和删除后台任务；领取、租约与尝试次数直接保存在任务行。",
+        "保存知识摄取、资源删除和晚到对象清理任务；领取、租约、精确存储标识与尝试次数直接保存在任务行。",
     ),
     "asset_catalog_state": ("资产目录状态", "记录系统资产目录的单例代次与更新时间。"),
     "system_asset_upgrade_audit": (
@@ -443,20 +447,21 @@ _COLUMN_PHRASES: dict[str, str] = {
 # Reused column names can carry materially different privacy and storage
 # semantics. Table-specific entries take precedence over the shared glossary.
 _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
-    ("knowledge_model_configurations", "display_name"): "管理页面显示名称",
-    ("knowledge_model_configurations", "status"): "配置状态（active 或 disabled）",
-    ("knowledge_model_configurations", "base_url"): "不含凭据的 OpenAI 兼容 API 基础地址",
-    ("knowledge_model_configurations", "embedding_model"): "Provider 接受的 Embedding 模型名称",
-    ("knowledge_model_configurations", "embedding_dimension"): "该配置返回的固定向量维度",
-    ("knowledge_model_configurations", "embedding_max_batch"): "单次 Embedding 请求最多包含的文本数量",
-    ("knowledge_model_configurations", "reranker_model"): "Provider 接受的 Reranker 模型名称",
-    ("knowledge_model_configurations", "reranker_max_batch"): "单次 Rerank 请求最多包含的候选数量",
-    ("knowledge_model_configurations", "request_timeout_seconds"): "单次 Provider 请求超时秒数",
-    ("knowledge_model_configurations", "api_key_nonce"): "当前 API Key Secret Envelope 的 12 字节 nonce",
-    ("knowledge_model_configurations", "api_key_ciphertext"): "当前 API Key Secret Envelope 的密文",
+    ("model_providers", "name"): "全局唯一（忽略大小写）的供应商名称",
+    ("model_providers", "base_url"): "不含凭据的 OpenAI 兼容 API 基础地址",
+    ("model_providers", "request_timeout_seconds"): "单次 Provider 请求超时秒数",
+    ("model_providers", "api_key_nonce"): "当前 API Key Secret Envelope 的 12 字节 nonce",
+    ("model_providers", "api_key_ciphertext"): "当前 API Key Secret Envelope 的密文",
+    ("model_provider_models", "provider_id"): "所属模型供应商标识",
+    ("model_provider_models", "model_type"): "模型类型（embedding 或 rerank）；建后不可变",
+    ("model_provider_models", "model_name"): "Provider 接受的模型名称；建后不可变",
+    ("model_provider_models", "embedding_dimension"): "embedding 模型返回的固定向量维度；rerank 行为空",
+    ("model_provider_models", "max_batch"): "单次请求最多包含的文本或候选数量",
+    ("model_provider_models", "status"): "模型状态（active 或 disabled）",
     ("knowledge_bases", "name"): "项目内唯一的知识库名称",
     ("knowledge_bases", "description"): "知识库描述",
-    ("knowledge_bases", "model_configuration_id"): "固定使用的 Embedding 与 Reranker 配置标识",
+    ("knowledge_bases", "embedding_model_id"): "固定使用的 Embedding 模型标识（指向供应商模型行）",
+    ("knowledge_bases", "reranker_model_id"): "可选的 Reranker 模型标识；为空表示检索不重排序",
     ("knowledge_bases", "status"): "知识库状态（active、disabled 或 deleting）",
     ("knowledge_bases", "default_top_k"): "检索未显式传参时使用的默认返回条数",
     ("knowledge_bases", "default_score_threshold"): "检索未显式传参时使用的默认相关性分数阈值（0 表示不过滤）",
@@ -494,7 +499,7 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_segments", "enabled"): "是否参与检索；停用不删除向量，重新启用即恢复可检索",
     ("knowledge_segments", "hit_count"): "检索最终结果命中该片段的累计次数",
     ("knowledge_segments", "source_position"): "页码、sheet 或行号等来源位置 JSON",
-    ("knowledge_segments", "embedding"): "与知识库模型配置维度一致的 pgvector 向量；parent_child 模式的父级片段为空",
+    ("knowledge_segments", "embedding"): "与知识库 Embedding 模型维度一致的 pgvector 向量；parent_child 模式的父级片段为空",
     ("knowledge_segment_children", "knowledge_base_id"): "所属知识库标识",
     ("knowledge_segment_children", "knowledge_document_id"): "所属知识文档标识",
     ("knowledge_segment_children", "knowledge_segment_id"): "所属父级知识片段标识",
@@ -502,15 +507,17 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_segment_children", "position"): "子块在父级片段内从 1 开始的位置",
     ("knowledge_segment_children", "content"): "参与向量召回的子块文本（属于私有内容）",
     ("knowledge_segment_children", "word_count"): "内容字符数",
-    ("knowledge_segment_children", "embedding"): "与知识库模型配置维度一致的 pgvector 向量",
+    ("knowledge_segment_children", "embedding"): "与知识库 Embedding 模型维度一致的 pgvector 向量",
+    ("knowledge_queries", "owner_user_id"): "发起本次检索并唯一有权读取原始查询文本的用户标识",
     ("knowledge_queries", "knowledge_base_ids"): "本次检索实际命中的目标知识库标识 JSON 数组",
     ("knowledge_queries", "query"): "检索查询文本（属于私有内容）",
     ("knowledge_queries", "source"): "查询来源（agent 工具或 retrieval_test 检索测试）",
     ("knowledge_queries", "result_count"): "最终返回的引用数量",
-    ("knowledge_queries", "top_score"): "最终结果中的最高 Reranker 相关性分数；无结果时为空",
+    ("knowledge_queries", "top_score"): "最终返回引用的最高检索分数，可为负；无结果时为空",
     ("knowledge_tasks", "resource_id"): "按任务类型指向知识文档或知识库的业务标识",
-    ("knowledge_tasks", "kind"): "任务类型（摄取文档、删除文档或删除知识库）",
+    ("knowledge_tasks", "kind"): "任务类型（摄取文档、删除文档、清理晚到文档对象或删除知识库）",
     ("knowledge_tasks", "target_version"): "ingest_document 任务允许发布的文档版本号",
+    ("knowledge_tasks", "storage_key"): "仅 delete_document_object 使用的精确 MinIO object key；属于受保护存储定位符",
     ("knowledge_tasks", "status"): "任务状态（queued、running、retry_wait、succeeded 或 failed）",
     ("knowledge_tasks", "attempt_count"): "已经开始执行的次数",
     ("knowledge_tasks", "max_attempts"): "允许执行的最大次数（MVP 固定为 3）",

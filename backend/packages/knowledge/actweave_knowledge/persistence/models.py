@@ -1,9 +1,9 @@
-"""Package-owned ORM rows for the eight ``knowledge_*`` tables.
+"""Package-owned ORM rows for the seven ``knowledge_*`` tables.
 
 The DDL authority is the host Schema V1 snapshot (``full_schema.sql``); these
 mappings mirror it exactly. The runtime never emits DDL from this metadata.
-Foreign keys to host tables (``projects``) exist only in the SQL snapshot so
-this metadata stays self-contained.
+Foreign keys to host tables (``projects``, ``model_provider_models``) exist
+only in the SQL snapshot so this metadata stays self-contained.
 """
 
 from __future__ import annotations
@@ -18,11 +18,9 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Double,
-    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
-    LargeBinary,
     SmallInteger,
     String,
     Text,
@@ -35,41 +33,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class KnowledgeOrmBase(DeclarativeBase):
     """Isolated metadata; never merged into the host declarative Base."""
-
-
-class KnowledgeModelConfigurationRow(KnowledgeOrmBase):
-    __tablename__ = "knowledge_model_configurations"
-    __table_args__ = (
-        CheckConstraint("btrim(display_name) <> ''", name="ck_knowledge_model_configurations_name"),
-        CheckConstraint("status IN ('active', 'disabled')", name="ck_knowledge_model_configurations_status"),
-        CheckConstraint("btrim(base_url) <> ''", name="ck_knowledge_model_configurations_base_url"),
-        CheckConstraint("btrim(embedding_model) <> ''", name="ck_knowledge_model_configurations_embedding_model"),
-        CheckConstraint("embedding_dimension BETWEEN 1 AND 16000", name="ck_knowledge_model_configurations_dimension"),
-        CheckConstraint("embedding_max_batch BETWEEN 1 AND 2048", name="ck_knowledge_model_configurations_batch"),
-        CheckConstraint("btrim(reranker_model) <> ''", name="ck_knowledge_model_configurations_reranker_model"),
-        CheckConstraint("reranker_max_batch BETWEEN 1 AND 256", name="ck_knowledge_model_configurations_reranker_batch"),
-        CheckConstraint("request_timeout_seconds BETWEEN 1 AND 300", name="ck_knowledge_model_configurations_timeout"),
-        CheckConstraint(
-            "octet_length(api_key_nonce) = 12 AND octet_length(api_key_ciphertext) >= 16",
-            name="ck_knowledge_model_configurations_secret",
-        ),
-        Index("uq_knowledge_model_configurations_name", text("lower(display_name)"), unique=True),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
-    base_url: Mapped[str] = mapped_column(String(1024), nullable=False)
-    embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
-    embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False)
-    embedding_max_batch: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("64"))
-    reranker_model: Mapped[str] = mapped_column(String(255), nullable=False)
-    reranker_max_batch: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("32"))
-    request_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("30"))
-    api_key_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    api_key_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
 
 class KnowledgeBaseRow(KnowledgeOrmBase):
@@ -85,17 +48,19 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
         ),
         Index("uq_knowledge_bases_project_name", "project_id", text("lower(name)"), unique=True),
         Index("ix_knowledge_bases_project_status", "project_id", "status", text("updated_at DESC"), "id"),
+        Index("ix_knowledge_bases_embedding_model", "embedding_model_id"),
+        Index("ix_knowledge_bases_reranker_model", "reranker_model_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str] = mapped_column(String(500), nullable=False, server_default=text("''"))
-    model_configuration_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("knowledge_model_configurations.id", name="fk_knowledge_bases_model", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # Bindings into the host-owned model registry (model_provider_models).
+    # The two REFERENCES ... ON DELETE RESTRICT foreign keys live only in the
+    # host SQL snapshot; the host KnowledgeModelPort validates type and status.
+    embedding_model_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    reranker_model_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
     # Per-base retrieval defaults: used when a search request omits the value
     # (retrieval test prefill and the Agent tool without explicit arguments).
@@ -359,8 +324,9 @@ class KnowledgeQueryRow(KnowledgeOrmBase):
     """Append-only retrieval log: one row per search on either path.
 
     ``knowledge_base_ids`` stores the resolved active bases the search really
-    targeted (JSONB array of UUID strings). Rows are history: base deletion
-    keeps them, project purge removes them.
+    targeted (JSONB array of UUID strings). Rows are owner-private history:
+    base deletion keeps them, former-owner/account retention removes the exact
+    owner scope, and Project retention removes every owner scope.
     """
 
     __tablename__ = "knowledge_queries"
@@ -372,15 +338,24 @@ class KnowledgeQueryRow(KnowledgeOrmBase):
             name="ck_knowledge_queries_base_ids",
         ),
         CheckConstraint("result_count >= 0", name="ck_knowledge_queries_result_count"),
+        # Cosine similarity floors the score at -1 for rerank-free searches;
+        # rerank scores stay in [0, 1]. NULL still means "no results".
         CheckConstraint(
-            "top_score IS NULL OR (top_score >= 0 AND top_score <= 1)",
+            "top_score IS NULL OR (top_score >= -1 AND top_score <= 1)",
             name="ck_knowledge_queries_top_score",
         ),
-        Index("ix_knowledge_queries_project_created", "project_id", text("created_at DESC"), "id"),
+        Index(
+            "ix_knowledge_queries_owner_created",
+            "project_id",
+            "owner_user_id",
+            text("created_at DESC"),
+            "id",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
     knowledge_base_ids: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     query: Mapped[str] = mapped_column(String(2000), nullable=False)
     source: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -393,12 +368,16 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
     __tablename__ = "knowledge_tasks"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('ingest_document', 'delete_document', 'delete_knowledge_base')",
+            "kind IN ('ingest_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')",
             name="ck_knowledge_tasks_kind",
         ),
         CheckConstraint(
             "(kind = 'ingest_document' AND target_version IS NOT NULL AND target_version >= 1) OR (kind <> 'ingest_document' AND target_version IS NULL)",
             name="ck_knowledge_tasks_target_version",
+        ),
+        CheckConstraint(
+            "(kind = 'delete_document_object' AND storage_key IS NOT NULL AND btrim(storage_key) <> '') OR (kind <> 'delete_document_object' AND storage_key IS NULL)",
+            name="ck_knowledge_tasks_storage_key",
         ),
         CheckConstraint(
             "status IN ('queued', 'running', 'retry_wait', 'succeeded', 'failed')",
@@ -443,6 +422,12 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
             postgresql_where=text("kind = 'delete_document' AND status IN ('queued', 'running', 'retry_wait')"),
         ),
         Index(
+            "uq_knowledge_tasks_open_document_object_delete",
+            "storage_key",
+            unique=True,
+            postgresql_where=text("kind = 'delete_document_object' AND status IN ('queued', 'running', 'retry_wait')"),
+        ),
+        Index(
             "uq_knowledge_tasks_open_base_delete",
             "resource_id",
             unique=True,
@@ -455,6 +440,7 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
     resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     target_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'queued'"))
     attempt_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
     max_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("3"))

@@ -19,6 +19,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..authority import KnowledgeProjectAuthority, revalidate_project_authority
 from ..contracts import (
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_MAX_METADATA_FIELDS_PER_BASE,
@@ -34,7 +35,7 @@ from ..contracts import (
     KnowledgeMetadataFieldView,
 )
 from ..documents.service import document_view
-from ..persistence.derivations import delete_error_expression
+from ..persistence.derivations import document_delete_error_expression
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
@@ -102,9 +103,20 @@ class KnowledgeMetadataService:
     def __init__(self, *, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def list_metadata_fields(self, project_id: UUID, base_id: UUID) -> list[KnowledgeMetadataFieldView]:
+    async def list_metadata_fields(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> list[KnowledgeMetadataFieldView]:
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 base_exists = await session.scalar(select(KnowledgeBaseRow.id).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id))
                 if base_exists is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
@@ -128,12 +140,18 @@ class KnowledgeMetadataService:
         *,
         name: str,
         field_type: KnowledgeMetadataFieldType,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> KnowledgeMetadataFieldView:
         cleaned = _validated_field_name(name)
         if field_type not in _FIELD_TYPES:
             raise _invalid("field_type 只能是 string、number 或 time")
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 # The base lock serializes concurrent creates so the quota
                 # check cannot be raced past.
                 base = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id).with_for_update())
@@ -165,12 +183,24 @@ class KnowledgeMetadataService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def rename_metadata_field(self, project_id: UUID, field_id: UUID, *, name: str) -> KnowledgeMetadataFieldView:
+    async def rename_metadata_field(
+        self,
+        project_id: UUID,
+        field_id: UUID,
+        *,
+        name: str,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeMetadataFieldView:
         """Rename the definition and rewrite the key across the base's documents."""
 
         cleaned = _validated_field_name(name)
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 row = await session.scalar(select(KnowledgeMetadataFieldRow).where(KnowledgeMetadataFieldRow.project_id == project_id, KnowledgeMetadataFieldRow.id == field_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "元数据字段不存在")
@@ -203,11 +233,22 @@ class KnowledgeMetadataService:
         except SQLAlchemyError:
             raise _storage_unavailable() from None
 
-    async def delete_metadata_field(self, project_id: UUID, field_id: UUID) -> None:
+    async def delete_metadata_field(
+        self,
+        project_id: UUID,
+        field_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> None:
         """Drop the definition and strip the key from the base's documents."""
 
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 row = await session.scalar(select(KnowledgeMetadataFieldRow).where(KnowledgeMetadataFieldRow.project_id == project_id, KnowledgeMetadataFieldRow.id == field_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "元数据字段不存在")
@@ -230,6 +271,8 @@ class KnowledgeMetadataService:
         project_id: UUID,
         document_id: UUID,
         values: dict[str, Any],
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
     ) -> KnowledgeDocumentView:
         """Merge metadata values into one document (``None`` removes the key).
 
@@ -241,6 +284,11 @@ class KnowledgeMetadataService:
             raise _invalid("values 必须是对象")
         try:
             async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
                 row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
@@ -267,7 +315,7 @@ class KnowledgeMetadataService:
                 row.updated_at = func.now()  # type: ignore[assignment]
                 await session.flush()
                 await session.refresh(row)
-                delete_error = await session.scalar(select(delete_error_expression("delete_document", KnowledgeDocumentRow.id)).where(KnowledgeDocumentRow.id == row.id))
+                delete_error = await session.scalar(select(document_delete_error_expression(KnowledgeDocumentRow.id)).where(KnowledgeDocumentRow.id == row.id))
                 return document_view(row, delete_error=delete_error)
         except KnowledgeError:
             raise

@@ -14,9 +14,6 @@ _OPENAI_FAMILY_ADAPTERS = (
     "deepseek",
     "openai",
     "openai_responses",
-    "patched_deepseek",
-    "patched_openai",
-    "patched_openai_responses",
 )
 
 
@@ -96,7 +93,7 @@ def test_openai_timeout_wrapper_preserves_connect_stage_proof(
 
     assert error.__cause__ is cause
     assert classify_provider_no_response(
-        provider_adapter="patched_deepseek",
+        provider_adapter="deepseek",
         error=error,
     ) == ProviderNoResponseProof(failure_code=failure_code)
 
@@ -133,7 +130,7 @@ def test_provider_failure_without_connect_stage_proof_remains_unknown(
 ) -> None:
     assert (
         classify_provider_no_response(
-            provider_adapter="patched_deepseek",
+            provider_adapter="deepseek",
             error=error,
         )
         is None

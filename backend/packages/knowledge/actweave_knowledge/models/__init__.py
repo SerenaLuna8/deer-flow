@@ -1,16 +1,14 @@
-"""Internal model-access layer: SiliconFlow client and configuration service.
+"""Internal model-access layer: the SiliconFlow-compatible HTTP client.
 
-Nothing in this package is exported from the root public API; hosts reach the
+Model governance (providers, typed models, keys) lives in the host registry;
+this package only turns host-materialized credentials into provider calls.
+Nothing here is exported from the root public API; hosts reach the
 functionality through :class:`actweave_knowledge.KnowledgeModule`.
 """
 
-from .client import KnowledgeModelClient, KnowledgeModelMaterial, RerankScore
-from .service import KnowledgeModelConfigurationService, materialize_model_material
+from .client import KnowledgeModelClient, RerankScore
 
 __all__ = [
     "KnowledgeModelClient",
-    "KnowledgeModelConfigurationService",
-    "KnowledgeModelMaterial",
     "RerankScore",
-    "materialize_model_material",
 ]

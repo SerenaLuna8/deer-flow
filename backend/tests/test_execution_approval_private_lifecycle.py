@@ -197,6 +197,11 @@ async def test_retention_worker_reconciles_mount_owners_before_phase_b() -> None
     handler = object.__new__(RetentionPurgeJobHandler)
     handler._mount_owner_reconciler = reconciler
 
+    async def not_a_project_purge(_claim) -> bool:  # noqa: ANN001
+        return False
+
+    handler._knowledge_purge_admitted = not_a_project_purge
+
     await handler(
         SimpleNamespace(job_type="retention_purge"),
         object(),

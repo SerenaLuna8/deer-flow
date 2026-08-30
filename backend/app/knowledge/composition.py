@@ -1,19 +1,49 @@
 """Composition root assembling the Knowledge Package onto host resources.
 
-:func:`create_knowledge_module_from_app_config` is the single entry point for
-Gateway and Worker once they wire the feature in (M2+); it must run after the
-persistence engine is initialized. A disabled feature yields ``None`` and no
-Knowledge resource is constructed.
+The Gateway composes the optional feature module. The Worker composes that
+module plus an independent Project-retention capability, because disabling
+the product surface must not make historical rows or objects undeletable.
+Both entry points require an initialized persistence engine.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
-from actweave_knowledge import KnowledgeModule, create_knowledge_module
+from actweave_knowledge import (
+    KnowledgeModule,
+    create_knowledge_module,
+    create_knowledge_project_purger,
+)
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.knowledge.config import load_knowledge_settings
-from app.knowledge.secret_adapter import EnvelopeKnowledgeSecretAdapter
+from app.knowledge.model_port import RegistryKnowledgeModelPort
+from deerflow.persistence.projects.model import ProjectRow
+
+KnowledgeProjectPurge = Callable[[UUID], Awaitable[bool]]
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeWorkerResources:
+    """Independent runtime and retention capabilities for one Worker."""
+
+    feature_module: KnowledgeModule | None
+    project_purge: KnowledgeProjectPurge
+
+
+async def is_knowledge_project_active(
+    session: AsyncSession,
+    project_id: UUID,
+) -> bool:
+    """Check Project execution eligibility under the claim transaction."""
+
+    status = await session.scalar(select(ProjectRow.status).where(ProjectRow.id == project_id).with_for_update(read=True, of=ProjectRow))
+    return status == "active"
 
 
 def create_knowledge_module_from_app_config(app_config: Any) -> KnowledgeModule | None:
@@ -28,7 +58,26 @@ def create_knowledge_module_from_app_config(app_config: Any) -> KnowledgeModule 
     return create_knowledge_module(
         settings=settings,
         session_factory=get_session_factory(),
-        secret_port=EnvelopeKnowledgeSecretAdapter.from_environment(),
+        model_port=RegistryKnowledgeModelPort.from_environment(),
+        project_active_check=is_knowledge_project_active,
+    )
+
+
+def create_knowledge_worker_resources_from_app_config(app_config: Any) -> KnowledgeWorkerResources:
+    """Build Worker capabilities without equating feature disable with cleanup."""
+
+    settings = load_knowledge_settings(app_config)
+    feature_module = create_knowledge_module_from_app_config(app_config)
+    from deerflow.persistence.engine import get_session_factory
+
+    project_purger = create_knowledge_project_purger(
+        settings=settings,
+        session_factory=get_session_factory(),
+    )
+
+    return KnowledgeWorkerResources(
+        feature_module=feature_module,
+        project_purge=project_purger.purge_project,
     )
 
 

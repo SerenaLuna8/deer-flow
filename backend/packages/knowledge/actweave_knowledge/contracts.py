@@ -13,12 +13,14 @@ from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # ---------------------------------------------------------------------------
 # Error codes and error type
 # ---------------------------------------------------------------------------
 
 KNOWLEDGE_DISABLED = "KNOWLEDGE_DISABLED"
+KNOWLEDGE_FORBIDDEN = "KNOWLEDGE_FORBIDDEN"
 KNOWLEDGE_NOT_FOUND = "KNOWLEDGE_NOT_FOUND"
 KNOWLEDGE_NAME_CONFLICT = "KNOWLEDGE_NAME_CONFLICT"
 KNOWLEDGE_CONFLICT = "KNOWLEDGE_CONFLICT"
@@ -83,10 +85,13 @@ class KnowledgeSettings(BaseModel):
     enabled: bool = False
     worker_concurrency: int = Field(default=2, ge=1, le=16)
     task_timeout_seconds: int = Field(default=900, ge=30, le=7200)
-    upload_max_bytes: int = Field(default=52428800, ge=1)
+    # MinIO's Python SDK buffers a single PUT part in process memory. Keep the
+    # configurable ceiling at the 50 MiB product default so one accepted file
+    # cannot turn the SDK's one-part path into a multi-GiB allocation.
+    upload_max_bytes: int = Field(default=52428800, ge=1, le=50 * 1024**2)
     max_knowledge_bases_per_project: int = Field(default=20, ge=1)
     max_documents_per_knowledge_base: int = Field(default=500, ge=1)
-    max_segments_per_document: int = Field(default=5000, ge=1)
+    max_segments_per_document: int = Field(default=5000, ge=1, le=5000)
     minio: KnowledgeMinioSettings | None = None
 
     @model_validator(mode="after")
@@ -97,92 +102,71 @@ class KnowledgeSettings(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Secret port
+# Model port (host-owned registry)
 # ---------------------------------------------------------------------------
+
+KnowledgeModelType = Literal["embedding", "rerank"]
 
 
 @dataclass(frozen=True, slots=True)
-class KnowledgeProtectedSecret:
-    """Encrypted API-key material held by a model configuration row."""
+class KnowledgeEmbeddingMaterial:
+    """One embedding model materialized for provider calls, plaintext key included.
 
-    nonce: bytes
-    ciphertext: bytes
+    Instances live only in memory for the duration of a call; the plaintext
+    ``api_key`` never reaches logs (``repr=False``) or storage.
+    """
 
-
-class KnowledgeSecretPort(Protocol):
-    """Host-provided encryption for the shared model-configuration API key."""
-
-    def protect_api_key(self, configuration_id: UUID, api_key: str) -> KnowledgeProtectedSecret: ...
-
-    def materialize_api_key(self, configuration_id: UUID, secret: KnowledgeProtectedSecret) -> str: ...
-
-
-# ---------------------------------------------------------------------------
-# Model configuration DTOs
-# ---------------------------------------------------------------------------
-
-KnowledgeModelConfigurationStatus = Literal["active", "disabled"]
-
-
-@dataclass(frozen=True, slots=True)
-class KnowledgeModelConfigurationCreate:
-    display_name: str
+    model_id: UUID
     base_url: str
-    embedding_model: str
-    embedding_dimension: int
-    reranker_model: str
-    api_key: str = field(repr=False)
-    embedding_max_batch: int = 64
-    reranker_max_batch: int = 32
-    request_timeout_seconds: int = 30
-
-
-@dataclass(frozen=True, slots=True)
-class KnowledgeModelConfigurationUpdate:
-    """Partial update; ``None`` keeps the stored value."""
-
-    display_name: str | None = None
-    status: KnowledgeModelConfigurationStatus | None = None
-    base_url: str | None = None
-    embedding_model: str | None = None
-    embedding_dimension: int | None = None
-    embedding_max_batch: int | None = None
-    reranker_model: str | None = None
-    reranker_max_batch: int | None = None
-    request_timeout_seconds: int | None = None
-    api_key: str | None = field(default=None, repr=False)
-
-
-@dataclass(frozen=True, slots=True)
-class KnowledgeModelConfigurationView:
-    id: UUID
-    display_name: str
-    status: KnowledgeModelConfigurationStatus
-    base_url: str
-    embedding_model: str
-    embedding_dimension: int
-    embedding_max_batch: int
-    reranker_model: str
-    reranker_max_batch: int
+    model_name: str
+    dimension: int
+    max_batch: int
     request_timeout_seconds: int
-    in_use: bool
-    created_at: datetime
-    updated_at: datetime
+    api_key: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
-class KnowledgeModelOption:
-    id: UUID
-    display_name: str
-    embedding_model: str
-    embedding_dimension: int
-    reranker_model: str
+class KnowledgeRerankMaterial:
+    """One rerank model materialized for provider calls, plaintext key included."""
+
+    model_id: UUID
+    base_url: str
+    model_name: str
+    max_batch: int
+    request_timeout_seconds: int
+    api_key: str = field(repr=False)
 
 
-@dataclass(frozen=True, slots=True)
-class KnowledgeModelConnectionResult:
-    ok: bool
-    message: str
+class KnowledgeModelPort(Protocol):
+    """Host-provided access to the registry rows Knowledge Bases bind.
+
+    Every method runs inside the caller's transaction (``session``): binding
+    paths lock Provider then Model ``FOR SHARE`` so they serialize with the
+    registry's ``FOR UPDATE`` write paths, and material resolution validates
+    type and ``active`` status before decrypting. Any unresolvable model —
+    missing, wrong type, disabled, or undecryptable material — raises
+    ``KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE)``. The package never joins
+    or imports host ORM tables.
+    """
+
+    async def lock_model_for_binding(
+        self,
+        session: AsyncSession,
+        model_id: UUID,
+        model_type: KnowledgeModelType,
+    ) -> None: ...
+
+    async def embedding_material(
+        self,
+        session: AsyncSession,
+        model_id: UUID,
+    ) -> KnowledgeEmbeddingMaterial: ...
+
+    async def rerank_material(
+        self,
+        session: AsyncSession,
+        model_id: UUID,
+    ) -> KnowledgeRerankMaterial: ...
 
 
 # ---------------------------------------------------------------------------
@@ -198,19 +182,27 @@ KNOWLEDGE_MAX_TOP_K = 20
 @dataclass(frozen=True, slots=True)
 class KnowledgeBaseCreate:
     name: str
-    model_configuration_id: UUID
+    embedding_model_id: UUID
     description: str = ""
+    reranker_model_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeBaseUpdate:
-    """Partial update; ``None`` keeps the stored value."""
+    """Partial update; ``None`` keeps the stored value.
+
+    Rerank rebinding is tri-state: ``reranker_model_id`` set rebinds without a
+    rebuild, ``clear_reranker_model=True`` switches reranking off, and neither
+    keeps the stored binding. Setting both is invalid.
+    """
 
     name: str | None = None
     description: str | None = None
     status: Literal["active", "disabled"] | None = None
     default_top_k: int | None = None
     default_score_threshold: float | None = None
+    reranker_model_id: UUID | None = None
+    clear_reranker_model: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,7 +211,8 @@ class KnowledgeBaseView:
     project_id: UUID
     name: str
     description: str
-    model_configuration_id: UUID
+    embedding_model_id: UUID
+    reranker_model_id: UUID | None
     status: KnowledgeBaseStatus
     document_count: int
     default_top_k: int
@@ -306,7 +299,7 @@ class KnowledgeSegmentView:
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeSegmentCreate:
-    """One manually added segment; embedded with the base's model configuration."""
+    """One manually added segment; embedded with the base's embedding model."""
 
     content: str
 
@@ -420,7 +413,7 @@ class KnowledgeMetadataFilter:
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeSearchRequest:
-    """Search input; ``project_id`` comes from host context, never request bodies.
+    """Search input; scope identities come from host context, never request bodies.
 
     ``top_k``/``score_threshold`` left as ``None`` resolve to the per-base
     defaults stored on the targeted knowledge bases. ``source`` labels the
@@ -429,6 +422,7 @@ class KnowledgeSearchRequest:
     """
 
     project_id: UUID
+    owner_user_id: UUID
     query: str
     knowledge_base_ids: tuple[UUID, ...] | None = None
     top_k: int | None = None

@@ -11,9 +11,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.knowledge.bootstrap import (
-    KnowledgeBootstrapConfigurationInvalid,
-    prepare_knowledge_bootstrap,
+from app.model_registry.bootstrap import (
+    ModelRegistryBootstrapConfigurationInvalid,
+    prepare_model_registry_bootstrap,
 )
 from app.system_settings.bootstrap import (
     DefaultSystemModelBootstrapConfigurationInvalid,
@@ -71,11 +71,11 @@ async def reset_and_initialize(
     except Exception:
         raise PostgresResetError("数据库重置预检失败；请检查 bootstrap Secret 和模型 Key 配置") from None
     try:
-        knowledge_bootstrap = prepare_knowledge_bootstrap()
-    except KnowledgeBootstrapConfigurationInvalid:
-        raise PostgresResetError("数据库重置预检失败；请检查 Knowledge bootstrap Key 和 Secret 配置") from None
+        model_registry_bootstrap = prepare_model_registry_bootstrap()
+    except ModelRegistryBootstrapConfigurationInvalid:
+        raise PostgresResetError("数据库重置预检失败；请检查模型供应商 bootstrap Key 和 Secret 配置") from None
     except Exception:
-        raise PostgresResetError("数据库重置预检失败；请检查 Knowledge bootstrap Key 和 Secret 配置") from None
+        raise PostgresResetError("数据库重置预检失败；请检查模型供应商 bootstrap Key 和 Secret 配置") from None
 
     try:
         engine = create_async_engine(
@@ -106,7 +106,7 @@ async def reset_and_initialize(
             revision = await bootstrap_empty_schema_under_lock(
                 database_url,
                 default_model_bootstrap=default_model_bootstrap,
-                knowledge_bootstrap=knowledge_bootstrap,
+                model_registry_bootstrap=model_registry_bootstrap,
                 force_public_schema=True,
             )
             bootstrap_completed = True

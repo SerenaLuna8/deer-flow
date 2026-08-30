@@ -597,6 +597,49 @@ export function extractContentFromMessage(message: Message) {
   return "";
 }
 
+/**
+ * Extract provider-supplied reasoning text from one content block.
+ *
+ * Covers the Anthropic thinking shape (`{type:"thinking", thinking}`) and the
+ * OpenAI Responses shape `{type:"reasoning", summary:[{type:"summary_text",
+ * text}]}` — streamed chunks carry the same nesting. Returns "" when the
+ * block holds no reasoning text: an absent summary means nothing to show, and
+ * `encrypted_content` is never displayed.
+ */
+function reasoningBlockText(block: unknown): string {
+  if (!block || typeof block !== "object") {
+    return "";
+  }
+  const record = block as Record<string, unknown>;
+  if (record.type !== "thinking" && record.type !== "reasoning") {
+    return "";
+  }
+  for (const key of ["thinking", "reasoning", "text"]) {
+    const value = record[key];
+    if (typeof value === "string" && value) {
+      return value;
+    }
+  }
+  if (!Array.isArray(record.summary)) {
+    return "";
+  }
+  // Settled summary entries are complete paragraphs (streaming deltas are
+  // aggregated per entry upstream), so join with a paragraph break instead
+  // of gluing the last word of one paragraph to the first of the next.
+  return record.summary
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return "";
+      }
+      const part = item as { type?: unknown; text?: unknown };
+      return part.type === "summary_text" && typeof part.text === "string"
+        ? part.text
+        : "";
+    })
+    .filter((text) => text !== "")
+    .join("\n\n");
+}
+
 export function extractReasoningContentFromMessage(message: Message) {
   if (message.type !== "ai") {
     return null;
@@ -608,13 +651,66 @@ export function extractReasoningContentFromMessage(message: Message) {
     return message.additional_kwargs.reasoning_content as string | null;
   }
   if (Array.isArray(message.content)) {
-    const part = message.content[0];
-    if (part && typeof part === "object" && "thinking" in part) {
-      return part.thinking as string;
+    const parts = message.content
+      .map((part) => reasoningBlockText(part))
+      .filter((text) => text !== "");
+    if (parts.length > 0) {
+      return parts.join("");
     }
   }
   if (typeof message.content === "string") {
     return splitInlineReasoningFromAIMessage(message)?.reasoning ?? null;
+  }
+  return null;
+}
+
+export type ReasoningPresentationKind = "full" | "summary";
+
+/**
+ * Classify how a message's reasoning surfaced: a provider-native full chain
+ * (DeepSeek `reasoning_content`, Anthropic thinking, inline `<think>` tags)
+ * or an OpenAI Responses reasoning summary. The chat UI labels the two
+ * differently so a model-written summary is never presented as the chain.
+ */
+export function reasoningPresentationKind(
+  message: Message,
+): ReasoningPresentationKind | null {
+  if (message.type !== "ai") {
+    return null;
+  }
+  if (
+    message.additional_kwargs &&
+    "reasoning_content" in message.additional_kwargs
+  ) {
+    const value = message.additional_kwargs.reasoning_content;
+    return typeof value === "string" && value ? "full" : null;
+  }
+  if (Array.isArray(message.content)) {
+    let sawSummary = false;
+    for (const block of message.content) {
+      if (!block || typeof block !== "object") {
+        continue;
+      }
+      const record = block as Record<string, unknown>;
+      if (record.type !== "thinking" && record.type !== "reasoning") {
+        continue;
+      }
+      for (const key of ["thinking", "reasoning", "text"]) {
+        const value = record[key];
+        if (typeof value === "string" && value) {
+          return "full";
+        }
+      }
+      if (reasoningBlockText(block) !== "") {
+        sawSummary = true;
+      }
+    }
+    return sawSummary ? "summary" : null;
+  }
+  if (typeof message.content === "string") {
+    return splitInlineReasoningFromAIMessage(message)?.reasoning
+      ? "full"
+      : null;
   }
   return null;
 }
@@ -686,9 +782,8 @@ export function hasReasoning(message: Message) {
     return true;
   }
   if (Array.isArray(message.content)) {
-    const part = message.content[0];
-    // Compatible with the Anthropic gateway
-    return (part as unknown as { type: "thinking" })?.type === "thinking";
+    // Anthropic thinking blocks and OpenAI Responses reasoning summaries.
+    return message.content.some((part) => reasoningBlockText(part) !== "");
   }
   if (typeof message.content === "string") {
     return splitInlineReasoning(message.content).reasoning !== null;

@@ -15,7 +15,6 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models.patched_deepseek import PatchedChatDeepSeek
-from deerflow.models.patched_openai import PatchedChatOpenAI
 from deerflow.models.runtime import ModelRuntime, ModelRuntimeProfile
 from deerflow.models.vllm_provider import VllmChatModel
 from deerflow.tools.builtins.inspect_image_tool import (
@@ -51,14 +50,6 @@ from deerflow.vision.contracts import VisionUsageReceipt
         ),
         (
             ChatDeepSeek(api_key="test-only", model="deepseek-model", max_retries=0),
-            "openai_chat",
-        ),
-        (
-            PatchedChatOpenAI(
-                api_key="test-only",
-                model="patched-openai-model",
-                max_retries=0,
-            ),
             "openai_chat",
         ),
         (
@@ -130,8 +121,6 @@ def test_existing_adapter_serializes_provider_neutral_image_block(
     [
         ("langchain_openai:ChatOpenAI", {}),
         ("langchain_anthropic:ChatAnthropic", {}),
-        ("langchain_deepseek:ChatDeepSeek", {}),
-        ("deerflow.models.patched_openai:PatchedChatOpenAI", {}),
         ("deerflow.models.patched_deepseek:PatchedChatDeepSeek", {}),
         (
             "deerflow.models.vllm_provider:VllmChatModel",
