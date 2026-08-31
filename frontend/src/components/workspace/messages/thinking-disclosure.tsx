@@ -17,6 +17,7 @@ import {
   type ReasoningProps,
 } from "@/components/ai-elements/reasoning";
 import { useI18n } from "@/core/i18n/hooks";
+import type { ReasoningPresentationKind } from "@/core/messages/utils";
 import { cn } from "@/lib/utils";
 
 const AUTO_COLLAPSE_DELAY_MS = 1000;
@@ -27,11 +28,15 @@ export function ThinkingDisclosure({
   defaultOpen,
   duration: observedDuration,
   isStreaming = false,
+  // A provider-written reasoning summary is labeled distinctly so it is
+  // never presented as the model's complete chain of thought.
+  kind = "full",
   statusDetail,
   ...props
 }: Omit<ReasoningProps, "defaultOpen" | "onOpenChange" | "open"> & {
   children?: ReactNode;
   defaultOpen?: boolean;
+  kind?: ReasoningPresentationKind;
   statusDetail?: ReactNode;
 }) {
   const [isOpen, setIsOpen] = useState(defaultOpen ?? isStreaming);
@@ -68,6 +73,7 @@ export function ThinkingDisclosure({
       <ThinkingDisclosureTrigger
         completedDuration={observedDuration}
         hasContent={children != null}
+        kind={kind}
         statusDetail={statusDetail}
       />
       {children}
@@ -97,10 +103,12 @@ export function ThinkingDisclosureContent({
 function ThinkingDisclosureTrigger({
   completedDuration,
   hasContent,
+  kind,
   statusDetail,
 }: {
   completedDuration?: number;
   hasContent: boolean;
+  kind: ReasoningPresentationKind;
   statusDetail?: ReactNode;
 }) {
   const { isOpen, isStreaming, startTime } = useReasoning();
@@ -117,6 +125,7 @@ function ThinkingDisclosureTrigger({
       <ThinkingStatus
         duration={completedDuration}
         isStreaming={isStreaming}
+        kind={kind}
         startTime={startTime}
       />
       {statusDetail != null && (
@@ -139,10 +148,12 @@ function ThinkingDisclosureTrigger({
 function ThinkingStatus({
   duration,
   isStreaming,
+  kind,
   startTime,
 }: {
   duration?: number;
   isStreaming: boolean;
+  kind: ReasoningPresentationKind;
   startTime: number | null;
 }) {
   const { t } = useI18n();
@@ -167,12 +178,21 @@ function ThinkingStatus({
   }, [isStreaming, startTime]);
 
   if (isStreaming) {
+    const seconds = startTime == null ? undefined : elapsed;
     return (
       <span className="animate-pulse">
-        {t.common.thinkingInProgress(startTime == null ? undefined : elapsed)}
+        {kind === "summary"
+          ? t.common.reasoningSummaryInProgress(seconds)
+          : t.common.thinkingInProgress(seconds)}
       </span>
     );
   }
 
-  return <span>{t.common.thoughtFor(duration)}</span>;
+  return (
+    <span>
+      {kind === "summary"
+        ? t.common.reasoningSummaryFor(duration)
+        : t.common.thoughtFor(duration)}
+    </span>
+  );
 }

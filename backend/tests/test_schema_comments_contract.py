@@ -4,9 +4,12 @@ import re
 import stat
 from pathlib import Path
 
+from actweave_knowledge.persistence.models import KnowledgeOrmBase
+
 import deerflow.persistence.models  # noqa: F401 -- populate metadata
 from deerflow.persistence.base import Base
 from deerflow.persistence.final_schema_contract import (
+    FINAL_APP_TABLES,
     LANGGRAPH_COMMENT_SIGNATURE,
     _rows_digest,
 )
@@ -37,9 +40,11 @@ def test_generated_comment_artifact_and_embedded_schema_are_current() -> None:
 def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
     tables = generate_schema_comments._parse_schema(SCHEMA_PATH.read_text(encoding="utf-8"))
     definitions = {table.name: table.columns for table in tables}
-    assert set(definitions) == set(Base.metadata.tables) | {"alembic_version"}
+    assert set(definitions) == FINAL_APP_TABLES | {"alembic_version"}
     assert definitions["alembic_version"] == ("version_num",)
     for table_name, table in Base.metadata.tables.items():
+        assert definitions[table_name] == tuple(column.name for column in table.columns)
+    for table_name, table in KnowledgeOrmBase.metadata.tables.items():
         assert definitions[table_name] == tuple(column.name for column in table.columns)
 
     comments = COMMENTS_PATH.read_text(encoding="utf-8")
@@ -53,8 +58,8 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         comments,
         re.MULTILINE,
     )
-    assert len(table_comments) == 99
-    assert len(column_comments) == 1229
+    assert len(table_comments) == 108
+    assert len(column_comments) == 1352
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
@@ -115,6 +120,98 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("system_asset_upgrade_audit", "after_checksum"),
         ("system_asset_upgrade_audit", "package_digest"),
         ("system_asset_upgrade_audit", "operator_identity"),
+        ("model_providers", "name"),
+        ("model_providers", "base_url"),
+        ("model_providers", "request_timeout_seconds"),
+        ("model_providers", "api_key_nonce"),
+        ("model_providers", "api_key_ciphertext"),
+        ("model_provider_models", "provider_id"),
+        ("model_provider_models", "model_type"),
+        ("model_provider_models", "model_name"),
+        ("model_provider_models", "embedding_dimension"),
+        ("model_provider_models", "max_batch"),
+        ("model_provider_models", "status"),
+        ("knowledge_bases", "name"),
+        ("knowledge_bases", "description"),
+        ("knowledge_bases", "embedding_model_id"),
+        ("knowledge_bases", "reranker_model_id"),
+        ("knowledge_bases", "status"),
+        ("knowledge_bases", "default_top_k"),
+        ("knowledge_bases", "default_score_threshold"),
+        ("knowledge_bases", "retrieval_mode"),
+        ("knowledge_documents", "knowledge_base_id"),
+        ("knowledge_documents", "name"),
+        ("knowledge_documents", "original_name"),
+        ("knowledge_documents", "storage_key"),
+        ("knowledge_documents", "media_type"),
+        ("knowledge_documents", "size_bytes"),
+        ("knowledge_documents", "status"),
+        ("knowledge_documents", "enabled"),
+        ("knowledge_documents", "version"),
+        ("knowledge_documents", "chunk_size"),
+        ("knowledge_documents", "chunk_overlap"),
+        ("knowledge_documents", "chunk_separator"),
+        ("knowledge_documents", "remove_extra_spaces"),
+        ("knowledge_documents", "remove_urls_emails"),
+        ("knowledge_documents", "chunking_mode"),
+        ("knowledge_documents", "child_chunk_size"),
+        ("knowledge_documents", "child_chunk_separator"),
+        ("knowledge_documents", "segment_count"),
+        ("knowledge_documents", "word_count"),
+        ("knowledge_documents", "hit_count"),
+        ("knowledge_documents", "doc_metadata"),
+        ("knowledge_documents", "error_message"),
+        ("knowledge_documents", "published_version"),
+        ("knowledge_metadata_fields", "knowledge_base_id"),
+        ("knowledge_metadata_fields", "name"),
+        ("knowledge_metadata_fields", "field_type"),
+        ("knowledge_segments", "knowledge_base_id"),
+        ("knowledge_segments", "knowledge_document_id"),
+        ("knowledge_segments", "document_version"),
+        ("knowledge_segments", "position"),
+        ("knowledge_segments", "content"),
+        ("knowledge_segments", "word_count"),
+        ("knowledge_segments", "enabled"),
+        ("knowledge_segments", "hit_count"),
+        ("knowledge_segments", "source_position"),
+        ("knowledge_segments", "embedding"),
+        ("knowledge_segments", "lexical_tsv"),
+        ("knowledge_segments", "lexical_version"),
+        ("knowledge_segment_children", "knowledge_base_id"),
+        ("knowledge_segment_children", "knowledge_document_id"),
+        ("knowledge_segment_children", "knowledge_segment_id"),
+        ("knowledge_segment_children", "document_version"),
+        ("knowledge_segment_children", "position"),
+        ("knowledge_segment_children", "content"),
+        ("knowledge_segment_children", "word_count"),
+        ("knowledge_segment_children", "embedding"),
+        ("knowledge_segment_children", "lexical_tsv"),
+        ("knowledge_segment_children", "lexical_version"),
+        ("knowledge_queries", "owner_user_id"),
+        ("knowledge_queries", "knowledge_base_ids"),
+        ("knowledge_queries", "query"),
+        ("knowledge_queries", "source"),
+        ("knowledge_queries", "result_count"),
+        ("knowledge_queries", "top_score"),
+        ("knowledge_queries", "top_score_kind"),
+        ("knowledge_queries", "strategy_version"),
+        ("knowledge_tasks", "resource_id"),
+        ("knowledge_tasks", "kind"),
+        ("knowledge_tasks", "target_version"),
+        ("knowledge_tasks", "storage_key"),
+        ("knowledge_tasks", "status"),
+        ("knowledge_tasks", "attempt_count"),
+        ("knowledge_tasks", "max_attempts"),
+        ("knowledge_tasks", "available_at"),
+        ("knowledge_tasks", "claim_token"),
+        ("knowledge_tasks", "lease_until"),
+        ("knowledge_tasks", "error_message"),
+        ("knowledge_tasks", "finished_at"),
+        ("knowledge_tasks", "reparse_settings"),
+        ("knowledge_tasks", "stage"),
+        ("knowledge_tasks", "completed_units"),
+        ("knowledge_tasks", "total_units"),
+        ("knowledge_tasks", "progress_updated_at"),
     }
 
     assert set(generate_schema_comments._TABLE_COLUMN_PHRASES) == expected

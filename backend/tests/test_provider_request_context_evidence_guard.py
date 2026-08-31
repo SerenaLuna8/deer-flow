@@ -244,8 +244,7 @@ def test_model_request_measurement_preserves_tool_result_status() -> None:
         "anthropic",
         "deepseek",
         "openai",
-        "patched_deepseek",
-        "patched_openai",
+        "openai_responses",
         "vllm",
     ],
 )
@@ -277,7 +276,7 @@ def test_provider_wire_projection_normalizes_adapter_specific_replay_fields() ->
     )
     deepseek = provider_visible_message_payload(
         reasoning,
-        provider_adapter="patched_deepseek",
+        provider_adapter="deepseek",
     )
     vllm = provider_visible_message_payload(
         reasoning,
@@ -289,38 +288,6 @@ def test_provider_wire_projection_normalizes_adapter_specific_replay_fields() ->
     assert "reasoning_content" not in vllm
     assert "local_only" not in deepseek
     assert "local_only" not in vllm
-
-    signed_call = AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "name": "lookup",
-                "args": {"query": "x"},
-                "id": "call-1",
-                "type": "tool_call",
-            },
-        ],
-        additional_kwargs={
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {
-                        "name": "lookup",
-                        "arguments": '{"query":"x"}',
-                    },
-                    "thought_signature": "signed",
-                    "local_only": "must not be sent",
-                },
-            ],
-        },
-    )
-    signed_payload = provider_visible_message_payload(
-        signed_call,
-        provider_adapter="patched_openai",
-    )
-    assert signed_payload["tool_calls"][0]["thought_signature"] == "signed"  # type: ignore[index]
-    assert "local_only" not in signed_payload["tool_calls"][0]  # type: ignore[operator]
 
     audio = AIMessage(
         content=[],
@@ -993,7 +960,7 @@ async def test_async_guard_records_openai_family_connect_stage_as_proven_no_resp
     cause_type: type[httpx.RequestError],
     failure_code: str,
 ) -> None:
-    profile = _profile(provider_adapter="patched_deepseek")
+    profile = _profile(provider_adapter="deepseek")
     events: list[tuple[str, Any]] = []
     observer = _RecordingObserver(events)
     request = httpx.Request(
@@ -1040,7 +1007,7 @@ async def test_async_guard_records_openai_family_connect_stage_as_proven_no_resp
 async def test_async_guard_keeps_post_connect_transport_failure_ambiguous(
     cause_type: type[httpx.RequestError],
 ) -> None:
-    profile = _profile(provider_adapter="patched_deepseek")
+    profile = _profile(provider_adapter="deepseek")
     events: list[tuple[str, Any]] = []
     observer = _RecordingObserver(events)
     request = httpx.Request(
@@ -1076,7 +1043,7 @@ async def test_async_guard_keeps_post_connect_transport_failure_ambiguous(
 
 @pytest.mark.asyncio
 async def test_async_guard_keeps_unproven_api_connection_failure_ambiguous() -> None:
-    profile = _profile(provider_adapter="patched_deepseek")
+    profile = _profile(provider_adapter="deepseek")
     events: list[tuple[str, Any]] = []
     observer = _RecordingObserver(events)
     provider_error = APIConnectionError(

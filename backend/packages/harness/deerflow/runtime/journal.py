@@ -63,7 +63,7 @@ from deerflow.runtime.recovered_llm_failures import (
     build_recovered_llm_failures_receipt,
 )
 from deerflow.runtime.runs.execution_contracts import RunSemanticStopRecorder
-from deerflow.utils.messages import message_to_text
+from deerflow.utils.messages import message_to_text, reasoning_block_text
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
@@ -625,9 +625,7 @@ class RunJournal(BaseCallbackHandler):
         for block in content:
             if not isinstance(block, Mapping):
                 continue
-            if block.get("type") not in {"thinking", "reasoning"}:
-                continue
-            if any(cls._non_empty_text(block.get(key)) for key in ("thinking", "reasoning", "text", "content")):
+            if cls._non_empty_text(reasoning_block_text(block)):
                 return True
         return False
 

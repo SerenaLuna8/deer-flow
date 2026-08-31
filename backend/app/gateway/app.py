@@ -46,6 +46,8 @@ from app.gateway.routers import (
 )
 from app.gateway.skill_version_body_limit import SkillVersionRequestBodyLimitMiddleware
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
+from app.knowledge import gateway as knowledge_gateway
+from app.model_registry import gateway as model_registry_gateway
 from app.private_work.legacy_run_skill_snapshot_writer import (
     freeze_run_skill_snapshot_writer,
 )
@@ -384,6 +386,10 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(admin_audit.router)
     app.include_router(admin_model_settings.router)
     app.include_router(admin_system_settings.router)
+
+    # Knowledge API: project routes plus the admin model registry it binds.
+    app.include_router(model_registry_gateway.router)
+    app.include_router(knowledge_gateway.project_router)
 
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)

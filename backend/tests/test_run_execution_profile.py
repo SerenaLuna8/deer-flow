@@ -73,6 +73,7 @@ from app.system_runtime_settings.models import (
     MaterializedAgentRuntimePolicy,
 )
 from app.system_settings import SystemModelCatalogService
+from app.system_settings.validation import materialize_effective_model_settings
 from app.worker.service import JobLeaseAuthority
 from deerflow.agents.memory.snip import SnipArchiveContext
 from deerflow.config.agents_config import AgentModelSettings
@@ -268,6 +269,12 @@ def test_disabled_thinking_freezes_none_effort_for_reasoning_models() -> None:
 
 
 def test_flash_and_image_profile_reach_openai_responses_payload() -> None:
+    # Derive the protocol constants exactly as materialization pins them for
+    # the ``openai_responses`` entrypoint instead of hand-writing the switch.
+    effective_settings = materialize_effective_model_settings(
+        {"base_url": "https://opencode.ai/zen/v1"},
+        provider_adapter="openai_responses",
+    )
     model = ModelConfig(
         name=PRIMARY_MODEL_REF,
         display_name="GPT 5.6 Luna",
@@ -276,13 +283,12 @@ def test_flash_and_image_profile_reach_openai_responses_payload() -> None:
         model="gpt-5.6-luna",
         max_input_tokens=64_000,
         api_key=SecretStr("unit-test-key"),
-        base_url="https://opencode.ai/zen/v1",
-        use_responses_api=True,
-        output_version="responses/v1",
         supports_thinking=True,
         supports_reasoning_effort=True,
         supports_vision=True,
+        **effective_settings,
     )
+    model._system_provider_adapter = "openai_responses"
     chat_model = create_chat_model(
         name=model.name,
         thinking_enabled=False,
@@ -644,11 +650,14 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
 @pytest.mark.parametrize(
     ("provider_adapter", "provider_settings"),
     [
+        # ``openai_responses`` pins the protocol switch at materialization;
+        # the hand-built ModelConfig mirrors that materialized shape.
         (
-            "openai",
+            "openai_responses",
             {
                 "base_url": "https://responses.example.test/v1",
                 "use_responses_api": True,
+                "output_version": "responses/v1",
             },
         ),
         ("anthropic", {}),

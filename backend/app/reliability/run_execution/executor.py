@@ -298,6 +298,7 @@ class RunAgentPrivateExecutor:
         audit: PrivateFileFinalizationAuditPort | None = None,
         host_execution_domain: HostExecutionDomainSnapshot | None = None,
         skill_builder_activity_emitter_factory: Any = (SkillBuilderActivityEmitter.create),
+        knowledge_module: Any | None = None,
     ) -> None:
         self._factory = session_factory
         self._app_config = app_config
@@ -335,6 +336,10 @@ class RunAgentPrivateExecutor:
             self._asset_runtime = asset_runtime
         self._agent_factory = agent_factory or self._default_agent_factory()
         self._runner = runner
+        # Worker-lifecycle KnowledgeModule; present only when the feature is
+        # enabled. Ordinary chat Runs get the project-bound knowledge_search
+        # tool; Skill Builder Runs never do.
+        self._knowledge_module = knowledge_module
         if not callable(skill_builder_activity_emitter_factory):
             raise TypeError("skill_builder_activity_emitter_factory must be callable")
         self._skill_builder_activity_emitter_factory = skill_builder_activity_emitter_factory
@@ -579,6 +584,44 @@ class RunAgentPrivateExecutor:
                     raise TransientExecutionError("INVALID_RUN_PAYLOAD") from None
             graph_input["messages"] = converted
         return graph_input
+
+    def _resolve_agent_factory(
+        self,
+        execution: PrivateRunExecution,
+        claim: JobClaim,
+        base_factory: Any,
+    ) -> Any:
+        """Skill Builder Runs use the authoring graph and never receive the
+        knowledge tool; chat Runs gain it exactly when the module is enabled."""
+        if execution.runtime_kind == "skill_builder":
+            return SkillBuilderAgentFactory(
+                catalog=WorkerSkillBuilderAuthoringCatalog(
+                    self._factory,
+                    execution.context,
+                ),
+                draft_sink=SkillDesignService(
+                    self._factory,
+                ).terminal_sink(
+                    execution.context,
+                    claim,
+                ),
+            )
+        if self._knowledge_module is None:
+            return base_factory
+        from app.knowledge.authority import PrivateWorkKnowledgeAuthority
+        from app.knowledge.run_tool import create_knowledge_lead_agent_factory
+        from app.projects.capabilities import Capability
+
+        return create_knowledge_lead_agent_factory(
+            module=self._knowledge_module,
+            project_id=execution.context.project_id,
+            owner_user_id=execution.context.user_id,
+            authority=PrivateWorkKnowledgeAuthority(
+                execution.context,
+                Capability.SHARED_ASSETS_EXECUTE,
+            ),
+            base_factory=base_factory,
+        )
 
     @staticmethod
     def _admitted(
@@ -1065,18 +1108,11 @@ class RunAgentPrivateExecutor:
                         stream_bridge,
                         activity_emitter,
                     )
-                    agent_factory = SkillBuilderAgentFactory(
-                        catalog=WorkerSkillBuilderAuthoringCatalog(
-                            self._factory,
-                            execution.context,
-                        ),
-                        draft_sink=SkillDesignService(
-                            self._factory,
-                        ).terminal_sink(
-                            execution.context,
-                            claim,
-                        ),
-                    )
+                agent_factory = self._resolve_agent_factory(
+                    execution,
+                    claim,
+                    agent_factory,
+                )
                 outcome = await self._runner(
                     stream_bridge,
                     run_manager,

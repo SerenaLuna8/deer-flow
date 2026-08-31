@@ -107,6 +107,13 @@ services:
       - ACT_WEAVE_INTERNAL_AUTH_TOKEN=${ACT_WEAVE_INTERNAL_AUTH_TOKEN}
       - ACT_WEAVE_PROXY_AUTH_TOKEN=${ACT_WEAVE_PROXY_AUTH_TOKEN}
       - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
+      # Knowledge MinIO object store (optional feature; Compose creates no MinIO
+      # service). Inside Compose the S3 API endpoint must be reachable from both
+      # Gateway and Worker, e.g. host.docker.internal:9000 — never the
+      # container's own 127.0.0.1. See Install.md.
+      - ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT=${ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT:-}
+      - ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY=${ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY:-}
+      - ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY=${ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY:-}
       # DooD path/network translation
       - ACT_WEAVE_HOST_BASE_DIR=${ACT_WEAVE_HOME}
       - ACT_WEAVE_HOST_SKILLS_PATH=${ACT_WEAVE_REPO_ROOT}/skills

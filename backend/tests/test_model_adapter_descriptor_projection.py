@@ -35,8 +35,7 @@ def test_admin_catalog_projects_only_authorable_builtin_adapters() -> None:
         "anthropic",
         "deepseek",
         "openai",
-        "patched_deepseek",
-        "patched_openai",
+        "openai_responses",
         "vllm",
     }
     assert "vision_bridge_fake" not in descriptors
@@ -44,7 +43,22 @@ def test_admin_catalog_projects_only_authorable_builtin_adapters() -> None:
     assert descriptors["openai"].api_key_required is True
     openai_fields = {field.name: field for field in descriptors["openai"].setting_fields}
     anthropic_fields = {field.name: field for field in descriptors["anthropic"].setting_fields}
-    assert openai_fields["use_responses_api"].input_type == "boolean"
+    # The wire protocol is fixed by the adapter identity; neither OpenAI entry
+    # exposes a protocol switch or output-version knob as an authoring field.
+    for openai_adapter in ("openai", "openai_responses"):
+        field_names = {field.name for field in descriptors[openai_adapter].setting_fields}
+        assert "use_responses_api" not in field_names
+        assert "output_version" not in field_names
+    # Both entries share the OpenAI-compatible fields; only the Responses
+    # entry adds the protocol-specific reasoning-summary opt-in.
+    chat_field_names = {field.name for field in descriptors["openai"].setting_fields}
+    responses_fields = {field.name: field for field in descriptors["openai_responses"].setting_fields}
+    assert set(responses_fields) - chat_field_names == {"reasoning_summary"}
+    assert chat_field_names - set(responses_fields) == set()
+    assert responses_fields["reasoning_summary"].options == ["auto", "concise", "detailed"]
+    assert responses_fields["reasoning_summary"].advanced is True
+    assert responses_fields["reasoning_summary"].default_mode == "provider"
+    assert responses_fields["reasoning_summary"].default_value is None
     assert openai_fields["max_tokens"].minimum == 1
     assert openai_fields["max_tokens"].maximum == 2_000_000
     assert openai_fields["max_tokens"].advanced is False
@@ -90,23 +104,22 @@ def test_deepseek_reasoning_effort_is_provider_specific() -> None:
     )
     descriptors = {item.id: item for item in response.provider_adapters}
 
-    for adapter in ("deepseek", "patched_deepseek"):
-        fields = {field.name: field for field in descriptors[adapter].setting_fields}
-        assert fields["reasoning_effort"].options == ["low", "high", "max"]
-        for effort in ("low", "high", "max"):
-            assert validate_model_settings(
+    fields = {field.name: field for field in descriptors["deepseek"].setting_fields}
+    assert fields["reasoning_effort"].options == ["low", "high", "max"]
+    for effort in ("low", "high", "max"):
+        assert validate_model_settings(
+            {"reasoning_effort": effort},
+            provider_adapter="deepseek",
+        ) == {"reasoning_effort": effort}
+    for effort in ("none", "minimal", "medium", "xhigh"):
+        with pytest.raises(ModelSettingsInvalid):
+            validate_model_settings(
                 {"reasoning_effort": effort},
-                provider_adapter=adapter,
-            ) == {"reasoning_effort": effort}
-        for effort in ("none", "minimal", "medium", "xhigh"):
-            with pytest.raises(ModelSettingsInvalid):
-                validate_model_settings(
-                    {"reasoning_effort": effort},
-                    provider_adapter=adapter,
-                )
+                provider_adapter="deepseek",
+            )
 
     openai_compatible_options = ["none", "low", "medium", "high", "xhigh", "max"]
-    for adapter in ("openai", "patched_openai", "vllm"):
+    for adapter in ("openai", "openai_responses", "vllm"):
         fields = {field.name: field for field in descriptors[adapter].setting_fields}
         assert fields["reasoning_effort"].options == openai_compatible_options
         for effort in openai_compatible_options:
@@ -242,17 +255,22 @@ def test_provider_setting_descriptor_rejects_illegal_metadata() -> None:
         (
             "openai",
             "https://api.openai.com/v1",
-            {"stream_chunk_timeout": 240.0},
+            {
+                "stream_chunk_timeout": 240.0,
+                # Pinned by the adapter identity: Chat Completions never lets
+                # the SDK auto-select the Responses protocol.
+                "use_responses_api": False,
+            },
         ),
         (
-            "patched_deepseek",
-            "https://api.deepseek.com/v1",
-            {"stream_chunk_timeout": 240.0},
-        ),
-        (
-            "patched_openai",
+            "openai_responses",
             "https://api.openai.com/v1",
-            {"stream_chunk_timeout": 240.0},
+            {
+                "stream_chunk_timeout": 240.0,
+                # Pinned by the adapter identity, never authored by admins.
+                "use_responses_api": True,
+                "output_version": "responses/v1",
+            },
         ),
         (
             "vllm",

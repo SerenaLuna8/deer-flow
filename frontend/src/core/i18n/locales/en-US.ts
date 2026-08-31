@@ -47,6 +47,16 @@ export const enUS: Translations = {
         : seconds === 0
           ? "Thought (under 1 second)"
           : `Thought (${seconds} ${seconds === 1 ? "second" : "seconds"})`,
+    reasoningSummaryInProgress: (seconds?: number) =>
+      seconds === undefined
+        ? "Summarizing reasoning…"
+        : `Summarizing reasoning… (${seconds}s)`,
+    reasoningSummaryFor: (seconds?: number) =>
+      seconds === undefined
+        ? "Reasoning summary"
+        : seconds === 0
+          ? "Reasoning summary (under 1 second)"
+          : `Reasoning summary (${seconds} ${seconds === 1 ? "second" : "seconds"})`,
     artifacts: "Artifacts",
     public: "Public",
     custom: "Custom",
@@ -137,6 +147,488 @@ export const enUS: Translations = {
     citeCount: (count) => `${count} ${count === 1 ? "cite" : "cites"}`,
     copyReference: (title) => `Copy ${title} reference`,
     copiedReference: (title) => `Copied ${title} reference`,
+  },
+
+  // Knowledge bases
+  knowledge: {
+    page: {
+      eyebrow: (projectName) => `${projectName} · Knowledge`,
+      title: "Knowledge",
+      description:
+        "Manage knowledge bases and documents, and test retrieval quality.",
+    },
+    tabs: {
+      bases: "Bases",
+      search: "Retrieval test",
+    },
+    common: {
+      back: "Back",
+      cancel: "Cancel",
+      save: "Save",
+      saving: "Saving…",
+      create: "Create",
+      creating: "Creating…",
+      delete: "Delete",
+      deleting: "Deleting…",
+      edit: "Edit",
+    },
+    status: {
+      active: "Active",
+      disabled: "Disabled",
+      deleting: "Deleting",
+    },
+    documentStatus: {
+      uploading: "Uploading",
+      queued: "Queued",
+      processing: "Processing",
+      ready: "Ready",
+      failed: "Failed",
+      deleting: "Deleting",
+    },
+    bases: {
+      title: "Knowledge bases",
+      empty: "No knowledge bases yet. Create one to start uploading documents.",
+      createButton: "New base",
+      createTitle: "New knowledge base",
+      createDescription:
+        "Pick a model configuration for this base; it cannot be changed later.",
+      nameLabel: "Name",
+      namePlaceholder: "e.g. Product handbook",
+      descriptionLabel: "Description (optional)",
+      descriptionPlaceholder: "What this base is for",
+      modelLabel: "Embedding model",
+      modelPlaceholder: "Select an embedding model",
+      modelHint: "Changing it later requires rebuilding every document.",
+      noModels:
+        "No embedding models available. Ask a system administrator to add one in model management.",
+      modelsLoadFailed: "Models could not be loaded. Try again later.",
+      editTitle: "Edit knowledge base",
+      statusLabel: "Status",
+      deleteTitle: "Delete knowledge base",
+      deleteDescription: (name) =>
+        `This deletes "${name}" with all documents, segments, and stored files. This cannot be undone.`,
+      deleteConfirm: "Delete",
+      deleteError: (message) => `Delete failed: ${message}`,
+      documentCount: (count) =>
+        `${count} ${count === 1 ? "document" : "documents"}`,
+      updatedAt: (time) => `Updated ${time}`,
+      openDocuments: "View documents",
+      noDescription: "No description yet.",
+      retrievalSectionTitle: "Retrieval defaults",
+      defaultTopKLabel: "Default results (top_k)",
+      defaultTopKHint: "Used when a search omits top_k; range 1-20.",
+      defaultThresholdLabel: "Default score threshold",
+      defaultThresholdHint:
+        "Used when a search omits the threshold; 0 disables filtering.",
+      rerankerLabel: "Reranker model",
+      rerankerNone: "No reranking",
+      rerankerHint: "Optional. Takes effect on save; no rebuild required.",
+      rebuildSectionTitle: "Embedding model",
+      rebuildModelLabel: "Embedding model",
+      rebuildHint:
+        "Re-embedding keeps every segment's text, identity, and enabled state (manual edits included) and only regenerates vectors; documents are excluded from retrieval until they finish. Pick a different model to rebind, or keep the current one to re-embed as is.",
+      rebuildButton: "Re-embed documents",
+      rebuildPending: "Submitting…",
+      rebuildOutcome: (accepted, skipped) =>
+        skipped > 0
+          ? `Re-embedding accepted for ${accepted} documents; ${skipped} never-published documents were skipped (retry them to parse from the original file).`
+          : `Re-embedding accepted for ${accepted} documents.`,
+      rebuildConfirmTitle: "Re-embed knowledge base documents",
+      rebuildConfirmDescription: (name) =>
+        `This re-embeds every published document of "${name}" with the selected model. Segment text, manual edits, and enabled states are preserved; only vectors are regenerated. Documents are excluded from retrieval while they process, and embedding calls incur model cost.`,
+      rebuildConfirm: "Re-embed",
+    },
+    wizard: {
+      heroTitle: "Create your first knowledge base",
+      uploadCreateTitle: "Create from documents",
+      uploadCreateHint:
+        "Upload documents; chunking and indexing run automatically. The fastest way to start.",
+      orSeparator: "or",
+      emptyCreateTitle: "Create an empty base",
+      emptyCreateHint: "Create the base first and upload documents later.",
+      steps: {
+        source: "Choose data source",
+        configure: "Chunking & model",
+        finish: "Process & finish",
+      },
+      stepBadge: (step) => `STEP ${step}`,
+      sourceSectionTitle: "Upload text files",
+      dropzoneTitle: "Drag files here, or click to browse",
+      removeFile: (name) => `Remove ${name}`,
+      filesSelected: (count) =>
+        `${count} ${count === 1 ? "file" : "files"} selected`,
+      next: "Next",
+      previous: "Previous",
+      saveAndProcess: "Save & process",
+      chunkSectionTitle: "Chunk settings",
+      infoSectionTitle: "Base details",
+      createdTitle: "Knowledge base created",
+      createdHint:
+        "Documents are being embedded. Once ready they are searchable in retrieval tests and agent chats.",
+      processingTitle: "Embedding progress",
+      summaryTitle: "Settings",
+      goToDocuments: "Go to documents",
+      uploadFailedNote:
+        "These files failed to upload; you can upload them again from the documents page:",
+      previewTitle: "Chunk preview",
+      previewHint: (fileName) => `Previewing: ${fileName}`,
+      previewPickFile: "Preview file",
+      previewLoading: "Generating preview…",
+      previewRefresh: "Refresh preview",
+      previewStale:
+        "Preview is out of date. Refresh to apply the current settings.",
+      previewInvalid:
+        "Fix the invalid chunk settings before refreshing the preview.",
+      previewShowing: (count, total) =>
+        `Showing ${count} of ${total} chunks`,
+      previewChunkLabel: (position) =>
+        `Chunk-${String(position).padStart(2, "0")}`,
+      previewCharacters: (count) => `${count} characters`,
+      previewChildCount: (count) =>
+        `${count} child ${count === 1 ? "chunk" : "chunks"}`,
+      previewChildLabel: (index) => `C-${String(index).padStart(2, "0")}`,
+    },
+    detail: {
+      navLabel: "Knowledge base sections",
+      documents: "Documents",
+      settings: "Settings",
+      settingsSaved: "Saved.",
+      metadata: "Metadata",
+      baseNotFound: "This knowledge base does not exist or is inaccessible.",
+      backToBases: "Back to knowledge bases",
+    },
+    metadata: {
+      title: "Metadata fields",
+      description:
+        "Define custom fields assignable to documents; searches can filter on them.",
+      empty: "No metadata fields yet.",
+      addButton: "Add field",
+      addTitle: "Add metadata field",
+      nameLabel: "Field name",
+      namePlaceholder: "e.g. department, published_year",
+      typeLabel: "Field type",
+      typeString: "Text",
+      typeNumber: "Number",
+      typeTime: "Time",
+      columns: {
+        name: "Name",
+        type: "Type",
+        actions: "Actions",
+      },
+      rename: "Rename",
+      renameTitle: (name) => `Rename field "${name}"`,
+      delete: "Delete",
+      deleteTitle: "Delete metadata field",
+      deleteDescription: (name) =>
+        `This deletes the field "${name}" and clears its value from every document. This cannot be undone.`,
+    },
+    documents: {
+      title: (baseName) => `${baseName} · Documents`,
+      empty: "No documents yet. Upload one to get started.",
+      filteredEmpty: "No documents match the current filters.",
+      notFound: "This document does not exist or is inaccessible.",
+      backToList: "Back to documents",
+      searchPlaceholder: "Search by name or original file name",
+      searchAria: "Search documents",
+      statusFilterLabel: "Status",
+      statusFilterAll: "All statuses",
+      sortLabel: "Sort",
+      sortOptions: {
+        created_desc: "Newest first",
+        created_asc: "Oldest first",
+        name_asc: "Name ascending",
+        name_desc: "Name descending",
+      },
+      pageInfo: (page, pageCount, total) =>
+        `Page ${page}/${pageCount} · ${total} documents`,
+      previousPage: "Previous",
+      nextPage: "Next",
+      uploadButton: "Upload document",
+      uploadTitle: "Upload document",
+      uploadDescription:
+        "PDF, DOCX, TXT, Markdown, CSV, XLSX, HTML, PPTX, and EPUB up to 50 MB per file.",
+      fileLabel: "File",
+      displayNameLabel: "Display name (optional)",
+      displayNamePlaceholder: "Defaults to the file name",
+      chunkSizeLabel: "Chunk size (characters)",
+      chunkSizeHint: "Allowed range: 200-4000 characters.",
+      chunkOverlapLabel: "Chunk overlap (characters)",
+      chunkOverlapHint:
+        "Allowed range: 0-500 characters, smaller than the chunk size.",
+      chunkSeparatorLabel: "Delimiter",
+      chunkSeparatorHint:
+        "Preferred split boundary; \\n stands for a line break (default \\n\\n).",
+      chunkingModeLabel: "Chunking mode",
+      chunkingModeGeneral: "General",
+      chunkingModeGeneralHint:
+        "Each chunk is embedded on its own and recalled directly.",
+      chunkingModeParentChild: "Parent-child",
+      chunkingModeParentChildHint:
+        "Parents carry full context; children are embedded for recall and roll hits up to their parent.",
+      childChunkSizeLabel: "Child chunk size (characters)",
+      childChunkSeparatorLabel: "Child delimiter",
+      childChunkSeparatorHint:
+        "Children are split inside each parent at this delimiter (default \\n).",
+      preprocessingLabel: "Text pre-processing rules",
+      removeExtraSpacesLabel: "Replace consecutive spaces, newlines and tabs",
+      removeUrlsEmailsLabel: "Delete all URLs and email addresses",
+      chunkImmutableNote:
+        "Chunk settings cannot be changed after upload; retry reuses the original settings.",
+      upload: "Upload",
+      uploading: "Uploading…",
+      uploadingProgress: (done, total) => `Uploading… (${done}/${total})`,
+      uploadResultSuccess: (name) => `${name}: uploaded`,
+      uploadResultFailed: (name, message) => `${name}: ${message}`,
+      columns: {
+        name: "Name",
+        status: "Status",
+        enabled: "Enabled",
+        size: "Size",
+        segments: "Segments",
+        words: "Characters",
+        actions: "Actions",
+      },
+      retry: "Retry",
+      download: "Download original",
+      delete: "Delete",
+      deleteTitle: "Delete document",
+      deleteDescription: (name) =>
+        `This deletes "${name}" with all segments and the stored file. This cannot be undone.`,
+      viewSegments: "View segments",
+      rename: "Rename",
+      renameTitle: "Rename document",
+      renameLabel: "Display name",
+      actionsAria: (name) => `Actions for ${name}`,
+      enableAria: (name) => `Enable ${name}`,
+      disableAria: (name) => `Disable ${name}`,
+      selectAllAria: "Select all documents",
+      selectRowAria: (name) => `Select ${name}`,
+      selectedCount: (count) =>
+        `${count} ${count === 1 ? "document" : "documents"} selected`,
+      batchEnable: "Enable",
+      batchDisable: "Disable",
+      batchDelete: "Delete",
+      clearSelection: "Clear selection",
+      batchDeleteTitle: "Delete selected documents",
+      batchDeleteDescription: (count) =>
+        `This deletes ${count} ${count === 1 ? "document" : "documents"} with all segments and stored files. This cannot be undone.`,
+      metadataAction: "Metadata",
+      metadataTitle: (name) => `Edit metadata · ${name}`,
+      metadataEmpty:
+        "This knowledge base has no metadata fields yet. Define them under Metadata first.",
+      metadataClearHint: "Leave a value empty to clear that field.",
+      processingSummary: {
+        processing: (count) => `${count} processing`,
+        retryWait: (count) => `${count} waiting to retry`,
+        failed: (count) => `${count} failed`,
+        ready: (count) => `${count} ready`,
+      },
+      progress: {
+        kinds: {
+          ingest_document: "Ingest",
+          reembed_document: "Re-embed",
+        },
+        stages: {
+          queued: "Queued",
+          reading_source: "Reading source",
+          extracting_splitting: "Extracting and splitting",
+          loading_segments: "Loading segments",
+          embedding: "Embedding",
+          publishing: "Publishing",
+          done: "Done",
+        },
+        units: (done, total) => `${done}/${total}`,
+        attempt: (current, max) => `Attempt ${current}/${max}`,
+        retryWaitAt: (time) => `Waiting for automatic retry · ${time}`,
+        retryWaitSoon: "Waiting for automatic retry",
+        failedDuring: (stage) => `Failed during ${stage}`,
+      },
+      batchMetadata: "Edit metadata",
+      batchMetadataTitle: (count) => `Batch metadata (${count} documents)`,
+      batchMetadataDescription:
+        "Choose keep, set, or clear per field. Only explicitly edited fields are submitted, in one all-or-nothing patch across the selection.",
+      batchMetadataMixedValues: (count) => `${count} distinct values`,
+      batchMetadataModeKeep: "Keep",
+      batchMetadataModeSet: "Set",
+      batchMetadataModeClear: "Clear",
+      batchMetadataOverwrite: (count) =>
+        `Overwrites this field on ${count} documents`,
+      reparse: "Reparse from original",
+      reparseTitle: (name) => `Reparse ${name}`,
+      reparseWarning:
+        "Reparses the stored original file with the parameters below and replaces every segment. Manual segment edits and per-segment disables are overwritten, re-embedding incurs model cost, and the document is not searchable while it processes.",
+      reparsePreviewButton: "Preview split",
+      reparsePreviewShowing: (shown, total) =>
+        `Showing ${shown} of ${total} chunks`,
+      reparseSubmit: "Reparse",
+      reparsePending: "Submitting…",
+      reparseConflict:
+        "The document changed outside this dialog. The latest parameters and version were reloaded; review and confirm again.",
+    },
+    segments: {
+      title: (documentName) => `${documentName} · Segments`,
+      empty: "This document has no segments.",
+      position: (position) => `Segment #${position}`,
+      pageInfo: (page, pageCount, total) =>
+        `Page ${page} of ${pageCount} · ${total} total`,
+      previousPage: "Previous",
+      nextPage: "Next",
+      close: "Close",
+      stats: (segments, words) =>
+        `${segments} ${segments === 1 ? "segment" : "segments"} · ${words.toLocaleString()} characters`,
+      add: "Add segment",
+      addTitle: "Add segment",
+      addDescription:
+        "The segment is embedded with this base's embedding model and becomes retrievable immediately.",
+      contentLabel: "Content",
+      contentPlaceholder: "Enter the segment content",
+      edit: "Edit",
+      editTitle: (position) => `Edit segment #${position}`,
+      delete: "Delete",
+      deleteTitle: "Delete segment",
+      deleteDescription: (position) =>
+        `This deletes segment #${position} and its vector. This cannot be undone.`,
+      enableAria: (position) => `Enable segment #${position}`,
+      disableAria: (position) => `Disable segment #${position}`,
+      wordCount: (count) => `${count.toLocaleString()} characters`,
+      manualBadge: "Manual",
+      locatedTitle: (position) => `Located segment #${position}`,
+      locateFailed:
+        "This segment cannot be located; it may have been deleted or is inaccessible.",
+      locateStale:
+        "This segment belongs to an earlier document version; the content may have changed.",
+      dismissLocate: "Dismiss",
+    },
+    sourcePosition: {
+      page: (page) => `Page ${page}`,
+      paragraph: (paragraph) => `Paragraph ${paragraph}`,
+      row: (row) => `Row ${row}`,
+      slide: (slide) => `Slide ${slide}`,
+      chapter: (chapter) => `Chapter ${chapter}`,
+    },
+    search: {
+      title: "Retrieval test",
+      description:
+        "Run retrieval against this knowledge base to verify recall. With a reranker bound, results are ordered by rerank scores (0 to 1); otherwise by cosine similarity (-1 to 1).",
+      queryLabel: "Query",
+      queryPlaceholder: "Enter a question or keywords",
+      baseFilterLabel: "Limit to bases (optional)",
+      allBases: "All bases",
+      topKLabel: "Results (top_k)",
+      topKHint: "Leave empty to use the base default.",
+      thresholdLabel: "Score threshold",
+      thresholdHint: "Leave empty to use the base default; 0 disables filtering.",
+      submit: "Search",
+      searching: "Searching…",
+      empty: "No matching content found",
+      resultsTitle: (count) => `${count} ${count === 1 ? "match" : "matches"}`,
+      score: (score) => `Retrieval score ${score.toFixed(3)}`,
+      recentTitle: "Recent queries",
+      recentEmpty: "No queries recorded yet.",
+      recentColumns: {
+        query: "Query",
+        source: "Source",
+        results: "Matches",
+        topScore: "Top retrieval score",
+        time: "Time",
+      },
+      recentSource: {
+        agent: "Agent call",
+        retrieval_test: "Retrieval test",
+      },
+      filtersLabel: "Metadata filters",
+      filtersHint:
+        "Conditions combine with AND; only documents matching all of them are recalled.",
+      addFilter: "Add condition",
+      removeFilterAria: (index) => `Remove condition ${index}`,
+      filterFieldAria: (index) => `Condition ${index} field`,
+      filterOperatorAria: (index) => `Condition ${index} operator`,
+      filterValueAria: (index) => `Condition ${index} value`,
+      filterValuePlaceholder: "Filter value",
+      filterNoFields:
+        "This knowledge base has no metadata fields, so no filters can be added.",
+      operators: {
+        eq: "equals",
+        contains: "contains",
+        gte: "≥",
+        lte: "≤",
+      },
+      retrievalModeLabel: "Retrieval route",
+      retrievalModes: {
+        default: "Base default",
+        semantic: "Semantic only (this search)",
+        hybrid: "Hybrid (this search)",
+      },
+      neverSearched:
+        "Run a query to test retrieval; results and diagnostics appear here.",
+      retry: "Retry",
+      scoreKinds: {
+        cosine: "Cosine",
+        rerank: "Rerank",
+        rank_fusion: "Rank fusion",
+        unknown: "Unknown provenance",
+      },
+      emptyReasons: {
+        not_ready: "No target document is ready for retrieval yet.",
+        no_candidates: "Recall produced no candidates for this query.",
+        filtered_out:
+          "Every candidate fell below the score threshold or the metadata filters.",
+        stale_candidates:
+          "Candidates changed while the search ran; run it again.",
+      },
+      diagnostics: {
+        title: "Diagnostics",
+        strategyVersion: "Strategy version",
+        retrievalMode: "Retrieval mode",
+        targetBases: "Target bases",
+        routeBudget: "Per-base route budget",
+        models: "Models",
+        semanticCandidates: "Semantic candidates",
+        lexicalCandidates: "Lexical candidates",
+        parentsDeduplicated: "Parents after dedup",
+        thresholdFiltered: "Filtered by threshold",
+        staleFiltered: "Dropped as stale",
+        returned: "Returned",
+        embeddingMs: "Query embedding",
+        recallMs: "Recall",
+        rerankMs: "Rerank",
+        finalValidationMs: "Final validation",
+        heterogeneousWarning:
+          "Heterogeneous score domains without lexical evidence: ordering merges per-domain ranks only.",
+      },
+      hitDiagnosticsSummary: "Hit diagnostics",
+      localScore: (score) => `Native score ${score.toFixed(3)}`,
+      rankingScore: (score) => `Ranking score ${score.toFixed(3)}`,
+      openDetail: (position) => `View segment #${position} in full`,
+      detail: {
+        title: "Segment detail",
+        conflict:
+          "The document changed after this result was scored. Run the search again to see current content.",
+        staleContent:
+          "This stored row is stale relative to the current document version.",
+        disabledBadge: "Disabled",
+        matchedChildrenTitle: "Child chunks matched in this search",
+        childrenTitle: (total) => `Child chunks (${total})`,
+        matchedBadge: "Matched",
+        routes: {
+          semantic: "Semantic",
+          lexical: "Lexical",
+        },
+        locate: "Open in documents",
+      },
+    },
+    citations: {
+      summary: (count) =>
+        `Cited ${count} knowledge ${count === 1 ? "source" : "sources"}`,
+      score: (score) => `Retrieval score ${score.toFixed(3)}`,
+      segmentPosition: (position) => `Segment #${position}`,
+    },
+    errors: {
+      generic: "The operation failed. Please try again.",
+      network: "Network error. Check your connection and retry.",
+      invalidResponse: "The server returned an unexpected response.",
+      incompleteList: "The list did not load completely. Refresh to retry.",
+    },
   },
 
   // Workspace Changes
@@ -355,6 +847,7 @@ export const enUS: Translations = {
       conversations: "Chats",
       automations: "Automations",
       agents: "Agent",
+      knowledge: "Knowledge",
       skills: "Skill",
       mcp: "MCP",
       memory: "Memory",
@@ -723,7 +1216,7 @@ export const enUS: Translations = {
       audit: "Logs",
       assets: "Assets",
       systemSettings: "System settings",
-      settings: "Model settings",
+      settings: "Model management",
     },
     overview: {
       title: "Operations overview",

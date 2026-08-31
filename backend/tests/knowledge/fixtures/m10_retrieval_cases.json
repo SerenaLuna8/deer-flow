@@ -1,0 +1,1751 @@
+{
+  "schema_version": 1,
+  "annotation_unit": "parent_segment",
+  "source": {
+    "kind": "synthetic_desensitized",
+    "pii": false,
+    "description": "ActWeave Knowledge M10 评测语料：合成运维/产品手册，不含真实用户、主机或密钥。",
+    "method": "由实现者根据 M10 设计第11节类别手写父段与三级标注；身份键为 source_id+position+SHA-256(content)；开发集与验收集按类别分层一次冻结；调参不得改验收集。"
+  },
+  "models": {
+    "primary_embedding": {
+      "provider": "siliconflow",
+      "name": "Qwen/Qwen3-Embedding-8B",
+      "dimension": 1024,
+      "note": "生产默认名为 Qwen/Qwen3-VL-Embedding-8B；评测改用同系列文本嵌入并固定 1024 维以控制费用与 SiliconFlow 512 token 上限。"
+    },
+    "secondary_embedding": {
+      "provider": "siliconflow",
+      "name": "Qwen/Qwen3-Embedding-0.6B",
+      "dimension": 1024,
+      "note": "生产客户端固定发送 dimensions；bge-m3 拒绝该字段，故异构域改用同系列 0.6B。"
+    },
+    "reranker": {
+      "provider": "siliconflow",
+      "name": "Qwen/Qwen3-Reranker-8B"
+    }
+  },
+  "parameters": {
+    "top_k": 10,
+    "score_threshold": 0.2,
+    "scale_retrieval_units": 10000,
+    "filler_topic": "north_china_winter_wheat_weather"
+  },
+  "gates": {
+    "identifier_recall_candidate_min": 0.95,
+    "identifier_recall_at_10_min": 0.95,
+    "natural_language_recall_regression_max": 0.02,
+    "natural_language_ndcg_regression_max": 0.02,
+    "p95_regression_review_ratio": 1.5
+  },
+  "documents": [
+    {
+      "source_id": "ops-error-codes",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "值班手册把 EMG-3088 定义为嵌入批次在第三次尝试后仍返回 5xx 的终态。出现该码时文档保持 failed，进度行必须显示 Failed during Embedding 与 Attempt 3/3，不得把部分成功批次显示成 ready。"
+        },
+        {
+          "position": 2,
+          "content": "认证网关把 ERR.AUTH_4012 映射为项目成员能力不足。只读成员调用批量 metadata 必须得到 403，且整批回滚，不留下半写入。"
+        },
+        {
+          "position": 3,
+          "content": "模型客户端把连续两次传输超时记为 E_TIMEOUT_88。该错误必须上浮为 KNOWLEDGE_MODEL_UNAVAILABLE，搜索不得改写成空成功。"
+        },
+        {
+          "position": 4,
+          "content": "巡检把 IDX-LEAK-7701 留给词法索引与正文不一致的行。hybrid 检索若发现 lexical_version 不是 1，必须冲突失败，禁止静默跳过。"
+        },
+        {
+          "position": 5,
+          "content": "通知通道把 SMTP-554-7.1.1 解释为收件人被对端永久拒绝。知识库任务不得把该码当成可重试的 429。"
+        },
+        {
+          "position": 6,
+          "content": "Worker 领取任务时使用 PROC.LOCK_9F 作为文档行锁标签。同一文档同一版本只允许一个开放索引任务，ingest 与 reembed 共享该互斥。"
+        },
+        {
+          "position": 7,
+          "content": "重新解析提交必须携带 CAS-EXPECTED-VERSION。版本不一致时保留未保存参数表单，预览作废，由用户重新确认。"
+        },
+        {
+          "position": 8,
+          "content": "调度器把 SKILL_TREE_ORPHAN 留给超过宽限期仍无活 owner 的技能树节点。该标识只出现在运行时回收文档，与知识库检索单元无关但必须能被精确搜到。"
+        },
+        {
+          "position": 9,
+          "content": "安装脚本使用 PG-ADVISORY-0x0DEE 作为模型注册表 bootstrap 的会话锁。评测不得把它写进日志或诊断正文。"
+        },
+        {
+          "position": 10,
+          "content": "EMG-1099 表示嵌入探测成功但维度与库绑定不一致，必须拒绝写入。"
+        },
+        {
+          "position": 11,
+          "content": "上传配额耗尽返回 ERR.QUOTA_413，前端必须按文件保留失败原因。"
+        },
+        {
+          "position": 12,
+          "content": "首段超过预算时稳定错误码是 KNOWLEDGE_PASSAGE_OVER_BUDGET，错误 ToolMessage 不带引用。"
+        }
+      ]
+    },
+    {
+      "source_id": "ops-network",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "回环演练把检索探针固定到 192.0.2.17，这是 TEST-NET-1 地址，不指向真实主机。"
+        },
+        {
+          "position": 2,
+          "content": "备用探针落在 198.51.100.77。文档要求防火墙只放行该地址的 8001 端口。"
+        },
+        {
+          "position": 3,
+          "content": "观测旁路使用 203.0.113.9 作为伪造源，用于确认诊断不回显对端地址。"
+        },
+        {
+          "position": 4,
+          "content": "IPv6 演练记录规范地址 2001:db8:85a3::8a2e:370:7334，词法索引必须保留完整项。"
+        },
+        {
+          "position": 5,
+          "content": "第二组 IPv6 探针是 2001:db8::cafe，用于确认大小写折叠后仍能命中。"
+        },
+        {
+          "position": 6,
+          "content": "开发集探针地址 192.0.2.88 仅用于确认词法 IP 规则，不得出现在验收集题面。"
+        },
+        {
+          "position": 7,
+          "content": "开发集 IPv6 写作 2001:db8::1，用于确认压缩形式保留。"
+        }
+      ]
+    },
+    {
+      "source_id": "ops-hardware",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "主嵌入绑定名称写作 QW-EMBED-8B，对应评测冻结的主向量模型别名，不是第二套配置行。"
+        },
+        {
+          "position": 2,
+          "content": "硬件资产表把机架控制器称为 ACTW-R42，固件升级必须先停摄入任务。"
+        },
+        {
+          "position": 3,
+          "content": "机柜风扇策略 HW-FAN-B7 要求温度超过 71 摄氏度才提升转速，与检索分数无关。"
+        },
+        {
+          "position": 4,
+          "content": "评测对象前缀使用 MINIO-BUCKET-actweave-eval。该名字只出现在本语料，生产桶名不得写入评测文档。"
+        }
+      ]
+    },
+    {
+      "source_id": "ops-interfaces",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "Agent 只读工具 knowledge_metadata_fields 只返回字段定义，不扫描值，也不提供写能力。"
+        },
+        {
+          "position": 2,
+          "content": "文档动作 Reparse from original 对应 HTTP reparse-preview 与 reparse。预览按权威原文件切分，确认后才替换段行。"
+        },
+        {
+          "position": 3,
+          "content": "词法派生版本固定为 lexical_v1。中文用重叠二元词元，标识符保留完整项并补部件，PostgreSQL 只提供 simple 配置，不声明 BM25。"
+        },
+        {
+          "position": 4,
+          "content": "工具装包字段 TOOL-OMITTED-COUNT 表示因 64KiB 预算被整段跳过的命中数。它不是第二套 LLM 计数器。"
+        },
+        {
+          "position": 5,
+          "content": "重新解析示例把 CHUNK-SIZE-500 写成覆盖后的切分宽度，旧行不得用新参数解释。"
+        },
+        {
+          "position": 6,
+          "content": "秩融合常量写作 RRF-K60，公式为 61/2 乘各路 1/(60+rank)。"
+        },
+        {
+          "position": 7,
+          "content": "分库预算记号 BASE-BUDGET-C 等于 min(B, floor(400/N))，C<1 时显式拒绝。"
+        },
+        {
+          "position": 8,
+          "content": "详情钉住失败返回 HIT-DETAIL-409，提示重新检索而不是静默换正文。"
+        },
+        {
+          "position": 9,
+          "content": "定位按钮文案键 OPEN-IN-DOCUMENTS 必须把 doc 与 segment 写入 URL。"
+        }
+      ]
+    },
+    {
+      "source_id": "product-reembed",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "重嵌入读取当前已发布段和子块，包括禁用行，只重算向量并翻转代次。UUID、正文、位置、启停和人工编辑必须保持。从未发布的失败文档被跳过，不能偷偷从原文件解析。"
+        }
+      ]
+    },
+    {
+      "source_id": "product-hybrid",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "混合召回在向量路之外增加词法路，两路按父段 RRF 合并后再截 C。词法新增项仍要回填真实 cosine 并先过原生阈值。纯语义搜索不建词法查询。"
+        }
+      ]
+    },
+    {
+      "source_id": "product-metadata",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "批量元数据一次共同 patch 最多 100 篇文档和 20 个字段。未传字段保留，null 清空，任一冲突整批回滚。内建字段不可写。"
+        }
+      ]
+    },
+    {
+      "source_id": "product-progress",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "任务进度来自当前 attempt 的成功批次。新领取会清零计数。失败保留失败阶段，未知总数不显示百分比，旧 attempt 不得倒灌。"
+        }
+      ]
+    },
+    {
+      "source_id": "product-wizard",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "创建向导的 File picker 只对当前选中文件自动预览一次。参数编辑只标过期，迟到的较慢响应不能覆盖已选文件的预览。"
+        }
+      ]
+    },
+    {
+      "source_id": "product-ranking",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "最终排序有三支：统一重排器走原生重排分，同域无重排器走原生 cosine，异构域做秩融合。融合分是排序证据，不是正确性概率。"
+        }
+      ]
+    },
+    {
+      "source_id": "product-retention",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "查询日志按 owner 保留。项目删除会清掉该项目全部 owner 历史，恢复不能把已 purge 的检索日志变回来。"
+        }
+      ]
+    },
+    {
+      "source_id": "tail-answers",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "许多团队会把换模型和换切分混成一次重建。有人以为点一次重建就会同时改 embedding、改 chunk 大小、再从对象存储拉原文件。手册先解释队列、租约、发布代次和失败重试。下面这些句子只用来把可支持答案推到第 320 个字符之后，本身不包含结论。值班人员会先核对项目仍有效、库仍是 active、文档仍是 ready，然后才看任务行。队列里的租约、尝试次数和阶段字段必须来自当前领取，不能把上一轮成功批次累加进来。若只看到短摘要就下结论，很容易把界面 snippet 误当成模型读到的全部证据。手册因此要求先读完铺垫，再看段尾那一句可执行规则。这一段继续说明权限复核、版本对齐和诊断不得回传正文，仍然没有给出题目要的那句结论。直到段尾才给出可执行区分：重嵌入只重算当前正文的向量并保留段身份；若必须从原文件重新切分，唯一入口是显式重新解析，确认文案必须写明覆盖人工编辑。结论标记 TAIL-REPARSE-ONLY：重新解析才会替换段行，重嵌入不会。"
+        },
+        {
+          "position": 2,
+          "content": "检索测试面板默认展示短摘要，容易让人以为模型也只看到三百二十个字符。下面连续解释 snippet、引用投影、历史缺字段和诊断安全边界。下面这些句子只用来把可支持答案推到第 320 个字符之后，本身不包含结论。值班人员会先核对项目仍有效、库仍是 active、文档仍是 ready，然后才看任务行。队列里的租约、尝试次数和阶段字段必须来自当前领取，不能把上一轮成功批次累加进来。若只看到短摘要就下结论，很容易把界面 snippet 误当成模型读到的全部证据。手册因此要求先读完铺垫，再看段尾那一句可执行规则。这一段继续说明权限复核、版本对齐和诊断不得回传正文，仍然没有给出题目要的那句结论。真正可引用的规则出现在段尾：Agent 工具按 UTF-8 JSON 64KiB 整段装包，装不下的整段跳过并报告 omitted_count。结论标记 TAIL-BUDGET-64KIB：模型正文是完整父段，界面摘要保持短引用。"
+        },
+        {
+          "position": 3,
+          "content": "跨库检索时两个库可能绑定不同的 embedding。前面先解释分组、query vector 复用、阈值只作用于原生分，以及诊断里的 heterogeneous 标记。下面这些句子只用来把可支持答案推到第 320 个字符之后，本身不包含结论。值班人员会先核对项目仍有效、库仍是 active、文档仍是 ready，然后才看任务行。队列里的租约、尝试次数和阶段字段必须来自当前领取，不能把上一轮成功批次累加进来。若只看到短摘要就下结论，很容易把界面 snippet 误当成模型读到的全部证据。手册因此要求先读完铺垫，再看段尾那一句可执行规则。这一段继续说明权限复核、版本对齐和诊断不得回传正文，仍然没有给出题目要的那句结论。段尾给出判定：异构且没有词法证据时只做域内名次折中，不得宣称比单域更准。结论标记 TAIL-FUSION-LIMIT：无词法证据的异构域只保证公平，不保证更准。"
+        },
+        {
+          "position": 4,
+          "content": "维护页可以改文档名、启停和自定义字段。前半段强调改名不会触发嵌入，列表筛选和检索过滤也不是同一条路径。下面这些句子只用来把可支持答案推到第 320 个字符之后，本身不包含结论。值班人员会先核对项目仍有效、库仍是 active、文档仍是 ready，然后才看任务行。队列里的租约、尝试次数和阶段字段必须来自当前领取，不能把上一轮成功批次累加进来。若只看到短摘要就下结论，很容易把界面 snippet 误当成模型读到的全部证据。手册因此要求先读完铺垫，再看段尾那一句可执行规则。这一段继续说明权限复核、版本对齐和诊断不得回传正文，仍然没有给出题目要的那句结论。段尾才写清：metadata 条件在全部召回路的 limit 前以及最终复核都要重放。结论标记 TAIL-FILTER-AND：过滤是召回约束，不是排序后的装饰。"
+        }
+      ]
+    },
+    {
+      "source_id": "near-miss-ops",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "值班手册还列出若干相近但不相同的嵌入失败描述，例如批次重试耗尽、向量维度漂移。这些段落能帮助理解运维，但没有给出任何一个精确错误码，不能单独用来回答具体码值。"
+        }
+      ]
+    },
+    {
+      "source_id": "large-similar-widget",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "大库维护手册讨论小部件外观和清洁，不给出校准周期，也不能回答 14 天这个问题。"
+        }
+      ]
+    },
+    {
+      "source_id": "small-unique",
+      "base": "small_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "小库独有事实 SMALL-ALPHA-WIDGET：只有轻量库记载小部件校准周期为 14 天。大库里的相近段落只讨论通用维护，不包含这个周期。"
+        },
+        {
+          "position": 2,
+          "content": "小库独有事实 SMALL-BETA-OFFSET：时区偏移校准值是 37 分钟。该数字不出现在大库或异构库。"
+        }
+      ]
+    },
+    {
+      "source_id": "pc-manual",
+      "base": "parent_child_hybrid",
+      "chunking_mode": "parent_child",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "父子切分手册把一章拆成父段摘要加若干子块。父段只保留章节意图，具体操作步骤写在子块里，检索应回卷到父段。",
+          "children": [
+            {
+              "position": 1,
+              "content": "子块一只讲如何打开库设置，不包含回卷规则的判定句。"
+            },
+            {
+              "position": 2,
+              "content": "子块二写明 PC-ROLLUP-SECOND：parent_child 命中非首个子块时，引用仍然返回父段全文，matched_children 必须包含该真实子块。"
+            },
+            {
+              "position": 3,
+              "content": "子块三写明 PC-CHILD-COSINE-MAX：词法只命中某个子块时，父段 cosine 取当前全部子块的最大 cosine，不能用空父向量比较。"
+            }
+          ]
+        },
+        {
+          "position": 2,
+          "content": "另一章说明禁用父段会同时撤出其全部子块，不单独禁用子块。",
+          "children": [
+            {
+              "position": 1,
+              "content": "该章子块一只重复启停入口位置。"
+            },
+            {
+              "position": 2,
+              "content": "该章子块二写明 PC-DISABLE-PARENT：禁用父段后任何子块都不得进入召回。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source_id": "meta-rd",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {
+        "dept": "研发"
+      },
+      "segments": [
+        {
+          "position": 1,
+          "content": "研发备忘把接口冻结窗口放在每周三，字段 dept=研发。"
+        },
+        {
+          "position": 2,
+          "content": "研发备忘补充联调禁止改绑定，字段仍是研发。"
+        }
+      ]
+    },
+    {
+      "source_id": "meta-mkt",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {
+        "dept": "市场"
+      },
+      "segments": [
+        {
+          "position": 1,
+          "content": "市场备忘把对外演示稿锁在绿色主题，字段 dept=市场。"
+        },
+        {
+          "position": 2,
+          "content": "市场备忘禁止在演示中展示原始分数当置信度，字段仍是市场。"
+        }
+      ]
+    },
+    {
+      "source_id": "hetero-special",
+      "base": "hetero_semantic",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "异构库独有事实 HETERO-GAMMA-SLOPE：第二套 embedding 空间里把斜率记为 0.13。该事实不进入主向量库。"
+        },
+        {
+          "position": 2,
+          "content": "异构库独有事实 HETERO-DELTA-BIAS：偏置常数是 -0.42，只写在第二套模型库。"
+        }
+      ]
+    },
+    {
+      "source_id": "weather-distractor",
+      "base": "large_hybrid",
+      "chunking_mode": "general",
+      "metadata": {},
+      "segments": [
+        {
+          "position": 1,
+          "content": "华北冬小麦区本旬平均降水 12 毫米，与知识库运维无关。"
+        },
+        {
+          "position": 2,
+          "content": "观测站记录能见度 18 公里，没有错误码或接口名。"
+        }
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "id": "h-id-01",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "EMG-3088 是什么错误",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 1,
+          "content_sha256": "8475facd7779286c764c0ea7ab636e94705002164bb864407d8149c060b88f56",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "EMG-3088"
+    },
+    {
+      "id": "h-id-02",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "ERR.AUTH_4012 如何处理",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 2,
+          "content_sha256": "9962ef36d52362a917070e4240133bb89177d4b26b94854f6b78356a16b994fc",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "ERR.AUTH_4012"
+    },
+    {
+      "id": "h-id-03",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "E_TIMEOUT_88 应该映射成哪个错误",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 3,
+          "content_sha256": "01020e60c660625427b92594c3316d9b7c28b4f71882fcb23ab5e49344f81953",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "E_TIMEOUT_88"
+    },
+    {
+      "id": "h-id-04",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "IDX-LEAK-7701 出现时检索怎么做",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 4,
+          "content_sha256": "9a4ad493c54159d0c9c67996aea1190ed6dc18dd5ff1a0309dab489b74af7404",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "IDX-LEAK-7701"
+    },
+    {
+      "id": "h-id-05",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "SMTP-554-7.1.1 能不能当 429 重试",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 5,
+          "content_sha256": "730431eecf996202fd58c718c2c2397306df04bd4603022fcac8659874ed0ad5",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "SMTP-554-7.1.1"
+    },
+    {
+      "id": "h-id-06",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "PROC.LOCK_9F 保护什么互斥",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 6,
+          "content_sha256": "03145e315fb5cc154bdaa324f20871427e4ef1d1d2c3ef9065872bbeafd57027",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "PROC.LOCK_9F"
+    },
+    {
+      "id": "h-id-07",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "CAS-EXPECTED-VERSION 冲突后表单怎么处理",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 7,
+          "content_sha256": "21265bb862595e96a46403e571c3b91ea5016639bea9b2aba6c7135ceceaa9eb",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "CAS-EXPECTED-VERSION"
+    },
+    {
+      "id": "h-id-08",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "SKILL_TREE_ORPHAN 指什么节点",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 8,
+          "content_sha256": "061998b661877cb3c159ca4db43864bed9032d31c4f39c1ffd9749a2b81b82cf",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "SKILL_TREE_ORPHAN"
+    },
+    {
+      "id": "h-id-09",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "PG-ADVISORY-0x0DEE 是哪把锁",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 9,
+          "content_sha256": "89ccebf6f90621f98122cf6c8405b6f3aa76ee4822982740dfc07aac58cbd52c",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "PG-ADVISORY-0x0DEE"
+    },
+    {
+      "id": "h-id-10",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "192.0.2.17 用在哪次演练",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-network",
+          "position": 1,
+          "content_sha256": "23e147ed63db0c6488b8ba367c1056089ab30d66dcc5c0d59f00f7c260288d57",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "192.0.2.17"
+    },
+    {
+      "id": "h-id-11",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "198.51.100.77 要放行哪个端口",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-network",
+          "position": 2,
+          "content_sha256": "43185984fa55a21c155262c6562a82a855b0ea1f6f6f86ee79e182262a1326a2",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "198.51.100.77"
+    },
+    {
+      "id": "h-id-12",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "203.0.113.9 是什么角色",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-network",
+          "position": 3,
+          "content_sha256": "bd5e49c45ddebd7f9f34d34c92bd65c2a098f07d177fe0ee1508fb12ae6c2f3f",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "203.0.113.9"
+    },
+    {
+      "id": "h-id-13",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "2001:db8:85a3::8a2e:370:7334 要不要保留完整项",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-network",
+          "position": 4,
+          "content_sha256": "2f38cf7a868828b20850db8f2f3231607bd5dd7566bf1a91463a08513db5d84e",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "2001:db8:85a3::8a2e:370:7334"
+    },
+    {
+      "id": "h-id-14",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "2001:db8::cafe 能否在大小写折叠后命中",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-network",
+          "position": 5,
+          "content_sha256": "907f167b03e060afac75e1decabc4ca13a3433722a8f6a0cda3ee109432419ce",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "2001:db8::cafe"
+    },
+    {
+      "id": "h-id-15",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "QW-EMBED-8B 是什么别名",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-hardware",
+          "position": 1,
+          "content_sha256": "4dff9782f414b7c911e23e583e364199686643f34da2b3bcc03a70fbe05764d1",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "QW-EMBED-8B"
+    },
+    {
+      "id": "h-id-16",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "ACTW-R42 升级前要停什么",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-hardware",
+          "position": 2,
+          "content_sha256": "5b8cdb379ff774d5544ebdb6449d897adc9a2c59bd9663097ed7ea8e8fa725df",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "ACTW-R42"
+    },
+    {
+      "id": "h-id-17",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "HW-FAN-B7 的温度阈值是多少",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-hardware",
+          "position": 3,
+          "content_sha256": "1dc847d90fe7ec7ba9afeb97d021424b79991a2e83dd02aa48a91e1bbbb0326f",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "HW-FAN-B7"
+    },
+    {
+      "id": "h-id-18",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "knowledge_metadata_fields 工具会不会写值",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-interfaces",
+          "position": 1,
+          "content_sha256": "595c53af32b2193511b48f6dec6f3c2f8dd5e3e0d3633bdc74d04da74e33d418",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "knowledge_metadata_fields"
+    },
+    {
+      "id": "h-id-19",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "reparse-preview 读的是什么文件",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-interfaces",
+          "position": 2,
+          "content_sha256": "1855ee9a366a2d56364089f8b7de26580ddffd9782975e12e97f42f3ac991bf4",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "reparse-preview"
+    },
+    {
+      "id": "h-id-20",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "lexical_v1 用什么数据库配置",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-interfaces",
+          "position": 3,
+          "content_sha256": "92fcdad6d9f7e510a7737f053751f15f95a8ad21cc8a4c7cdf84c144ae1898bc",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "lexical_v1"
+    },
+    {
+      "id": "h-id-21",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "MINIO-BUCKET-actweave-eval 是什么前缀",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-hardware",
+          "position": 4,
+          "content_sha256": "65c0ebadfc452971372e07982f6b49959f6ccafcec85cea0eacd02b7e5d8f459",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "MINIO-BUCKET-actweave-eval"
+    },
+    {
+      "id": "h-id-22",
+      "split": "holdout",
+      "category": "identifier",
+      "query": "TOOL-OMITTED-COUNT 表示什么",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-interfaces",
+          "position": 4,
+          "content_sha256": "ae9ea9d05475ea6daa4c8ff0b827afe244fa26d4beb7308f150db1ecf4cd521c",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "TOOL-OMITTED-COUNT"
+    },
+    {
+      "id": "d-id-01",
+      "split": "dev",
+      "category": "identifier",
+      "query": "EMG-1099 在什么情况下出现",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 10,
+          "content_sha256": "7ec193147bda5020e5407c3b2528a6ea5c26aa0154bb086a45fd7e79698b7519",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "EMG-1099"
+    },
+    {
+      "id": "d-id-02",
+      "split": "dev",
+      "category": "identifier",
+      "query": "192.0.2.88 属于哪一集",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-network",
+          "position": 6,
+          "content_sha256": "69b82183d699bf108e2e48d8a943df34799604402da9392c912c1ed8d198b5ba",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "192.0.2.88"
+    },
+    {
+      "id": "d-id-03",
+      "split": "dev",
+      "category": "identifier",
+      "query": "ERR.QUOTA_413 前端怎么展示",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 11,
+          "content_sha256": "b4b648b410021997304af636ddae2b8a786d9a930d9056b6d96d4250495afe7d",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "ERR.QUOTA_413"
+    },
+    {
+      "id": "d-id-04",
+      "split": "dev",
+      "category": "identifier",
+      "query": "CHUNK-SIZE-500 何时生效",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-interfaces",
+          "position": 5,
+          "content_sha256": "3158156febff99b06c688bfec94573ba1f3225eccdad5e11a2e8afb2a80f6cf6",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "CHUNK-SIZE-500"
+    },
+    {
+      "id": "d-id-05",
+      "split": "dev",
+      "category": "identifier",
+      "query": "RRF-K60 的公式是什么",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-interfaces",
+          "position": 6,
+          "content_sha256": "3320583b201bbf2d8196cc550308382463a6d31f3537c560ebfa07bcb31f4991",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "RRF-K60"
+    },
+    {
+      "id": "d-id-06",
+      "split": "dev",
+      "category": "identifier",
+      "query": "BASE-BUDGET-C 怎么计算",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-interfaces",
+          "position": 7,
+          "content_sha256": "6b9d62893890ee670a53da51761f3c27877f396bb499a3f28b185cad3343fc3d",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "BASE-BUDGET-C"
+    },
+    {
+      "id": "d-id-07",
+      "split": "dev",
+      "category": "identifier",
+      "query": "2001:db8::1 用于什么",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-network",
+          "position": 7,
+          "content_sha256": "ba4b017906e7d89efc1d06199309d0384432d921be40636b3d227da473382782",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "2001:db8::1"
+    },
+    {
+      "id": "d-id-08",
+      "split": "dev",
+      "category": "identifier",
+      "query": "HIT-DETAIL-409 应该提示什么",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-interfaces",
+          "position": 8,
+          "content_sha256": "db26ffd8216a70bcfebf7a80b540f848eb03d95bc3e3c9c4f3ccc09bbfb9c59e",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "HIT-DETAIL-409"
+    },
+    {
+      "id": "d-id-09",
+      "split": "dev",
+      "category": "identifier",
+      "query": "OPEN-IN-DOCUMENTS 往 URL 写哪些参数",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-interfaces",
+          "position": 9,
+          "content_sha256": "2628193c2be80b30e65170f38dbb9f321bab2c6d936e9e8b808707d91788ee1d",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "OPEN-IN-DOCUMENTS"
+    },
+    {
+      "id": "d-id-10",
+      "split": "dev",
+      "category": "identifier",
+      "query": "KNOWLEDGE_PASSAGE_OVER_BUDGET 带不带引用",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "ops-error-codes",
+          "position": 12,
+          "content_sha256": "7e5d9bae8ffe184448cac9c0103387706c524a1d2cb5887fd011bc289c5b4fb7",
+          "grade": 2
+        },
+        {
+          "source_id": "near-miss-ops",
+          "position": 1,
+          "content_sha256": "f759a5670ddb6ce8477429e046a651cf0f69da49703d4fba32c442ec5ae5f61a",
+          "grade": 1
+        }
+      ],
+      "identifier_token": "KNOWLEDGE_PASSAGE_OVER_BUDGET"
+    },
+    {
+      "id": "h-nl-01",
+      "split": "holdout",
+      "category": "natural_language",
+      "query": "重嵌入会不会丢掉人工改过的段落",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-reembed",
+          "position": 1,
+          "content_sha256": "cfc48e9f89227762c432c818828374b9e069f11dc6b996c74659799db5084002",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "h-nl-02",
+      "split": "holdout",
+      "category": "natural_language",
+      "query": "混合召回怎样和向量路合并",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-hybrid",
+          "position": 1,
+          "content_sha256": "5b9330c5a28ef7fbb5ed60cb1bc509eb23f2c69bfdbd0be745399f98e515c4b6",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "h-nl-03",
+      "split": "holdout",
+      "category": "natural_language",
+      "query": "批量改元数据时未编辑的字段会怎样",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-metadata",
+          "position": 1,
+          "content_sha256": "72e1ef9d8febcb0268e7b5697cc315dfe71d2f4d52b584b27e89d43f7355fd87",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "h-nl-04",
+      "split": "holdout",
+      "category": "natural_language",
+      "query": "任务失败时进度为什么还显示原来的阶段",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-progress",
+          "position": 1,
+          "content_sha256": "9f4a56192a084ddf58518b10f4cf57c397e88b7d90eec6f45c528a1f65ef3b85",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "h-nl-05",
+      "split": "holdout",
+      "category": "natural_language",
+      "query": "创建向导里后选的文件预览会不会被先发出的请求盖掉",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-wizard",
+          "position": 1,
+          "content_sha256": "9729eba802269dd11a0493bc74cb17033386d41a9b2a17a08a66b369bba9cc3e",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "h-nl-06",
+      "split": "holdout",
+      "category": "natural_language",
+      "query": "跨库融合分能当成正确性概率吗",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-ranking",
+          "position": 1,
+          "content_sha256": "277f94a7b6cf1b76219995b58b02c715d30525f2315917ade182d14800e99746",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "d-nl-01",
+      "split": "dev",
+      "category": "natural_language",
+      "query": "项目删除后旧的检索日志还能恢复吗",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-retention",
+          "position": 1,
+          "content_sha256": "4b3b4a79159efecec5c81adbfe70192216814e424235d7201d2b28897dea9c70",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "d-nl-02",
+      "split": "dev",
+      "category": "natural_language",
+      "query": "从未成功发布的失败文档重嵌入时怎么办",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-reembed",
+          "position": 1,
+          "content_sha256": "cfc48e9f89227762c432c818828374b9e069f11dc6b996c74659799db5084002",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "d-nl-03",
+      "split": "dev",
+      "category": "natural_language",
+      "query": "纯语义搜索会不会走词法路",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-hybrid",
+          "position": 1,
+          "content_sha256": "5b9330c5a28ef7fbb5ed60cb1bc509eb23f2c69bfdbd0be745399f98e515c4b6",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "d-nl-04",
+      "split": "dev",
+      "category": "natural_language",
+      "query": "批量元数据冲突是不是只回滚出错的那一篇",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-metadata",
+          "position": 1,
+          "content_sha256": "72e1ef9d8febcb0268e7b5697cc315dfe71d2f4d52b584b27e89d43f7355fd87",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "d-nl-05",
+      "split": "dev",
+      "category": "natural_language",
+      "query": "领取新尝试时旧的完成计数还在吗",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "product-progress",
+          "position": 1,
+          "content_sha256": "9f4a56192a084ddf58518b10f4cf57c397e88b7d90eec6f45c528a1f65ef3b85",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "h-tail-01",
+      "split": "holdout",
+      "category": "tail",
+      "query": "想从原文件重新切分应该用哪个入口",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "tail-answers",
+          "position": 1,
+          "content_sha256": "e255c1e47946bf641843ab4da794a5e73d04a4977856970349beaf14b0e8f999",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "TAIL-REPARSE-ONLY"
+    },
+    {
+      "id": "h-tail-02",
+      "split": "holdout",
+      "category": "tail",
+      "query": "模型实际读到的是短摘要还是完整父段",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "tail-answers",
+          "position": 2,
+          "content_sha256": "bcf1a5fc435a49a613c06f1df206c88687e06f292cac0c12633b87756e37b057",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "TAIL-BUDGET-64KIB"
+    },
+    {
+      "id": "d-tail-01",
+      "split": "dev",
+      "category": "tail",
+      "query": "两个库 embedding 不同又没有词法证据时能不能说比单库更准",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "tail-answers",
+          "position": 3,
+          "content_sha256": "ab6622227e5d83747df995b41859fe9104f3f5e15e7121e3bd270334dbf02147",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "TAIL-FUSION-LIMIT"
+    },
+    {
+      "id": "d-tail-02",
+      "split": "dev",
+      "category": "tail",
+      "query": "元数据过滤是排序之后再裁一次吗",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "tail-answers",
+          "position": 4,
+          "content_sha256": "bd76514375ea1f1cc29dfadfd6549e90cf854dc2d40f4c78546a25ebdd35766a",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "TAIL-FILTER-AND"
+    },
+    {
+      "id": "h-pc-01",
+      "split": "holdout",
+      "category": "parent_child",
+      "query": "parent_child 命中第二个子块时引用返回什么",
+      "base_scope": "parent_child",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "pc-manual",
+          "position": 1,
+          "content_sha256": "8764227e912a64d796ab7594fae89e627d8093c98d641d45dfb73f08749c7dba",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "PC-ROLLUP-SECOND"
+    },
+    {
+      "id": "h-pc-02",
+      "split": "holdout",
+      "category": "parent_child",
+      "query": "词法只打中某一个子块时父段 cosine 怎么取",
+      "base_scope": "parent_child",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "pc-manual",
+          "position": 1,
+          "content_sha256": "8764227e912a64d796ab7594fae89e627d8093c98d641d45dfb73f08749c7dba",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "PC-CHILD-COSINE-MAX"
+    },
+    {
+      "id": "d-pc-01",
+      "split": "dev",
+      "category": "parent_child",
+      "query": "禁用父段之后子块还能被搜到吗",
+      "base_scope": "parent_child",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "pc-manual",
+          "position": 2,
+          "content_sha256": "2329249ac85d50cd176df82585728a0b34c367baf3ad72eeb737866ab7da817c",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "PC-DISABLE-PARENT"
+    },
+    {
+      "id": "d-pc-02",
+      "split": "dev",
+      "category": "parent_child",
+      "query": "父子回卷时 matched children 要不要包含真实命中的非首子块",
+      "base_scope": "parent_child",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "pc-manual",
+          "position": 1,
+          "content_sha256": "8764227e912a64d796ab7594fae89e627d8093c98d641d45dfb73f08749c7dba",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "PC-ROLLUP-SECOND"
+    },
+    {
+      "id": "h-xb-01",
+      "split": "holdout",
+      "category": "cross_base",
+      "query": "小部件校准周期是多少天",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "small-unique",
+          "position": 1,
+          "content_sha256": "d049bc8a32c8166034ad6730d43906f0cabc121bad16288dea74ba1dfe8ca276",
+          "grade": 2
+        },
+        {
+          "source_id": "large-similar-widget",
+          "position": 1,
+          "content_sha256": "b1029194c4699fe5fb6b54a004a63bfc174d2bd66f3b70422852b8ae9cd208b6",
+          "grade": 1
+        }
+      ],
+      "answer_marker": "SMALL-ALPHA-WIDGET"
+    },
+    {
+      "id": "h-xb-02",
+      "split": "holdout",
+      "category": "cross_base",
+      "query": "时区偏移校准值是多少分钟",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "small-unique",
+          "position": 2,
+          "content_sha256": "5a4b288cb3902a3fbd5c4175487aace90335606d3528b85a91b994ce546254b0",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "SMALL-BETA-OFFSET"
+    },
+    {
+      "id": "d-xb-01",
+      "split": "dev",
+      "category": "cross_base",
+      "query": "轻量库里的小部件校准周期写的是多久",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "small-unique",
+          "position": 1,
+          "content_sha256": "d049bc8a32c8166034ad6730d43906f0cabc121bad16288dea74ba1dfe8ca276",
+          "grade": 2
+        },
+        {
+          "source_id": "large-similar-widget",
+          "position": 1,
+          "content_sha256": "b1029194c4699fe5fb6b54a004a63bfc174d2bd66f3b70422852b8ae9cd208b6",
+          "grade": 1
+        }
+      ],
+      "answer_marker": "SMALL-ALPHA-WIDGET"
+    },
+    {
+      "id": "d-xb-02",
+      "split": "dev",
+      "category": "cross_base",
+      "query": "只有小库记载的偏移校准是多少",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "small-unique",
+          "position": 2,
+          "content_sha256": "5a4b288cb3902a3fbd5c4175487aace90335606d3528b85a91b994ce546254b0",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "SMALL-BETA-OFFSET"
+    },
+    {
+      "id": "h-meta-01",
+      "split": "holdout",
+      "category": "metadata",
+      "query": "接口冻结窗口在周几",
+      "base_scope": "same_domain",
+      "metadata_filters": [
+        {
+          "name": "dept",
+          "operator": "eq",
+          "value": "研发",
+          "field_kind": "custom"
+        }
+      ],
+      "judgments": [
+        {
+          "source_id": "meta-rd",
+          "position": 1,
+          "content_sha256": "10774f8b2523408065a69ef1af5809f035626c3d07c6f2d60155889ba349b3b3",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "h-meta-02",
+      "split": "holdout",
+      "category": "metadata",
+      "query": "对外演示稿锁在什么主题",
+      "base_scope": "same_domain",
+      "metadata_filters": [
+        {
+          "name": "dept",
+          "operator": "eq",
+          "value": "市场",
+          "field_kind": "custom"
+        }
+      ],
+      "judgments": [
+        {
+          "source_id": "meta-mkt",
+          "position": 1,
+          "content_sha256": "febfbc9c69d92b70c29885d2fab1678fd4083fa25a599531229998887ce43607",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "d-meta-01",
+      "split": "dev",
+      "category": "metadata",
+      "query": "研发联调期间能不能改模型绑定",
+      "base_scope": "same_domain",
+      "metadata_filters": [
+        {
+          "name": "dept",
+          "operator": "eq",
+          "value": "研发",
+          "field_kind": "custom"
+        }
+      ],
+      "judgments": [
+        {
+          "source_id": "meta-rd",
+          "position": 2,
+          "content_sha256": "50534742b1722d42e5af007827e88f2989c0e7c3353f39f3cfa500c3c402e3b9",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "d-meta-02",
+      "split": "dev",
+      "category": "metadata",
+      "query": "市场演示能不能把原始分数说成置信度",
+      "base_scope": "same_domain",
+      "metadata_filters": [
+        {
+          "name": "dept",
+          "operator": "eq",
+          "value": "市场",
+          "field_kind": "custom"
+        }
+      ],
+      "judgments": [
+        {
+          "source_id": "meta-mkt",
+          "position": 2,
+          "content_sha256": "47886514ec52b5eb72c8caf85919d552ad4cb2b5e63fab93948d397d0d457961",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "h-na-01",
+      "split": "holdout",
+      "category": "no_answer",
+      "query": "火星基地供水协议的循环周期是多少小时",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": []
+    },
+    {
+      "id": "h-na-02",
+      "split": "holdout",
+      "category": "no_answer",
+      "query": "中世纪羊皮纸修复要用哪种虫胶配比",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": []
+    },
+    {
+      "id": "d-na-01",
+      "split": "dev",
+      "category": "no_answer",
+      "query": "南极冰核氚浓度的放行阈值是多少",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": []
+    },
+    {
+      "id": "d-na-02",
+      "split": "dev",
+      "category": "no_answer",
+      "query": "宋代官窑釉面气泡密度如何分级",
+      "base_scope": "same_domain",
+      "metadata_filters": null,
+      "judgments": []
+    },
+    {
+      "id": "h-he-01",
+      "split": "holdout",
+      "category": "cross_base",
+      "query": "第二套 embedding 空间把斜率记成多少",
+      "base_scope": "hetero",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "hetero-special",
+          "position": 1,
+          "content_sha256": "572b260d0affd918cda2feb4ba971d7d7e36dcbaa093efeaafc8ce4fa250aafe",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "HETERO-GAMMA-SLOPE"
+    },
+    {
+      "id": "d-he-01",
+      "split": "dev",
+      "category": "cross_base",
+      "query": "异构库里的偏置常数是多少",
+      "base_scope": "hetero",
+      "metadata_filters": null,
+      "judgments": [
+        {
+          "source_id": "hetero-special",
+          "position": 2,
+          "content_sha256": "164278b3095f6c846602e5657c95f50786c3b08a77790a949b92f8bbf79273dc",
+          "grade": 2
+        }
+      ],
+      "answer_marker": "HETERO-DELTA-BIAS"
+    }
+  ]
+}

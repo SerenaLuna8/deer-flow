@@ -342,6 +342,19 @@ async def gateway_platform_runtime(
         model_materializer = SystemModelMaterializer(sf)
         app.state.system_model_catalog = model_catalog
         app.state.system_model_materializer = model_materializer
+
+        # Knowledge is startup-only: a missing/disabled `knowledge` block keeps
+        # the module absent and every knowledge route answers KNOWLEDGE_DISABLED.
+        from app.knowledge.composition import (
+            create_knowledge_module_from_app_config,
+            require_knowledge_storage_ready,
+        )
+
+        knowledge_module = create_knowledge_module_from_app_config(config)
+        app.state.knowledge_module = knowledge_module
+        if knowledge_module is not None:
+            stack.push_async_callback(knowledge_module.aclose)
+            await require_knowledge_storage_ready(knowledge_module)
         runtime_policy_service = SystemRuntimePolicyService(
             sf,
             audit_service,

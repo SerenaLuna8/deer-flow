@@ -48,6 +48,10 @@ from deerflow.persistence.execution_approvals import (
 )
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.jobs import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
+from deerflow.persistence.model_registry import (
+    ModelProviderModelRow,
+    ModelProviderRow,
+)
 from deerflow.persistence.models.run_event import (
     RunEventInvariantRow,
     RunEventPartitionStateRow,
@@ -167,6 +171,8 @@ __all__ = [
     "McpServerRow",
     "McpServerVersionRow",
     "McpToolDiscoveryAttemptRow",
+    "ModelProviderModelRow",
+    "ModelProviderRow",
     "ProjectMcpSecretGenerationRow",
     "ProjectMcpSecretStateRow",
     "ProjectMcpSecretTombstoneRow",

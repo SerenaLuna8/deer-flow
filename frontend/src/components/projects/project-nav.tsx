@@ -2,6 +2,7 @@
 
 import {
   ArrowLeftIcon,
+  BookOpenIcon,
   BotIcon,
   BrainCircuitIcon,
   CableIcon,
@@ -34,6 +35,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useI18n } from "@/core/i18n/hooks";
+import { useKnowledgeFeature } from "@/core/knowledge/hooks";
+import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import {
   projectPrivateWorkEntryEnabled,
   useProjectPrivateWorkReadiness,
@@ -58,6 +61,7 @@ type ProjectNavigationItem = {
     | "conversations"
     | "automations"
     | "agents"
+    | "knowledge"
     | "skills"
     | "mcp"
     | "memory"
@@ -95,6 +99,7 @@ export function projectNavigationItems(
   staticWebsiteOnly = false,
   _usageReady = false,
   _auditReady = false,
+  knowledgeReady = false,
 ): ProjectNavigationItem[] {
   const base = `/projects/${encodeURIComponent(project.slug)}`;
   const items: ProjectNavigationItem[] = [
@@ -145,6 +150,16 @@ export function projectNavigationItems(
       icon: BotIcon,
       section: "capabilities",
     });
+    // The knowledge module is a deployment-level feature: when the host runs
+    // without it, the routes answer KNOWLEDGE_DISABLED and the entry hides.
+    if (knowledgeReady) {
+      items.push({
+        id: "knowledge",
+        href: `${base}/knowledge`,
+        icon: BookOpenIcon,
+        section: "capabilities",
+      });
+    }
   }
   if (capabilityWorkspaceVisible) {
     items.push(
@@ -289,6 +304,11 @@ function ProjectNavigationLinks({
     automationReadiness.data?.status === "ready" &&
     automationReadiness.data.project_private_work_ready &&
     automationReadiness.data.schema_ready;
+  const { scope } = useProjectPrivateWorkScope();
+  const knowledgeFeature = useKnowledgeFeature(
+    scope,
+    !staticWebsiteOnly && canReadProjectAgents(project.capabilities),
+  );
   return (
     <ProjectNavigationLinksContent
       project={project}
@@ -297,6 +317,7 @@ function ProjectNavigationLinks({
       privateWorkReady={privateWorkReady}
       automationReady={automationReady}
       staticWebsiteOnly={staticWebsiteOnly}
+      knowledgeReady={knowledgeFeature.enabled}
     />
   );
 }
@@ -308,6 +329,7 @@ function ProjectNavigationLinksContent({
   privateWorkReady,
   automationReady,
   staticWebsiteOnly,
+  knowledgeReady,
 }: {
   project: Project;
   mobile: boolean;
@@ -315,6 +337,7 @@ function ProjectNavigationLinksContent({
   privateWorkReady: boolean;
   automationReady: boolean;
   staticWebsiteOnly: boolean;
+  knowledgeReady: boolean;
 }) {
   const { t } = useI18n();
   const pathname = usePathname();
@@ -325,6 +348,9 @@ function ProjectNavigationLinksContent({
     automationReady,
     PROJECT_AUTOMATION,
     staticWebsiteOnly,
+    false,
+    false,
+    knowledgeReady,
   );
   const standaloneLinks = links.filter((item) => item.section === null);
   const renderLink = ({ id, href, icon: Icon }: ProjectNavigationItem) => {

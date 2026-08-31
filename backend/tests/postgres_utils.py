@@ -72,6 +72,20 @@ async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
         body_error: BaseException | None = None
         try:
             try:
+                # Mirror the operator install flow: maintenance authority
+                # prepares ``public.vector`` before Schema V1 can be staged.
+                try:
+                    extension_engine = create_async_engine(
+                        replace_database(admin_url, database),
+                        isolation_level="AUTOCOMMIT",
+                    )
+                    try:
+                        async with extension_engine.connect() as connection:
+                            await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public"))
+                    finally:
+                        await extension_engine.dispose()
+                except Exception:
+                    raise RuntimeError("unable to prepare pgvector in isolated PostgreSQL test database") from None
                 yield replace_database(admin_url, database)
             except BaseException as exc:
                 body_error = exc

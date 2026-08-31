@@ -102,7 +102,7 @@ def _deepseek_model_command(
         CreateSystemModel(
             display_name=display_name,
             status="active",
-            provider_adapter="patched_deepseek",
+            provider_adapter="deepseek",
             provider_model=provider_model,
             max_input_tokens=DEEPSEEK_V4_MAX_INPUT_TOKENS,
             settings={

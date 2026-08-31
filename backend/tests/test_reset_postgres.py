@@ -70,7 +70,10 @@ def test_cli_reports_only_safe_target_after_confirmed_reset(
         "DATABASE_URL",
         "postgresql+asyncpg://owner:reset-secret@127.0.0.1:9432/deerflow",
     )
-    monkeypatch.delenv("POSTGRES_ADMIN_URL", raising=False)
+    monkeypatch.setenv(
+        "POSTGRES_ADMIN_URL",
+        "postgresql+asyncpg://admin:admin-secret@127.0.0.1:9432/postgres",
+    )
     monkeypatch.delenv("CONFIRM_DATABASE", raising=False)
     reset = AsyncMock(
         return_value=reset_postgres.SetupResult(
@@ -91,7 +94,9 @@ def test_cli_reports_only_safe_target_after_confirmed_reset(
     assert "127.0.0.1:9432/deerflow" in rendered
     assert "schema_v1" in rendered
     assert "reset-secret" not in rendered
+    assert "admin-secret" not in rendered
     assert "postgresql" not in rendered
+    assert reset.await_args.kwargs["admin_url"] == "postgresql+asyncpg://admin:admin-secret@127.0.0.1:9432/postgres"
 
 
 class _ResetEngine:
@@ -131,6 +136,9 @@ class _ResetEngine:
             raise ConnectionError("postgresql://owner:commit-secret@127.0.0.1/deerflow")
 
 
+_ADMIN_URL = "postgresql+asyncpg://admin:admin-secret@127.0.0.1:9432/postgres"
+
+
 def _install_successful_preflight(monkeypatch) -> None:
     monkeypatch.setattr(
         reset_postgres,
@@ -138,6 +146,41 @@ def _install_successful_preflight(monkeypatch) -> None:
         lambda: object(),
         raising=False,
     )
+    monkeypatch.setattr(
+        reset_postgres,
+        "prepare_model_registry_bootstrap",
+        lambda: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        reset_postgres,
+        "ensure_vector_extension",
+        AsyncMock(),
+        raising=False,
+    )
+
+
+def test_noninteractive_cli_requires_admin_url_after_confirmation(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://owner:reset-secret@127.0.0.1:9432/deerflow",
+    )
+    monkeypatch.delenv("POSTGRES_ADMIN_URL", raising=False)
+    monkeypatch.setenv("CONFIRM_DATABASE", "deerflow")
+    reset = AsyncMock()
+    monkeypatch.setattr(reset_postgres, "reset_and_initialize", reset)
+
+    assert reset_postgres.main([]) == 2
+
+    reset.assert_not_awaited()
+    output = capsys.readouterr()
+    rendered = output.out + output.err
+    assert "POSTGRES_ADMIN_URL" in rendered
+    assert "reset-secret" not in rendered
+    assert "postgresql+asyncpg" not in rendered
 
 
 @pytest.mark.asyncio
@@ -160,6 +203,56 @@ async def test_reset_rejects_invalid_bootstrap_before_ddl(
         await reset_postgres.reset_and_initialize(
             "postgresql://owner:secret@127.0.0.1:9432/deerflow",
             expected_database="deerflow",
+            admin_url=_ADMIN_URL,
+        )
+
+
+@pytest.mark.asyncio
+async def test_reset_rejects_invalid_admin_url_before_ddl(
+    monkeypatch,
+) -> None:
+    _install_successful_preflight(monkeypatch)
+    monkeypatch.setattr(
+        reset_postgres,
+        "create_async_engine",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("DDL engine must not be created")),
+    )
+
+    with pytest.raises(reset_postgres.PostgresResetError, match="POSTGRES_ADMIN_URL"):
+        await reset_postgres.reset_and_initialize(
+            "postgresql://owner:secret@127.0.0.1:9432/deerflow",
+            expected_database="deerflow",
+            admin_url="postgresql://admin:secret@127.0.0.1:9432/deerflow",
+        )
+
+
+@pytest.mark.asyncio
+async def test_reset_rejects_missing_model_registry_bootstrap_before_ddl(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        reset_postgres,
+        "prepare_default_system_model_bootstrap",
+        lambda: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        reset_postgres,
+        "prepare_model_registry_bootstrap",
+        lambda: (_ for _ in ()).throw(reset_postgres.ModelRegistryBootstrapConfigurationInvalid()),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        reset_postgres,
+        "create_async_engine",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("DDL engine must not be created")),
+    )
+
+    with pytest.raises(reset_postgres.PostgresResetError, match="模型供应商 bootstrap"):
+        await reset_postgres.reset_and_initialize(
+            "postgresql://owner:secret@127.0.0.1:9432/deerflow",
+            expected_database="deerflow",
+            admin_url=_ADMIN_URL,
         )
 
 
@@ -194,14 +287,34 @@ async def test_reset_rebuilds_public_schema_then_runs_schema_v1_setup(
         "prepare_default_system_model_bootstrap",
         lambda: bootstrap_material,
     )
+    registry_material = object()
+    monkeypatch.setattr(
+        reset_postgres,
+        "prepare_model_registry_bootstrap",
+        lambda: registry_material,
+    )
+
+    async def prepare_vector(admin_url: str, database: str) -> None:
+        assert admin_url == _ADMIN_URL
+        assert database == "deerflow"
+        lock_events.append("vector")
+
+    monkeypatch.setattr(
+        reset_postgres,
+        "ensure_vector_extension",
+        prepare_vector,
+        raising=False,
+    )
 
     async def bootstrap(
         _database_url: str,
         *,
         default_model_bootstrap,
+        model_registry_bootstrap,
         force_public_schema: bool,
     ) -> str:
         assert default_model_bootstrap is bootstrap_material
+        assert model_registry_bootstrap is registry_material
         assert force_public_schema is True
         lock_events.append("bootstrap")
         return "schema_v1"
@@ -216,6 +329,7 @@ async def test_reset_rebuilds_public_schema_then_runs_schema_v1_setup(
     result = await reset_postgres.reset_and_initialize(
         "postgresql+asyncpg://owner:secret@127.0.0.1:9432/deerflow",
         expected_database="deerflow",
+        admin_url=_ADMIN_URL,
     )
 
     assert engine.statements == [
@@ -224,7 +338,7 @@ async def test_reset_rebuilds_public_schema_then_runs_schema_v1_setup(
     ]
     assert all("GRANT ALL" not in statement for statement in engine.statements)
     assert engine.dispose.await_count == 1
-    assert lock_events == ["enter", "bootstrap", "exit"]
+    assert lock_events == ["enter", "vector", "bootstrap", "exit"]
     assert result.revision == "schema_v1"
 
 
@@ -260,6 +374,7 @@ async def test_reset_rejects_non_public_effective_schema_before_ddl(
         await reset_postgres.reset_and_initialize(
             "postgresql://owner:secret@127.0.0.1:9432/deerflow",
             expected_database="deerflow",
+            admin_url=_ADMIN_URL,
         )
 
     assert engine.statements == []
@@ -299,6 +414,7 @@ async def test_reset_reports_unknown_outcome_when_commit_confirmation_is_lost(
         await reset_postgres.reset_and_initialize(
             "postgresql://owner:secret@127.0.0.1:9432/deerflow",
             expected_database="deerflow",
+            admin_url=_ADMIN_URL,
         )
 
     rendered = str(exc_info.value)
@@ -342,6 +458,7 @@ async def test_reset_sanitizes_unknown_bootstrap_outcome_without_leaking_failure
         await reset_postgres.reset_and_initialize(
             "postgresql://owner:secret@127.0.0.1:9432/deerflow",
             expected_database="deerflow",
+            admin_url=_ADMIN_URL,
         )
 
     rendered = str(exc_info.value)

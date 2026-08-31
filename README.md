@@ -125,6 +125,49 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   `inspect_image` 返回有界、不可信视觉分析；视觉调用与其他模型调用共用唯一
   `ModelRuntime` 和所选模型已有的 Provider adapter。
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
+- 可选的项目 RAG 知识库（Knowledge）：独立 `actweave-knowledge` 软件包提供文档上传、
+  摄取切分、向量召回加 Reranker 精排检索和 Agent `knowledge_search` 引用；文件存储在
+  外部 MinIO，功能由根 `config.yaml` 的 `knowledge` 块启用，默认关闭。关闭功能会停用
+  路由、Agent 工具和 Knowledge Task worker，但 Worker 仍保留 Project 最终删除所需的
+  清理能力；曾经写入过文档的部署必须保留原 MinIO 配置直到相关 retention 清理完成，
+  且 bucket 必须关闭 versioning/Object Lock，凭据需允许读取 versioning 状态、列举前缀
+  和删除对象；否则启动、每次上传的 PUT 前检查或 Project purge 会失败关闭而不会伪成功。
+  单文件上限硬限制为 50 MiB，单 PUT 在每个对象存储实例内串行执行，以约束 MinIO SDK
+  的整 part 内存峰值。Project 进入待删除状态后，Knowledge Task 不消耗重试预算地暂停；
+  恢复 Project 会自动继续，最终清理则等待所有仍在运行的 Task 静默后才删除对象。启用后项目侧
+  提供知识库/文档管理与检索测试页面（导航按模块可用性自动显示，页面状态随 URL
+  可深链接/前进后退），支持文档与分段级
+  治理：启停开关（停用即从检索与引用中排除，不删除向量）、文档重命名与批量启停/删除、
+  分段浏览页内编辑/手工新增/删除分段（内容修改同步重算向量）及字数统计；文档列表
+  支持搜索/状态过滤/排序/分页，处理中的文档展示真实任务进度（阶段、已验证批次
+  计数、尝试次数与自动重试等待），列表上方汇总处理中/等待重试/失败/就绪数量；上传按
+  递归分隔符切分，可自定义分隔符（默认 `\n\n`）并选择预处理规则（压缩多余空白、
+  删除 URL 与邮箱），创建向导内置分块实时预览（所见即所得，与实际摄取一致，
+  多文件时可指定预览文件，参数修改标记过期后显式刷新），
+  全部分块参数上传时固化、重试沿用；多文件上传逐文件给出结果，失败文件保留在
+  队列中重试且不重传已成功者；支持父子分段模式（父块承载返回内容、
+  子块承载向量，命中按父块内最高子块分回卷去重）；知识库可配置检索默认参数
+  （top_k 与分数阈值，检索测试与 Agent 工具未显式传参时生效）与检索模式
+  （semantic 或 hybrid：词法 `lexical_v1` 分词走 PostgreSQL tsvector/GIN 与
+  向量路 RRF 合并，检索测试可单次覆盖模式），检索自动记录
+  查询日志（含来源、命中数与最高分，检索测试页展示最近查询并可点击回填）
+  并累计分段/文档命中次数；检索测试结果标注最终排名与分数来源
+  （Cosine/Rerank/秩融合），可展开安全诊断（策略/预算/计数/耗时/模型，
+  不含正文），命中详情钉住检索时的完整原段并高亮真实命中的子块，内容漂移
+  时提示重新检索，且可一键定位到文档维护页；空结果按从未检索/无命中/
+  过滤为空/未就绪/内容过期区分，模型失败持续可见并可重试；上传支持
+  PDF/DOCX/TXT/MD/CSV/XLSX/HTML/PPTX/EPUB；
+  知识库可定义元数据字段（文本/数字/时间）并为文档赋值（支持多选文档批量
+  保持/设置/清空，一次全量成功或全量回滚），检索测试与
+  Agent 工具支持按元数据条件过滤（等于/包含/范围，AND 组合）；
+  设置页可换绑 Embedding 模型并对已发布文档重嵌入（保留分段 UUID/文本/
+  人工编辑/启停状态，仅重算向量，处理期间退出召回，未发布文档跳过并报
+  真实计数），文档操作里可从原文件重新解析（可改切分参数并先服务端预览，
+  确认后替换全部分段、覆盖人工编辑与启停），并可按库选配或解绑 Reranker
+  模型（保存即生效，无需重建）；Agent `knowledge_search` 引用返回 64KiB
+  预算内的完整原文正文（超出以 `omitted_count` 记数），会话中的
+  最终回答下方展示知识库引用；管理员在 `/admin/settings/models` 的检索模型注册表
+  维护模型提供商及其 Embedding 与 Reranker 模型并做连接测试。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
   System Runtime Policy v6 在系统设置中分别配置主 Agent 每 Run 与每个 Sub-Agent Task 的
@@ -198,7 +241,10 @@ make setup
 ### 初始化数据库
 
 为一个新的空 PostgreSQL 目标配置 `DATABASE_URL`、`POSTGRES_ADMIN_URL`、
-`ACT_WEAVE_SECRET_KEY` 和 `ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY`，然后运行：
+`ACT_WEAVE_SECRET_KEY` 和 `ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY`，并为
+检索模型注册表 seed 提供 `ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY`
+（SiliconFlow；不使用 Knowledge 的部署可改设
+`ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP=1` 显式跳过），然后运行：
 
 ```bash
 make setup-db
@@ -282,7 +328,7 @@ DeepSeek 与 DeepSeek 兼容增强适配器的思考强度只提供 `low`、`hig
 MiMo、MiniMax、StepFun、MindIE、Claude Code CLI
 和 Codex CLI 模型适配器已停止支持，不再允许新建、启用、设为默认或准入新 Run；已有
 历史目录记录仍可由管理员查看并改配到受支持适配器。全新数据库只初始化
-三个 `patched_deepseek` 模型配置：`deepseek-v4-flash`、`deepseek-v4-pro` 和
+三个 `deepseek` 模型配置：`deepseek-v4-flash`、`deepseek-v4-pro` 和
 `deepseek-v4-flash-vision-exp`。Flash 是默认 System Model；Vision Exp 是默认
 Vision Bridge；三者的必填最大输入上限均初始化为 `1,000,000` tokens，独立于
 `settings.max_tokens=51,200` 的输出上限。管理员新建、更新或测试 System Model 时必须

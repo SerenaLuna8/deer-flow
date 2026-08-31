@@ -2368,6 +2368,11 @@ async def test_retention_commit_revalidates_lease_after_scope_lock_wait(
         handler._clock = lambda: datetime.now(UTC) - timedelta(days=1)
         handler._retry_initial_seconds = 2
         handler._retry_max_seconds = 300
+
+        async def knowledge_already_clean(_project_id: uuid.UUID) -> bool:
+            return True
+
+        handler._knowledge_purge = knowledge_already_clean
         settlement = await handler(claim, object())
 
         async with seed.factory() as blocker, blocker.begin():

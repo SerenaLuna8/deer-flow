@@ -66,7 +66,7 @@ def _model_update(
 ) -> UpdateSystemModel:
     return UpdateSystemModel(
         display_name=display_name,
-        provider_adapter="patched_deepseek",
+        provider_adapter="deepseek",
         provider_model="deepseek-v4-flash",
         max_input_tokens=64_000,
         settings={"base_url": base_url},
@@ -110,7 +110,7 @@ async def test_system_model_update_keeps_json_settings_and_checksum_atomic(
             CreateSystemModel(
                 display_name="DeepSeek numeric settings",
                 status="active",
-                provider_adapter="patched_deepseek",
+                provider_adapter="deepseek",
                 provider_model="deepseek-v4-flash",
                 max_input_tokens=64_000,
                 settings={
@@ -129,7 +129,7 @@ async def test_system_model_update_keeps_json_settings_and_checksum_atomic(
             created.id,
             UpdateSystemModel(
                 display_name="DeepSeek numeric settings",
-                provider_adapter="patched_deepseek",
+                provider_adapter="deepseek",
                 provider_model="deepseek-v4-flash",
                 max_input_tokens=64_000,
                 settings={
@@ -189,7 +189,7 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
             CreateSystemModel(
                 display_name="DeepSeek unready",
                 status="active",
-                provider_adapter="patched_deepseek",
+                provider_adapter="deepseek",
                 provider_model="deepseek-v4-pro",
                 max_input_tokens=64_000,
                 settings={"base_url": "https://api.deepseek.com"},
@@ -222,7 +222,7 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
             CreateSystemModel(
                 display_name="DeepSeek lifecycle",
                 status="active",
-                provider_adapter="patched_deepseek",
+                provider_adapter="deepseek",
                 provider_model="deepseek-v4-flash",
                 max_input_tokens=64_000,
                 settings={"base_url": "https://api.deepseek.com"},
@@ -253,7 +253,7 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
             assert first_secret.encode() not in bytes(first_generation.ciphertext)
 
         with monkeypatch.context() as retired_adapter:
-            retired_adapter.delitem(PROVIDER_ADAPTERS, "patched_deepseek")
+            retired_adapter.delitem(PROVIDER_ADAPTERS, "deepseek")
             async with seed.factory() as session:
                 assert (
                     await SystemModelRepository(

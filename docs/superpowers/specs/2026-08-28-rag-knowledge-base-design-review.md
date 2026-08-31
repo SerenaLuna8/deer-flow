@@ -54,7 +54,7 @@ knowledge_tasks
 - Document 直接持有 MinIO object key 和切分参数；
 - Segment 直接持有正文、来源位置和 embedding；
 - 一条 Knowledge Model Configuration 同时保存 Base URL、Embedding model/dimension/batch、Reranker model 和二者共用的当前加密 API Key；
-- `knowledge_tasks` 单行保存任务状态、claim、lease、目标 Document version 和重试计数，是 Knowledge 后台任务的唯一持久状态；
+- `knowledge_tasks` 单行保存任务状态、claim、lease、目标 Document version、晚到对象的精确 storage key 和重试计数，是 Knowledge 后台任务的唯一持久状态；
 - 当前 API Key 的 nonce/ciphertext 由模型配置行持有，宿主 Adapter 只负责加解密；
 - Project 删除前调用 Package `purge_project`。
 
@@ -134,7 +134,13 @@ knowledge_tasks
 ### 已冻结的实施基线
 
 - MinIO 是唯一持久文件存储；Gateway 请求 Path 和 Worker 任务 Path 只在单次操作中存在，并在成功、失败或取消后清理；
-- 官方同步 MinIO client、临时文件 I/O 和同步 parser 统一通过 `asyncio.to_thread` 执行；
+- 官方同步 MinIO client、临时文件 I/O 和同步 parser 统一通过基于
+  `asyncio.to_thread` 的 cancellation-settling adapter 执行；取消后等待已启动调用结束；
+- 文件上传强制单 PUT，默认值和配置硬上限均为 50 MiB；每个对象存储实例串行 PUT，
+  约束 MinIO SDK 的整 part 内存峰值，并避免 crash 遗留普通对象 list/delete 无法发现的
+  incomplete multipart upload；
+- MinIO bucket 必须关闭 versioning/Object Lock；启动与删除路径用
+  `GetBucketVersioning` 失败关闭，避免 delete marker 被误判为物理清理；
 - Knowledge TaskWorker 复用现有 `app.worker` 进程和 stop event；生产/开发 Compose 只透传外部 MinIO 连接配置，不创建新的 MinIO 服务。
 - 本机 MinIO 的 S3 API 是 `127.0.0.1:9000`，`http://127.0.0.1:9001` 只用于 Console；bucket 由管理员预先创建，容器运行时改用 Gateway/Worker 均可达的 S3 API 地址。
 - 空库安装由代码 bootstrap 写入一条固定的 SiliconFlow Qwen3-VL Embedding + Reranker 配置；SQL 不写模型 seed 或明文密钥，初始化不调用外部 Provider。

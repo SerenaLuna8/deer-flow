@@ -84,7 +84,7 @@ from deerflow.runtime.context_keys import RuntimeContextKeys
 
 logger = logging.getLogger(__name__)
 
-PROVIDER_REQUEST_ESTIMATOR_REVISION = "provider-wire-engineering-v6"
+PROVIDER_REQUEST_ESTIMATOR_REVISION = "provider-wire-engineering-v7"
 PROVIDER_REQUEST_ERROR_CONTRACT = "versioned_engineering_allowance_for_app_owned_serialized_material_plus_declared_provider_overhead"
 _SERIALIZATION_FRAMING_UTF8_BYTES = 1_024
 _ESTIMATE_UTF8_BYTES_PER_TOKEN = 4
@@ -98,9 +98,6 @@ _PROVIDER_OVERHEAD: dict[str, tuple[int, int, int]] = {
     "deepseek": (256, 32, 96),
     "openai": (256, 32, 96),
     "openai_responses": (256, 32, 96),
-    "patched_deepseek": (256, 32, 96),
-    "patched_openai": (256, 32, 96),
-    "patched_openai_responses": (256, 32, 96),
     "vllm": (256, 32, 96),
 }
 _PROVIDER_ERROR_ALLOWANCE_RATIO: dict[str, float] = {
@@ -108,9 +105,6 @@ _PROVIDER_ERROR_ALLOWANCE_RATIO: dict[str, float] = {
     "deepseek": 0.20,
     "openai": 0.20,
     "openai_responses": 0.20,
-    "patched_deepseek": 0.20,
-    "patched_openai": 0.20,
-    "patched_openai_responses": 0.20,
     "vllm": 0.25,
 }
 # Declared per-image Token upper bounds for adapters whose providers cap or
@@ -124,8 +118,6 @@ _PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE: dict[str, int] = {
     "anthropic": 1_600,
     "openai": 2_048,
     "openai_responses": 2_048,
-    "patched_openai": 2_048,
-    "patched_openai_responses": 2_048,
 }
 # Mirrors ViewImageMiddleware._MAX_CURRENT_UPLOAD_IMAGES; a focused test keeps
 # the two values synchronized without importing the middleware (and its PIL
@@ -140,10 +132,8 @@ _VISION_CONTEXT_PER_IMAGE_UTF8_BYTES = 512
 _VISUAL_BLOCK_TYPES = frozenset({"image", "image_url", "input_image"})
 _PROVIDER_CLASS_TO_ADAPTER = {
     "langchain_anthropic:ChatAnthropic": "anthropic",
-    "langchain_deepseek:ChatDeepSeek": "deepseek",
+    "deerflow.models.patched_deepseek:PatchedChatDeepSeek": "deepseek",
     "langchain_openai:ChatOpenAI": "openai",
-    "deerflow.models.patched_deepseek:PatchedChatDeepSeek": "patched_deepseek",
-    "deerflow.models.patched_openai:PatchedChatOpenAI": "patched_openai",
     "deerflow.models.vllm_provider:VllmChatModel": "vllm",
 }
 
@@ -798,8 +788,11 @@ def resolve_provider_adapter(
     model: object | None = None,
 ) -> str | None:
     resolved = provider_adapter if provider_adapter in _PROVIDER_OVERHEAD else _PROVIDER_CLASS_TO_ADAPTER.get(provider_class_path or "")
-    if getattr(model, "use_responses_api", None) is True and resolved in {"openai", "patched_openai"}:
-        return f"{resolved}_responses"
+    # ``openai_responses`` shares the native ChatOpenAI class, so a class-path
+    # fallback lands on "openai"; the pinned protocol switch on the instance
+    # is the proof that the request speaks the Responses wire.
+    if getattr(model, "use_responses_api", None) is True and resolved == "openai":
+        return "openai_responses"
     return resolved
 
 

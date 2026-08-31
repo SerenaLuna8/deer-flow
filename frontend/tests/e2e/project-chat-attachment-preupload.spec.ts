@@ -2476,6 +2476,120 @@ test("deduplicates live and durable Run-control progress across refresh", async 
   expect(requests.unexpectedRequests).toEqual([]);
 });
 
+test("renders knowledge citations under the final answer and restores them after refresh", async ({
+  page,
+}) => {
+  const finalAnswer = "KNOWLEDGE_CITED_FINAL_ANSWER";
+  const knowledgeCitations = [
+    {
+      knowledge_base_id: "40000000-0000-4000-8000-000000000021",
+      knowledge_base_name: "产品手册",
+      document_id: "50000000-0000-4000-8000-000000000021",
+      document_name: "发布说明.pdf",
+      segment_id: "60000000-0000-4000-8000-000000000021",
+      segment_position: 7,
+      snippet: "发布前需要完成回归测试与变更评审。",
+      score: 0.93,
+      source_position: { page: 7 },
+    },
+    {
+      knowledge_base_id: "40000000-0000-4000-8000-000000000021",
+      knowledge_base_name: "产品手册",
+      document_id: "50000000-0000-4000-8000-000000000022",
+      document_name: "运维守则.md",
+      segment_id: "60000000-0000-4000-8000-000000000022",
+      segment_position: 2,
+      snippet: "发布窗口固定在每周四凌晨。",
+      score: 0.41,
+      source_position: { row: 12 },
+    },
+  ] as const;
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    liveValuesMessages: [
+      {
+        id: "human-knowledge-citations",
+        type: "human",
+        content: "发布流程有哪些步骤？",
+        additional_kwargs: { run_id: RUN_ID },
+      },
+      {
+        id: "ai-knowledge-search",
+        type: "ai",
+        content: "",
+        additional_kwargs: { run_id: RUN_ID },
+        tool_calls: [
+          {
+            id: "call-knowledge-search",
+            name: "knowledge_search",
+            args: { query: "发布流程" },
+          },
+        ],
+      },
+      {
+        id: "tool-knowledge-search",
+        type: "tool",
+        name: "knowledge_search",
+        tool_call_id: "call-knowledge-search",
+        content:
+          "[1] 产品手册 / 发布说明.pdf\n发布前需要完成回归测试与变更评审。",
+        additional_kwargs: {
+          run_id: RUN_ID,
+          knowledge_citations: knowledgeCitations,
+        },
+      },
+      {
+        id: "ai-knowledge-final",
+        type: "ai",
+        content: finalAnswer,
+        additional_kwargs: { run_id: RUN_ID },
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("发布流程有哪些步骤？");
+  await composer.press("Enter");
+  await expect.poll(requests.runPostCount).toBe(1);
+  await expect(page.getByText(finalAnswer, { exact: true })).toBeVisible();
+
+  // The projection attaches the ToolMessage's citations to the Run's final AI
+  // text message, so the panel must mount inside that same assistant turn.
+  const finalTurn = page
+    .locator('[data-assistant-turn=""]')
+    .filter({ hasText: finalAnswer });
+  const panel = finalTurn.getByTestId("knowledge-citations-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("Cited 2 knowledge sources");
+  await panel.locator("summary").click();
+  await expect(panel.getByRole("listitem")).toHaveCount(2);
+  const firstCitation = panel.getByRole("listitem").first();
+  await expect(firstCitation).toContainText("发布说明.pdf");
+  await expect(firstCitation).toContainText("Retrieval score 0.930");
+  await expect(firstCitation).toContainText("Segment #7");
+  await expect(firstCitation).toContainText("Page 7");
+  await expect(panel.getByRole("listitem").nth(1)).toContainText(
+    "运维守则.md",
+  );
+
+  // After a refresh the live stream is gone; the durable Run messages must
+  // restore the same citations from additional_kwargs.
+  await page.reload();
+  await expect(page.getByText(finalAnswer, { exact: true })).toBeVisible();
+  const replayedPanel = page.getByTestId("knowledge-citations-panel");
+  await expect(replayedPanel).toBeVisible();
+  await expect(replayedPanel).toContainText("Cited 2 knowledge sources");
+  await replayedPanel.locator("summary").click();
+  await expect(replayedPanel.getByRole("listitem")).toHaveCount(2);
+  await expect(replayedPanel.getByRole("listitem").first()).toContainText(
+    "发布说明.pdf",
+  );
+  expect(requests.unexpectedRequests).toEqual([]);
+});
+
 test("keeps a specific terminal failure authoritative after a tool budget receipt", async ({
   page,
 }) => {

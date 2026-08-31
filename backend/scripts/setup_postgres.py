@@ -20,6 +20,15 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.model_registry.bootstrap import (
+    ModelRegistryBootstrapConfigurationInvalid,
+    ModelRegistryBootstrapConflict,
+    ModelRegistryBootstrapSkipped,
+    ModelRegistryBootstrapStorageUnavailable,
+    ModelRegistrySeed,
+    bootstrap_default_model_registry,
+    prepare_model_registry_bootstrap,
+)
 from app.projects.errors import ProjectBootstrapFailed
 from app.system_runtime_settings.bootstrap import (
     SystemRuntimePolicyBootstrapConflict,
@@ -476,12 +485,14 @@ async def _bootstrap_existing(
     database_url: str,
     *,
     default_model_bootstrap: (DefaultSystemModelBootstrapMaterial | None) = None,
+    model_registry_bootstrap: (ModelRegistrySeed | ModelRegistryBootstrapSkipped | None) = None,
 ) -> str:
     try:
         async with _complete_bootstrap_lock(database_url):
             return await _bootstrap_empty_schema_under_lock(
                 database_url,
                 default_model_bootstrap=default_model_bootstrap,
+                model_registry_bootstrap=model_registry_bootstrap,
             )
     except PostgresSetupError:
         raise
@@ -493,6 +504,7 @@ async def _bootstrap_empty_schema_under_lock(
     database_url: str,
     *,
     default_model_bootstrap: (DefaultSystemModelBootstrapMaterial | None) = None,
+    model_registry_bootstrap: (ModelRegistrySeed | ModelRegistryBootstrapSkipped | None) = None,
     force_public_schema: bool = False,
 ) -> str:
     """Initialize an empty target while the caller owns the bootstrap lock."""
@@ -517,6 +529,8 @@ async def _bootstrap_empty_schema_under_lock(
         )
         bootstrap_stage = "runtime_policies"
         await _bootstrap_runtime_policy_schema(engine)
+        bootstrap_stage = "model_registry"
+        await _bootstrap_model_registry_schema(engine, model_registry_bootstrap)
         bootstrap_stage = "langgraph"
         if force_public_schema:
             await _bootstrap_langgraph_schemas(
@@ -538,6 +552,8 @@ async def _bootstrap_empty_schema_under_lock(
         DefaultSystemModelBootstrapStorageUnavailable,
         SystemRuntimePolicyBootstrapConflict,
         SystemRuntimePolicyBootstrapStorageUnavailable,
+        ModelRegistryBootstrapConflict,
+        ModelRegistryBootstrapStorageUnavailable,
     ) as exc:
         primary_error = exc
         raise PostgresSetupError(str(exc)) from None
@@ -606,6 +622,63 @@ async def _bootstrap_runtime_policy_schema(engine: AsyncEngine) -> None:
     )
 
 
+async def _bootstrap_model_registry_schema(
+    engine: AsyncEngine,
+    seed: ModelRegistrySeed | ModelRegistryBootstrapSkipped | None,
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    if seed is None:
+        # A programming error in the caller, not a storage conflict: every
+        # empty-schema bootstrap must have prepared the seed during preflight.
+        raise PostgresSetupError("MODEL_REGISTRY_BOOTSTRAP_SEED_MISSING: 空库初始化缺少模型注册表预检材料")
+    if isinstance(seed, ModelRegistryBootstrapSkipped):
+        # Explicit operator decision (ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP=1):
+        # the registry and knowledge tables install with Schema V1, only the
+        # seeded default Provider and its models are omitted.
+        return
+    await bootstrap_default_model_registry(
+        async_sessionmaker(engine, expire_on_commit=False),
+        seed,
+    )
+
+
+async def _ensure_vector_extension(admin_url: str, database_name: str) -> None:
+    """Install ``public.vector`` in the target database with admin authority.
+
+    The Knowledge tables require the pgvector extension type. Installing the
+    extension is an administrator preparation step, never an application-role
+    or runtime responsibility, so it runs on the maintenance credentials
+    against the freshly ensured target database.
+    """
+
+    parse_target(admin_url, maintenance=True)
+    database_name = validate_identifier(database_name, kind="database")
+    target_url = make_url(_asyncpg_url(admin_url)).set(database=database_name).render_as_string(hide_password=False)
+    connection = None
+    lock_acquired = False
+    try:
+        connection = await asyncpg.connect(target_url)
+        # ``CREATE EXTENSION IF NOT EXISTS`` still races against a concurrent
+        # setup on catalog rows, so serialize concurrent installers first.
+        await connection.execute("SELECT pg_advisory_lock($1)", _SETUP_LOCK_KEY)
+        lock_acquired = True
+        await connection.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public")
+    except Exception:
+        raise PostgresSetupError("无法准备 pgvector 扩展；请确认 PostgreSQL 服务器已安装 pgvector 并且 POSTGRES_ADMIN_URL 具备安装扩展的权限") from None
+    finally:
+        if connection is not None:
+            if lock_acquired:
+                try:
+                    await connection.execute("SELECT pg_advisory_unlock($1)", _SETUP_LOCK_KEY)
+                except Exception:
+                    pass
+            try:
+                await connection.close()
+            except Exception:
+                pass
+
+
 async def setup_postgres(
     admin_url: str,
     database_url: str,
@@ -640,14 +713,20 @@ async def setup_postgres(
         default_model_bootstrap = prepare_default_system_model_bootstrap()
     except DefaultSystemModelBootstrapConfigurationInvalid as exc:
         raise PostgresSetupError(str(exc)) from None
+    try:
+        model_registry_bootstrap = prepare_model_registry_bootstrap()
+    except ModelRegistryBootstrapConfigurationInvalid as exc:
+        raise PostgresSetupError(str(exc)) from None
     created = await ensure_database(
         admin_url,
         target.database,
         owner_name=target.username,
     )
+    await _ensure_vector_extension(admin_url, target.database)
     revision = await _bootstrap_existing(
         database_url,
         default_model_bootstrap=default_model_bootstrap,
+        model_registry_bootstrap=model_registry_bootstrap,
     )
     return SetupResult(
         host=target.host,

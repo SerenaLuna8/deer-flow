@@ -3,6 +3,7 @@
 import { PencilIcon, PlusIcon, RefreshCwIcon, SearchIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { AdminModelRegistrySection } from "@/components/admin/settings/admin-model-registry-page";
 import {
   AdminPage,
   AdminPageHeader,
@@ -50,7 +51,7 @@ type EditorTarget = AdminModelItem | null;
 
 const MODEL_SETTINGS_COPY = {
   "en-US": {
-    pageTitle: "Model settings",
+    pageTitle: "Model management",
     sectionTitle: "System models",
     searchModels: "Search models",
     searchPlaceholder: "Search by name, provider, or model ID",
@@ -135,7 +136,7 @@ const MODEL_SETTINGS_COPY = {
     confirmClear: "Confirm clear",
   },
   "zh-CN": {
-    pageTitle: "模型配置",
+    pageTitle: "模型管理",
     sectionTitle: "系统模型",
     searchModels: "搜索模型",
     searchPlaceholder: "搜索名称、Provider 或模型 ID",
@@ -253,10 +254,9 @@ const BUILTIN_PROVIDER_SETTING_LABELS: Record<
     "en-US": "Reasoning effort",
     "zh-CN": "推理强度",
   },
-  output_version: { "en-US": "Output version", "zh-CN": "输出版本" },
-  use_responses_api: {
-    "en-US": "Use Responses API",
-    "zh-CN": "使用 Responses API",
+  reasoning_summary: {
+    "en-US": "Reasoning summary",
+    "zh-CN": "推理摘要",
   },
   cumulative_stream_usage: {
     "en-US": "Cumulative stream usage",
@@ -1187,6 +1187,7 @@ export function AdminModelSettingsPage() {
           </div>
         )}
       </AdminSection>
+      <AdminModelRegistrySection />
       {editorOpen && catalog.data ? (
         <ModelEditorDialog
           key={`${target?.id ?? "new"}:${target?.revision ?? 0}`}

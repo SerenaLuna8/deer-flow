@@ -62,7 +62,7 @@ const DEFAULT_NAVIGATION_LABELS: NavigationLabels = {
   audit: "Logs",
   assets: "Assets",
   systemSettings: "System settings",
-  settings: "Model settings",
+  settings: "Model management",
 };
 
 export const ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY =

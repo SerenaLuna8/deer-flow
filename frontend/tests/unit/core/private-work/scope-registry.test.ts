@@ -2,6 +2,7 @@ import { describe, expect, test, rs } from "@rstest/core";
 import { QueryClient } from "@tanstack/react-query";
 
 import { agentBuilderRootKey } from "@/core/agent-builder/query-keys";
+import { knowledgeRoot } from "@/core/knowledge/query-keys";
 import { privateWorkRoot } from "@/core/private-work/query-keys";
 import {
   clearProjectReconnectStorage,
@@ -218,6 +219,7 @@ describe("project private-work scope registry", () => {
       [...projectSharedAssetRoot(A_P1), "skills"],
       "old",
     );
+    queryClient.setQueryData([...knowledgeRoot(A_P1), "bases", "list"], "old");
     rs.spyOn(queryClient, "cancelQueries").mockImplementation(async () => {
       order.push("cancel");
     });
@@ -225,6 +227,7 @@ describe("project private-work scope registry", () => {
     await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
 
     expect(order).toEqual([
+      "cancel",
       "cancel",
       "cancel",
       "cancel",
@@ -249,6 +252,9 @@ describe("project private-work scope registry", () => {
     ).toBeUndefined();
     expect(
       queryClient.getQueryData([...projectSharedAssetRoot(A_P1), "skills"]),
+    ).toBeUndefined();
+    expect(
+      queryClient.getQueryData([...knowledgeRoot(A_P1), "bases", "list"]),
     ).toBeUndefined();
   });
 

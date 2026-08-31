@@ -2350,6 +2350,60 @@ class TestSerializeMessage:
         assert result["type"] == "tool"
         assert isinstance(result["content"], str)
 
+    def test_tool_message_serialization_keeps_additional_kwargs(self):
+        """Knowledge Citations ride ToolMessage.additional_kwargs on the values path."""
+        citations = [{"segment_id": "seg-1", "snippet": "量子比特", "score": 0.9}]
+        msg = ToolMessage(
+            content='{"items": []}',
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="knowledge_search",
+            additional_kwargs={"knowledge_citations": citations},
+        )
+        result = DeerFlowClient._serialize_message(msg)
+        assert result["additional_kwargs"]["knowledge_citations"] == citations
+
+
+class TestToolMessageEvent:
+    def test_event_preserves_additional_kwargs(self):
+        """Knowledge Citations survive the messages-tuple normalization."""
+        citations = [{"segment_id": "seg-1", "snippet": "量子比特", "score": 0.9}]
+        msg = ToolMessage(
+            content='{"items": []}',
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="knowledge_search",
+            additional_kwargs={"knowledge_citations": citations},
+        )
+        event = DeerFlowClient._tool_message_event(msg)
+        assert event.type == "messages-tuple"
+        assert event.data["type"] == "tool"
+        assert event.data["name"] == "knowledge_search"
+        assert event.data["tool_call_id"] == "tc-1"
+        assert event.data["additional_kwargs"]["knowledge_citations"] == citations
+
+    def test_event_omits_empty_additional_kwargs(self):
+        msg = ToolMessage(content="ok", id="tm-2", tool_call_id="tc-2", name="bash")
+        event = DeerFlowClient._tool_message_event(msg)
+        assert "additional_kwargs" not in event.data
+
+    def test_event_carries_error_status(self):
+        """Error ToolMessages stay distinguishable on the SDK facade stream."""
+        msg = ToolMessage(
+            content="Error: KNOWLEDGE_SEARCH_FAILED: 检索失败了",
+            id="tm-3",
+            tool_call_id="tc-3",
+            name="knowledge_search",
+            status="error",
+        )
+        event = DeerFlowClient._tool_message_event(msg)
+        assert event.data["status"] == "error"
+
+    def test_event_omits_status_for_successful_messages(self):
+        msg = ToolMessage(content="ok", id="tm-4", tool_call_id="tc-4", name="bash")
+        event = DeerFlowClient._tool_message_event(msg)
+        assert "status" not in event.data
+
 
 # ===========================================================================
 # Hardening — upload / delete symlink attack

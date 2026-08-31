@@ -22,7 +22,7 @@ _AGENT_MAX_TOKENS_PROVIDER_FIELDS = (
     "max_tokens",
     "max_output_tokens",
 )
-_DEEPSEEK_PROVIDER_ADAPTERS = frozenset({"deepseek", "patched_deepseek"})
+_DEEPSEEK_PROVIDER_ADAPTERS = frozenset({"deepseek"})
 _DEEPSEEK_RUNTIME_REASONING_EFFORTS = {
     "low": "low",
     "medium": "high",
@@ -449,6 +449,20 @@ def create_chat_model(
     if "stream_usage" not in model_settings_from_config and "stream_usage" not in kwargs:
         if "stream_usage" in getattr(model_class, "model_fields", {}):
             model_settings_from_config["stream_usage"] = True
+
+    # ``openai_responses`` authoring exposes the reasoning summary as its own
+    # enum field, but the Responses API accepts it only inside the single
+    # ``reasoning`` object. Fold the summary and the effective effort together
+    # and drop the flat keys: once ``reasoning`` is present the SDK no longer
+    # rewrites ``reasoning_effort``, and the endpoint rejects the flat spelling.
+    reasoning_summary = model_settings_from_config.pop("reasoning_summary", None)
+    if reasoning_summary is not None and model_settings_from_config.get("use_responses_api") is True:
+        catalog_reasoning_effort = model_settings_from_config.pop("reasoning_effort", None)
+        effective_reasoning_effort = kwargs.pop("reasoning_effort", catalog_reasoning_effort)
+        reasoning_payload: dict = {"summary": reasoning_summary}
+        if effective_reasoning_effort is not None:
+            reasoning_payload["effort"] = effective_reasoning_effort
+        model_settings_from_config["reasoning"] = reasoning_payload
 
     _warn_unknown_model_settings(model_class, name, model_settings_from_config)
 

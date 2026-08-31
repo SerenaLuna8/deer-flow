@@ -15,6 +15,7 @@ tests.
 | Schema or durable state          | PostgreSQL schema and persistence           |
 | Jobs, Runs, streams, files       | Jobs, Runs, streams, checkpoints, and files |
 | Agents, Skills, MCP, domain secrets | Governed assets                          |
+| Knowledge bases, RAG, retrieval  | Knowledge (optional RAG module)             |
 | Memory, audit, quota, retention  | Memory, audit, quota, and retention         |
 | Configuration, models, vision    | Configuration, models, and `inspect_image`  |
 | Implementation or verification   | Common change paths; Tests and code quality |
@@ -46,11 +47,18 @@ Run full-stack commands from the repository root and backend targets from
   contexts, and domain transactions.
 - `packages/harness/deerflow/<domain>/` owns reusable graph, runtime,
   persistence, sandbox, Skill, MCP, and subagent primitives.
+- `packages/knowledge/actweave_knowledge/` owns the self-contained RAG
+  Knowledge module; `app/knowledge/` owns its host adapters (config mapping,
+  Gateway routers, Worker handlers, Agent tool, authority seam, model port).
+  `app/model_registry/` owns the host-level retrieval Model Registry
+  (admin routes, provider/model service, provider-secret envelopes, and the
+  optional install-time default-provider bootstrap).
 - `scripts/` owns explicit Schema V1 setup and operator workflows.
 - `tests/` owns unit, PostgreSQL, process, and contract gates.
 
-The dependency direction is `app.* -> deerflow.*`; harness code must never
-import `app.*`.
+The dependency direction is `app.* -> deerflow.*` and
+`app.knowledge -> actweave_knowledge`; harness code must never import `app.*`,
+and `actweave_knowledge` must never import `app.*` or `deerflow.*`.
 
 ## Non-negotiable boundaries
 
@@ -458,6 +466,201 @@ recreated explicitly, never repaired in place.
   Snapshots keep their Definition payload; suspended Agents remain
   fail-closed, and an archived slug may be reused by a new Agent.
 
+### Knowledge (optional RAG module)
+
+- Knowledge is disabled by default and enabled only by the root `config.yaml`
+  `knowledge` block. The knowledge routes are always mounted but answer 404
+  `KNOWLEDGE_DISABLED` while the module is absent; a disabled module also means
+  the Worker registers no knowledge task handlers and no Run receives the
+  `knowledge_search` tool. The Worker's Project-retention cleanup capability is
+  composed independently and remains active while the feature is disabled.
+  If historical Document rows or a `delete_document_object` task not in
+  `succeeded` remain but MinIO configuration was removed, Project purge fails
+  closed and retries; operators must restore the original endpoint, bucket,
+  and credentials until those rows and objects are purged.
+  When enabled, Gateway and Worker startup verify the configured MinIO bucket
+  is reachable and unversioned; `Enabled`/`Suspended` versioning, Object Lock,
+  or missing `GetBucketVersioning` authority fail closed. The bucket is
+  administrator-provisioned and never auto-created. Members lacking a knowledge
+  capability receive 403 `KNOWLEDGE_FORBIDDEN`; outsiders and missing projects
+  collapse to 404.
+- `actweave_knowledge` stays host-agnostic: the host supplies engine, secret
+  cipher, and configuration through `app/knowledge/` adapters. Do not import
+  `app.*` or `deerflow.*` from the package.
+- The eight `knowledge_*` tables are ordinary Schema V1 members: ORM,
+  `full_schema.sql`, catalog digest, Chinese comments, and schema tests change
+  together, and `public.vector` (pgvector) must exist before install.
+  PostgreSQL owns all metadata, task, and segment authority; MinIO owns only
+  document bytes, keyed by database-issued storage keys.
+- Embedding/Reranker model configurations are PostgreSQL-administered with
+  independently encrypted API keys (shared secret-envelope infrastructure).
+  Keys are write-only through the admin API and never appear in responses,
+  logs, or the browser; a configuration referenced by knowledge bases cannot
+  be disabled or deleted. Admin routes require `system_admin`; project routes
+  require membership plus `shared_assets.read` for reads and
+  `shared_assets.edit` for writes; the search API and Agent tool return only
+  segments of the caller's project.
+- Ingestion, document deletion, base deletion, and exact-key orphan cleanup run
+  as `knowledge_tasks` claimed by the Worker under lease semantics. Project
+  purge is a separate retention hook that stays composed when Knowledge is
+  disabled. Extraction
+  covers PDF, DOCX, TXT, MD, CSV, XLSX, HTML, PPTX, and EPUB (source
+  positions mark page/paragraph/row/slide/chapter) and enforces a total
+  character budget and archive pre-checks. Splitting is
+  recursive-separator based: the user separator (escaped form, default
+  `\n\n`) leads a fixed fallback sequence, optional pre-processing rules
+  (`remove_extra_spaces`, `remove_urls_emails`) clean text before splitting,
+  and all chunk parameters freeze on the document row at upload so retry
+  reuses them. The `parent_child` chunking mode second-splits each parent
+  into `knowledge_segment_children` rows: only children carry embeddings
+  (parent rows store NULL), publish is single-transaction and
+  version-checked, and segment governance re-splits children on edit/add.
+  Chunk preview runs synchronously in the Gateway through the
+  same extract→clean→split path (stateless, no rows, no queue, temp file
+  removed per request) and nests child contents in parent_child mode. The
+  per-document vector-entry budget also applies to manual Segment create/edit:
+  general counts parent Segment rows and parent_child counts child rows, with a
+  pre-Embedding check plus a final check under the Document lock. Deletion
+  removes MinIO objects before releasing database rows and records
+  `delete_error` for operator-visible retry. A late upload put whose row was
+  already removed receives a durable `delete_document_object` task carrying the
+  exact server-issued storage key. When its Base still exists, cleanup also
+  recreates a `deleting` Document tombstone so terminal failure remains visible
+  and the normal user delete action can retry it. The exact-key handler validates
+  Project/Document scope before deleting; final Project retention still sweeps
+  the entire trusted Project prefix as a fallback. A recent `uploading` row
+  defers Project purge without touching storage or rows. An upload older than
+  the one-day settlement grace is first converted to `deleting` plus exact-key
+  cleanup and only a later retention attempt may delete it. PostgreSQL time is
+  authoritative; one day is well above normal MinIO transfer/retry settlement
+  and well below the fixed 30-day Project retention window.
+  Project deletion admission also fences Knowledge execution: after claiming,
+  the Worker checks Project `active` state under the same transaction and a
+  Project share lock. A pending-deletion claim returns to `retry_wait` for 60
+  seconds without spending an attempt, so restore resumes it automatically and
+  no handler starts during the retention window. Before destructive Project
+  cleanup, the purger recovers expired claims and locks every Project open Task;
+  a live `running` Task defers the attempt, while `queued|retry_wait` rows are
+  removed before objects or relationship rows.
+  Knowledge supports only an unversioned MinIO bucket: startup health, every
+  upload immediately before its PUT, and every destructive storage path require
+  bucket versioning to be absent/`Off`. `Enabled` and `Suspended` (and therefore
+  Object Lock) fail closed. Credentials must allow object get/put/delete,
+  `GetBucketVersioning`, and listing the configured Knowledge prefix.
+  Every accepted upload is hard-capped at 50 MiB and `fput_object` is forced to
+  one PUT. Because the MinIO Python SDK buffers that part in process memory,
+  each `MinioObjectStore` has exactly one upload slot. Do not raise the cap,
+  remove the slot, or re-enable multipart upload: an interrupted multipart
+  session is not returned by ordinary `list_objects`/`remove_object` cleanup
+  and would invalidate Project-purge evidence.
+  Worker timeout cancellation joins any already-started
+  parser or MinIO SDK call before releasing the claim, stopping cleanup and
+  retry from overlapping that work; a synchronous call that never returns can
+  therefore exceed the nominal timeout and requires process recovery rather
+  than an unsafe concurrent retry.
+- Segment and document governance runs synchronously in the Gateway: document
+  rename and batch enable/disable/delete (all-or-nothing, bounded batch), plus
+  segment edit/add/toggle/delete on `ready` documents. Content edits and
+  manual additions re-embed with the base's model configuration before the
+  write transaction, which re-checks the document version and answers
+  `KNOWLEDGE_CONFLICT` when a re-ingest or delete won the race. A disabled
+  document or segment is excluded from retrieval candidates without touching
+  its vectors; `word_count` tracks segment characters and aggregates onto the
+  document row.   Per-base metadata field definitions
+  (`knowledge_metadata_fields`, string/number/time) validate typed values
+  written into `knowledge_documents.doc_metadata` (JSONB, GIN-indexed);
+  field rename and delete rewrite document keys in the same transaction.
+  Batch metadata assignment (`PATCH .../documents/metadata`) writes only the
+  explicitly submitted fields across the selection in one all-or-nothing
+  transaction; field discovery (`GET .../filter-fields`) returns builtin and
+  custom definitions with `field_kind`, and the read-only
+  `knowledge_metadata_fields` Agent tool returns definitions only, never
+  values. Reprocessing is two explicit entry points with distinct
+  preservation contracts: base rebuild (re-embed) rebinds the embedding
+  Provider Model and queues `reembed_document` tasks for published documents
+  only (admission reports accepted/skipped counts) — the handler is
+  constructed without extractor or object-store access, keeps Segment
+  UUIDs/text/positions/enabled states/manual edits, regenerates vectors, and
+  flips the whole generation in one version-checked publish; document reparse
+  (`POST .../reparse-preview` + `POST .../reparse`) re-splits the stored
+  original file with edited parameters under an `expected_version` CAS,
+  freezes the parameters on the task, writes them back to the document row on
+  publish, and replaces every segment row (manual edits and disables are
+  overwritten). Retry inherits the latest indexing task's kind and frozen
+  reparse settings. Indexing tasks record real progress (stage, verified
+  batch counts, attempt) that projects to the API only for the current
+  document generation; ingest and reembed embedding loops re-check authority
+  before every provider batch so lease loss or revocation stops undispatched
+  work.
+- Every Project-facing Knowledge read carries the server-issued Project
+  authority into the transaction that reads bases, metadata, Documents,
+  Segments, or query history; request-admission context alone is never read
+  authority. Model options come from the host model registry, not from a
+  Knowledge-owned table. Health probes revalidate before and after external
+  storage I/O. Document download revalidates in a fresh transaction after the
+  MinIO copy and before the Gateway can return the staged file.
+- Retrieval recalls with pgvector exact cosine similarity, grouping bases by
+  their `(embedding model, reranker model)` pair. A group with a reranker
+  scores every recalled candidate and its `[0,1]` relevance score is the
+  final score; a reranker failure fails the search rather than silently
+  degrading to cosine order. A rerank-free group keeps raw cosine similarity
+  (`[-1,1]`) as the final score.
+  Recall merges two paths: general segments carry their own vectors;
+  parent_child documents recall through child chunks whose best score rolls
+  up to the parent (one candidate per parent, deduplicated). `top_k` and
+  `score_threshold` omitted by the caller resolve from the per-base defaults
+  stored on `knowledge_bases`. Optional `metadata_filters`
+  (eq/contains/gte/lte against defined fields, AND-combined, max 10) gate
+  both recall paths and are validated against the base's field definitions
+  before SQL.
+  Per-base candidate budgeting caps every base at
+  `C = min(min(100, max(20, 5*top_k)), floor(400/N))` for N target bases and
+  rejects the search when `C < 1`. Final ordering is three-branch: one shared
+  non-null reranker (or no reranker anywhere with one shared embedding) keeps
+  native ordering and native `citation.score`; heterogeneous score domains
+  rank-fuse with `61/2 × 1/(60+domain_rank)` over per-domain shared ranks
+  (ties broken only by stable identity, never fabricated score deltas), and
+  `score_kind` (`cosine|rerank|rank_fusion`) plus `local_score` preserve the
+  native evidence. Base `retrieval_mode` (`semantic|hybrid`, request-level
+  override never persists) adds a `lexical_v1` path for hybrid bases:
+  deterministic tokenizer (Chinese bigrams, ASCII terms, business identifier
+  and IP rules, byte caps) over PostgreSQL `tsvector`/GIN, per-base RRF merge
+  (k=60) of the lexical and vector paths before the C cut, >128 deduplicated
+  query tokens rejected explicitly, and any in-scope row with a stale
+  `lexical_version` failing with `KNOWLEDGE_CONFLICT` instead of silently
+  degrading. Lexical columns are maintained in the same transaction as every
+  content write (publish, reparse, segment edit/add, child re-split);
+  re-embedding leaves them byte-identical. The search snapshots each base's
+  model bindings and re-verifies them before provider dispatch and at the
+  final review — a mid-search rebind is a `KNOWLEDGE_CONFLICT`, and the final
+  unified review drops stale candidates while backfilling true
+  `matched_children`. Request-level `debug` returns safe diagnostics only in
+  that response (strategy, budgets, real counts, monotonic timings, model
+  ids, per-hit local scores, four-valued `empty_reason`; never segment text).
+  Citations carry `document_version`/`content_digest` plus `score_kind`; the
+  segment detail endpoint pages children and answers `KNOWLEDGE_CONFLICT`
+  when the caller's expected version/digest drifted. The agent tool packs
+  full passages under a 64 KiB UTF-8 JSON budget with `omitted_count`. Every completed search with searchable bases appends a
+  `knowledge_queries` row bound to the trusted `project_id + owner_user_id`
+  (source `agent` or `retrieval_test`); recent-query reads return only that
+  actor's raw query text. Query text follows owner-private retention:
+  former-owner and account Phase B delete only the exact Project/owner rows
+  while retaining Project-shared Knowledge; final Project retention deletes
+  every owner's query rows with the rest of that Project's Knowledge. Query-
+  history and hit-counter database faults remain best-effort. Search
+  revalidates before every per-group query embedding, after each
+  embedding inside the exact recall transaction, again immediately before
+  sending Segment text to the Reranker, and finally after Provider work;
+  revocation thus suppresses later Provider spend, Segment disclosure, query
+  logging, hit updates, and already-computed citations at the applicable
+  boundary. The
+  `knowledge_search` tool binds `project_id` and owner from the Run context
+  (never model arguments) and persists citations in the ToolMessage's
+  `additional_kwargs.knowledge_citations`, which stream, values, and journal
+  paths all preserve for replay.
+- Knowledge tests live under `backend/tests/knowledge/` and require the
+  development PostgreSQL plus local MinIO from the root `.env`.
+
 ### Memory, audit, quota, and retention
 
 - PostgreSQL is the only project Memory authority. Every document, history row,
@@ -583,10 +786,11 @@ materialization applies platform defaults with explicit model settings taking
 precedence; do not invent Provider defaults or expose raw JSON authoring for
 structured compatibility settings.
 
-The `openai`, `patched_openai`, and `vllm` adapter forms expose reasoning-effort
-choices in this order: `none`, `low`, `medium`, `high`, `xhigh`, and `max`.
+The `openai`, `openai_responses`, and `vllm` adapter forms expose
+reasoning-effort choices in this order: `none`, `low`, `medium`, `high`,
+`xhigh`, and `max`.
 
-The `deepseek` and `patched_deepseek` adapters expose only DeepSeek's
+The `deepseek` adapter exposes only DeepSeek's
 provider-native `low`, `high`, and `max` reasoning-effort settings. Per-Run
 product modes remain canonical: the Worker translates `thinking` to `low`,
 `pro` to `high`, and `ultra` to `max`; `flash` uses the configured
@@ -594,7 +798,15 @@ thinking-disabled payload and does not forward a reasoning-effort value.
 
 #### Model adapters and `inspect_image`
 
-The authorable System Model adapter allowlist is intentionally narrow. Retired
+The authorable System Model adapter allowlist is intentionally narrow:
+`anthropic`, `deepseek`, `openai`, `openai_responses`, and `vllm`. `openai`
+and `openai_responses` are two fixed protocol entries sharing the native
+ChatOpenAI implementation — `openai` pins Chat Completions and
+`openai_responses` pins the Responses API; the wire protocol is decided by
+the adapter identity, never by a user-editable switch. `deepseek` is the
+single DeepSeek entry and points at the reasoning-replay implementation
+class. The `patched_openai` and `patched_deepseek` adapter identities are
+retired and not accepted as aliases. Retired
 adapter rows may remain admin-readable for remediation, but they must not be
 reactivated, made default, exposed in the public model catalog, or admitted to
 a new Run snapshot.

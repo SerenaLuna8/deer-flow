@@ -107,16 +107,24 @@ _Avoid_: Backup, lifecycle archive
 ## Knowledge assets
 
 **Knowledge Base**:
-A Project-shared collection of Knowledge Documents that selects one Knowledge Model Configuration for indexing and search.
+A Project-shared collection of Knowledge Documents that binds one embedding Provider Model for indexing and search, and optionally one reranker Provider Model for result ordering.
 _Avoid_: Dataset, vector table
 
 **Knowledge Document**:
-A source file uploaded to one Knowledge Base. It owns the stored file location, processing status, segments, and embeddings.
+A source file uploaded to one Knowledge Base. It owns the stored file location, processing status, metadata values, segments, and embeddings.
 _Avoid_: Source Blob, upload row
 
 **Knowledge Segment**:
 A stable, ordered text chunk derived from one version of a Knowledge Document.
 _Avoid_: random chunk
+
+**Knowledge Segment Child**:
+A finer-grained chunk derived from one Knowledge Segment in parent-child mode. Children carry the vectors used for recall; a hit rolls up to its parent Segment for reranking and citation.
+_Avoid_: child segment, sub-document
+
+**Knowledge Metadata Field**:
+A Knowledge Base–scoped custom field definition typed as string, number, or time. Knowledge Documents hold typed values for these fields, and retrieval filters on them.
+_Avoid_: tag, label, free-form attribute
 
 **Knowledge Task**:
 A durable background work item for document ingestion or deletion.
@@ -126,9 +134,17 @@ _Avoid_: Run, Job, fire-and-forget background task
 A reference to the Knowledge Base, Knowledge Document, and Knowledge Segment that supplied one search result.
 _Avoid_: complete source document
 
-**Knowledge Model Configuration**:
-A platform-administered retrieval profile that binds one Embedding model and one Reranker model to the same provider endpoint and Configuration Secret. A Knowledge Base selects one Knowledge Model Configuration for indexing, candidate retrieval, and reranking. It is distinct from the System Model Configuration used for Agent model execution.
-_Avoid_: System Model Configuration, embedding provider row, reranker provider row
+**Knowledge Query**:
+A logged retrieval request against a Project's Knowledge Bases, recording its source, result count, and top score for hit statistics.
+_Avoid_: chat message, Run
+
+**Model Provider**:
+A platform-administered retrieval-model vendor in the host model registry: a display name, an OpenAI-compatible endpoint, and one write-only API key held as its Configuration Secret. It owns Provider Models. It is not a System Model Configuration and carries no `provider_adapter`; those concepts belong to Agent model execution.
+_Avoid_: Knowledge Model Configuration, provider adapter, System Model Configuration
+
+**Provider Model**:
+One typed model under a Model Provider: embedding (with a fixed vector dimension) or reranker. A Knowledge Base binds exactly one embedding Provider Model — changed only through rebuild — and at most one reranker Provider Model, effective on save. A Provider Model referenced by any Knowledge Base is in use, and neither it nor its Model Provider can be disabled or deleted.
+_Avoid_: Knowledge Model Configuration, model configuration row
 
 ## Configuration secrets
 

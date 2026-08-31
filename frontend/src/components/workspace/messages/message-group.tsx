@@ -31,6 +31,8 @@ import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
   getReasoningDurationSeconds,
+  reasoningPresentationKind,
+  type ReasoningPresentationKind,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
@@ -270,6 +272,7 @@ export function MessageGroup({
           defaultOpen={defaultOpen}
           duration={step.reasoningDurationSeconds}
           isStreaming={isStreaming}
+          kind={step.reasoningKind}
           statusDetail={inlineThinkingToken}
         >
           <ThinkingDisclosureContent>
@@ -713,6 +716,7 @@ interface GenericCoTStep<T extends string = string> {
 
 interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
   reasoning: string | null;
+  reasoningKind: ReasoningPresentationKind;
   reasoningDurationSeconds?: number;
 }
 
@@ -744,6 +748,7 @@ function convertToSteps(
           messageId: message.id,
           type: "reasoning",
           reasoning,
+          reasoningKind: reasoningPresentationKind(message) ?? "full",
           reasoningDurationSeconds: getReasoningDurationSeconds(message),
         };
         steps.push(step);

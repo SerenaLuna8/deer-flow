@@ -52,8 +52,8 @@ const descriptor: AdminModelProviderAdapterDescriptor = {
       options: [],
     },
     {
-      name: "use_responses_api",
-      label: "Use Responses API",
+      name: "streaming_enabled",
+      label: "Streaming enabled",
       input_type: "boolean",
       advanced: true,
       form_control: "input",
@@ -111,7 +111,7 @@ describe("descriptor-driven admin model provider settings", () => {
     const draft = createAdminModelProviderSettingsDraft(descriptor, {
       max_tokens: 64_000,
       temperature: 0,
-      use_responses_api: false,
+      streaming_enabled: false,
       reasoning_effort: "high",
       extra_body: { reasoning: { effort: "high" } },
     });
@@ -120,7 +120,7 @@ describe("descriptor-driven admin model provider settings", () => {
       base_url: "https://provider.example.test/v1",
       max_tokens: "64000",
       temperature: "0",
-      use_responses_api: "false",
+      streaming_enabled: "false",
       reasoning_effort: "high",
       routing_label: "standard",
     });
@@ -139,14 +139,14 @@ describe("descriptor-driven admin model provider settings", () => {
     const saved = createAdminModelProviderSettingsDraft(descriptor, {
       max_tokens: 51_200,
       temperature: 0,
-      use_responses_api: false,
+      streaming_enabled: false,
       extra_body: { reasoning_format: "deepseek-style" },
     });
     expect(serializeAdminModelProviderSettingsDraft(descriptor, saved)).toEqual(
       {
         max_tokens: 51_200,
         temperature: 0,
-        use_responses_api: false,
+        streaming_enabled: false,
         extra_body: { reasoning_format: "deepseek-style" },
       },
     );
@@ -166,7 +166,7 @@ describe("descriptor-driven admin model provider settings", () => {
     );
     draft = updateAdminModelProviderSettingDraftValue(
       draft,
-      "use_responses_api",
+      "streaming_enabled",
       "true",
     );
     draft = updateAdminModelProviderSettingDraftValue(
@@ -178,7 +178,7 @@ describe("descriptor-driven admin model provider settings", () => {
       {
         max_tokens: 64_000,
         temperature: 0.25,
-        use_responses_api: true,
+        streaming_enabled: true,
         routing_label: "premium",
       },
     );
@@ -197,7 +197,7 @@ describe("descriptor-driven admin model provider settings", () => {
     expect(draft.values.temperature).toBe("");
     expect(serializeAdminModelProviderSettingsDraft(descriptor, draft)).toEqual(
       {
-        use_responses_api: true,
+        streaming_enabled: true,
         routing_label: "premium",
       },
     );

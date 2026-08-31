@@ -30,6 +30,7 @@ import {
   extractContentFromMessage,
   getReasoningDurationSeconds,
   extractReasoningContentFromMessage,
+  reasoningPresentationKind,
   getMessageCopyData,
   parseUploadedFiles,
   stripUploadedFilesTag,
@@ -44,9 +45,11 @@ import {
   resolveSlashSkillDisplay,
 } from "@/core/skills";
 import { SafeReasoningContent } from "@/core/streamdown/components";
+import { readKnowledgeCitations } from "@/core/threads/message-projection";
 import { cn } from "@/lib/utils";
 
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
+import { KnowledgeCitationsPanel } from "../citations/knowledge-citations-panel";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
@@ -298,6 +301,7 @@ function MessageContent_({
 
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
+  const reasoningKind = reasoningPresentationKind(message) ?? "full";
   const reasoningDuration = getReasoningDurationSeconds(message);
 
   const files = useMemo(() => {
@@ -329,6 +333,10 @@ function MessageContent_({
     () => (isHuman ? [] : extractCitationSources(contentToDisplay)),
     [contentToDisplay, isHuman],
   );
+  const knowledgeCitations = useMemo(
+    () => readKnowledgeCitations(message),
+    [message],
+  );
 
   const filesList =
     files && files.length > 0 ? (
@@ -358,6 +366,7 @@ function MessageContent_({
         <ThinkingDisclosure
           duration={reasoningDuration}
           isStreaming={isLoading}
+          kind={reasoningKind}
         >
           <SafeReasoningContent className="border-border/70 text-foreground/75 mt-2 ml-1.5 border-l py-1 pr-0 pl-5 leading-6">
             {reasoningContent}
@@ -455,6 +464,7 @@ function MessageContent_({
           className="mb-3"
           duration={reasoningDuration}
           isStreaming={isLoading}
+          kind={reasoningKind}
         >
           <SafeReasoningContent className="border-border/70 text-foreground/75 mt-2 ml-1.5 border-l py-1 pr-0 pl-5 leading-6">
             {reasoningContent}
@@ -469,6 +479,7 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
+      <KnowledgeCitationsPanel citations={knowledgeCitations} />
     </AIElementMessageContent>
   );
 }

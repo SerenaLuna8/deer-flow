@@ -16,9 +16,6 @@ _OPENAI_FAMILY_ADAPTERS = frozenset(
         "deepseek",
         "openai",
         "openai_responses",
-        "patched_deepseek",
-        "patched_openai",
-        "patched_openai_responses",
     }
 )
 # vLLM is an OpenAI-compatible adapter built on the OpenAI SDK, so its status

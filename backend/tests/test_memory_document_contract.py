@@ -16,6 +16,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
 from deerflow.persistence.final_schema_contract import (
     FINAL_APP_SEQUENCES,
+    FINAL_APP_TABLES,
 )
 from deerflow.persistence.jobs.sql import JobType
 
@@ -79,7 +80,7 @@ def test_full_schema_contains_only_the_final_memory_tables_and_job() -> None:
     sql_tables = set(
         re.findall(r"^CREATE TABLE ([a-z0-9_]+) \(", schema_sql, re.MULTILINE),
     )
-    assert sql_tables == set(Base.metadata.tables) | {"alembic_version"}
+    assert sql_tables == FINAL_APP_TABLES | {"alembic_version"}
 
 
 def test_deferred_dream_result_fk_matches_the_orm() -> None:

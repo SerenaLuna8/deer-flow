@@ -121,9 +121,29 @@ const OPENAI_SETTING_FIELDS = [
     options: [],
   },
   {
-    name: "use_responses_api",
-    label: "Use Responses API",
-    input_type: "boolean",
+    name: "temperature",
+    label: "Temperature",
+    input_type: "number",
+    advanced: true,
+    form_control: "input",
+    default_mode: "provider",
+    default_value: null,
+    minimum: -2,
+    maximum: 2,
+    step: 0.01,
+    options: [],
+  },
+] as const;
+
+// The Responses entrypoint authors the same fields as Chat Completions plus
+// the reasoning-summary switch; the wire protocol itself is pinned by the
+// adapter identity and never appears as an editable field.
+const OPENAI_RESPONSES_SETTING_FIELDS = [
+  ...OPENAI_SETTING_FIELDS,
+  {
+    name: "reasoning_summary",
+    label: "Reasoning summary",
+    input_type: "enum",
     advanced: true,
     form_control: "input",
     default_mode: "provider",
@@ -131,20 +151,7 @@ const OPENAI_SETTING_FIELDS = [
     minimum: null,
     maximum: null,
     step: null,
-    options: [],
-  },
-  {
-    name: "output_version",
-    label: "Output version",
-    input_type: "enum",
-    advanced: true,
-    form_control: "input",
-    default_mode: "platform",
-    default_value: "responses/v1",
-    minimum: null,
-    maximum: null,
-    step: null,
-    options: ["responses/v1"],
+    options: ["auto", "concise", "detailed"],
   },
 ] as const;
 
@@ -391,6 +398,11 @@ async function mockModelSettings(
             id: "openai",
             api_key_required: true,
             setting_fields: OPENAI_SETTING_FIELDS,
+          },
+          {
+            id: "openai_responses",
+            api_key_required: true,
+            setting_fields: OPENAI_RESPONSES_SETTING_FIELDS,
           },
         ],
         catalog_revision: 1,
@@ -771,4 +783,64 @@ test("uses typed Provider fields, preserves structured settings, and resets defa
   await providerSelect.selectOption("deepseek");
   await expect(dialog.getByLabel("Maximum output tokens")).toHaveValue("51200");
   await expect(dialog.getByLabel("Temperature")).not.toBeVisible();
+});
+
+test("offers a single DeepSeek entry plus two OpenAI protocol entrypoints without protocol switches", async ({
+  page,
+  baseURL,
+}) => {
+  await page.context().addCookies([
+    {
+      name: "locale",
+      value: "en-US",
+      url: baseURL ?? "http://localhost:3000",
+    },
+  ]);
+  await mockModelSettings(page);
+  await page.goto("/admin/settings/models");
+  await page.getByRole("button", { name: "Add model" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add model" });
+  const providerSelect = dialog.getByRole("combobox", {
+    name: "Provider",
+    exact: true,
+  });
+
+  // The catalog offers exactly one DeepSeek identity and the two OpenAI
+  // protocol entrypoints; retired patched adapters never reappear.
+  await expect(providerSelect.locator("option")).toHaveText([
+    "deepseek",
+    "openai",
+    "openai_responses",
+  ]);
+
+  const openAdvanced = async () => {
+    const advanced = dialog.locator("details");
+    if ((await advanced.getAttribute("open")) === null) {
+      await advanced.locator("summary").click();
+    }
+    await expect(advanced).toHaveAttribute("open", "");
+  };
+
+  // Chat Completions authors no protocol switch and no summary field.
+  await providerSelect.selectOption("openai");
+  await openAdvanced();
+  await expect(dialog.getByLabel("Temperature")).toBeVisible();
+  await expect(dialog.getByLabel("Reasoning summary")).toHaveCount(0);
+  await expect(dialog.getByLabel("Use Responses API")).toHaveCount(0);
+  await expect(dialog.getByLabel("Output version")).toHaveCount(0);
+
+  // The Responses entrypoint adds only the reasoning-summary enum; the
+  // protocol itself stays pinned by the adapter identity.
+  await providerSelect.selectOption("openai_responses");
+  await openAdvanced();
+  const summarySelect = dialog.getByLabel("Reasoning summary");
+  await expect(summarySelect).toBeVisible();
+  await expect(summarySelect.locator("option")).toHaveText([
+    "Provider default",
+    "auto",
+    "concise",
+    "detailed",
+  ]);
+  await expect(dialog.getByLabel("Use Responses API")).toHaveCount(0);
+  await expect(dialog.getByLabel("Output version")).toHaveCount(0);
 });

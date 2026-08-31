@@ -1,10 +1,12 @@
-"""Patched ChatDeepSeek that preserves reasoning_content in multi-turn conversations.
+"""ChatDeepSeek with reasoning_content replay in multi-turn conversations.
 
-This module provides a patched version of ChatDeepSeek that properly handles
-reasoning_content when sending messages back to the API. The original implementation
-stores reasoning_content in additional_kwargs but doesn't include it when making
-subsequent API calls, which causes errors with APIs that require reasoning_content
-on all assistant messages when thinking mode is enabled.
+This is the sole implementation behind the ``deepseek`` adapter. The stock
+ChatDeepSeek stores reasoning_content in additional_kwargs but drops it from
+subsequent request payloads. Per the official thinking-mode guide, requests
+that carry tools must echo historical assistant reasoning_content back
+(including turns that produced no tool_calls); requests without tools ignore
+the field. Replaying it unconditionally therefore satisfies the strict case
+and stays harmless in the tolerant one.
 """
 
 from typing import Any
@@ -16,12 +18,12 @@ from deerflow.models.assistant_payload_replay import restore_assistant_payloads,
 
 
 class PatchedChatDeepSeek(ChatDeepSeek):
-    """ChatDeepSeek with proper reasoning_content preservation.
+    """ChatDeepSeek with reasoning_content replay on outgoing payloads.
 
-    When using thinking/reasoning enabled models, the API expects reasoning_content
-    to be present on ALL assistant messages in multi-turn conversations. This patched
-    version ensures reasoning_content from additional_kwargs is included in the
-    request payload.
+    Requests that carry tools require reasoning_content on every historical
+    assistant message; requests without tools accept and ignore it. This
+    subclass restores the stored reasoning_content into the request payload
+    unconditionally, covering both cases without inspecting the tool set.
     """
 
     @classmethod

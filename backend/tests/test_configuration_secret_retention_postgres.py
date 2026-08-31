@@ -270,7 +270,7 @@ async def _add_all_domain_secrets(session, context: ProjectContext) -> _ProjectS
         id=uuid.uuid4(),
         display_name="Retention model",
         status="active",
-        provider_adapter="patched_deepseek",
+        provider_adapter="deepseek",
         provider_model="deepseek-v4-flash",
         max_input_tokens=64_000,
         settings={"base_url": "https://api.deepseek.com"},

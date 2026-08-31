@@ -59,6 +59,13 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "files",
     "job_attempts",
     "jobs",
+    "knowledge_bases",
+    "knowledge_documents",
+    "knowledge_metadata_fields",
+    "knowledge_queries",
+    "knowledge_segment_children",
+    "knowledge_segments",
+    "knowledge_tasks",
     "memory_document_versions",
     "memory_documents",
     "memory_dream_runs",
@@ -69,6 +76,8 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "mcp_servers",
     "mcp_tool_discovery_attempts",
     "mcp_version_secret_slots",
+    "model_provider_models",
+    "model_providers",
     "project_mcp_secret_generations",
     "project_mcp_secret_states",
     "project_mcp_secret_tombstones",
@@ -144,6 +153,7 @@ class PostgresCheckResult:
     revision_matches: bool = False
     missing_tables: tuple[str, ...] = ()
     pg_trgm_installed: bool = False
+    vector_installed: bool = False
     schema_state: Literal[
         "ready",
         "uninitialized",
@@ -155,7 +165,7 @@ class PostgresCheckResult:
 
     @property
     def healthy(self) -> bool:
-        return self.connected and self.schema_state == "ready" and self.revision_matches and not self.missing_tables and self.pg_trgm_installed and not self.error
+        return self.connected and self.schema_state == "ready" and self.revision_matches and not self.missing_tables and self.pg_trgm_installed and self.vector_installed and not self.error
 
 
 def get_schema_marker() -> str:
@@ -174,6 +184,7 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
         async with engine.connect() as connection:
             server_version = await connection.scalar(text("SELECT version()"))
             pg_trgm_installed = bool(await connection.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')")))
+            vector_installed = bool(await connection.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')")))
             has_revision_table = await connection.scalar(text("SELECT to_regclass('alembic_version') IS NOT NULL"))
             current_revision = await connection.scalar(text("SELECT version_num FROM alembic_version")) if has_revision_table else None
             rows = await connection.execute(
@@ -208,6 +219,7 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
                 revision_matches=current_revision == expected_marker,
                 missing_tables=missing_tables,
                 pg_trgm_installed=pg_trgm_installed,
+                vector_installed=vector_installed,
                 schema_state=schema_state,
                 error=error,
             )
@@ -243,6 +255,7 @@ def print_result(result: PostgresCheckResult) -> None:
     print(f"目标 Schema marker: {result.head_revision or '未知'}")
     print(f"Schema 状态: {result.schema_state}")
     print(f"pg_trgm 扩展: {'已安装' if result.pg_trgm_installed else '缺失'}")
+    print(f"vector 扩展: {'已安装' if result.vector_installed else '缺失'}")
     if result.missing_tables:
         print(f"缺失表: {', '.join(result.missing_tables)}")
     if result.error:
