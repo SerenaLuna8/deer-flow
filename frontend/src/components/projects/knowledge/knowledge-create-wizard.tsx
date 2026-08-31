@@ -2,6 +2,11 @@
 
 import {
   ArrowLeftIcon,
+  ArrowRightIcon,
+  BookOpenIcon,
+  CheckIcon,
+  LayersIcon,
+  WaypointsIcon,
   FolderPlusIcon,
   RefreshCwIcon,
   UploadCloudIcon,
@@ -81,6 +86,7 @@ type KnowledgeSubmissionSnapshot = {
   name: string;
   description: string;
   embeddingModelId: string;
+  rerankerModelId: string;
   retrievalMode: KnowledgeRetrievalMode;
   chunkSize: number;
   chunkOverlap: number;
@@ -127,40 +133,33 @@ function StepIndicator({
     [3, labels.finish],
   ];
   return (
-    <ol className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+    <ol className="flex min-w-0 flex-wrap items-center justify-center gap-2 text-[13px]">
       {steps.map(([value, label], index) => {
         const active = value === step;
         return (
           <li key={value} className="flex items-center gap-2">
             {index > 0 ? (
-              <span aria-hidden className="text-border">
-                —
-              </span>
+              <span aria-hidden className="bg-border mx-1 h-px w-5" />
             ) : null}
             <span
               aria-current={active ? "step" : undefined}
               className={cn(
-                "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5",
+                "flex items-center gap-2 whitespace-nowrap",
                 active
-                  ? "bg-selection-subtle/50 text-selection font-medium"
+                  ? "font-medium text-blue-600 dark:text-blue-400"
                   : "text-muted-foreground",
               )}
             >
               <span
                 className={cn(
-                  "flex size-4 items-center justify-center rounded-full text-[10px] tabular-nums",
+                  "flex h-5 items-center justify-center rounded-full text-[10px] font-medium tabular-nums",
                   active
-                    ? "bg-selection text-selection-foreground"
-                    : "bg-muted text-muted-foreground",
+                    ? "bg-blue-600 px-2 text-white"
+                    : "border-border size-5 border",
                 )}
               >
-                {value}
+                {active ? t.knowledge.wizard.stepBadge(value) : value}
               </span>
-              {active ? (
-                <span className="font-medium">
-                  {t.knowledge.wizard.stepBadge(value)}
-                </span>
-              ) : null}
               {label}
             </span>
           </li>
@@ -194,6 +193,7 @@ export function KnowledgeCreateWizard({
   const [nameTouched, setNameTouched] = useState(false);
   const [description, setDescription] = useState("");
   const [embeddingModelId, setEmbeddingModelId] = useState("");
+  const [rerankerModelId, setRerankerModelId] = useState("");
   const [retrievalMode, setRetrievalMode] =
     useState<KnowledgeRetrievalMode>("semantic");
   const [chunkSize, setChunkSize] = useState("1000");
@@ -411,6 +411,7 @@ export function KnowledgeCreateWizard({
       name: name.trim(),
       description: description.trim(),
       embeddingModelId,
+      rerankerModelId,
       retrievalMode,
       chunkSize: parsedChunkSize,
       chunkOverlap: parsedChunkOverlap,
@@ -432,6 +433,9 @@ export function KnowledgeCreateWizard({
         base = await createBase.mutateAsync({
           name: snapshot.name,
           embedding_model_id: snapshot.embeddingModelId,
+          ...(snapshot.rerankerModelId
+            ? { reranker_model_id: snapshot.rerankerModelId }
+            : {}),
           retrieval_mode: snapshot.retrievalMode,
           description: snapshot.description,
         });
@@ -493,20 +497,28 @@ export function KnowledgeCreateWizard({
   const modelDisplayName = selectedEmbeddingOption
     ? `${selectedEmbeddingOption.provider_name} · ${selectedEmbeddingOption.model_name}`
     : "";
+  const selectedRerankerOption = options.data?.reranker_models.find(
+    (option) =>
+      option.id === (submissionSnapshot?.rerankerModelId ?? rerankerModelId),
+  );
+  const rerankerDisplayName = selectedRerankerOption
+    ? `${selectedRerankerOption.provider_name} · ${selectedRerankerOption.model_name}`
+    : labels.bases.rerankerNone;
 
   return (
     <section
       aria-label={wizard.uploadCreateTitle}
-      className="space-y-6 text-[13px]"
+      className={cn(
+        "flex min-h-0 flex-col text-[13px]",
+        step === 2 && "lg:h-[calc(100dvh-3rem)]",
+      )}
     >
-      <div className="border-border/70 flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-center lg:justify-between">
+      <div className="border-border/60 grid shrink-0 gap-3 border-b pb-3 md:grid-cols-[1fr_auto_1fr] md:items-center">
         <Button
           type="button"
           variant="ghost"
           size="sm"
-          className="h-8 w-fit rounded-lg text-[13px]"
-          // Leaving mid-upload would keep the loop running invisibly with no
-          // progress or failure surface; the exit waits like "go to documents".
+          className="h-8 w-fit rounded-lg px-1 text-[13px]"
           disabled={isSubmitting}
           onClick={onExit}
           aria-label={labels.common.back}
@@ -515,23 +527,21 @@ export function KnowledgeCreateWizard({
           {labels.page.title}
         </Button>
         <StepIndicator step={step} labels={wizard.steps} />
+        <span aria-hidden className="hidden md:block" />
       </div>
 
       {step === 1 ? (
-        <div className="w-full space-y-6">
+        <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto py-6">
           <div className="space-y-3">
             <h2 className="text-base font-semibold tracking-tight">
               {wizard.sourceSectionTitle}
             </h2>
             <label
-              className="border-border/80 bg-background hover:border-selection/50 hover:bg-selection-subtle/20 focus-within:ring-selection/20 flex cursor-pointer flex-col items-center gap-2 rounded-lg border border-dashed px-6 py-10 text-center transition-colors focus-within:ring-2"
+              className="border-border/80 bg-muted/25 flex cursor-pointer flex-col items-center gap-2 rounded-lg border border-dashed px-6 py-14 text-center transition-colors focus-within:ring-2 focus-within:ring-blue-500/20 hover:border-blue-400 hover:bg-blue-50/40"
               onDragOver={(event) => event.preventDefault()}
               onDrop={handleDrop}
             >
-              <UploadCloudIcon
-                aria-hidden
-                className="text-selection/75 size-6"
-              />
+              <UploadCloudIcon aria-hidden className="size-8 text-blue-600" />
               <span className="text-[13px] font-medium">
                 {wizard.dropzoneTitle}
               </span>
@@ -603,7 +613,7 @@ export function KnowledgeCreateWizard({
 
           <div className="flex justify-end">
             <Button
-              className="h-8 rounded-lg text-[13px] shadow-none"
+              className="h-9 rounded-lg bg-blue-600 text-[13px] text-white shadow-none hover:bg-blue-700"
               type="button"
               disabled={files.length === 0}
               onClick={() => setStep(2)}
@@ -615,7 +625,7 @@ export function KnowledgeCreateWizard({
           <div className="border-border/70 border-t pt-4">
             <button
               type="button"
-              className="text-selection hover:text-selection/80 focus-visible:ring-selection/20 flex items-center gap-1.5 rounded-lg text-[13px] focus-visible:ring-2 focus-visible:outline-none"
+              className="flex items-center gap-1.5 rounded-lg text-[13px] text-blue-600 hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500/20 focus-visible:outline-none"
               onClick={onCreateEmpty}
             >
               <FolderPlusIcon aria-hidden className="size-4" />
@@ -626,282 +636,357 @@ export function KnowledgeCreateWizard({
       ) : null}
 
       {step === 2 ? (
-        <div className="grid w-full gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="grid min-h-0 w-full flex-1 gap-5 py-4 lg:grid-cols-2 lg:overflow-hidden">
           <form
-            className="w-full space-y-6"
+            className="flex min-h-0 flex-col gap-4"
             onSubmit={(event) => {
               event.preventDefault();
               void startProcessing();
             }}
           >
-            <div className="space-y-3">
-              <h2 className="text-[13px] font-semibold">
-                {wizard.chunkSectionTitle}
-              </h2>
-              <fieldset className="grid gap-2 text-[13px]">
-                <legend className="sr-only">
-                  {labels.documents.chunkingModeLabel}
-                </legend>
-                {(
-                  [
+            <div className="min-h-0 flex-1 space-y-5 pb-1 lg:overflow-y-auto lg:pr-4">
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <h2 className="text-[13px] font-semibold">
+                    {wizard.chunkSectionTitle}
+                  </h2>
+                  <p className="text-muted-foreground text-xs leading-5">
+                    {labels.documents.chunkImmutableNote}
+                  </p>
+                </div>
+                <fieldset className="grid gap-2.5">
+                  <legend className="sr-only">
+                    {labels.documents.chunkingModeLabel}
+                  </legend>
+                  {(
                     [
-                      "general",
-                      labels.documents.chunkingModeGeneral,
-                      labels.documents.chunkingModeGeneralHint,
-                    ],
-                    [
-                      "parent_child",
-                      labels.documents.chunkingModeParentChild,
-                      labels.documents.chunkingModeParentChildHint,
-                    ],
-                  ] as const
-                ).map(([mode, label, hint]) => (
-                  <label
-                    key={mode}
-                    className={cn(
-                      "flex cursor-pointer items-start gap-2.5 rounded-lg border px-3.5 py-2.5 transition-colors",
-                      chunkingMode === mode
-                        ? "border-selection/40 bg-selection-subtle/25"
-                        : "border-border/70 bg-background hover:bg-muted/30",
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name="chunking-mode"
-                      value={mode}
-                      className="accent-selection mt-0.5 size-4"
-                      checked={chunkingMode === mode}
-                      disabled={isSubmitting}
-                      onChange={() => setChunkingMode(mode)}
-                    />
-                    <span className="grid gap-0.5">
-                      <span className="font-medium">{label}</span>
-                      <span className="text-muted-foreground text-xs leading-5">
-                        {hint}
-                      </span>
-                    </span>
-                  </label>
-                ))}
-              </fieldset>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="grid gap-1.5 text-[13px]">
-                  <span className="font-medium">
-                    {labels.documents.chunkSizeLabel}
-                  </span>
-                  <Input
-                    className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
-                    type="number"
-                    min={KNOWLEDGE_CHUNK_SIZE_MIN}
-                    max={KNOWLEDGE_CHUNK_SIZE_MAX}
-                    required
+                      [
+                        "general",
+                        labels.documents.chunkingModeGeneral,
+                        labels.documents.chunkingModeGeneralHint,
+                      ],
+                      [
+                        "parent_child",
+                        labels.documents.chunkingModeParentChild,
+                        labels.documents.chunkingModeParentChildHint,
+                      ],
+                    ] as const
+                  ).map(([mode, label, hint]) => (
+                    <div
+                      key={mode}
+                      className={cn(
+                        "overflow-hidden rounded-xl border transition-colors",
+                        chunkingMode === mode
+                          ? "border-blue-600"
+                          : "border-border/70",
+                      )}
+                    >
+                      <label className="bg-muted/35 flex min-h-16 cursor-pointer items-start gap-3 p-3">
+                        <span
+                          aria-hidden
+                          className="border-border/50 bg-background flex size-8 shrink-0 items-center justify-center rounded-lg border shadow-xs"
+                        >
+                          {mode === "general" ? (
+                            <LayersIcon className="size-4 text-blue-600" />
+                          ) : (
+                            <WaypointsIcon className="size-4 text-sky-500" />
+                          )}
+                        </span>
+                        <span className="min-w-0 flex-1 space-y-0.5">
+                          <span className="block text-[13px] font-semibold">
+                            {label}
+                          </span>
+                          <span className="text-muted-foreground block text-xs leading-5">
+                            {hint}
+                          </span>
+                        </span>
+                        <input
+                          type="radio"
+                          name="chunking-mode"
+                          value={mode}
+                          className="mt-1 size-4 shrink-0 accent-blue-600"
+                          checked={chunkingMode === mode}
+                          disabled={isSubmitting}
+                          onChange={() => setChunkingMode(mode)}
+                        />
+                      </label>
+                      {chunkingMode === mode ? (
+                        <div className="bg-background space-y-4 p-4">
+                          {mode === "parent_child" ? (
+                            <h3 className="text-xs font-semibold">
+                              {wizard.parentContextTitle}
+                            </h3>
+                          ) : null}
+                          <div className="grid items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                            <label className="grid gap-1.5 text-[13px]">
+                              <span className="font-medium">
+                                {labels.documents.chunkSeparatorLabel}
+                              </span>
+                              <Input
+                                className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                                required
+                                maxLength={64}
+                                disabled={isSubmitting}
+                                value={chunkSeparator}
+                                onChange={(event) =>
+                                  setChunkSeparator(event.target.value)
+                                }
+                              />
+                            </label>
+                            <label className="grid gap-1.5 text-[13px]">
+                              <span className="font-medium">
+                                {labels.documents.chunkSizeLabel}
+                              </span>
+                              <Input
+                                className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                                type="number"
+                                min={KNOWLEDGE_CHUNK_SIZE_MIN}
+                                max={KNOWLEDGE_CHUNK_SIZE_MAX}
+                                required
+                                disabled={isSubmitting}
+                                value={chunkSize}
+                                onChange={(event) =>
+                                  setChunkSize(event.target.value)
+                                }
+                              />
+                            </label>
+                            <label className="grid gap-1.5 text-[13px]">
+                              <span className="font-medium">
+                                {labels.documents.chunkOverlapLabel}
+                              </span>
+                              <Input
+                                className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                                type="number"
+                                min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
+                                max={KNOWLEDGE_CHUNK_OVERLAP_MAX}
+                                required
+                                disabled={isSubmitting}
+                                value={chunkOverlap}
+                                onChange={(event) =>
+                                  setChunkOverlap(event.target.value)
+                                }
+                              />
+                            </label>
+                          </div>
+                          {chunkingMode === "parent_child" ? (
+                            <div className="space-y-2">
+                              <h3 className="text-xs font-semibold">
+                                {wizard.childRetrievalTitle}
+                              </h3>
+                              <div className="grid grid-cols-2 items-start gap-3">
+                                <label className="grid gap-1.5 text-[13px]">
+                                  <span className="font-medium">
+                                    {labels.documents.childChunkSizeLabel}
+                                  </span>
+                                  <Input
+                                    className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                                    type="number"
+                                    min={KNOWLEDGE_CHILD_CHUNK_SIZE_MIN}
+                                    max={KNOWLEDGE_CHILD_CHUNK_SIZE_MAX}
+                                    required
+                                    disabled={isSubmitting}
+                                    value={childChunkSize}
+                                    onChange={(event) =>
+                                      setChildChunkSize(event.target.value)
+                                    }
+                                  />
+                                </label>
+                                <label className="grid gap-1.5 text-[13px]">
+                                  <span className="font-medium">
+                                    {labels.documents.childChunkSeparatorLabel}
+                                  </span>
+                                  <Input
+                                    className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                                    required
+                                    maxLength={64}
+                                    disabled={isSubmitting}
+                                    value={childChunkSeparator}
+                                    onChange={(event) =>
+                                      setChildChunkSeparator(event.target.value)
+                                    }
+                                  />
+                                </label>
+                              </div>
+                            </div>
+                          ) : null}
+                          <fieldset className="border-border/60 grid gap-2 border-t pt-3 text-[13px]">
+                            <legend className="bg-background pr-2 text-xs font-semibold">
+                              {labels.documents.preprocessingLabel}
+                            </legend>
+                            <label className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                className="size-4 accent-blue-600"
+                                checked={removeExtraSpaces}
+                                disabled={isSubmitting}
+                                onChange={(event) =>
+                                  setRemoveExtraSpaces(event.target.checked)
+                                }
+                              />
+                              {labels.documents.removeExtraSpacesLabel}
+                            </label>
+                            <label className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                className="size-4 accent-blue-600"
+                                checked={removeUrlsEmails}
+                                disabled={isSubmitting}
+                                onChange={(event) =>
+                                  setRemoveUrlsEmails(event.target.checked)
+                                }
+                              />
+                              {labels.documents.removeUrlsEmailsLabel}
+                            </label>
+                          </fieldset>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </fieldset>
+              </div>
+              <div className="border-border/60 space-y-3 border-t pt-5">
+                <div className="space-y-1">
+                  <h2 className="text-[13px] font-semibold">
+                    {labels.bases.modelLabel}
+                  </h2>
+                  <p className="text-muted-foreground text-xs leading-5">
+                    {labels.bases.modelHint}
+                  </p>
+                </div>
+                {options.isLoading ? (
+                  <Skeleton className="h-9 rounded-lg" />
+                ) : options.error ? (
+                  <p role="alert" className="text-destructive text-[13px]">
+                    {labels.bases.modelsLoadFailed}
+                  </p>
+                ) : (options.data?.embedding_models.length ?? 0) === 0 ? (
+                  <p className="text-muted-foreground text-[13px]">
+                    {labels.bases.noModels}
+                  </p>
+                ) : (
+                  <Select
+                    value={embeddingModelId}
                     disabled={isSubmitting}
-                    value={chunkSize}
-                    onChange={(event) => setChunkSize(event.target.value)}
+                    onValueChange={setEmbeddingModelId}
+                  >
+                    <SelectTrigger
+                      className="bg-muted/60 w-full rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15"
+                      aria-label={labels.bases.modelLabel}
+                    >
+                      <SelectValue
+                        placeholder={labels.bases.modelPlaceholder}
+                      />
+                    </SelectTrigger>
+                    <SelectContent className="border-border/70 rounded-lg">
+                      {options.data?.embedding_models.map((option) => (
+                        <SelectItem
+                          className="rounded-md text-[13px]"
+                          key={option.id}
+                          value={option.id}
+                        >
+                          {option.provider_name} · {option.model_name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+
+              <KnowledgeRetrievalModeField
+                variant="cards"
+                value={retrievalMode}
+                onChange={setRetrievalMode}
+                disabled={isSubmitting}
+                selectedContent={
+                  <div className="space-y-2">
+                    <h3 className="text-[13px] font-medium">
+                      {labels.bases.rerankerLabel}
+                    </h3>
+                    {options.isLoading ? (
+                      <Skeleton className="h-9 rounded-lg" />
+                    ) : options.error ? (
+                      <p role="alert" className="text-destructive text-[13px]">
+                        {labels.bases.modelsLoadFailed}
+                      </p>
+                    ) : (
+                      <>
+                        {options.data?.reranker_models.length === 0 ? (
+                          <p className="text-muted-foreground text-xs leading-5">
+                            {labels.bases.rerankerUnavailable}
+                          </p>
+                        ) : null}
+                        <Select
+                          value={rerankerModelId || "none"}
+                          disabled={isSubmitting}
+                          onValueChange={(value) =>
+                            setRerankerModelId(value === "none" ? "" : value)
+                          }
+                        >
+                          <SelectTrigger
+                            className="bg-muted/60 w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-blue-500/15"
+                            aria-label={labels.bases.rerankerLabel}
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="rounded-lg">
+                            <SelectItem value="none">
+                              {labels.bases.rerankerNone}
+                            </SelectItem>
+                            {options.data?.reranker_models.map((option) => (
+                              <SelectItem key={option.id} value={option.id}>
+                                {option.provider_name} · {option.model_name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </>
+                    )}
+                  </div>
+                }
+              />
+              <div className="border-border/60 space-y-3 border-t pt-5">
+                <h2 className="text-[13px] font-semibold">
+                  {wizard.infoSectionTitle}
+                </h2>
+                <label className="grid gap-1.5 text-[13px]">
+                  <span className="font-medium">{labels.bases.nameLabel}</span>
+                  <Input
+                    className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                    value={name}
+                    required
+                    maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
+                    disabled={isSubmitting}
+                    placeholder={labels.bases.namePlaceholder}
+                    onChange={(event) => {
+                      setNameTouched(true);
+                      setName(event.target.value);
+                    }}
                   />
-                  <span className="text-muted-foreground text-xs leading-5">
-                    {labels.documents.chunkSizeHint}
-                  </span>
                 </label>
                 <label className="grid gap-1.5 text-[13px]">
                   <span className="font-medium">
-                    {labels.documents.chunkOverlapLabel}
+                    {labels.bases.descriptionLabel}
                   </span>
-                  <Input
-                    className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
-                    type="number"
-                    min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
-                    max={KNOWLEDGE_CHUNK_OVERLAP_MAX}
-                    required
+                  <Textarea
+                    className="bg-muted/60 w-full rounded-lg border-transparent text-[13px] leading-5 shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                    value={description}
+                    rows={2}
                     disabled={isSubmitting}
-                    value={chunkOverlap}
-                    onChange={(event) => setChunkOverlap(event.target.value)}
+                    placeholder={labels.bases.descriptionPlaceholder}
+                    onChange={(event) => setDescription(event.target.value)}
                   />
-                  <span className="text-muted-foreground text-xs leading-5">
-                    {labels.documents.chunkOverlapHint}
-                  </span>
                 </label>
               </div>
-              <label className="grid gap-1.5 text-[13px]">
-                <span className="font-medium">
-                  {labels.documents.chunkSeparatorLabel}
-                </span>
-                <Input
-                  className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
-                  required
-                  maxLength={64}
-                  disabled={isSubmitting}
-                  value={chunkSeparator}
-                  onChange={(event) => setChunkSeparator(event.target.value)}
-                />
-                <span className="text-muted-foreground text-xs leading-5">
-                  {labels.documents.chunkSeparatorHint}
-                </span>
-              </label>
-              {chunkingMode === "parent_child" ? (
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="grid gap-1.5 text-[13px]">
-                    <span className="font-medium">
-                      {labels.documents.childChunkSizeLabel}
-                    </span>
-                    <Input
-                      className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
-                      type="number"
-                      min={KNOWLEDGE_CHILD_CHUNK_SIZE_MIN}
-                      max={KNOWLEDGE_CHILD_CHUNK_SIZE_MAX}
-                      required
-                      disabled={isSubmitting}
-                      value={childChunkSize}
-                      onChange={(event) =>
-                        setChildChunkSize(event.target.value)
-                      }
-                    />
-                  </label>
-                  <label className="grid gap-1.5 text-[13px]">
-                    <span className="font-medium">
-                      {labels.documents.childChunkSeparatorLabel}
-                    </span>
-                    <Input
-                      className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
-                      required
-                      maxLength={64}
-                      disabled={isSubmitting}
-                      value={childChunkSeparator}
-                      onChange={(event) =>
-                        setChildChunkSeparator(event.target.value)
-                      }
-                    />
-                    <span className="text-muted-foreground text-xs leading-5">
-                      {labels.documents.childChunkSeparatorHint}
-                    </span>
-                  </label>
-                </div>
-              ) : null}
-              <fieldset className="grid gap-2 text-[13px]">
-                <legend className="font-medium">
-                  {labels.documents.preprocessingLabel}
-                </legend>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    className="accent-selection size-4"
-                    checked={removeExtraSpaces}
-                    disabled={isSubmitting}
-                    onChange={(event) =>
-                      setRemoveExtraSpaces(event.target.checked)
-                    }
-                  />
-                  {labels.documents.removeExtraSpacesLabel}
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    className="accent-selection size-4"
-                    checked={removeUrlsEmails}
-                    disabled={isSubmitting}
-                    onChange={(event) =>
-                      setRemoveUrlsEmails(event.target.checked)
-                    }
-                  />
-                  {labels.documents.removeUrlsEmailsLabel}
-                </label>
-              </fieldset>
-              <p className="text-muted-foreground text-xs leading-5">
-                {labels.documents.chunkImmutableNote}
-              </p>
-            </div>
 
-            <div className="space-y-3">
-              <h2 className="text-[13px] font-semibold">
-                {labels.bases.modelLabel}
-              </h2>
-              {options.isLoading ? (
-                <Skeleton className="h-9 rounded-lg" />
-              ) : options.error ? (
+              {createBase.error ? (
                 <p role="alert" className="text-destructive text-[13px]">
-                  {labels.bases.modelsLoadFailed}
+                  {knowledgeErrorMessage(createBase.error, labels.errors)}
                 </p>
-              ) : (options.data?.embedding_models.length ?? 0) === 0 ? (
-                <p className="text-muted-foreground text-[13px]">
-                  {labels.bases.noModels}
-                </p>
-              ) : (
-                <Select
-                  value={embeddingModelId}
-                  disabled={isSubmitting}
-                  onValueChange={setEmbeddingModelId}
-                >
-                  <SelectTrigger
-                    className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 rounded-lg text-[13px] shadow-none focus-visible:ring-2"
-                    aria-label={labels.bases.modelLabel}
-                  >
-                    <SelectValue placeholder={labels.bases.modelPlaceholder} />
-                  </SelectTrigger>
-                  <SelectContent className="border-border/70 rounded-lg">
-                    {options.data?.embedding_models.map((option) => (
-                      <SelectItem
-                        className="rounded-md text-[13px]"
-                        key={option.id}
-                        value={option.id}
-                      >
-                        {option.provider_name} · {option.model_name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-              <p className="text-muted-foreground text-xs leading-5">
-                {labels.bases.modelHint}
-              </p>
+              ) : null}
             </div>
-
-            <KnowledgeRetrievalModeField
-              value={retrievalMode}
-              onChange={setRetrievalMode}
-              disabled={isSubmitting}
-            />
-            <div className="space-y-3">
-              <h2 className="text-[13px] font-semibold">
-                {wizard.infoSectionTitle}
-              </h2>
-              <label className="grid gap-1.5 text-[13px]">
-                <span className="font-medium">{labels.bases.nameLabel}</span>
-                <Input
-                  className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
-                  value={name}
-                  required
-                  maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
-                  disabled={isSubmitting}
-                  placeholder={labels.bases.namePlaceholder}
-                  onChange={(event) => {
-                    setNameTouched(true);
-                    setName(event.target.value);
-                  }}
-                />
-              </label>
-              <label className="grid gap-1.5 text-[13px]">
-                <span className="font-medium">
-                  {labels.bases.descriptionLabel}
-                </span>
-                <Textarea
-                  className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 rounded-lg text-[13px] leading-5 shadow-none focus-visible:ring-2 md:text-[13px]"
-                  value={description}
-                  rows={3}
-                  disabled={isSubmitting}
-                  placeholder={labels.bases.descriptionPlaceholder}
-                  onChange={(event) => setDescription(event.target.value)}
-                />
-              </label>
-            </div>
-
-            {createBase.error ? (
-              <p role="alert" className="text-destructive text-[13px]">
-                {knowledgeErrorMessage(createBase.error, labels.errors)}
-              </p>
-            ) : null}
-
-            <div className="flex items-center justify-between gap-3">
+            <div className="border-border/70 bg-background flex shrink-0 items-center justify-between gap-3 border-t pt-3">
               <Button
-                className="h-8 rounded-lg text-[13px] shadow-none"
+                className="h-9 rounded-lg text-[13px] shadow-none"
                 type="button"
                 variant="outline"
                 disabled={isSubmitting}
@@ -910,7 +995,7 @@ export function KnowledgeCreateWizard({
                 {wizard.previous}
               </Button>
               <Button
-                className="h-8 rounded-lg text-[13px] shadow-none"
+                className="h-9 rounded-lg bg-blue-600 text-[13px] text-white shadow-none hover:bg-blue-700"
                 type="submit"
                 disabled={isSubmitting || !configureValid}
               >
@@ -920,316 +1005,376 @@ export function KnowledgeCreateWizard({
               </Button>
             </div>
           </form>
-
           <aside
             aria-label={wizard.previewTitle}
-            className="border-border/70 min-w-0 space-y-3 lg:border-l lg:pl-8"
+            className="border-border/70 bg-background flex min-h-80 min-w-0 flex-col overflow-hidden rounded-xl border lg:min-h-0"
             data-testid="chunk-preview-panel"
             aria-busy={previewLoading}
           >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-baseline gap-2">
-                  <h2 className="text-[13px] font-semibold">
-                    {wizard.previewTitle}
-                  </h2>
-                  {visiblePreviewData ? (
-                    <span className="text-muted-foreground text-xs leading-5 tabular-nums">
-                      {wizard.previewShowing(
-                        visiblePreviewData.items.length,
-                        visiblePreviewData.total,
-                      )}
-                    </span>
-                  ) : null}
-                </div>
+            <div className="border-border/60 shrink-0 space-y-2 border-b px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                  {wizard.previewTitle}
+                </h2>
+                <Button
+                  className="h-8 shrink-0 rounded-lg text-xs text-blue-600 shadow-none hover:text-blue-700"
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    isSubmitting ||
+                    previewFile === null ||
+                    currentPreviewParams === null ||
+                    previewLoading
+                  }
+                  onClick={requestCurrentPreview}
+                >
+                  <RefreshCwIcon
+                    aria-hidden
+                    className={cn("size-3.5", previewLoading && "animate-spin")}
+                  />
+                  {previewLoading
+                    ? wizard.previewLoading
+                    : wizard.previewRefresh}
+                </Button>{" "}
+              </div>
+              <div className="flex min-w-0 items-center gap-2">
                 {previewFile ? (
-                  <p className="text-muted-foreground max-w-sm truncate text-xs">
+                  <KnowledgeFileTypeIcon fileName={previewFile.name} />
+                ) : null}
+                {files.length > 1 ? (
+                  <Select
+                    value={previewFile?.name ?? ""}
+                    disabled={isSubmitting}
+                    onValueChange={setPreviewFileName}
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      aria-label={wizard.previewPickFile}
+                      className="min-w-0 flex-1 rounded-lg border-0 bg-transparent px-1 text-[13px] font-medium shadow-none focus-visible:ring-blue-500/20"
+                    >
+                      <SelectValue placeholder={wizard.previewPickFile}>
+                        {previewFile
+                          ? wizard.previewHint(previewFile.name)
+                          : undefined}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent className="border-border/70 rounded-lg">
+                      {files.map((file) => (
+                        <SelectItem
+                          className="rounded-md text-[13px]"
+                          key={file.name}
+                          value={file.name}
+                        >
+                          {file.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : previewFile ? (
+                  <p
+                    className="min-w-0 flex-1 truncate text-[13px] font-medium"
+                    title={previewFile.name}
+                  >
                     {wizard.previewHint(previewFile.name)}
                   </p>
                 ) : null}
               </div>
-              <Button
-                className="h-8 rounded-lg text-[13px] shadow-none"
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={
-                  isSubmitting ||
-                  previewFile === null ||
-                  currentPreviewParams === null ||
-                  previewLoading
-                }
-                onClick={requestCurrentPreview}
-              >
-                <RefreshCwIcon
-                  aria-hidden
-                  className={cn("size-3.5", previewLoading && "animate-spin")}
-                />
-                {previewLoading ? wizard.previewLoading : wizard.previewRefresh}
-              </Button>
+              {visiblePreviewData ? (
+                <p className="text-muted-foreground text-xs tabular-nums">
+                  {wizard.previewShowing(
+                    visiblePreviewData.items.length,
+                    visiblePreviewData.total,
+                  )}
+                </p>
+              ) : null}
             </div>
-            {files.length > 1 ? (
-              <Select
-                value={previewFile?.name ?? ""}
-                disabled={isSubmitting}
-                onValueChange={setPreviewFileName}
-              >
-                <SelectTrigger
-                  size="sm"
-                  aria-label={wizard.previewPickFile}
-                  className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 w-full max-w-sm rounded-lg text-[13px] shadow-none focus-visible:ring-2"
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+              {previewLoading ? (
+                <p
+                  role="status"
+                  className="text-muted-foreground text-xs leading-5"
                 >
-                  <SelectValue placeholder={wizard.previewPickFile} />
-                </SelectTrigger>
-                <SelectContent className="border-border/70 rounded-lg">
-                  {files.map((file) => (
-                    <SelectItem
-                      className="rounded-md text-[13px]"
-                      key={file.name}
-                      value={file.name}
-                    >
-                      {file.name}
-                    </SelectItem>
+                  {wizard.previewLoading}
+                </p>
+              ) : currentPreviewParams === null ? (
+                <p role="status" className="text-destructive text-xs">
+                  {wizard.previewInvalid}
+                </p>
+              ) : previewIsStale ? (
+                <p
+                  role="status"
+                  className="text-muted-foreground text-xs leading-5"
+                >
+                  {wizard.previewStale}
+                </p>
+              ) : null}
+              {visiblePreviewError ? (
+                <p role="alert" className="text-destructive text-[13px]">
+                  {knowledgeErrorMessage(visiblePreviewError, labels.errors)}
+                </p>
+              ) : null}
+              {visiblePreviewData ? (
+                <ul
+                  className={cn(
+                    "grid gap-6 transition-opacity",
+                    previewIsStale && "opacity-60",
+                  )}
+                >
+                  {visiblePreviewData.items.map((chunk) => (
+                    <li key={chunk.position} className="space-y-2">
+                      <p className="text-muted-foreground flex items-center justify-between gap-2 text-xs tabular-nums">
+                        <span className="font-medium">
+                          {wizard.previewChunkLabel(chunk.position)}
+                        </span>
+                        <span>
+                          {chunk.child_contents.length > 0
+                            ? `${wizard.previewChildCount(chunk.child_contents.length)} · `
+                            : null}
+                          {wizard.previewCharacters(chunk.word_count)}
+                        </span>
+                      </p>
+                      {chunk.child_contents.length === 0 ? (
+                        <p className="text-[13px] leading-6 break-words whitespace-pre-wrap">
+                          {chunk.content}
+                        </p>
+                      ) : null}
+                      {chunk.child_contents.length > 0 ? (
+                        <ol className="flex flex-wrap items-start gap-x-1 gap-y-1.5">
+                          {chunk.child_contents.map((childContent, index) => (
+                            <li
+                              key={index}
+                              className="bg-muted/60 max-w-full rounded-sm px-1.5 py-0.5 text-[13px] leading-6 break-words"
+                            >
+                              <span className="text-muted-foreground mr-1.5 inline-block text-[10px] font-medium tabular-nums">
+                                {wizard.previewChildLabel(index + 1)}
+                              </span>
+                              <span className="whitespace-normal">
+                                {childContent}
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
+                      ) : null}
+                      {chunk.child_contents.length > 0 ? (
+                        <details className="text-muted-foreground text-xs">
+                          <summary className="hover:text-foreground cursor-pointer py-1">
+                            {wizard.previewParentText}
+                          </summary>
+                          <p className="pt-1 text-[13px] leading-6 break-words whitespace-pre-wrap">
+                            {chunk.content}
+                          </p>
+                        </details>
+                      ) : null}
+                    </li>
                   ))}
-                </SelectContent>
-              </Select>
-            ) : null}
-            {previewLoading ? (
-              <p
-                role="status"
-                className="text-muted-foreground text-xs leading-5"
-              >
-                {wizard.previewLoading}
-              </p>
-            ) : currentPreviewParams === null ? (
-              <p role="status" className="text-destructive text-xs">
-                {wizard.previewInvalid}
-              </p>
-            ) : previewIsStale ? (
-              <p
-                role="status"
-                className="text-muted-foreground text-xs leading-5"
-              >
-                {wizard.previewStale}
-              </p>
-            ) : null}
-            {visiblePreviewError ? (
-              <p role="alert" className="text-destructive text-[13px]">
-                {knowledgeErrorMessage(visiblePreviewError, labels.errors)}
-              </p>
-            ) : null}
-            {visiblePreviewData ? (
-              <ul
-                className={cn(
-                  "grid max-h-[32rem] gap-3 overflow-y-auto pr-1 transition-opacity",
-                  previewIsStale && "opacity-60",
-                )}
-              >
-                {visiblePreviewData.items.map((chunk) => (
-                  <li
-                    key={chunk.position}
-                    className="border-border/70 bg-background space-y-1.5 rounded-lg border px-4 py-3"
-                  >
-                    <p className="text-muted-foreground flex items-center justify-between gap-2 text-xs tabular-nums">
-                      <span className="font-medium">
-                        {wizard.previewChunkLabel(chunk.position)}
-                      </span>
-                      <span>
-                        {chunk.child_contents.length > 0
-                          ? `${wizard.previewChildCount(chunk.child_contents.length)} · `
-                          : null}
-                        {wizard.previewCharacters(chunk.word_count)}
-                      </span>
-                    </p>
-                    <p className="text-[13px] leading-6 break-words whitespace-pre-wrap">
-                      {chunk.content}
-                    </p>
-                    {chunk.child_contents.length > 0 ? (
-                      <ol className="border-selection/20 mt-2 grid gap-1.5 border-l-2 pl-3">
-                        {chunk.child_contents.map((childContent, index) => (
-                          <li
-                            key={index}
-                            className="border-border/50 bg-muted/20 rounded-lg border px-2.5 py-1.5"
-                          >
-                            <p className="text-muted-foreground text-xs font-medium tabular-nums">
-                              {wizard.previewChildLabel(index + 1)}
-                            </p>
-                            <p className="text-xs leading-5 break-words whitespace-pre-wrap">
-                              {childContent}
-                            </p>
-                          </li>
-                        ))}
-                      </ol>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
+                </ul>
+              ) : null}
+            </div>
           </aside>
         </div>
       ) : null}
 
       {step === 3 && createdBase && submissionSnapshot ? (
-        <div className="w-full space-y-6">
-          <div className="space-y-1">
-            <h2 className="text-base font-semibold tracking-tight">
-              {wizard.createdTitle}
-            </h2>
-            <p className="text-muted-foreground text-[13px]">
-              {wizard.createdHint}
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <h3 className="text-[13px] font-semibold">
-              {wizard.processingTitle}
-            </h3>
-            {uploadingIndex !== null ? (
-              <p
-                role="status"
-                className="text-muted-foreground text-xs leading-5"
-              >
-                {labels.documents.uploadingProgress(
-                  uploadingIndex + 1,
-                  submissionSnapshot.files.length,
-                )}
+        <div className="mx-auto grid min-h-0 w-full max-w-6xl flex-1 gap-8 overflow-y-auto py-7 lg:grid-cols-[minmax(0,1fr)_18rem]">
+          <div className="space-y-5">
+            <div className="space-y-1">
+              <h2 className="flex items-center gap-2 text-base font-semibold tracking-tight">
+                <CheckIcon aria-hidden className="size-5 text-emerald-600" />
+                {wizard.createdTitle}
+              </h2>
+              <p className="text-muted-foreground text-[13px]">
+                {wizard.createdHint}
               </p>
-            ) : null}
-            <ul
-              className="divide-border/60 bg-background border-border/70 divide-y overflow-hidden rounded-lg border"
-              data-testid="wizard-document-status"
-            >
-              {(documents.data?.items ?? []).map((document) => (
-                <li
-                  key={document.id}
-                  className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-[13px]"
+            </div>
+
+            <div className="flex items-center gap-3">
+              <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-950/30">
+                <BookOpenIcon aria-hidden className="size-5" />
+              </span>
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="text-xs font-medium">{labels.bases.nameLabel}</p>
+                <p
+                  className="bg-muted/60 truncate rounded-lg px-3 py-2 text-[13px]"
+                  title={createdBase.name}
                 >
-                  <KnowledgeFileTypeIcon fileName={document.original_name} />
-                  <span className="min-w-0 flex-1 truncate">
-                    {document.name}
-                  </span>
-                  <Badge
-                    variant={documentStatusVariant(document.status)}
-                    className={documentStatusClassName(document.status)}
-                  >
-                    {labels.documentStatus[document.status]}
-                  </Badge>
-                </li>
-              ))}
-            </ul>
-            {uploadFailures.length > 0 ? (
-              <div className="space-y-1">
-                <p role="alert" className="text-destructive text-xs">
-                  {wizard.uploadFailedNote}
-                </p>
-                <ul className="grid gap-1 text-xs">
-                  {uploadFailures.map((failure) => (
-                    <li key={failure.fileName} className="text-destructive">
-                      {labels.documents.uploadResultFailed(
-                        failure.fileName,
-                        failure.message,
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="space-y-3">
-            <h3 className="text-[13px] font-semibold">{wizard.summaryTitle}</h3>
-            <dl className="divide-border/60 bg-background border-border/70 divide-y overflow-hidden rounded-lg border text-[13px]">
-              <div className="flex items-center justify-between gap-3 px-4 py-2.5">
-                <dt className="text-muted-foreground">
-                  {labels.bases.nameLabel}
-                </dt>
-                <dd className="min-w-0 truncate font-medium">
                   {createdBase.name}
-                </dd>
+                </p>
               </div>
-              <div className="flex items-center justify-between gap-3 px-4 py-2.5">
-                <dt className="text-muted-foreground">
-                  {labels.documents.chunkingModeLabel}
-                </dt>
-                <dd>
-                  {submissionSnapshot.chunkingMode === "parent_child"
-                    ? labels.documents.chunkingModeParentChild
-                    : labels.documents.chunkingModeGeneral}
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-3 px-4 py-2.5">
-                <dt className="text-muted-foreground">
-                  {labels.documents.chunkSizeLabel}
-                </dt>
-                <dd className="tabular-nums">{submissionSnapshot.chunkSize}</dd>
-              </div>
-              <div className="flex items-center justify-between gap-3 px-4 py-2.5">
-                <dt className="text-muted-foreground">
-                  {labels.documents.chunkOverlapLabel}
-                </dt>
-                <dd className="tabular-nums">
-                  {submissionSnapshot.chunkOverlap}
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-3 px-4 py-2.5">
-                <dt className="text-muted-foreground">
-                  {labels.documents.chunkSeparatorLabel}
-                </dt>
-                <dd className="font-mono text-xs">
-                  {submissionSnapshot.chunkSeparator}
-                </dd>
-              </div>
-              {submissionSnapshot.chunkingMode === "parent_child" ? (
-                <>
-                  <div className="flex items-center justify-between gap-3 px-4 py-2.5">
-                    <dt className="text-muted-foreground">
-                      {labels.documents.childChunkSizeLabel}
-                    </dt>
-                    <dd className="tabular-nums">
-                      {submissionSnapshot.childChunkSize}
-                    </dd>
-                  </div>
-                  <div className="flex items-center justify-between gap-3 px-4 py-2.5">
-                    <dt className="text-muted-foreground">
-                      {labels.documents.childChunkSeparatorLabel}
-                    </dt>
-                    <dd className="font-mono text-xs">
-                      {submissionSnapshot.childChunkSeparator}
-                    </dd>
-                  </div>
-                </>
+            </div>
+            <div className="border-border/60 space-y-3 border-t pt-4">
+              <h3 className="text-[13px] font-semibold">
+                {wizard.processingTitle}
+              </h3>
+              {uploadingIndex !== null ? (
+                <p
+                  role="status"
+                  className="text-muted-foreground text-xs leading-5"
+                >
+                  {labels.documents.uploadingProgress(
+                    uploadingIndex + 1,
+                    submissionSnapshot.files.length,
+                  )}
+                </p>
               ) : null}
-              <div className="flex items-center justify-between gap-3 px-4 py-2.5">
-                <dt className="text-muted-foreground">
-                  {labels.bases.modelLabel}
-                </dt>
-                <dd className="min-w-0 truncate">{modelDisplayName}</dd>
-              </div>
-              <div className="flex items-center justify-between gap-3 px-4 py-2.5">
-                <dt className="text-muted-foreground">
-                  {labels.bases.retrievalModeLabel}
-                </dt>
-                <dd>
-                  {
-                    labels.bases.retrievalModes[
-                      submissionSnapshot.retrievalMode
-                    ]
-                  }
-                </dd>
-              </div>
-            </dl>
-          </div>
+              <ul
+                className="divide-border/60 bg-background border-border/70 divide-y overflow-hidden rounded-lg border"
+                data-testid="wizard-document-status"
+              >
+                {(documents.data?.items ?? []).map((document) => (
+                  <li
+                    key={document.id}
+                    className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-[13px]"
+                  >
+                    <KnowledgeFileTypeIcon fileName={document.original_name} />
+                    <span className="min-w-0 flex-1 truncate">
+                      {document.name}
+                    </span>
+                    <Badge
+                      variant={documentStatusVariant(document.status)}
+                      className={documentStatusClassName(document.status)}
+                    >
+                      {labels.documentStatus[document.status]}
+                    </Badge>
+                  </li>
+                ))}
+              </ul>
+              {uploadFailures.length > 0 ? (
+                <div className="space-y-1">
+                  <p role="alert" className="text-destructive text-xs">
+                    {wizard.uploadFailedNote}
+                  </p>
+                  <ul className="grid gap-1 text-xs">
+                    {uploadFailures.map((failure) => (
+                      <li key={failure.fileName} className="text-destructive">
+                        {labels.documents.uploadResultFailed(
+                          failure.fileName,
+                          failure.message,
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
 
-          <div className="flex justify-end">
-            <Button
-              className="h-8 rounded-lg text-[13px] shadow-none"
-              type="button"
-              disabled={isSubmitting}
-              onClick={() => onFinished(createdBase)}
-            >
-              {wizard.goToDocuments}
-            </Button>
+            <div className="space-y-3">
+              <h3 className="text-[13px] font-semibold">
+                {wizard.summaryTitle}
+              </h3>
+              <dl className="grid gap-x-4 gap-y-2 text-[13px]">
+                <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                  <dt className="text-muted-foreground">
+                    {labels.bases.nameLabel}
+                  </dt>
+                  <dd className="min-w-0 truncate font-medium">
+                    {createdBase.name}
+                  </dd>
+                </div>
+                <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                  <dt className="text-muted-foreground">
+                    {labels.documents.chunkingModeLabel}
+                  </dt>
+                  <dd>
+                    {submissionSnapshot.chunkingMode === "parent_child"
+                      ? labels.documents.chunkingModeParentChild
+                      : labels.documents.chunkingModeGeneral}
+                  </dd>
+                </div>
+                <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                  <dt className="text-muted-foreground">
+                    {labels.documents.chunkSizeLabel}
+                  </dt>
+                  <dd className="tabular-nums">
+                    {submissionSnapshot.chunkSize}
+                  </dd>
+                </div>
+                <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                  <dt className="text-muted-foreground">
+                    {labels.documents.chunkOverlapLabel}
+                  </dt>
+                  <dd className="tabular-nums">
+                    {submissionSnapshot.chunkOverlap}
+                  </dd>
+                </div>
+                <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                  <dt className="text-muted-foreground">
+                    {labels.documents.chunkSeparatorLabel}
+                  </dt>
+                  <dd className="font-mono text-xs">
+                    {submissionSnapshot.chunkSeparator}
+                  </dd>
+                </div>
+                {submissionSnapshot.chunkingMode === "parent_child" ? (
+                  <>
+                    <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                      <dt className="text-muted-foreground">
+                        {labels.documents.childChunkSizeLabel}
+                      </dt>
+                      <dd className="tabular-nums">
+                        {submissionSnapshot.childChunkSize}
+                      </dd>
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                      <dt className="text-muted-foreground">
+                        {labels.documents.childChunkSeparatorLabel}
+                      </dt>
+                      <dd className="font-mono text-xs">
+                        {submissionSnapshot.childChunkSeparator}
+                      </dd>
+                    </div>
+                  </>
+                ) : null}
+                <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                  <dt className="text-muted-foreground">
+                    {labels.bases.modelLabel}
+                  </dt>
+                  <dd className="min-w-0 truncate">{modelDisplayName}</dd>
+                </div>
+                <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                  <dt className="text-muted-foreground">
+                    {labels.bases.retrievalModeLabel}
+                  </dt>
+                  <dd>
+                    {
+                      labels.bases.retrievalModes[
+                        submissionSnapshot.retrievalMode
+                      ]
+                    }
+                  </dd>
+                </div>
+                <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                  <dt className="text-muted-foreground">
+                    {labels.bases.rerankerLabel}
+                  </dt>
+                  <dd className="min-w-0 truncate" title={rerankerDisplayName}>
+                    {rerankerDisplayName}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className="flex justify-start pt-1">
+              <Button
+                className="h-9 rounded-lg bg-blue-600 text-[13px] text-white shadow-none hover:bg-blue-700"
+                type="button"
+                disabled={isSubmitting}
+                onClick={() => onFinished(createdBase)}
+              >
+                {wizard.goToDocuments}
+                <ArrowRightIcon aria-hidden className="size-4" />
+              </Button>
+            </div>
           </div>
+          <aside className="bg-muted/35 h-fit space-y-3 rounded-xl p-5 lg:mt-12">
+            <BookOpenIcon aria-hidden className="size-5 text-blue-600" />
+            <h3 className="text-[13px] font-semibold">
+              {wizard.nextStepsTitle}
+            </h3>
+            <p className="text-muted-foreground text-xs leading-5">
+              {wizard.nextStepsHint}
+            </p>
+          </aside>
         </div>
       ) : null}
     </section>

@@ -158,6 +158,12 @@ export interface Translations {
       createButton: string;
       createTitle: string;
       createDescription: string;
+      unconfigured: string;
+      unconfiguredHint: string;
+      setupTitle: string;
+      setupDescription: string;
+      setupButton: string;
+      setupSave: string;
       nameLabel: string;
       namePlaceholder: string;
       descriptionLabel: string;
@@ -177,10 +183,12 @@ export interface Translations {
       updatedAt: (time: string) => string;
       openDocuments: string;
       noDescription: string;
+      basicSectionTitle: string;
       retrievalSectionTitle: string;
       retrievalModeLabel: string;
       retrievalModeHint: string;
       retrievalModes: { semantic: string; hybrid: string };
+      retrievalModeDescriptions: { semantic: string; hybrid: string };
       defaultTopKLabel: string;
       defaultTopKHint: string;
       defaultThresholdLabel: string;
@@ -188,6 +196,7 @@ export interface Translations {
       rerankerLabel: string;
       rerankerNone: string;
       rerankerHint: string;
+      rerankerUnavailable: string;
       rebuildSectionTitle: string;
       rebuildModelLabel: string;
       rebuildHint: string;
@@ -219,6 +228,11 @@ export interface Translations {
       previous: string;
       saveAndProcess: string;
       chunkSectionTitle: string;
+      parentContextTitle: string;
+      childRetrievalTitle: string;
+      previewParentText: string;
+      nextStepsTitle: string;
+      nextStepsHint: string;
       infoSectionTitle: string;
       createdTitle: string;
       createdHint: string;
@@ -244,6 +258,7 @@ export interface Translations {
       documents: string;
       settings: string;
       settingsSaved: string;
+      settingsDescription: string;
       metadata: string;
       baseNotFound: string;
       backToBases: string;
@@ -411,6 +426,7 @@ export interface Translations {
       addDescription: string;
       contentLabel: string;
       contentPlaceholder: string;
+      viewContent: string;
       edit: string;
       editTitle: (position: number) => string;
       delete: string;
@@ -436,6 +452,11 @@ export interface Translations {
     search: {
       title: string;
       description: string;
+      workspaceHint: string;
+      parametersTitle: string;
+      outcomeTitle: string;
+      waitingTitle: string;
+      scoreHelp: string;
       queryLabel: string;
       queryPlaceholder: string;
       baseFilterLabel: string;

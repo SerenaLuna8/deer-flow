@@ -191,7 +191,15 @@ export const enUS: Translations = {
       createButton: "New base",
       createTitle: "New knowledge base",
       createDescription:
-        "Pick a model configuration for this base; it cannot be changed later.",
+        "Create an empty knowledge base now. Configure models and retrieval when you first upload documents.",
+      unconfigured: "Not configured",
+      unconfiguredHint:
+        "This knowledge base has no model configured yet. Set it up when you first upload documents.",
+      setupTitle: "Configure knowledge base",
+      setupDescription:
+        "Choose an embedding model and retrieval method before importing documents.",
+      setupButton: "Configure models",
+      setupSave: "Save configuration",
       nameLabel: "Name",
       namePlaceholder: "e.g. Product handbook",
       descriptionLabel: "Description (optional)",
@@ -214,11 +222,18 @@ export const enUS: Translations = {
       updatedAt: (time) => `Updated ${time}`,
       openDocuments: "View documents",
       noDescription: "No description yet.",
+      basicSectionTitle: "General",
       retrievalSectionTitle: "Retrieval defaults",
       retrievalModeLabel: "Default retrieval route",
       retrievalModeHint:
         "Used by Agents and searches that use the base default. Takes effect on save; no rebuild required.",
-      retrievalModes: { semantic: "Semantic only", hybrid: "Hybrid" },
+      retrievalModes: { semantic: "Vector search", hybrid: "Hybrid" },
+      retrievalModeDescriptions: {
+        semantic:
+          "Turn the question into a vector to find semantically similar document segments.",
+        hybrid:
+          "Combine semantic and keyword retrieval into one set of candidates.",
+      },
       defaultTopKLabel: "Default results (top_k)",
       defaultTopKHint: "Used when a search omits top_k; range 1-20.",
       defaultThresholdLabel: "Default score threshold",
@@ -227,10 +242,12 @@ export const enUS: Translations = {
       rerankerLabel: "Reranker model",
       rerankerNone: "No reranking",
       rerankerHint: "Optional. Takes effect on save; no rebuild required.",
+      rerankerUnavailable:
+        "No reranker models are available. Continue without reranking or configure one in model management.",
       rebuildSectionTitle: "Embedding model",
       rebuildModelLabel: "Embedding model",
       rebuildHint:
-        "Re-embedding keeps every segment's text, identity, and enabled state (manual edits included) and only regenerates vectors; documents are excluded from retrieval until they finish. Pick a different model to rebind, or keep the current one to re-embed as is.",
+        "Regenerate vectors with the current or a new model, preserving all segment text, IDs, enabled states, and manual edits. Documents stay out of retrieval until processing finishes.",
       rebuildButton: "Re-embed documents",
       rebuildPending: "Submitting…",
       rebuildOutcome: (accepted, skipped) =>
@@ -265,10 +282,16 @@ export const enUS: Translations = {
       previous: "Previous",
       saveAndProcess: "Save & process",
       chunkSectionTitle: "Chunk settings",
+      parentContextTitle: "Parent chunks provide context",
+      childRetrievalTitle: "Child chunks are searched",
+      previewParentText: "View full parent chunk",
+      nextStepsTitle: "What’s next",
+      nextStepsHint:
+        "Open Documents to check processing, inspect segments, or retry failed files. When documents are ready, test retrieval and use them in Agent conversations.",
       infoSectionTitle: "Base details",
       createdTitle: "Knowledge base created",
       createdHint:
-        "Documents are being embedded. Once ready they are searchable in retrieval tests and agent chats.",
+        "Once documents are ready, test retrieval and use them in Agent conversations.",
       processingTitle: "Embedding progress",
       summaryTitle: "Settings",
       goToDocuments: "Go to documents",
@@ -296,6 +319,8 @@ export const enUS: Translations = {
       documents: "Documents",
       settings: "Settings",
       settingsSaved: "Saved.",
+      settingsDescription:
+        "Manage knowledge base details and retrieval defaults.",
       metadata: "Metadata",
       baseNotFound: "This knowledge base does not exist or is inaccessible.",
       backToBases: "Back to knowledge bases",
@@ -485,6 +510,7 @@ export const enUS: Translations = {
         "The segment is embedded with this base's embedding model and becomes retrievable immediately.",
       contentLabel: "Content",
       contentPlaceholder: "Enter the segment content",
+      viewContent: "View full content",
       edit: "Edit",
       editTitle: (position) => `Edit segment #${position}`,
       delete: "Delete",
@@ -512,6 +538,12 @@ export const enUS: Translations = {
     },
     search: {
       title: "Retrieval test",
+      workspaceHint:
+        "Ask a question to check what this knowledge base retrieves.",
+      parametersTitle: "Retrieval parameters",
+      outcomeTitle: "Retrieval results",
+      waitingTitle: "Ready to search",
+      scoreHelp: "About retrieval scores",
       description:
         "Run retrieval against this knowledge base to verify recall. With a reranker bound, results are ordered by rerank scores (0 to 1); otherwise by cosine similarity (-1 to 1).",
       queryLabel: "Query",
@@ -561,7 +593,7 @@ export const enUS: Translations = {
       retrievalModeLabel: "Retrieval route",
       retrievalModes: {
         default: "Base default",
-        semantic: "Semantic only (this search)",
+        semantic: "Vector search (this search)",
         hybrid: "Hybrid (this search)",
       },
       neverSearched:

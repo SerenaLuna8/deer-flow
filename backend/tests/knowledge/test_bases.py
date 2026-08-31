@@ -1,7 +1,7 @@
 """M3 gates: Knowledge Base CRUD rules over the installed Schema V1 snapshot.
 
 Covers project scoping, the per-project name and quota rules, the registry
-model bindings (embedding required, reranker optional), ordering, and the
+model bindings (deferred embedding for empty bases, optional reranker), ordering, and the
 ``document_count`` / ``delete_error`` view derivations.
 """
 
@@ -112,6 +112,31 @@ async def _prepared(postgres_database_url: str, **settings_overrides: object) ->
 
 
 @pytest.mark.asyncio
+async def test_create_unconfigured_base_without_any_registered_models(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+
+        created = await harness.service.create_knowledge_base(
+            project_id,
+            KnowledgeBaseCreate(name="待配置知识库", description="首次导入时配置"),
+        )
+
+        assert created.embedding_model_id is None
+        assert created.reranker_model_id is None
+        assert created.retrieval_mode == "semantic"
+        assert created.document_count == 0
+        assert created.status == "active"
+        assert await harness.service.get_knowledge_base(project_id, created.id) == created
+        listed, total = await harness.service.list_knowledge_bases(project_id)
+        assert total == 1
+        assert listed == [created]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_create_then_get_round_trips_the_view(postgres_database_url: str) -> None:
     harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
     try:
@@ -135,6 +160,34 @@ async def test_create_then_get_round_trips_the_view(postgres_database_url: str) 
 
         fetched = await harness.service.get_knowledge_base(project_id, created.id)
         assert fetched == created
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_base_rejects_reranker_without_embedding(postgres_database_url: str) -> None:
+    harness, project_id, _ = await _prepared(postgres_database_url)
+    try:
+        provider_id = await seed_provider(harness.factory)
+        reranker_id = await seed_rerank_model(harness.factory, provider_id)
+        with pytest.raises(KnowledgeError) as create_error:
+            await harness.service.create_knowledge_base(
+                project_id,
+                KnowledgeBaseCreate(name="不可仅配置重排序", reranker_model_id=reranker_id),
+            )
+        assert create_error.value.code == KNOWLEDGE_INVALID_REQUEST
+
+        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="待配置"))
+        with pytest.raises(KnowledgeError) as update_error:
+            await harness.service.update_knowledge_base(
+                project_id,
+                created.id,
+                KnowledgeBaseUpdate(reranker_model_id=reranker_id, retrieval_mode="hybrid"),
+            )
+        assert update_error.value.code == KNOWLEDGE_INVALID_REQUEST
+        assert await harness.service.get_knowledge_base(project_id, created.id) == created
+        _, total = await harness.service.list_knowledge_bases(project_id)
+        assert total == 1
     finally:
         await harness.engine.dispose()
 
@@ -405,6 +458,64 @@ async def test_view_derives_document_count_and_delete_error(postgres_database_ur
 # ---------------------------------------------------------------------------
 # Update
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_initial_configuration_rejects_a_base_with_documents(postgres_database_url: str) -> None:
+    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
+    try:
+        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="待配置"))
+        # Even a never-published failed document prevents initial binding.
+        async with harness.factory() as session, session.begin():
+            session.add(_seed_document(project_id, created.id, name="failed", status="failed", published_version=None))
+        before = await harness.service.get_knowledge_base(project_id, created.id)
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.update_knowledge_base(
+                project_id,
+                created.id,
+                KnowledgeBaseUpdate(embedding_model_id=embedding_model_id, retrieval_mode="hybrid"),
+            )
+        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
+        assert await harness.service.get_knowledge_base(project_id, created.id) == before
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_initial_configuration_commits_models_and_retrieval_settings_together(postgres_database_url: str) -> None:
+    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
+    try:
+        provider_id = await seed_provider(harness.factory)
+        reranker_id = await seed_rerank_model(harness.factory, provider_id)
+        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="待配置"))
+
+        with pytest.raises(KnowledgeError) as invalid_reranker:
+            await harness.service.update_knowledge_base(
+                project_id,
+                created.id,
+                KnowledgeBaseUpdate(embedding_model_id=embedding_model_id, reranker_model_id=embedding_model_id, retrieval_mode="hybrid", name="不应保存"),
+            )
+        assert invalid_reranker.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
+        assert await harness.service.get_knowledge_base(project_id, created.id) == created
+
+        configured = await harness.service.update_knowledge_base(
+            project_id,
+            created.id,
+            KnowledgeBaseUpdate(embedding_model_id=embedding_model_id, reranker_model_id=reranker_id, retrieval_mode="hybrid"),
+        )
+        assert configured.embedding_model_id == embedding_model_id
+        assert configured.reranker_model_id == reranker_id
+        assert configured.retrieval_mode == "hybrid"
+        assert configured.document_count == 0
+        assert await harness.service.get_knowledge_base(project_id, created.id) == configured
+
+        with pytest.raises(KnowledgeError) as rebound:
+            await harness.service.update_knowledge_base(project_id, created.id, KnowledgeBaseUpdate(embedding_model_id=uuid.uuid4()))
+        assert rebound.value.code == KNOWLEDGE_INVALID_REQUEST
+        unchanged = await harness.service.update_knowledge_base(project_id, created.id, KnowledgeBaseUpdate(embedding_model_id=None))
+        assert unchanged == configured
+    finally:
+        await harness.engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -875,4 +986,121 @@ async def test_rebuild_serializes_against_concurrent_model_disable(postgres_data
             tasks = (await session.scalars(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind == "ingest_document"))).all()
         assert tasks == []
     finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_initial_configurations_commit_one_complete_configuration(postgres_database_url: str) -> None:
+    """Only the first configuration owns every field; its competitor cannot overwrite any."""
+
+    harness = await _harness(postgres_database_url)
+    configuration_tasks = []
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        first_embedding_id, first_reranker_id = await seed_registry_models(harness.factory)
+        second_embedding_id, second_reranker_id = await seed_registry_models(harness.factory)
+        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="待配置"))
+        first_update = KnowledgeBaseUpdate(
+            name="第一套配置",
+            description="第一套描述",
+            embedding_model_id=first_embedding_id,
+            reranker_model_id=first_reranker_id,
+            retrieval_mode="hybrid",
+            default_top_k=8,
+            default_score_threshold=0.6,
+        )
+        second_update = KnowledgeBaseUpdate(
+            name="第二套配置",
+            description="第二套描述",
+            embedding_model_id=second_embedding_id,
+            reranker_model_id=second_reranker_id,
+            retrieval_mode="semantic",
+            default_top_k=2,
+            default_score_threshold=0.1,
+        )
+
+        async with harness.factory() as blocker, blocker.begin():
+            model = await blocker.scalar(select(ModelProviderModelRow).where(ModelProviderModelRow.id == first_embedding_id).with_for_update())
+            assert model is not None
+            first_task = asyncio.create_task(harness.service.update_knowledge_base(project_id, created.id, first_update))
+            configuration_tasks.append(first_task)
+            # The first call owns the Base lock while waiting for this model.
+            done, _ = await asyncio.wait({first_task}, timeout=0.5)
+            assert not done
+            second_task = asyncio.create_task(harness.service.update_knowledge_base(project_id, created.id, second_update))
+            configuration_tasks.append(second_task)
+            # Its different models are unlocked; only the shared Base can
+            # prevent the competitor from racing past the first configuration.
+            done, _ = await asyncio.wait(set(configuration_tasks), timeout=0.5)
+            assert not done
+
+        first_result, second_result = await asyncio.wait_for(asyncio.gather(*configuration_tasks, return_exceptions=True), timeout=5)
+        assert not isinstance(first_result, BaseException)
+        assert isinstance(second_result, KnowledgeError)
+        assert second_result.code == KNOWLEDGE_INVALID_REQUEST
+        stored = await harness.service.get_knowledge_base(project_id, created.id)
+        assert stored == first_result
+        assert stored.name == first_update.name
+        assert stored.description == first_update.description
+        assert stored.embedding_model_id == first_embedding_id
+        assert stored.reranker_model_id == first_reranker_id
+        assert stored.retrieval_mode == first_update.retrieval_mode
+        assert stored.default_top_k == first_update.default_top_k
+        assert stored.default_score_threshold == first_update.default_score_threshold
+        assert stored.document_count == 0
+    finally:
+        for task in configuration_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*configuration_tasks, return_exceptions=True)
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_initial_configuration_rolls_back_after_concurrent_reranker_disable(postgres_database_url: str) -> None:
+    """A model disabled while initial binding waits leaves the entire Base unchanged."""
+
+    harness = await _harness(postgres_database_url)
+    configuration_task = None
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        embedding_id, reranker_id = await seed_registry_models(harness.factory)
+        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="等待模型配置", description="尚未配置"))
+        async with harness.factory() as admin_session, admin_session.begin():
+            reranker = await admin_session.scalar(select(ModelProviderModelRow).where(ModelProviderModelRow.id == reranker_id).with_for_update())
+            assert reranker is not None
+            reranker.status = "disabled"
+            await admin_session.flush()
+            configuration_task = asyncio.create_task(
+                harness.service.update_knowledge_base(
+                    project_id,
+                    created.id,
+                    KnowledgeBaseUpdate(
+                        name="不应保存的名称",
+                        description="不应保存的描述",
+                        embedding_model_id=embedding_id,
+                        reranker_model_id=reranker_id,
+                        retrieval_mode="hybrid",
+                        default_top_k=9,
+                        default_score_threshold=0.7,
+                    ),
+                )
+            )
+            # Embedding validation has no conflicting lock. The second model
+            # must wait and re-read active status after this disable commits.
+            done, _ = await asyncio.wait({configuration_task}, timeout=0.5)
+            assert not done
+
+        with pytest.raises(KnowledgeError) as error:
+            await asyncio.wait_for(configuration_task, timeout=5)
+        assert error.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
+        # Includes models, defaults, mode, text fields, and updated_at.
+        assert await harness.service.get_knowledge_base(project_id, created.id) == created
+    finally:
+        if configuration_task is not None:
+            if not configuration_task.done():
+                configuration_task.cancel()
+            await asyncio.gather(configuration_task, return_exceptions=True)
         await harness.engine.dispose()

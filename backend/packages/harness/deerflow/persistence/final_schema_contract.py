@@ -132,15 +132,15 @@ FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
     "columns": CatalogInvariant(
         count=1351,
-        digest="acc5701ad220e22df44a1a2a90a0d329aa61a2c52f717116118470fbdfa434ae",
+        digest="737f132ab3fb3d4e8caf64c1ac1613a399c693c62fb5b0d9fac29bdc42a0cfc2",
     ),
     "table_comments": CatalogInvariant(
         count=108,
-        digest="3eb676471a0c5a0bd591a34cc901501b81240937c329120d25150c3a0e1e87d5",
+        digest="49865a7bb80e5786c3df74c77595a26db114dcc680d663dd876d8860faf9e3a2",
     ),
     "column_comments": CatalogInvariant(
         count=1352,
-        digest="6af3f6776eaa73851cc761a918defb9d08b5152e5832fa13dca975b5423ffd6a",
+        digest="e905ec4697e29df708c266646f1260a5340ac6efb1029a1b6483f6fa4239b78c",
     ),
     "sequences": CatalogInvariant(
         count=4,

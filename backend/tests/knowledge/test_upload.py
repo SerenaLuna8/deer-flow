@@ -208,6 +208,28 @@ async def _table_counts(harness: _UploadHarness) -> tuple[int, int]:
 
 
 @pytest.mark.asyncio
+async def test_unconfigured_base_rejects_upload_without_reserving_or_storing_a_document(postgres_database_url: str, tmp_path: Path) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        base_id = uuid.uuid4()
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+            session.add(KnowledgeBaseRow(id=base_id, project_id=project_id, name="待配置"))
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.upload_document(project_id, base_id, _upload(tmp_path))
+
+        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
+        assert await harness.service.list_documents(project_id, base_id) == ([], 0)
+        assert await _table_counts(harness) == (0, 0)
+        assert harness.store.objects == {}
+        assert harness.store.uploads == []
+        assert harness.store.deletes == []
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_upload_creates_queued_document_and_ingest_task(postgres_database_url: str, tmp_path: Path) -> None:
     harness = await _harness(postgres_database_url)
     try:
@@ -1336,6 +1358,62 @@ async def test_http_health_reports_module_probes(temp_path_tracker: list[Path]) 
         "message": "对象存储 bucket 不可访问",
         "request_id": _REQUEST_ID,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("create_binding", [{}, {"embedding_model_id": None}])
+async def test_http_unconfigured_base_create_and_first_configuration(create_binding: dict[str, None]) -> None:
+    from dataclasses import replace
+
+    from actweave_knowledge import KnowledgeBaseView
+
+    base_view = KnowledgeBaseView(
+        id=_BASE_ID,
+        project_id=_PROJECT_ID,
+        name="待配置",
+        description="",
+        embedding_model_id=None,
+        reranker_model_id=None,
+        retrieval_mode="semantic",
+        status="active",
+        document_count=0,
+        default_top_k=4,
+        default_score_threshold=0.2,
+        delete_error=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    embedding_id, reranker_id = uuid.uuid4(), uuid.uuid4()
+
+    class _BaseModule(_FakeModule):
+        async def create_knowledge_base(self, project_id, create, *, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
+            assert create.embedding_model_id is None
+            assert create.reranker_model_id is None
+            assert create.retrieval_mode == "semantic"
+            return base_view
+
+        async def update_knowledge_base(self, project_id, base_id, update, *, authority):  # noqa: ANN001
+            assert authority.project_id == project_id
+            assert base_id == _BASE_ID
+            assert update.embedding_model_id == embedding_id
+            assert update.reranker_model_id == reranker_id
+            assert update.retrieval_mode == "hybrid"
+            return replace(base_view, embedding_model_id=embedding_id, reranker_model_id=reranker_id, retrieval_mode="hybrid")
+
+    async with _client(_app(_BaseModule())) as client:
+        created = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/bases", json={"name": "待配置", **create_binding})
+        assert created.status_code == 200
+        assert created.json()["item"]["embedding_model_id"] is None
+        assert created.json()["item"]["document_count"] == 0
+        configured = await client.patch(
+            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}",
+            json={"embedding_model_id": str(embedding_id), "retrieval_mode": "hybrid", "reranker_model_id": str(reranker_id)},
+        )
+        assert configured.status_code == 200
+        assert configured.json()["item"]["embedding_model_id"] == str(embedding_id)
+        assert configured.json()["item"]["reranker_model_id"] == str(reranker_id)
+        assert configured.json()["item"]["retrieval_mode"] == "hybrid"
 
 
 @pytest.mark.asyncio

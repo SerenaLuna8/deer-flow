@@ -89,10 +89,13 @@ class TestFrozenFormulaSamples:
 
 
 class TestM9PremisesHoldInCode:
-    def test_base_create_requires_embedding_and_keeps_reranker_optional(self) -> None:
-        fields = {f.name: f for f in dataclasses.fields(KnowledgeBaseCreate)}
-        assert fields["embedding_model_id"].default is dataclasses.MISSING
-        assert fields["reranker_model_id"].default is None
+    def test_empty_base_can_defer_embedding_and_keeps_reranker_optional(self) -> None:
+        # Empty-base creation now defers indexing configuration; the stored
+        # retrieval defaults still apply once the first embedding is bound.
+        create = KnowledgeBaseCreate(name="待配置知识库")
+        assert create.embedding_model_id is None
+        assert create.reranker_model_id is None
+        assert create.retrieval_mode == "semantic"
 
     def test_base_update_keeps_the_tri_state_reranker_rebinding(self) -> None:
         fields = {f.name: f for f in dataclasses.fields(KnowledgeBaseUpdate)}

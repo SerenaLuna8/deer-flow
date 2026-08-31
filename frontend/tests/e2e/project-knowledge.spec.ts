@@ -80,6 +80,8 @@ type MockBase = {
   status: "active" | "disabled" | "deleting";
   document_count: number;
   delete_error: string | null;
+  /** Omitted seeded bindings stay configured; explicit null is an empty base. */
+  embedding_model_id?: string | null;
   default_top_k?: number;
   default_score_threshold?: number;
   reranker_model_id?: string | null;
@@ -149,7 +151,10 @@ function baseView(base: MockBase) {
     project_id: PROJECT_ID,
     name: base.name,
     description: base.description,
-    embedding_model_id: MODEL_ID,
+    embedding_model_id:
+      base.embedding_model_id === undefined
+        ? MODEL_ID
+        : base.embedding_model_id,
     reranker_model_id: base.reranker_model_id ?? null,
     retrieval_mode: base.retrieval_mode ?? "semantic",
     status: base.status,
@@ -250,6 +255,8 @@ type KnowledgeMockOptions = {
   documents?: MockDocument[];
   /** Keep the create response in flight after the mock server accepted it. */
   createBaseResponseGate?: Promise<void>;
+  /** Keep initial model configuration pending after the server accepted it. */
+  baseUpdateResponseGate?: Promise<void>;
   /** Keep an upload response in flight after the mock server accepted it. */
   uploadResponseGate?: Promise<void>;
   documentListFailure?: {
@@ -306,10 +313,17 @@ async function mockKnowledgeRoutes(
     queryCounter: 0,
     fieldCounter: 0,
     documentListRequests: 0,
+    modelOptionsRequests: 0,
     documentListFailure: options.documentListFailure ?? null,
     searchRequests: [] as Array<Record<string, unknown>>,
     previewRequests: [] as Array<Record<string, string>>,
+    baseCreates: [] as Array<Record<string, unknown>>,
     baseUpdates: [] as Array<Record<string, unknown>>,
+    baseUpdateFailure: null as null | {
+      status: number;
+      code: string;
+      message: string;
+    },
     rebuildRequests: [] as Array<Record<string, unknown>>,
     metadataUpdates: [] as Array<Record<string, unknown>>,
     batchMetadataRequests: [] as Array<{
@@ -380,6 +394,7 @@ async function mockKnowledgeRoutes(
       });
     }
     if (path === `${knowledgeBase}/model-options` && method === "GET") {
+      state.modelOptionsRequests += 1;
       return json(route, {
         embedding_models: [
           {
@@ -416,16 +431,21 @@ async function mockKnowledgeRoutes(
       const body = request.postDataJSON() as {
         name: string;
         description?: string;
+        embedding_model_id?: string;
         retrieval_mode?: "semantic" | "hybrid";
+        reranker_model_id?: string;
       };
+      state.baseCreates.push(body);
       const created: MockBase = {
         id: `40000000-0000-4000-8000-00000000000${state.bases.length + 1}`,
         name: body.name,
         description: body.description ?? "",
+        embedding_model_id: body.embedding_model_id ?? null,
         status: "active",
         document_count: 0,
         delete_error: null,
         retrieval_mode: body.retrieval_mode ?? "semantic",
+        reranker_model_id: body.reranker_model_id ?? null,
       };
       state.bases.push(created);
       await options.createBaseResponseGate;
@@ -448,11 +468,25 @@ async function mockKnowledgeRoutes(
         status?: "active" | "disabled";
         default_top_k?: number;
         default_score_threshold?: number;
+        embedding_model_id?: string;
         retrieval_mode?: "semantic" | "hybrid";
         reranker_model_id?: string;
         clear_reranker_model?: boolean;
       };
       state.baseUpdates.push(body);
+      if (state.baseUpdateFailure) {
+        const failure = state.baseUpdateFailure;
+        state.baseUpdateFailure = null;
+        return knowledgeError(
+          route,
+          failure.status,
+          failure.code,
+          failure.message,
+        );
+      }
+      if (body.embedding_model_id !== undefined) {
+        base.embedding_model_id = body.embedding_model_id;
+      }
       if (body.name !== undefined) base.name = body.name;
       if (body.description !== undefined) base.description = body.description;
       if (body.status !== undefined) base.status = body.status;
@@ -469,6 +503,7 @@ async function mockKnowledgeRoutes(
       } else if (body.reranker_model_id !== undefined) {
         base.reranker_model_id = body.reranker_model_id;
       }
+      await options.baseUpdateResponseGate;
       return json(route, { item: baseView(base), request_id: "req-update" });
     }
     if (baseMatch && method === "DELETE") {
@@ -1554,10 +1589,39 @@ test("creates a base through the wizard and watches the upload reach ready", asy
   await page.getByLabel("Name").fill("产品手册");
   await page.getByLabel("Embedding model").click();
   await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  const reranker = page.getByRole("combobox", { name: "Reranker model" });
+  await expect(reranker).toHaveText("No reranking");
+  await reranker.click();
+  await page
+    .getByRole("option", { name: "SiliconFlow · BAAI/bge-reranker-v2-m3" })
+    .click();
+  // Reranking is available for either retrieval route; switching routes must
+  // not discard the independently chosen model.
+  const retrievalRoute = page.getByRole("radiogroup", {
+    name: "Default retrieval route",
+  });
+  await retrievalRoute
+    .getByRole("radio", { name: "Hybrid", exact: true })
+    .check();
+  await expect(reranker).toHaveText("SiliconFlow · BAAI/bge-reranker-v2-m3");
+  await retrievalRoute
+    .getByRole("radio", { name: "Vector search", exact: true })
+    .check();
+  await expect(reranker).toHaveText("SiliconFlow · BAAI/bge-reranker-v2-m3");
   await page.getByRole("button", { name: "Save & process" }).click();
 
   // Step 3: the base exists and embedding progress advances to ready.
   await expect(page.getByText("Knowledge base created")).toBeVisible();
+  expect(state.baseCreates).toHaveLength(1);
+  expect(state.baseCreates[0]).toMatchObject({
+    name: "产品手册",
+    embedding_model_id: MODEL_ID,
+    retrieval_mode: "semantic",
+    reranker_model_id: RERANK_MODEL_ID,
+  });
+  expect(state.bases[0]?.reranker_model_id).toBe(RERANK_MODEL_ID);
+  const summary = page.getByRole("heading", { name: "Settings" }).locator("..");
+  await expect(summary).toContainText("SiliconFlow · BAAI/bge-reranker-v2-m3");
   const statusList = page.getByTestId("wizard-document-status");
   await expect(statusList.getByText("handbook-1.txt")).toBeVisible();
   // The stateful mock advances queued → processing → ready on each poll.
@@ -1622,16 +1686,42 @@ test("freezes wizard controls and submitted settings while base creation is pend
   await page.getByLabel("Name").fill("冻结设置");
   await page.getByLabel("Embedding model").click();
   await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  const retrievalRoute = page.getByRole("radiogroup", {
+    name: "Default retrieval route",
+  });
+  await retrievalRoute
+    .getByRole("radio", { name: "Hybrid", exact: true })
+    .check();
+  const reranker = page.getByRole("combobox", { name: "Reranker model" });
+  await reranker.click();
+  await page
+    .getByRole("option", { name: "SiliconFlow · BAAI/bge-reranker-v2-m3" })
+    .click();
   await page.getByRole("button", { name: "Save & process" }).click();
 
   // The mock has accepted the create, but the browser still awaits its reply.
   await expect.poll(() => state.bases.length).toBe(1);
   try {
+    expect(state.baseCreates).toHaveLength(1);
+    expect(state.baseCreates[0]).toMatchObject({
+      name: "冻结设置",
+      embedding_model_id: MODEL_ID,
+      retrieval_mode: "hybrid",
+      reranker_model_id: RERANK_MODEL_ID,
+    });
     await expect(page.getByRole("button", { name: "Back" })).toBeDisabled();
     await expect(page.getByRole("button", { name: "Previous" })).toBeDisabled();
     await expect(page.getByLabel("Name")).toBeDisabled();
     await expect(page.getByLabel("Description")).toBeDisabled();
     await expect(page.getByLabel("Embedding model")).toBeDisabled();
+    await expect(reranker).toBeDisabled();
+    await expect(reranker).toHaveText("SiliconFlow · BAAI/bge-reranker-v2-m3");
+    await expect(
+      retrievalRoute.getByRole("radio", { name: "Hybrid", exact: true }),
+    ).toBeDisabled();
+    await expect(
+      retrievalRoute.getByRole("radio", { name: "Vector search", exact: true }),
+    ).toBeDisabled();
     await expect(page.getByRole("radio", { name: /General/u })).toBeDisabled();
     await expect(
       page.getByRole("radio", { name: /Parent-child/u }),
@@ -1671,6 +1761,8 @@ test("freezes wizard controls and submitted settings while base creation is pend
   await expect(summary).toContainText("Parent-child");
   await expect(summary).toContainText("300");
   await expect(summary).toContainText("。");
+  await expect(summary).toContainText("SiliconFlow · BAAI/bge-reranker-v2-m3");
+  expect(state.bases[0]?.reranker_model_id).toBe(RERANK_MODEL_ID);
 });
 
 test("does not continue document uploads after the create wizard unmounts", async ({
@@ -1710,20 +1802,306 @@ test("does not continue document uploads after the create wizard unmounts", asyn
   expect(state.uploadCounter).toBe(0);
 });
 
-test("creates an empty base from the wizard escape hatch", async ({ page }) => {
-  await mockKnowledgeRoutes(page);
+test("creates an unconfigured empty base using only name and description", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page);
   await page.goto("/projects/alpha/knowledge");
 
   await page.getByRole("button", { name: "New base" }).click();
   await page.getByRole("button", { name: "Create an empty base" }).click();
-  await page.getByLabel("Name").fill("空知识库");
-  await page.getByLabel("Embedding model").click();
-  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
-  await page.getByRole("button", { name: "Create", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Name").fill("空知识库");
+  await dialog.getByLabel("Description").fill("稍后配置并上传文档");
+  await expect(dialog.getByRole("combobox")).toHaveCount(0);
+  await expect(dialog.getByRole("radiogroup")).toHaveCount(0);
+  expect(state.modelOptionsRequests).toBe(0);
+  await dialog.getByRole("button", { name: "Create", exact: true }).click();
 
   const baseList = page.getByTestId("knowledge-base-list");
   await expect(baseList.getByText("空知识库")).toBeVisible();
   await expect(baseList.getByText("0 documents")).toBeVisible();
+  await expect(baseList.getByText("Not configured")).toBeVisible();
+  expect(state.baseCreates).toEqual([
+    { name: "空知识库", description: "稍后配置并上传文档" },
+  ]);
+  expect(state.bases[0]).toMatchObject({
+    embedding_model_id: null,
+    retrieval_mode: "semantic",
+    reranker_model_id: null,
+    document_count: 0,
+  });
+  expect(state.modelOptionsRequests).toBe(0);
+  expect(state.uploadCounter).toBe(0);
+});
+
+test("configures an empty base before opening its first upload dialog", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  let releaseConfiguration!: () => void;
+  const baseUpdateResponseGate = new Promise<void>((resolve) => {
+    releaseConfiguration = resolve;
+  });
+  const state = await mockKnowledgeRoutes(page, {
+    baseUpdateResponseGate,
+    bases: [
+      {
+        id: BASE_ID,
+        name: "Awaiting configuration",
+        description: "",
+        status: "active",
+        document_count: 0,
+        delete_error: null,
+        embedding_model_id: null,
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await expect(
+    page.getByTestId("knowledge-base-list").getByText("Not configured"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Upload document" }).click();
+  const configuration = page.getByRole("dialog", {
+    name: "Configure knowledge base",
+  });
+  await expect(configuration).toBeVisible();
+  await expect(configuration.getByLabel("File", { exact: true })).toHaveCount(
+    0,
+  );
+  await configuration.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  await configuration
+    .getByRole("radio", { name: "Hybrid", exact: true })
+    .check();
+  await configuration.getByLabel("Reranker model").click();
+  await page
+    .getByRole("option", { name: "SiliconFlow · BAAI/bge-reranker-v2-m3" })
+    .click();
+
+  try {
+    await configuration
+      .getByRole("button", { name: "Save configuration" })
+      .click();
+    await expect.poll(() => state.baseUpdates.length).toBe(1);
+    expect(state.baseUpdates[0]).toEqual({
+      embedding_model_id: MODEL_ID,
+      retrieval_mode: "hybrid",
+      reranker_model_id: RERANK_MODEL_ID,
+    });
+    // An accepted PATCH is not a successful response yet: file admission must
+    // wait, even though the mock server has already persisted the binding.
+    await expect(configuration).toBeVisible();
+    await expect(
+      page.getByRole("dialog", { name: "Upload document", exact: true }),
+    ).toHaveCount(0);
+    expect(state.uploadCounter).toBe(0);
+    expect(state.documents).toHaveLength(0);
+  } finally {
+    releaseConfiguration();
+  }
+
+  const uploadDialog = page.getByRole("dialog", {
+    name: "Upload document",
+    exact: true,
+  });
+  await expect(uploadDialog).toBeVisible();
+  await expect(configuration).toHaveCount(0);
+  expect(state.bases[0]).toMatchObject({
+    embedding_model_id: MODEL_ID,
+    retrieval_mode: "hybrid",
+    reranker_model_id: RERANK_MODEL_ID,
+  });
+  await uploadDialog.getByLabel("File").setInputFiles({
+    name: "configured-first-upload.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("Upload only after the initial configuration succeeds"),
+  });
+  await uploadDialog
+    .getByRole("button", { name: "Upload", exact: true })
+    .click();
+  await expect(
+    page.getByTestId("knowledge-document-rows").getByText("handbook-1.txt"),
+  ).toBeVisible();
+  expect(state.uploadCounter).toBe(1);
+  expect(state.documents).toHaveLength(1);
+});
+
+test("failed initial configuration preserves choices without uploading documents", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "Configuration failure",
+        description: "",
+        status: "active",
+        document_count: 0,
+        delete_error: null,
+        embedding_model_id: null,
+        retrieval_mode: "semantic",
+        reranker_model_id: null,
+      },
+    ],
+  });
+  state.baseUpdateFailure = {
+    status: 503,
+    code: "KNOWLEDGE_UNAVAILABLE",
+    message: "Model binding temporarily unavailable.",
+  };
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Upload document" }).click();
+  const configuration = page.getByRole("dialog", {
+    name: "Configure knowledge base",
+  });
+  await configuration.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  await configuration
+    .getByRole("radio", { name: "Hybrid", exact: true })
+    .check();
+  await configuration.getByLabel("Reranker model").click();
+  await page
+    .getByRole("option", { name: "SiliconFlow · BAAI/bge-reranker-v2-m3" })
+    .click();
+  await configuration
+    .getByRole("button", { name: "Save configuration" })
+    .click();
+
+  await expect(configuration.getByRole("alert")).toHaveText(
+    "Model binding temporarily unavailable.",
+  );
+  await expect(configuration.getByLabel("Embedding model")).toHaveText(
+    "SiliconFlow · BAAI/bge-m3",
+  );
+  await expect(
+    configuration.getByRole("radio", { name: "Hybrid", exact: true }),
+  ).toBeChecked();
+  await expect(configuration.getByLabel("Reranker model")).toHaveText(
+    "SiliconFlow · BAAI/bge-reranker-v2-m3",
+  );
+  await expect(
+    configuration.getByRole("button", { name: "Save configuration" }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("dialog", { name: "Upload document", exact: true }),
+  ).toHaveCount(0);
+  expect(state.baseUpdates).toHaveLength(1);
+  expect(state.bases[0]).toMatchObject({
+    embedding_model_id: null,
+    retrieval_mode: "semantic",
+    reranker_model_id: null,
+    document_count: 0,
+  });
+  expect(state.uploadCounter).toBe(0);
+  expect(state.documents).toHaveLength(0);
+});
+
+test("read-only members cannot configure an unconfigured base", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    capabilities: READ_CAPABILITIES,
+    bases: [
+      {
+        id: BASE_ID,
+        name: "Unconfigured read-only base",
+        description: "",
+        status: "active",
+        document_count: 0,
+        delete_error: null,
+        embedding_model_id: null,
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await expect(
+    page.getByTestId("knowledge-base-list").getByText("Not configured"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "View documents" }).click();
+  await expect(
+    page.getByRole("button", { name: "Upload document" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Configure models" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Settings", exact: true }),
+  ).toHaveCount(0);
+
+  // A manually entered settings URL cannot grant the missing edit capability.
+  await page.goto(`/projects/alpha/knowledge?kb=${BASE_ID}&view=settings`);
+  await expect(
+    page.getByRole("button", { name: "Configure models" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("dialog", { name: "Configure knowledge base" }),
+  ).toHaveCount(0);
+  expect(state.baseUpdates).toHaveLength(0);
+  expect(state.modelOptionsRequests).toBe(0);
+  expect(state.uploadCounter).toBe(0);
+});
+
+test("settings configure an empty base without opening an upload dialog", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "Configure from settings",
+        description: "",
+        status: "active",
+        document_count: 0,
+        delete_error: null,
+        embedding_model_id: null,
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Re-embed documents" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Configure models" }).click();
+  const configuration = page.getByRole("dialog", {
+    name: "Configure knowledge base",
+  });
+  await configuration.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  await expect(
+    configuration.getByRole("radio", { name: "Vector search", exact: true }),
+  ).toBeChecked();
+  await expect(configuration.getByLabel("Reranker model")).toHaveText(
+    "No reranking",
+  );
+  await configuration
+    .getByRole("button", { name: "Save configuration" })
+    .click();
+
+  await expect(configuration).toHaveCount(0);
+  expect(state.baseUpdates).toEqual([
+    { embedding_model_id: MODEL_ID, retrieval_mode: "semantic" },
+  ]);
+  expect(state.bases[0]?.embedding_model_id).toBe(MODEL_ID);
+  await expect(
+    page.getByRole("button", { name: "Configure models" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Re-embed documents" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Upload document", exact: true }),
+  ).toHaveCount(0);
+  expect(state.rebuildRequests).toHaveLength(0);
+  expect(state.uploadCounter).toBe(0);
+  expect(state.documents).toHaveLength(0);
 });
 
 test("persists the base retrieval route at creation and in settings without changing it for a search override", async ({
@@ -1731,32 +2109,44 @@ test("persists the base retrieval route at creation and in settings without chan
 }) => {
   const state = await mockKnowledgeRoutes(page);
   await page.goto("/projects/alpha/knowledge");
-  await page.getByRole("button", { name: "New base" }).click();
-  await page.getByRole("button", { name: "Create an empty base" }).click();
+  await page.getByRole("button", { name: "Create from documents" }).click();
+  await page.getByLabel("File").setInputFiles({
+    name: "persistent-route.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("Keep the chosen retrieval route after creation"),
+  });
+  await page.getByRole("button", { name: "Next" }).click();
   await page.getByLabel("Name").fill("Persistent retrieval route");
   await page.getByLabel("Embedding model").click();
   await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
-  await page.getByRole("combobox", { name: "Default retrieval route" }).click();
-  await page.getByRole("option", { name: "Hybrid", exact: true }).click();
-  await page.getByRole("button", { name: "Create", exact: true }).click();
-  await expect(page.getByTestId("knowledge-base-list")).toBeVisible();
+  await page
+    .getByRole("radiogroup", { name: "Default retrieval route" })
+    .getByRole("radio", { name: "Hybrid", exact: true })
+    .check();
+  await page.getByRole("button", { name: "Save & process" }).click();
+  await expect(page.getByText("Knowledge base created")).toBeVisible();
   expect(state.bases[0]?.retrieval_mode).toBe("hybrid");
 
-  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Go to documents" }).click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const route = page.getByRole("combobox", { name: "Default retrieval route" });
-  await expect(route).toHaveText("Hybrid");
-  await route.click();
-  await page
-    .getByRole("option", { name: "Semantic only", exact: true })
-    .click();
+  const route = page.getByRole("radiogroup", {
+    name: "Default retrieval route",
+  });
+  await expect(
+    route.getByRole("radio", { name: "Hybrid", exact: true }),
+  ).toBeChecked();
+  await route
+    .getByRole("radio", { name: "Vector search", exact: true })
+    .check();
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
   expect(state.baseUpdates.at(-1)).toMatchObject({
     retrieval_mode: "semantic",
   });
   await page.reload();
-  await expect(route).toHaveText("Semantic only");
+  await expect(
+    route.getByRole("radio", { name: "Vector search", exact: true }),
+  ).toBeChecked();
 
   await page.getByRole("button", { name: "Retrieval test" }).click();
   await page.getByLabel("Query").fill("single search override");
@@ -1784,13 +2174,60 @@ test("the document creation wizard persists its chosen base retrieval route", as
   await page.getByRole("button", { name: "Next" }).click();
   await page.getByLabel("Embedding model").click();
   await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
-  const route = page.getByRole("combobox", { name: "Default retrieval route" });
-  await expect(route).toHaveText("Semantic only");
-  await route.click();
-  await page.getByRole("option", { name: "Hybrid", exact: true }).click();
+  const route = page.getByRole("radiogroup", {
+    name: "Default retrieval route",
+  });
+  await expect(
+    route.getByRole("radio", { name: "Vector search", exact: true }),
+  ).toBeChecked();
+  await route.getByRole("radio", { name: "Hybrid", exact: true }).check();
   await page.getByRole("button", { name: "Save & process" }).click();
   await expect(page.getByText("Knowledge base created")).toBeVisible();
   expect(state.bases[0]?.retrieval_mode).toBe("hybrid");
+  expect(state.baseCreates[0]).not.toHaveProperty("reranker_model_id");
+  const summary = page.getByRole("heading", { name: "Settings" }).locator("..");
+  await expect(summary).toContainText("No reranking");
+});
+
+test("wizard omits a cleared reranker when creating a hybrid base", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page);
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+  await page.getByLabel("File").setInputFiles({
+    name: "no-reranker.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("A hybrid base without a reranking model"),
+  });
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  const retrievalRoute = page.getByRole("radiogroup", {
+    name: "Default retrieval route",
+  });
+  await retrievalRoute
+    .getByRole("radio", { name: "Hybrid", exact: true })
+    .check();
+  const reranker = page.getByRole("combobox", { name: "Reranker model" });
+  await reranker.click();
+  await page
+    .getByRole("option", { name: "SiliconFlow · BAAI/bge-reranker-v2-m3" })
+    .click();
+  await expect(reranker).toHaveText("SiliconFlow · BAAI/bge-reranker-v2-m3");
+  await reranker.click();
+  await page.getByRole("option", { name: "No reranking", exact: true }).click();
+  await expect(reranker).toHaveText("No reranking");
+  await page.getByRole("button", { name: "Save & process" }).click();
+
+  await expect(page.getByText("Knowledge base created")).toBeVisible();
+  expect(state.baseCreates).toHaveLength(1);
+  expect(state.baseCreates[0]).toMatchObject({ retrieval_mode: "hybrid" });
+  expect(state.baseCreates[0]).not.toHaveProperty("reranker_model_id");
+  expect(state.baseCreates[0]).not.toHaveProperty("clear_reranker_model");
+  expect(state.bases[0]?.reranker_model_id).toBeNull();
+  const summary = page.getByRole("heading", { name: "Settings" }).locator("..");
+  await expect(summary).toContainText("No reranking");
 });
 
 test("failed document shows the error, retry re-queues it, and the segment browser opens when ready", async ({
@@ -2876,8 +3313,15 @@ test("base settings save retrieval defaults and empty search inputs defer to the
   // Saving new defaults goes through the base PATCH route.
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel("Default results (top_k)").fill("6");
+  await page.getByLabel("Default score threshold").fill("2");
+  await page.getByLabel("Default score threshold").press("Enter");
+  expect(state.baseUpdates).toHaveLength(0);
+  await expect(
+    page.getByRole("button", { name: "Save", exact: true }),
+  ).toBeDisabled();
   await page.getByLabel("Default score threshold").fill("0.3");
-  await page.getByRole("button", { name: "Save", exact: true }).click();
+  // The external field remains associated with the settings form.
+  await page.getByLabel("Default score threshold").press("Enter");
   await expect(page.getByText("Saved.")).toBeVisible();
   expect(state.baseUpdates.at(-1)).toMatchObject({
     default_top_k: 6,
@@ -3031,6 +3475,10 @@ test("segment browser edits, toggles, adds, and deletes segments", async ({
 
   // Editing re-embeds server-side and updates the aggregated counts.
   const first = list.getByRole("listitem").filter({ hasText: "第一段" });
+  await first.getByRole("button", { name: "View full content" }).click();
+  await expect(page.getByRole("dialog")).toContainText("第一段原始内容");
+  await page.getByRole("dialog").press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await first.getByRole("button", { name: "Edit" }).click();
   await page.getByLabel("Content").fill("第一段修改后的内容");
   await page

@@ -41,7 +41,7 @@ export const knowledgeBaseItemSchema = z
     project_id: z.string().uuid(),
     name: z.string(),
     description: z.string(),
-    embedding_model_id: z.string().uuid(),
+    embedding_model_id: z.string().uuid().nullable(),
     reranker_model_id: z.string().uuid().nullable(),
     retrieval_mode: knowledgeRetrievalModeSchema,
     status: knowledgeBaseStatusSchema,
@@ -126,9 +126,7 @@ export const knowledgeTaskProgressSchema = z
     next_attempt_at: z.string().nullable(),
   })
   .strict();
-export type KnowledgeTaskProgress = z.infer<
-  typeof knowledgeTaskProgressSchema
->;
+export type KnowledgeTaskProgress = z.infer<typeof knowledgeTaskProgressSchema>;
 
 export const knowledgeDocumentItemSchema = z
   .object({
@@ -396,7 +394,7 @@ export type KnowledgeSegmentDetailResponse = z.infer<
 
 export type CreateKnowledgeBaseInput = {
   name: string;
-  embedding_model_id: string;
+  embedding_model_id?: string;
   reranker_model_id?: string;
   description?: string;
   /** hybrid adds the lexical recall route; the backend defaults to semantic. */
@@ -404,6 +402,8 @@ export type CreateKnowledgeBaseInput = {
 };
 
 export type UpdateKnowledgeBaseInput = {
+  /** Initial binding only; configured bases change models through rebuild. */
+  embedding_model_id?: string;
   name?: string;
   description?: string;
   status?: "active" | "disabled";

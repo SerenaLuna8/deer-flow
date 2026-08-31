@@ -63,7 +63,8 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
     # Bindings into the host-owned model registry (model_provider_models).
     # The two REFERENCES ... ON DELETE RESTRICT foreign keys live only in the
     # host SQL snapshot; the host KnowledgeModelPort validates type and status.
-    embedding_model_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # An empty Base may defer its first binding until document upload.
+    embedding_model_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     reranker_model_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
     # semantic keeps recall vector-only; hybrid adds the lexical route. A

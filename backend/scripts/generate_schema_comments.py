@@ -58,7 +58,7 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
         "供应商模型",
         "保存供应商下的 embedding 或 rerank 具体模型及其维度、批量与状态；知识库按标识绑定。",
     ),
-    "knowledge_bases": ("知识库", "保存项目内绑定同一 Embedding 模型（可选 Reranker 模型）的知识文档集合。"),
+    "knowledge_bases": ("知识库", "保存项目内的知识文档集合；空库可暂不配置模型，首次上传前绑定 Embedding 模型及可选 Reranker 模型。"),
     "knowledge_documents": (
         "知识文档",
         "保存上传文件、MinIO object key、切分参数、处理版本和当前处理状态。",
@@ -460,7 +460,7 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("model_provider_models", "status"): "模型状态（active 或 disabled）",
     ("knowledge_bases", "name"): "项目内唯一的知识库名称",
     ("knowledge_bases", "description"): "知识库描述",
-    ("knowledge_bases", "embedding_model_id"): "固定使用的 Embedding 模型标识（指向供应商模型行）",
+    ("knowledge_bases", "embedding_model_id"): "使用的 Embedding 模型标识（指向供应商模型行）；空库尚未配置时为空，首次上传前完成绑定",
     ("knowledge_bases", "reranker_model_id"): "可选的 Reranker 模型标识；为空表示检索不重排序",
     ("knowledge_bases", "status"): "知识库状态（active、disabled 或 deleting）",
     ("knowledge_bases", "retrieval_mode"): "检索模式（semantic 仅向量或 hybrid 增加词法召回路）；检索测试可单次覆盖不落库",

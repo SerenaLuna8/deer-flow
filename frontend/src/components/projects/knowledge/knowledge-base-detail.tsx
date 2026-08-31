@@ -55,6 +55,7 @@ import type {
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
+import { KnowledgeBaseSetupDialog } from "./knowledge-base-setup-dialog";
 import { KnowledgeDocumentsView } from "./knowledge-documents-view";
 import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
@@ -211,7 +212,21 @@ export function KnowledgeBaseDetail({
             onNavigate={onNavigate}
           />
         ) : null}
-        {section === "search" ? (
+        {section === "search" && base.embedding_model_id === null ? (
+          <div className="space-y-3 rounded-xl border border-dashed p-8 text-[13px]">
+            <h2 className="text-base font-semibold">
+              {labels.bases.unconfigured}
+            </h2>
+            <p className="text-muted-foreground">
+              {labels.bases.unconfiguredHint}
+            </p>
+            {canEdit ? (
+              <Button type="button" onClick={() => setSection("documents")}>
+                {labels.documents.uploadButton}
+              </Button>
+            ) : null}
+          </div>
+        ) : section === "search" ? (
           <KnowledgeSearchPanel
             scope={scope}
             base={base}
@@ -253,6 +268,7 @@ function KnowledgeBaseSettingsPanel({
   const labels = t.knowledge;
   const updateBase = useUpdateKnowledgeBase(scope);
   const modelOptions = useKnowledgeModelOptions(scope, true);
+  const [setupOpen, setSetupOpen] = useState(false);
   const [name, setName] = useState(base.name);
   const [description, setDescription] = useState(base.description);
   const [status, setStatus] = useState<"active" | "disabled">(
@@ -284,13 +300,23 @@ function KnowledgeBaseSettingsPanel({
     parsedThreshold <= 1;
   const formValid = name.trim().length > 0 && topKValid && thresholdValid;
 
+  // Associate the later retrieval inputs and save action with this form while
+  // keeping re-embedding outside it, so native validation and Enter still work.
+  const settingsFormId = "knowledge-settings-" + base.id;
+
   return (
-    <section aria-label={labels.detail.settings} className="w-full space-y-4">
-      <h2 className="text-base font-semibold tracking-tight">
-        {labels.detail.settings}
-      </h2>
+    <section aria-label={labels.detail.settings} className="w-full text-[13px]">
+      <header className="mb-8 space-y-1">
+        <h2 className="text-base font-semibold tracking-tight">
+          {labels.detail.settings}
+        </h2>
+        <p className="text-muted-foreground text-xs leading-5">
+          {labels.detail.settingsDescription}
+        </p>
+      </header>
       <form
-        className="grid gap-4"
+        id={settingsFormId}
+        className="grid gap-5 pb-6"
         onSubmit={(event) => {
           event.preventDefault();
           if (!formValid) return;
@@ -312,175 +338,256 @@ function KnowledgeBaseSettingsPanel({
           });
         }}
       >
-        <label className="grid gap-1.5 text-[13px]">
-          <span className="font-medium">{labels.bases.nameLabel}</span>
-          <Input
-            className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-            value={name}
-            required
-            maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
-            onChange={(event) => {
-              touch();
-              setName(event.target.value);
-            }}
-          />
+        <label className="grid gap-2 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6">
+          <span className="font-medium sm:pt-2.5">
+            {labels.bases.nameLabel}
+          </span>
+          <span className="flex w-full max-w-[820px] min-w-0 items-center gap-2.5">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400">
+              <BookOpenIcon aria-hidden className="size-4.5" />
+            </span>
+            <Input
+              className="bg-muted h-9 w-full min-w-0 flex-1 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
+              value={name}
+              required
+              maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
+              onChange={(event) => {
+                touch();
+                setName(event.target.value);
+              }}
+            />
+          </span>
         </label>
-        <label className="grid gap-1.5 text-[13px]">
-          <span className="font-medium">{labels.bases.descriptionLabel}</span>
+        <label className="grid gap-2 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6">
+          <span className="font-medium sm:pt-2.5">
+            {labels.bases.descriptionLabel}
+          </span>
           <Textarea
-            className="border-input/80 bg-background rounded-lg text-[13px] leading-5 shadow-none md:text-[13px]"
+            className="bg-muted min-h-20 w-full max-w-[820px] min-w-0 rounded-lg border-transparent text-[13px] leading-5 shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
             value={description}
-            rows={3}
+            rows={2}
             onChange={(event) => {
               touch();
               setDescription(event.target.value);
             }}
           />
         </label>
-        <div className="grid gap-1.5 text-[13px]">
-          <span className="font-medium">{labels.bases.statusLabel}</span>
-          <Select
-            value={status}
-            onValueChange={(value) => {
-              touch();
-              setStatus(value === "disabled" ? "disabled" : "active");
-            }}
-          >
-            <SelectTrigger
-              className="border-input/80 bg-background rounded-lg text-[13px] shadow-none"
-              aria-label={labels.bases.statusLabel}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent className="rounded-lg">
-              <SelectItem className="text-[13px]" value="active">
-                {labels.status.active}
-              </SelectItem>
-              <SelectItem className="text-[13px]" value="disabled">
-                {labels.status.disabled}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <fieldset className="border-border/70 grid gap-3 rounded-lg border px-3 pt-2 pb-3">
-          <legend className="text-muted-foreground px-1 text-xs font-medium">
-            {labels.bases.retrievalSectionTitle}
-          </legend>
-          <KnowledgeRetrievalModeField
-            value={retrievalMode}
-            onChange={(value) => {
-              touch();
-              setRetrievalMode(value);
-            }}
-            disabled={updateBase.isPending}
-          />
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1.5 text-[13px]">
-              <span className="font-medium">
-                {labels.bases.defaultTopKLabel}
-              </span>
-              <Input
-                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                type="number"
-                min={1}
-                max={20}
-                required
-                value={defaultTopK}
-                onChange={(event) => {
-                  touch();
-                  setDefaultTopK(event.target.value);
-                }}
-              />
-              <span className="text-muted-foreground text-xs">
-                {labels.bases.defaultTopKHint}
-              </span>
-            </label>
-            <label className="grid gap-1.5 text-[13px]">
-              <span className="font-medium">
-                {labels.bases.defaultThresholdLabel}
-              </span>
-              <Input
-                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                type="number"
-                min={0}
-                max={1}
-                step={0.05}
-                required
-                value={defaultThreshold}
-                onChange={(event) => {
-                  touch();
-                  setDefaultThreshold(event.target.value);
-                }}
-              />
-              <span className="text-muted-foreground text-xs">
-                {labels.bases.defaultThresholdHint}
-              </span>
-            </label>
-          </div>
-        </fieldset>
-        <div className="grid gap-1.5 text-[13px]">
-          <span className="font-medium">{labels.bases.rerankerLabel}</span>
-          {modelOptions.isLoading ? (
-            <Skeleton className="h-9 rounded-md" />
-          ) : modelOptions.error ? (
-            <p role="alert" className="text-destructive text-[13px]">
-              {labels.bases.modelsLoadFailed}
-            </p>
-          ) : (
+        <div className="grid gap-2 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6">
+          <span className="font-medium sm:pt-2.5">
+            {labels.bases.statusLabel}
+          </span>
+          <div className="w-full max-w-[820px] min-w-0">
             <Select
-              value={rerankerModelId}
+              value={status}
               onValueChange={(value) => {
                 touch();
-                setRerankerModelId(value);
+                setStatus(value === "disabled" ? "disabled" : "active");
               }}
             >
               <SelectTrigger
-                className="border-input/80 bg-background rounded-lg text-[13px] shadow-none"
-                aria-label={labels.bases.rerankerLabel}
+                className="bg-muted w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15"
+                aria-label={labels.bases.statusLabel}
               >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent className="rounded-lg">
-                <SelectItem className="text-[13px]" value={RERANKER_NONE}>
-                  {labels.bases.rerankerNone}
+                <SelectItem
+                  className="text-[13px] focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-blue-950/30 dark:focus:text-blue-300"
+                  value="active"
+                >
+                  {labels.status.active}
                 </SelectItem>
-                {modelOptions.data?.reranker_models.map((option) => (
-                  <SelectItem
-                    className="text-[13px]"
-                    key={option.id}
-                    value={option.id}
-                  >
-                    {option.provider_name} · {option.model_name}
-                  </SelectItem>
-                ))}
+                <SelectItem
+                  className="text-[13px] focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-blue-950/30 dark:focus:text-blue-300"
+                  value="disabled"
+                >
+                  {labels.status.disabled}
+                </SelectItem>
               </SelectContent>
             </Select>
-          )}
-          <span className="text-muted-foreground text-xs">
-            {labels.bases.rerankerHint}
-          </span>
+          </div>
         </div>
-        {updateBase.error ? (
-          <p role="alert" className="text-destructive text-[13px]">
-            {knowledgeErrorMessage(updateBase.error, labels.errors)}
-          </p>
-        ) : null}
-        {updateBase.isSuccess ? (
-          <p role="status" className="text-success text-[13px]">
-            {labels.detail.settingsSaved}
-          </p>
-        ) : null}
-        <div>
+      </form>
+
+      {base.embedding_model_id === null ? (
+        <section className="border-border/60 grid gap-3 border-t py-6 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6">
+          <h3 className="text-[13px] font-medium">
+            {labels.bases.rebuildSectionTitle}
+          </h3>
+          <div className="space-y-3">
+            <p className="text-muted-foreground text-xs leading-5">
+              {labels.bases.unconfiguredHint}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setSetupOpen(true)}
+            >
+              {labels.bases.setupButton}
+            </Button>
+          </div>
+        </section>
+      ) : (
+        <KnowledgeRebuildSection scope={scope} base={base} />
+      )}
+
+      <KnowledgeBaseSetupDialog
+        key={base.id}
+        scope={scope}
+        base={base}
+        open={setupOpen}
+        onOpenChange={setSetupOpen}
+        onConfigured={(configured) => {
+          setRetrievalMode(configured.retrieval_mode);
+          setRerankerModelId(configured.reranker_model_id ?? RERANKER_NONE);
+        }}
+      />
+
+      {base.embedding_model_id !== null ? (
+        <section
+          aria-label={labels.bases.retrievalSectionTitle}
+          className="border-border/60 grid gap-3 border-t py-6 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6"
+        >
+          <div className="space-y-1.5 sm:pt-2">
+            <h3 className="font-medium">
+              {labels.bases.retrievalSectionTitle}
+            </h3>
+            <p className="text-muted-foreground text-xs leading-5">
+              {labels.bases.retrievalModeHint}
+            </p>
+          </div>
+          <div className="w-full max-w-[820px] min-w-0 space-y-4">
+            <KnowledgeRetrievalModeField
+              variant="cards"
+              showLabel={false}
+              showHint={false}
+              value={retrievalMode}
+              onChange={(value) => {
+                touch();
+                setRetrievalMode(value);
+              }}
+              disabled={updateBase.isPending}
+            />
+            <div className="border-border/70 space-y-4 rounded-xl border p-4">
+              <div className="grid gap-1.5">
+                <span className="font-medium">
+                  {labels.bases.rerankerLabel}
+                </span>
+                {modelOptions.isLoading ? (
+                  <Skeleton className="h-9 rounded-lg" />
+                ) : modelOptions.error ? (
+                  <p role="alert" className="text-destructive text-[13px]">
+                    {labels.bases.modelsLoadFailed}
+                  </p>
+                ) : (
+                  <Select
+                    value={rerankerModelId}
+                    onValueChange={(value) => {
+                      touch();
+                      setRerankerModelId(value);
+                    }}
+                  >
+                    <SelectTrigger
+                      className="bg-muted w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15"
+                      aria-label={labels.bases.rerankerLabel}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="rounded-lg">
+                      <SelectItem
+                        className="text-[13px] focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-blue-950/30 dark:focus:text-blue-300"
+                        value={RERANKER_NONE}
+                      >
+                        {labels.bases.rerankerNone}
+                      </SelectItem>
+                      {modelOptions.data?.reranker_models.map((option) => (
+                        <SelectItem
+                          className="text-[13px] focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-blue-950/30 dark:focus:text-blue-300"
+                          key={option.id}
+                          value={option.id}
+                        >
+                          {option.provider_name} · {option.model_name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+                <span className="text-muted-foreground text-xs leading-5">
+                  {labels.bases.rerankerHint}
+                </span>
+              </div>
+              <div className="grid items-start gap-4 md:grid-cols-2">
+                <label className="grid gap-1.5">
+                  <span className="font-medium">
+                    {labels.bases.defaultTopKLabel}
+                  </span>
+                  <Input
+                    form={settingsFormId}
+                    className="bg-muted h-9 w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
+                    type="number"
+                    min={1}
+                    max={20}
+                    required
+                    value={defaultTopK}
+                    onChange={(event) => {
+                      touch();
+                      setDefaultTopK(event.target.value);
+                    }}
+                  />
+                  <span className="text-muted-foreground text-xs leading-5">
+                    {labels.bases.defaultTopKHint}
+                  </span>
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="font-medium">
+                    {labels.bases.defaultThresholdLabel}
+                  </span>
+                  <Input
+                    form={settingsFormId}
+                    className="bg-muted h-9 w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    required
+                    value={defaultThreshold}
+                    onChange={(event) => {
+                      touch();
+                      setDefaultThreshold(event.target.value);
+                    }}
+                  />
+                  <span className="text-muted-foreground text-xs leading-5">
+                    {labels.bases.defaultThresholdHint}
+                  </span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      <div className="border-border/60 grid gap-3 border-t pt-5 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6">
+        <div className="w-full max-w-[820px] space-y-3 sm:col-start-2">
+          {updateBase.error ? (
+            <p role="alert" className="text-destructive text-[13px]">
+              {knowledgeErrorMessage(updateBase.error, labels.errors)}
+            </p>
+          ) : null}
+          {updateBase.isSuccess ? (
+            <p role="status" className="text-success text-[13px]">
+              {labels.detail.settingsSaved}
+            </p>
+          ) : null}
           <Button
-            className="h-9 rounded-lg text-[13px] shadow-none"
+            form={settingsFormId}
+            className="h-9 min-w-24 rounded-lg bg-blue-600 text-[13px] text-white shadow-none hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600"
             type="submit"
             disabled={updateBase.isPending || !formValid}
           >
             {updateBase.isPending ? labels.common.saving : labels.common.save}
           </Button>
         </div>
-      </form>
-      <KnowledgeRebuildSection scope={scope} base={base} />
+      </div>
     </section>
   );
 }
@@ -501,7 +608,7 @@ function KnowledgeRebuildSection({
   const modelOptions = useKnowledgeModelOptions(scope, true);
   const rebuild = useRebuildKnowledgeBase(scope);
   const [embeddingModelId, setEmbeddingModelId] = useState(
-    base.embedding_model_id,
+    base.embedding_model_id ?? "",
   );
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -510,73 +617,75 @@ function KnowledgeRebuildSection({
   return (
     <section
       aria-label={labels.bases.rebuildSectionTitle}
-      className="border-border/80 bg-muted/30 mt-2 space-y-3 rounded-xl border p-4"
+      className="border-border/60 grid gap-3 border-t py-6 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6"
     >
-      <h3 className="text-[13px] font-semibold">
-        {labels.bases.rebuildSectionTitle}
-      </h3>
-      <p className="text-muted-foreground text-xs">
-        {labels.bases.rebuildHint}
-      </p>
-      <div className="grid gap-1.5 text-[13px]">
-        <span className="font-medium">{labels.bases.rebuildModelLabel}</span>
-        <Select
-          value={embeddingModelId}
-          onValueChange={(value) => {
-            rebuild.reset();
-            setEmbeddingModelId(value);
-          }}
-        >
-          <SelectTrigger
-            className="border-input/80 bg-background rounded-lg text-[13px] shadow-none"
-            aria-label={labels.bases.rebuildModelLabel}
-          >
-            <SelectValue placeholder={labels.bases.modelPlaceholder} />
-          </SelectTrigger>
-          <SelectContent className="rounded-lg">
-            {options.map((option) => (
-              <SelectItem
-                className="text-[13px]"
-                key={option.id}
-                value={option.id}
+      <div className="space-y-1.5 sm:pt-2.5">
+        <h3 className="text-[13px] font-medium">
+          {labels.bases.rebuildSectionTitle}
+        </h3>
+      </div>
+      <div className="w-full max-w-[820px] min-w-0 space-y-3">
+        <div className="flex min-w-0 flex-col gap-2 xl:flex-row xl:items-center">
+          <div className="min-w-0 flex-1">
+            <Select
+              value={embeddingModelId}
+              onValueChange={(value) => {
+                rebuild.reset();
+                setEmbeddingModelId(value);
+              }}
+            >
+              <SelectTrigger
+                className="bg-muted w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15"
+                aria-label={labels.bases.rebuildModelLabel}
               >
-                {option.provider_name} · {option.model_name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      {rebuild.error ? (
-        <p role="alert" className="text-destructive text-[13px]">
-          {knowledgeErrorMessage(rebuild.error, labels.errors)}
+                <SelectValue placeholder={labels.bases.modelPlaceholder} />
+              </SelectTrigger>
+              <SelectContent className="rounded-lg">
+                {options.map((option) => (
+                  <SelectItem
+                    className="text-[13px] focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-blue-950/30 dark:focus:text-blue-300"
+                    key={option.id}
+                    value={option.id}
+                  >
+                    {option.provider_name} · {option.model_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button
+            className="border-border/70 h-9 shrink-0 rounded-lg text-[13px] shadow-none"
+            type="button"
+            variant="outline"
+            disabled={rebuild.isPending || options.length === 0}
+            onClick={() => setConfirmOpen(true)}
+          >
+            {rebuild.isPending
+              ? labels.bases.rebuildPending
+              : labels.bases.rebuildButton}
+          </Button>
+        </div>
+        <p className="text-muted-foreground text-xs leading-5">
+          {labels.bases.rebuildHint}
         </p>
-      ) : null}
-      {rebuild.data ? (
-        <p
-          role="status"
-          className="text-success text-[13px]"
-          data-testid="knowledge-rebuild-outcome"
-        >
-          {labels.bases.rebuildOutcome(
-            rebuild.data.accepted_document_count,
-            rebuild.data.skipped_document_ids.length,
-          )}
-        </p>
-      ) : null}
-      <div>
-        <Button
-          className="h-9 rounded-lg text-[13px] shadow-none"
-          type="button"
-          variant="outline"
-          disabled={rebuild.isPending || options.length === 0}
-          onClick={() => setConfirmOpen(true)}
-        >
-          {rebuild.isPending
-            ? labels.bases.rebuildPending
-            : labels.bases.rebuildButton}
-        </Button>
+        {rebuild.error ? (
+          <p role="alert" className="text-destructive text-[13px]">
+            {knowledgeErrorMessage(rebuild.error, labels.errors)}
+          </p>
+        ) : null}
+        {rebuild.data ? (
+          <p
+            role="status"
+            className="text-success text-[13px]"
+            data-testid="knowledge-rebuild-outcome"
+          >
+            {labels.bases.rebuildOutcome(
+              rebuild.data.accepted_document_count,
+              rebuild.data.skipped_document_ids.length,
+            )}
+          </p>
+        ) : null}
       </div>
-
       <Dialog
         open={confirmOpen}
         onOpenChange={(open) => {
@@ -602,7 +711,7 @@ function KnowledgeRebuildSection({
               {labels.common.cancel}
             </Button>
             <Button
-              className="h-9 rounded-lg text-[13px] shadow-none"
+              className="h-9 rounded-lg bg-blue-600 text-[13px] text-white shadow-none hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600"
               type="button"
               disabled={rebuild.isPending}
               onClick={() => {

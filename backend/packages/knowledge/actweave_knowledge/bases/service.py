@@ -159,14 +159,17 @@ class KnowledgeBaseService:
                         KNOWLEDGE_QUOTA_EXCEEDED,
                         f"Project 内 Knowledge Base 数量已达上限 {self._settings.max_knowledge_bases_per_project}",
                     )
-                if not isinstance(create.embedding_model_id, UUID):
-                    raise _invalid("embedding_model_id 必须是 UUID")
+                if create.embedding_model_id is not None and not isinstance(create.embedding_model_id, UUID):
+                    raise _invalid("embedding_model_id 必须是 UUID 或 null")
                 if create.reranker_model_id is not None and not isinstance(create.reranker_model_id, UUID):
                     raise _invalid("reranker_model_id 必须是 UUID 或 null")
+                if create.embedding_model_id is None and create.reranker_model_id is not None:
+                    raise _invalid("请先配置 Embedding 模型，再绑定 Reranker 模型")
                 # FOR SHARE (Provider then Model, inside the port) serializes
                 # with the registry's FOR UPDATE disable/delete paths, so the
                 # active check can never pass on a stale snapshot.
-                await self._model_port.lock_model_for_binding(session, create.embedding_model_id, "embedding")
+                if create.embedding_model_id is not None:
+                    await self._model_port.lock_model_for_binding(session, create.embedding_model_id, "embedding")
                 reranker_model_id = create.reranker_model_id
                 if reranker_model_id is not None:
                     await self._model_port.lock_model_for_binding(session, reranker_model_id, "rerank")
@@ -275,6 +278,8 @@ class KnowledgeBaseService:
             changes["retrieval_mode"] = update.retrieval_mode
         if update.reranker_model_id is not None and update.clear_reranker_model:
             raise _invalid("reranker_model_id 与 clear_reranker_model 不能同时设置")
+        if update.embedding_model_id is not None and not isinstance(update.embedding_model_id, UUID):
+            raise _invalid("embedding_model_id 必须是 UUID")
         if update.reranker_model_id is not None and not isinstance(update.reranker_model_id, UUID):
             raise _invalid("reranker_model_id 必须是 UUID")
         try:
@@ -289,7 +294,20 @@ class KnowledgeBaseService:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
                 if row.status == "deleting":
                     raise _invalid("Knowledge Base 正在删除，不能修改")
+                effective_embedding_model_id = update.embedding_model_id or row.embedding_model_id
+                if effective_embedding_model_id is None and update.reranker_model_id is not None:
+                    raise _invalid("请先配置 Embedding 模型，再绑定 Reranker 模型")
                 effective = {name: value for name, value in changes.items() if value != getattr(row, name)}
+                if update.embedding_model_id is not None:
+                    if row.embedding_model_id is not None:
+                        raise _invalid("Embedding 模型已配置，请通过重嵌入更换模型")
+                    document_count = await session.scalar(select(func.count()).select_from(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == base_id))
+                    if document_count:
+                        raise _invalid("仅没有文档的 Knowledge Base 支持首次配置 Embedding 模型")
+                    # The base lock also serializes upload admission and other
+                    # first configurations; all settings commit together.
+                    await self._model_port.lock_model_for_binding(session, update.embedding_model_id, "embedding")
+                    effective["embedding_model_id"] = update.embedding_model_id
                 # Rerank rebinding never rebuilds and never bumps document
                 # versions: only which reranker (if any) scores recall changes.
                 if update.reranker_model_id is not None and update.reranker_model_id != row.reranker_model_id:

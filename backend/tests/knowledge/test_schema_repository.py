@@ -364,6 +364,34 @@ def test_prepare_model_registry_bootstrap_honors_explicit_skip(
 
 
 @pytest.mark.asyncio
+async def test_empty_base_can_be_stored_before_embedding_configuration(
+    postgres_database_url: str,
+) -> None:
+    """空知识库可以先保存，检索模式默认值和后续模型绑定仍由原有契约管理。"""
+
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        await _install_full_schema(engine)
+        async with factory() as session, session.begin():
+            project_id = await _seed_project(session, "unconfigured")
+            base = KnowledgeBaseRow(
+                id=uuid.uuid4(),
+                project_id=project_id,
+                name="Unconfigured knowledge",
+            )
+            session.add(base)
+            await session.flush()
+            await session.refresh(base)
+
+            assert base.embedding_model_id is None
+            assert base.reranker_model_id is None
+            assert base.retrieval_mode == "semantic"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_base_names_unique_per_project_and_model_restrict(
     postgres_database_url: str,
 ) -> None:

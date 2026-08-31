@@ -107,7 +107,7 @@ _Avoid_: Backup, lifecycle archive
 ## Knowledge assets
 
 **Knowledge Base**:
-A Project-shared collection of Knowledge Documents that binds one embedding Provider Model for indexing and search, and optionally one reranker Provider Model for result ordering.
+A Project-shared collection of Knowledge Documents. An empty Knowledge Base may start unconfigured, with no embedding Provider Model. Before its first document upload, it binds one embedding Provider Model for indexing and search and optionally one reranker Provider Model for result ordering. Unconfigured empty bases do not participate in retrieval.
 _Avoid_: Dataset, vector table
 
 **Knowledge Document**:
@@ -143,7 +143,7 @@ A platform-administered retrieval-model vendor in the host model registry: a dis
 _Avoid_: Knowledge Model Configuration, provider adapter, System Model Configuration
 
 **Provider Model**:
-One typed model under a Model Provider: embedding (with a fixed vector dimension) or reranker. A Knowledge Base binds exactly one embedding Provider Model — changed only through rebuild — and at most one reranker Provider Model, effective on save. A Provider Model referenced by any Knowledge Base is in use, and neither it nor its Model Provider can be disabled or deleted.
+One typed model under a Model Provider: embedding (with a fixed vector dimension) or reranker. An unconfigured empty Knowledge Base has no model binding. Its initial configuration binds one embedding Provider Model; after that, this binding changes only through rebuild and cannot be cleared. It may also bind at most one reranker Provider Model, effective on save. A Provider Model referenced by any Knowledge Base is in use, and neither it nor its Model Provider can be disabled or deleted.
 _Avoid_: Knowledge Model Configuration, model configuration row
 
 ## Configuration secrets
