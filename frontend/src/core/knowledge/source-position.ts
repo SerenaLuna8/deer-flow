@@ -2,7 +2,7 @@
  * Human-readable rendering of a segment's `source_position`.
  *
  * The ingestion extractor records provenance per source format — `{page}` for
- * PDF, `{paragraph}` for DOCX, `{row}` for CSV, `{sheet, row}` for XLSX,
+ * PDF, `{paragraph}` or `{table, row}` for DOCX, `{row}` for CSV, `{sheet, row}` for XLSX,
  * `{slide}` for PPTX, `{chapter}` for EPUB, and `{}` for plain text and HTML.
  * The formatter is deliberately closed over these known keys: an unknown
  * payload renders as nothing rather than leaking raw JSON.
@@ -11,6 +11,7 @@
 export type KnowledgeSourcePositionLabels = {
   page: (page: string) => string;
   paragraph: (paragraph: string) => string;
+  table: (table: string) => string;
   row: (row: string) => string;
   slide: (slide: string) => string;
   chapter: (chapter: string) => string;
@@ -39,6 +40,10 @@ export function formatKnowledgeSourcePosition(
   const chapter = scalarText(position.chapter);
   if (chapter !== null) return labels.chapter(chapter);
   const row = scalarText(position.row);
+  const table = scalarText(position.table);
+  if (table !== null && row !== null) {
+    return `${labels.table(table)} · ${labels.row(row)}`;
+  }
   const sheet = scalarText(position.sheet);
   if (sheet !== null && row !== null) {
     return `${sheet} · ${labels.row(row)}`;

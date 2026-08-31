@@ -8,13 +8,7 @@ import {
   UploadCloudIcon,
   XIcon,
 } from "lucide-react";
-import {
-  useEffect,
-  useReducer,
-  useRef,
-  useState,
-  type DragEvent,
-} from "react";
+import { useEffect, useReducer, useRef, useState, type DragEvent } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -60,6 +54,7 @@ import {
   DEFAULT_CHUNK_SEPARATOR,
   type KnowledgeBaseItem,
   type KnowledgeChunkingMode,
+  type KnowledgeRetrievalMode,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
@@ -69,6 +64,7 @@ import {
   KNOWLEDGE_UPLOAD_ACCEPT,
 } from "./knowledge-documents-view";
 import { knowledgeErrorMessage } from "./knowledge-error";
+import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
 
 const ACCEPTED_EXTENSIONS = KNOWLEDGE_UPLOAD_ACCEPT;
 
@@ -84,6 +80,7 @@ type KnowledgeSubmissionSnapshot = {
   name: string;
   description: string;
   embeddingModelId: string;
+  retrievalMode: KnowledgeRetrievalMode;
   chunkSize: number;
   chunkOverlap: number;
   chunkSeparator: string;
@@ -196,6 +193,8 @@ export function KnowledgeCreateWizard({
   const [nameTouched, setNameTouched] = useState(false);
   const [description, setDescription] = useState("");
   const [embeddingModelId, setEmbeddingModelId] = useState("");
+  const [retrievalMode, setRetrievalMode] =
+    useState<KnowledgeRetrievalMode>("semantic");
   const [chunkSize, setChunkSize] = useState("1000");
   const [chunkOverlap, setChunkOverlap] = useState("100");
   const [chunkSeparator, setChunkSeparator] = useState(DEFAULT_CHUNK_SEPARATOR);
@@ -411,6 +410,7 @@ export function KnowledgeCreateWizard({
       name: name.trim(),
       description: description.trim(),
       embeddingModelId,
+      retrievalMode,
       chunkSize: parsedChunkSize,
       chunkOverlap: parsedChunkOverlap,
       chunkSeparator,
@@ -431,6 +431,7 @@ export function KnowledgeCreateWizard({
         base = await createBase.mutateAsync({
           name: snapshot.name,
           embedding_model_id: snapshot.embeddingModelId,
+          retrieval_mode: snapshot.retrievalMode,
           description: snapshot.description,
         });
       } catch {
@@ -839,6 +840,11 @@ export function KnowledgeCreateWizard({
               </p>
             </div>
 
+            <KnowledgeRetrievalModeField
+              value={retrievalMode}
+              onChange={setRetrievalMode}
+              disabled={isSubmitting}
+            />
             <div className="space-y-3">
               <h2 className="text-sm font-semibold">
                 {wizard.infoSectionTitle}
@@ -1155,6 +1161,18 @@ export function KnowledgeCreateWizard({
                   {labels.bases.modelLabel}
                 </dt>
                 <dd className="min-w-0 truncate">{modelDisplayName}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-3 px-4 py-2.5">
+                <dt className="text-muted-foreground">
+                  {labels.bases.retrievalModeLabel}
+                </dt>
+                <dd>
+                  {
+                    labels.bases.retrievalModes[
+                      submissionSnapshot.retrievalMode
+                    ]
+                  }
+                </dd>
               </div>
             </dl>
           </div>

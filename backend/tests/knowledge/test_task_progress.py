@@ -41,12 +41,14 @@ from actweave_knowledge.persistence.models import (
     KnowledgeTaskRow,
 )
 from actweave_knowledge.persistence.tasks import claim_next_task, settle_task_failure
-from actweave_knowledge.tasks import KnowledgeTaskClaim
+from actweave_knowledge.tasks import KnowledgeTaskClaim, KnowledgeTaskWorker
 from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.knowledge.composition import is_knowledge_project_active
 from deerflow.persistence.bootstrap import _install_full_schema
+from deerflow.persistence.projects.model import ProjectRow
 
 # ---------------------------------------------------------------------------
 # Harness
@@ -76,6 +78,7 @@ class _Provider:
         # request was being answered.
         self.observed: list[tuple[str, int, int | None]] = []
         self.fail_from_request: int | None = None
+        self.failure_status = 500
         self.on_request = None
         self.task_id: uuid.UUID | None = None
 
@@ -90,7 +93,7 @@ class _Provider:
         if self.on_request is not None:
             await self.on_request(len(self.requests))
         if self.fail_from_request is not None and len(self.requests) >= self.fail_from_request:
-            return httpx.Response(500)
+            return httpx.Response(self.failure_status)
         return httpx.Response(
             200,
             json={"data": [{"index": index, "embedding": [0.1, 0.2, 0.3, 0.4]} for index in range(len(batch))]},
@@ -112,6 +115,7 @@ class _Harness:
             object_store=self.store,  # type: ignore[arg-type]
             model_client=self.client,
             model_port=registry_model_port(),
+            project_active_check=is_knowledge_project_active,
         )
 
     def reembed_handler(self) -> KnowledgeReembedHandler:
@@ -119,6 +123,7 @@ class _Harness:
             session_factory=self.factory,
             model_client=self.client,
             model_port=registry_model_port(),
+            project_active_check=is_knowledge_project_active,
         )
 
     def documents(self) -> KnowledgeDocumentService:
@@ -449,6 +454,165 @@ async def test_lost_lease_stops_undispatched_batches(postgres_database_url: str)
         stolen = await _task_row(harness, claim.id)
         assert stolen.completed_units == 0
     finally:
+        await harness.dispose()
+
+
+async def _run_until_indexing_settles(harness: _Harness, project_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    """Observe the worker through the Document's public progress projection."""
+
+    stop = asyncio.Event()
+    worker = KnowledgeTaskWorker(
+        session_factory=harness.factory,
+        handlers={"ingest_document": harness.ingest_handler(), "reembed_document": harness.reembed_handler()},
+        project_active_check=is_knowledge_project_active,
+        concurrency=1,
+        task_timeout_seconds=10,
+        poll_interval_seconds=0.01,
+    )
+    running = asyncio.create_task(worker.run(stop))
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                view = await harness.documents().get_document(project_id, document_id)
+                if view.status in ("ready", "failed") or (view.task_progress is not None and view.task_progress.status == "retry_wait"):
+                    break
+                await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await running
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ingest_document", "reembed_document"])
+@pytest.mark.parametrize("provider_failure", [False, True], ids=["success", "terminal-provider-error"])
+async def test_pending_project_stops_indexing_and_restore_resumes_without_spending_attempt(postgres_database_url: str, kind: str, provider_failure: bool) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness, max_batch=1)
+        seed_document = _seed_queued_document if kind == "ingest_document" else _seed_published_document
+        document_id = await seed_document(harness, project_id, base_id)
+
+        async def delete_project_after_first_batch(request_number: int) -> None:
+            if request_number == 1:
+                async with harness.factory() as session, session.begin():
+                    await session.execute(
+                        update(ProjectRow)
+                        .where(ProjectRow.id == project_id)
+                        .values(
+                            status="pending_deletion",
+                            deletion_requested_at=datetime.now(UTC),
+                            deletion_effective_at=datetime.now(UTC) + timedelta(days=30),
+                        )
+                    )
+
+        harness.provider.on_request = delete_project_after_first_batch
+        if provider_failure:
+            harness.provider.fail_from_request = 1
+            harness.provider.failure_status = 400
+        await _run_until_indexing_settles(harness, project_id, document_id)
+
+        paused = await harness.documents().get_document(project_id, document_id)
+        assert len(harness.provider.requests) == 1
+        assert paused.status == "processing"
+        assert paused.task_progress is not None
+        assert paused.task_progress.status == "retry_wait"
+        assert paused.task_progress.attempt_count == 0
+        assert paused.task_progress.next_attempt_at > datetime.now(UTC) + timedelta(seconds=50)
+        segments, total = await harness.documents().list_document_segments(project_id, document_id)
+        assert total == (0 if kind == "ingest_document" else 3)
+        if segments:
+            assert {segment.document_version for segment in segments} == {1}
+
+        harness.provider.on_request = None
+        harness.provider.fail_from_request = None
+        async with harness.factory() as session, session.begin():
+            await session.execute(update(ProjectRow).where(ProjectRow.id == project_id).values(status="active"))
+            await session.execute(update(KnowledgeTaskRow).where(KnowledgeTaskRow.resource_id == document_id).values(available_at=datetime.now(UTC) - timedelta(seconds=1)))
+        await _run_until_indexing_settles(harness, project_id, document_id)
+        resumed = await harness.documents().get_document(project_id, document_id)
+        assert resumed.status == "ready"
+        assert resumed.task_progress is None
+        assert len(harness.provider.requests) == 4
+    finally:
+        await harness.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ingest_document", "reembed_document"])
+@pytest.mark.parametrize("provider_failure", [False, True], ids=["verified-batch", "provider-retry"])
+async def test_expired_lease_stops_indexing_before_more_provider_work(postgres_database_url: str, kind: str, provider_failure: bool) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness, max_batch=1)
+        seed_document = _seed_queued_document if kind == "ingest_document" else _seed_published_document
+        document_id = await seed_document(harness, project_id, base_id)
+        claim = await _claim(harness)
+
+        async def expire_lease_during_provider_request(request_number: int) -> None:
+            if request_number == 1:
+                async with harness.factory() as session, session.begin():
+                    await session.execute(update(KnowledgeTaskRow).where(KnowledgeTaskRow.id == claim.id).values(lease_until=datetime.now(UTC) - timedelta(seconds=1)))
+
+        harness.provider.on_request = expire_lease_during_provider_request
+        if provider_failure:
+            harness.provider.fail_from_request = 1
+        handler = harness.ingest_handler() if kind == "ingest_document" else harness.reembed_handler()
+        with pytest.raises(KnowledgeError) as error:
+            await handler(claim)
+
+        assert error.value.code == KNOWLEDGE_TASK_FAILED
+        assert len(harness.provider.requests) == 1
+        view = await harness.documents().get_document(project_id, document_id)
+        assert view.status == "processing"
+        assert view.task_progress is not None and view.task_progress.completed_units == 0
+        segments, total = await harness.documents().list_document_segments(project_id, document_id)
+        assert total == (0 if kind == "ingest_document" else 3)
+        if segments:
+            assert {segment.document_version for segment in segments} == {1}
+    finally:
+        await harness.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ingest_document", "reembed_document"])
+async def test_indexing_cannot_publish_when_lease_expires_waiting_for_document_lock(postgres_database_url: str, kind: str) -> None:
+    harness = await _harness(postgres_database_url)
+    blocker = harness.factory()
+    running: asyncio.Task | None = None
+    try:
+        project_id, base_id = await _seed_base(harness, max_batch=10)
+        seed_document = _seed_queued_document if kind == "ingest_document" else _seed_published_document
+        document_id = await seed_document(harness, project_id, base_id)
+        claim = await _claim(harness)
+
+        async def hold_document_until_lease_expires(_request_number: int) -> None:
+            await blocker.begin()
+            await blocker.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == document_id).with_for_update())
+            async with harness.factory() as session, session.begin():
+                await session.execute(update(KnowledgeTaskRow).where(KnowledgeTaskRow.id == claim.id).values(lease_until=datetime.now(UTC) + timedelta(seconds=1)))
+
+        harness.provider.on_request = hold_document_until_lease_expires
+        handler = harness.ingest_handler() if kind == "ingest_document" else harness.reembed_handler()
+        running = asyncio.create_task(handler(claim))
+        async with asyncio.timeout(5):
+            while (await _task_row(harness, claim.id)).stage != "publishing":
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(1.1)
+        await blocker.rollback()
+        with pytest.raises(KnowledgeError) as error:
+            await running
+        assert error.value.code == KNOWLEDGE_TASK_FAILED
+        view = await harness.documents().get_document(project_id, document_id)
+        assert view.status == "processing"
+        segments, total = await harness.documents().list_document_segments(project_id, document_id)
+        assert total == (0 if kind == "ingest_document" else 3)
+        if segments:
+            assert {segment.document_version for segment in segments} == {1}
+    finally:
+        await blocker.close()
+        if running is not None and not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
         await harness.dispose()
 
 

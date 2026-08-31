@@ -51,6 +51,7 @@ import {
   type CreateKnowledgeBaseInput,
   type CreateKnowledgeMetadataFieldInput,
   type KnowledgeBaseListResponse,
+  type KnowledgeDocumentItem,
   type KnowledgeDocumentListResponse,
   type KnowledgeDocumentsMetadataInput,
   type KnowledgeReparseInput,
@@ -691,22 +692,29 @@ export function useReparseKnowledgeDocument(scope: ProjectClientScope) {
 export function useKnowledgeSegmentLocate(
   scope: ProjectClientScope,
   baseId: string,
-  documentId: string,
+  document: Pick<KnowledgeDocumentItem, "id" | "version" | "status">,
   segmentId: string | null,
 ) {
   return useQuery({
     queryKey: knowledgeQueryKey(
       scope,
-      "segment-locate",
+      // Share the document's segment subtree so edits and deletes refresh
+      // both the list and an already-mounted location card.
+      "segments",
+      document.id,
+      "locate",
       baseId,
-      documentId,
       segmentId,
+      // Admission changes the version; publication changes the status. Both
+      // need a new detail read as a reparse/re-embed finishes under an open card.
+      document.version,
+      document.status,
     ),
     queryFn: ({ signal }) =>
       getKnowledgeSegmentDetail(
         scope.projectId,
         baseId,
-        documentId,
+        document.id,
         segmentId ?? "",
         undefined,
         signal,
@@ -714,6 +722,7 @@ export function useKnowledgeSegmentLocate(
     enabled: segmentId !== null,
     retry: false,
     refetchOnWindowFocus: false,
+    gcTime: 0,
   });
 }
 

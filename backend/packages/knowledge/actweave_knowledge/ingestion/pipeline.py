@@ -41,14 +41,13 @@ from ..persistence.models import (
     KnowledgeDocumentRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
-    KnowledgeTaskRow,
 )
 from ..persistence.tasks import settle_task_row_success
 from ..retrieval.lexical import lexical_index_input
 from ..storage import MinioObjectStore
-from ..tasks.worker import KnowledgeTaskClaim
+from ..tasks.worker import KnowledgeTaskClaim, ProjectActiveCheck
 from .preview import extract_clean_split
-from .progress import KnowledgeTaskProgressReporter
+from .progress import KnowledgeTaskProgressReporter, ensure_locked_task_lease, lock_indexing_claim
 from .splitter import SegmentDraft
 
 logger = logging.getLogger(__name__)
@@ -132,12 +131,14 @@ class KnowledgeIngestionHandler:
         object_store: MinioObjectStore,
         model_client: KnowledgeModelClient,
         model_port: KnowledgeModelPort,
+        project_active_check: ProjectActiveCheck | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._object_store = object_store
         self._model_client = model_client
         self._model_port = model_port
+        self._project_active_check = project_active_check
 
     async def __call__(self, claim: KnowledgeTaskClaim) -> None:
         prepared = await self._begin_processing(claim)
@@ -145,7 +146,7 @@ class KnowledgeIngestionHandler:
             return
         # Stage and batch progress live in short claim-guarded transactions;
         # a no-op claim above never reports a stage.
-        progress = KnowledgeTaskProgressReporter(self._session_factory, claim)
+        progress = KnowledgeTaskProgressReporter(self._session_factory, claim, project_active_check=self._project_active_check)
         await progress.advance_stage("reading_source")
         temp_dir = Path(
             await run_sync_to_completion(
@@ -219,6 +220,7 @@ class KnowledgeIngestionHandler:
 
         try:
             async with self._session_factory() as session, session.begin():
+                await lock_indexing_claim(session, claim, project_active_check=self._project_active_check)
                 document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == claim.resource_id).with_for_update())
                 if document is None or document.version != claim.target_version or document.status not in ("queued", "processing"):
                     return None
@@ -288,19 +290,9 @@ class KnowledgeIngestionHandler:
 
         try:
             async with self._session_factory() as session, session.begin():
-                task = await session.scalar(
-                    select(KnowledgeTaskRow)
-                    .where(
-                        KnowledgeTaskRow.id == claim.id,
-                        KnowledgeTaskRow.claim_token == claim.claim_token,
-                        KnowledgeTaskRow.status == "running",
-                    )
-                    .with_for_update()
-                )
-                if task is None:
-                    # The lease was re-claimed; the new owner publishes instead.
-                    return
+                task = await lock_indexing_claim(session, claim, project_active_check=self._project_active_check)
                 document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == claim.resource_id).with_for_update())
+                await ensure_locked_task_lease(session, task)
                 moment = datetime.now(UTC)
                 if document is None or document.status != "processing" or document.version != claim.target_version:
                     # Late result: never publish, settle the claim as a no-op.

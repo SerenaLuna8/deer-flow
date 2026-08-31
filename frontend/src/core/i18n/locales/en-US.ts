@@ -215,6 +215,10 @@ export const enUS: Translations = {
       openDocuments: "View documents",
       noDescription: "No description yet.",
       retrievalSectionTitle: "Retrieval defaults",
+      retrievalModeLabel: "Default retrieval route",
+      retrievalModeHint:
+        "Used by Agents and searches that use the base default. Takes effect on save; no rebuild required.",
+      retrievalModes: { semantic: "Semantic only", hybrid: "Hybrid" },
       defaultTopKLabel: "Default results (top_k)",
       defaultTopKHint: "Used when a search omits top_k; range 1-20.",
       defaultThresholdLabel: "Default score threshold",
@@ -279,8 +283,7 @@ export const enUS: Translations = {
         "Preview is out of date. Refresh to apply the current settings.",
       previewInvalid:
         "Fix the invalid chunk settings before refreshing the preview.",
-      previewShowing: (count, total) =>
-        `Showing ${count} of ${total} chunks`,
+      previewShowing: (count, total) => `Showing ${count} of ${total} chunks`,
       previewChunkLabel: (position) =>
         `Chunk-${String(position).padStart(2, "0")}`,
       previewCharacters: (count) => `${count} characters`,
@@ -502,6 +505,7 @@ export const enUS: Translations = {
     sourcePosition: {
       page: (page) => `Page ${page}`,
       paragraph: (paragraph) => `Paragraph ${paragraph}`,
+      table: (table) => `Table ${table}`,
       row: (row) => `Row ${row}`,
       slide: (slide) => `Slide ${slide}`,
       chapter: (chapter) => `Chapter ${chapter}`,
@@ -517,7 +521,8 @@ export const enUS: Translations = {
       topKLabel: "Results (top_k)",
       topKHint: "Leave empty to use the base default.",
       thresholdLabel: "Score threshold",
-      thresholdHint: "Leave empty to use the base default; 0 disables filtering.",
+      thresholdHint:
+        "Leave empty to use the base default; 0 disables filtering.",
       submit: "Search",
       searching: "Searching…",
       empty: "No matching content found",

@@ -172,6 +172,7 @@ class KnowledgeSegmentService:
                 content,
                 material,
                 available_vector_entries=(self._settings.max_segments_per_document - other_vector_entries),
+                authority=authority,
             )
             vector = embedded.parent_vector
 
@@ -247,6 +248,7 @@ class KnowledgeSegmentService:
             content,
             material,
             available_vector_entries=(self._settings.max_segments_per_document - current_vector_entries),
+            authority=authority,
         )
         vector = embedded.parent_vector
         snapshot_version = document.version
@@ -553,6 +555,7 @@ class KnowledgeSegmentService:
         material: KnowledgeEmbeddingMaterial,
         *,
         available_vector_entries: int,
+        authority: KnowledgeProjectAuthority | None,
     ) -> _EmbeddedContent:
         """Embed per the document's frozen chunking mode.
 
@@ -561,13 +564,22 @@ class KnowledgeSegmentService:
         children — the parent row keeps a NULL vector.
         """
 
+        async def before_batch() -> None:
+            if authority is None:
+                return
+            try:
+                async with self._session_factory() as session, session.begin():
+                    await revalidate_project_authority(authority, session, project_id=document.project_id)
+            except SQLAlchemyError:
+                raise _storage_unavailable() from None
+
         if document.chunking_mode != "parent_child":
             if available_vector_entries < 1:
                 raise _quota_exceeded(
                     self._settings.max_segments_per_document,
                 )
             return _EmbeddedContent(
-                parent_vector=(await self._client.embed(material, [content]))[0],
+                parent_vector=(await self._client.embed(material, [content], batch_guard=before_batch))[0],
                 children=(),
                 child_vectors=(),
             )
@@ -582,7 +594,7 @@ class KnowledgeSegmentService:
             raise _quota_exceeded(
                 self._settings.max_segments_per_document,
             )
-        child_vectors = await self._client.embed(material, list(children))
+        child_vectors = await self._client.embed(material, list(children), batch_guard=before_batch)
         return _EmbeddedContent(parent_vector=None, children=children, child_vectors=tuple(child_vectors))
 
     async def _replace_children(

@@ -48,7 +48,9 @@ export const zhCN: Translations = {
           ? "已思考（用时不足 1 秒）"
           : `已思考（用时 ${seconds} 秒）`,
     reasoningSummaryInProgress: (seconds?: number) =>
-      seconds === undefined ? "生成推理摘要中…" : `生成推理摘要中…（${seconds} 秒）`,
+      seconds === undefined
+        ? "生成推理摘要中…"
+        : `生成推理摘要中…（${seconds} 秒）`,
     reasoningSummaryFor: (seconds?: number) =>
       seconds === undefined
         ? "推理摘要"
@@ -206,6 +208,10 @@ export const zhCN: Translations = {
       openDocuments: "查看文档",
       noDescription: "暂无描述。",
       retrievalSectionTitle: "检索默认参数",
+      retrievalModeLabel: "默认检索路线",
+      retrievalModeHint:
+        "供 Agent 和使用库默认值的检索使用。保存后生效，无需重建。",
+      retrievalModes: { semantic: "仅语义检索", hybrid: "混合检索" },
       defaultTopKLabel: "默认返回条数 (top_k)",
       defaultTopKHint: "检索未指定 top_k 时使用，范围 1-20。",
       defaultThresholdLabel: "默认分数阈值",
@@ -264,7 +270,8 @@ export const zhCN: Translations = {
       previewRefresh: "刷新预览",
       previewStale: "预览已过期，请刷新以应用当前分段设置。",
       previewInvalid: "请先修正无效的分段设置，再刷新预览。",
-      previewShowing: (count, total) => `预览前 ${count} 段 · 预计共 ${total} 段`,
+      previewShowing: (count, total) =>
+        `预览前 ${count} 段 · 预计共 ${total} 段`,
       previewChunkLabel: (position) =>
         `Chunk-${String(position).padStart(2, "0")}`,
       previewCharacters: (count) => `${count} 字符`,
@@ -432,7 +439,8 @@ export const zhCN: Translations = {
       reparseWarning:
         "将按下方参数从原始文件重新解析并全量替换分段：人工增删改与段级禁用会被覆盖，重新嵌入会产生模型调用费用，处理期间该文档暂不可检索。",
       reparsePreviewButton: "预览切分",
-      reparsePreviewShowing: (shown, total) => `预览 ${shown} 段 / 共 ${total} 段`,
+      reparsePreviewShowing: (shown, total) =>
+        `预览 ${shown} 段 / 共 ${total} 段`,
       reparseSubmit: "确认重新解析",
       reparsePending: "提交中…",
       reparseConflict:
@@ -473,6 +481,7 @@ export const zhCN: Translations = {
     sourcePosition: {
       page: (page) => `页 ${page}`,
       paragraph: (paragraph) => `段落 ${paragraph}`,
+      table: (table) => `表 ${table}`,
       row: (row) => `行 ${row}`,
       slide: (slide) => `幻灯片 ${slide}`,
       chapter: (chapter) => `章节 ${chapter}`,
@@ -559,7 +568,8 @@ export const zhCN: Translations = {
         recallMs: "召回",
         rerankMs: "重排",
         finalValidationMs: "最终复核",
-        heterogeneousWarning: "异构分数域且无词法证据：仅按各域内名次融合排序。",
+        heterogeneousWarning:
+          "异构分数域且无词法证据：仅按各域内名次融合排序。",
       },
       hitDiagnosticsSummary: "命中诊断",
       localScore: (score) => `原生分 ${score.toFixed(3)}`,

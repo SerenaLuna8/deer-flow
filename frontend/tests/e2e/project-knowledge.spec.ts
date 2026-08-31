@@ -416,6 +416,7 @@ async function mockKnowledgeRoutes(
       const body = request.postDataJSON() as {
         name: string;
         description?: string;
+        retrieval_mode?: "semantic" | "hybrid";
       };
       const created: MockBase = {
         id: `40000000-0000-4000-8000-00000000000${state.bases.length + 1}`,
@@ -424,6 +425,7 @@ async function mockKnowledgeRoutes(
         status: "active",
         document_count: 0,
         delete_error: null,
+        retrieval_mode: body.retrieval_mode ?? "semantic",
       };
       state.bases.push(created);
       await options.createBaseResponseGate;
@@ -446,6 +448,7 @@ async function mockKnowledgeRoutes(
         status?: "active" | "disabled";
         default_top_k?: number;
         default_score_threshold?: number;
+        retrieval_mode?: "semantic" | "hybrid";
         reranker_model_id?: string;
         clear_reranker_model?: boolean;
       };
@@ -453,6 +456,8 @@ async function mockKnowledgeRoutes(
       if (body.name !== undefined) base.name = body.name;
       if (body.description !== undefined) base.description = body.description;
       if (body.status !== undefined) base.status = body.status;
+      if (body.retrieval_mode !== undefined)
+        base.retrieval_mode = body.retrieval_mode;
       if (body.default_top_k !== undefined) {
         base.default_top_k = body.default_top_k;
       }
@@ -1060,7 +1065,7 @@ async function mockKnowledgeRoutes(
         knowledge_base_id: baseId,
         document_id: documentId,
         document_name: owner.name,
-        content_state: "current",
+        content_state: owner.status === "ready" ? "current" : "stale",
         stored_content_version: state.detailVersion,
         current_document_version: state.detailVersion,
         children_total: childList.length,
@@ -1204,8 +1209,7 @@ async function mockKnowledgeRoutes(
                 (body.retrieval_mode as string | undefined) ?? "semantic",
               counts: {
                 semantic_candidates: 3,
-                lexical_candidates:
-                  body.retrieval_mode === "hybrid" ? 2 : 0,
+                lexical_candidates: body.retrieval_mode === "hybrid" ? 2 : 0,
                 parents_deduplicated: 3,
                 threshold_filtered: thresholdFiltered,
                 stale_filtered: 0,
@@ -1451,9 +1455,7 @@ test("creates a base through the wizard and watches the upload reach ready", asy
   await expect(
     previewPanel.getByText("预览分段一 size=1000 sep=\\n\\n"),
   ).toBeVisible();
-  await expect(
-    previewPanel.getByText("Showing 3 of 7 chunks"),
-  ).toBeVisible();
+  await expect(previewPanel.getByText("Showing 3 of 7 chunks")).toBeVisible();
   expect(state.previewRequests).toHaveLength(1);
 
   // Returning to the same file and unchanged settings keeps the first result;
@@ -1722,6 +1724,73 @@ test("creates an empty base from the wizard escape hatch", async ({ page }) => {
   const baseList = page.getByTestId("knowledge-base-list");
   await expect(baseList.getByText("空知识库")).toBeVisible();
   await expect(baseList.getByText("0 documents")).toBeVisible();
+});
+
+test("persists the base retrieval route at creation and in settings without changing it for a search override", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page);
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "New base" }).click();
+  await page.getByRole("button", { name: "Create an empty base" }).click();
+  await page.getByLabel("Name").fill("Persistent retrieval route");
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  await page.getByRole("combobox", { name: "Default retrieval route" }).click();
+  await page.getByRole("option", { name: "Hybrid", exact: true }).click();
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(page.getByTestId("knowledge-base-list")).toBeVisible();
+  expect(state.bases[0]?.retrieval_mode).toBe("hybrid");
+
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const route = page.getByRole("combobox", { name: "Default retrieval route" });
+  await expect(route).toHaveText("Hybrid");
+  await route.click();
+  await page
+    .getByRole("option", { name: "Semantic only", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
+  expect(state.baseUpdates.at(-1)).toMatchObject({
+    retrieval_mode: "semantic",
+  });
+  await page.reload();
+  await expect(route).toHaveText("Semantic only");
+
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill("single search override");
+  await page
+    .getByRole("combobox", { name: "Retrieval route", exact: true })
+    .click();
+  await page.getByRole("option", { name: "Hybrid (this search)" }).click();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect.poll(() => state.searchRequests.length).toBe(1);
+  expect(state.searchRequests[0]).toMatchObject({ retrieval_mode: "hybrid" });
+  expect(state.bases[0]?.retrieval_mode).toBe("semantic");
+});
+
+test("the document creation wizard persists its chosen base retrieval route", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page);
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+  await page.getByLabel("File").setInputFiles({
+    name: "hybrid-handbook.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("A handbook for hybrid retrieval"),
+  });
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  const route = page.getByRole("combobox", { name: "Default retrieval route" });
+  await expect(route).toHaveText("Semantic only");
+  await route.click();
+  await page.getByRole("option", { name: "Hybrid", exact: true }).click();
+  await page.getByRole("button", { name: "Save & process" }).click();
+  await expect(page.getByText("Knowledge base created")).toBeVisible();
+  expect(state.bases[0]?.retrieval_mode).toBe("hybrid");
 });
 
 test("failed document shows the error, retry re-queues it, and the segment browser opens when ready", async ({
@@ -3431,7 +3500,7 @@ test("filters, sort, and paging work over the complete list and keep keywords ou
   await expect(pageInfo).toHaveText("Page 1/1 · 12 documents");
   await expect(rows.getByText("doc-120.txt")).toBeVisible();
   await expect(rows.getByText("doc-125.txt")).toBeVisible();
-  expect(page.url()).not.toContain("12");
+  expect(new URL(page.url()).search).not.toContain("12");
   await expect(page).not.toHaveURL(/page=/u);
 
   // The status filter is URL state and combines with the keyword: row 125
@@ -3461,9 +3530,9 @@ test("filters, sort, and paging work over the complete list and keep keywords ou
   await expect(
     page.getByRole("searchbox", { name: "Search documents" }),
   ).toHaveValue("");
-  await expect(
-    page.getByTestId("knowledge-documents-page-info"),
-  ).toHaveText("Page 1/7 · 130 documents");
+  await expect(page.getByTestId("knowledge-documents-page-info")).toHaveText(
+    "Page 1/7 · 130 documents",
+  );
 });
 
 test("an incomplete document list is an explicit error, never a partial table", async ({
@@ -3602,6 +3671,112 @@ test("a segment URL locates through the detail endpoint and fails loudly for for
     ),
   ).toBeVisible();
 });
+
+test("a mounted segment location refreshes after editing and stops showing a deleted segment", async ({
+  page,
+}) => {
+  const documents = t9Documents(1);
+  const documentId = documents[0]!.id;
+  const segmentId = "60000000-0000-4000-8000-000000000001";
+  await mockKnowledgeRoutes(page, {
+    bases: [t9Base({ document_count: 1 })],
+    documents,
+    segments: {
+      [documentId]: [
+        {
+          id: segmentId,
+          position: 1,
+          content: "Original located text",
+          enabled: true,
+          source_position: {},
+        },
+      ],
+    },
+  });
+  await page.goto(
+    `/projects/alpha/knowledge?kb=${T9_BASE_ID}&doc=${documentId}&segment=${segmentId}`,
+  );
+  const locateCard = page.getByTestId("knowledge-segment-locate");
+  const list = page.getByTestId("knowledge-segment-list");
+  await expect(locateCard).toContainText("Original located text");
+  await list.getByRole("button", { name: "Edit", exact: true }).click();
+  await page.getByLabel("Content").fill("Updated located text");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Save", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(list).toContainText("Updated located text");
+  // Stay on the same document/segment URL: no reload/remount can hide a
+  // missing mutation invalidation.
+  await expect(locateCard).toContainText("Updated located text");
+  await expect(locateCard).not.toContainText("Original located text");
+
+  await list.getByRole("button", { name: "Delete", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(locateCard).toContainText(
+    "This segment cannot be located; it may have been deleted or is inaccessible.",
+  );
+  await expect(locateCard).not.toContainText("Updated located text");
+});
+
+for (const processingKind of ["reparse", "reembed"] as const) {
+  test(`a located segment follows ${processingKind} publication while the document stays open`, async ({
+    page,
+  }) => {
+    const documents = t9Documents(1);
+    const document = documents[0]!;
+    document.status = "processing";
+    document.version = 2;
+    const segmentId = "60000000-0000-4000-8000-000000000001";
+    const state = await mockKnowledgeRoutes(page, {
+      bases: [t9Base({ document_count: 1 })],
+      documents,
+      segments: {
+        [document.id]: [
+          {
+            id: segmentId,
+            position: 1,
+            content: "Previously published text",
+            enabled: true,
+            source_position: {},
+          },
+        ],
+      },
+    });
+    await page.goto(
+      `/projects/alpha/knowledge?kb=${T9_BASE_ID}&doc=${document.id}&segment=${segmentId}`,
+    );
+    const locateCard = page.getByTestId("knowledge-segment-locate");
+    await expect(locateCard).toContainText("Previously published text");
+    await expect(locateCard).toContainText(
+      "This segment belongs to an earlier document version",
+    );
+
+    // Simulate the worker publishing while the mounted documents query polls.
+    // Re-embedding keeps the segment; re-parsing replaces the old identities.
+    state.documents[0]!.status = "ready";
+    state.detailVersion = 2;
+    if (processingKind === "reparse") state.segments.set(document.id, []);
+    if (processingKind === "reparse") {
+      await expect(locateCard).toContainText(
+        "This segment cannot be located; it may have been deleted or is inaccessible.",
+        { timeout: 10_000 },
+      );
+      await expect(locateCard).not.toContainText("Previously published text");
+    } else {
+      await expect(locateCard).not.toContainText(
+        "This segment belongs to an earlier document version",
+        { timeout: 10_000 },
+      );
+      await expect(locateCard).toContainText("Previously published text");
+    }
+  });
+}
 
 test("the preview file picker previews each shown file exactly once", async ({
   page,
@@ -3819,9 +3994,9 @@ test("empty reasons are told apart and a failed search persists until retried", 
   await expect(error).toContainText("Reranker 服务暂不可用，请稍后重试");
   const requestsBeforeRetry = state.searchRequests.length;
   await error.getByRole("button", { name: "Retry" }).click();
-  await expect.poll(() => state.searchRequests.length).toBe(
-    requestsBeforeRetry + 1,
-  );
+  await expect
+    .poll(() => state.searchRequests.length)
+    .toBe(requestsBeforeRetry + 1);
   expect(state.searchRequests.at(-1)?.query).toBe("rerank-down 状况");
   await expect(error).toContainText("Reranker 服务暂不可用，请稍后重试");
 
@@ -3888,9 +4063,9 @@ test("hit detail pins the scored content, highlights true child matches, and loc
     .getByRole("button", { name: "View segment #7 in full" })
     .click();
   const dialog = page.getByRole("dialog");
-  await expect(
-    dialog.getByTestId("knowledge-detail-content"),
-  ).toHaveText("完整原始分段正文，比检索片段更长。");
+  await expect(dialog.getByTestId("knowledge-detail-content")).toHaveText(
+    "完整原始分段正文，比检索片段更长。",
+  );
   await expect(dialog.getByText("Child chunks (2)")).toBeVisible();
   const children = dialog.getByTestId("knowledge-detail-children");
   await expect(children.getByRole("listitem")).toHaveCount(2);
@@ -4089,7 +4264,9 @@ test("task progress shows stages, counts, and attempts, and a new attempt restar
   await expect(rowFor("embedding.txt")).not.toContainText("%");
 
   // A stage without a verifiable total renders indeterminate: no counter.
-  await expect(rowFor("reading.txt")).toContainText("Re-embed · Reading source");
+  await expect(rowFor("reading.txt")).toContainText(
+    "Re-embed · Reading source",
+  );
   await expect(rowFor("reading.txt")).not.toContainText("0/");
 
   // retry_wait names the wait and the attempt it will start.
@@ -4225,9 +4402,9 @@ test("batch metadata shows mixed values and applies one all-or-nothing patch", a
     .getByLabel("category value")
     .fill("统一分类");
   await expect(
-    fieldBoxes.filter({ hasText: "category" }).getByText(
-      "Overwrites this field on 2 documents",
-    ),
+    fieldBoxes
+      .filter({ hasText: "category" })
+      .getByText("Overwrites this field on 2 documents"),
   ).toBeVisible();
 
   await fieldBoxes
@@ -4340,14 +4517,10 @@ test("reparse previews the split, freezes parameters, and a stale confirmation c
       response.url().includes(`/bases/${BASE_ID}/documents?page=`),
   );
   await dialog.getByRole("button", { name: "Reparse", exact: true }).click();
-  await expect(
-    dialog.getByTestId("knowledge-reparse-conflict"),
-  ).toBeVisible();
+  await expect(dialog.getByTestId("knowledge-reparse-conflict")).toBeVisible();
   expect(state.reparseRequests).toHaveLength(1);
   expect(state.reparseRequests.at(-1)).toMatchObject({ expected_version: 1 });
-  await expect(dialog.getByLabel("Chunk size (characters)")).toHaveValue(
-    "600",
-  );
+  await expect(dialog.getByLabel("Chunk size (characters)")).toHaveValue("600");
 
   // Re-confirming against the refreshed version freezes the parameters.
   await authorityRefresh;
@@ -4432,9 +4605,7 @@ test("a stale reparse preview conflicts, refreshes the version, and the next att
   expect(state.reparsePreviewRequests.at(-1)).toMatchObject({
     expected_version: 2,
   });
-  await expect(dialog.getByTestId("knowledge-reparse-conflict")).toHaveCount(
-    0,
-  );
+  await expect(dialog.getByTestId("knowledge-reparse-conflict")).toHaveCount(0);
 });
 
 test("a batch metadata conflict refreshes the selection for re-confirmation", async ({

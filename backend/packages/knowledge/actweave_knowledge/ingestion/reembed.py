@@ -39,11 +39,10 @@ from ..persistence.models import (
     KnowledgeDocumentRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
-    KnowledgeTaskRow,
 )
 from ..persistence.tasks import settle_task_row_success
-from ..tasks.worker import KnowledgeTaskClaim
-from .progress import KnowledgeTaskProgressReporter
+from ..tasks.worker import KnowledgeTaskClaim, ProjectActiveCheck
+from .progress import KnowledgeTaskProgressReporter, ensure_locked_task_lease, lock_indexing_claim
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +77,17 @@ class KnowledgeReembedHandler:
         session_factory: async_sessionmaker[AsyncSession],
         model_client: KnowledgeModelClient,
         model_port: KnowledgeModelPort,
+        project_active_check: ProjectActiveCheck | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._model_client = model_client
         self._model_port = model_port
+        self._project_active_check = project_active_check
 
     async def __call__(self, claim: KnowledgeTaskClaim) -> None:
         # Loading spans the snapshot transaction below; reporting it first
         # also verifies the claim before any row is read.
-        progress = KnowledgeTaskProgressReporter(self._session_factory, claim)
+        progress = KnowledgeTaskProgressReporter(self._session_factory, claim, project_active_check=self._project_active_check)
         await progress.advance_stage("loading_segments")
         prepared = await self._begin_processing(claim)
         if prepared is None:
@@ -115,6 +116,7 @@ class KnowledgeReembedHandler:
 
         try:
             async with self._session_factory() as session, session.begin():
+                await lock_indexing_claim(session, claim, project_active_check=self._project_active_check)
                 document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == claim.resource_id).with_for_update())
                 if document is None or document.version != claim.target_version or document.status not in ("queued", "processing"):
                     return None
@@ -180,19 +182,9 @@ class KnowledgeReembedHandler:
 
         try:
             async with self._session_factory() as session, session.begin():
-                task = await session.scalar(
-                    select(KnowledgeTaskRow)
-                    .where(
-                        KnowledgeTaskRow.id == claim.id,
-                        KnowledgeTaskRow.claim_token == claim.claim_token,
-                        KnowledgeTaskRow.status == "running",
-                    )
-                    .with_for_update()
-                )
-                if task is None:
-                    # The lease was re-claimed; the new owner publishes instead.
-                    return
+                task = await lock_indexing_claim(session, claim, project_active_check=self._project_active_check)
                 document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == claim.resource_id).with_for_update())
+                await ensure_locked_task_lease(session, task)
                 moment = datetime.now(UTC)
                 if document is None or document.status != "processing" or document.version != claim.target_version:
                     # Late result: never publish, settle the claim as a no-op.

@@ -88,6 +88,41 @@ async def claim_next_task(
     return row
 
 
+async def _lock_live_task_claim(
+    session: AsyncSession,
+    task_id: UUID,
+    claim_token: UUID,
+    *,
+    now: datetime | None = None,
+) -> tuple[KnowledgeTaskRow, datetime] | None:
+    """Lock the exact claim, then check its deadline against current time.
+
+    A lease predicate in the locking SELECT or UPDATE is evaluated before a
+    pure row-lock wait. Read the database clock only after acquiring the lock,
+    so a claim that expired during that wait cannot be revived or settled.
+    Explicit ``now`` remains the deterministic clock for repository tests.
+    """
+
+    row = await session.scalar(
+        select(KnowledgeTaskRow)
+        .where(
+            KnowledgeTaskRow.id == task_id,
+            KnowledgeTaskRow.claim_token == claim_token,
+            KnowledgeTaskRow.status == "running",
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        return None
+    moment = now if now is not None else await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(moment, datetime) or moment.tzinfo is None:
+        raise RuntimeError("database task clock is unavailable")
+    if row.lease_until is None or row.lease_until <= moment:
+        return None
+    return row, moment
+
+
 async def extend_task_lease(
     session: AsyncSession,
     task_id: UUID,
@@ -98,17 +133,13 @@ async def extend_task_lease(
 ) -> bool:
     """Extend the lease of a running claim; False when the claim was lost."""
 
-    moment = now or datetime.now(UTC)
-    result = await session.execute(
-        update(KnowledgeTaskRow)
-        .where(
-            KnowledgeTaskRow.id == task_id,
-            KnowledgeTaskRow.claim_token == claim_token,
-            KnowledgeTaskRow.status == "running",
-        )
-        .values(lease_until=moment + timedelta(seconds=lease_seconds), updated_at=moment)
-    )
-    return result.rowcount == 1
+    locked = await _lock_live_task_claim(session, task_id, claim_token, now=now)
+    if locked is None:
+        return False
+    row, moment = locked
+    row.lease_until = moment + timedelta(seconds=lease_seconds)
+    row.updated_at = moment
+    return True
 
 
 async def defer_task_claim_for_inactive_project(
@@ -116,8 +147,8 @@ async def defer_task_claim_for_inactive_project(
     row: KnowledgeTaskRow,
     *,
     pause_seconds: int = DEFAULT_INACTIVE_PROJECT_PAUSE_SECONDS,
-) -> None:
-    """Return a just-claimed task to retry_wait without spending an attempt.
+) -> bool:
+    """Return an inactive Project's task without spending its current attempt.
 
     The caller owns ``row`` through the claim transaction and has already
     established that its Project is not active. PostgreSQL stamps the bounded
@@ -131,6 +162,8 @@ async def defer_task_claim_for_inactive_project(
     database_now = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(database_now, datetime) or database_now.tzinfo is None:
         raise RuntimeError("database task clock is unavailable")
+    if row.lease_until <= database_now:
+        return False
     row.status = "retry_wait"
     row.attempt_count -= 1
     row.available_at = database_now + timedelta(seconds=pause_seconds)
@@ -138,6 +171,17 @@ async def defer_task_claim_for_inactive_project(
     row.lease_until = None
     row.finished_at = None
     row.updated_at = database_now
+    return True
+
+
+async def defer_running_task_for_inactive_project(session: AsyncSession, task_id: UUID, claim_token: UUID) -> bool:
+    """Pause an exact live claim after its handler has finished draining."""
+
+    locked = await _lock_live_task_claim(session, task_id, claim_token)
+    if locked is None:
+        return False
+    row, _moment = locked
+    return await defer_task_claim_for_inactive_project(session, row)
 
 
 def settle_task_row_success(row: KnowledgeTaskRow, *, now: datetime) -> None:
@@ -167,26 +211,12 @@ async def settle_task_success(
 ) -> bool:
     """Settle a running claim as succeeded; False when the claim was lost."""
 
-    moment = now or datetime.now(UTC)
-    result = await session.execute(
-        update(KnowledgeTaskRow)
-        .where(
-            KnowledgeTaskRow.id == task_id,
-            KnowledgeTaskRow.claim_token == claim_token,
-            KnowledgeTaskRow.status == "running",
-        )
-        .values(
-            status="succeeded",
-            stage="done",
-            claim_token=None,
-            lease_until=None,
-            error_message=None,
-            finished_at=moment,
-            progress_updated_at=moment,
-            updated_at=moment,
-        )
-    )
-    return result.rowcount == 1
+    locked = await _lock_live_task_claim(session, task_id, claim_token, now=now)
+    if locked is None:
+        return False
+    row, moment = locked
+    settle_task_row_success(row, now=moment)
+    return True
 
 
 async def update_task_progress(
@@ -209,25 +239,18 @@ async def update_task_progress(
     current attempt's counters.
     """
 
-    moment = now or datetime.now(UTC)
-    result = await session.execute(
-        update(KnowledgeTaskRow)
-        .where(
-            KnowledgeTaskRow.id == task_id,
-            KnowledgeTaskRow.claim_token == claim_token,
-            KnowledgeTaskRow.status == "running",
-            KnowledgeTaskRow.attempt_count == attempt_count,
-            KnowledgeTaskRow.target_version == target_version,
-        )
-        .values(
-            stage=stage,
-            completed_units=completed_units,
-            total_units=total_units,
-            progress_updated_at=moment,
-            updated_at=moment,
-        )
-    )
-    return result.rowcount == 1
+    locked = await _lock_live_task_claim(session, task_id, claim_token, now=now)
+    if locked is None:
+        return False
+    row, moment = locked
+    if row.attempt_count != attempt_count or row.target_version != target_version:
+        return False
+    row.stage = stage
+    row.completed_units = completed_units
+    row.total_units = total_units
+    row.progress_updated_at = moment
+    row.updated_at = moment
+    return True
 
 
 async def settle_task_failure(
@@ -247,18 +270,10 @@ async def settle_task_failure(
     document ``failed`` so the failure is explainable in document views.
     """
 
-    moment = now or datetime.now(UTC)
-    row = await session.scalar(
-        select(KnowledgeTaskRow)
-        .where(
-            KnowledgeTaskRow.id == task_id,
-            KnowledgeTaskRow.claim_token == claim_token,
-            KnowledgeTaskRow.status == "running",
-        )
-        .with_for_update()
-    )
-    if row is None:
+    locked = await _lock_live_task_claim(session, task_id, claim_token, now=now)
+    if locked is None:
         return None
+    row, moment = locked
     row.claim_token = None
     row.lease_until = None
     row.error_message = error_message

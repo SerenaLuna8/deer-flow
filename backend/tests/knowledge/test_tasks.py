@@ -7,6 +7,7 @@ propagation can be asserted precisely.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,6 +30,7 @@ from actweave_knowledge.persistence.models import (
 )
 from actweave_knowledge.persistence.tasks import (
     claim_next_task,
+    defer_running_task_for_inactive_project,
     extend_task_lease,
     recover_expired_tasks,
     settle_task_failure,
@@ -294,6 +296,148 @@ async def test_extend_task_lease_requires_the_claim_token(postgres_database_url:
         async with harness.factory() as session, session.begin():
             assert await extend_task_lease(session, claim.id, uuid.uuid4(), lease_seconds=600) is False
     finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["heartbeat", "success", "failure", "progress", "defer"])
+async def test_expired_claim_cannot_be_revived_or_settled(postgres_database_url: str, operation: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        task_id = await _seed_task(harness, project_id, uuid.uuid4())
+        claim = await _claim_snapshot(harness)
+        expired = datetime.now(UTC) - timedelta(seconds=1)
+        async with harness.factory() as session, session.begin():
+            cached = await session.get(KnowledgeTaskRow, task_id)
+            assert cached is not None and cached.lease_until > datetime.now(UTC)
+            async with harness.factory() as other, other.begin():
+                await other.execute(text("UPDATE knowledge_tasks SET lease_until = :expired WHERE id = :id"), {"expired": expired, "id": task_id})
+            if operation == "heartbeat":
+                result = await extend_task_lease(session, claim.id, claim.claim_token, lease_seconds=60)
+            elif operation == "success":
+                result = await settle_task_success(session, claim.id, claim.claim_token)
+            elif operation == "failure":
+                result = await settle_task_failure(session, claim.id, claim.claim_token, error_message="late failure", retry_delay_seconds=30)
+            elif operation == "defer":
+                result = await defer_running_task_for_inactive_project(session, claim.id, claim.claim_token)
+            else:
+                result = await update_task_progress(
+                    session,
+                    task_id=claim.id,
+                    claim_token=claim.claim_token,
+                    attempt_count=claim.attempt_count,
+                    target_version=claim.target_version,
+                    stage="embedding",
+                    completed_units=1,
+                    total_units=3,
+                )
+        assert result is (None if operation == "failure" else False)
+        row = await _task_row(harness, task_id)
+        assert row.status == "running"
+        assert row.claim_token == claim.claim_token and row.lease_until == expired
+        assert row.completed_units == 0
+        async with harness.factory() as session, session.begin():
+            assert await recover_expired_tasks(session) == 1
+        recovered = await _task_row(harness, task_id)
+        assert recovered.status == "retry_wait" and recovered.claim_token is None
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_task_claim_mutations_preserve_explicit_repository_clock(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        moment = datetime(2020, 1, 1, tzinfo=UTC)
+        claim_token = uuid.uuid4()
+        task_id = await _seed_task(
+            harness,
+            project_id,
+            uuid.uuid4(),
+            status="running",
+            attempt_count=1,
+            claim_token=claim_token,
+            lease_until=moment + timedelta(seconds=1),
+        )
+        async with harness.factory() as session, session.begin():
+            assert await extend_task_lease(session, task_id, claim_token, lease_seconds=60, now=moment) is True
+        row = await _task_row(harness, task_id)
+        assert row.lease_until == moment + timedelta(seconds=60)
+        async with harness.factory() as session, session.begin():
+            assert await settle_task_success(session, task_id, claim_token, now=moment + timedelta(seconds=61)) is False
+        async with harness.factory() as session, session.begin():
+            assert await settle_task_success(session, task_id, claim_token, now=moment + timedelta(seconds=59)) is True
+        settled = await _task_row(harness, task_id)
+        assert settled.finished_at == moment + timedelta(seconds=59)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["heartbeat", "success", "failure", "progress", "defer"])
+async def test_claim_expiring_while_waiting_for_task_lock_cannot_be_mutated(postgres_database_url: str, operation: str) -> None:
+    harness = await _harness(postgres_database_url)
+    blocker = harness.factory()
+    running: asyncio.Task | None = None
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        task_id = await _seed_task(harness, project_id, uuid.uuid4())
+        claim = await _claim_snapshot(harness, lease_seconds=2)
+        before = await _task_row(harness, task_id)
+        await blocker.begin()
+        # Deliberately do not update the row: PostgreSQL does not re-evaluate
+        # a pre-lock WHERE predicate after a pure row-lock wait.
+        await blocker.scalar(select(KnowledgeTaskRow.id).where(KnowledgeTaskRow.id == task_id).with_for_update())
+        connection_pid: list[int] = []
+
+        async def mutate_waiting_claim():  # noqa: ANN202
+            async with harness.factory() as session, session.begin():
+                connection_pid.append(await session.scalar(select(func.pg_backend_pid())))
+                if operation == "heartbeat":
+                    return await extend_task_lease(session, claim.id, claim.claim_token, lease_seconds=60)
+                if operation == "success":
+                    return await settle_task_success(session, claim.id, claim.claim_token)
+                if operation == "failure":
+                    return await settle_task_failure(session, claim.id, claim.claim_token, error_message="late failure", retry_delay_seconds=30)
+                if operation == "defer":
+                    return await defer_running_task_for_inactive_project(session, claim.id, claim.claim_token)
+                return await update_task_progress(
+                    session,
+                    task_id=claim.id,
+                    claim_token=claim.claim_token,
+                    attempt_count=claim.attempt_count,
+                    target_version=claim.target_version,
+                    stage="embedding",
+                    completed_units=1,
+                    total_units=3,
+                )
+
+        running = asyncio.create_task(mutate_waiting_claim())
+        async with asyncio.timeout(5):
+            while True:
+                if connection_pid:
+                    async with harness.factory() as session:
+                        waiting = await session.scalar(text("SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"), {"pid": connection_pid[0]})
+                    if waiting:
+                        break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(2.1)
+        await blocker.rollback()
+        assert await running is (None if operation == "failure" else False)
+        after = await _task_row(harness, task_id)
+        assert after.status == "running"
+        assert after.claim_token == claim.claim_token and after.lease_until == before.lease_until
+        assert after.attempt_count == 1 and after.completed_units == 0
+    finally:
+        await blocker.close()
+        if running is not None and not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
         await harness.engine.dispose()
 
 

@@ -225,18 +225,25 @@ const LIST_MAX_PAGES = 20;
  * (up to 500 documents per base), and a silently truncated list would make
  * the overflow rows invisible and unmanageable.
  *
- * Completeness is checked against the server-reported total. A premature
- * empty page or the local page cap without reaching that total raises an
+ * Offset pages must agree on their total and contain distinct identities.
+ * A concurrent insertion/deletion can otherwise make the counts look complete
+ * while skipping rows. A changed total, duplicate, premature empty page or
+ * the local page cap without reaching the exact total raises an
  * explicit `INCOMPLETE_LIST` error instead of publishing a partial list —
  * callers filter and paginate over this result as if it were everything,
  * and a silent partial would quietly hide the missing rows.
  */
-async function listAllPages<Item, R extends { items: Item[]; total: number }>(
+async function listAllPages<
+  Item extends { id: string },
+  R extends { items: Item[]; total: number },
+>(
   pageURL: (page: number) => string,
   schema: z.ZodType<R, z.ZodTypeDef, unknown>,
   signal?: AbortSignal,
 ): Promise<R> {
   const items: Item[] = [];
+  const seenIds = new Set<string>();
+  let expectedTotal: number | undefined;
   let page = 1;
   for (;;) {
     const response = await requestKnowledge(
@@ -244,8 +251,29 @@ async function listAllPages<Item, R extends { items: Item[]; total: number }>(
       signal ? { signal } : undefined,
     );
     const parsed = await readKnowledgeResponse(response, schema);
+    expectedTotal ??= parsed.total;
+    if (
+      parsed.total !== expectedTotal ||
+      items.length + parsed.items.length > expectedTotal
+    ) {
+      throw new KnowledgeApiError(
+        response.status,
+        "INCOMPLETE_LIST",
+        "Knowledge list changed while loading. Retry to load it again.",
+      );
+    }
+    for (const item of parsed.items) {
+      if (seenIds.has(item.id)) {
+        throw new KnowledgeApiError(
+          response.status,
+          "INCOMPLETE_LIST",
+          "Knowledge list changed while loading. Retry to load it again.",
+        );
+      }
+      seenIds.add(item.id);
+    }
     items.push(...parsed.items);
-    if (items.length >= parsed.total) {
+    if (items.length === expectedTotal) {
       return { ...parsed, items, page: 1 };
     }
     if (parsed.items.length === 0 || page >= LIST_MAX_PAGES) {

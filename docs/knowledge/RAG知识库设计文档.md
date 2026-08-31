@@ -267,7 +267,7 @@ upload -> extract -> clean -> split -> embed -> publish
 | 扩展名 | 提取器 |
 | --- | --- |
 | `.pdf` | pypdf |
-| `.docx` | python-docx |
+| `.docx` | python-docx(正文顺序读取段落及表格行,行内单元格不拆散,合并单元格只计一次) |
 | `.txt` / `.md` | 文本解码器 |
 | `.csv` | Python csv |
 | `.xlsx` | openpyxl |
@@ -343,8 +343,8 @@ Worker 为一次处理创建临时目录,把对象下载到临时 `Path` 后调�
    分批调用 `embed_many`;每个 Provider 批次前重检查权限与 lease,撤权或失锁
    停止未派发批次;
 2. 返回数量、维度、有限数值与非零校验,任一批失败则本次不发布;
-3. Worker 完成所有 embedding 后开启短事务:锁定 Task 和 Document → 检查
-   `claim_token` → 检查 `version == target_version` → 检查仍是 `processing`
+3. Worker 完成所有 embedding 后开启短事务:复核并锁定 Project → 锁定 Task 和 Document → 检查
+   `claim_token` 与数据库时钟下未过期的 lease → 检查 `version == target_version` → 检查仍是 `processing`
    → 删除旧 Segment → 插入新 Segment(和 Child)并写入向量与词法两列 →
    更新 Document 为 `ready` 并写入 `segment_count`/字数 → Task `succeeded`,
    一次提交;
@@ -457,8 +457,9 @@ Segment id。snippet 默认取 Segment 全文的前 320 字符;完整正文按�
 
 ### 7.4 一致性、诊断与引用
 
-- 检索快照库的模型绑定,在 Provider 派发前与最终复核时重验;中途改绑报
-  `KNOWLEDGE_CONFLICT`;最终统一复核剔除过期候选并回填真实 `matched_children`;
+- 检索快照库的模型绑定与本次实际使用的 top_k、阈值、检索模式,在 Provider
+  派发前与最终复核时重验;有效策略变化报 `KNOWLEDGE_CONFLICT`,已由请求覆盖
+  的库默认值变化不影响本次检索;最终统一复核剔除过期候选并回填真实 `matched_children`;
 - 请求级 `debug` 仅在该响应返回安全诊断:策略版本、预算、真实计数、单调耗时、
   模型 ID、逐命中局部分数与四值 `empty_reason`,无任何正文;
 - 引用携带 `document_version`/`content_digest` 与 `score_kind`/`local_score`;
@@ -473,7 +474,8 @@ Embedding 与 Reranker 的 Provider 细节都留在 Package 内部。
 检索在每组 query embedding 前、召回事务内、发送 Segment 文本给 Reranker 前、
 Provider 工作完成后共四类边界经宿主 authority 重验证;撤权在相应边界抑制后续
 Provider 开销、Segment 披露、查询日志、命中计数与已计算 Citation。纯数据库的
-查询日志或命中计数写入故障按 best-effort 处理,不把一次已授权检索伪装成失败。
+查询日志或命中计数写入故障在独立 savepoint 中按 best-effort 处理,不把一次已授权
+检索伪装成失败;权限与内容复验、外层事务失败仍必须拒绝返回。
 
 `knowledge_queries` 按 `project_id + owner_user_id` 记录原始 query(来源
 `agent|retrieval_test`)。最近查询接口只能读取当前可信 actor 自己的行;

@@ -196,6 +196,70 @@ def test_extract_docx_paragraphs_become_blocks(tmp_path: Path) -> None:
     assert blocks[1].source_position == {"paragraph": 2}
 
 
+@pytest.mark.parametrize("with_surrounding_paragraphs", [False, True])
+def test_extract_docx_includes_table_text_in_document_order(tmp_path: Path, with_surrounding_paragraphs: bool) -> None:
+    import docx
+
+    document = docx.Document()
+    if with_surrounding_paragraphs:
+        document.add_paragraph("服务器故障手册")
+    table = document.add_table(rows=2, cols=2)
+    for cell, value in zip(
+        (cell for row in table.rows for cell in row.cells),
+        ("故障代码", "处置步骤", "E42", "重启网关服务"),
+        strict=True,
+    ):
+        cell.text = value
+    if with_surrounding_paragraphs:
+        document.add_paragraph("操作完成后确认服务状态")
+    path = tmp_path / "table.docx"
+    document.save(str(path))
+
+    blocks = extract_blocks(path, ".docx")
+
+    expected = ["故障代码\t处置步骤", "E42\t重启网关服务"]
+    if with_surrounding_paragraphs:
+        expected = ["服务器故障手册", *expected, "操作完成后确认服务状态"]
+    assert [block.text for block in blocks] == expected
+    assert [block.source_position for block in blocks if "table" in block.source_position] == [{"table": 1, "row": 1}, {"table": 1, "row": 2}]
+
+
+def test_extract_docx_merged_table_cells_are_counted_once(tmp_path: Path) -> None:
+    import docx
+
+    document = docx.Document()
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).merge(table.cell(0, 1)).text = "故障指南"
+    table.cell(1, 0).text = "E42"
+    table.cell(1, 1).text = "重启网关服务"
+    path = tmp_path / "merged.docx"
+    document.save(str(path))
+
+    blocks = extract_blocks(path, ".docx", max_total_chars=14)
+
+    assert [block.text for block in blocks] == ["故障指南", "E42\t重启网关服务"]
+    with pytest.raises(KnowledgeError) as error:
+        extract_blocks(path, ".docx", max_total_chars=13)
+    assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_docx_table_preview_keeps_fault_code_and_procedure_in_one_segment(tmp_path: Path) -> None:
+    import docx
+
+    document = docx.Document()
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "E42"
+    table.cell(0, 1).text = "重启网关服务"
+    path = tmp_path / "procedures.docx"
+    document.save(str(path))
+
+    preview = await preview_document_chunks(_preview_request(path), KnowledgeSettings.model_validate({"enabled": False}))
+
+    assert preview.total == 1
+    assert preview.chunks[0].content == "E42\t重启网关服务"
+
+
 def test_extract_csv_rows_join_cells_and_skip_empty_rows(tmp_path: Path) -> None:
     path = tmp_path / "table.csv"
     path.write_text('名称,数量\n"苹果, 红",3\n,,\n梨,5\n', encoding="utf-8")

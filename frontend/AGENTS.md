@@ -336,7 +336,10 @@ generator; a necessary local patch needs focused coverage and an explanation.
   response cannot resurrect them.
 - The retrieval test's top_k and threshold inputs are optional: empty inputs
   omit the field so the backend resolves the base defaults (placeholders show
-  them), which are edited in the base settings panel. Metadata filter rows
+  them), which are edited in the base settings panel. The wizard, empty-base
+  creation, and base settings persist the semantic/hybrid retrieval mode;
+  changing the retrieval test's mode overrides only that request and does not
+  change what an Agent inherits from the base. Metadata filter rows
   (field/operator/typed value; operators follow the field type) are built
   client-side and sent as `metadata_filters` only when present; with no
   defined fields the section explains why none can be added. Below the
@@ -369,8 +372,12 @@ generator; a necessary local patch needs focused coverage and an explanation.
   selectable. Knowledge workspace state (base, view, document, segment,
   status filter, sort, page) lives in the URL for deep links and history;
   the document list is searched/filtered/sorted client-side over a
-  completeness-checked full fetch (an incomplete multi-page read is an
-  explicit error, never a partial table). Status cells render the projected
+  completeness-checked full fetch (a changed total, duplicate identity, or
+  incomplete multi-page read is an explicit error, never a partial table).
+  Segment lists and location details share the document-scoped segments query
+  root, so maintenance invalidation also refreshes a mounted location card's
+  edited or deleted content.
+  Status cells render the projected
   real task progress (kind, stage, verified counts, attempt, retry wait) and
   a summary bar above the table counts processing/retry-wait/failed/ready
   documents without folding failures into success. "View

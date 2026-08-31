@@ -178,6 +178,9 @@ export interface Translations {
       openDocuments: string;
       noDescription: string;
       retrievalSectionTitle: string;
+      retrievalModeLabel: string;
+      retrievalModeHint: string;
+      retrievalModes: { semantic: string; hybrid: string };
       defaultTopKLabel: string;
       defaultTopKHint: string;
       defaultThresholdLabel: string;
@@ -425,6 +428,7 @@ export interface Translations {
     sourcePosition: {
       page: (page: string) => string;
       paragraph: (paragraph: string) => string;
+      table: (table: string) => string;
       row: (row: string) => string;
       slide: (slide: string) => string;
       chapter: (chapter: string) => string;

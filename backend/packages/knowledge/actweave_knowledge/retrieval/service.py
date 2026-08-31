@@ -44,7 +44,8 @@ parent_child-mode documents recall through child chunks whose best score
 rolls up to the parent segment (one candidate per parent). The reranker
 always scores the text a citation would return — the parent content.
 
-The effective strategy snapshot (every targeted base's model bindings) is
+The effective strategy snapshot (every targeted base's model bindings and
+resolved retrieval settings) is
 re-checked before every provider dispatch and inside the final review: a
 mid-search rebinding of any targeted base raises ``KNOWLEDGE_CONFLICT``
 instead of mixing two strategies into one result. Every completed search
@@ -358,6 +359,21 @@ class _BaseDefaults:
     retrieval_mode: KnowledgeRetrievalMode
 
 
+def _effective_defaults(defaults: _BaseDefaults, overrides: _ValidatedSearch) -> _BaseDefaults:
+    return _BaseDefaults(
+        top_k=overrides.top_k if overrides.top_k is not None else defaults.top_k,
+        score_threshold=overrides.score_threshold if overrides.score_threshold is not None else defaults.score_threshold,
+        retrieval_mode=overrides.retrieval_mode if overrides.retrieval_mode is not None else defaults.retrieval_mode,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchSnapshot:
+    model_bindings: dict[UUID, tuple[UUID, UUID | None]]
+    effective_defaults: dict[UUID, _BaseDefaults]
+    overrides: _ValidatedSearch
+
+
 @dataclass(frozen=True, slots=True)
 class _SearchGroup:
     """Bases sharing one ``(embedding model, reranker model)`` pair.
@@ -458,15 +474,16 @@ def _rank_fused(ranked: list[_Ranked], lexical_ranks: dict[UUID, int]) -> list[t
     return fused
 
 
-async def _assert_snapshot_bindings(
+async def _assert_snapshot_strategy(
     session: AsyncSession,
     project_id: UUID,
-    snapshot_bindings: dict[UUID, tuple[UUID, UUID | None]],
+    snapshot: _SearchSnapshot,
 ) -> None:
-    """Every targeted base still binds the snapshot's models, or conflict.
+    """Every targeted base still has the effective search strategy, or conflict.
 
     A deleted base is not a rebinding: its rows simply leave retrieval scope
-    and any of its hits drop at the final review.
+    and any of its hits drop at the final review. A request override shields
+    that setting from unrelated changes to the base's unused default.
     """
 
     rows = (
@@ -475,12 +492,31 @@ async def _assert_snapshot_bindings(
                 KnowledgeBaseRow.id,
                 KnowledgeBaseRow.embedding_model_id,
                 KnowledgeBaseRow.reranker_model_id,
-            ).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id.in_(snapshot_bindings))
+                KnowledgeBaseRow.default_top_k,
+                KnowledgeBaseRow.default_score_threshold,
+                KnowledgeBaseRow.retrieval_mode,
+            ).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id.in_(snapshot.model_bindings))
         )
     ).all()
+    current_defaults = dict(snapshot.effective_defaults)
     for row in rows:
-        if snapshot_bindings[row.id] != (row.embedding_model_id, row.reranker_model_id):
+        actual = _effective_defaults(
+            _BaseDefaults(
+                top_k=row.default_top_k,
+                score_threshold=float(row.default_score_threshold),
+                retrieval_mode=row.retrieval_mode,
+            ),
+            snapshot.overrides,
+        )
+        expected = snapshot.effective_defaults[row.id]
+        if snapshot.model_bindings[row.id] != (row.embedding_model_id, row.reranker_model_id) or expected.score_threshold != actual.score_threshold or expected.retrieval_mode != actual.retrieval_mode:
             raise KnowledgeError(KNOWLEDGE_CONFLICT, "检索策略已变更，请重新检索")
+        current_defaults[row.id] = actual
+    # top_k is one global limit: a smaller base default changing without
+    # changing the maximum cannot alter this search's budget or result cap.
+    # Missing bases keep their snapshot settings; deletion only drops hits.
+    if max(item.top_k for item in current_defaults.values()) != max(item.top_k for item in snapshot.effective_defaults.values()):
+        raise KnowledgeError(KNOWLEDGE_CONFLICT, "检索策略已变更，请重新检索")
 
 
 def _candidate_sort_key(candidate: _Candidate) -> tuple[float, UUID, UUID, int, UUID]:
@@ -606,9 +642,10 @@ class KnowledgeSearchService:
             # N = 0 searches nothing (§8.2); with debug the shape still says so.
             return KnowledgeSearchResult(diagnostics=_empty_scope_diagnostics(validated) if request.debug else None)
 
+        defaults = {base_id: _effective_defaults(base_defaults, validated) for base_id, base_defaults in defaults.items()}
         # An omitted top_k widens to the largest per-base default among the
         # targeted bases, so no base's configured expectation is truncated.
-        top_k = validated.top_k if validated.top_k is not None else max(item.top_k for item in defaults.values())
+        top_k = max(item.top_k for item in defaults.values())
         target_base_count = len(defaults)
         per_base_budget = calculate_per_base_budget(top_k, target_base_count)
         if per_base_budget < 1:
@@ -616,7 +653,7 @@ class KnowledgeSearchService:
         # A request override applies to every targeted base for this one
         # call; the per-base configuration is untouched. Without a hybrid
         # target no lexical query exists and no token cap applies.
-        hybrid_base_ids = frozenset(base_id for base_id, base_defaults in defaults.items() if (validated.retrieval_mode or base_defaults.retrieval_mode) == "hybrid")
+        hybrid_base_ids = frozenset(base_id for base_id, base_defaults in defaults.items() if base_defaults.retrieval_mode == "hybrid")
         lexical_query: str | None = None
         if hybrid_base_ids:
             query_tokens = lexical_query_input(validated.query)
@@ -626,8 +663,12 @@ class KnowledgeSearchService:
             # still runs.
             lexical_query = " | ".join(query_tokens) if query_tokens else None
         # The effective strategy snapshot of this search: every targeted
-        # base's model bindings, frozen by the group-load transaction.
-        snapshot_bindings: dict[UUID, tuple[UUID, UUID | None]] = {base_id: (group.embedding.model_id, group.rerank.model_id if group.rerank is not None else None) for group in groups for base_id in group.base_ids}
+        # base's model bindings and resolved settings, frozen by group load.
+        snapshot = _SearchSnapshot(
+            model_bindings={base_id: (group.embedding.model_id, group.rerank.model_id if group.rerank is not None else None) for group in groups for base_id in group.base_ids},
+            effective_defaults=defaults,
+            overrides=validated,
+        )
 
         # Groups sharing an embedding model reuse one query embedding per
         # search while keeping their own per-base recall budgets.
@@ -646,7 +687,7 @@ class KnowledgeSearchService:
             await self._revalidate_dispatch(
                 project_id=request.project_id,
                 authority=authority,
-                snapshot_bindings=snapshot_bindings,
+                snapshot=snapshot,
             )
 
         for group in groups:
@@ -745,7 +786,7 @@ class KnowledgeSearchService:
             # Per-base thresholds act on native scores only — never on the
             # fused ranking score (§8.3).
             for item in group_ranked:
-                threshold = validated.score_threshold if validated.score_threshold is not None else defaults[item.candidate.knowledge_base_id].score_threshold
+                threshold = defaults[item.candidate.knowledge_base_id].score_threshold
                 if threshold > 0 and item.final_score < threshold:
                     threshold_filtered += 1
                     continue
@@ -826,7 +867,7 @@ class KnowledgeSearchService:
         hits = await self._review_and_record(
             project_id=request.project_id,
             owner_user_id=request.owner_user_id,
-            snapshot_bindings=snapshot_bindings,
+            snapshot=snapshot,
             query=validated.query,
             source=request.source,
             pending=pending,
@@ -954,7 +995,7 @@ class KnowledgeSearchService:
         *,
         project_id: UUID,
         owner_user_id: UUID,
-        snapshot_bindings: dict[UUID, tuple[UUID, UUID | None]],
+        snapshot: _SearchSnapshot,
         query: str,
         source: str,
         pending: list[KnowledgeSearchHit],
@@ -967,10 +1008,11 @@ class KnowledgeSearchService:
         (every targeted base, hits or not), re-checks each hit against the
         current rows (status/enabled/version, content digest, child identities,
         and the complete hard filters), and only then appends the query-log
-        row and hit counters — so the log can never describe hits the caller
-        did not receive. Stale hits are dropped without backfill; a rebound
-        model is a conflict; any database uncertainty fails the whole search
-        instead of returning unverified content.
+        row and hit counters. The optional statistics share a savepoint, so
+        a write fault rolls them all back without discarding verified hits.
+        Stale hits are dropped without backfill; a changed effective strategy
+        is a conflict. Authority, content reads and the outer transaction
+        commit must still succeed before any content can return.
         """
 
         try:
@@ -984,35 +1026,42 @@ class KnowledgeSearchService:
                 # computed under a strategy some base no longer has: conflict,
                 # never a silent partial result — even when that base
                 # contributed no hits.
-                await _assert_snapshot_bindings(session, project_id, snapshot_bindings)
+                await _assert_snapshot_strategy(session, project_id, snapshot)
                 hits = tuple(await self._reviewed_hits(session, project_id, pending, metadata_filters)) if pending else ()
                 # top_score and its provenance come from the same returned hit
                 # so the logged score can never claim a kind the citation did
                 # not carry.
                 top_hit = max(hits, key=lambda hit: hit.citation.score) if hits else None
-                session.add(
-                    KnowledgeQueryRow(
-                        id=uuid4(),
-                        project_id=project_id,
-                        owner_user_id=str(owner_user_id),
-                        knowledge_base_ids=[str(base_id) for base_id in sorted(snapshot_bindings)],
-                        query=query,
-                        source=source,
-                        result_count=len(hits),
-                        top_score=top_hit.citation.score if top_hit is not None else None,
-                        top_score_kind=(top_hit.citation.score_kind if top_hit is not None else None),
-                        strategy_version=KNOWLEDGE_STRATEGY_VERSION,
-                    )
-                )
-                if hits:
-                    segment_ids = [hit.citation.segment_id for hit in hits]
-                    await session.execute(update(KnowledgeSegmentRow).where(KnowledgeSegmentRow.id.in_(segment_ids)).values(hit_count=KnowledgeSegmentRow.hit_count + 1))
-                    hits_per_document: dict[UUID, int] = {}
-                    for hit in hits:
-                        document_id = hit.citation.document_id
-                        hits_per_document[document_id] = hits_per_document.get(document_id, 0) + 1
-                    for document_id, hit_increment in hits_per_document.items():
-                        await session.execute(update(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == document_id).values(hit_count=KnowledgeDocumentRow.hit_count + hit_increment))
+                try:
+                    # Keep Project/Membership authority locks in the outer
+                    # transaction. A failed metric must not release those
+                    # locks or leave partially recorded history/counters.
+                    async with session.begin_nested():
+                        session.add(
+                            KnowledgeQueryRow(
+                                id=uuid4(),
+                                project_id=project_id,
+                                owner_user_id=str(owner_user_id),
+                                knowledge_base_ids=[str(base_id) for base_id in sorted(snapshot.model_bindings)],
+                                query=query,
+                                source=source,
+                                result_count=len(hits),
+                                top_score=top_hit.citation.score if top_hit is not None else None,
+                                top_score_kind=(top_hit.citation.score_kind if top_hit is not None else None),
+                                strategy_version=KNOWLEDGE_STRATEGY_VERSION,
+                            )
+                        )
+                        if hits:
+                            segment_ids = [hit.citation.segment_id for hit in hits]
+                            await session.execute(update(KnowledgeSegmentRow).where(KnowledgeSegmentRow.id.in_(segment_ids)).values(hit_count=KnowledgeSegmentRow.hit_count + 1))
+                            hits_per_document: dict[UUID, int] = {}
+                            for hit in hits:
+                                document_id = hit.citation.document_id
+                                hits_per_document[document_id] = hits_per_document.get(document_id, 0) + 1
+                            for document_id, hit_increment in hits_per_document.items():
+                                await session.execute(update(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == document_id).values(hit_count=KnowledgeDocumentRow.hit_count + hit_increment))
+                except SQLAlchemyError as error:
+                    logger.warning("knowledge search statistics write failed: %s", type(error).__name__)
         except KnowledgeError:
             raise
         except SQLAlchemyError:
@@ -1698,7 +1747,7 @@ class KnowledgeSearchService:
         *,
         project_id: UUID,
         authority: KnowledgeProjectAuthority | None,
-        snapshot_bindings: dict[UUID, tuple[UUID, UUID | None]],
+        snapshot: _SearchSnapshot,
     ) -> None:
         """Pre-dispatch guard: authority plus the strategy snapshot.
 
@@ -1714,7 +1763,7 @@ class KnowledgeSearchService:
                     session,
                     project_id=project_id,
                 )
-                await _assert_snapshot_bindings(session, project_id, snapshot_bindings)
+                await _assert_snapshot_strategy(session, project_id, snapshot)
         except KnowledgeError:
             raise
         except SQLAlchemyError:

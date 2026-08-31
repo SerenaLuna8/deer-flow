@@ -8,6 +8,7 @@ import {
 const labels: KnowledgeSourcePositionLabels = {
   page: (page) => `页 ${page}`,
   paragraph: (paragraph) => `段落 ${paragraph}`,
+  table: (table) => `表 ${table}`,
   row: (row) => `行 ${row}`,
   slide: (slide) => `幻灯片 ${slide}`,
   chapter: (chapter) => `章节 ${chapter}`,
@@ -21,6 +22,12 @@ describe("formatKnowledgeSourcePosition", () => {
   it("renders the DOCX paragraph marker", () => {
     expect(formatKnowledgeSourcePosition({ paragraph: 12 }, labels)).toBe(
       "段落 12",
+    );
+  });
+
+  it("renders the DOCX table and row together", () => {
+    expect(formatKnowledgeSourcePosition({ table: 1, row: 2 }, labels)).toBe(
+      "表 1 · 行 2",
     );
   });
 

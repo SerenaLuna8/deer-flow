@@ -1567,6 +1567,66 @@ async def test_search_appends_query_log_rows_and_increments_hit_counts(postgres_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_event",
+    ["INSERT ON knowledge_queries", "UPDATE OF hit_count ON knowledge_segments", "UPDATE OF hit_count ON knowledge_documents"],
+)
+async def test_search_returns_verified_hits_when_only_statistics_writes_fail(
+    postgres_database_url: str,
+    failure_event: str,
+) -> None:
+    """History and counters roll back together without discarding safe hits."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, _, _ = await _seed_single_base(
+            harness,
+            segments=[("统计故障时仍可回答的原文", [1.0, 0.0, 0.0])],
+        )
+        # Fail only the selected metrics write, after the final authorization
+        # and content reads succeeded, in this fixture's isolated database.
+        async with harness.engine.begin() as connection:
+            await connection.execute(text("CREATE FUNCTION reject_statistics_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'statistics unavailable'; END $$"))
+            await connection.execute(text(f"CREATE TRIGGER reject_statistics_write BEFORE {failure_event} FOR EACH ROW EXECUTE FUNCTION reject_statistics_write()"))  # noqa: S608 - fixed parametrized trigger clauses
+
+        result = await harness.service.search(_request(project_id))
+
+        assert [hit.passage for hit in result.hits] == ["统计故障时仍可回答的原文"]
+        history, total = await harness.service.list_recent_queries(project_id, _DEFAULT_OWNER_USER_ID, base_id)
+        assert (history, total) == ([], 0)
+        async with harness.factory() as session:
+            segment_hits = await session.scalar(select(KnowledgeSegmentRow.hit_count))
+            document_hits = await session.scalar(select(KnowledgeDocumentRow.hit_count))
+        assert (segment_hits, document_hits) == (0, 0)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_search_fails_when_final_transaction_cannot_commit(postgres_database_url: str) -> None:
+    """An outer COMMIT failure is not a best-effort statistics failure."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, _, _ = await _seed_single_base(
+            harness,
+            segments=[("最终事务未完成时不得返回", [1.0, 0.0, 0.0])],
+        )
+        async with harness.engine.begin() as connection:
+            await connection.execute(text("CREATE FUNCTION reject_final_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'final commit unavailable'; END $$"))
+            await connection.execute(text("CREATE CONSTRAINT TRIGGER reject_final_commit AFTER INSERT ON knowledge_queries DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_final_commit()"))
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.search(_request(project_id))
+
+        assert error.value.code == KNOWLEDGE_SEARCH_FAILED
+        history, total = await harness.service.list_recent_queries(project_id, _DEFAULT_OWNER_USER_ID, base_id)
+        assert (history, total) == ([], 0)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_zero_result_searches_still_log_with_null_top_score(postgres_database_url: str) -> None:
     harness = await _harness(postgres_database_url)
     try:
@@ -2822,6 +2882,132 @@ async def test_final_review_conflicts_when_the_base_rebinds_models_mid_search(po
 
         assert error.value.code == KNOWLEDGE_CONFLICT
         assert await _query_rows(harness, project_id) == []
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting", "new_value"),
+    [("default_score_threshold", 0.9), ("default_top_k", 1), ("retrieval_mode", "hybrid")],
+)
+@pytest.mark.parametrize("provider_stage", ["embedding", "rerank"])
+async def test_search_conflicts_when_effective_base_settings_change_during_provider_wait(
+    postgres_database_url: str,
+    setting: str,
+    new_value: Any,
+    provider_stage: str,
+) -> None:
+    """Results computed under replaced effective settings must be retried."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, _, rerank_id = await _seed_single_base(
+            harness,
+            segments=[("旧策略下的命中", [1.0, 0.0, 0.0])],
+        )
+        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=0, score=0.5)]
+
+        async def _change_settings() -> None:
+            async with harness.factory() as session, session.begin():
+                base = await session.get(KnowledgeBaseRow, base_id)
+                assert base is not None
+                setattr(base, setting, new_value)
+
+        if provider_stage == "rerank":
+            _rerank_side_effect(harness, _change_settings)
+        else:
+            original_embed = harness.client.embed
+
+            async def _embed_then_change(material, texts, **hooks):  # noqa: ANN001, ANN202
+                vectors = await original_embed(material, texts, **hooks)
+                await _change_settings()
+                return vectors
+
+            harness.client.embed = _embed_then_change  # type: ignore[method-assign]
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.search(_request(project_id))
+
+        assert error.value.code == KNOWLEDGE_CONFLICT
+        if provider_stage == "embedding":
+            assert harness.client.rerank_calls == []
+        history, total = await harness.service.list_recent_queries(project_id, _DEFAULT_OWNER_USER_ID, base_id)
+        assert (history, total) == ([], 0)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting", "new_value", "request_override"),
+    [
+        ("default_score_threshold", 0.9, {"score_threshold": 0}),
+        ("default_top_k", 1, {"top_k": 2}),
+        ("retrieval_mode", "hybrid", {"retrieval_mode": "semantic"}),
+    ],
+)
+async def test_search_request_override_ignores_changes_to_unused_base_defaults(
+    postgres_database_url: str,
+    setting: str,
+    new_value: Any,
+    request_override: dict[str, Any],
+) -> None:
+    """A base edit must not conflict with a parameter pinned by this request."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, _, rerank_id = await _seed_single_base(
+            harness,
+            segments=[("请求覆盖参数下的命中", [1.0, 0.0, 0.0])],
+        )
+        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=0, score=0.5)]
+
+        async def _change_unused_default() -> None:
+            async with harness.factory() as session, session.begin():
+                base = await session.get(KnowledgeBaseRow, base_id)
+                assert base is not None
+                setattr(base, setting, new_value)
+
+        _rerank_side_effect(harness, _change_unused_default)
+
+        result = await harness.service.search(_request(project_id, **request_override))
+
+        assert [hit.passage for hit in result.hits] == ["请求覆盖参数下的命中"]
+        history, total = await harness.service.list_recent_queries(project_id, _DEFAULT_OWNER_USER_ID, base_id)
+        assert total == 1
+        assert history[0].result_count == 1
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_search_ignores_default_top_k_changes_that_leave_the_effective_limit_unchanged(postgres_database_url: str) -> None:
+    """A multi-base search uses the largest default, not every default as a cap."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, embedding_id, rerank_id = await _seed_single_base(
+            harness,
+            segments=[("较小默认值库的命中", [1.0, 0.0, 0.0])],
+        )
+        async with harness.factory() as session, session.begin():
+            larger_default_base = _base_row(project_id, embedding_id, rerank_id, name="默认八条", default_top_k=8)
+            session.add(larger_default_base)
+
+        async def _lower_nonmaximal_default() -> None:
+            async with harness.factory() as session, session.begin():
+                base = await session.get(KnowledgeBaseRow, base_id)
+                assert base is not None
+                base.default_top_k = 2
+
+        _rerank_side_effect(harness, _lower_nonmaximal_default)
+
+        result = await harness.service.search(_request(project_id, debug=True))
+
+        assert [hit.passage for hit in result.hits] == ["较小默认值库的命中"]
+        assert result.diagnostics is not None
+        assert result.diagnostics.effective_top_k == 8
     finally:
         await harness.engine.dispose()
 

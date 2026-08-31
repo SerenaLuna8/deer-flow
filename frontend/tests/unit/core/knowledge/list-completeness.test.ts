@@ -98,8 +98,8 @@ describe("knowledge list completeness", () => {
 
   test("hitting the page cap without reaching total is an incomplete error", async () => {
     queuePages(
-      Array.from({ length: 20 }, () => ({
-        items: Array.from({ length: 100 }, (_, i) => baseItem(i)),
+      Array.from({ length: 20 }, (_, page) => ({
+        items: Array.from({ length: 100 }, (_, i) => baseItem(page * 100 + i)),
         total: 99_999,
       })),
     );
@@ -114,17 +114,45 @@ describe("knowledge list completeness", () => {
     expect(fetchMock).toHaveBeenCalledTimes(20);
   });
 
-  test("a shrinking total between pages still completes once satisfied", async () => {
-    // Rows deleted mid-pagination: page 2 reports a smaller total that the
-    // collected rows already satisfy.
+  test("rejects a changed total rather than publishing a list that skips a surviving row", async () => {
+    // Deleting row 50 after page 1 shifts surviving row 101 before page 2's
+    // offset. The count still matches, but row 101 is missing from the read.
     queuePages([
-      { items: Array.from({ length: 100 }, (_, i) => baseItem(i)), total: 150 },
-      { items: Array.from({ length: 10 }, (_, i) => baseItem(100 + i)), total: 105 },
+      {
+        items: Array.from({ length: 100 }, (_, i) => baseItem(i + 1)),
+        total: 150,
+      },
+      {
+        items: Array.from({ length: 49 }, (_, i) => baseItem(102 + i)),
+        total: 149,
+      },
     ]);
 
-    const response = await listKnowledgeBases(PROJECT_ID);
-
-    expect(response.items).toHaveLength(110);
+    await expect(listKnowledgeBases(PROJECT_ID)).rejects.toMatchObject({
+      code: "INCOMPLETE_LIST",
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("rejects repeated identities even when the reported total stays unchanged", async () => {
+    queuePages([
+      {
+        items: Array.from({ length: 100 }, (_, i) => baseItem(i + 1)),
+        total: 150,
+      },
+      // A replacement/reorder between offset pages repeats row 100, making
+      // 150 returned rows contain only 149 distinct resources.
+      {
+        items: Array.from({ length: 50 }, (_, i) => baseItem(100 + i)),
+        total: 150,
+      },
+    ]);
+
+    const failure = await listKnowledgeBases(PROJECT_ID).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(KnowledgeApiError);
+    expect((failure as KnowledgeApiError).code).toBe("INCOMPLETE_LIST");
   });
 });

@@ -701,6 +701,7 @@ class KnowledgeModule:
                 object_store=object_store,
                 model_client=self._model_client,
                 model_port=self._model_port,
+                project_active_check=project_active_check,
             ),
             # Re-embedding reads current rows only: no object store on purpose,
             # so it structurally cannot re-parse the original file.
@@ -708,6 +709,7 @@ class KnowledgeModule:
                 session_factory=self._session_factory,
                 model_client=self._model_client,
                 model_port=self._model_port,
+                project_active_check=project_active_check,
             ),
             "delete_document": KnowledgeDocumentDeletionHandler(
                 session_factory=self._session_factory,

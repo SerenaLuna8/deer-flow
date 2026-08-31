@@ -39,10 +39,12 @@ import {
 import type {
   KnowledgeBaseItem,
   KnowledgeBaseStatus,
+  KnowledgeRetrievalMode,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
+import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
 
 function baseStatusVariant(
   status: KnowledgeBaseStatus,
@@ -280,6 +282,8 @@ function CreateBaseDialog({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [embeddingModelId, setEmbeddingModelId] = useState("");
+  const [retrievalMode, setRetrievalMode] =
+    useState<KnowledgeRetrievalMode>("semantic");
 
   const close = (nextOpen: boolean) => {
     onOpenChange(nextOpen);
@@ -287,6 +291,7 @@ function CreateBaseDialog({
       setName("");
       setDescription("");
       setEmbeddingModelId("");
+      setRetrievalMode("semantic");
       createBase.reset();
     }
   };
@@ -309,6 +314,7 @@ function CreateBaseDialog({
             createBase.mutate(
               {
                 name: name.trim(),
+                retrieval_mode: retrievalMode,
                 embedding_model_id: embeddingModelId,
                 description: description.trim(),
               },
@@ -368,6 +374,11 @@ function CreateBaseDialog({
               {labels.bases.modelHint}
             </p>
           </div>
+          <KnowledgeRetrievalModeField
+            value={retrievalMode}
+            onChange={setRetrievalMode}
+            disabled={createBase.isPending}
+          />
           {createBase.error ? (
             <p role="alert" className="text-destructive text-sm">
               {knowledgeErrorMessage(createBase.error, labels.errors)}
@@ -397,4 +408,3 @@ function CreateBaseDialog({
     </Dialog>
   );
 }
-

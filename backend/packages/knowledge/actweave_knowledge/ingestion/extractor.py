@@ -12,6 +12,7 @@ import codecs
 import csv
 import io
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -146,15 +147,47 @@ def _extract_pdf(path: Path, budget: _CharBudget) -> list[ExtractedBlock]:
 
 def _extract_docx(path: Path, budget: _CharBudget) -> list[ExtractedBlock]:
     import docx
+    from docx.oxml.table import CT_Tc
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    def table_rows(table: Table) -> Iterator[tuple[int, str]]:
+        # Keep each row together so a fault code and its procedure remain in
+        # the same chunk. A merged cell occupies several grid positions but
+        # contributes its underlying XML cell only once.
+        seen_cells: set[CT_Tc] = set()
+        for row_number, row in enumerate(table.rows, start=1):
+            cells: list[str] = []
+            for cell in row.cells:
+                if cell._tc in seen_cells:
+                    continue
+                seen_cells.add(cell._tc)
+                parts: list[str] = []
+                for block in cell.iter_inner_content():
+                    if isinstance(block, Paragraph):
+                        parts.append(block.text)
+                    else:
+                        parts.extend(text for _, text in table_rows(block))
+                cells.append("\n".join(parts))
+            yield row_number, "\t".join(cells)
 
     _ensure_zip_within_budget(path, budget, kind="DOCX")
     try:
         document = docx.Document(str(path))
         blocks: list[ExtractedBlock] = []
-        for paragraph_number, paragraph in enumerate(document.paragraphs, start=1):
-            text = paragraph.text
-            budget.spend(text)
-            blocks.append(ExtractedBlock(text=text, source_position={"paragraph": paragraph_number}))
+        paragraph_number = 0
+        table_number = 0
+        for block in document.iter_inner_content():
+            if isinstance(block, Paragraph):
+                paragraph_number += 1
+                text = block.text
+                budget.spend(text)
+                blocks.append(ExtractedBlock(text=text, source_position={"paragraph": paragraph_number}))
+            else:
+                table_number += 1
+                for row_number, text in table_rows(block):
+                    budget.spend(text)
+                    blocks.append(ExtractedBlock(text=text, source_position={"table": table_number, "row": row_number}))
         return blocks
     except KnowledgeError:
         raise

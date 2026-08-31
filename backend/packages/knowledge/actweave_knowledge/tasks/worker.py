@@ -31,6 +31,7 @@ from ..contracts import KNOWLEDGE_TASK_FAILED, KnowledgeError
 from ..persistence.models import KnowledgeTaskRow
 from ..persistence.tasks import (
     claim_next_task,
+    defer_running_task_for_inactive_project,
     defer_task_claim_for_inactive_project,
     extend_task_lease,
     recover_expired_tasks,
@@ -65,6 +66,13 @@ class KnowledgeTaskClaim:
 
 TaskHandler = Callable[[KnowledgeTaskClaim], Awaitable[None]]
 ProjectActiveCheck = Callable[[AsyncSession, UUID], Awaitable[bool]]
+
+
+class KnowledgeProjectInactive(KnowledgeError):
+    """Pause an indexing claim after its in-flight work has drained."""
+
+    def __init__(self) -> None:
+        super().__init__(KNOWLEDGE_TASK_FAILED, "Project 不再 active，暂停 Knowledge 任务")
 
 
 class KnowledgeTaskWorker:
@@ -160,6 +168,7 @@ class KnowledgeTaskWorker:
         stop_heartbeat = asyncio.Event()
         heartbeat = asyncio.create_task(self._heartbeat(claim, stop_heartbeat), name=f"knowledge-task-heartbeat-{claim.id}")
         error: KnowledgeError | None = None
+        project_inactive = False
         try:
             # wait_for waits for handler cancellation to finish. Knowledge
             # handlers settle started blocking calls before propagating that
@@ -167,6 +176,8 @@ class KnowledgeTaskWorker:
             await asyncio.wait_for(handler(claim), timeout=self._task_timeout_seconds)
         except TimeoutError:
             error = KnowledgeError(KNOWLEDGE_TASK_FAILED, f"任务执行超过 {self._task_timeout_seconds} 秒")
+        except KnowledgeProjectInactive:
+            project_inactive = True
         except KnowledgeError as exc:
             error = exc
         except asyncio.CancelledError:
@@ -182,10 +193,21 @@ class KnowledgeTaskWorker:
                 # A heartbeat bug must not mask the handler outcome, but it
                 # must be visible; the lease machinery covers the fallout.
                 logger.exception("knowledge task %s heartbeat crashed", claim.id)
-        if error is None:
+        if project_inactive:
+            await self._defer_inactive_claim(claim)
+        elif error is None:
             await self._settle_success(claim)
         else:
             await self._settle_failure(claim, error)
+
+    async def _defer_inactive_claim(self, claim: KnowledgeTaskClaim) -> None:
+        """Release a paused claim only after handler cleanup and heartbeat drain."""
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                await defer_running_task_for_inactive_project(session, claim.id, claim.claim_token)
+        except SQLAlchemyError:
+            logger.warning("knowledge task %s inactive Project deferral failed", claim.id, exc_info=True)
 
     async def _heartbeat(self, claim: KnowledgeTaskClaim, stop_heartbeat: asyncio.Event) -> None:
         interval = max(self._lease_seconds / 3.0, 1.0)
@@ -239,6 +261,12 @@ class KnowledgeTaskWorker:
     async def _settle_failure(self, claim: KnowledgeTaskClaim, error: KnowledgeError) -> None:
         try:
             async with self._session_factory() as session, session.begin():
+                # A terminal Provider error (or timeout) may arrive before the
+                # next batch guard observes Project deletion. It must pause
+                # without consuming the retry budget just like that guard.
+                if not await self._project_active_check(session, claim.project_id):
+                    await defer_running_task_for_inactive_project(session, claim.id, claim.claim_token)
+                    return
                 outcome = await settle_task_failure(
                     session,
                     claim.id,

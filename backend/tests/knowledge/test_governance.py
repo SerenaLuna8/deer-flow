@@ -8,6 +8,7 @@ tests pin the new route contracts over ASGI with a fake module.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from actweave_knowledge import (
 )
 from actweave_knowledge.contracts import KNOWLEDGE_LEXICAL_VERSION
 from actweave_knowledge.documents import KnowledgeDocumentService
+from actweave_knowledge.models.client import KnowledgeModelClient
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
@@ -51,6 +53,7 @@ from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from deerflow.persistence.bootstrap import _install_full_schema
+from deerflow.persistence.model_registry import ModelProviderModelRow
 
 # ---------------------------------------------------------------------------
 # Fakes and harness
@@ -458,6 +461,57 @@ async def test_update_segment_conflicts_when_version_moves_during_embedding(post
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["update", "create"])
+@pytest.mark.parametrize("first_response_status", [200, 429])
+async def test_segment_governance_stops_batches_and_retries_after_revocation(
+    postgres_database_url: str,
+    operation: str,
+    first_response_status: int,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        seeded = await _seed_ready_document(harness, segments=["既有内容"], chunking_mode="parent_child", child_chunk_size=100)
+        async with harness.factory() as session, session.begin():
+            model = await session.get(ModelProviderModelRow, seeded.embedding_model_id)
+            assert model is not None
+            model.max_batch = 1
+        authority = _RevokedAfterProviderAuthority(seeded.project_id)
+        requests: list[list[str]] = []
+
+        async def provider(request: httpx.Request) -> httpx.Response:
+            inputs = json.loads(request.content)["input"]
+            requests.append(inputs)
+            authority.revoked = True
+            return httpx.Response(first_response_status, json={"data": [{"index": index, "embedding": [1.0, 0.0, 0.0]} for index in range(len(inputs))]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+            module = KnowledgeModule(
+                settings=KnowledgeSettings.model_validate(
+                    {
+                        "enabled": True,
+                        "minio": {"endpoint": "127.0.0.1:9000", "bucket": "authority-test", "access_key": "test-access", "secret_key": "test-secret"},
+                    }
+                ),
+                session_factory=harness.factory,
+                model_port=registry_model_port(),
+                model_client=KnowledgeModelClient(http),
+            )
+            with pytest.raises(KnowledgeError) as error:
+                if operation == "update":
+                    await module.update_segment(seeded.project_id, seeded.segment_ids[0], KnowledgeSegmentUpdate(content="甲" * 250), authority=authority)
+                else:
+                    await module.create_segment(seeded.project_id, seeded.document_id, KnowledgeSegmentCreate(content="甲" * 250), authority=authority)
+            assert requests == [["甲" * 100]]
+            assert error.value.code == KNOWLEDGE_NOT_FOUND
+            authority.revoked = False
+            segments, total = await module.list_document_segments(seeded.project_id, seeded.document_id, authority=authority)
+            assert total == 1
+            assert [segment.content for segment in segments] == ["既有内容"]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_update_segment_revalidates_authority_after_embedding_before_commit(postgres_database_url: str) -> None:
     """Revocation during Provider I/O must prevent the edited content from publishing."""
 
@@ -496,7 +550,6 @@ async def test_update_segment_revalidates_authority_after_embedding_before_commi
             )
 
         assert error.value.code == KNOWLEDGE_NOT_FOUND
-        assert authority.calls == 3
         assert harness.client.embed_calls == [["不应发布的内容"]]
         segment = await _segment_row_of(harness, seeded.segment_ids[0])
         assert segment is not None

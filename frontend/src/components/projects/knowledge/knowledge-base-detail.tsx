@@ -50,12 +50,14 @@ import type {
   KnowledgeBaseItem,
   KnowledgeMetadataFieldItem,
   KnowledgeMetadataFieldType,
+  KnowledgeRetrievalMode,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
 import { KnowledgeDocumentsView } from "./knowledge-documents-view";
 import { knowledgeErrorMessage } from "./knowledge-error";
+import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
 import { KnowledgeSearchPanel } from "./knowledge-search-panel";
 
 type DetailSection = KnowledgeView;
@@ -253,6 +255,9 @@ function KnowledgeBaseSettingsPanel({
     base.status === "disabled" ? "disabled" : "active",
   );
   const [defaultTopK, setDefaultTopK] = useState(String(base.default_top_k));
+  const [retrievalMode, setRetrievalMode] = useState<KnowledgeRetrievalMode>(
+    base.retrieval_mode,
+  );
   const [defaultThreshold, setDefaultThreshold] = useState(
     String(base.default_score_threshold),
   );
@@ -290,6 +295,7 @@ function KnowledgeBaseSettingsPanel({
               description: description.trim(),
               status,
               default_top_k: parsedTopK,
+              retrieval_mode: retrievalMode,
               default_score_threshold: parsedThreshold,
               // The reranker binding is stated explicitly on every save:
               // either the selected model or an explicit clear.
@@ -337,9 +343,7 @@ function KnowledgeBaseSettingsPanel({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="active">{labels.status.active}</SelectItem>
-              <SelectItem value="disabled">
-                {labels.status.disabled}
-              </SelectItem>
+              <SelectItem value="disabled">{labels.status.disabled}</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -347,6 +351,14 @@ function KnowledgeBaseSettingsPanel({
           <legend className="text-sm font-medium">
             {labels.bases.retrievalSectionTitle}
           </legend>
+          <KnowledgeRetrievalModeField
+            value={retrievalMode}
+            onChange={(value) => {
+              touch();
+              setRetrievalMode(value);
+            }}
+            disabled={updateBase.isPending}
+          />
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="grid gap-1.5 text-sm">
               <span className="font-medium">

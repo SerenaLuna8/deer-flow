@@ -506,7 +506,9 @@ recreated explicitly, never repaired in place.
   disabled. Extraction
   covers PDF, DOCX, TXT, MD, CSV, XLSX, HTML, PPTX, and EPUB (source
   positions mark page/paragraph/row/slide/chapter) and enforces a total
-  character budget and archive pre-checks. Splitting is
+  character budget and archive pre-checks. DOCX traversal includes tables in
+  document order, groups cell text into row blocks with table/row positions,
+  and counts merged cells only once. Splitting is
   recursive-separator based: the user separator (escaped form, default
   `\n\n`) leads a fixed fallback sequence, optional pre-processing rules
   (`remove_extra_spaces`, `remove_urls_emails`) clean text before splitting,
@@ -538,7 +540,14 @@ recreated explicitly, never repaired in place.
   the Worker checks Project `active` state under the same transaction and a
   Project share lock. A pending-deletion claim returns to `retry_wait` for 60
   seconds without spending an attempt, so restore resumes it automatically and
-  no handler starts during the retention window. Before destructive Project
+  no handler starts during the retention window. Indexing handlers repeat the
+  Project and unexpired-lease checks before every Provider request/retry and
+  in the publish transaction. An in-flight Project deletion defers the claim
+  only after started work settles, without consuming an attempt; expired
+  claims cannot renew or publish and remain owned by expired-claim recovery.
+  Renewal and settlement compare database time after acquiring the Task lock;
+  publish repeats the check after acquiring the Document lock.
+  Before destructive Project
   cleanup, the purger recovers expired claims and locks every Project open Task;
   a live `running` Task defers the attempt, while `queued|retry_wait` rows are
   removed before objects or relationship rows.
@@ -563,7 +572,9 @@ recreated explicitly, never repaired in place.
   segment edit/add/toggle/delete on `ready` documents. Content edits and
   manual additions re-embed with the base's model configuration before the
   write transaction, which re-checks the document version and answers
-  `KNOWLEDGE_CONFLICT` when a re-ingest or delete won the race. A disabled
+  `KNOWLEDGE_CONFLICT` when a re-ingest or delete won the race. Every actual
+  edit/add Embedding batch and internal retry revalidates the caller's
+  Project authority in a short transaction before dispatch. A disabled
   document or segment is excluded from retrieval candidates without touching
   its vectors; `word_count` tracks segment characters and aggregates onto the
   document row.   Per-base metadata field definitions
@@ -631,8 +642,11 @@ recreated explicitly, never repaired in place.
   degrading. Lexical columns are maintained in the same transaction as every
   content write (publish, reparse, segment edit/add, child re-split);
   re-embedding leaves them byte-identical. The search snapshots each base's
-  model bindings and re-verifies them before provider dispatch and at the
-  final review — a mid-search rebind is a `KNOWLEDGE_CONFLICT`, and the final
+  model bindings, per-base threshold/mode, and the effective global top_k, then
+  re-verifies them before provider dispatch and at the final review — a
+  mid-search change is a `KNOWLEDGE_CONFLICT`; changes to defaults already
+  overridden by the request, or a smaller top_k default that does not change
+  the effective maximum, do not invalidate its strategy. The final
   unified review drops stale candidates while backfilling true
   `matched_children`. Request-level `debug` returns safe diagnostics only in
   that response (strategy, budgets, real counts, monotonic timings, model
@@ -647,7 +661,9 @@ recreated explicitly, never repaired in place.
   former-owner and account Phase B delete only the exact Project/owner rows
   while retaining Project-shared Knowledge; final Project retention deletes
   every owner's query rows with the rest of that Project's Knowledge. Query-
-  history and hit-counter database faults remain best-effort. Search
+  history and hit-counter database faults remain best-effort inside a
+  savepoint, while authority/content validation and the outer transaction
+  must succeed. Search
   revalidates before every per-group query embedding, after each
   embedding inside the exact recall transaction, again immediately before
   sending Segment text to the Reranker, and finally after Provider work;

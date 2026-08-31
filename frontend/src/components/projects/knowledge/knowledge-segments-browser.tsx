@@ -311,12 +311,7 @@ function SegmentLocateCard({
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
-  const locate = useKnowledgeSegmentLocate(
-    scope,
-    base.id,
-    document.id,
-    segmentId,
-  );
+  const locate = useKnowledgeSegmentLocate(scope, base.id, document, segmentId);
 
   return (
     <aside
