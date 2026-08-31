@@ -148,6 +148,14 @@ export const zhCN: Translations = {
 
   // Knowledge bases
   knowledge: {
+    summary: {
+      indexLabel: "摘要索引",
+      indexHint: "通过系统生成的分段摘要辅助检索，引用始终展示原文。",
+      modelMissing: "请联系管理员在系统设置的知识库配置中选择摘要模型。",
+      generatedTitle: "系统生成摘要",
+      backfillOutcome: (accepted, skipped) =>
+        `摘要回填：已入队 ${accepted} 个文档，跳过 ${skipped} 个。`,
+    },
     page: {
       eyebrow: (projectName) => `${projectName} · 知识库`,
       title: "知识库",
@@ -436,12 +444,14 @@ export const zhCN: Translations = {
         kinds: {
           ingest_document: "摄取",
           reembed_document: "重嵌入",
+          summarize_document: "生成摘要",
         },
         stages: {
           queued: "排队中",
           reading_source: "读取原文件",
           extracting_splitting: "解析与切分",
           loading_segments: "加载分段",
+          summarizing: "生成摘要",
           embedding: "向量化",
           publishing: "发布中",
           done: "完成",
@@ -592,6 +602,9 @@ export const zhCN: Translations = {
         routeBudget: "每库每路候选预算",
         models: "模型",
         semanticCandidates: "语义候选",
+        summaryCandidates: "摘要候选",
+        queryCacheHits: "查询向量缓存命中",
+        queryCacheMisses: "查询向量缓存未命中",
         lexicalCandidates: "词法候选",
         parentsDeduplicated: "父段去重后",
         thresholdFiltered: "阈值淘汰",
@@ -605,6 +618,7 @@ export const zhCN: Translations = {
           "异构分数域且无词法证据：仅按各域内名次融合排序。",
       },
       hitDiagnosticsSummary: "命中诊断",
+      matchedVia: { segment: "原文分段", child: "子块", summary: "摘要" },
       localScore: (score) => `原生分 ${score.toFixed(3)}`,
       rankingScore: (score) => `排序分 ${score.toFixed(3)}`,
       openDetail: (position) => `查看分段 #${position} 完整内容`,
@@ -1188,6 +1202,7 @@ export const zhCN: Translations = {
       jobs: "作业",
       audit: "日志",
       assets: "资产",
+      knowledgeSettings: "知识库配置",
       systemSettings: "系统配置",
       settings: "模型管理",
     },
@@ -1224,6 +1239,7 @@ export const zhCN: Translations = {
           unknown: "未知",
         },
         components: {
+          knowledge: "知识库",
           database: "数据库",
           schema: "架构",
           worker_fleet: "执行器集群",
@@ -1387,6 +1403,34 @@ export const zhCN: Translations = {
     },
   },
 
+  adminKnowledgeSettings: {
+    title: "知识库配置",
+    description: "管理文档存储、处理限额与检索服务。",
+    sectionTitle: "知识库服务",
+    restartNotice:
+      "保存后需重启 Gateway 和 Worker 才会生效；摘要模型变更即时生效。",
+    save: "保存配置",
+    saving: "保存中…",
+    reset: "放弃修改",
+    loading: "正在加载知识库配置…",
+    retry: "重试",
+    secretConfigured: "已配置，留空保留",
+    secretUnset: "未配置",
+    noSummaryModel: "未配置",
+    unavailableModel: "模型不可用，请更换或清除",
+    modelsUnavailable: "模型目录暂不可用，请重试后选择。",
+    dirty: "有未保存的修改",
+    saved: "配置已保存。",
+    revision: "版本",
+    conflict:
+      "配置已被其他管理员更新。草稿已保留，并已载入最新版本，请检查后重新保存。",
+    conflictRefreshFailed:
+      "配置已被其他管理员更新。草稿已保留，请重试加载最新版本后再保存。",
+    authRequired: "管理员会话已失效，请重新登录。",
+    invalid: "请检查存储连接、密钥、模型与数值范围。",
+    unavailable: "知识库配置暂不可用，请稍后重试。",
+    generic: "知识库配置保存失败，请重试。",
+  },
   adminSystemSettings: {
     header: {
       eyebrow: "平台配置",

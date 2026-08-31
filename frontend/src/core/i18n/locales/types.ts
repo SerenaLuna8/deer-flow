@@ -119,6 +119,13 @@ export interface Translations {
 
   // Knowledge bases (project pages, retrieval test, chat citations)
   knowledge: {
+    summary: {
+      indexLabel: string;
+      indexHint: string;
+      modelMissing: string;
+      generatedTitle: string;
+      backfillOutcome: (accepted: number, skipped: number) => string;
+    };
     page: {
       eyebrow: (projectName: string) => string;
       title: string;
@@ -385,12 +392,14 @@ export interface Translations {
         kinds: {
           ingest_document: string;
           reembed_document: string;
+          summarize_document: string;
         };
         stages: {
           queued: string;
           reading_source: string;
           extracting_splitting: string;
           loading_segments: string;
+          summarizing: string;
           embedding: string;
           publishing: string;
           done: string;
@@ -533,6 +542,9 @@ export interface Translations {
         models: string;
         semanticCandidates: string;
         lexicalCandidates: string;
+        summaryCandidates: string;
+        queryCacheHits: string;
+        queryCacheMisses: string;
         parentsDeduplicated: string;
         thresholdFiltered: string;
         staleFiltered: string;
@@ -544,6 +556,7 @@ export interface Translations {
         heterogeneousWarning: string;
       };
       hitDiagnosticsSummary: string;
+      matchedVia: { segment: string; child: string; summary: string };
       localScore: (score: number) => string;
       rankingScore: (score: number) => string;
       openDetail: (position: number) => string;
@@ -1060,6 +1073,7 @@ export interface Translations {
       jobs: string;
       audit: string;
       assets: string;
+      knowledgeSettings: string;
       systemSettings: string;
       settings: string;
     };
@@ -1096,6 +1110,7 @@ export interface Translations {
           unknown: string;
         };
         components: {
+          knowledge: string;
           database: string;
           schema: string;
           worker_fleet: string;
@@ -1516,6 +1531,31 @@ export interface Translations {
     };
   };
 
+  adminKnowledgeSettings: {
+    title: string;
+    description: string;
+    sectionTitle: string;
+    restartNotice: string;
+    save: string;
+    saving: string;
+    reset: string;
+    loading: string;
+    retry: string;
+    secretConfigured: string;
+    secretUnset: string;
+    noSummaryModel: string;
+    unavailableModel: string;
+    modelsUnavailable: string;
+    dirty: string;
+    saved: string;
+    revision: string;
+    conflict: string;
+    conflictRefreshFailed: string;
+    authRequired: string;
+    invalid: string;
+    unavailable: string;
+    generic: string;
+  };
   adminSystemSettings: {
     header: {
       eyebrow: string;

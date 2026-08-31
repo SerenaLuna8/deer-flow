@@ -151,6 +151,16 @@ export const enUS: Translations = {
 
   // Knowledge bases
   knowledge: {
+    summary: {
+      indexLabel: "Summary index",
+      indexHint:
+        "Use generated segment summaries to improve retrieval. Citations always show the original text.",
+      modelMissing:
+        "Ask an administrator to configure a summary model in Knowledge settings.",
+      generatedTitle: "System-generated summary",
+      backfillOutcome: (accepted, skipped) =>
+        `Summary backfill: ${accepted} queued, ${skipped} skipped.`,
+    },
     page: {
       eyebrow: (projectName) => `${projectName} · Knowledge`,
       title: "Knowledge",
@@ -461,12 +471,14 @@ export const enUS: Translations = {
         kinds: {
           ingest_document: "Ingest",
           reembed_document: "Re-embed",
+          summarize_document: "Generate summaries",
         },
         stages: {
           queued: "Queued",
           reading_source: "Reading source",
           extracting_splitting: "Extracting and splitting",
           loading_segments: "Loading segments",
+          summarizing: "Generating summaries",
           embedding: "Embedding",
           publishing: "Publishing",
           done: "Done",
@@ -627,6 +639,9 @@ export const enUS: Translations = {
         routeBudget: "Per-base route budget",
         models: "Models",
         semanticCandidates: "Semantic candidates",
+        summaryCandidates: "Summary candidates",
+        queryCacheHits: "Query cache hits",
+        queryCacheMisses: "Query cache misses",
         lexicalCandidates: "Lexical candidates",
         parentsDeduplicated: "Parents after dedup",
         thresholdFiltered: "Filtered by threshold",
@@ -640,6 +655,7 @@ export const enUS: Translations = {
           "Heterogeneous score domains without lexical evidence: ordering merges per-domain ranks only.",
       },
       hitDiagnosticsSummary: "Hit diagnostics",
+      matchedVia: { segment: "Segment", child: "Child", summary: "Summary" },
       localScore: (score) => `Native score ${score.toFixed(3)}`,
       rankingScore: (score) => `Ranking score ${score.toFixed(3)}`,
       openDetail: (position) => `View segment #${position} in full`,
@@ -1258,6 +1274,7 @@ export const enUS: Translations = {
       jobs: "Jobs",
       audit: "Logs",
       assets: "Assets",
+      knowledgeSettings: "Knowledge settings",
       systemSettings: "System settings",
       settings: "Model management",
     },
@@ -1294,6 +1311,7 @@ export const enUS: Translations = {
           unknown: "Unknown",
         },
         components: {
+          knowledge: "Knowledge",
           database: "Database",
           schema: "Schema",
           worker_fleet: "Worker fleet",
@@ -1458,6 +1476,38 @@ export const enUS: Translations = {
     },
   },
 
+  adminKnowledgeSettings: {
+    title: "Knowledge settings",
+    description:
+      "Manage document storage, processing limits, and retrieval services.",
+    sectionTitle: "Knowledge service",
+    restartNotice:
+      "After saving, restart Gateway and Worker for these settings to take effect. Summary model changes take effect immediately.",
+    save: "Save settings",
+    saving: "Saving…",
+    reset: "Discard changes",
+    loading: "Loading knowledge settings…",
+    retry: "Retry",
+    secretConfigured: "Configured — leave blank to keep",
+    secretUnset: "Not configured",
+    noSummaryModel: "Not configured",
+    unavailableModel: "Unavailable model — select another or clear",
+    modelsUnavailable:
+      "The model catalog is unavailable. Retry to choose a model.",
+    dirty: "Unsaved changes",
+    saved: "Settings saved.",
+    revision: "Revision",
+    conflict:
+      "Settings changed elsewhere. Your draft is preserved and the latest revision has been loaded. Review your changes before saving again.",
+    conflictRefreshFailed:
+      "Settings changed elsewhere. Your draft is preserved. Retry loading the latest revision before saving again.",
+    authRequired:
+      "Your administrator session is no longer available. Sign in again.",
+    invalid:
+      "Check the storage connection, secret key, model, and numeric limits.",
+    unavailable: "Knowledge settings are unavailable. Try again later.",
+    generic: "Could not save knowledge settings. Try again.",
+  },
   adminSystemSettings: {
     header: {
       eyebrow: "Platform configuration",

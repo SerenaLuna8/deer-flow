@@ -11,15 +11,21 @@ registry internals.
 
 from __future__ import annotations
 
+import time
 import uuid
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Protocol
 
 from actweave_knowledge import (
     KNOWLEDGE_MODEL_UNAVAILABLE,
+    KNOWLEDGE_SUMMARY_MAX_TOKENS,
+    KNOWLEDGE_TASK_FAILED,
     KnowledgeEmbeddingMaterial,
     KnowledgeError,
     KnowledgeModelType,
     KnowledgeRerankMaterial,
 )
+from langchain_core.messages import BaseMessage, HumanMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,7 +33,7 @@ from app.model_registry.secrets import (
     ModelProviderSecretInvalid,
     materialize_provider_api_key,
 )
-from deerflow.models.runtime import ModelRuntime
+from deerflow.models.runtime import ModelRuntimeProfile
 from deerflow.persistence.knowledge_settings import KnowledgeSystemSettingsRow
 from deerflow.persistence.model_registry import ModelProviderModelRow, ModelProviderRow
 from deerflow.persistence.system_settings import SystemModelConfigRow
@@ -40,6 +46,17 @@ def _model_unavailable() -> KnowledgeError:
 
 def _summary_model_unavailable() -> KnowledgeError:
     return KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "摘要模型不存在或已停用")
+
+
+class SummaryModelReference(Protocol):
+    model_name: str
+
+
+SummaryModelReader = Callable[[AsyncSession], Awaitable[SummaryModelReference | None]]
+
+
+class KnowledgeSummaryRuntime(Protocol):
+    async def ainvoke(self, messages: list[HumanMessage], *, profile: ModelRuntimeProfile, model_name: str, model_overrides: Mapping[str, object], provider_max_retries: int, deadline_monotonic: float) -> BaseMessage: ...
 
 
 class RegistryKnowledgeModelPort:
@@ -55,14 +72,16 @@ class RegistryKnowledgeModelPort:
         self,
         *,
         secret_key: SecretKey,
-        model_runtime: ModelRuntime | None = None,
+        model_runtime: KnowledgeSummaryRuntime | None = None,
+        summary_model_reader: SummaryModelReader | None = None,
     ) -> None:
         self._secret_key = secret_key
         self._model_runtime = model_runtime
+        self._summary_model_reader = summary_model_reader
 
     @classmethod
-    def from_environment(cls) -> RegistryKnowledgeModelPort:
-        return cls(secret_key=SecretKey.from_environment())
+    def from_environment(cls, *, model_runtime: KnowledgeSummaryRuntime | None = None, summary_model_reader: SummaryModelReader | None = None) -> RegistryKnowledgeModelPort:
+        return cls(secret_key=SecretKey.from_environment(), model_runtime=model_runtime, summary_model_reader=summary_model_reader)
 
     async def lock_model_for_binding(
         self,
@@ -135,6 +154,9 @@ class RegistryKnowledgeModelPort:
         ``KNOWLEDGE_MODEL_UNAVAILABLE`` error instead of degrading silently.
         """
 
+        if self._summary_model_reader is not None:
+            model = await self._summary_model_reader(session)
+            return model.model_name if model is not None else None
         model_name = await session.scalar(select(KnowledgeSystemSettingsRow.summary_model_name).where(KnowledgeSystemSettingsRow.id == 1))
         if model_name is None:
             return None
@@ -142,7 +164,7 @@ class RegistryKnowledgeModelPort:
             model_id = uuid.UUID(model_name)
         except ValueError:
             raise _summary_model_unavailable() from None
-        status = await session.scalar(select(SystemModelConfigRow.status).where(SystemModelConfigRow.id == model_id))
+        status = await session.scalar(select(SystemModelConfigRow.status).where(SystemModelConfigRow.id == model_id).with_for_update(read=True))
         if status != "active":
             raise _summary_model_unavailable()
         return model_name
@@ -153,17 +175,33 @@ class RegistryKnowledgeModelPort:
         model_ref: str,
         prompt: str,
     ) -> str:
-        """Generate one segment summary without holding a database session.
-
-        T1 freezes the port signature only: an unconfigured runtime is the
-        only reachable branch and raises the typed error. The actual
-        ModelRuntime dispatch (with ``KNOWLEDGE_TASK_FAILED`` on call
-        failure) lands with the M11 summary pipeline task.
-        """
+        """Invoke the private profile; source text never becomes system authority."""
 
         if self._model_runtime is None:
             raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "摘要模型运行时未配置")
-        raise NotImplementedError("summary generation dispatch lands with the M11 pipeline task")
+        try:
+            message = await self._model_runtime.ainvoke(
+                [HumanMessage(prompt)],
+                profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+                model_name=model_ref,
+                model_overrides={"max_tokens": KNOWLEDGE_SUMMARY_MAX_TOKENS},
+                # SDK retries cannot revalidate the Knowledge task lease;
+                # retries instead use separately guarded durable attempts.
+                provider_max_retries=0,
+                deadline_monotonic=time.monotonic() + 120,
+            )
+            content = message.content
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("non-text summary response")
+            return content
+        except KnowledgeError as exc:
+            if exc.code == KNOWLEDGE_MODEL_UNAVAILABLE:
+                raise _summary_model_unavailable() from None
+            raise KnowledgeError(KNOWLEDGE_TASK_FAILED, "摘要生成失败") from None
+        except Exception:
+            # Provider failures can contain prompts, endpoints, and credentials.
+            # Cancellation is deliberately not caught: the Worker must drain it.
+            raise KnowledgeError(KNOWLEDGE_TASK_FAILED, "摘要生成失败") from None
 
     async def _resolved_active_model(
         self,

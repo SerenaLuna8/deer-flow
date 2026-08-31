@@ -83,7 +83,7 @@ describe("Knowledge Document cache authority", () => {
     });
     const queryKey = knowledgeQueryKey(SCOPE, "documents", "list", BASE_ID);
     const cached = {
-      items: [{ name: "private.txt" }],
+      items: [{ name: "private.txt", status: "ready", task_progress: null }],
       total: 1,
       page: 1,
       page_size: 100,

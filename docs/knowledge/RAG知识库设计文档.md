@@ -2,7 +2,7 @@
 
 > 本文整合自原《RAG知识库独立软件包架构设计》《RAG摄取管道技术设计文档》
 > 《RAG检索模块技术设计文档》《RAG模型接入层设计文档》与《RAG知识库MVP执行计划》,
-> 描述 M0–M10 全部交付后的当前实现。功能需求见
+> 描述 M0–M10 与 M11 的实现契约；M11 真实模型质量与目标部署仍需独立放行。功能需求见
 > [《RAG知识库需求文档》](RAG知识库需求文档.md)。
 > 权威 DDL 见 `backend/packages/harness/deerflow/persistence/full_schema.sql`;
 > 行为以代码与 `backend/tests/knowledge/` 聚焦测试为准。
@@ -26,14 +26,15 @@ backend/packages/knowledge/
     ├── documents/
     ├── metadata/
     ├── segments/
-    ├── ingestion/         # extractors/cleaner/splitter/service/progress/reembed
-    ├── retrieval/         # service/lexical
+    ├── ingestion/         # extractors/cleaner/splitter/service/progress/reembed/summarize
+    ├── retrieval/         # service/lexical/query_cache
     ├── persistence/
     ├── storage/           # MinIO 对象存储
     └── tasks/
 
 backend/app/knowledge/     # 宿主接入
 backend/app/model_registry/ # 宿主模型注册表(M9)
+backend/app/knowledge_settings/ # 宿主系统知识配置(M11)
 backend/tests/knowledge/
 ```
 
@@ -60,7 +61,7 @@ backend/tests/knowledge/
 | SearchService(`retrieval/`) | query embedding、余弦召回、`lexical_v1` 词法召回、RRF、精排、预算、三分支排序、诊断与引用 |
 | TaskWorker | claim、执行和重试摄取、重嵌入、资源删除与 exact-key 对象清理任务 |
 | ProjectPurger | 独立于功能启停清理 Project 的 MinIO 对象与 Knowledge 行;缺少必要存储配置时失败关闭 |
-| PostgreSQLStore(`persistence/`) | 七张 Knowledge 表的数据访问 |
+| PostgreSQLStore(`persistence/`) | 八张 Knowledge 表的数据访问 |
 | MinioObjectStore(`storage/`) | 单 PUT 上传、下载到任务临时 Path、校验 bucket 删除语义并执行 exact-key/Project-prefix 删除 |
 | KnowledgeModelClient(`models/`) | SiliconFlow 文本 `/embeddings` 与 `/rerank` 调用,按各自 batch 上限分批 |
 
@@ -74,9 +75,9 @@ backend/tests/knowledge/
 2. `model_provider_models` — `model_type ∈ embedding|rerank`、模型名、维度、
    批量上限、`active|disabled`。
 
-Knowledge 七张(`actweave_knowledge` 持有):
+Knowledge 八张(`actweave_knowledge` 持有):
 
-3. `knowledge_bases` — `embedding_model_id`(必填)+ `reranker_model_id`
+3. `knowledge_bases` — `embedding_model_id`(未配置空库可空)+ `reranker_model_id`
    (可空),库级默认 `top_k`/阈值、`retrieval_mode`;外键只写 SQL 快照;
 4. `knowledge_documents` — 展示名/原始名、storage key、8 个冻结切分参数、
    version、状态、`enabled`、字数、`doc_metadata`(JSONB+GIN);
@@ -89,7 +90,12 @@ Knowledge 七张(`actweave_knowledge` 持有):
    来源、结果数、最高分(`[-1,1]` 或 NULL);
 9. `knowledge_tasks` — 任务状态、claim、lease、重试计数、真实进度、
    仅 object-only cleanup 使用的精确 `storage_key`、仅显式重解析使用的冻结
-   `reparse_settings`。
+   `reparse_settings`；摘要任务与摄取/重嵌入共享单开放槽。
+10. `knowledge_segment_summaries` — 每个 Segment 至多一条完整摘要，含源内容哈希、
+    document_version、库向量空间的 embedding 与生成时间，随 Segment 级联删除。
+
+另有宿主 `knowledge_system_settings` 单行配置表，存储配置、密钥信封、配额、缓存
+参数及摘要 System Model 引用；不归入独立包 ORM。
 
 处理规则和 MinIO object key 直接保存在 Knowledge Document。独立软件包不对应
 独立 PostgreSQL Schema。Schema 变更要求 ORM、`full_schema.sql`、catalog
@@ -593,42 +599,39 @@ Project retention 通过独立 purger(不是 `knowledge_tasks` kind)清理:
 
 ## 10. 配置与初始化
 
-### 10.1 Runtime 配置
+### 10.1 PostgreSQL 系统配置
 
-根 `config.yaml` 默认只需要关闭配置:
+`app/knowledge_settings/` 管理 `knowledge_system_settings` 单行，显式安装时播种默认禁用配置。
+管理员通过 `/admin/settings/knowledge` 读写，PUT 使用 `expected_revision` CAS；开启时先在
+事务外探测 MinIO，再锁行复核版本、管理员和摘要模型后保存，探测失败不落库。
+MinIO 密钥以共享 secret-envelope 加密，recipient 绑定 endpoint；更换 endpoint 必须重交密钥。
 
-```yaml
-knowledge:
-  enabled: false
-```
+Gateway 与 Worker 只从数据库装配功能模块。禁用、行缺失、存储不可达分别有明确状态；
+存储失败关闭该模块并在运维页报告 `unavailable`，其他服务和管理员配置页面继续可用。
+配额、存储、启停与缓存变更需要两进程重启；摘要 System Model 引用在后续任务实时读取。
+Project retention 独立组装，历史文档未清完时继续要求原有存储证据，不能因功能停用伪成功。
 
-启用时再配置完整参数:
+非空 YAML `knowledge` 块被墓碑拒绝。迁移顺序为停服、确认当前 Schema V1 已安装、运行
+`backend/scripts/migrate_knowledge_config.py`、移除 YAML 块、同步重启；详见
+[Install.md](../../Install.md#knowledge-configuration-migration)。脚本仅迁移配置数据，
+不补列、不 stamp，不授权重建任何数据库。
 
-```yaml
-knowledge:
-  enabled: true
-  worker_concurrency: 2
-  task_timeout_seconds: 900
-  upload_max_bytes: 52428800
-  max_knowledge_bases_per_project: 20
-  max_documents_per_knowledge_base: 500
-  max_segments_per_document: 5000
-  minio:
-    endpoint: $ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT
-    bucket: actweave-knowledge
-    access_key: $ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY
-    secret_key: $ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY
-    secure: false
-```
+### 10.1.1 查询缓存与摘要索引
 
-`backend/app/knowledge/config.py` 从宿主 `AppConfig.model_extra` 读取可选的
-`knowledge` 映射,再使用 Package 导出的 `KnowledgeSettings` 校验;配置块完全
-缺失等同 `enabled=false`。已写入 Knowledge Document 的部署即使关闭功能,也
-必须保留原 endpoint、bucket 和凭据,直到相关 Project retention 与 Document
-删除完成;提前移除时 Project purger 返回未完成而非伪成功。Harness 不 import
-Knowledge Package,启动配置不进入 System Runtime Settings。Gateway 与 Worker
-使用同一组 MinIO endpoint 和 bucket;Compose 不创建 MinIO 服务,endpoint 与
-bucket 是部署前提。
+查询缓存以 `(embedding_model_id, SHA-256(query))` 为键，值为不可变向量元组，进程内 LRU+TTL，
+没有跨进程存储或并发 single-flight。命中只跳过 Embedding Provider 调用；召回、Reranker
+派发、终审权限和库策略检查保持不变。摘要开关也纳入检索策略快照，搜索中途变更会冲突。
+
+摘要索引在 Base 级 opt-in，文本模型来自系统配置的 System Model。字符数至少 200 的
+段经独立 `summarize_document` 任务生成，固定提示 v1、最大输出 1024 tokens、落库文本最多
+1000 字符；不可信源内容进入 HumanMessage。每次 LLM/Embedding 前回验租约和 Project，
+SDK 内部重试关闭，重试重新经过持久任务授权。发布复验版本、绑定、开关与源内容哈希；
+并发编辑/新增未覆盖段会触发后续刷新。失败保留文档 ready，可重试，不伪装成摄取失败。
+
+召回对 Segment/Child/Summary 三个来源取每段最高余弦，再按原有每库预算 C 截断与 RRF
+合并，词法和三分支排序不变。摘要不进入引用或工具正文，仅在详情单独标注；诊断提供
+`summary_candidates`、`query_embedding_cache_hits/misses` 和 `matched_via`。重嵌入保留
+摘要文字并原子重算向量（零 LLM 调用）；重解析替换 Segment 后级联删除并重新生成摘要。
 
 ### 10.2 初始模型引导
 
@@ -657,8 +660,7 @@ secure:          false
   `9001` 只用于浏览器 Console;
 - 目标 bucket 约定为 `actweave-knowledge`,启用前由管理员创建并验证访问;
   Runtime 不自动创建 bucket;
-- 凭据映射为 `ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY` 与
-  `ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY`,版本库只保留变量名;
+- 凭据在管理员知识库配置页写入并加密存储；旧环境变量仅供显式迁移和隔离测试使用;
 - Compose 容器内不能使用容器自身的 `127.0.0.1`,必须配置两个进程都可达的
   S3 API 地址;
 - `GET /minio/health/live` 成功只证明进程存活;Knowledge health 必须使用配置

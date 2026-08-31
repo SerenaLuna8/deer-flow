@@ -353,20 +353,19 @@ async def gateway_platform_runtime(
         app.state.model_registry_probe_client = model_registry_probe_client
         stack.push_async_callback(model_registry_probe_client.aclose)
 
-        # Knowledge is startup-only: a missing/disabled `knowledge` block keeps
+        # Knowledge is startup-only: a missing/disabled settings row keeps
         # the module absent and every knowledge route answers KNOWLEDGE_DISABLED.
         from app.knowledge.composition import (
-            create_knowledge_module_from_app_config,
-            require_knowledge_storage_ready,
+            create_knowledge_module_from_database,
         )
 
-        knowledge_module = create_knowledge_module_from_app_config(config)
+        knowledge_module, knowledge_state = await create_knowledge_module_from_database(app_config=config)
         app.state.knowledge_module = knowledge_module
+        app.state.knowledge_startup_state = knowledge_state
         if knowledge_module is not None:
             # The module keeps creating and closing its own client; the two
             # instances never share ownership or shutdown responsibility.
             stack.push_async_callback(knowledge_module.aclose)
-            await require_knowledge_storage_ready(knowledge_module)
         runtime_policy_service = SystemRuntimePolicyService(
             sf,
             audit_service,

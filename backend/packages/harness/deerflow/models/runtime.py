@@ -116,10 +116,16 @@ class ModelRuntime:
         thinking_enabled: bool = False,
         reasoning_effort: str | None = None,
         model_overrides: Mapping[str, object] | None = None,
+        provider_max_retries: int | None = None,
     ) -> BaseChatModel:
         """Construct one Provider model through the shared internal factory."""
 
         policy = _profile_policy(profile)
+        retry_limit = policy.provider_max_retries
+        if provider_max_retries is not None:
+            if type(provider_max_retries) is not int or not 0 <= provider_max_retries <= retry_limit:
+                raise ValueError("provider_max_retries must be a nonnegative integer within the profile policy")
+            retry_limit = provider_max_retries
         factory_kwargs: dict[str, object] = {
             "name": model_name,
             "thinking_enabled": thinking_enabled,
@@ -127,7 +133,7 @@ class ModelRuntime:
             "attach_tracing": policy.attach_model_tracing,
             "model_overrides": model_overrides,
             "runtime_overrides": {
-                "max_retries": policy.provider_max_retries,
+                "max_retries": retry_limit,
             },
         }
         if reasoning_effort is not None:
@@ -143,6 +149,7 @@ class ModelRuntime:
         thinking_enabled: bool = False,
         reasoning_effort: str | None = None,
         model_overrides: Mapping[str, object] | None = None,
+        provider_max_retries: int | None = None,
         config: RunnableConfig | None = None,
         deadline_monotonic: float | None = None,
         abort_event: AsyncAbortEvent | None = None,
@@ -173,6 +180,7 @@ class ModelRuntime:
             thinking_enabled=thinking_enabled,
             reasoning_effort=reasoning_effort,
             model_overrides=model_overrides,
+            provider_max_retries=provider_max_retries,
         )
         return cast(
             BaseMessage,

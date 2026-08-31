@@ -49,6 +49,7 @@ const operationsReadinessSchema = z
     stream: z.string().min(1),
     quota: z.string().min(1),
     audit: z.string().min(1),
+    knowledge: z.enum(["ready", "disabled", "unavailable"]),
     role: z.enum(["gateway", "worker", "scheduler"]),
     worker_count: z.number().int().nonnegative(),
     worker_capacity: z.number().int().nonnegative(),

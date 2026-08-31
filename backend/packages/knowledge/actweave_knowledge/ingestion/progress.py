@@ -98,8 +98,11 @@ class KnowledgeTaskProgressReporter:
 
     async def begin_embedding(self, total_units: int) -> None:
         """Enter ``embedding`` with a verifiable total and zero verified units."""
+        await self.begin_stage("embedding", total_units)
 
-        self._stage = "embedding"
+    async def begin_stage(self, stage: str, total_units: int) -> None:
+        """Begin a measured stage, resetting counters for this stage only."""
+        self._stage = stage
         self._completed_units = 0
         self._total_units = total_units
         await self._write()

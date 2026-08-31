@@ -7,6 +7,7 @@ import {
   knowledgeBaseListResponseSchema,
   knowledgeBaseMutationResponseSchema,
   knowledgeBaseRebuildResponseSchema,
+  knowledgeBaseUpdateResponseSchema,
   knowledgeChunkPreviewResponseSchema,
   knowledgeDocumentBatchResponseSchema,
   knowledgeDocumentListResponseSchema,
@@ -46,6 +47,7 @@ import {
   type PreviewKnowledgeChunksInput,
   type SetKnowledgeDocumentMetadataInput,
   type UpdateKnowledgeBaseInput,
+  type KnowledgeBaseUpdateResponse,
   type UpdateKnowledgeSegmentInput,
   type UploadKnowledgeDocumentInput,
 } from "./types";
@@ -320,16 +322,16 @@ export async function updateKnowledgeBase(
   baseId: string,
   input: UpdateKnowledgeBaseInput,
   signal?: AbortSignal,
-): Promise<KnowledgeBaseItem> {
+): Promise<KnowledgeBaseUpdateResponse> {
   const response = await requestKnowledge(
     `${knowledgeBaseURL(projectId)}/bases/${encodeURIComponent(baseId)}`,
     jsonRequestInit("PATCH", input, signal),
   );
   const parsed = await readKnowledgeResponse(
     response,
-    knowledgeBaseMutationResponseSchema,
+    knowledgeBaseUpdateResponseSchema,
   );
-  return parsed.item;
+  return parsed;
 }
 
 export async function deleteKnowledgeBase(
@@ -627,6 +629,7 @@ export async function listKnowledgeModelOptions(
   return {
     embedding_models: parsed.embedding_models,
     reranker_models: parsed.reranker_models,
+    summary_model: parsed.summary_model,
   };
 }
 

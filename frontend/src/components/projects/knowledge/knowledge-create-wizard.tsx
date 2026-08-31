@@ -477,16 +477,18 @@ export function KnowledgeCreateWizard({
             // A configured base owns its models. An empty base gets exactly
             // one atomic initial configuration before any file is uploaded.
             if (existingBase.embedding_model_id === null) {
-              base = await updateBase.mutateAsync({
-                baseId: existingBase.id,
-                input: {
-                  embedding_model_id: snapshot.embeddingModelId,
-                  retrieval_mode: snapshot.retrievalMode,
-                  ...(snapshot.rerankerModelId
-                    ? { reranker_model_id: snapshot.rerankerModelId }
-                    : {}),
-                },
-              });
+              base = (
+                await updateBase.mutateAsync({
+                  baseId: existingBase.id,
+                  input: {
+                    embedding_model_id: snapshot.embeddingModelId,
+                    retrieval_mode: snapshot.retrievalMode,
+                    ...(snapshot.rerankerModelId
+                      ? { reranker_model_id: snapshot.rerankerModelId }
+                      : {}),
+                  },
+                })
+              ).item;
             }
           } else {
             base = await createBase.mutateAsync({

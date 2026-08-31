@@ -426,6 +426,13 @@ class _FakeSession:
     def begin(self) -> _FakeSessionBegin:
         return _FakeSessionBegin()
 
+    async def get(self, model, identity):  # noqa: ANN001, ANN201
+        # This HTTP fixture has no configured Knowledge settings singleton.
+        from deerflow.persistence.knowledge_settings import KnowledgeSystemSettingsRow
+
+        assert model is KnowledgeSystemSettingsRow and identity == 1
+        return None
+
 
 class _ReadyProbe:
     async def require_ready(self, session: object) -> None:

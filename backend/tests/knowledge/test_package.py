@@ -563,8 +563,11 @@ class TestM11ContractShapes:
 
 def _stub_module_with_health(*, storage_ok: bool):
     from actweave_knowledge import KnowledgeHealth
+    from actweave_knowledge.contracts import KnowledgeMinioSettings, KnowledgeSettings
 
     class _Module:
+        settings = KnowledgeSettings(enabled=True, minio=KnowledgeMinioSettings(endpoint="localhost:9000", bucket="knowledge", access_key="test", secret_key="test"))
+
         async def health(self) -> KnowledgeHealth:
             return KnowledgeHealth(
                 enabled=True,
@@ -577,18 +580,28 @@ def _stub_module_with_health(*, storage_ok: bool):
 
 
 @pytest.mark.asyncio
-async def test_startup_storage_check_fails_fast_when_bucket_unreachable() -> None:
+async def test_startup_storage_check_fails_fast_when_bucket_unreachable(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from actweave_knowledge import KNOWLEDGE_STORAGE_UNAVAILABLE, KnowledgeError
+
+    from app.knowledge import composition
     from app.knowledge.composition import (
         KnowledgeStorageNotReady,
         require_knowledge_storage_ready,
     )
 
+    monkeypatch.setattr(composition, "probe_knowledge_storage", AsyncMock(side_effect=KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "private endpoint")))
     with pytest.raises(KnowledgeStorageNotReady, match="对象存储"):
         await require_knowledge_storage_ready(_stub_module_with_health(storage_ok=False))  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
-async def test_startup_storage_check_passes_when_bucket_reachable() -> None:
+async def test_startup_storage_check_passes_when_bucket_reachable(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.knowledge import composition
     from app.knowledge.composition import require_knowledge_storage_ready
 
+    monkeypatch.setattr(composition, "probe_knowledge_storage", AsyncMock())
     await require_knowledge_storage_ready(_stub_module_with_health(storage_ok=True))  # type: ignore[arg-type]

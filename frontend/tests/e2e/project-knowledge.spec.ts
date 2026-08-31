@@ -87,6 +87,7 @@ type MockBase = {
   default_score_threshold?: number;
   reranker_model_id?: string | null;
   retrieval_mode?: "semantic" | "hybrid";
+  summary_index_enabled?: boolean;
   /** deleting bases disappear after this many further list polls */
   pollsUntilGone?: number;
 };
@@ -136,6 +137,7 @@ type MockSegment = {
   content: string;
   enabled: boolean;
   source_position: Record<string, unknown>;
+  summary?: { content: string; created_at: string } | null;
 };
 
 type MockQuery = {
@@ -158,6 +160,7 @@ function baseView(base: MockBase) {
         : base.embedding_model_id,
     reranker_model_id: base.reranker_model_id ?? null,
     retrieval_mode: base.retrieval_mode ?? "semantic",
+    summary_index_enabled: base.summary_index_enabled ?? false,
     status: base.status,
     document_count: base.document_count,
     default_top_k: base.default_top_k ?? 4,
@@ -250,6 +253,7 @@ function listPayload(items: unknown[]) {
 }
 
 type KnowledgeMockOptions = {
+  summaryModel?: { model_name: string; display_name: string } | null;
   capabilities?: Capability[];
   featureDisabled?: boolean;
   bases?: MockBase[];
@@ -418,6 +422,7 @@ async function mockKnowledgeRoutes(
             embedding_dimension: null,
           },
         ],
+        summary_model: options.summaryModel ?? null,
         request_id: "req-options",
       });
     }
@@ -478,8 +483,26 @@ async function mockKnowledgeRoutes(
         retrieval_mode?: "semantic" | "hybrid";
         reranker_model_id?: string;
         clear_reranker_model?: boolean;
+        summary_index_enabled?: boolean;
       };
       state.baseUpdates.push(body);
+      const summaryBackfill =
+        body.summary_index_enabled === true && !base.summary_index_enabled
+          ? {
+              accepted_document_count: state.documents.filter(
+                (document) =>
+                  document.knowledge_base_id === base.id &&
+                  document.status === "ready",
+              ).length,
+              skipped_document_ids: state.documents
+                .filter(
+                  (document) =>
+                    document.knowledge_base_id === base.id &&
+                    document.status !== "ready",
+                )
+                .map((document) => document.id),
+            }
+          : null;
       if (state.baseUpdateFailure) {
         const failure = state.baseUpdateFailure;
         state.baseUpdateFailure = null;
@@ -496,6 +519,8 @@ async function mockKnowledgeRoutes(
       if (body.name !== undefined) base.name = body.name;
       if (body.description !== undefined) base.description = body.description;
       if (body.status !== undefined) base.status = body.status;
+      if (body.summary_index_enabled !== undefined)
+        base.summary_index_enabled = body.summary_index_enabled;
       if (body.retrieval_mode !== undefined)
         base.retrieval_mode = body.retrieval_mode;
       if (body.default_top_k !== undefined) {
@@ -510,7 +535,11 @@ async function mockKnowledgeRoutes(
         base.reranker_model_id = body.reranker_model_id;
       }
       await options.baseUpdateResponseGate;
-      return json(route, { item: baseView(base), request_id: "req-update" });
+      return json(route, {
+        item: baseView(base),
+        summary_backfill: summaryBackfill,
+        request_id: "req-update",
+      });
     }
     if (baseMatch && method === "DELETE") {
       const base = state.bases.find((item) => item.id === baseMatch[1]);
@@ -1061,9 +1090,19 @@ async function mockKnowledgeRoutes(
       const target = state.documents.find((item) => item.id === retryMatch[1]);
       if (!target)
         return knowledgeError(route, 404, "KNOWLEDGE_NOT_FOUND", "文档不存在");
-      target.status = "queued";
-      target.error_message = null;
-      target.progression = ["processing", "ready"];
+      if (target.task_progress?.kind === "summarize_document") {
+        target.task_progress = {
+          ...target.task_progress,
+          status: "queued",
+          stage: "queued",
+          completed_units: 0,
+          attempt_count: 0,
+        };
+      } else {
+        target.status = "queued";
+        target.error_message = null;
+        target.progression = ["processing", "ready"];
+      }
       return json(route, {
         item: documentView(target),
         request_id: "req-retry",
@@ -1117,6 +1156,7 @@ async function mockKnowledgeRoutes(
         stored_content_version: state.detailVersion,
         current_document_version: state.detailVersion,
         children_total: childList.length,
+        summary: segment.summary ?? null,
         child_page: childPage,
         children: pageChildren.map((child) => ({
           id: child.id,
@@ -1258,6 +1298,19 @@ async function mockKnowledgeRoutes(
               counts: {
                 semantic_candidates: 3,
                 lexical_candidates: body.retrieval_mode === "hybrid" ? 2 : 0,
+                summary_candidates: Array.from(state.segments.values())
+                  .flat()
+                  .filter((segment) => segment.summary).length,
+                query_embedding_cache_hits: state.searchRequests
+                  .slice(0, -1)
+                  .some((request) => request.query === query)
+                  ? 1
+                  : 0,
+                query_embedding_cache_misses: state.searchRequests
+                  .slice(0, -1)
+                  .some((request) => request.query === query)
+                  ? 0
+                  : 1,
                 parents_deduplicated: 3,
                 threshold_filtered: thresholdFiltered,
                 stale_filtered: 0,
@@ -1280,6 +1333,12 @@ async function mockKnowledgeRoutes(
                 score_domain: "reranker:10000000-0000-4000-8000-00000000000e",
                 ranking_method: "rerank",
                 ranking_score: citation.score,
+                matched_via: Array.from(state.segments.values())
+                  .flat()
+                  .find((segment) => segment.id === citation.segment_id)
+                  ?.summary
+                  ? "summary"
+                  : "segment",
                 matched_children:
                   citation.segment_id === "60000000-0000-4000-8000-000000000011"
                     ? [
@@ -3243,9 +3302,7 @@ test("an existing configured base uploads through the wizard without changing it
   await wizard
     .getByLabel("Display name (optional)", { exact: true })
     .fill("Uploaded guide");
-  await wizard
-    .getByRole("radio", { name: /Parent-child/u })
-    .check();
+  await wizard.getByRole("radio", { name: /Parent-child/u }).check();
   await wizard
     .getByLabel("Child chunk size (characters)", { exact: true })
     .fill("200");
@@ -5520,4 +5577,230 @@ test("the document metadata dialog follows the authoritative row after a conflic
   const rows = page.getByTestId("knowledge-document-rows");
   await expect(rows.getByText("消失文档.txt")).toHaveCount(0);
   await expect(rows.getByText("保留文档.txt")).toBeVisible();
+});
+
+test("summary index stays unavailable until an administrator configures its model", async ({
+  page,
+}) => {
+  await mockKnowledgeRoutes(page, { bases: [T11_BASE] });
+  await page.goto(`/projects/alpha/knowledge?kb=${T11_BASE.id}&view=settings`);
+  const toggle = page.getByRole("switch", { name: "Summary index" });
+  await expect(toggle).toBeDisabled();
+  await expect(
+    page.getByText(
+      "Ask an administrator to configure a summary model in Knowledge settings.",
+    ),
+  ).toBeVisible();
+});
+
+test("summary index can be turned off after its model becomes unavailable", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [{ ...T11_BASE, summary_index_enabled: true }],
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${T11_BASE.id}&view=settings`);
+  const toggle = page.getByRole("switch", { name: "Summary index" });
+  await expect(toggle).toBeChecked();
+  await expect(toggle).toBeEnabled();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(toggle).toBeDisabled();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
+  expect(state.baseUpdates.at(-1)?.summary_index_enabled).toBe(false);
+});
+
+test("summary index saves its switch and shows the backfill receipt", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [{ ...T11_BASE }],
+    summaryModel: { model_name: MODEL_ID, display_name: "Summary model" },
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-0000000000a1",
+        knowledge_base_id: T11_BASE.id,
+        name: "Ready.txt",
+        original_name: "Ready.txt",
+        status: "ready",
+        segment_count: 1,
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: "50000000-0000-4000-8000-0000000000a2",
+        knowledge_base_id: T11_BASE.id,
+        name: "Pending.txt",
+        original_name: "Pending.txt",
+        status: "queued",
+        segment_count: 0,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${T11_BASE.id}&view=settings`);
+  await page.getByRole("switch", { name: "Summary index" }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(
+    page.getByTestId("knowledge-summary-backfill-outcome"),
+  ).toHaveText("Summary backfill: 1 queued, 1 skipped.");
+  expect(state.baseUpdates.at(-1)?.summary_index_enabled).toBe(true);
+});
+
+test("summary index evidence stays separate from original content in search and segment details", async ({
+  page,
+}) => {
+  const DOC_ID = "50000000-0000-4000-8000-000000000001";
+  const SEGMENT_ID = "60000000-0000-4000-8000-000000000011";
+  await mockKnowledgeRoutes(page, {
+    bases: [{ ...T11_BASE, summary_index_enabled: true }],
+    documents: [
+      {
+        id: DOC_ID,
+        knowledge_base_id: T11_BASE.id,
+        name: "发布说明.pdf",
+        original_name: "发布说明.pdf",
+        status: "ready",
+        segment_count: 1,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+    segments: {
+      [DOC_ID]: [
+        {
+          id: SEGMENT_ID,
+          position: 7,
+          content: "真实原文内容",
+          enabled: true,
+          source_position: { page: 7 },
+          summary: { content: "系统生成的摘要内容", created_at: TIMESTAMP },
+        },
+      ],
+    },
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${T11_BASE.id}&view=search`);
+  await page.getByLabel("Query").fill("发布流程");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const results = page.getByTestId("knowledge-search-results");
+  await expect(results.getByText("Summary", { exact: true })).toBeVisible();
+  await page
+    .getByTestId("knowledge-search-diagnostics")
+    .locator("summary")
+    .click();
+  await expect(page.getByTestId("knowledge-search-diagnostics")).toContainText(
+    "Summary candidates",
+  );
+  await expect(page.getByTestId("knowledge-search-diagnostics")).toContainText(
+    "Query cache misses",
+  );
+  await results
+    .getByRole("button", { name: "View segment #7 in full" })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByTestId("knowledge-detail-content")).toHaveText(
+    "真实原文内容",
+  );
+  await expect(dialog.getByTestId("knowledge-segment-summary")).toContainText(
+    "System-generated summary",
+  );
+  await expect(dialog.getByTestId("knowledge-segment-summary")).toContainText(
+    "系统生成的摘要内容",
+  );
+  await dialog.press("Escape");
+  await page.goto(
+    `/projects/alpha/knowledge?kb=${T11_BASE.id}&view=documents&doc=${DOC_ID}`,
+  );
+  await page.getByRole("button", { name: "View full content" }).click();
+  await expect(
+    page.getByRole("dialog").getByTestId("knowledge-segment-summary"),
+  ).toContainText("系统生成的摘要内容");
+});
+
+test("summary index progress keeps polling while the document remains ready", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [{ ...T11_BASE, summary_index_enabled: true }],
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-0000000000b1",
+        knowledge_base_id: T11_BASE.id,
+        name: "Summary progress.txt",
+        original_name: "Summary progress.txt",
+        status: "ready",
+        segment_count: 3,
+        error_message: null,
+        delete_error: null,
+        task_progress: {
+          kind: "summarize_document",
+          status: "running",
+          stage: "summarizing",
+          completed_units: 1,
+          total_units: 3,
+          attempt_count: 1,
+          max_attempts: 3,
+          target_version: 1,
+          next_attempt_at: null,
+        },
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${T11_BASE.id}&view=documents`);
+  const row = page
+    .getByTestId("knowledge-document-rows")
+    .getByRole("row")
+    .filter({ hasText: "Summary progress.txt" });
+  await expect(row.getByTestId("knowledge-task-progress")).toContainText(
+    "Generate summaries · Generating summaries",
+  );
+  await expect(row).toContainText("Ready");
+  const initialRequests = state.documentListRequests;
+  state.documents[0]!.task_progress = null;
+  await expect(row.getByTestId("knowledge-task-progress")).toHaveCount(0);
+  expect(state.documentListRequests).toBeGreaterThan(initialRequests);
+});
+
+test("summary index failures can be retried without hiding ready source content", async ({
+  page,
+}) => {
+  await mockKnowledgeRoutes(page, {
+    bases: [{ ...T11_BASE, summary_index_enabled: true }],
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-0000000000b2",
+        knowledge_base_id: T11_BASE.id,
+        name: "Summary retry.txt",
+        original_name: "Summary retry.txt",
+        status: "ready",
+        segment_count: 3,
+        error_message: null,
+        delete_error: null,
+        task_progress: {
+          kind: "summarize_document",
+          status: "failed",
+          stage: "summarizing",
+          completed_units: 0,
+          total_units: 3,
+          attempt_count: 3,
+          max_attempts: 3,
+          target_version: 1,
+          next_attempt_at: null,
+        },
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${T11_BASE.id}&view=documents`);
+  const menu = await openDocumentActions(page, "Summary retry.txt");
+  await menu.getByRole("menuitem", { name: "Retry", exact: true }).click();
+  const row = page
+    .getByTestId("knowledge-document-rows")
+    .getByRole("row")
+    .filter({ hasText: "Summary retry.txt" });
+  await expect(row).toContainText("Ready");
+  await expect(row.getByTestId("knowledge-task-progress")).toContainText(
+    "Generate summaries · Queued",
+  );
 });

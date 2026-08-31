@@ -20,6 +20,7 @@ from .contracts import (
     KnowledgeBaseCreate,
     KnowledgeBaseFilterFields,
     KnowledgeBaseUpdate,
+    KnowledgeBaseUpdateResult,
     KnowledgeBaseView,
     KnowledgeChunkPreview,
     KnowledgeChunkPreviewRequest,
@@ -49,11 +50,13 @@ from .ingestion import (
     KnowledgeReembedHandler,
     preview_document_chunks,
 )
+from .ingestion.summarize import KnowledgeSummarizeHandler
 from .metadata import KnowledgeMetadataService
 from .models import KnowledgeModelClient
 from .project_retention import create_knowledge_project_purger
 from .registry import retrieval_model_in_use
 from .retrieval import KnowledgeSearchService
+from .retrieval.query_cache import KnowledgeQueryEmbeddingCache
 from .segments import KnowledgeSegmentService
 from .storage import MinioObjectStore
 from .tasks import (
@@ -137,6 +140,11 @@ class KnowledgeModule:
             session_factory=session_factory,
             client=self._model_client,
             model_port=model_port,
+            query_cache=KnowledgeQueryEmbeddingCache(
+                enabled=settings.query_cache_enabled,
+                max_entries=settings.query_cache_max_entries,
+                ttl_seconds=settings.query_cache_ttl_seconds,
+            ),
         )
         self._segment_service = KnowledgeSegmentService(
             session_factory=session_factory,
@@ -218,7 +226,7 @@ class KnowledgeModule:
         update: KnowledgeBaseUpdate,
         *,
         authority: KnowledgeProjectAuthority,
-    ) -> KnowledgeBaseView:
+    ) -> KnowledgeBaseUpdateResult:
         return await self._base_service.update_knowledge_base(
             project_id,
             base_id,
@@ -695,6 +703,12 @@ class KnowledgeModule:
             # Re-embedding reads current rows only: no object store on purpose,
             # so it structurally cannot re-parse the original file.
             "reembed_document": KnowledgeReembedHandler(
+                session_factory=self._session_factory,
+                model_client=self._model_client,
+                model_port=self._model_port,
+                project_active_check=project_active_check,
+            ),
+            "summarize_document": KnowledgeSummarizeHandler(
                 session_factory=self._session_factory,
                 model_client=self._model_client,
                 model_port=self._model_port,

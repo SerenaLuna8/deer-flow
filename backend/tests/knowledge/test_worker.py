@@ -31,7 +31,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.knowledge.composition import (
-    create_knowledge_worker_resources_from_app_config,
+    create_knowledge_worker_resources_from_database,
     is_knowledge_project_active,
 )
 from app.knowledge.worker import run_worker_loops
@@ -880,21 +880,16 @@ async def test_disabled_worker_retention_with_preserved_storage_removes_project_
 
         monkeypatch.setattr(minio_store_module, "Minio", _FakeMinio)
         monkeypatch.setattr(engine_module, "get_session_factory", lambda: harness.factory)
-        resources = create_knowledge_worker_resources_from_app_config(
-            SimpleNamespace(
-                model_extra={
-                    "knowledge": {
-                        "enabled": False,
-                        "minio": {
-                            "endpoint": "minio.invalid:9000",
-                            "bucket": bucket,
-                            "access_key": "retained-access",
-                            "secret_key": "retained-secret",
-                        },
-                    }
-                }
-            )
-        )
+        from app.knowledge_settings.service import default_knowledge_settings_row, knowledge_minio_secret_recipient
+        from deerflow.secrets import SecretEnvelope, SecretKey
+
+        row = default_knowledge_settings_row()
+        row.minio_endpoint, row.minio_bucket, row.minio_access_key = "minio.invalid:9000", bucket, "retained-access"
+        envelope = SecretEnvelope.protect(b"retained-secret", recipient=knowledge_minio_secret_recipient(row.minio_endpoint), key=SecretKey.from_environment())
+        row.minio_secret_nonce, row.minio_secret_ciphertext = envelope.nonce, envelope.ciphertext
+        async with harness.factory() as session, session.begin():
+            session.add(row)
+        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
         assert resources.feature_module is None
 
         sequence: list[str] = []
@@ -938,7 +933,7 @@ async def test_disabled_worker_retention_without_storage_retries_when_documents_
         import deerflow.persistence.engine as engine_module
 
         monkeypatch.setattr(engine_module, "get_session_factory", lambda: harness.factory)
-        resources = create_knowledge_worker_resources_from_app_config(SimpleNamespace(model_extra={"knowledge": {"enabled": False}}))
+        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
         assert resources.feature_module is None
 
         sequence: list[str] = []
@@ -970,7 +965,7 @@ async def test_disabled_worker_retention_without_historical_documents_can_contin
         import deerflow.persistence.engine as engine_module
 
         monkeypatch.setattr(engine_module, "get_session_factory", lambda: harness.factory)
-        resources = create_knowledge_worker_resources_from_app_config(SimpleNamespace(model_extra={"knowledge": {"enabled": False}}))
+        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
 
         sequence: list[str] = []
         rows: list[object] = [_gate_job_row(project_id), _gate_project_row()]
@@ -1015,7 +1010,7 @@ async def test_disabled_worker_without_storage_fails_closed_for_object_cleanup_t
             "get_session_factory",
             lambda: harness.factory,
         )
-        resources = create_knowledge_worker_resources_from_app_config(SimpleNamespace(model_extra={"knowledge": {"enabled": False}}))
+        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
 
         assert await resources.project_purge(project_id) is False
         async with harness.factory() as session:
@@ -1065,7 +1060,7 @@ async def test_disabled_worker_without_storage_accepts_succeeded_object_cleanup_
             "get_session_factory",
             lambda: harness.factory,
         )
-        resources = create_knowledge_worker_resources_from_app_config(SimpleNamespace(model_extra={"knowledge": {"enabled": False}}))
+        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
 
         assert await resources.project_purge(project_id) is True
         async with harness.factory() as session:

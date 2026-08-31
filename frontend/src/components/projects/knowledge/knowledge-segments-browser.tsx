@@ -52,6 +52,7 @@ import { cn } from "@/lib/utils";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeFileTypeIcon } from "./knowledge-file-type-icon";
+import { KnowledgeSummaryBlock } from "./knowledge-summary-block";
 
 /** Mirrors the backend's segment content ceiling (splitter's largest chunk). */
 const MAX_SEGMENT_CONTENT_CHARS = 4000;
@@ -349,6 +350,8 @@ export function KnowledgeSegmentsBrowser({
 
       {viewing ? (
         <ViewSegmentSheet
+          scope={scope}
+          base={base}
           document={document}
           segment={viewing}
           onClose={() => setViewing(null)}
@@ -456,6 +459,7 @@ function SegmentLocateCard({
           <p className="text-foreground/85 text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-pre-wrap">
             {locate.data.segment.content}
           </p>
+          <KnowledgeSummaryBlock summary={locate.data.summary} />
         </div>
       )}
     </aside>
@@ -667,16 +671,26 @@ function EditSegmentSheet({
 }
 
 function ViewSegmentSheet({
+  scope,
+  base,
   document,
   segment,
   onClose,
 }: {
+  scope: ProjectClientScope;
+  base: KnowledgeBaseItem;
   document: KnowledgeDocumentItem;
   segment: KnowledgeSegmentItem;
   onClose: () => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
+  const detail = useKnowledgeSegmentLocate(
+    scope,
+    base.id,
+    document,
+    segment.id,
+  );
 
   return (
     <Sheet
@@ -699,10 +713,21 @@ function ViewSegmentSheet({
             {document.name} · {labels.segments.wordCount(segment.word_count)}
           </SheetDescription>
         </SheetHeader>
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          <p className="text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-pre-wrap">
-            {segment.content}
-          </p>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4">
+          {detail.error ? (
+            <p role="alert" className="text-destructive text-[13px]">
+              {labels.segments.locateFailed}
+            </p>
+          ) : detail.data ? (
+            <>
+              <KnowledgeSummaryBlock summary={detail.data.summary} />
+              <p className="text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-pre-wrap">
+                {detail.data.segment.content}
+              </p>
+            </>
+          ) : (
+            <Skeleton className="h-28" />
+          )}
         </div>
         <SheetFooter className="border-border/60 mt-0 shrink-0 flex-row justify-end border-t px-5 py-3">
           <Button

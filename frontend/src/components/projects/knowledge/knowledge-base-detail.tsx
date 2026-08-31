@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import { KNOWLEDGE_BASE_NAME_MAX_CHARS } from "@/core/knowledge/chunk-settings";
@@ -284,6 +285,9 @@ function KnowledgeBaseSettingsPanel({
   const [defaultThreshold, setDefaultThreshold] = useState(
     String(base.default_score_threshold),
   );
+  const [summaryIndexEnabled, setSummaryIndexEnabled] = useState(
+    base.summary_index_enabled,
+  );
   // Radix Select cannot represent "" as an item value; use a sentinel.
   const [rerankerModelId, setRerankerModelId] = useState(
     base.reranker_model_id ?? RERANKER_NONE,
@@ -331,6 +335,7 @@ function KnowledgeBaseSettingsPanel({
               status,
               default_top_k: parsedTopK,
               retrieval_mode: retrievalMode,
+              summary_index_enabled: summaryIndexEnabled,
               default_score_threshold: parsedThreshold,
               // The reranker binding is stated explicitly on every save:
               // either the selected model or an explicit clear.
@@ -471,6 +476,40 @@ function KnowledgeBaseSettingsPanel({
               }}
               disabled={updateBase.isPending}
             />
+            <div className="border-border/70 flex items-start justify-between gap-4 rounded-xl border p-4">
+              <div className="space-y-1.5">
+                <label
+                  htmlFor={`${settingsFormId}-summary`}
+                  className="font-medium"
+                >
+                  {labels.summary.indexLabel}
+                </label>
+                <p className="text-muted-foreground text-xs leading-5">
+                  {labels.summary.indexHint}
+                </p>
+                <p className="text-muted-foreground text-xs leading-5">
+                  {modelOptions.error
+                    ? labels.bases.modelsLoadFailed
+                    : (modelOptions.data?.summary_model?.display_name ??
+                      labels.summary.modelMissing)}
+                </p>
+              </div>
+              <Switch
+                id={`${settingsFormId}-summary`}
+                form={settingsFormId}
+                aria-label={labels.summary.indexLabel}
+                checked={summaryIndexEnabled}
+                disabled={
+                  updateBase.isPending ||
+                  modelOptions.isLoading ||
+                  (!modelOptions.data?.summary_model && !summaryIndexEnabled)
+                }
+                onCheckedChange={(checked) => {
+                  touch();
+                  setSummaryIndexEnabled(checked);
+                }}
+              />
+            </div>
             <div className="border-border/70 space-y-4 rounded-xl border p-4">
               <div className="grid gap-1.5">
                 <span className="font-medium">
@@ -579,6 +618,18 @@ function KnowledgeBaseSettingsPanel({
           {updateBase.isSuccess ? (
             <p role="status" className="text-success text-[13px]">
               {labels.detail.settingsSaved}
+            </p>
+          ) : null}
+          {updateBase.data?.summary_backfill ? (
+            <p
+              role="status"
+              data-testid="knowledge-summary-backfill-outcome"
+              className="text-muted-foreground text-[13px]"
+            >
+              {labels.summary.backfillOutcome(
+                updateBase.data.summary_backfill.accepted_document_count,
+                updateBase.data.summary_backfill.skipped_document_ids.length,
+              )}
             </p>
           ) : null}
           <Button

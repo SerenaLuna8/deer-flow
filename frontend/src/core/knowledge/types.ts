@@ -44,6 +44,7 @@ export const knowledgeBaseItemSchema = z
     embedding_model_id: z.string().uuid().nullable(),
     reranker_model_id: z.string().uuid().nullable(),
     retrieval_mode: knowledgeRetrievalModeSchema,
+    summary_index_enabled: z.boolean(),
     status: knowledgeBaseStatusSchema,
     document_count: z.number().int(),
     default_top_k: z.number().int(),
@@ -75,6 +76,20 @@ export const knowledgeBaseMutationResponseSchema = z
   })
   .strict();
 
+export const knowledgeBaseUpdateResponseSchema =
+  knowledgeBaseMutationResponseSchema.extend({
+    summary_backfill: z
+      .object({
+        accepted_document_count: z.number().int().nonnegative(),
+        skipped_document_ids: z.array(z.string().uuid()),
+      })
+      .strict()
+      .nullable(),
+  });
+export type KnowledgeBaseUpdateResponse = z.infer<
+  typeof knowledgeBaseUpdateResponseSchema
+>;
+
 /** Re-embed admission outcome: the rebound base plus per-document counts. */
 export const knowledgeBaseRebuildResponseSchema = z
   .object({
@@ -102,6 +117,7 @@ export const knowledgeTaskStageSchema = z.enum([
   "reading_source",
   "extracting_splitting",
   "loading_segments",
+  "summarizing",
   "embedding",
   "publishing",
   "done",
@@ -115,7 +131,7 @@ export type KnowledgeTaskStage = z.infer<typeof knowledgeTaskStageSchema>;
  */
 export const knowledgeTaskProgressSchema = z
   .object({
-    kind: z.enum(["ingest_document", "reembed_document"]),
+    kind: z.enum(["ingest_document", "reembed_document", "summarize_document"]),
     status: z.enum(["queued", "running", "retry_wait", "failed"]),
     stage: knowledgeTaskStageSchema,
     completed_units: z.number().int().nonnegative(),
@@ -199,16 +215,25 @@ export const knowledgeModelOptionSchema = z
   .strict();
 export type KnowledgeModelOption = z.infer<typeof knowledgeModelOptionSchema>;
 
+export const knowledgeSummaryModelSchema = z
+  .object({
+    model_name: z.string(),
+    display_name: z.string(),
+  })
+  .strict();
+
 export const knowledgeModelOptionsResponseSchema = z
   .object({
     embedding_models: z.array(knowledgeModelOptionSchema),
     reranker_models: z.array(knowledgeModelOptionSchema),
+    summary_model: knowledgeSummaryModelSchema.nullable(),
     request_id: z.string(),
   })
   .strict();
 export type KnowledgeModelOptions = {
   embedding_models: KnowledgeModelOption[];
   reranker_models: KnowledgeModelOption[];
+  summary_model: z.infer<typeof knowledgeSummaryModelSchema> | null;
 };
 
 export const knowledgeSegmentItemSchema = z
@@ -307,6 +332,7 @@ export const knowledgeHitDiagnosticsSchema = z
     ranking_method: knowledgeScoreKindSchema,
     ranking_score: z.number(),
     matched_children: z.array(knowledgeMatchedChildSchema),
+    matched_via: z.enum(["segment", "child", "summary"]),
   })
   .strict();
 export type KnowledgeHitDiagnostics = z.infer<
@@ -325,6 +351,9 @@ export const knowledgeSearchDiagnosticsSchema = z
       .object({
         semantic_candidates: z.number().int(),
         lexical_candidates: z.number().int(),
+        summary_candidates: z.number().int(),
+        query_embedding_cache_hits: z.number().int(),
+        query_embedding_cache_misses: z.number().int(),
         parents_deduplicated: z.number().int(),
         threshold_filtered: z.number().int(),
         stale_filtered: z.number().int(),
@@ -373,6 +402,16 @@ export const knowledgeSegmentChildSchema = z
   .strict();
 export type KnowledgeSegmentChild = z.infer<typeof knowledgeSegmentChildSchema>;
 
+export const knowledgeSegmentSummarySchema = z
+  .object({
+    content: z.string(),
+    created_at: z.string(),
+  })
+  .strict();
+export type KnowledgeSegmentSummary = z.infer<
+  typeof knowledgeSegmentSummarySchema
+>;
+
 export const knowledgeSegmentDetailResponseSchema = z
   .object({
     segment: knowledgeSegmentItemSchema,
@@ -385,6 +424,7 @@ export const knowledgeSegmentDetailResponseSchema = z
     children_total: z.number().int(),
     child_page: z.number().int(),
     children: z.array(knowledgeSegmentChildSchema),
+    summary: knowledgeSegmentSummarySchema.nullable(),
     request_id: z.string(),
   })
   .strict();
@@ -413,6 +453,7 @@ export type UpdateKnowledgeBaseInput = {
   reranker_model_id?: string;
   clear_reranker_model?: boolean;
   retrieval_mode?: KnowledgeRetrievalMode;
+  summary_index_enabled?: boolean;
 };
 
 export type UploadKnowledgeDocumentInput = {

@@ -529,6 +529,8 @@ async def _bootstrap_empty_schema_under_lock(
         )
         bootstrap_stage = "runtime_policies"
         await _bootstrap_runtime_policy_schema(engine)
+        bootstrap_stage = "knowledge_settings"
+        await _bootstrap_knowledge_settings_schema(engine)
         bootstrap_stage = "model_registry"
         await _bootstrap_model_registry_schema(engine, model_registry_bootstrap)
         bootstrap_stage = "langgraph"
@@ -620,6 +622,14 @@ async def _bootstrap_runtime_policy_schema(engine: AsyncEngine) -> None:
     await bootstrap_system_runtime_policies(
         async_sessionmaker(engine, expire_on_commit=False),
     )
+
+
+async def _bootstrap_knowledge_settings_schema(engine: AsyncEngine) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.knowledge_settings.bootstrap import bootstrap_knowledge_system_settings
+
+    await bootstrap_knowledge_system_settings(async_sessionmaker(engine, expire_on_commit=False))
 
 
 async def _bootstrap_model_registry_schema(

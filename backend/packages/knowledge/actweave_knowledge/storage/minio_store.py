@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from minio import Minio
@@ -22,6 +23,9 @@ from minio.versioningconfig import OFF
 
 from ..asyncio_utils import run_sync_to_completion
 from ..contracts import KNOWLEDGE_STORAGE_UNAVAILABLE, KnowledgeError, KnowledgeMinioSettings
+
+if TYPE_CHECKING:
+    from urllib3 import PoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +78,7 @@ def is_document_storage_key(
 class MinioObjectStore:
     """Store, fetch, and delete document objects in one MinIO bucket."""
 
-    def __init__(self, settings: KnowledgeMinioSettings) -> None:
+    def __init__(self, settings: KnowledgeMinioSettings, *, http_client: PoolManager | None = None) -> None:
         self._bucket = settings.bucket
         # The MinIO SDK materializes a one-part PUT as one ``bytes`` object.
         # One slot bounds this store instance to one such allocation at a time.
@@ -84,6 +88,7 @@ class MinioObjectStore:
             access_key=settings.access_key,
             secret_key=settings.secret_key.get_secret_value(),
             secure=settings.secure,
+            **({"http_client": http_client} if http_client is not None else {}),
         )
 
     async def upload_from(self, key: str, source_path: Path, *, media_type: str | None = None) -> None:

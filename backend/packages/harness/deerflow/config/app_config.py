@@ -92,7 +92,7 @@ LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
     }
 )
 
-YAML_CONFIG_TOMBSTONES = frozenset({"memory_document", "models", "scheduler"})
+YAML_CONFIG_TOMBSTONES = frozenset({"memory_document", "models", "scheduler", "knowledge"})
 
 DATABASE_RUNTIME_POLICY_PATHS = frozenset(
     {
@@ -300,7 +300,7 @@ class AppConfig(BaseModel):
         description="Database-backed text-model Vision Bridge selection for this Run.",
     )
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
     database: DatabaseConfig = Field(
         default_factory=DatabaseConfig,
         description=format_field_description(
@@ -348,6 +348,8 @@ class AppConfig(BaseModel):
             removed = set(LEGACY_CONFIG_TOMBSTONES.intersection(value))
             if info.context and info.context.get("config_source") == "yaml":
                 removed.update(YAML_CONFIG_TOMBSTONES.intersection(value))
+                if value.get("knowledge") in (None, {}):
+                    removed.discard("knowledge")
             for field_path in LEGACY_CONFIG_PATH_TOMBSTONES:
                 section, key = field_path.split(".", 1)
                 section_value = value.get(section)
@@ -365,6 +367,8 @@ class AppConfig(BaseModel):
                         if isinstance(current, Mapping) and parts[-1] in current:
                             removed.add(field_path)
             if removed:
+                if "knowledge" in removed:
+                    raise ValueError("LEGACY_CONFIG_REMOVED: knowledge; 停服后运行 scripts/migrate_knowledge_config.py，再移除 YAML knowledge 块；后续在系统设置 → 知识库配置中管理")
                 raise ValueError(f"LEGACY_CONFIG_REMOVED: {','.join(sorted(removed))}")
         return value
 

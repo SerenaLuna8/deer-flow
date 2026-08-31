@@ -39,6 +39,7 @@ from ..persistence.models import (
     KnowledgeDocumentRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
+    KnowledgeSegmentSummaryRow,
 )
 from ..persistence.tasks import settle_task_row_success
 from ..tasks.worker import KnowledgeTaskClaim, ProjectActiveCheck
@@ -65,6 +66,7 @@ class _PreparedReembed:
     # (row id, content) pairs of what gets embedded: segments in general
     # mode, children in parent_child mode.
     entries: tuple[tuple[UUID, str], ...]
+    summary_entries: tuple[tuple[UUID, str], ...]
     parent_child: bool
 
 
@@ -93,9 +95,10 @@ class KnowledgeReembedHandler:
         if prepared is None:
             return
         vectors: list[list[float]] = []
-        await progress.begin_embedding(len(prepared.entries))
-        if prepared.entries:
-            contents = [content for _row_id, content in prepared.entries]
+        all_entries = prepared.entries + prepared.summary_entries
+        await progress.begin_embedding(len(all_entries))
+        if all_entries:
+            contents = [content for _row_id, content in all_entries]
             vectors = await self._model_client.embed(
                 prepared.material,
                 contents,
@@ -154,12 +157,21 @@ class KnowledgeReembedHandler:
                         )
                     ).all()
                 document.status = "processing"
+                summaries = (
+                    await session.execute(
+                        select(KnowledgeSegmentSummaryRow.id, KnowledgeSegmentSummaryRow.content)
+                        .join(KnowledgeSegmentRow, KnowledgeSegmentRow.id == KnowledgeSegmentSummaryRow.knowledge_segment_id)
+                        .where(KnowledgeSegmentRow.knowledge_document_id == document.id, KnowledgeSegmentRow.document_version == document.published_version, KnowledgeSegmentSummaryRow.document_version == document.published_version)
+                        .order_by(KnowledgeSegmentSummaryRow.knowledge_segment_id)
+                    )
+                ).all()
                 document.updated_at = datetime.now(UTC)
                 return _PreparedReembed(
                     embedding_model_id=embedding_model_id,
                     material=material,
                     published_version=document.published_version,
                     entries=tuple((row_id, content) for row_id, content in rows),
+                    summary_entries=tuple((row_id, content) for row_id, content in summaries),
                     parent_child=parent_child,
                 )
         except KnowledgeError:
@@ -201,7 +213,12 @@ class KnowledgeReembedHandler:
                     embedded_table = KnowledgeSegmentChildRow if prepared.parent_child else KnowledgeSegmentRow
                     await session.execute(
                         update(embedded_table),
-                        [{"id": row_id, "embedding": vector} for (row_id, _content), vector in zip(prepared.entries, vectors, strict=True)],
+                        [{"id": row_id, "embedding": vector} for (row_id, _content), vector in zip(prepared.entries, vectors[: len(prepared.entries)], strict=True)],
+                    )
+                if prepared.summary_entries:
+                    await session.execute(
+                        update(KnowledgeSegmentSummaryRow),
+                        [{"id": row_id, "embedding": vector, "document_version": document.version} for (row_id, _content), vector in zip(prepared.summary_entries, vectors[len(prepared.entries) :], strict=True)],
                     )
                 # Flip the generation of every published row — parents and
                 # children in both modes — so recall's version filter accepts

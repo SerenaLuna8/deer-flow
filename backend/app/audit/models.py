@@ -97,6 +97,7 @@ class AuditAction(StrEnum):
     PURGE_COMPLETED = "purge.completed"
     AUDIT_CORRECTED = "audit.corrected"
     SYSTEM_SETTING_UPDATED = "system_setting.updated"
+    KNOWLEDGE_SETTINGS_UPDATED = "knowledge_settings.update"
 
 
 class AuditTargetKind(StrEnum):
@@ -540,6 +541,11 @@ _ACTION_CONTRACTS[AuditAction.AUDIT_CORRECTED] = _contract(
     "system",
 )
 _ACTION_CONTRACTS[AuditAction.SYSTEM_SETTING_UPDATED] = _contract(
+    AuditTargetKind.SYSTEM_SETTING,
+    AuditScope.PLATFORM,
+    "system",
+)
+_ACTION_CONTRACTS[AuditAction.KNOWLEDGE_SETTINGS_UPDATED] = _contract(
     AuditTargetKind.SYSTEM_SETTING,
     AuditScope.PLATFORM,
     "system",

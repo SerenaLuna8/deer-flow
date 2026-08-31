@@ -4,6 +4,7 @@ import {
   ActivityIcon,
   ArrowLeftIcon,
   BotIcon,
+  BookOpenIcon,
   BoxesIcon,
   BriefcaseBusinessIcon,
   ClipboardListIcon,
@@ -46,6 +47,7 @@ interface NavigationLabels {
   audit: string;
   assets: string;
   systemSettings: string;
+  knowledgeSettings: string;
   settings: string;
 }
 
@@ -62,6 +64,7 @@ const DEFAULT_NAVIGATION_LABELS: NavigationLabels = {
   audit: "Logs",
   assets: "Assets",
   systemSettings: "System settings",
+  knowledgeSettings: "Knowledge settings",
   settings: "Model management",
 };
 
@@ -144,6 +147,7 @@ export function AdminOperationsNavigation({
   mobile = false,
   pathname,
   labels = DEFAULT_NAVIGATION_LABELS,
+  showKnowledgeSettings = true,
 }: {
   className?: string;
   compact?: boolean;
@@ -152,6 +156,7 @@ export function AdminOperationsNavigation({
   mobile?: boolean;
   pathname: string;
   labels?: NavigationLabels;
+  showKnowledgeSettings?: boolean;
 }) {
   const navigationGroups = [
     {
@@ -193,6 +198,11 @@ export function AdminOperationsNavigation({
           href: "/admin/settings/system",
           label: labels.systemSettings,
           icon: SettingsIcon,
+        },
+        {
+          href: "/admin/settings/knowledge",
+          label: labels.knowledgeSettings,
+          icon: BookOpenIcon,
         },
         {
           href: "/admin/settings/models",
@@ -238,6 +248,8 @@ export function AdminOperationsNavigation({
             {group.label}
           </p>
           {group.items.map(({ href, label, icon: Icon }) => {
+            if (href === "/admin/settings/knowledge" && !showKnowledgeSettings)
+              return null;
             const active =
               pathname === href ||
               pathname.startsWith(`${href}/`) ||
@@ -401,11 +413,14 @@ export function AdminOperationsShell({
             : pathname === "/admin/settings/system" ||
                 pathname.startsWith("/admin/settings/system/")
               ? t.adminOperations.navigation.systemSettings
-              : pathname === "/admin/settings" ||
-                  pathname === "/admin/settings/models" ||
-                  pathname.startsWith("/admin/settings/models/")
-                ? t.adminOperations.navigation.settings
-                : t.adminOperations.navigation.overview;
+              : pathname === "/admin/settings/knowledge" ||
+                  pathname.startsWith("/admin/settings/knowledge/")
+                ? t.adminOperations.navigation.knowledgeSettings
+                : pathname === "/admin/settings" ||
+                    pathname === "/admin/settings/models" ||
+                    pathname.startsWith("/admin/settings/models/")
+                  ? t.adminOperations.navigation.settings
+                  : t.adminOperations.navigation.overview;
 
   return (
     <div
@@ -494,6 +509,7 @@ export function AdminOperationsShell({
         <AdminOperationsNavigation
           compact={!desktopNavigationExpanded}
           pathname={pathname}
+          showKnowledgeSettings={user?.system_role === "system_admin"}
           labels={t.adminOperations.navigation}
           groupLabels={localLabels.navigationGroups}
           className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2.5 py-4"
@@ -594,6 +610,7 @@ export function AdminOperationsShell({
                 mobile
                 idPrefix="admin-mobile-navigation"
                 pathname={pathname}
+                showKnowledgeSettings={user?.system_role === "system_admin"}
                 labels={t.adminOperations.navigation}
                 groupLabels={localLabels.navigationGroups}
                 className="min-h-0 flex-1 overflow-y-auto px-2.5 py-4"

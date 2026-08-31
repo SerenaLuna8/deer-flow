@@ -314,7 +314,9 @@ rename/delete controls remain sibling buttons outside the navigation link.
   authorization.
 - `core/knowledge/` owns the strict contracts, query keys, and hooks; the
   knowledge root is registered in `scope-registry.ts`. Base and document lists
-  poll every 2 seconds only while a row is in an active status; a `deleting`
+  poll every 2 seconds while a row or its current task progress is active;
+  `summarize_document` leaves the Document ready while generation is running.
+  A `deleting`
   row with a recorded `delete_error` parks (stops polling, shows the reason)
   until the user explicitly re-deletes. A recoverable background document-list
   refresh failure keeps the last account/project-scoped rows with an explicit
@@ -441,6 +443,21 @@ rename/delete controls remain sibling buttons outside the navigation link.
   retrieval model referenced by knowledge bases (`in_use`) cannot be disabled
   or deleted. Registry administration works even while the Knowledge module
   is disabled. Chat and sidecar selection stays per model, never per provider.
+- `/admin/settings/knowledge` owns system Knowledge configuration, independent
+  of feature availability and gated by current `system_admin` in layout and
+  component. `core/admin-settings/knowledge/` has strict GET/PUT contracts;
+  secret-bearing saves are imperative, abort on account/role changes, and never
+  enter mutation/query caches. GET exposes only `secret_key_configured`; blank
+  secret retains the value, while changing the endpoint requires re-entry.
+  Version conflicts and storage-probe failures keep the draft and a safe error.
+  The page distinguishes restart-required settings from the summary System
+  Model reference that applies to subsequent tasks immediately.
+- Base settings expose the summary-index flag only when a summary System Model
+  is available. Saving ON reports accepted/skipped backfill documents and
+  invalidates the document list. Segment and hit details label generated
+  summaries separately from source content; they remain read-only. Diagnostics
+  show summary candidate and query-vector cache counts plus `matched_via`
+  (Segment/Child/Summary), never substitute summaries into citation bodies.
 - Chat citations render only from the thread projection's validated
   `knowledge_citations` payload on the Run's final AI text message; the
   renderer re-validates and degrades to "no citations" rather than trusting an

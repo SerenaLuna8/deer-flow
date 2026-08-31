@@ -904,7 +904,12 @@ function DocumentsTable({
                                 </a>
                               </DropdownMenuItem>
                             ) : null}
-                            {canEdit && document.status === "failed" ? (
+                            {canEdit &&
+                            (document.status === "failed" ||
+                              (document.status === "ready" &&
+                                document.task_progress?.kind ===
+                                  "summarize_document" &&
+                                document.task_progress.status === "failed")) ? (
                               <DropdownMenuItem
                                 className="text-[13px]"
                                 disabled={retryDocument.isPending}

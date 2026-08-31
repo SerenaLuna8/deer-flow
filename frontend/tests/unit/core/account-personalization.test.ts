@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, rs } from "@rstest/core";
+import { QueryClient } from "@tanstack/react-query";
 
 import { SETTINGS_SECTION_IDS } from "@/components/workspace/settings/settings-sections";
 import {
@@ -8,6 +9,11 @@ import {
   resetAccountMemory,
   updateAccountPersonalization,
 } from "@/core/account-personalization";
+import {
+  abortAccountPersonalizationAccount,
+  runAbortableAccountPersonalizationMutation,
+} from "@/core/account-personalization/api";
+import { transitionAccountQueries } from "@/core/auth/account-query-client";
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -28,6 +34,52 @@ afterEach(() => {
 });
 
 describe("account personalization client", () => {
+  test("cleanup ignores development and malformed identities without weakening requests", async () => {
+    expect(() => abortAccountPersonalizationAccount("default")).not.toThrow();
+    expect(() =>
+      abortAccountPersonalizationAccount("not-an-account"),
+    ).not.toThrow();
+    await expect(fetchAccountPersonalization("default")).rejects.toThrow();
+  });
+
+  test("default to UUID transition clears old caches and subsequent role loss aborts UUID work", async () => {
+    const client = new QueryClient();
+    client.setQueryData(
+      ["account", "default", "admin", "settings", "knowledge"],
+      { revision: 1 },
+    );
+    await expect(
+      transitionAccountQueries(client, "default", ACCOUNT_ID),
+    ).resolves.toBe(true);
+    expect(client.getQueryCache().getAll()).toHaveLength(0);
+    client.setQueryData(accountPersonalizationQueryKey(ACCOUNT_ID), {
+      version: 1,
+    });
+    const pending = runAbortableAccountPersonalizationMutation(
+      ACCOUNT_ID,
+      (signal) =>
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        }),
+    );
+    const aborted = expect(pending).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    await expect(
+      transitionAccountQueries(client, ACCOUNT_ID, ACCOUNT_ID, {
+        previousSystemRole: "system_admin",
+        nextSystemRole: "user",
+      }),
+    ).resolves.toBe(true);
+    await aborted;
+    expect(client.getQueryCache().getAll()).toHaveLength(0);
+    client.clear();
+  });
+
   test("exposes personalization in Settings and scopes its query to the account", () => {
     expect(SETTINGS_SECTION_IDS).toContain("personalization");
     expect(accountPersonalizationQueryKey(ACCOUNT_ID)).toEqual([

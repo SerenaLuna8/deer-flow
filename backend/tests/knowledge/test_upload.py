@@ -1365,7 +1365,7 @@ async def test_http_health_reports_module_probes(temp_path_tracker: list[Path]) 
 async def test_http_unconfigured_base_create_and_first_configuration(create_binding: dict[str, None]) -> None:
     from dataclasses import replace
 
-    from actweave_knowledge import KnowledgeBaseView
+    from actweave_knowledge import KnowledgeBaseUpdateResult, KnowledgeBaseView
 
     base_view = KnowledgeBaseView(
         id=_BASE_ID,
@@ -1400,7 +1400,7 @@ async def test_http_unconfigured_base_create_and_first_configuration(create_bind
             assert update.embedding_model_id == embedding_id
             assert update.reranker_model_id == reranker_id
             assert update.retrieval_mode == "hybrid"
-            return replace(base_view, embedding_model_id=embedding_id, reranker_model_id=reranker_id, retrieval_mode="hybrid")
+            return KnowledgeBaseUpdateResult(base=replace(base_view, embedding_model_id=embedding_id, reranker_model_id=reranker_id, retrieval_mode="hybrid"))
 
     async with _client(_app(_BaseModule())) as client:
         created = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/bases", json={"name": "待配置", **create_binding})
@@ -1419,7 +1419,7 @@ async def test_http_unconfigured_base_create_and_first_configuration(create_bind
 
 @pytest.mark.asyncio
 async def test_http_base_routes_round_trip_the_module_views() -> None:
-    from actweave_knowledge import KnowledgeBaseView, KnowledgeRebuildResult
+    from actweave_knowledge import KnowledgeBaseUpdateResult, KnowledgeBaseView, KnowledgeRebuildResult
 
     base_view = KnowledgeBaseView(
         id=_BASE_ID,
@@ -1458,7 +1458,7 @@ async def test_http_base_routes_round_trip_the_module_views() -> None:
         async def update_knowledge_base(self, project_id, base_id, update, *, authority):  # noqa: ANN001
             assert authority.project_id == project_id
             self.calls.append(("update_base", (project_id, base_id, update)))
-            return base_view
+            return KnowledgeBaseUpdateResult(base=base_view)
 
         async def rebuild_knowledge_base(self, project_id, base_id, *, embedding_model_id, authority):  # noqa: ANN001
             assert authority.project_id == project_id
@@ -1687,16 +1687,17 @@ async def test_http_reparse_routes_round_trip_the_module_views() -> None:
 
 
 @pytest.mark.asyncio
-async def test_http_document_views_project_task_progress(temp_path_tracker: list[Path]) -> None:
+@pytest.mark.parametrize(("kind", "stage", "document_status"), [("reembed_document", "embedding", "processing"), ("summarize_document", "summarizing", "ready")])
+async def test_http_document_views_project_task_progress(temp_path_tracker: list[Path], kind: str, stage: str, document_status: str) -> None:
     """List and detail responses carry the current-generation task progress —
     or an explicit null — and expose no claim or lease material."""
 
     from actweave_knowledge import KnowledgeTaskProgress
 
     progress = KnowledgeTaskProgress(
-        kind="reembed_document",
+        kind=kind,
         status="retry_wait",
-        stage="embedding",
+        stage=stage,
         completed_units=6,
         total_units=9,
         attempt_count=1,
@@ -1713,7 +1714,7 @@ async def test_http_document_views_project_task_progress(temp_path_tracker: list
             self.calls.append(("list_documents", (project_id, base_id, page, page_size)))
             return (
                 [
-                    _document_view(id=running_id, status="processing", version=2, task_progress=progress),
+                    _document_view(id=running_id, status=document_status, version=2, task_progress=progress),
                     _document_view(id=idle_id, status="ready"),
                 ],
                 2,
@@ -1722,7 +1723,7 @@ async def test_http_document_views_project_task_progress(temp_path_tracker: list
         async def get_document(self, project_id, document_id, *, authority):  # noqa: ANN001
             assert authority.project_id == project_id
             self.calls.append(("get_document", (project_id, document_id)))
-            return _document_view(id=document_id, status="processing", version=2, task_progress=progress)
+            return _document_view(id=document_id, status=document_status, version=2, task_progress=progress)
 
     module = _ProgressModule()
     async with _client(_app(module)) as client:
@@ -1733,9 +1734,9 @@ async def test_http_document_views_project_task_progress(temp_path_tracker: list
     items = {item["id"]: item for item in listed.json()["items"]}
     running_progress = items[str(running_id)]["task_progress"]
     assert running_progress == {
-        "kind": "reembed_document",
+        "kind": kind,
         "status": "retry_wait",
-        "stage": "embedding",
+        "stage": stage,
         "completed_units": 6,
         "total_units": 9,
         "attempt_count": 1,
@@ -1746,7 +1747,7 @@ async def test_http_document_views_project_task_progress(temp_path_tracker: list
     assert items[str(idle_id)]["task_progress"] is None
 
     assert fetched.status_code == 200
-    assert fetched.json()["item"]["task_progress"]["stage"] == "embedding"
+    assert fetched.json()["item"]["task_progress"]["stage"] == stage
 
 
 @pytest.mark.asyncio

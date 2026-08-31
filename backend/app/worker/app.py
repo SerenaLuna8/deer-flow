@@ -175,20 +175,18 @@ async def run_worker(
         engine = get_engine()
         if engine is None:
             raise WorkerConfigurationUnavailable()
-        # Knowledge is startup-only: a missing/disabled `knowledge` block keeps
+        # Knowledge is startup-only: a missing/disabled settings row keeps
         # the feature module absent, so no Knowledge task loop runs. Project
         # cleanup remains independently composed because historical Knowledge
         # data can outlive a later feature-disable configuration change.
         from app.knowledge.composition import (
-            create_knowledge_worker_resources_from_app_config,
-            require_knowledge_storage_ready,
+            create_knowledge_worker_resources_from_database,
         )
 
-        knowledge_resources = create_knowledge_worker_resources_from_app_config(config)
+        knowledge_resources = await create_knowledge_worker_resources_from_database(app_config=config)
         knowledge_module = knowledge_resources.feature_module
         if knowledge_module is not None:
             stack.push_async_callback(knowledge_module.aclose)
-            await require_knowledge_storage_ready(knowledge_module)
         sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
         try:
             run_mount_provider_ready = await asyncio.to_thread(

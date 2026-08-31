@@ -49,7 +49,7 @@ from ..persistence.models import (
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
 )
-from ..persistence.tasks import INDEXING_TASK_KINDS, TASK_OPEN_STATUSES
+from ..persistence.tasks import TASK_OPEN_STATUSES, VERSIONED_TASK_KINDS
 from ..storage import DOCUMENT_STORAGE_EXTENSIONS, MinioObjectStore, document_storage_key
 
 logger = logging.getLogger(__name__)
@@ -342,9 +342,8 @@ async def indexing_task_progress(
         await session.execute(
             select(KnowledgeTaskRow).where(
                 KnowledgeTaskRow.project_id == project_id,
-                KnowledgeTaskRow.kind.in_(INDEXING_TASK_KINDS),
+                KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS),
                 KnowledgeTaskRow.resource_id.in_(version_by_document),
-                KnowledgeTaskRow.status != "succeeded",
             )
         )
     ).scalars()
@@ -355,7 +354,7 @@ async def indexing_task_progress(
         current = newest.get(row.resource_id)
         if current is None or (row.created_at, row.id.hex) > (current.created_at, current.id.hex):
             newest[row.resource_id] = row
-    return {document_id: _task_progress_view(row) for document_id, row in newest.items()}
+    return {document_id: _task_progress_view(row) for document_id, row in newest.items() if row.status != "succeeded"}
 
 
 class KnowledgeDocumentService:
@@ -747,23 +746,35 @@ class KnowledgeDocumentService:
                 row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id).with_for_update())
                 if row is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
-                if row.status != "failed":
-                    raise _invalid("仅 failed 状态的文档支持重试")
                 base_status = await session.scalar(select(KnowledgeBaseRow.status).where(KnowledgeBaseRow.id == row.knowledge_base_id))
                 if base_status != "active":
                     raise _invalid("所属 Knowledge Base 不是 active 状态，不能重试")
                 last_indexing = (
                     await session.execute(
-                        select(KnowledgeTaskRow.kind, KnowledgeTaskRow.reparse_settings)
+                        select(KnowledgeTaskRow.kind, KnowledgeTaskRow.reparse_settings, KnowledgeTaskRow.status, KnowledgeTaskRow.target_version)
                         .where(
                             KnowledgeTaskRow.resource_id == row.id,
-                            KnowledgeTaskRow.kind.in_(INDEXING_TASK_KINDS),
+                            KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS),
                         )
                         .order_by(KnowledgeTaskRow.created_at.desc(), KnowledgeTaskRow.id.desc())
                         .limit(1)
                     )
                 ).one_or_none()
-                retry_kind, retry_reparse_settings = last_indexing or ("ingest_document", None)
+                if row.status == "ready":
+                    if last_indexing is None or last_indexing.kind != "summarize_document" or last_indexing.status != "failed" or last_indexing.target_version != row.version:
+                        raise _invalid("仅失败的文档或摘要任务支持重试")
+                    if await session.scalar(select(KnowledgeTaskRow.id).where(KnowledgeTaskRow.resource_id == row.id, KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS), KnowledgeTaskRow.status.in_(TASK_OPEN_STATUSES)).limit(1)):
+                        raise _invalid("文档存在未完成的索引任务，暂不能重试")
+                    summary_enabled = await session.scalar(select(KnowledgeBaseRow.summary_index_enabled).where(KnowledgeBaseRow.id == row.knowledge_base_id))
+                    if not summary_enabled:
+                        raise _invalid("请先启用知识库的摘要索引")
+                    session.add(KnowledgeTaskRow(id=uuid4(), project_id=project_id, resource_id=row.id, kind="summarize_document", target_version=row.version))
+                    await session.flush()
+                    progress = await indexing_task_progress(session, project_id, {row.id: row.version})
+                    return document_view(row, delete_error=await self._derived_delete_error(session, row.id), task_progress=progress.get(row.id))
+                if row.status != "failed":
+                    raise _invalid("仅 failed 状态的文档支持重试")
+                retry_kind, retry_reparse_settings = (last_indexing.kind, last_indexing.reparse_settings) if last_indexing is not None else ("ingest_document", None)
                 row.version = row.version + 1
                 row.status = "queued"
                 if retry_kind == "ingest_document" and row.published_version is None:
@@ -914,7 +925,7 @@ class KnowledgeDocumentService:
                 open_indexing = await session.scalar(
                     select(KnowledgeTaskRow.id).where(
                         KnowledgeTaskRow.resource_id == row.id,
-                        KnowledgeTaskRow.kind.in_(INDEXING_TASK_KINDS),
+                        KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS),
                         KnowledgeTaskRow.status.in_(TASK_OPEN_STATUSES),
                     )
                 )
