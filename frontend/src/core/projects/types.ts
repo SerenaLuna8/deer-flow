@@ -80,6 +80,7 @@ export const projectSchema = z
     role: projectRoleSchema,
     capabilities: z.array(capabilitySchema),
     is_pinned: z.boolean(),
+    created_at: z.string().datetime({ offset: true }),
     last_entered_at: z.string().datetime({ offset: true }).nullable(),
     member_count: z.number().int().nonnegative(),
     agent_count: z.number().int().nonnegative(),

@@ -1,6 +1,7 @@
 "use client";
 
-import { ArrowRightIcon, FolderIcon, PencilIcon, PinIcon } from "lucide-react";
+import { ArrowRightIcon, PencilIcon, PinIcon } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
@@ -21,87 +22,105 @@ export function ProjectCard({
   onEdit: () => void;
   pinPending?: boolean;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const copy = t.projectWorkspace.card;
+  const createdAt = new Intl.DateTimeFormat(locale, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(project.created_at));
   return (
     <article
       data-testid="project-card"
-      className="group hover:bg-muted/20 focus-within:ring-ring/50 grid min-w-0 gap-5 px-5 py-5 transition-colors focus-within:ring-[3px] focus-within:ring-inset xl:grid-cols-[minmax(18rem,1.2fr)_minmax(14rem,1fr)_minmax(23rem,auto)] xl:items-center xl:px-8 xl:py-6"
+      className="group border-border/60 bg-card text-card-foreground hover:border-border relative h-[164px] min-w-0 rounded-xl border p-4 shadow-[0_1px_3px_rgba(15,23,42,0.04)] transition-[border-color,box-shadow] hover:shadow-[0_3px_10px_rgba(15,23,42,0.07)]"
     >
-      <div className="flex min-w-0 items-center gap-4 lg:gap-6">
-        <div className="bg-muted text-primary flex size-16 shrink-0 items-center justify-center rounded-xl lg:size-[4.5rem] lg:rounded-2xl">
-          {project.icon === "folder" ? (
-            <FolderIcon aria-hidden className="size-7 lg:size-8" />
-          ) : (
-            <span aria-hidden className="text-xl">
+      <Link
+        href={`/projects/${encodeURIComponent(project.slug)}`}
+        aria-label={`${copy.open}: ${project.display_name}`}
+        className="focus-visible:ring-ring/50 absolute inset-0 z-10 rounded-xl outline-none focus-visible:ring-2"
+      >
+        <span
+          aria-hidden
+          className="text-muted-foreground group-hover:text-primary absolute right-3 bottom-3 flex size-7 items-center justify-center transition-colors"
+        >
+          <ArrowRightIcon className="size-4" />
+        </span>
+      </Link>
+
+      <div className="flex min-w-0 items-center gap-3 pr-14">
+        {project.icon === "folder" ? (
+          <Image
+            src="/images/workspace/project-folder.webp"
+            width={40}
+            height={40}
+            alt=""
+            aria-hidden
+            className="size-10 shrink-0 rounded-[10px] object-contain"
+          />
+        ) : (
+          <div className="bg-muted flex size-10 shrink-0 items-center justify-center rounded-[10px]">
+            <span aria-hidden className="text-xl leading-none">
               {project.icon}
             </span>
-          )}
-        </div>
+          </div>
+        )}
         <div className="min-w-0">
-          <h3 className="truncate text-lg font-semibold lg:text-xl">
+          <h3 className="truncate text-sm leading-5 font-semibold">
             {project.display_name}
           </h3>
-          <p className="text-muted-foreground mt-1 truncate font-mono text-xs">
+          <p className="text-muted-foreground mt-1 truncate text-[11px] leading-4">
             {project.slug}
           </p>
         </div>
       </div>
 
-      <p className="text-muted-foreground line-clamp-2 text-sm lg:text-base">
+      <p className="text-muted-foreground mt-4 line-clamp-2 text-[13px] leading-5">
         {project.description || copy.noDescription}
       </p>
 
-      <div className="flex flex-wrap items-center gap-1 border-t pt-4 xl:justify-end xl:border-t-0 xl:pt-0">
+      <p className="text-muted-foreground absolute right-12 bottom-3 left-4 flex h-7 items-center gap-1 text-[11px] leading-4">
+        <span className="shrink-0">{copy.createdAt}</span>
+        <time dateTime={project.created_at} className="truncate">
+          {createdAt}
+        </time>
+      </p>
+
+      <div className="absolute top-3 right-3 z-20 flex items-center gap-0.5">
         <Button
           type="button"
           variant="ghost"
+          size="icon-sm"
           className={cn(
-            "h-11 px-3 text-sm lg:text-base",
+            "text-muted-foreground size-7 disabled:pointer-events-auto",
             project.is_pinned && "text-selection hover:text-selection",
           )}
           aria-label={project.is_pinned ? copy.unpin : copy.pin}
           aria-pressed={project.is_pinned}
+          title={project.is_pinned ? copy.unpin : copy.pin}
           disabled={pinPending}
           onClick={onPin}
         >
           <PinIcon
             aria-hidden
-            className={cn(
-              "size-[1.125rem]",
-              project.is_pinned && "fill-current",
-            )}
+            className={cn("size-3.5", project.is_pinned && "fill-current")}
           />
-          {project.is_pinned ? copy.pinned : copy.pinAction}
         </Button>
         {canUpdateProject(project) ? (
-          <>
-            <span
-              aria-hidden
-              className="bg-border mx-1 hidden h-7 w-px sm:block"
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              className="h-11 px-3 text-sm lg:text-base"
-              aria-label={copy.edit}
-              onClick={onEdit}
-            >
-              <PencilIcon aria-hidden className="size-[1.125rem]" />
-              {copy.editAction}
-            </Button>
-          </>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="text-muted-foreground size-7"
+            aria-label={copy.edit}
+            title={copy.edit}
+            onClick={onEdit}
+          >
+            <PencilIcon aria-hidden className="size-3.5" />
+          </Button>
         ) : null}
-        <Button
-          asChild
-          size="lg"
-          className="ml-auto h-12 px-5 text-base max-sm:mt-2 max-sm:w-full xl:ml-4"
-        >
-          <Link href={`/projects/${encodeURIComponent(project.slug)}`}>
-            {copy.open}
-            <ArrowRightIcon aria-hidden className="size-4" />
-          </Link>
-        </Button>
       </div>
     </article>
   );

@@ -2740,6 +2740,7 @@ export const zhCN: Translations = {
       pinned: "已置顶",
       noDescription: "暂无项目描述",
       open: "进入项目",
+      createdAt: "创建于",
     },
     empty: {
       noMatchesTitle: "没有匹配的项目",
@@ -2924,6 +2925,9 @@ export const zhCN: Translations = {
     sideEffectStateUnknownTitle: "运行状态无法确认",
     sideEffectStateUnknownDescription:
       "部分操作可能已经执行，但 Worker 无法确认最终状态。为避免重复执行，请勿直接重新发送；请先检查运行记录。",
+    graphRecursionLimitTitle: "已达到图执行步数上限",
+    graphRecursionLimitDescription:
+      "Agent 已停止，已有回答或文件可能不完整。部分操作可能已经执行，为避免重复执行，请勿直接重新发送；请先检查运行记录和现有结果。",
     currentUploadUnavailableTitle: "当前图片附件不可用",
     currentUploadUnavailableDescription:
       "本次运行无法安全读取或校验当前图片附件。请恢复原输入并重试；若仍失败，请移除后重新粘贴图片。",

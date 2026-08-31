@@ -12,6 +12,7 @@ import {
   CONTEXT_CAPACITY_EXCEEDED,
   CONTEXT_PROVIDER_CALL_AMBIGUOUS,
   CURRENT_UPLOAD_UNAVAILABLE,
+  GRAPH_RECURSION_LIMIT,
   LLM_AUTHENTICATION_FAILED,
   LLM_CIRCUIT_OPEN,
   LLM_PROVIDER_UNAVAILABLE,
@@ -138,6 +139,26 @@ describe("RunFailureAlert", () => {
     expect(english).toContain("do not resend this message directly");
     expect(english).not.toContain("Restore to composer");
     expect(english).not.toContain("Retry without deep thinking");
+  });
+
+  test("explains the graph step limit without offering replay or input restore", () => {
+    const failureCode = GRAPH_RECURSION_LIMIT;
+    const chinese = render(failureCode, "zh-CN", false, true);
+    const english = render(failureCode, "en-US", false, true);
+
+    expect(chinese).toContain('data-run-failure-code="GRAPH_RECURSION_LIMIT"');
+    expect(chinese).toContain("已达到图执行步数上限");
+    expect(chinese).toContain("Agent 已停止，已有回答或文件可能不完整");
+    expect(chinese).toContain("请勿直接重新发送");
+    expect(chinese).not.toContain("Worker 无法确认最终状态");
+    expect(chinese).not.toContain("恢复到输入框");
+    expect(english).toContain("Graph execution step limit reached");
+    expect(english).toContain("The Agent has stopped");
+    expect(english).toContain("Existing answers or files may be incomplete");
+    expect(english).toContain("do not resend this message directly");
+    expect(english).not.toContain("Restore to composer");
+    expect(english).not.toContain("Retry without deep thinking");
+    expect(canReplayRunFailure(failureCode)).toBe(false);
   });
 
   test("blocks message replay when durable side effects may already exist", () => {

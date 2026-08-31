@@ -27,6 +27,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   retention 执行最终清理。会话输入框选择、粘贴或拖入附件后会立即在后台预上传；发送
   消息时复用同一上传结果，不会重复上传。已经持久化的完整回复不会因运行时或沙箱
   回收失败被改写为 Agent 执行失败；此类回收问题作为 Worker 运维错误重试和记录。
+  Agent 图执行步数耗尽时明确显示“已达到图执行步数上限”，保留具体失败原因和已有
+  过程输出；当前结果可能不完整，界面不提供直接重放入口，以免重复已经执行的操作。
   每次模型调用的思考内容可独立折叠；思考、过程输出和工具调用按模型调用顺序逐项展示，
   普通执行过程不再使用“查看其他 N 个步骤”或“执行过程 · N 个步骤”的聚合折叠，
   也不会在 Run 完成时隐藏或重排。
@@ -320,7 +322,7 @@ Scheduler、Frontend、Nginx 五个子进程仍存活，且数据库中出现 fr
 
 浏览器访问 <http://localhost:2026>。常见入口：
 
-- `/workspace`：账户级多项目工作区。
+- `/workspace`：账户级多项目工作区，以紧凑卡片浏览和进入项目，显示项目创建时间，支持搜索、置顶、编辑与恢复项目。
 - `/projects/{project_slug}`：项目会话、资产、Memory、Automation 和设置。
 - `/admin`：仅 system admin 可访问的平台治理与运维页面。
 
@@ -367,6 +369,9 @@ Vision Bridge；三者的必填最大输入上限均初始化为 `1,000,000` tok
 时，须在接收项目 Run 前清空选择。
 全新安装把单次 `inspect_image` 端到端截止时间初始化为 60 秒；管理员可在 5–120 秒内
 调整，更新只会冻结到之后新建的 Run。
+每个 Run 的视觉请求次数、累计图片字节或像素额度耗尽时，工具返回
+`VISION_BUDGET_EXHAUSTED`，明确要求本次 Run 不再重试，等待不会恢复额度。
+供应商暂时限流仍返回 `VISION_RATE_LIMITED`；两者不再混用。
 
 Bridge 不解析或重写厂商协议。`inspect_image` 通过唯一 `ModelRuntime` 向所选模型发送标准
 LangChain 多模态 content block；OpenAI、Anthropic、DeepSeek、vLLM 或其他已支持

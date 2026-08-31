@@ -3,6 +3,7 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   CURRENT_UPLOAD_UNAVAILABLE,
+  GRAPH_RECURSION_LIMIT,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   SIDE_EFFECT_STATE_UNKNOWN,
@@ -168,6 +169,26 @@ describe("run failure recovery", () => {
       SIDE_EFFECT_STATE_UNKNOWN,
     );
     expect(resolveRunFailureRunId(liveError, "run-live", [])).toBe("run-live");
+  });
+
+  test("recognizes the graph step limit from live and refreshed durable failures", () => {
+    const durableFailure = [run("error", GRAPH_RECURSION_LIMIT)];
+
+    expect(latestRunFailureCode(durableFailure)).toBe("GRAPH_RECURSION_LIMIT");
+    expect(resolveRunFailureCode(undefined, durableFailure)).toBe(
+      "GRAPH_RECURSION_LIMIT",
+    );
+    expect(resolveRunFailureRunId(undefined, null, durableFailure)).toBe(
+      "run-1",
+    );
+
+    const liveError = new Error(GRAPH_RECURSION_LIMIT);
+    liveError.name = GRAPH_RECURSION_LIMIT;
+    expect(resolveRunFailureCode(liveError, [])).toBe("GRAPH_RECURSION_LIMIT");
+    expect(resolveRunFailureRunId(liveError, "run-live", [])).toBe("run-live");
+    expect(
+      latestRunFailureCode([run("success", GRAPH_RECURSION_LIMIT)]),
+    ).toBeNull();
   });
 
   test("recognizes a current-upload failure from live and durable terminals", () => {

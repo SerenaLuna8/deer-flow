@@ -34,7 +34,7 @@ class _Boundary:
         normalized_pixels: int,
     ) -> None:
         if self.before_calls + 1 > MAX_VISION_CALLS_PER_RUN or self.normalized_bytes + normalized_bytes > MAX_VISION_NORMALIZED_BYTES_PER_RUN or self.normalized_pixels + normalized_pixels > MAX_VISION_NORMALIZED_PIXELS_PER_RUN:
-            raise VisionDispatchDenied("VISION_RATE_LIMITED")
+            raise VisionDispatchDenied("VISION_BUDGET_EXHAUSTED")
         self.before_calls += 1
         self.normalized_bytes += normalized_bytes
         self.normalized_pixels += normalized_pixels
@@ -88,7 +88,7 @@ async def test_dispatch_uses_durable_boundary_for_cumulative_limits() -> None:
             normalized_bytes=1,
             normalized_pixels=1,
         )
-    assert caught.value.code == "VISION_RATE_LIMITED"
+    assert caught.value.code == "VISION_BUDGET_EXHAUSTED"
     assert boundary.before_calls == MAX_VISION_CALLS_PER_RUN
 
     # Reconstructing the process-local authority must not reset the boundary.
@@ -98,7 +98,7 @@ async def test_dispatch_uses_durable_boundary_for_cumulative_limits() -> None:
             normalized_bytes=1,
             normalized_pixels=1,
         )
-    assert caught.value.code == "VISION_RATE_LIMITED"
+    assert caught.value.code == "VISION_BUDGET_EXHAUSTED"
 
     byte_boundary = _Boundary()
     byte_authority = _authority(byte_boundary)
@@ -107,7 +107,7 @@ async def test_dispatch_uses_durable_boundary_for_cumulative_limits() -> None:
             normalized_bytes=MAX_VISION_NORMALIZED_BYTES_PER_RUN + 1,
             normalized_pixels=1,
         )
-    assert caught.value.code == "VISION_RATE_LIMITED"
+    assert caught.value.code == "VISION_BUDGET_EXHAUSTED"
     assert byte_boundary.before_calls == 0
 
 

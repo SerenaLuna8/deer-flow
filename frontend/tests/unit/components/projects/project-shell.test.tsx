@@ -26,6 +26,7 @@ const adminProject: Project = {
   role: "admin",
   capabilities: [...CAPABILITIES],
   is_pinned: true,
+  created_at: "2026-07-01T00:00:00Z",
   last_entered_at: "2026-07-12T10:30:00+08:00",
   member_count: 3,
   agent_count: 0,

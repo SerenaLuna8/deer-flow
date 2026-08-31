@@ -82,6 +82,7 @@ class VisionErrorResult(_StrictContract):
         "IMAGE_PIXEL_LIMIT_EXCEEDED",
         "DATA_POLICY_BLOCKED",
         "VISION_BUSY",
+        "VISION_BUDGET_EXHAUSTED",
         "VISION_RATE_LIMITED",
         "VISION_DEADLINE_EXCEEDED",
         "VISION_UNAVAILABLE",

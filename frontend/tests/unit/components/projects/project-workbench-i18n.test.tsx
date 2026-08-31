@@ -15,6 +15,7 @@ const project: Project = {
   role: "admin",
   capabilities: [...CAPABILITIES],
   is_pinned: true,
+  created_at: "2026-07-01T00:00:00Z",
   last_entered_at: null,
   member_count: 1,
   agent_count: 0,
@@ -86,16 +87,11 @@ describe("project workbench locale", () => {
 
     for (const text of [
       "Workspace",
-      "Manage and enter your projects",
       "Search by name or project slug",
       "All projects",
-      "Pinned only",
       "1 project",
       "Create project",
-      "Description",
-      "Actions",
       "No project description",
-      "Pinned",
       "Open project",
       "Recoverable projects",
     ]) {
@@ -103,13 +99,13 @@ describe("project workbench locale", () => {
     }
 
     expect(html).toContain('data-testid="project-list"');
-    expect(html).toContain('data-testid="project-list-header"');
+    expect(html).not.toContain("Pinned only");
+    expect(html).not.toContain('data-testid="project-list-header"');
     expect(html).not.toContain("No projects are currently recoverable.");
 
     for (const label of [
       "Account",
       "Search projects",
-      "Filter projects",
       "Project list",
       "Edit project",
       "Unpin project",

@@ -379,6 +379,44 @@ async def test_inspect_image_bounds_long_multibyte_model_text(
 
 
 @pytest.mark.asyncio
+async def test_inspect_image_reports_exhausted_run_budget_without_provider_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_private_image(monkeypatch)
+
+    class ExhaustedAuthority(_Authority):
+        async def before_attempt(
+            self,
+            *,
+            normalized_bytes: int,
+            normalized_pixels: int,
+        ) -> VisionDispatchAttempt:
+            raise VisionDispatchDenied("VISION_BUDGET_EXHAUSTED")
+
+    model_runtime = _Runtime(AssertionError("exhausted Run must not dispatch"))
+    journal = _Journal()
+    inspect_image = build_inspect_image_tool(
+        app_config=_app_config(),
+        model_runtime_factory=lambda _config: model_runtime,
+    )
+
+    message = await inspect_image.coroutine(
+        runtime=SimpleNamespace(context=_tool_context(ExhaustedAuthority(), journal)),
+        image_path="/mnt/user-data/uploads/image.png",
+        mode="ui",
+        analysis_goal=ANALYSIS_GOAL,
+        tool_call_id="call-budget-exhausted",
+    )
+
+    assert message.status == "error"
+    payload = json.loads(message.content)
+    assert payload["code"] == "VISION_BUDGET_EXHAUSTED"
+    assert payload["message"] == ("Image analysis quota is exhausted for this Run. Do not retry in this Run; waiting will not restore quota. Continue without further image analysis and do not guess image contents.")
+    assert model_runtime.calls == []
+    assert journal.records == []
+
+
+@pytest.mark.asyncio
 async def test_inspect_image_maps_provider_failure_without_leaking_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -403,7 +441,9 @@ async def test_inspect_image_maps_provider_failure_without_leaking_message(
     )
 
     assert message.status == "error"
-    assert json.loads(message.content)["code"] == "VISION_RATE_LIMITED"
+    payload = json.loads(message.content)
+    assert payload["code"] == "VISION_RATE_LIMITED"
+    assert payload["message"] == "Image analysis is temporarily rate limited."
     assert "secret provider response" not in message.content
     receipt, error_code = authority.events[1][1]
     assert error_code == "VISION_RATE_LIMITED"

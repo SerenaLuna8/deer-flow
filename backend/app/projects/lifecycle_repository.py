@@ -326,6 +326,7 @@ class ProjectLifecycleRepository:
             display_name=project.display_name,
             description=project.description,
             icon=project.icon,
+            created_at=project.created_at,
             role=role,
             capabilities=capabilities_for(role),
             is_pinned=membership.is_pinned,

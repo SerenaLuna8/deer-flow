@@ -183,7 +183,7 @@ class PrivateRunExecutionLeaseLost(PrivateRunConflict):
     """The supplied durable job token cannot mutate the scoped Run."""
 
 
-class PrivateRunVisionDispatchRateLimited(PrivateRunConflict):
+class PrivateRunVisionDispatchBudgetExhausted(PrivateRunConflict):
     """One more Vision HTTP attempt would cross the logical Run limit."""
 
 
@@ -943,7 +943,7 @@ class PrivateRunRepository:
                 max_normalized_pixels=MAX_VISION_NORMALIZED_PIXELS_PER_RUN,
             )
         except RunVisionDispatchBudgetExceeded:
-            raise PrivateRunVisionDispatchRateLimited from None
+            raise PrivateRunVisionDispatchBudgetExhausted from None
         run.metadata_json = reserved_metadata
         if job.retry_safety == "safe":
             job.retry_safety = "unknown"

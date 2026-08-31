@@ -3,6 +3,7 @@ import {
   CONTEXT_CAPACITY_EXCEEDED,
   CONTEXT_PROVIDER_CALL_AMBIGUOUS,
   CURRENT_UPLOAD_UNAVAILABLE,
+  GRAPH_RECURSION_LIMIT,
   LLM_AUTHENTICATION_FAILED,
   LLM_CIRCUIT_OPEN,
   LLM_PROVIDER_BUSY,
@@ -34,6 +35,11 @@ export function resolveRunFailureCopy(
       return {
         title: conversation.modelOutputLimitTitle,
         description: conversation.modelOutputLimitDescription,
+      };
+    case GRAPH_RECURSION_LIMIT:
+      return {
+        title: conversation.graphRecursionLimitTitle,
+        description: conversation.graphRecursionLimitDescription,
       };
     case LOOP_SAFETY_LIMIT:
       return {

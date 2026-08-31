@@ -152,3 +152,32 @@ The current request replaces the upload dialog with the same three-step workspac
 - **Cleanup:** only the isolated port-3126 server and temporary visual-test copy were removed. The normal port-2026 service remains running. No business data was created or changed by this UI verification.
 
 final result: passed
+
+## Workspace card redesign — 2026-08-31
+
+The user selected the second displayed refinement after supplying a white-card grid reference. This entry covers only `/workspace`; the Knowledge entries above remain historical evidence for their own scope.
+
+- **Selected visual:** `/Users/jiangfeng/.codex/generated_images/01a05614-6f61-7450-abe3-3bff9add0e45/exec-755941f4-5734-4734-a540-c1c271318cd5.png`, 1672 × 941 pixels.
+- **Implementation:** `/Users/jiangfeng/.codex/visualizations/2026/08/31/01a05614-6f61-7450-abe3-3bff9add0e45/workspace-redesign/desktop.png`, 1672 × 941 pixels; `mobile.png` in the same directory, 393 × 852 pixels. Browser CSS viewports match these dimensions, device pixel ratio 1. Full-page capture avoids the browser's scaled emulation preview; no density normalization is needed for the final captures.
+- **State:** authenticated Chinese workspace, one actual default project, no description, no pinned project, zero recoverable projects. No fake projects, counts, invitations, or activity panels were introduced.
+
+### Fidelity and comparison
+
+Source and desktop capture were opened together at original resolution. The card identity, icon, actions, and description were also inspected at native scale with DOM geometry and font measurements; these small regions are legible in the full-resolution files, so no separate enlarged crop was required.
+
+1. **Typography:** existing system sans and serif Fluva wordmark remain. Page title is 18px, card title 14px, slug 11px, description 13px. Mobile search uses 16px to avoid the usual iOS input auto-zoom behavior; desktop search stays 13px. A physical iOS device was not tested.
+2. **Layout:** white header and toolbar sit above a light gray card canvas. At 1672px, the grid has five 310.4px columns with 14px gaps; cards are 164px high. At 393px, a single 361px card fits inside 16px margins and the toolbar wraps without horizontal overflow. The rendered DOM scroll widths equal both viewport widths. The 56px header and 81px desktop toolbar deliberately tighten the generated mock's larger spacing, following the user's repeated request for smaller UI. Card width responds to the real grid rather than stretching a lone item across the page.
+3. **Colors:** white card, neutral gray canvas `#f3f5f7`, subtle neutral border/shadow, blue selection and create action `#2454ff`. An initial inherited purple accent was corrected locally; existing global theme tokens were not changed. Dark-mode fallbacks remain but were not visually tested.
+4. **Assets:** the folder is an independently generated raster asset at `frontend/public/images/workspace/project-folder.webp` (512 × 512, approximately 7.25 KiB), rendered at 40px. Its pastel blue tile and gray folder follow the supplied reference. The image loaded successfully. Functional pin, pencil, arrow, search, and recovery icons reuse the existing icon library. User-supplied non-folder icons retain their existing data semantics.
+5. **Content:** actual project name, slug, description fallback, project count, and all existing labels remain localized. The large subtitle and table-column headings are removed for the selected card layout. Card navigation is a named real link; pin/edit are independent buttons and do not nest inside that link.
+
+### Interaction and validation
+
+- Browser checked search/no-match/clear, pinned filter, pin/unpin, create-dialog open/cancel, edit-dialog open/close without navigation, recovery expand/collapse, and Enter on the project link reaching `/projects/default-project`. The temporary pin was restored to its initial value; no projects were created, edited, restored, or deleted. Entering the project follows the normal application entry behavior.
+- Desktop and mobile screenshots were inspected; browser console error retrieval returned an empty list. The temporary viewport override was reset and the preview returned to `/workspace`.
+- `pnpm check` passed. `pnpm test` passed **203 files / 1,130 tests**, zero failures or skips. Production build passed with 69 generated pages. Changed TSX/test files passed Prettier; `git diff --check` passed.
+- Focused tests cover the named project link, independent mutation controls, pending pin state, capability-based edit visibility, custom project icons, and translated workspace labels. The existing Playwright suite was not rerun; browser evidence above is live interaction verification through the connected browser, not a claim about all browser engines or all end-to-end specs.
+- The implementation was reviewed for keyboard and responsive regressions. No actionable P0/P1/P2 remains in the inspected scope. P3 limits: physical touch hardware, other browser engines, dark mode, and populated multi-project ordering were not visually exercised; existing sorting/data contracts are unchanged.
+- Unrelated dirty backend, chat/runtime, localization, and existing documentation changes were preserved. No commit, push, database maintenance, or deployment was performed for this redesign.
+
+final result: passed

@@ -46,7 +46,6 @@ import { ProjectCard } from "./project-card";
 import { ProjectEmptyState } from "./project-empty-state";
 import {
   filterAndSortProjects,
-  type ProjectListFilter,
   projectErrorMessage,
 } from "./project-view-model";
 import { WorkspaceRecoverySection } from "./workspace-recovery-section";
@@ -85,13 +84,11 @@ export function ProjectWorkbench({
   const { t } = useI18n();
   const copy = t.projectWorkspace;
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<ProjectListFilter>("all");
   const [createOpen, setCreateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const projectsQuery = useProjects(userId, {
     ...(search.trim() ? { query: search.trim() } : {}),
-    ...(filter === "pinned" ? { pinned: true } : {}),
     limit: 100,
   });
   const create = useCreateProject(userId);
@@ -99,7 +96,6 @@ export function ProjectWorkbench({
   const projects = filterAndSortProjects(
     projectsQuery.data?.items ?? [],
     search,
-    filter,
   );
 
   useEffect(() => {
@@ -111,16 +107,19 @@ export function ProjectWorkbench({
   }, [update.isSuccess]);
 
   return (
-    <WorkspaceContainer data-testid="project-workbench">
+    <WorkspaceContainer
+      data-testid="project-workbench"
+      className="[--selection:#2454ff] dark:[--selection:#8b8ae8]"
+    >
       <SettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         defaultSection="appearance"
       />
-      <header className="flex h-20 shrink-0 items-center justify-between gap-4 border-b px-5 sm:px-8">
+      <header className="bg-background flex h-14 shrink-0 items-center justify-between gap-4 border-b px-4 sm:px-8">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="text-primary font-serif text-2xl">Fluva</span>
-          <span className="text-muted-foreground hidden text-base sm:inline">
+          <span className="text-foreground font-serif text-xl">Fluva</span>
+          <span className="text-muted-foreground hidden text-xs sm:inline">
             {copy.title}
           </span>
         </div>
@@ -128,7 +127,12 @@ export function ProjectWorkbench({
           <SystemNotificationCenter userId={userId} />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" aria-label={copy.account}>
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-8 gap-2 px-2 text-xs"
+                aria-label={copy.account}
+              >
                 <UserRoundIcon className="size-4" />
                 <span className="hidden max-w-56 truncate sm:inline">
                   {accountUsername}
@@ -175,134 +179,107 @@ export function ProjectWorkbench({
           </DropdownMenu>
         </div>
       </header>
-      <WorkspaceBody className="overflow-y-auto">
-        <main
-          id="workspace-main"
-          tabIndex={-1}
-          className="mx-auto w-full max-w-[1440px] px-5 py-10 outline-none sm:px-8 sm:py-12 lg:px-12 lg:py-14"
-        >
-          <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-                {copy.title}
-              </h1>
-              <p className="text-muted-foreground mt-3 text-base sm:text-lg">
-                {copy.subtitle}
-              </p>
-            </div>
-            <Button
-              type="button"
-              size="lg"
-              className="h-14 shrink-0 px-7 text-base max-sm:w-full"
-              onClick={() => setCreateOpen(true)}
-            >
-              <PlusIcon aria-hidden className="size-5" /> {copy.createProject}
-            </Button>
-          </div>
-
+      <WorkspaceBody className="dark:bg-muted/30 overflow-y-auto bg-[#f3f5f7]">
+        <main id="workspace-main" tabIndex={-1} className="w-full outline-none">
           <div
             data-testid="project-toolbar"
-            className="mt-12 mb-12 grid gap-4 md:grid-cols-[minmax(0,1fr)_20rem] md:items-center lg:grid-cols-[minmax(22rem,1fr)_24rem_auto]"
+            className="bg-background flex flex-wrap items-center gap-x-6 gap-y-3 border-b px-4 py-5 sm:px-8 lg:gap-x-10 lg:py-6"
           >
-            <div className="relative min-w-0 flex-1">
-              <SearchIcon className="text-muted-foreground absolute top-1/2 left-4 size-5 -translate-y-1/2" />
-              <Input
-                aria-label={copy.searchProjects}
-                className="h-14 rounded-lg pl-12 text-base shadow-none"
-                placeholder={copy.searchPlaceholder}
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-              />
+            <div className="flex shrink-0 items-center gap-3">
+              <h1 className="text-lg font-semibold tracking-tight">
+                {copy.title}
+              </h1>
+              <span
+                aria-live="polite"
+                aria-atomic="true"
+                className="text-muted-foreground text-xs"
+              >
+                {!projectsQuery.isLoading && !projectsQuery.error
+                  ? copy.projectCount(projects.length)
+                  : null}
+              </span>
             </div>
-            <div
-              role="group"
-              aria-label={copy.filterProjects}
-              className="bg-muted grid h-14 grid-cols-2 rounded-lg p-1"
-            >
+            <span className="border-selection text-selection flex h-8 items-center border-b-2 px-1 text-[13px] font-medium">
+              {copy.allProjects}
+            </span>
+            <div className="flex w-full items-center gap-3 md:ml-auto md:w-auto">
+              <div className="relative min-w-0 flex-1 md:w-64">
+                <SearchIcon
+                  aria-hidden
+                  className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2"
+                />
+                <Input
+                  aria-label={copy.searchProjects}
+                  className="h-8 rounded-md pl-9 text-base shadow-none md:text-[13px]"
+                  placeholder={copy.searchPlaceholder}
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                />
+              </div>
               <Button
                 type="button"
-                variant="ghost"
-                className="aria-pressed:border-selection/15 aria-pressed:bg-selection-subtle aria-pressed:text-selection h-12 min-w-0 border border-transparent text-base shadow-none"
-                aria-pressed={filter === "all"}
-                onClick={() => setFilter("all")}
+                className="bg-selection text-selection-foreground hover:bg-selection/90 h-8 shrink-0 gap-1.5 rounded-md px-3 text-[13px] shadow-none"
+                onClick={() => setCreateOpen(true)}
               >
-                {copy.allProjects}
+                <PlusIcon aria-hidden className="size-3.5" />{" "}
+                {copy.createProject}
               </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                className="aria-pressed:border-selection/15 aria-pressed:bg-selection-subtle aria-pressed:text-selection h-12 min-w-0 border border-transparent text-base shadow-none"
-                aria-pressed={filter === "pinned"}
-                onClick={() => setFilter("pinned")}
-              >
-                {copy.pinnedOnly}
-              </Button>
-            </div>
-            <div
-              aria-live="polite"
-              aria-atomic="true"
-              className="text-muted-foreground flex min-h-9 min-w-20 items-center text-base md:col-span-2 md:justify-self-end lg:col-span-1"
-            >
-              {!projectsQuery.isLoading && !projectsQuery.error
-                ? copy.projectCount(projects.length)
-                : null}
             </div>
           </div>
 
-          <section aria-label={copy.projectList}>
-            {projectsQuery.isLoading ? (
-              <div
-                data-testid="project-loading"
-                aria-label={copy.loadingProjects}
-                className="border-border/80 divide-border/80 overflow-hidden rounded-xl border"
-              >
-                {[0, 1, 2].map((item) => (
-                  <div key={item} className="border-t p-6 first:border-t-0">
-                    <Skeleton className="h-20 rounded-xl" />
-                  </div>
-                ))}
-              </div>
-            ) : projectsQuery.error ? (
-              <div
-                data-testid="project-load-error"
-                role="alert"
-                className="border-destructive/30 bg-destructive/5 rounded-xl border p-6"
-              >
-                <h2 className="font-semibold">{copy.projectLoadFailed}</h2>
-                <p className="text-muted-foreground mt-2 text-sm">
-                  {projectErrorMessage(projectsQuery.error, copy.errors)}
-                </p>
-                <Button
-                  type="button"
-                  className="mt-4"
-                  variant="outline"
-                  onClick={() => void projectsQuery.refetch()}
-                >
-                  {copy.retry}
-                </Button>
-              </div>
-            ) : projects.length === 0 ? (
-              <ProjectEmptyState
-                search={search}
-                filtered={filter === "pinned"}
-                onClearSearch={() => setSearch("")}
-                onClearFilter={() => setFilter("all")}
-              />
-            ) : (
-              <div
-                data-testid="project-list"
-                className="border-border/80 divide-border/80 overflow-hidden rounded-xl border"
-              >
+          <div className="px-4 py-6 sm:px-8 sm:py-7">
+            <section aria-label={copy.projectList}>
+              {projectsQuery.isLoading ? (
                 <div
-                  data-testid="project-list-header"
-                  aria-hidden
-                  className="text-foreground/80 hidden grid-cols-[minmax(18rem,1.2fr)_minmax(14rem,1fr)_minmax(23rem,auto)] items-center gap-5 border-b px-8 py-5 text-sm font-semibold xl:grid"
+                  data-testid="project-loading"
+                  aria-label={copy.loadingProjects}
+                  className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,18rem),1fr))] gap-3.5"
                 >
-                  <span>{copy.columns.project}</span>
-                  <span>{copy.columns.description}</span>
-                  <span>{copy.columns.actions}</span>
+                  {[0, 1, 2].map((item) => (
+                    <div
+                      key={item}
+                      className="bg-card h-[164px] rounded-xl border p-4"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Skeleton className="size-10 rounded-lg" />
+                        <div className="flex-1 space-y-2">
+                          <Skeleton className="h-3 w-24" />
+                          <Skeleton className="h-2.5 w-32" />
+                        </div>
+                      </div>
+                      <Skeleton className="mt-4 h-3 w-3/4" />
+                    </div>
+                  ))}
                 </div>
-                <div className="divide-border/80 divide-y">
+              ) : projectsQuery.error ? (
+                <div
+                  data-testid="project-load-error"
+                  role="alert"
+                  className="border-destructive/30 bg-destructive/5 rounded-xl border p-5 text-sm"
+                >
+                  <h2 className="font-semibold">{copy.projectLoadFailed}</h2>
+                  <p className="text-muted-foreground mt-2 text-sm">
+                    {projectErrorMessage(projectsQuery.error, copy.errors)}
+                  </p>
+                  <Button
+                    type="button"
+                    className="mt-4"
+                    variant="outline"
+                    onClick={() => void projectsQuery.refetch()}
+                  >
+                    {copy.retry}
+                  </Button>
+                </div>
+              ) : projects.length === 0 ? (
+                <ProjectEmptyState
+                  search={search}
+                  onClearSearch={() => setSearch("")}
+                />
+              ) : (
+                <div
+                  data-testid="project-list"
+                  className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,18rem),1fr))] gap-3.5"
+                >
                   {projects.map((project) => (
                     <ProjectCardWithActions
                       key={project.id}
@@ -312,12 +289,12 @@ export function ProjectWorkbench({
                     />
                   ))}
                 </div>
-              </div>
-            )}
-          </section>
+              )}
+            </section>
 
-          <div className="mt-12">
-            <WorkspaceRecoverySection userId={userId} />
+            <div className="mt-6">
+              <WorkspaceRecoverySection userId={userId} />
+            </div>
           </div>
         </main>
       </WorkspaceBody>

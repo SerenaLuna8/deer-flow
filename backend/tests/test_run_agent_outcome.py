@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langgraph.graph import START, MessagesState, StateGraph
 
 import deerflow.runtime.runs.worker as run_worker
 from deerflow.agents.middlewares.token_budget_middleware import (
@@ -794,6 +795,66 @@ async def test_provider_failure_precedes_loop_capped_semantic_outcome() -> None:
     assert record.error == "LLM_PROVIDER_UNAVAILABLE"
     assert outcome.status == "failed"
     assert outcome.public_error_code == "LLM_PROVIDER_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_graph_step_limit_preserves_partial_output_and_reports_specific_failure() -> None:
+    published: list[tuple[str, object]] = []
+    file_events: list[str] = []
+    graph_calls: list[int] = []
+
+    class Authority:
+        async def restore(self) -> object:
+            return object()
+
+        async def finalize(self) -> object:
+            raise AssertionError("an exhausted graph must not finalize as successful")
+
+        async def mark_failed(self) -> None:
+            file_events.append("failed")
+
+        async def release(self) -> None:
+            file_events.append("released")
+
+    async def continue_work(_state: MessagesState) -> dict:
+        graph_calls.append(1)
+        return {"messages": [AIMessage(content="Partial result before the graph step limit.")]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("continue_work", continue_work)
+    builder.add_edge(START, "continue_work")
+    builder.add_edge("continue_work", "continue_work")
+    graph = builder.compile()
+
+    class Bridge:
+        async def publish(self, _run_id: str, event: str, payload: object) -> None:
+            published.append((event, payload))
+
+        async def publish_end(self, _run_id: str) -> None:
+            published.append(("end", None))
+
+    run_manager = RunManager()
+    record = await run_manager.create("graph-step-limit-thread")
+
+    outcome = await run_agent(
+        Bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, file_authority=Authority()),
+        agent_factory=lambda *, config: graph,
+        graph_input={"messages": []},
+        config={"recursion_limit": 3},
+    )
+
+    assert len(graph_calls) == 3
+    assert record.status.value == "error"
+    assert record.error == "GRAPH_RECURSION_LIMIT"
+    assert outcome.status == "failed"
+    assert outcome.public_error_code == "GRAPH_RECURSION_LIMIT"
+    assert file_events == ["failed", "released"]
+    assert any(event == "values" and "Partial result before the graph step limit" in str(payload) for event, payload in published)
+    assert ("error", {"name": "GRAPH_RECURSION_LIMIT", "message": "The Run stopped after reaching the graph execution step limit"}) in published
+    assert published[-1] == ("end", None)
 
 
 @pytest.mark.asyncio

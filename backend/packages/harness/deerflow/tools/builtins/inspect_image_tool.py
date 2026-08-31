@@ -62,6 +62,7 @@ _ERROR_MESSAGES = {
     "IMAGE_PIXEL_LIMIT_EXCEEDED": "The image dimensions exceed the supported limit.",
     "DATA_POLICY_BLOCKED": "Image analysis is blocked by the current data policy.",
     "VISION_BUSY": "Image analysis is busy. Continue without guessing image contents.",
+    "VISION_BUDGET_EXHAUSTED": ("Image analysis quota is exhausted for this Run. Do not retry in this Run; waiting will not restore quota. Continue without further image analysis and do not guess image contents."),
     "VISION_RATE_LIMITED": "Image analysis is temporarily rate limited.",
     "VISION_DEADLINE_EXCEEDED": "Image analysis exceeded its deadline.",
     "VISION_UNAVAILABLE": "Image analysis is temporarily unavailable.",

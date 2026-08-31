@@ -33,6 +33,7 @@ const project: Project = {
     "shared_assets.execute",
   ],
   is_pinned: false,
+  created_at: "2026-07-01T00:00:00Z",
   last_entered_at: null,
   member_count: 1,
   agent_count: 1,
@@ -2635,5 +2636,62 @@ test("keeps a specific terminal failure authoritative after a tool budget receip
   await expect(failure).toContainText(
     /Model provider temporarily unavailable|模型服务暂时不可用/u,
   );
+  expect(requests.unexpectedRequests).toEqual([]);
+});
+
+test("preserves the graph step limit and partial results after refresh without replay", async ({
+  page,
+}) => {
+  const partialAnswer =
+    "The first draft is ready, but visual review is incomplete.";
+  const requests = await mockProjectChat(page, {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+    firstRunError: "GRAPH_RECURSION_LIMIT",
+    liveValuesMessages: [
+      {
+        id: "human-graph-step-limit",
+        type: "human",
+        content: "Create and review a draft.",
+        additional_kwargs: { run_id: RUN_ID },
+      },
+      {
+        id: "ai-graph-step-limit-partial",
+        type: "ai",
+        content: partialAnswer,
+        additional_kwargs: { run_id: RUN_ID },
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("Create and review a draft.");
+  await composer.press("Enter");
+  await expect.poll(requests.runPostCount).toBe(1);
+
+  const assertStoppedWithoutReplay = async () => {
+    const failure = page.getByTestId("run-failure-alert");
+    await expect(failure).toHaveAttribute(
+      "data-run-failure-code",
+      "GRAPH_RECURSION_LIMIT",
+    );
+    await expect(failure).toContainText("Graph execution step limit reached");
+    await expect(failure).toContainText("The Agent has stopped");
+    await expect(failure).toContainText("do not resend this message directly");
+    await expect(failure).not.toContainText("Worker could not confirm");
+    await expect(page.getByText(partialAnswer, { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: /Restore to composer|Retry without deep thinking|Regenerate/u,
+      }),
+    ).toHaveCount(0);
+  };
+
+  await assertStoppedWithoutReplay();
+  await page.reload();
+  await assertStoppedWithoutReplay();
+  expect(requests.runPostCount()).toBe(1);
   expect(requests.unexpectedRequests).toEqual([]);
 });

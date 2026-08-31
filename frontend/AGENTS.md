@@ -24,6 +24,13 @@ same-origin `/api/*` through Nginx. Override the backend base URL only for
 deliberate split-origin development.
 
 - `/workspace` is the authenticated account-wide project landing page.
+  `ProjectWorkbench` owns its compact toolbar and responsive project-card grid.
+  Each card has one full-surface navigation link with independent pin/edit
+  buttons; edit visibility follows the server-issued `project.update`
+  capability. Keep the recoverable-project disclosure collapsed by default.
+  The toolbar searches all projects; pinning affects order without a pinned-only filter.
+  Card creation times come from the server's `created_at` and use the selected
+  locale and browser time zone; never substitute `last_entered_at` or the current time.
 - `/projects/[project_slug]/*` is the only live project shell: chats, assets,
   Memory, Connections, Automation, Usage, Audit, members, and settings
   according to server-issued capabilities.
@@ -120,6 +127,10 @@ generator; a necessary local patch needs focused coverage and an explanation.
   overwrite canonical terminal history or cause a second Run/cancel request.
   Preserve the visible conversation projection across any SDK/history detach,
   then replace it atomically with canonical history.
+- Render `GRAPH_RECURSION_LIMIT` consistently from live errors, durable stream
+  terminals, and Run history as graph execution step exhaustion. Keep partial
+  output visible and suppress direct replay and input-restoration actions;
+  a known failure cause does not make already executed operations safe to repeat.
 - Scope disposal aborts the stream and prevents late state writes. Compare-and-
   remove reconnect metadata so an old consumer cannot erase a newer Run. A
   successful Thread DELETE immediately tears down only that exact

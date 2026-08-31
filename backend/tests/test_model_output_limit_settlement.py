@@ -127,6 +127,7 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
     assert STREAM_TERMINAL_ERROR_CODES == {
         "MODEL_OUTPUT_LIMIT",
         "LOOP_SAFETY_LIMIT",
+        "GRAPH_RECURSION_LIMIT",
         "OUTPUT_DELIVERY_INCOMPLETE",
         "CURRENT_UPLOAD_UNAVAILABLE",
         "LLM_QUOTA_EXCEEDED",
@@ -262,6 +263,22 @@ def test_context_provider_ambiguity_is_typed_and_nonretryable() -> None:
 
 
 def test_unknown_retry_safety_preserves_reviewed_nonretryable_terminal_codes() -> None:
+    assert (
+        _dead_error_code_for_failure(
+            retry_safety="unknown",
+            public_error_code="GRAPH_RECURSION_LIMIT",
+            retryable=False,
+        )
+        == "GRAPH_RECURSION_LIMIT"
+    )
+    assert (
+        _dead_error_code_for_failure(
+            retry_safety="unknown",
+            public_error_code="GRAPH_RECURSION_LIMIT",
+            retryable=True,
+        )
+        == "SIDE_EFFECT_STATE_UNKNOWN"
+    )
     assert (
         _dead_error_code_for_failure(
             retry_safety="unknown",

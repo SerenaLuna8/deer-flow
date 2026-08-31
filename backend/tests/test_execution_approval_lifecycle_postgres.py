@@ -5,6 +5,7 @@ import hashlib
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -1355,6 +1356,115 @@ async def test_durable_response_terminal_precedes_only_ordinary_stop(
                 assert (run.status, job.status) == ("interrupted", "cancelled")
             else:
                 assert (run.status, job.status) == ("error", "dead")
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_graph_recursion_limit_after_side_effect_preserves_terminal_without_retry(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    scenario = await _prepare_clock_scenario(
+        migrated_postgres_database_url,
+        stage=False,
+    )
+    store = DbRunEventStore(
+        scenario.seed.factory,
+        run_event_notify_enabled=False,
+    )
+    output = tmp_path / "partial-result.txt"
+
+    class LimitedExecutor:
+        async def execute(self, execution, _authority):
+            boundary = PrivateRunExecutionBoundary(
+                scenario.seed.factory,
+                context=execution.context,
+                claim=scenario.claim,
+            )
+            await boundary.before_sandbox_write()
+            output.write_text("A partial result already exists.", encoding="utf-8")
+            async with scenario.seed.factory() as session, session.begin():
+                await store.append_stream_frame(
+                    session,
+                    scope=execution.context.resource_scope,
+                    thread_id=scenario.thread_id,
+                    run_id=scenario.source_run_id,
+                    frame=StreamFrame.end(
+                        status="error",
+                        error_code="GRAPH_RECURSION_LIMIT",
+                    ),
+                    lease=StreamLeaseProof(
+                        job_id=scenario.claim.job_id,
+                        lease_token=scenario.claim.lease_token,
+                    ),
+                )
+            return AgentExecutionResult.failed(
+                "GRAPH_RECURSION_LIMIT",
+                retryable=False,
+            )
+
+    try:
+        settlement = await PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=LimitedExecutor(),
+            job_repository_builder=lambda session: JobRepository(
+                session,
+                owner_ref_hasher=lambda _owner: JobOwnerRef("test", "0" * 64),
+                terminal_port=PrivateRunJobTerminalPort(),
+            ),
+        )(
+            scenario.claim,
+            SimpleNamespace(
+                bind_heartbeat_callback=lambda _callback: None,
+                cancel_requested=False,
+            ),
+        )
+        await settlement.commit()
+
+        assert output.read_text(encoding="utf-8") == "A partial result already exists."
+        async with scenario.seed.factory() as session:
+            run = await PrivateRunRepository(session).get(
+                scope=scenario.seed.owner_a_scope,
+                run_id=scenario.source_run_id,
+            )
+            assert run is not None and run.status == "error"
+            assert run.error == "GRAPH_RECURSION_LIMIT"
+            dead_jobs = await JobRepository(session).list_dead(
+                scenario.claim.scope,
+                limit=100,
+            )
+            dead = next(job for job in dead_jobs if job.job_id == scenario.claim.job_id)
+            assert dead.retry_safety == "unknown"
+            assert dead.public_error_code == "GRAPH_RECURSION_LIMIT"
+            assert dead.attempt_count == 1
+
+        replay_store = DbRunEventStore(
+            scenario.seed.factory,
+            run_event_notify_enabled=False,
+        )
+        async with scenario.seed.factory() as session:
+            frames = await replay_store.list_stream_frames(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                cursor=0,
+                limit=100,
+            )
+            assert len(frames) == 1
+            assert frames[0].terminal is True
+            assert frames[0].data == {
+                "status": "error",
+                "error_code": "GRAPH_RECURSION_LIMIT",
+            }
+            next_claim = await JobRepository(session).claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+            assert next_claim is None or next_claim.job_id != scenario.claim.job_id
     finally:
         await scenario.seed.engine.dispose()
 

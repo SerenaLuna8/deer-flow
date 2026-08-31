@@ -29,6 +29,7 @@ from typing import Any, Literal, Protocol, cast
 
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
@@ -1847,13 +1848,19 @@ async def run_agent(
         )
 
     except (
+        GraphRecursionError,
         ToolCallControlLoopFinalizationFailed,
         ToolCallControlStateInvalid,
     ) as exc:
-        error_code = PublicRunErrorCode.LOOP_FINALIZATION_FAILED if isinstance(exc, ToolCallControlLoopFinalizationFailed) else PublicRunErrorCode.TOOL_CALL_CONTROL_STATE_INVALID
+        if isinstance(exc, GraphRecursionError):
+            error_code = PublicRunErrorCode.GRAPH_RECURSION_LIMIT
+        elif isinstance(exc, ToolCallControlLoopFinalizationFailed):
+            error_code = PublicRunErrorCode.LOOP_FINALIZATION_FAILED
+        else:
+            error_code = PublicRunErrorCode.TOOL_CALL_CONTROL_STATE_INVALID
         public_error = PublicRunError(error_code)
         logger.error(
-            "Run %s failed with tool-call control error %s",
+            "Run %s failed with public error %s",
             run_id,
             error_code.value,
         )

@@ -57,6 +57,7 @@ class ProjectView:
     display_name: str
     description: str
     icon: str
+    created_at: datetime
     role: ProjectRole
     capabilities: frozenset[Capability]
     is_pinned: bool

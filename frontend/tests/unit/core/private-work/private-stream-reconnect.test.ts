@@ -10,6 +10,7 @@ import {
   disposeProjectAPIClient,
   emptyProjectStreamCursorState,
   getProjectAPIClient,
+  GRAPH_RECURSION_LIMIT,
   isModelOutputLimitError,
   isOutputDeliveryIncompleteError,
   LLM_PROVIDER_UNAVAILABLE,
@@ -1045,6 +1046,37 @@ describe("private stream reconnect", () => {
         message: failureCode,
       },
     });
+  });
+
+  test("preserves the graph step limit through live errors and durable terminals", () => {
+    const liveFailure = {
+      id: "8",
+      event: "error",
+      data: {
+        name: GRAPH_RECURSION_LIMIT,
+        message: "Graph step limit reached",
+      },
+    };
+    const terminal = {
+      id: "9",
+      event: "end",
+      data: { status: "error", error_code: GRAPH_RECURSION_LIMIT },
+    };
+
+    expect(projectStreamFailureName(liveFailure)).toBe("GRAPH_RECURSION_LIMIT");
+    expect(projectStreamFailureName(terminal)).toBe("GRAPH_RECURSION_LIMIT");
+    const projected = projectStreamFrameForUI(terminal);
+    expect(projected).toEqual({
+      id: "9",
+      event: "custom",
+      data: {
+        type: "project_run_terminal_failure",
+        error: "GRAPH_RECURSION_LIMIT",
+        message: "GRAPH_RECURSION_LIMIT",
+      },
+    });
+    const error = projectRunTerminalFailureEventToError(projected.data);
+    expect(error?.name).toBe("GRAPH_RECURSION_LIMIT");
   });
 
   test("preserves unknown side-effect state at the durable terminal", () => {

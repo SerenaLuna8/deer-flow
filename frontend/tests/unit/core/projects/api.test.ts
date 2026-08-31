@@ -28,6 +28,7 @@ const project = {
   role: "admin",
   capabilities: [...CAPABILITIES],
   is_pinned: false,
+  created_at: "2026-07-01T00:00:00Z",
   last_entered_at: null,
   member_count: 1,
   agent_count: 0,
@@ -57,6 +58,45 @@ beforeEach(() => {
 });
 
 describe("projects api", () => {
+  test.each(["2026-07-01T00:00:00Z", "2026-07-01T08:00:00+08:00"])(
+    "preserves the server's timezone-qualified creation time (%s)",
+    async (created_at) => {
+      mockedFetch.mockResolvedValueOnce(
+        jsonResponse(200, { ...project, created_at }),
+      );
+
+      await expect(getProject(project.id)).resolves.toMatchObject({
+        created_at,
+      });
+    },
+  );
+
+  test.each([
+    undefined,
+    null,
+    "not-a-date",
+    "2026-07-01T00:00:00",
+    "2026-02-30T00:00:00Z",
+  ])(
+    "rejects missing or invalid project creation time (%s)",
+    async (created_at) => {
+      const invalidProject = { ...project, created_at };
+      mockedFetch.mockResolvedValueOnce(jsonResponse(200, invalidProject));
+      await expect(getProject(project.id)).rejects.toMatchObject({
+        code: "PROJECT_RESPONSE_INVALID",
+        message: "Project response was invalid",
+      });
+
+      mockedFetch.mockResolvedValueOnce(
+        jsonResponse(200, { items: [invalidProject], next_cursor: null }),
+      );
+      await expect(listProjects({})).rejects.toMatchObject({
+        code: "PROJECT_RESPONSE_INVALID",
+        message: "Project response was invalid",
+      });
+    },
+  );
+
   test("encodes stable list filters and forwards AbortSignal", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, { items: [project], next_cursor: "next" }),

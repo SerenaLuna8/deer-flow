@@ -265,6 +265,7 @@ class ProjectRepository:
             project.display_name,
             project.description,
             project.icon,
+            project.created_at,
             role,
             capabilities_for(role),
             membership.is_pinned,

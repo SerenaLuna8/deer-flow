@@ -92,6 +92,8 @@ and `actweave_knowledge` must never import `app.*` or `deerflow.*`.
   repositories, composite constraints, and a non-superuser app role.
 - Public request/response models reject unknown authority fields. Copy the error
   and strictness convention of the neighboring route family.
+  Project responses expose the persisted `ProjectRow.created_at` as read-only
+  metadata; creation and update requests cannot supply or replace it.
 
 ### Authentication, secrets, and public contracts
 
@@ -277,7 +279,10 @@ recreated explicitly, never repaired in place.
   Run-scoped semantic recorder authorizes durable suppression of unexecuted
   proposals on success and error paths. A loop-capped Lead Run is terminal
   error `LOOP_SAFETY_LIMIT`; answers or files already produced are partial
-  results. Recovered LLM retry attempts live only in the bounded, redacted
+  results. Lead graph-step exhaustion settles as nonretryable
+  `GRAPH_RECURSION_LIMIT`, preserving that known cause even after side effects
+  without clearing Retry Safety or claiming successful File Finalization.
+  Recovered LLM retry attempts live only in the bounded, redacted
   `run.recovered_issue` trace (closed caller/subtype plus bounded HTTP status;
   never raw exception text, provider bodies, or URLs). The receipt is never
   attached to an `AIMessage`, never projected into conversation history, and
@@ -867,6 +872,10 @@ production descriptor/class path and `vision_bridge_fake` is test-only;
 neither may enter new authoring, defaults, bindings, or Run snapshots.
 Preserve exact frozen `purpose="vision"` snapshots, Worker abort/deadline
 behavior, tracing suppression, and durable dispatch authority.
+Run-scoped dispatch budget exhaustion returns `VISION_BUDGET_EXHAUSTED` and
+instructs the Agent to continue without further image analysis or guessed
+image contents. Waiting or a new Job Attempt does not reset that budget.
+Reserve `VISION_RATE_LIMITED` for temporary Provider rate limits.
 
 #### Configuration schema and bootstrap secrets
 

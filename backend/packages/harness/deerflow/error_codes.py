@@ -40,6 +40,7 @@ class PublicRunErrorCode(StrEnum):
 
     PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE = "PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE"
     MODEL_OUTPUT_LIMIT = "MODEL_OUTPUT_LIMIT"
+    GRAPH_RECURSION_LIMIT = "GRAPH_RECURSION_LIMIT"
     LOOP_SAFETY_LIMIT = "LOOP_SAFETY_LIMIT"
     LOOP_FINALIZATION_FAILED = LOOP_FINALIZATION_FAILED_ERROR_CODE
     TOOL_CALL_CONTROL_STATE_INVALID = TOOL_CALL_CONTROL_STATE_INVALID_ERROR_CODE
@@ -57,6 +58,7 @@ _PUBLIC_RUN_ERROR_MESSAGE_BY_CODE: Final[Mapping[PublicRunErrorCode, str]] = Map
     {
         PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE: ("Private Run pre-run message boundary is unavailable"),
         PublicRunErrorCode.MODEL_OUTPUT_LIMIT: ("The model reached its output limit before completing the response"),
+        PublicRunErrorCode.GRAPH_RECURSION_LIMIT: ("The Run stopped after reaching the graph execution step limit"),
         PublicRunErrorCode.LOOP_SAFETY_LIMIT: ("The Run stopped after reaching the loop safety limit"),
         PublicRunErrorCode.LOOP_FINALIZATION_FAILED: ("The model did not complete the required tool-free final response"),
         PublicRunErrorCode.TOOL_CALL_CONTROL_STATE_INVALID: ("The Run stopped because its tool-control state could not be validated"),

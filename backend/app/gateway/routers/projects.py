@@ -85,6 +85,7 @@ class ProjectResponse(BaseModel):
     display_name: str
     description: str
     icon: str
+    created_at: datetime
     role: PublicProjectRole
     capabilities: list[Capability]
     is_pinned: bool

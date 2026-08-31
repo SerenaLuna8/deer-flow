@@ -697,7 +697,7 @@ async def test_postgres_concurrent_reserve_never_crosses_call_limit(
         assert sum(result is None for result in results) == 1
         denied = next(result for result in results if result is not None)
         assert isinstance(denied, VisionDispatchDenied)
-        assert denied.code == "VISION_RATE_LIMITED"
+        assert denied.code == "VISION_BUDGET_EXHAUSTED"
         denied_boundary = boundaries[results.index(denied)]
         assert denied_boundary.lease_lost is False
         assert denied_boundary.cancel_requested is False
@@ -731,7 +731,7 @@ async def test_postgres_concurrent_reserve_never_crosses_call_limit(
 )
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_all_budget_dimensions_allow_exact_limit_then_deny_one_over(
+async def test_postgres_all_budget_dimensions_allow_exact_limit_then_report_exhausted(
     migrated_postgres_database_url: str,
     initial_budget: RunVisionDispatchBudget,
 ) -> None:
@@ -762,7 +762,7 @@ async def test_postgres_all_budget_dimensions_allow_exact_limit_then_deny_one_ov
                 normalized_bytes=1,
                 normalized_pixels=1,
             )
-        assert caught.value.code == "VISION_RATE_LIMITED"
+        assert caught.value.code == "VISION_BUDGET_EXHAUSTED"
         assert denied.lease_lost is False
         assert denied.ambiguous_side_effect is False
 
@@ -783,7 +783,7 @@ async def test_postgres_all_budget_dimensions_allow_exact_limit_then_deny_one_ov
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_rate_limit_and_lease_denial_do_not_reserve(
+async def test_postgres_budget_exhaustion_and_lease_denial_do_not_reserve(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -795,7 +795,7 @@ async def test_postgres_rate_limit_and_lease_denial_do_not_reserve(
                 normalized_bytes=MAX_VISION_NORMALIZED_BYTES_PER_RUN + 1,
                 normalized_pixels=1,
             )
-        assert caught.value.code == "VISION_RATE_LIMITED"
+        assert caught.value.code == "VISION_BUDGET_EXHAUSTED"
         assert limited.lease_lost is False
         assert limited.ambiguous_side_effect is False
 

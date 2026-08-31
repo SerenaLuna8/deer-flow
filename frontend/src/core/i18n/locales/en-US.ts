@@ -2900,6 +2900,7 @@ export const enUS: Translations = {
       pinned: "Pinned",
       noDescription: "No project description",
       open: "Open project",
+      createdAt: "Created",
     },
     empty: {
       noMatchesTitle: "No matching projects",
@@ -3098,6 +3099,9 @@ export const enUS: Translations = {
     outputDeliveryIncompleteTitle: "Output file was not delivered",
     outputDeliveryIncompleteDescription:
       "A required output file was created but was not published to this conversation. Resending may repeat an already completed command, so review the run first.",
+    graphRecursionLimitTitle: "Graph execution step limit reached",
+    graphRecursionLimitDescription:
+      "The Agent has stopped. Existing answers or files may be incomplete. Some operations may already have completed; to avoid repeating them, do not resend this message directly. Check the Run history and existing results first.",
     sideEffectStateUnknownTitle: "Run state could not be confirmed",
     sideEffectStateUnknownDescription:
       "Some operations may already have completed, but the Worker could not confirm the final state. To avoid repeating them, do not resend this message directly; review the run first.",

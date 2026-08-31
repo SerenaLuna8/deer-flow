@@ -28,6 +28,7 @@ function projectFixture(capabilities: Capability[]): Project {
     role: "admin",
     capabilities,
     is_pinned: false,
+    created_at: "2026-07-01T00:00:00Z",
     last_entered_at: null,
     member_count: 1,
     agent_count: 1,

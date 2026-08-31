@@ -5,44 +5,40 @@ import { useI18n } from "@/core/i18n/hooks";
 
 export function ProjectEmptyState({
   search,
-  filtered,
-  onClearFilter,
   onClearSearch,
 }: {
   search: string;
-  filtered: boolean;
-  onClearFilter: () => void;
   onClearSearch: () => void;
 }) {
   const { t } = useI18n();
   const copy = t.projectWorkspace.empty;
   const searching = search.trim().length > 0;
-  const narrowed = searching || filtered;
   return (
     <div
-      data-testid={narrowed ? "project-search-empty" : "project-empty"}
-      className="border-border/70 bg-muted/20 flex min-h-80 flex-col items-center justify-center rounded-2xl border border-dashed px-6 text-center"
+      data-testid={searching ? "project-search-empty" : "project-empty"}
+      className="border-border/70 bg-card/60 flex min-h-48 flex-col items-center justify-center rounded-xl border border-dashed px-5 py-6 text-center"
     >
-      {narrowed ? (
-        <SearchXIcon className="text-muted-foreground mb-4 size-10" />
+      {searching ? (
+        <SearchXIcon
+          aria-hidden
+          className="text-muted-foreground mb-3 size-6"
+        />
       ) : (
-        <FolderPlusIcon className="text-primary mb-4 size-10" />
+        <FolderPlusIcon aria-hidden className="text-primary mb-3 size-6" />
       )}
-      <h2 className="text-xl font-semibold">
-        {narrowed ? copy.noMatchesTitle : copy.firstProjectTitle}
+      <h2 className="text-sm font-semibold">
+        {searching ? copy.noMatchesTitle : copy.firstProjectTitle}
       </h2>
-      <p className="text-muted-foreground mt-2 max-w-md text-sm">
-        {narrowed ? copy.noMatchesDescription : copy.firstProjectDescription}
+      <p className="text-muted-foreground mt-1.5 max-w-sm text-[13px] leading-5">
+        {searching ? copy.noMatchesDescription : copy.firstProjectDescription}
       </p>
-      {narrowed ? (
+      {searching ? (
         <Button
           type="button"
-          className="mt-6"
+          className="mt-4 text-xs"
+          size="sm"
           variant="outline"
-          onClick={() => {
-            onClearSearch();
-            onClearFilter();
-          }}
+          onClick={onClearSearch}
         >
           {copy.clearFilters}
         </Button>

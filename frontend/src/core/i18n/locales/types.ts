@@ -2487,6 +2487,7 @@ export interface Translations {
       pinned: string;
       noDescription: string;
       open: string;
+      createdAt: string;
     };
     empty: {
       noMatchesTitle: string;
@@ -2644,6 +2645,8 @@ export interface Translations {
     outputDeliveryIncompleteDescription: string;
     sideEffectStateUnknownTitle: string;
     sideEffectStateUnknownDescription: string;
+    graphRecursionLimitTitle: string;
+    graphRecursionLimitDescription: string;
     currentUploadUnavailableTitle: string;
     currentUploadUnavailableDescription: string;
     agentSuspendedTitle: string;

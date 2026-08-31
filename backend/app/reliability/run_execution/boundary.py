@@ -19,7 +19,7 @@ from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import (
     PrivateRunExecutionLeaseLost,
     PrivateRunRepository,
-    PrivateRunVisionDispatchRateLimited,
+    PrivateRunVisionDispatchBudgetExhausted,
 )
 from app.private_work.run_skill_tree_materializer import (
     MaterializationAttemptIdentity,
@@ -386,7 +386,7 @@ class PrivateRunExecutionBoundary:
                     )
         except asyncio.CancelledError:
             raise
-        except PrivateRunVisionDispatchRateLimited:
+        except PrivateRunVisionDispatchBudgetExhausted:
             if fence is not None:
                 self._unresolved_side_effect_fences.remove(fence)
             raise
@@ -464,10 +464,10 @@ class PrivateRunExecutionBoundary:
                     normalized_pixels,
                 ),
             )
-        except PrivateRunVisionDispatchRateLimited:
+        except PrivateRunVisionDispatchBudgetExhausted:
             # A hard resource limit is a normal pre-dispatch denial. It does
             # not imply lease loss, cancellation, or an ambiguous side effect.
-            raise VisionDispatchDenied("VISION_RATE_LIMITED") from None
+            raise VisionDispatchDenied("VISION_BUDGET_EXHAUSTED") from None
 
     async def after_vision_dispatch(self) -> None:
         """Require current authority before exposing provider evidence."""

@@ -75,6 +75,7 @@ STREAM_TERMINAL_ERROR_CODES = (
     frozenset(
         {
             "MODEL_OUTPUT_LIMIT",
+            "GRAPH_RECURSION_LIMIT",
             "LOOP_SAFETY_LIMIT",
             "LOOP_FINALIZATION_FAILED",
             "TOOL_CALL_CONTROL_STATE_INVALID",

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   CONTEXT_PROVIDER_CALL_AMBIGUOUS,
+  GRAPH_RECURSION_LIMIT,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   SIDE_EFFECT_STATE_UNKNOWN,
@@ -41,6 +42,7 @@ export function canReplayRunFailure(
 ): boolean {
   return (
     failureCode !== OUTPUT_DELIVERY_INCOMPLETE &&
+    failureCode !== GRAPH_RECURSION_LIMIT &&
     failureCode !== SIDE_EFFECT_STATE_UNKNOWN &&
     failureCode !== CONTEXT_PROVIDER_CALL_AMBIGUOUS
   );

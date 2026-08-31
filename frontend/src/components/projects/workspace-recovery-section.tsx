@@ -58,7 +58,7 @@ function RecoverableProjectRow({
   const [confirmOpen, setConfirmOpen] = useState(false);
   return (
     <>
-      <li className="bg-muted/40 flex flex-col gap-3 rounded-xl p-4 sm:flex-row sm:items-center sm:justify-between">
+      <li className="bg-card flex flex-col gap-3 rounded-lg border p-3 text-[13px] sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="font-medium">{project.display_name}</p>
           <p className="text-muted-foreground mt-1 text-xs">
@@ -79,6 +79,7 @@ function RecoverableProjectRow({
         <Button
           type="button"
           variant="outline"
+          size="sm"
           disabled={restore.isPending}
           onClick={() => setConfirmOpen(true)}
         >
@@ -130,18 +131,15 @@ export function WorkspaceRecoverySection({ userId }: { userId: string }) {
     ) ?? [];
 
   return (
-    <section
-      aria-labelledby="workspace-recovery-title"
-      className="border-border/80 bg-card mb-8 overflow-hidden rounded-xl border"
-    >
+    <section aria-labelledby="workspace-recovery-title" className="mb-6">
       <Collapsible>
         <h2 id="workspace-recovery-title">
           <CollapsibleTrigger
             data-testid="workspace-recovery-toggle"
-            className="group hover:bg-muted/50 focus-visible:ring-ring/50 flex min-h-20 w-full items-center justify-between gap-4 px-5 py-5 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-inset sm:px-8"
+            className="group text-muted-foreground hover:text-foreground focus-visible:ring-ring/50 flex h-8 items-center gap-3 rounded-md px-1 text-left text-[13px] transition-colors outline-none focus-visible:ring-2"
           >
-            <span className="flex items-center gap-2 font-semibold">
-              <ArchiveRestoreIcon aria-hidden className="text-primary size-5" />
+            <span className="flex items-center gap-2 font-medium">
+              <ArchiveRestoreIcon aria-hidden className="size-3.5" />
               {copy.title}
               <span
                 aria-live="polite"
@@ -155,12 +153,12 @@ export function WorkspaceRecoverySection({ userId }: { userId: string }) {
             </span>
             <ChevronDownIcon
               aria-hidden
-              className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-180"
+              className="size-3.5 transition-transform group-data-[state=open]:rotate-180"
             />
           </CollapsibleTrigger>
         </h2>
         <CollapsibleContent>
-          <div className="border-t px-5 py-5">
+          <div className="max-w-2xl pt-3">
             {projects.isLoading ? (
               <Skeleton className="h-16 rounded-xl" />
             ) : projects.error ? (
