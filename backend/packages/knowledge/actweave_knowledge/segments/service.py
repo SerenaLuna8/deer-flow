@@ -9,6 +9,7 @@ the race — a stale vector is never published.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 from dataclasses import dataclass
@@ -22,14 +23,18 @@ from ..authority import KnowledgeProjectAuthority, revalidate_project_authority
 from ..contracts import (
     KNOWLEDGE_CONFLICT,
     KNOWLEDGE_INVALID_REQUEST,
+    KNOWLEDGE_LEXICAL_VERSION,
     KNOWLEDGE_NOT_FOUND,
     KNOWLEDGE_QUOTA_EXCEEDED,
+    KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE,
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeDocumentView,
     KnowledgeEmbeddingMaterial,
     KnowledgeError,
     KnowledgeModelPort,
+    KnowledgeSegmentChildView,
     KnowledgeSegmentCreate,
+    KnowledgeSegmentDetail,
     KnowledgeSegmentUpdate,
     KnowledgeSegmentView,
     KnowledgeSettings,
@@ -44,6 +49,7 @@ from ..persistence.models import (
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
 )
+from ..retrieval.lexical import lexical_index_input
 
 logger = logging.getLogger(__name__)
 
@@ -141,17 +147,26 @@ class KnowledgeSegmentService:
 
         vector: list[float] | None = None
         embedded: _EmbeddedContent | None = None
+        snapshot_version: int | None = None
+        embedded_model_id: UUID | None = None
         if content is not None:
             document, _segment, other_vector_entries = await self._load_segment_snapshot(
                 project_id,
                 segment_id,
                 authority=authority,
             )
+            # Freeze the pre-provider-call coordinates. Re-embedding keeps
+            # row UUIDs, so "the row still exists on the current version" no
+            # longer proves nothing happened in between; only an explicit
+            # version-and-binding comparison keeps a late edit from writing
+            # an old model's vector into the new space.
+            snapshot_version = document.version
             material = await self._embedding_material(
                 project_id,
                 document.knowledge_base_id,
                 authority=authority,
             )
+            embedded_model_id = material.model_id
             embedded = await self._embed_for_document(
                 document,
                 content,
@@ -170,6 +185,10 @@ class KnowledgeSegmentService:
                 # After the embedding call any drift is a lost race, not a bad
                 # request: surface it as a refresh-and-retry conflict.
                 document, segment = await self._lock_segment(session, project_id, segment_id, as_conflict=content is not None)
+                if content is not None and document.version != snapshot_version:
+                    raise _conflict()
+                if content is not None and not await self._binding_unchanged(session, document.knowledge_base_id, embedded_model_id):
+                    raise _conflict()
                 if content is not None and embedded is not None:
                     other_vector_entries = await self._vector_entry_count(
                         session,
@@ -186,6 +205,10 @@ class KnowledgeSegmentService:
                     segment.content = content
                     segment.word_count = word_count
                     segment.embedding = vector
+                    # The lexical derivation moves with the text in the same
+                    # transaction; an enabled-only toggle never touches it.
+                    segment.lexical_tsv = func.to_tsvector("simple", lexical_index_input(content))
+                    segment.lexical_version = KNOWLEDGE_LEXICAL_VERSION
                     if document.chunking_mode == "parent_child":
                         await self._replace_children(session, segment, embedded)
                 if update.enabled is not None:
@@ -240,6 +263,8 @@ class KnowledgeSegmentService:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
                 if document.status != "ready" or document.version != snapshot_version:
                     raise _conflict()
+                if not await self._binding_unchanged(session, document.knowledge_base_id, material.model_id):
+                    raise _conflict()
                 current = (
                     KnowledgeSegmentRow.knowledge_document_id == document.id,
                     KnowledgeSegmentRow.document_version == document.version,
@@ -265,6 +290,8 @@ class KnowledgeSegmentService:
                     word_count=word_count,
                     source_position={"manual": True},
                     embedding=vector,
+                    lexical_tsv=func.to_tsvector("simple", lexical_index_input(content)),
+                    lexical_version=KNOWLEDGE_LEXICAL_VERSION,
                 )
                 session.add(segment)
                 if document.chunking_mode == "parent_child":
@@ -276,6 +303,108 @@ class KnowledgeSegmentService:
                 await session.flush()
                 await session.refresh(segment)
                 return _segment_view(segment)
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            raise _storage_unavailable() from None
+
+    async def get_segment_detail(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        document_id: UUID,
+        segment_id: UUID,
+        *,
+        expected_document_version: int | None = None,
+        expected_content_digest: str | None = None,
+        child_page: int = 1,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeSegmentDetail:
+        """Authoritative single-segment read with paged children.
+
+        Opened from a search hit, callers pass the hit's document version and
+        content digest: any drift — including a document that is no longer
+        ready or a row that is no longer the current generation — raises
+        ``KNOWLEDGE_CONFLICT`` instead of silently explaining old scores with
+        new text. Plain maintenance browsing omits the expectations and may
+        read ``stale`` rows left behind by a failed reprocessing, clearly
+        labeled with both generations. Every child page re-runs the complete
+        validation; there is no cross-request detail state.
+        """
+
+        if type(child_page) is not int or child_page < 1:
+            raise _invalid("child_page 必须是不小于 1 的整数")
+        if expected_document_version is not None and (type(expected_document_version) is not int or expected_document_version < 1):
+            raise _invalid("expected_document_version 必须是不小于 1 的整数")
+        if expected_content_digest is not None and not isinstance(expected_content_digest, str):
+            raise _invalid("expected_content_digest 必须是字符串")
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                result = (
+                    await session.execute(
+                        select(KnowledgeSegmentRow, KnowledgeDocumentRow)
+                        .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
+                        .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
+                        .where(
+                            KnowledgeBaseRow.project_id == project_id,
+                            KnowledgeBaseRow.id == base_id,
+                            KnowledgeDocumentRow.id == document_id,
+                            KnowledgeSegmentRow.id == segment_id,
+                        )
+                    )
+                ).one_or_none()
+                if result is None:
+                    raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Segment 不存在")
+                segment, document = result
+                content_state = "current" if segment.document_version == document.version else "stale"
+                if expected_document_version is not None or expected_content_digest is not None:
+                    # Search-hit semantics: the row must still be the ready
+                    # document's current generation and byte-identical.
+                    if document.status != "ready" or content_state != "current":
+                        raise _conflict()
+                    if expected_document_version is not None and expected_document_version != segment.document_version:
+                        raise _conflict()
+                    if expected_content_digest is not None and expected_content_digest != hashlib.sha256(segment.content.encode("utf-8")).hexdigest():
+                        raise _conflict()
+                children_scope = (
+                    KnowledgeSegmentChildRow.knowledge_segment_id == segment.id,
+                    KnowledgeSegmentChildRow.document_version == segment.document_version,
+                )
+                children_total = int(await session.scalar(select(func.count()).select_from(KnowledgeSegmentChildRow).where(*children_scope)) or 0)
+                child_rows = (
+                    await session.scalars(
+                        select(KnowledgeSegmentChildRow)
+                        .where(*children_scope)
+                        .order_by(KnowledgeSegmentChildRow.position.asc(), KnowledgeSegmentChildRow.id.asc())
+                        .offset((child_page - 1) * KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE)
+                        .limit(KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE)
+                    )
+                ).all()
+                return KnowledgeSegmentDetail(
+                    segment=_segment_view(segment),
+                    knowledge_base_id=base_id,
+                    document_id=document.id,
+                    document_name=document.name,
+                    content_state=content_state,
+                    stored_content_version=segment.document_version,
+                    current_document_version=document.version,
+                    children_total=children_total,
+                    child_page=child_page,
+                    children=tuple(
+                        KnowledgeSegmentChildView(
+                            id=row.id,
+                            position=row.position,
+                            content=row.content,
+                            word_count=row.word_count,
+                        )
+                        for row in child_rows
+                    ),
+                )
         except KnowledgeError:
             raise
         except SQLAlchemyError:
@@ -376,6 +505,17 @@ class KnowledgeSegmentService:
             raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
         return document, vector_entries
 
+    async def _binding_unchanged(
+        self,
+        session: AsyncSession,
+        base_id: UUID,
+        embedded_model_id: UUID | None,
+    ) -> bool:
+        """True while the base still binds the model the vector came from."""
+
+        current = await session.scalar(select(KnowledgeBaseRow.embedding_model_id).where(KnowledgeBaseRow.id == base_id))
+        return current == embedded_model_id
+
     async def _lock_segment(
         self,
         session: AsyncSession,
@@ -467,6 +607,8 @@ class KnowledgeSegmentService:
                     content=content,
                     word_count=len(content),
                     embedding=vector,
+                    lexical_tsv=func.to_tsvector("simple", lexical_index_input(content)),
+                    lexical_version=KNOWLEDGE_LEXICAL_VERSION,
                 )
                 for position, (content, vector) in enumerate(
                     zip(embedded.children, embedded.child_vectors, strict=True),

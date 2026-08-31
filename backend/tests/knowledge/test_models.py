@@ -605,3 +605,164 @@ def test_default_http_client_never_trusts_ambient_proxies() -> None:
     client = KnowledgeModelClient()
     assert client._http.trust_env is False
     assert client._http.follow_redirects is False
+
+
+# ---------------------------------------------------------------------------
+# Client: per-batch guard and verified-batch progress hooks (M10 T4)
+# ---------------------------------------------------------------------------
+
+
+class _HookLog:
+    """Order-preserving record of guard runs, HTTP dispatches, and progress."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.fail_at_guard_run: int | None = None
+        self._guard_runs = 0
+
+    async def guard(self) -> None:
+        self._guard_runs += 1
+        self.events.append(f"guard:{self._guard_runs}")
+        if self.fail_at_guard_run == self._guard_runs:
+            raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "授权或租约已失效")
+
+    async def verified(self, count: int) -> None:
+        self.events.append(f"verified:{count}")
+
+
+@pytest.mark.asyncio
+async def test_embed_runs_the_batch_guard_before_every_dispatch_and_before_the_retry() -> None:
+    """max_batch=2 over three texts is two provider batches; the second batch's
+    first attempt gets a 429, so its retry must re-run the guard first. The
+    verified hook reports exactly the validated batch sizes, in order."""
+
+    log = _HookLog()
+    http_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal http_calls
+        http_calls += 1
+        log.events.append(f"http:{http_calls}")
+        batch = json.loads(request.content)["input"]
+        if http_calls == 2:
+            return httpx.Response(429)
+        return _embedding_response([(index, [1.0, 0.0, 0.0]) for index in range(len(batch))])
+
+    client = _client(handler)
+    try:
+        vectors = await client.embed(
+            _embedding_material(),
+            ["a", "b", "c"],
+            batch_guard=log.guard,
+            on_batch_verified=log.verified,
+        )
+    finally:
+        await client.aclose()
+
+    assert len(vectors) == 3
+    assert log.events == [
+        "guard:1",
+        "http:1",
+        "verified:2",
+        "guard:2",
+        "http:2",
+        "guard:3",
+        "http:3",
+        "verified:1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_embed_guard_failure_stops_undispatched_batches() -> None:
+    """A guard failure between batches must propagate and keep the second
+    provider request from ever being dispatched."""
+
+    log = _HookLog()
+    log.fail_at_guard_run = 2
+    http_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal http_calls
+        http_calls += 1
+        batch = json.loads(request.content)["input"]
+        return _embedding_response([(index, [1.0, 0.0, 0.0]) for index in range(len(batch))])
+
+    client = _client(handler)
+    try:
+        with pytest.raises(KnowledgeError) as error:
+            await client.embed(
+                _embedding_material(),
+                ["a", "b", "c"],
+                batch_guard=log.guard,
+                on_batch_verified=log.verified,
+            )
+    finally:
+        await client.aclose()
+
+    assert error.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
+    assert http_calls == 1
+    assert log.events == ["guard:1", "verified:2", "guard:2"]
+
+
+@pytest.mark.asyncio
+async def test_embed_guard_failure_before_the_retry_prevents_the_second_attempt() -> None:
+    """After a 429 the guard runs again before the in-client retry; its
+    failure must stop the retry, so exactly one HTTP request is sent."""
+
+    log = _HookLog()
+    log.fail_at_guard_run = 2
+    http_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal http_calls
+        http_calls += 1
+        return httpx.Response(429)
+
+    client = _client(handler)
+    try:
+        with pytest.raises(KnowledgeError) as error:
+            await client.embed(
+                _embedding_material(),
+                ["only"],
+                batch_guard=log.guard,
+                on_batch_verified=log.verified,
+            )
+    finally:
+        await client.aclose()
+
+    assert error.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
+    assert http_calls == 1
+    assert log.events == ["guard:1", "guard:2"]
+
+
+@pytest.mark.asyncio
+async def test_rerank_runs_the_batch_guard_and_stops_undispatched_batches() -> None:
+    """The reranker path takes the same guard: batch one runs guarded, and a
+    guard failure before batch two keeps that request undispatched."""
+
+    log = _HookLog()
+    log.fail_at_guard_run = 2
+    http_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal http_calls
+        http_calls += 1
+        body = json.loads(request.content)
+        return _rerank_response([(index, 0.9 - index * 0.1) for index in range(body["top_n"])])
+
+    client = _client(handler)
+    try:
+        with pytest.raises(KnowledgeError) as error:
+            await client.rerank(
+                _rerank_material(),
+                "query",
+                ["doc a", "doc b", "doc c"],
+                top_n=3,
+                batch_guard=log.guard,
+            )
+    finally:
+        await client.aclose()
+
+    assert error.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
+    assert http_calls == 1
+    assert log.events == ["guard:1", "guard:2"]

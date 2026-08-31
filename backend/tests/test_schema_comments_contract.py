@@ -59,7 +59,7 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         re.MULTILINE,
     )
     assert len(table_comments) == 108
-    assert len(column_comments) == 1339
+    assert len(column_comments) == 1352
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
@@ -138,6 +138,7 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_bases", "status"),
         ("knowledge_bases", "default_top_k"),
         ("knowledge_bases", "default_score_threshold"),
+        ("knowledge_bases", "retrieval_mode"),
         ("knowledge_documents", "knowledge_base_id"),
         ("knowledge_documents", "name"),
         ("knowledge_documents", "original_name"),
@@ -160,6 +161,7 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_documents", "hit_count"),
         ("knowledge_documents", "doc_metadata"),
         ("knowledge_documents", "error_message"),
+        ("knowledge_documents", "published_version"),
         ("knowledge_metadata_fields", "knowledge_base_id"),
         ("knowledge_metadata_fields", "name"),
         ("knowledge_metadata_fields", "field_type"),
@@ -173,6 +175,8 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_segments", "hit_count"),
         ("knowledge_segments", "source_position"),
         ("knowledge_segments", "embedding"),
+        ("knowledge_segments", "lexical_tsv"),
+        ("knowledge_segments", "lexical_version"),
         ("knowledge_segment_children", "knowledge_base_id"),
         ("knowledge_segment_children", "knowledge_document_id"),
         ("knowledge_segment_children", "knowledge_segment_id"),
@@ -181,12 +185,16 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_segment_children", "content"),
         ("knowledge_segment_children", "word_count"),
         ("knowledge_segment_children", "embedding"),
+        ("knowledge_segment_children", "lexical_tsv"),
+        ("knowledge_segment_children", "lexical_version"),
         ("knowledge_queries", "owner_user_id"),
         ("knowledge_queries", "knowledge_base_ids"),
         ("knowledge_queries", "query"),
         ("knowledge_queries", "source"),
         ("knowledge_queries", "result_count"),
         ("knowledge_queries", "top_score"),
+        ("knowledge_queries", "top_score_kind"),
+        ("knowledge_queries", "strategy_version"),
         ("knowledge_tasks", "resource_id"),
         ("knowledge_tasks", "kind"),
         ("knowledge_tasks", "target_version"),
@@ -199,6 +207,11 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_tasks", "lease_until"),
         ("knowledge_tasks", "error_message"),
         ("knowledge_tasks", "finished_at"),
+        ("knowledge_tasks", "reparse_settings"),
+        ("knowledge_tasks", "stage"),
+        ("knowledge_tasks", "completed_units"),
+        ("knowledge_tasks", "total_units"),
+        ("knowledge_tasks", "progress_updated_at"),
     }
 
     assert set(generate_schema_comments._TABLE_COLUMN_PHRASES) == expected

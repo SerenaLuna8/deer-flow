@@ -29,7 +29,7 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
 _EXPECTED_TABLE_COUNT = 108
-_EXPECTED_COLUMN_COUNT = 1339
+_EXPECTED_COLUMN_COUNT = 1352
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -463,6 +463,7 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_bases", "embedding_model_id"): "固定使用的 Embedding 模型标识（指向供应商模型行）",
     ("knowledge_bases", "reranker_model_id"): "可选的 Reranker 模型标识；为空表示检索不重排序",
     ("knowledge_bases", "status"): "知识库状态（active、disabled 或 deleting）",
+    ("knowledge_bases", "retrieval_mode"): "检索模式（semantic 仅向量或 hybrid 增加词法召回路）；检索测试可单次覆盖不落库",
     ("knowledge_bases", "default_top_k"): "检索未显式传参时使用的默认返回条数",
     ("knowledge_bases", "default_score_threshold"): "检索未显式传参时使用的默认相关性分数阈值（0 表示不过滤）",
     ("knowledge_documents", "knowledge_base_id"): "所属知识库标识",
@@ -474,6 +475,7 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_documents", "status"): "处理状态（uploading、queued、processing、ready、failed 或 deleting）",
     ("knowledge_documents", "enabled"): "是否参与检索；停用不删除向量，重新启用即恢复可检索",
     ("knowledge_documents", "version"): "每次用户重试或删除前递增的处理版本号",
+    ("knowledge_documents", "published_version"): "最近一次成功发布（摄取或重嵌入）的执行代次；从未发布为空，人工删空不清除",
     ("knowledge_documents", "chunk_size"): "按字符切分的目标最大长度",
     ("knowledge_documents", "chunk_overlap"): "相邻片段重叠字符数",
     ("knowledge_documents", "chunk_separator"): "切分优先使用的分隔符，按用户输入的转义形式存储；上传时固化，重试沿用",
@@ -500,6 +502,8 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_segments", "hit_count"): "检索最终结果命中该片段的累计次数",
     ("knowledge_segments", "source_position"): "页码、sheet 或行号等来源位置 JSON",
     ("knowledge_segments", "embedding"): "与知识库 Embedding 模型维度一致的 pgvector 向量；parent_child 模式的父级片段为空",
+    ("knowledge_segments", "lexical_tsv"): "按包内 lexical_v1 规则派生的词法 tsvector（simple 配置）；内容变更同事务重算，重嵌入不改",
+    ("knowledge_segments", "lexical_version"): "词法派生规则版本；与当前版本不一致的行词法路明确失败，不运行时补数据",
     ("knowledge_segment_children", "knowledge_base_id"): "所属知识库标识",
     ("knowledge_segment_children", "knowledge_document_id"): "所属知识文档标识",
     ("knowledge_segment_children", "knowledge_segment_id"): "所属父级知识片段标识",
@@ -508,17 +512,26 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_segment_children", "content"): "参与向量召回的子块文本（属于私有内容）",
     ("knowledge_segment_children", "word_count"): "内容字符数",
     ("knowledge_segment_children", "embedding"): "与知识库 Embedding 模型维度一致的 pgvector 向量",
+    ("knowledge_segment_children", "lexical_tsv"): "按包内 lexical_v1 规则派生的词法 tsvector（simple 配置）；parent_child 词法召回经子块回卷父段",
+    ("knowledge_segment_children", "lexical_version"): "词法派生规则版本；与当前版本不一致的行词法路明确失败，不运行时补数据",
     ("knowledge_queries", "owner_user_id"): "发起本次检索并唯一有权读取原始查询文本的用户标识",
     ("knowledge_queries", "knowledge_base_ids"): "本次检索实际命中的目标知识库标识 JSON 数组",
     ("knowledge_queries", "query"): "检索查询文本（属于私有内容）",
     ("knowledge_queries", "source"): "查询来源（agent 工具或 retrieval_test 检索测试）",
     ("knowledge_queries", "result_count"): "最终返回的引用数量",
     ("knowledge_queries", "top_score"): "最终返回引用的最高检索分数，可为负；无结果时为空",
+    ("knowledge_queries", "top_score_kind"): "top_score 的分数来源（cosine、rerank 或 rank_fusion）；M10 前历史行为空表示未知",
+    ("knowledge_queries", "strategy_version"): "产生本行的检索策略版本标签；历史行为空",
     ("knowledge_tasks", "resource_id"): "按任务类型指向知识文档或知识库的业务标识",
-    ("knowledge_tasks", "kind"): "任务类型（摄取文档、删除文档、清理晚到文档对象或删除知识库）",
-    ("knowledge_tasks", "target_version"): "ingest_document 任务允许发布的文档版本号",
+    ("knowledge_tasks", "kind"): "任务类型（摄取文档、重嵌入文档、删除文档、清理晚到文档对象或删除知识库）",
+    ("knowledge_tasks", "target_version"): "ingest_document 与 reembed_document 任务允许发布的文档版本号",
     ("knowledge_tasks", "storage_key"): "仅 delete_document_object 使用的精确 MinIO object key；属于受保护存储定位符",
+    ("knowledge_tasks", "reparse_settings"): "显式重新解析时固化的完整切分/清洗参数 JSON；重试继承，其余任务为空",
     ("knowledge_tasks", "status"): "任务状态（queued、running、retry_wait、succeeded 或 failed）",
+    ("knowledge_tasks", "stage"): "真实处理阶段（queued 到 done），与任务状态正交；失败保留失败阶段",
+    ("knowledge_tasks", "completed_units"): "当前尝试内经校验成功的处理单元数（嵌入按向量条目计）；新尝试清零",
+    ("knowledge_tasks", "total_units"): "可验证的总处理单元数；无法确定时为空，界面不得模拟百分比",
+    ("knowledge_tasks", "progress_updated_at"): "阶段或计数最近更新时间",
     ("knowledge_tasks", "attempt_count"): "已经开始执行的次数",
     ("knowledge_tasks", "max_attempts"): "允许执行的最大次数（MVP 固定为 3）",
     ("knowledge_tasks", "available_at"): "queued 或 retry_wait 任务最早可领取的时间",

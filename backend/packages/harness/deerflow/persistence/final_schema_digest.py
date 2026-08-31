@@ -2,6 +2,6 @@
 
 # Updated together with FINAL_SCHEMA_V1_CATALOG_SIGNATURE after installing
 # ``full_schema.sql`` in a disposable PostgreSQL database.
-SCHEMA_V1_CANONICAL_DIGEST = "05bca61d40c24c93aacd464416b6185d5726dd0aaffce07005fa8ffedb7bc7fc"
+SCHEMA_V1_CANONICAL_DIGEST = "f0d76d50349cf36ed87c3d4b9b0f6bfda94dc62aca4fc506260a6e2bbd72f496"
 
 __all__ = ["SCHEMA_V1_CANONICAL_DIGEST"]

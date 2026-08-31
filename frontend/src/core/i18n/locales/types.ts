@@ -190,7 +190,7 @@ export interface Translations {
       rebuildHint: string;
       rebuildButton: string;
       rebuildPending: string;
-      rebuildStarted: string;
+      rebuildOutcome: (accepted: number, skipped: number) => string;
       rebuildConfirmTitle: string;
       rebuildConfirmDescription: (name: string) => string;
       rebuildConfirm: string;
@@ -225,11 +225,12 @@ export interface Translations {
       uploadFailedNote: string;
       previewTitle: string;
       previewHint: (fileName: string) => string;
+      previewPickFile: string;
       previewLoading: string;
       previewRefresh: string;
       previewStale: string;
       previewInvalid: string;
-      previewTotal: (total: number) => string;
+      previewShowing: (count: number, total: number) => string;
       previewChunkLabel: (position: number) => string;
       previewCharacters: (count: number) => string;
       previewChildCount: (count: number) => string;
@@ -241,6 +242,8 @@ export interface Translations {
       settings: string;
       settingsSaved: string;
       metadata: string;
+      baseNotFound: string;
+      backToBases: string;
     };
     metadata: {
       title: string;
@@ -268,6 +271,23 @@ export interface Translations {
     documents: {
       title: (baseName: string) => string;
       empty: string;
+      filteredEmpty: string;
+      notFound: string;
+      backToList: string;
+      searchPlaceholder: string;
+      searchAria: string;
+      statusFilterLabel: string;
+      statusFilterAll: string;
+      sortLabel: string;
+      sortOptions: {
+        created_desc: string;
+        created_asc: string;
+        name_asc: string;
+        name_desc: string;
+      };
+      pageInfo: (page: number, pageCount: number, total: number) => string;
+      previousPage: string;
+      nextPage: string;
       uploadButton: string;
       uploadTitle: string;
       uploadDescription: string;
@@ -331,6 +351,48 @@ export interface Translations {
       metadataTitle: (name: string) => string;
       metadataEmpty: string;
       metadataClearHint: string;
+      processingSummary: {
+        processing: (count: number) => string;
+        retryWait: (count: number) => string;
+        failed: (count: number) => string;
+        ready: (count: number) => string;
+      };
+      progress: {
+        kinds: {
+          ingest_document: string;
+          reembed_document: string;
+        };
+        stages: {
+          queued: string;
+          reading_source: string;
+          extracting_splitting: string;
+          loading_segments: string;
+          embedding: string;
+          publishing: string;
+          done: string;
+        };
+        units: (done: number, total: number) => string;
+        attempt: (current: number, max: number) => string;
+        retryWaitAt: (time: string) => string;
+        retryWaitSoon: string;
+        failedDuring: (stage: string) => string;
+      };
+      batchMetadata: string;
+      batchMetadataTitle: (count: number) => string;
+      batchMetadataDescription: string;
+      batchMetadataMixedValues: (count: number) => string;
+      batchMetadataModeKeep: string;
+      batchMetadataModeSet: string;
+      batchMetadataModeClear: string;
+      batchMetadataOverwrite: (count: number) => string;
+      reparse: string;
+      reparseTitle: (name: string) => string;
+      reparseWarning: string;
+      reparsePreviewButton: string;
+      reparsePreviewShowing: (shown: number, total: number) => string;
+      reparseSubmit: string;
+      reparsePending: string;
+      reparseConflict: string;
     };
     segments: {
       title: (documentName: string) => string;
@@ -355,6 +417,10 @@ export interface Translations {
       disableAria: (position: number) => string;
       wordCount: (count: number) => string;
       manualBadge: string;
+      locatedTitle: (position: number) => string;
+      locateFailed: string;
+      locateStale: string;
+      dismissLocate: string;
     };
     sourcePosition: {
       page: (page: string) => string;
@@ -407,6 +473,63 @@ export interface Translations {
         gte: string;
         lte: string;
       };
+      retrievalModeLabel: string;
+      retrievalModes: {
+        default: string;
+        semantic: string;
+        hybrid: string;
+      };
+      neverSearched: string;
+      retry: string;
+      scoreKinds: {
+        cosine: string;
+        rerank: string;
+        rank_fusion: string;
+        unknown: string;
+      };
+      emptyReasons: {
+        not_ready: string;
+        no_candidates: string;
+        filtered_out: string;
+        stale_candidates: string;
+      };
+      diagnostics: {
+        title: string;
+        strategyVersion: string;
+        retrievalMode: string;
+        targetBases: string;
+        routeBudget: string;
+        models: string;
+        semanticCandidates: string;
+        lexicalCandidates: string;
+        parentsDeduplicated: string;
+        thresholdFiltered: string;
+        staleFiltered: string;
+        returned: string;
+        embeddingMs: string;
+        recallMs: string;
+        rerankMs: string;
+        finalValidationMs: string;
+        heterogeneousWarning: string;
+      };
+      hitDiagnosticsSummary: string;
+      localScore: (score: number) => string;
+      rankingScore: (score: number) => string;
+      openDetail: (position: number) => string;
+      detail: {
+        title: string;
+        conflict: string;
+        staleContent: string;
+        disabledBadge: string;
+        matchedChildrenTitle: string;
+        childrenTitle: (total: number) => string;
+        matchedBadge: string;
+        routes: {
+          semantic: string;
+          lexical: string;
+        };
+        locate: string;
+      };
     };
     citations: {
       summary: (count: number) => string;
@@ -417,6 +540,7 @@ export interface Translations {
       generic: string;
       network: string;
       invalidResponse: string;
+      incompleteList: string;
     };
   };
 

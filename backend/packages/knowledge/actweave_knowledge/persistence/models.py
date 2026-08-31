@@ -27,7 +27,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -41,6 +41,10 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
         UniqueConstraint("project_id", "id", name="uq_knowledge_bases_project_id_id"),
         CheckConstraint("btrim(name) <> ''", name="ck_knowledge_bases_name"),
         CheckConstraint("status IN ('active', 'disabled', 'deleting')", name="ck_knowledge_bases_status"),
+        CheckConstraint(
+            "retrieval_mode IN ('semantic', 'hybrid')",
+            name="ck_knowledge_bases_retrieval_mode",
+        ),
         CheckConstraint("default_top_k BETWEEN 1 AND 20", name="ck_knowledge_bases_default_top_k"),
         CheckConstraint(
             "default_score_threshold >= 0 AND default_score_threshold <= 1",
@@ -62,6 +66,9 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
     embedding_model_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     reranker_model_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
+    # semantic keeps recall vector-only; hybrid adds the lexical route. A
+    # retrieval-test request may override for one call without persisting.
+    retrieval_mode: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'semantic'"))
     # Per-base retrieval defaults: used when a search request omits the value
     # (retrieval test prefill and the Agent tool without explicit arguments).
     default_top_k: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("4"))
@@ -82,6 +89,10 @@ class KnowledgeDocumentRow(KnowledgeOrmBase):
             name="ck_knowledge_documents_status",
         ),
         CheckConstraint("version >= 1", name="ck_knowledge_documents_version"),
+        CheckConstraint(
+            "published_version IS NULL OR (published_version >= 1 AND published_version <= version)",
+            name="ck_knowledge_documents_published_version",
+        ),
         CheckConstraint("chunk_size BETWEEN 200 AND 4000", name="ck_knowledge_documents_chunk_size"),
         CheckConstraint(
             "chunk_overlap BETWEEN 0 AND 500 AND chunk_overlap < chunk_size",
@@ -147,6 +158,11 @@ class KnowledgeDocumentRow(KnowledgeOrmBase):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'uploading'"))
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    # Execution generation of the last successful ingest/reembed publish;
+    # NULL only for documents that never published. Manual delete-all keeps
+    # it, so "initialized but emptied" stays distinct from "never published".
+    # ``content_initialized`` in DTOs derives from it — never a second flag.
+    published_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunk_size: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1000"))
     chunk_overlap: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("100"))
     # Escaped form as typed by the user (e.g. the four characters "\n\n");
@@ -226,6 +242,7 @@ class KnowledgeSegmentRow(KnowledgeOrmBase):
         CheckConstraint("word_count >= 0", name="ck_knowledge_segments_word_count"),
         CheckConstraint("hit_count >= 0", name="ck_knowledge_segments_hit_count"),
         CheckConstraint("jsonb_typeof(source_position) = 'object'", name="ck_knowledge_segments_source_position"),
+        CheckConstraint("lexical_version >= 0", name="ck_knowledge_segments_lexical_version"),
         # NULL for parent_child-mode parents: their vectors live on the child
         # rows and general-mode recall filters on ``embedding IS NOT NULL``.
         CheckConstraint(
@@ -250,6 +267,7 @@ class KnowledgeSegmentRow(KnowledgeOrmBase):
             "document_version",
             "position",
         ),
+        Index("ix_knowledge_segments_lexical", "lexical_tsv", postgresql_using="gin"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -264,6 +282,18 @@ class KnowledgeSegmentRow(KnowledgeOrmBase):
     hit_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     source_position: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     embedding: Mapped[Any | None] = mapped_column(Vector(), nullable=True)
+    # lexical_v1 derived tokens over normalized content (design §8.1). Both
+    # chunking modes maintain the parent field so fusion can score every
+    # shortlisted parent; content writes must refresh it in-transaction while
+    # re-embeds never touch it. The defaults are the pre-tokenizer placeholder
+    # (``lexical_version=0``); the lexical route requires the current version
+    # and fails loudly on a mismatch instead of backfilling.
+    lexical_tsv: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        nullable=False,
+        server_default=text("to_tsvector('simple', '')"),
+    )
+    lexical_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
 
@@ -288,6 +318,10 @@ class KnowledgeSegmentChildRow(KnowledgeOrmBase):
         CheckConstraint("content <> ''", name="ck_knowledge_segment_children_content"),
         CheckConstraint("word_count >= 0", name="ck_knowledge_segment_children_word_count"),
         CheckConstraint(
+            "lexical_version >= 0",
+            name="ck_knowledge_segment_children_lexical_version",
+        ),
+        CheckConstraint(
             "public.vector_dims(embedding) BETWEEN 1 AND 16000",
             name="ck_knowledge_segment_children_embedding",
         ),
@@ -305,6 +339,11 @@ class KnowledgeSegmentChildRow(KnowledgeOrmBase):
             "document_version",
             "position",
         ),
+        Index(
+            "ix_knowledge_segment_children_lexical",
+            "lexical_tsv",
+            postgresql_using="gin",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -317,6 +356,14 @@ class KnowledgeSegmentChildRow(KnowledgeOrmBase):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     word_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     embedding: Mapped[Any] = mapped_column(Vector(), nullable=False)
+    # Same contract as the parent segment's lexical fields; the lexical
+    # route recalls parent_child bases through these child tokens.
+    lexical_tsv: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        nullable=False,
+        server_default=text("to_tsvector('simple', '')"),
+    )
+    lexical_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
 
@@ -339,10 +386,19 @@ class KnowledgeQueryRow(KnowledgeOrmBase):
         ),
         CheckConstraint("result_count >= 0", name="ck_knowledge_queries_result_count"),
         # Cosine similarity floors the score at -1 for rerank-free searches;
-        # rerank scores stay in [0, 1]. NULL still means "no results".
+        # rerank and rank-fusion scores stay in [0, 1]. NULL still means
+        # "no results".
         CheckConstraint(
             "top_score IS NULL OR (top_score >= -1 AND top_score <= 1)",
             name="ck_knowledge_queries_top_score",
+        ),
+        CheckConstraint(
+            "top_score_kind IS NULL OR top_score_kind IN ('cosine', 'rerank', 'rank_fusion')",
+            name="ck_knowledge_queries_top_score_kind",
+        ),
+        CheckConstraint(
+            "strategy_version IS NULL OR btrim(strategy_version) <> ''",
+            name="ck_knowledge_queries_strategy_version",
         ),
         Index(
             "ix_knowledge_queries_owner_created",
@@ -361,6 +417,10 @@ class KnowledgeQueryRow(KnowledgeOrmBase):
     source: Mapped[str] = mapped_column(String(16), nullable=False)
     result_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     top_score: Mapped[float | None] = mapped_column(Double, nullable=True)
+    # Provenance of top_score (cosine/rerank/rank_fusion) and the strategy
+    # label that produced this row; NULL on pre-M10 history means unknown.
+    top_score_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    strategy_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
 
@@ -368,20 +428,35 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
     __tablename__ = "knowledge_tasks"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('ingest_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')",
+            "kind IN ('ingest_document', 'reembed_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')",
             name="ck_knowledge_tasks_kind",
         ),
+        # Both indexing kinds bind an execution generation; other kinds never.
         CheckConstraint(
-            "(kind = 'ingest_document' AND target_version IS NOT NULL AND target_version >= 1) OR (kind <> 'ingest_document' AND target_version IS NULL)",
+            "(kind IN ('ingest_document', 'reembed_document') AND target_version IS NOT NULL AND target_version >= 1) OR (kind NOT IN ('ingest_document', 'reembed_document') AND target_version IS NULL)",
             name="ck_knowledge_tasks_target_version",
         ),
         CheckConstraint(
             "(kind = 'delete_document_object' AND storage_key IS NOT NULL AND btrim(storage_key) <> '') OR (kind <> 'delete_document_object' AND storage_key IS NULL)",
             name="ck_knowledge_tasks_storage_key",
         ),
+        # Frozen reparse parameters ride only on an explicit-reparse ingest;
+        # a plain upload ingest and every other kind keep NULL.
+        CheckConstraint(
+            "reparse_settings IS NULL OR (kind = 'ingest_document' AND jsonb_typeof(reparse_settings) = 'object')",
+            name="ck_knowledge_tasks_reparse_settings",
+        ),
         CheckConstraint(
             "status IN ('queued', 'running', 'retry_wait', 'succeeded', 'failed')",
             name="ck_knowledge_tasks_status",
+        ),
+        CheckConstraint(
+            "stage IN ('queued', 'reading_source', 'extracting_splitting', 'loading_segments', 'embedding', 'publishing', 'done')",
+            name="ck_knowledge_tasks_stage",
+        ),
+        CheckConstraint(
+            "completed_units >= 0 AND (total_units IS NULL OR (total_units >= 0 AND completed_units <= total_units))",
+            name="ck_knowledge_tasks_progress_units",
         ),
         CheckConstraint(
             "attempt_count BETWEEN 0 AND max_attempts AND max_attempts = 3",
@@ -408,12 +483,15 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
             "id",
             postgresql_where=text("status = 'running'"),
         ),
+        # One open indexing operation per document/version regardless of
+        # kind: a reembed cannot bypass the guard an ingest holds and vice
+        # versa (M10 design §5).
         Index(
-            "uq_knowledge_tasks_open_ingest",
+            "uq_knowledge_tasks_open_indexing",
             "resource_id",
             "target_version",
             unique=True,
-            postgresql_where=text("kind = 'ingest_document' AND status IN ('queued', 'running', 'retry_wait')"),
+            postgresql_where=text("kind IN ('ingest_document', 'reembed_document') AND status IN ('queued', 'running', 'retry_wait')"),
         ),
         Index(
             "uq_knowledge_tasks_open_document_delete",
@@ -441,7 +519,21 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     target_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Complete, strictly validated chunk/clean parameters frozen at reparse
+    # admission; retries inherit them. Never a general task payload.
+    # ``none_as_null`` keeps an explicit Python None a SQL NULL: the CHECK
+    # constraint forbids the JSON 'null' a plain JSONB bind would produce.
+    reparse_settings: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'queued'"))
+    # Real pipeline stage, orthogonal to status: a failed task keeps its
+    # failing stage. ``done`` appears only with the final publish commit.
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'queued'"))
+    # Verified provider-batch progress of the current attempt; a new attempt
+    # resets to zero. ``total_units`` stays NULL while no verifiable total
+    # exists — the UI never simulates a percentage from it.
+    completed_units: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    total_units: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    progress_updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     attempt_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
     max_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("3"))
     available_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))

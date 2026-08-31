@@ -4262,6 +4262,7 @@ CREATE TABLE knowledge_bases (
     embedding_model_id UUID NOT NULL,
     reranker_model_id UUID,
     status VARCHAR(16) DEFAULT 'active' NOT NULL,
+    retrieval_mode VARCHAR(16) DEFAULT 'semantic' NOT NULL,
     default_top_k INTEGER DEFAULT 4 NOT NULL,
     default_score_threshold DOUBLE PRECISION DEFAULT 0.2 NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
@@ -4270,6 +4271,7 @@ CREATE TABLE knowledge_bases (
     CONSTRAINT uq_knowledge_bases_project_id_id UNIQUE (project_id, id),
     CONSTRAINT ck_knowledge_bases_name CHECK (btrim(name) <> ''),
     CONSTRAINT ck_knowledge_bases_status CHECK (status IN ('active', 'disabled', 'deleting')),
+    CONSTRAINT ck_knowledge_bases_retrieval_mode CHECK (retrieval_mode IN ('semantic', 'hybrid')),
     CONSTRAINT ck_knowledge_bases_default_top_k CHECK (default_top_k BETWEEN 1 AND 20),
     CONSTRAINT ck_knowledge_bases_default_score_threshold CHECK (
         default_score_threshold >= 0 AND default_score_threshold <= 1
@@ -4306,6 +4308,7 @@ CREATE TABLE knowledge_documents (
     status VARCHAR(16) DEFAULT 'uploading' NOT NULL,
     enabled BOOLEAN DEFAULT true NOT NULL,
     version INTEGER DEFAULT 1 NOT NULL,
+    published_version INTEGER,
     chunk_size INTEGER DEFAULT 1000 NOT NULL,
     chunk_overlap INTEGER DEFAULT 100 NOT NULL,
     chunk_separator VARCHAR(64) DEFAULT '\n\n' NOT NULL,
@@ -4330,6 +4333,9 @@ CREATE TABLE knowledge_documents (
         status IN ('uploading', 'queued', 'processing', 'ready', 'failed', 'deleting')
     ),
     CONSTRAINT ck_knowledge_documents_version CHECK (version >= 1),
+    CONSTRAINT ck_knowledge_documents_published_version CHECK (
+        published_version IS NULL OR (published_version >= 1 AND published_version <= version)
+    ),
     CONSTRAINT ck_knowledge_documents_chunk_size CHECK (chunk_size BETWEEN 200 AND 4000),
     CONSTRAINT ck_knowledge_documents_chunk_overlap CHECK (
         chunk_overlap BETWEEN 0 AND 500 AND chunk_overlap < chunk_size
@@ -4402,6 +4408,8 @@ CREATE TABLE knowledge_segments (
     hit_count INTEGER DEFAULT 0 NOT NULL,
     source_position JSONB DEFAULT '{}'::jsonb NOT NULL,
     embedding public.vector,
+    lexical_tsv TSVECTOR DEFAULT to_tsvector('simple', '') NOT NULL,
+    lexical_version INTEGER DEFAULT 0 NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     CONSTRAINT pk_knowledge_segments PRIMARY KEY (id),
     CONSTRAINT uq_knowledge_segments_document_version_position UNIQUE (
@@ -4415,6 +4423,7 @@ CREATE TABLE knowledge_segments (
     CONSTRAINT ck_knowledge_segments_word_count CHECK (word_count >= 0),
     CONSTRAINT ck_knowledge_segments_hit_count CHECK (hit_count >= 0),
     CONSTRAINT ck_knowledge_segments_source_position CHECK (jsonb_typeof(source_position) = 'object'),
+    CONSTRAINT ck_knowledge_segments_lexical_version CHECK (lexical_version >= 0),
     CONSTRAINT ck_knowledge_segments_embedding CHECK (
         embedding IS NULL OR public.vector_dims(embedding) BETWEEN 1 AND 16000
     ),
@@ -4438,6 +4447,10 @@ CREATE INDEX ix_knowledge_segments_document
         position
     );
 
+-- Lexical route (design §8): GIN over the lexical_v1 derived tokens.
+CREATE INDEX ix_knowledge_segments_lexical
+    ON knowledge_segments USING gin (lexical_tsv);
+
 CREATE TABLE knowledge_segment_children (
     id UUID NOT NULL,
     project_id UUID NOT NULL,
@@ -4449,6 +4462,8 @@ CREATE TABLE knowledge_segment_children (
     content TEXT NOT NULL,
     word_count INTEGER DEFAULT 0 NOT NULL,
     embedding public.vector NOT NULL,
+    lexical_tsv TSVECTOR DEFAULT to_tsvector('simple', '') NOT NULL,
+    lexical_version INTEGER DEFAULT 0 NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     CONSTRAINT pk_knowledge_segment_children PRIMARY KEY (id),
     CONSTRAINT uq_knowledge_segment_children_segment_position UNIQUE (
@@ -4459,6 +4474,7 @@ CREATE TABLE knowledge_segment_children (
     CONSTRAINT ck_knowledge_segment_children_position CHECK (position >= 1),
     CONSTRAINT ck_knowledge_segment_children_content CHECK (content <> ''),
     CONSTRAINT ck_knowledge_segment_children_word_count CHECK (word_count >= 0),
+    CONSTRAINT ck_knowledge_segment_children_lexical_version CHECK (lexical_version >= 0),
     CONSTRAINT ck_knowledge_segment_children_embedding CHECK (
         public.vector_dims(embedding) BETWEEN 1 AND 16000
     ),
@@ -4475,6 +4491,9 @@ CREATE INDEX ix_knowledge_segment_children_document
         position
     );
 
+CREATE INDEX ix_knowledge_segment_children_lexical
+    ON knowledge_segment_children USING gin (lexical_tsv);
+
 CREATE TABLE knowledge_queries (
     id UUID NOT NULL,
     project_id UUID NOT NULL,
@@ -4484,6 +4503,8 @@ CREATE TABLE knowledge_queries (
     source VARCHAR(16) NOT NULL,
     result_count INTEGER DEFAULT 0 NOT NULL,
     top_score DOUBLE PRECISION,
+    top_score_kind VARCHAR(16),
+    strategy_version VARCHAR(32),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     CONSTRAINT pk_knowledge_queries PRIMARY KEY (id),
     CONSTRAINT ck_knowledge_queries_query CHECK (btrim(query) <> ''),
@@ -4492,6 +4513,12 @@ CREATE TABLE knowledge_queries (
     CONSTRAINT ck_knowledge_queries_result_count CHECK (result_count >= 0),
     CONSTRAINT ck_knowledge_queries_top_score CHECK (
         top_score IS NULL OR (top_score >= -1 AND top_score <= 1)
+    ),
+    CONSTRAINT ck_knowledge_queries_top_score_kind CHECK (
+        top_score_kind IS NULL OR top_score_kind IN ('cosine', 'rerank', 'rank_fusion')
+    ),
+    CONSTRAINT ck_knowledge_queries_strategy_version CHECK (
+        strategy_version IS NULL OR btrim(strategy_version) <> ''
     ),
     CONSTRAINT fk_knowledge_queries_project FOREIGN KEY (project_id)
         REFERENCES projects (id) ON DELETE CASCADE
@@ -4507,7 +4534,12 @@ CREATE TABLE knowledge_tasks (
     kind VARCHAR(32) NOT NULL,
     target_version INTEGER,
     storage_key VARCHAR(1024),
+    reparse_settings JSONB,
     status VARCHAR(16) DEFAULT 'queued' NOT NULL,
+    stage VARCHAR(32) DEFAULT 'queued' NOT NULL,
+    completed_units INTEGER DEFAULT 0 NOT NULL,
+    total_units INTEGER,
+    progress_updated_at TIMESTAMP WITH TIME ZONE,
     attempt_count SMALLINT DEFAULT 0 NOT NULL,
     max_attempts SMALLINT DEFAULT 3 NOT NULL,
     available_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
@@ -4519,18 +4551,29 @@ CREATE TABLE knowledge_tasks (
     finished_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT pk_knowledge_tasks PRIMARY KEY (id),
     CONSTRAINT ck_knowledge_tasks_kind CHECK (
-        kind IN ('ingest_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')
+        kind IN ('ingest_document', 'reembed_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')
     ),
     CONSTRAINT ck_knowledge_tasks_target_version CHECK (
-        (kind = 'ingest_document' AND target_version IS NOT NULL AND target_version >= 1)
-        OR (kind <> 'ingest_document' AND target_version IS NULL)
+        (kind IN ('ingest_document', 'reembed_document') AND target_version IS NOT NULL AND target_version >= 1)
+        OR (kind NOT IN ('ingest_document', 'reembed_document') AND target_version IS NULL)
     ),
     CONSTRAINT ck_knowledge_tasks_storage_key CHECK (
         (kind = 'delete_document_object' AND storage_key IS NOT NULL AND btrim(storage_key) <> '')
         OR (kind <> 'delete_document_object' AND storage_key IS NULL)
     ),
+    CONSTRAINT ck_knowledge_tasks_reparse_settings CHECK (
+        reparse_settings IS NULL
+        OR (kind = 'ingest_document' AND jsonb_typeof(reparse_settings) = 'object')
+    ),
     CONSTRAINT ck_knowledge_tasks_status CHECK (
         status IN ('queued', 'running', 'retry_wait', 'succeeded', 'failed')
+    ),
+    CONSTRAINT ck_knowledge_tasks_stage CHECK (
+        stage IN ('queued', 'reading_source', 'extracting_splitting', 'loading_segments', 'embedding', 'publishing', 'done')
+    ),
+    CONSTRAINT ck_knowledge_tasks_progress_units CHECK (
+        completed_units >= 0
+        AND (total_units IS NULL OR (total_units >= 0 AND completed_units <= total_units))
     ),
     CONSTRAINT ck_knowledge_tasks_attempts CHECK (
         attempt_count BETWEEN 0 AND max_attempts AND max_attempts = 3
@@ -4555,9 +4598,11 @@ CREATE INDEX ix_knowledge_tasks_expired
     ON knowledge_tasks (lease_until, id)
     WHERE status = 'running';
 
-CREATE UNIQUE INDEX uq_knowledge_tasks_open_ingest
+-- One open indexing operation per document/version regardless of kind: a
+-- reembed cannot slip past the guard an ingest holds and vice versa.
+CREATE UNIQUE INDEX uq_knowledge_tasks_open_indexing
     ON knowledge_tasks (resource_id, target_version)
-    WHERE kind = 'ingest_document' AND status IN ('queued', 'running', 'retry_wait');
+    WHERE kind IN ('ingest_document', 'reembed_document') AND status IN ('queued', 'running', 'retry_wait');
 
 CREATE UNIQUE INDEX uq_knowledge_tasks_open_document_delete
     ON knowledge_tasks (resource_id)
@@ -4586,7 +4631,7 @@ INSERT INTO alembic_version (version_num) VALUES ('schema_v1');
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 108 static tables and 1339 columns.
+-- Coverage: 108 static tables and 1352 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE project_invitation_rate_limits IS '记录项目邀请码失败尝试的限流窗口。';
@@ -6045,6 +6090,7 @@ COMMENT ON COLUMN knowledge_bases.description IS '知识库：知识库描述。
 COMMENT ON COLUMN knowledge_bases.embedding_model_id IS '知识库：固定使用的 Embedding 模型标识（指向供应商模型行）。';
 COMMENT ON COLUMN knowledge_bases.reranker_model_id IS '知识库：可选的 Reranker 模型标识；为空表示检索不重排序。';
 COMMENT ON COLUMN knowledge_bases.status IS '知识库：知识库状态（active、disabled 或 deleting）。';
+COMMENT ON COLUMN knowledge_bases.retrieval_mode IS '知识库：检索模式（semantic 仅向量或 hybrid 增加词法召回路）；检索测试可单次覆盖不落库。';
 COMMENT ON COLUMN knowledge_bases.default_top_k IS '知识库：检索未显式传参时使用的默认返回条数。';
 COMMENT ON COLUMN knowledge_bases.default_score_threshold IS '知识库：检索未显式传参时使用的默认相关性分数阈值（0 表示不过滤）。';
 COMMENT ON COLUMN knowledge_bases.created_at IS '知识库：记录创建时间。';
@@ -6062,6 +6108,7 @@ COMMENT ON COLUMN knowledge_documents.size_bytes IS '知识文档：上传文件
 COMMENT ON COLUMN knowledge_documents.status IS '知识文档：处理状态（uploading、queued、processing、ready、failed 或 deleting）。';
 COMMENT ON COLUMN knowledge_documents.enabled IS '知识文档：是否参与检索；停用不删除向量，重新启用即恢复可检索。';
 COMMENT ON COLUMN knowledge_documents.version IS '知识文档：每次用户重试或删除前递增的处理版本号。';
+COMMENT ON COLUMN knowledge_documents.published_version IS '知识文档：最近一次成功发布（摄取或重嵌入）的执行代次；从未发布为空，人工删空不清除。';
 COMMENT ON COLUMN knowledge_documents.chunk_size IS '知识文档：按字符切分的目标最大长度。';
 COMMENT ON COLUMN knowledge_documents.chunk_overlap IS '知识文档：相邻片段重叠字符数。';
 COMMENT ON COLUMN knowledge_documents.chunk_separator IS '知识文档：切分优先使用的分隔符，按用户输入的转义形式存储；上传时固化，重试沿用。';
@@ -6100,6 +6147,8 @@ COMMENT ON COLUMN knowledge_segments.enabled IS '知识片段：是否参与检�
 COMMENT ON COLUMN knowledge_segments.hit_count IS '知识片段：检索最终结果命中该片段的累计次数。';
 COMMENT ON COLUMN knowledge_segments.source_position IS '知识片段：页码、sheet 或行号等来源位置 JSON。';
 COMMENT ON COLUMN knowledge_segments.embedding IS '知识片段：与知识库 Embedding 模型维度一致的 pgvector 向量；parent_child 模式的父级片段为空。';
+COMMENT ON COLUMN knowledge_segments.lexical_tsv IS '知识片段：按包内 lexical_v1 规则派生的词法 tsvector（simple 配置）；内容变更同事务重算，重嵌入不改。';
+COMMENT ON COLUMN knowledge_segments.lexical_version IS '知识片段：词法派生规则版本；与当前版本不一致的行词法路明确失败，不运行时补数据。';
 COMMENT ON COLUMN knowledge_segments.created_at IS '知识片段：记录创建时间。';
 
 COMMENT ON TABLE knowledge_segment_children IS '保存父子分块模式下父级片段内的二级子块及其向量；检索命中回卷到父级片段。';
@@ -6113,6 +6162,8 @@ COMMENT ON COLUMN knowledge_segment_children.position IS '知识子块：子块�
 COMMENT ON COLUMN knowledge_segment_children.content IS '知识子块：参与向量召回的子块文本（属于私有内容）。';
 COMMENT ON COLUMN knowledge_segment_children.word_count IS '知识子块：内容字符数。';
 COMMENT ON COLUMN knowledge_segment_children.embedding IS '知识子块：与知识库 Embedding 模型维度一致的 pgvector 向量。';
+COMMENT ON COLUMN knowledge_segment_children.lexical_tsv IS '知识子块：按包内 lexical_v1 规则派生的词法 tsvector（simple 配置）；parent_child 词法召回经子块回卷父段。';
+COMMENT ON COLUMN knowledge_segment_children.lexical_version IS '知识子块：词法派生规则版本；与当前版本不一致的行词法路明确失败，不运行时补数据。';
 COMMENT ON COLUMN knowledge_segment_children.created_at IS '知识子块：记录创建时间。';
 
 COMMENT ON TABLE knowledge_queries IS '按项目和查询发起者追加记录每次知识检索（检索测试与 Agent 工具）的查询、目标库与结果概要。';
@@ -6124,16 +6175,23 @@ COMMENT ON COLUMN knowledge_queries.query IS '知识检索查询日志：检索�
 COMMENT ON COLUMN knowledge_queries.source IS '知识检索查询日志：查询来源（agent 工具或 retrieval_test 检索测试）。';
 COMMENT ON COLUMN knowledge_queries.result_count IS '知识检索查询日志：最终返回的引用数量。';
 COMMENT ON COLUMN knowledge_queries.top_score IS '知识检索查询日志：最终返回引用的最高检索分数，可为负；无结果时为空。';
+COMMENT ON COLUMN knowledge_queries.top_score_kind IS '知识检索查询日志：top_score 的分数来源（cosine、rerank 或 rank_fusion）；M10 前历史行为空表示未知。';
+COMMENT ON COLUMN knowledge_queries.strategy_version IS '知识检索查询日志：产生本行的检索策略版本标签；历史行为空。';
 COMMENT ON COLUMN knowledge_queries.created_at IS '知识检索查询日志：记录创建时间。';
 
 COMMENT ON TABLE knowledge_tasks IS '保存知识摄取、资源删除和晚到对象清理任务；领取、租约、精确存储标识与尝试次数直接保存在任务行。';
 COMMENT ON COLUMN knowledge_tasks.id IS '知识后台任务：主键标识。';
 COMMENT ON COLUMN knowledge_tasks.project_id IS '知识后台任务：所属项目标识。';
 COMMENT ON COLUMN knowledge_tasks.resource_id IS '知识后台任务：按任务类型指向知识文档或知识库的业务标识。';
-COMMENT ON COLUMN knowledge_tasks.kind IS '知识后台任务：任务类型（摄取文档、删除文档、清理晚到文档对象或删除知识库）。';
-COMMENT ON COLUMN knowledge_tasks.target_version IS '知识后台任务：ingest_document 任务允许发布的文档版本号。';
+COMMENT ON COLUMN knowledge_tasks.kind IS '知识后台任务：任务类型（摄取文档、重嵌入文档、删除文档、清理晚到文档对象或删除知识库）。';
+COMMENT ON COLUMN knowledge_tasks.target_version IS '知识后台任务：ingest_document 与 reembed_document 任务允许发布的文档版本号。';
 COMMENT ON COLUMN knowledge_tasks.storage_key IS '知识后台任务：仅 delete_document_object 使用的精确 MinIO object key；属于受保护存储定位符。';
+COMMENT ON COLUMN knowledge_tasks.reparse_settings IS '知识后台任务：显式重新解析时固化的完整切分/清洗参数 JSON；重试继承，其余任务为空。';
 COMMENT ON COLUMN knowledge_tasks.status IS '知识后台任务：任务状态（queued、running、retry_wait、succeeded 或 failed）。';
+COMMENT ON COLUMN knowledge_tasks.stage IS '知识后台任务：真实处理阶段（queued 到 done），与任务状态正交；失败保留失败阶段。';
+COMMENT ON COLUMN knowledge_tasks.completed_units IS '知识后台任务：当前尝试内经校验成功的处理单元数（嵌入按向量条目计）；新尝试清零。';
+COMMENT ON COLUMN knowledge_tasks.total_units IS '知识后台任务：可验证的总处理单元数；无法确定时为空，界面不得模拟百分比。';
+COMMENT ON COLUMN knowledge_tasks.progress_updated_at IS '知识后台任务：阶段或计数最近更新时间。';
 COMMENT ON COLUMN knowledge_tasks.attempt_count IS '知识后台任务：已经开始执行的次数。';
 COMMENT ON COLUMN knowledge_tasks.max_attempts IS '知识后台任务：允许执行的最大次数（MVP 固定为 3）。';
 COMMENT ON COLUMN knowledge_tasks.available_at IS '知识后台任务：queued 或 retry_wait 任务最早可领取的时间。';

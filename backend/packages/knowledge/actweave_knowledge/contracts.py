@@ -175,6 +175,10 @@ class KnowledgeModelPort(Protocol):
 
 KnowledgeBaseStatus = Literal["active", "disabled", "deleting"]
 
+# One retrieval strategy per base; ``hybrid`` adds the lexical route while
+# ``semantic`` stays vector-only. A search request may override for one call.
+KnowledgeRetrievalMode = Literal["semantic", "hybrid"]
+
 # Search and per-base default share the same ceiling.
 KNOWLEDGE_MAX_TOP_K = 20
 
@@ -185,6 +189,7 @@ class KnowledgeBaseCreate:
     embedding_model_id: UUID
     description: str = ""
     reranker_model_id: UUID | None = None
+    retrieval_mode: KnowledgeRetrievalMode = "semantic"
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +208,7 @@ class KnowledgeBaseUpdate:
     default_score_threshold: float | None = None
     reranker_model_id: UUID | None = None
     clear_reranker_model: bool = False
+    retrieval_mode: KnowledgeRetrievalMode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +219,7 @@ class KnowledgeBaseView:
     description: str
     embedding_model_id: UUID
     reranker_model_id: UUID | None
+    retrieval_mode: KnowledgeRetrievalMode
     status: KnowledgeBaseStatus
     document_count: int
     default_top_k: int
@@ -222,11 +229,64 @@ class KnowledgeBaseView:
     updated_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class KnowledgeRebuildResult:
+    """Outcome of a base-level re-embed: rebind plus per-document admission.
+
+    ``skipped_document_ids`` lists never-published failed documents that stay
+    failed: re-embedding has no published content to read, and reparsing the
+    original file must remain an explicit, separate decision.
+    """
+
+    base: KnowledgeBaseView
+    accepted_document_count: int
+    skipped_document_ids: tuple[UUID, ...] = ()
+
+
 # ---------------------------------------------------------------------------
 # Knowledge Document DTOs
 # ---------------------------------------------------------------------------
 
 KnowledgeDocumentStatus = Literal["uploading", "queued", "processing", "ready", "failed", "deleting"]
+
+# Real pipeline stages; orthogonal to task status. A failed task keeps its
+# failing stage, and ``done`` appears only when the final publish commits.
+KnowledgeTaskStage = Literal[
+    "queued",
+    "reading_source",
+    "extracting_splitting",
+    "loading_segments",
+    "embedding",
+    "publishing",
+    "done",
+]
+
+KnowledgeTaskProgressStatus = Literal["queued", "running", "retry_wait", "failed"]
+
+KnowledgeIndexingTaskKind = Literal["ingest_document", "reembed_document"]
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeTaskProgress:
+    """Safe projection of the open indexing task bound to the current version.
+
+    Deliberately excludes claim tokens, lease deadlines, storage keys and raw
+    provider errors. ``total_units`` is ``None`` while no verifiable total
+    exists (never a simulated percentage), ``completed_units`` counts only
+    provider batches that validated successfully, and ``next_attempt_at`` is
+    populated solely in ``retry_wait``.
+    """
+
+    kind: KnowledgeIndexingTaskKind
+    status: KnowledgeTaskProgressStatus
+    stage: KnowledgeTaskStage
+    completed_units: int
+    total_units: int | None
+    attempt_count: int
+    max_attempts: int
+    target_version: int
+    next_attempt_at: datetime | None = None
+
 
 # Escaped form as typed by the user; the splitter decodes \n/\t/\r at use time.
 KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR = "\\n\\n"
@@ -282,6 +342,13 @@ class KnowledgeDocumentView:
     delete_error: str | None
     created_at: datetime
     updated_at: datetime
+    # Derived from ``published_version IS NOT NULL``: distinguishes a document
+    # that has published at least once (even if later edited down to zero
+    # segments) from one that never published successfully. Defaults to the
+    # conservative reading so a projection that says nothing shows "not yet".
+    content_initialized: bool = False
+    # Open indexing task bound to the current target version, if any.
+    task_progress: KnowledgeTaskProgress | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +383,47 @@ class KnowledgeSegmentUpdate:
     enabled: bool | None = None
 
 
+# ``current`` rows belong to the document's published content generation;
+# ``stale`` rows were left behind by a failed reprocessing run and are
+# read-only maintenance evidence, never retrievable content.
+KnowledgeContentState = Literal["current", "stale"]
+
+KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE = 50
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSegmentChildView:
+    """One child chunk shown in the segment detail; never cited directly."""
+
+    id: UUID
+    position: int
+    content: str
+    word_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSegmentDetail:
+    """Authoritative single-segment read with paged children.
+
+    Opened from a search hit, callers supply the expected document version
+    and content digest; a mismatch raises ``KNOWLEDGE_CONFLICT`` instead of
+    silently explaining old scores with new text. Plain maintenance browsing
+    omits the expectations and may read ``stale`` rows left by a failed
+    reprocessing, clearly labeled and excluded from retrieval.
+    """
+
+    segment: KnowledgeSegmentView
+    knowledge_base_id: UUID
+    document_id: UUID
+    document_name: str
+    content_state: KnowledgeContentState
+    stored_content_version: int
+    current_document_version: int
+    children_total: int
+    child_page: int
+    children: tuple[KnowledgeSegmentChildView, ...] = ()
+
+
 # ---------------------------------------------------------------------------
 # Metadata field DTOs
 # ---------------------------------------------------------------------------
@@ -342,6 +450,82 @@ class KnowledgeMetadataFieldView:
     field_type: KnowledgeMetadataFieldType
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Filter-field discovery and bounded batch assignment
+# ---------------------------------------------------------------------------
+
+KnowledgeFilterFieldKind = Literal["custom", "builtin"]
+
+# Read-only builtin filter fields projected from document authority columns;
+# they are never copied into ``doc_metadata`` and never writable.
+KNOWLEDGE_BUILTIN_FILTER_FIELDS: tuple[str, ...] = (
+    "document_name",
+    "uploaded_at",
+    "file_type",
+    "source_type",
+)
+
+# Authority sources: name, created_at (epoch seconds), the original file's
+# extension (lowercased), and the fixed ingestion channel "file_upload".
+KNOWLEDGE_BUILTIN_FILTER_FIELD_TYPES: dict[str, KnowledgeMetadataFieldType] = {
+    "document_name": "string",
+    "uploaded_at": "time",
+    "file_type": "string",
+    "source_type": "string",
+}
+
+# Operators a field of each type supports. For custom fields this is
+# advisory (a mismatched value is a non-match); for builtin fields, whose
+# types are fixed here, an unsupported operator is an invalid request.
+KNOWLEDGE_FILTER_OPERATORS_BY_TYPE: dict[KnowledgeMetadataFieldType, tuple[KnowledgeMetadataFilterOperator, ...]] = {
+    "string": ("eq", "contains"),
+    "number": ("eq", "gte", "lte"),
+    "time": ("eq", "gte", "lte"),
+}
+
+# Discovery budget: at most this many bases per call (each base already caps
+# custom fields at KNOWLEDGE_MAX_METADATA_FIELDS_PER_BASE plus 4 builtins).
+# A wider scope must be narrowed explicitly — never silently truncated.
+KNOWLEDGE_MAX_FILTER_DISCOVERY_BASES = 20
+
+KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS = 100
+KNOWLEDGE_MAX_BATCH_METADATA_FIELDS = 20
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeFilterFieldView:
+    """One filterable field: stable identity, type, operators, writability."""
+
+    kind: KnowledgeFilterFieldKind
+    name: str
+    field_type: KnowledgeMetadataFieldType
+    operators: tuple[KnowledgeMetadataFilterOperator, ...]
+    writable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeBaseFilterFields:
+    """Discovered filter fields of one base (builtin plus custom)."""
+
+    knowledge_base_id: UUID
+    fields: tuple[KnowledgeFilterFieldView, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeMetadataBatchPatch:
+    """Bounded common patch over documents of one base, all-or-nothing.
+
+    Untouched keys stay, ``None`` removes the key, builtin names are
+    rejected. Applies to at most ``KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS``
+    documents and ``KNOWLEDGE_MAX_BATCH_METADATA_FIELDS`` fields in one
+    transaction; any authority, existence or type conflict rolls back the
+    whole batch. Metadata changes never trigger re-embedding.
+    """
+
+    document_ids: tuple[UUID, ...]
+    values: dict[str, str | int | float | None]
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +569,44 @@ class KnowledgeChunkPreview:
 
 
 # ---------------------------------------------------------------------------
+# Reprocessing DTOs (re-embed keeps content; reparse rebuilds from the file)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeReparseRequest:
+    """Explicit re-parse of the original file with freshly confirmed settings.
+
+    ``expected_version`` is a CAS guard against concurrent edits. The chunk
+    settings are validated completely, frozen onto the task's dedicated
+    ``reparse_settings``, and replace the document's stored parameters only
+    when the new content publishes successfully. This is never a model change.
+    """
+
+    expected_version: int
+    chunk_size: int = 1000
+    chunk_overlap: int = 100
+    chunk_separator: str = KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR
+    remove_extra_spaces: bool = False
+    remove_urls_emails: bool = False
+    chunking_mode: KnowledgeChunkingMode = "general"
+    child_chunk_size: int = 500
+    child_chunk_separator: str = KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeReparsePreview:
+    """Read-only re-parse preview computed from the stored original file.
+
+    ``document_version`` is the version the preview was computed against;
+    submitting the reparse still performs its own CAS check.
+    """
+
+    document_version: int
+    preview: KnowledgeChunkPreview
+
+
+# ---------------------------------------------------------------------------
 # Search DTOs
 # ---------------------------------------------------------------------------
 
@@ -404,11 +626,14 @@ class KnowledgeMetadataFilter:
     substring-matches string values, and ``gte``/``lte`` compare number and
     time (epoch seconds) values numerically. A document without the key —
     or whose value has a mismatched JSON type — never matches.
+    ``field_kind`` separates read-only builtin fields from custom ones so a
+    custom field may reuse a builtin name without ambiguity.
     """
 
     name: str
     operator: KnowledgeMetadataFilterOperator
     value: str | int | float
+    field_kind: KnowledgeFilterFieldKind = "custom"
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,7 +643,9 @@ class KnowledgeSearchRequest:
     ``top_k``/``score_threshold`` left as ``None`` resolve to the per-base
     defaults stored on the targeted knowledge bases. ``source`` labels the
     query-log row; it never changes ranking. ``metadata_filters`` restrict
-    recall to documents matching every condition.
+    recall to documents matching every condition. ``retrieval_mode`` set
+    overrides the per-base mode for this one call (retrieval test only) and
+    is never persisted; ``debug`` adds the bounded safe diagnostics.
     """
 
     project_id: UUID
@@ -429,6 +656,58 @@ class KnowledgeSearchRequest:
     score_threshold: float | None = None
     source: KnowledgeQuerySource = "retrieval_test"
     metadata_filters: tuple[KnowledgeMetadataFilter, ...] | None = None
+    retrieval_mode: KnowledgeRetrievalMode | None = None
+    debug: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Score provenance and hits
+# ---------------------------------------------------------------------------
+
+# ``citation.score``/``top_score`` provenance: a native cosine similarity in
+# [-1, 1], a native reranker relevance in [0, 1], or the [0, 1] reciprocal
+# rank fusion of the final ranking. Fusion scores are ordering evidence, not
+# calibrated confidence, and thresholds never apply to them.
+KnowledgeScoreKind = Literal["cosine", "rerank", "rank_fusion"]
+
+# Native score kinds a threshold can act on (never ``rank_fusion``).
+KnowledgeLocalScoreKind = Literal["cosine", "rerank"]
+
+KnowledgeRecallRoute = Literal["semantic", "lexical"]
+
+KnowledgeEmptyReason = Literal["not_ready", "no_candidates", "filtered_out", "stale_candidates"]
+
+# Versioned retrieval strategy label written to query logs and diagnostics.
+KNOWLEDGE_STRATEGY_VERSION = "m10.1"
+
+# Fixed lexical derivation version (see retrieval/lexical); bumping it
+# requires re-running the quality evaluation.
+KNOWLEDGE_LEXICAL_VERSION = 1
+
+# With a hybrid target, the query may carry at most this many deduplicated
+# lexical tokens; longer queries must shorten or switch to semantic. A pure
+# semantic search never builds a lexical query and never hits this cap.
+KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS = 128
+
+# Global parent-candidate budget shared by every search (design §8.2).
+KNOWLEDGE_GLOBAL_PARENT_CANDIDATE_BUDGET = 400
+
+# At most this many really-recalled children are projected per hit.
+KNOWLEDGE_MAX_MATCHED_CHILDREN = 3
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeMatchedChild:
+    """One child chunk that really participated in recall for this hit.
+
+    Carried by the recall transaction itself; never reconstructed by
+    scanning children after the fact.
+    """
+
+    child_id: UUID
+    position: int
+    route: KnowledgeRecallRoute
+    score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,11 +721,109 @@ class KnowledgeCitation:
     snippet: str
     score: float
     source_position: dict[str, Any] = field(default_factory=dict)
+    # New writes always provide these; historical citations legally lack
+    # them and render as short quotes with unknown provenance.
+    document_version: int | None = None
+    content_digest: str | None = None
+    score_kind: KnowledgeScoreKind | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSearchHit:
+    """One search hit: the single source for citations and projections.
+
+    ``passage`` is the complete parent segment text from the recall snapshot
+    (never the whole original file). ``local_score`` is the native score the
+    threshold acted on; ``ranking_method``/``ranking_score`` explain the
+    final order. ``document_version`` and ``content_digest`` let a detail
+    read detect that the same segment ID now carries different content.
+    """
+
+    citation: KnowledgeCitation
+    passage: str
+    document_version: int
+    content_digest: str
+    local_score: float
+    local_score_kind: KnowledgeLocalScoreKind
+    score_domain: str
+    ranking_method: KnowledgeScoreKind
+    ranking_score: float
+    matched_children: tuple[KnowledgeMatchedChild, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeHitDiagnostics:
+    """Per-hit safe diagnostics; no passage, child text or losing candidates."""
+
+    segment_id: UUID
+    local_score: float
+    local_score_kind: KnowledgeLocalScoreKind
+    score_domain: str
+    ranking_method: KnowledgeScoreKind
+    ranking_score: float
+    matched_children: tuple[KnowledgeMatchedChild, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeRouteCounts:
+    """Actual recall/filter counts of one search."""
+
+    semantic_candidates: int = 0
+    lexical_candidates: int = 0
+    parents_deduplicated: int = 0
+    threshold_filtered: int = 0
+    stale_filtered: int = 0
+    returned: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSearchTimings:
+    """Server-side monotonic stage durations in milliseconds."""
+
+    query_embedding_ms: float = 0.0
+    recall_ms: float = 0.0
+    rerank_ms: float = 0.0
+    final_validation_ms: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSearchDiagnostics:
+    """Bounded safe diagnostics returned only on ``debug=true`` responses.
+
+    Exists solely in the response — never written to logs or a tracing
+    table. Model identities are limited to registry ids the project's model
+    options already expose; endpoints, keys and vectors stay out.
+    """
+
+    strategy_version: str
+    lexical_version: int
+    target_base_count: int
+    effective_top_k: int
+    per_base_route_budget: int
+    retrieval_mode: KnowledgeRetrievalMode
+    counts: KnowledgeRouteCounts
+    timings: KnowledgeSearchTimings
+    model_ids: tuple[UUID, ...] = ()
+    ranking_method: KnowledgeScoreKind | None = None
+    empty_reason: KnowledgeEmptyReason | None = None
+    heterogeneous_without_lexical_evidence: bool = False
+    hit_diagnostics: tuple[KnowledgeHitDiagnostics, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeSearchResult:
-    citations: tuple[KnowledgeCitation, ...]
+    """Search outcome; ``hits`` is the only ranked source of truth.
+
+    ``citations`` is derived per access so no second ordered list can drift
+    from the hits. ``diagnostics`` is present only for ``debug=true``.
+    """
+
+    hits: tuple[KnowledgeSearchHit, ...] = ()
+    diagnostics: KnowledgeSearchDiagnostics | None = None
+
+    @property
+    def citations(self) -> tuple[KnowledgeCitation, ...]:
+        return tuple(hit.citation for hit in self.hits)
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,6 +837,9 @@ class KnowledgeQueryView:
     result_count: int
     top_score: float | None
     created_at: datetime
+    # Provenance of ``top_score``; historical rows without it show unknown.
+    top_score_kind: KnowledgeScoreKind | None = None
+    strategy_version: str | None = None
 
 
 # ---------------------------------------------------------------------------

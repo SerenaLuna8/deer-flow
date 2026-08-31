@@ -1,6 +1,13 @@
 "use client";
 
-import { ArrowLeftIcon, PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  LocateIcon,
+  PencilIcon,
+  PlusIcon,
+  Trash2Icon,
+  XIcon,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +28,7 @@ import {
   useCreateKnowledgeSegment,
   useDeleteKnowledgeSegment,
   useKnowledgeDocumentSegments,
+  useKnowledgeSegmentLocate,
   useUpdateKnowledgeSegment,
 } from "@/core/knowledge/hooks";
 import { formatKnowledgeSourcePosition } from "@/core/knowledge/source-position";
@@ -40,6 +48,11 @@ const MAX_SEGMENT_CONTENT_CHARS = 4000;
 /**
  * Full segment browsing page for one document: list, enable toggles, edit,
  * manual add, and delete. Replaces the former read-only preview modal.
+ *
+ * `locateSegmentId` (the URL's `segment=`) resolves through the segment
+ * detail endpoint — never by walking the base's pages — and renders a
+ * pinned card. A deleted segment or a cross-base id combination shows an
+ * explicit failure instead of resurrecting a cached object.
  */
 export function KnowledgeSegmentsBrowser({
   scope,
@@ -47,12 +60,16 @@ export function KnowledgeSegmentsBrowser({
   document,
   canEdit,
   onBack,
+  locateSegmentId = null,
+  onDismissLocate,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
   document: KnowledgeDocumentItem;
   canEdit: boolean;
   onBack: () => void;
+  locateSegmentId?: string | null;
+  onDismissLocate?: () => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
@@ -108,6 +125,16 @@ export function KnowledgeSegmentsBrowser({
         <p role="alert" className="text-destructive text-sm">
           {knowledgeErrorMessage(toggleSegment.error, labels.errors)}
         </p>
+      ) : null}
+
+      {locateSegmentId !== null ? (
+        <SegmentLocateCard
+          scope={scope}
+          base={base}
+          document={document}
+          segmentId={locateSegmentId}
+          onDismiss={onDismissLocate}
+        />
       ) : null}
 
       {segments.isLoading ? (
@@ -260,6 +287,97 @@ export function KnowledgeSegmentsBrowser({
         />
       ) : null}
     </section>
+  );
+}
+
+/**
+ * Pinned card for the URL-addressed segment. The detail read validates the
+ * base/document/segment lineage server-side; any failure (deleted, foreign
+ * combination, revoked access) renders an explicit notice — the card never
+ * falls back to a previously cached object.
+ */
+function SegmentLocateCard({
+  scope,
+  base,
+  document,
+  segmentId,
+  onDismiss,
+}: {
+  scope: ProjectClientScope;
+  base: KnowledgeBaseItem;
+  document: KnowledgeDocumentItem;
+  segmentId: string;
+  onDismiss?: () => void;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge;
+  const locate = useKnowledgeSegmentLocate(
+    scope,
+    base.id,
+    document.id,
+    segmentId,
+  );
+
+  return (
+    <aside
+      aria-label={labels.segments.locatedTitle(
+        locate.data?.segment.position ?? 0,
+      )}
+      data-testid="knowledge-segment-locate"
+      className="border-primary/40 bg-primary/5 rounded-xl border p-3"
+    >
+      {locate.isLoading ? (
+        <Skeleton className="h-16 rounded-lg" />
+      ) : locate.error !== null || locate.data === undefined ? (
+        <div className="flex items-start gap-2">
+          <p role="alert" className="text-destructive min-w-0 flex-1 text-sm">
+            {labels.segments.locateFailed}
+          </p>
+          {onDismiss ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              aria-label={labels.segments.dismissLocate}
+              onClick={onDismiss}
+            >
+              <XIcon aria-hidden className="size-4" />
+            </Button>
+          ) : null}
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          <div className="text-muted-foreground flex items-center gap-2 text-xs">
+            <LocateIcon aria-hidden className="size-3.5" />
+            <span className="text-foreground font-medium">
+              {labels.segments.locatedTitle(locate.data.segment.position)}
+            </span>
+            <span>
+              · {labels.segments.wordCount(locate.data.segment.word_count)}
+            </span>
+            {locate.data.content_state === "stale" ? (
+              <Badge variant="secondary">{labels.segments.locateStale}</Badge>
+            ) : null}
+            {onDismiss ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="ml-auto size-7"
+                aria-label={labels.segments.dismissLocate}
+                onClick={onDismiss}
+              >
+                <XIcon aria-hidden className="size-4" />
+              </Button>
+            ) : null}
+          </div>
+          <p className="text-sm leading-6 whitespace-pre-wrap">
+            {locate.data.segment.content}
+          </p>
+        </div>
+      )}
+    </aside>
   );
 }
 

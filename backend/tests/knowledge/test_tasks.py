@@ -32,7 +32,9 @@ from actweave_knowledge.persistence.tasks import (
     extend_task_lease,
     recover_expired_tasks,
     settle_task_failure,
+    settle_task_row_success,
     settle_task_success,
+    update_task_progress,
 )
 from actweave_knowledge.tasks import (
     KnowledgeBaseDeletionHandler,
@@ -433,6 +435,150 @@ async def test_recover_expired_tasks_requeues_or_fails_by_remaining_budget(postg
         claim = await _claim_snapshot(harness)
         assert claim.id == retryable_task
         assert claim.attempt_count == 2
+    finally:
+        await harness.engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Verified progress of the current attempt (M10 T4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_claim_resets_progress_and_settlement_stamps_done(postgres_database_url: str) -> None:
+    """A new attempt starts from zero — stale stage/counters of the previous
+    attempt never accumulate — and only settlement stamps the ``done`` stage."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        task_id = await _seed_task(harness, project_id, uuid.uuid4(), status="retry_wait", attempt_count=1)
+        async with harness.factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE knowledge_tasks SET stage = 'embedding', completed_units = 5, total_units = 9 WHERE id = :id"),
+                {"id": str(task_id)},
+            )
+
+        claim = await _claim_snapshot(harness)
+        claimed = await _task_row(harness, task_id)
+        assert claimed.stage == "queued"
+        assert claimed.completed_units == 0
+        assert claimed.total_units is None
+        assert claimed.progress_updated_at is not None
+
+        async with harness.factory() as session, session.begin():
+            assert (
+                await update_task_progress(
+                    session,
+                    task_id=claim.id,
+                    claim_token=claim.claim_token,
+                    attempt_count=claim.attempt_count,
+                    target_version=claim.target_version,
+                    stage="embedding",
+                    completed_units=3,
+                    total_units=9,
+                )
+                is True
+            )
+        progressed = await _task_row(harness, task_id)
+        assert progressed.stage == "embedding"
+        assert progressed.completed_units == 3
+        assert progressed.total_units == 9
+
+        async with harness.factory() as session, session.begin():
+            assert await settle_task_success(session, claim.id, claim.claim_token) is True
+        settled = await _task_row(harness, task_id)
+        assert settled.status == "succeeded"
+        assert settled.stage == "done"
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_update_task_progress_rejects_stale_claims_and_late_attempts(postgres_database_url: str) -> None:
+    """Progress is verified against claim token, attempt, and target version;
+    a late update from a lost attempt matches no row and reports False."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        task_id = await _seed_task(harness, project_id, uuid.uuid4())
+        first = await _claim_snapshot(harness)
+
+        async def _attempt(claim: KnowledgeTaskClaim, **overrides: object) -> bool:
+            values = {
+                "task_id": claim.id,
+                "claim_token": claim.claim_token,
+                "attempt_count": claim.attempt_count,
+                "target_version": claim.target_version,
+            }
+            values.update(overrides)
+            async with harness.factory() as session, session.begin():
+                return await update_task_progress(
+                    session,
+                    stage="embedding",
+                    completed_units=1,
+                    total_units=4,
+                    **values,  # type: ignore[arg-type]
+                )
+
+        assert await _attempt(first, claim_token=uuid.uuid4()) is False
+        assert await _attempt(first, attempt_count=first.attempt_count + 1) is False
+        assert await _attempt(first, target_version=99) is False
+        assert await _attempt(first) is True
+
+        # The lease expires and another worker re-claims: attempt two.
+        async with harness.factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE knowledge_tasks SET lease_until = now() - interval '1 second' WHERE id = :id"),
+                {"id": str(task_id)},
+            )
+        second = await _claim_snapshot(harness)
+        assert second.id == task_id and second.attempt_count == 2
+        fresh = await _task_row(harness, task_id)
+        assert fresh.completed_units == 0 and fresh.stage == "queued"
+
+        # The first attempt's progress arrives late: no row may match.
+        assert await _attempt(first) is False
+        untouched = await _task_row(harness, task_id)
+        assert untouched.completed_units == 0 and untouched.stage == "queued"
+
+        # The current attempt still reports normally.
+        assert await _attempt(second) is True
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_settle_task_row_success_stamps_the_done_stage(postgres_database_url: str) -> None:
+    """The in-transaction settlement used by publishing handlers is the only
+    other place that may write ``done``."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        task_id = await _seed_task(harness, project_id, uuid.uuid4())
+        claim = await _claim_snapshot(harness)
+
+        async with harness.factory() as session, session.begin():
+            row = await session.scalar(
+                select(KnowledgeTaskRow)
+                .where(
+                    KnowledgeTaskRow.id == claim.id,
+                    KnowledgeTaskRow.claim_token == claim.claim_token,
+                    KnowledgeTaskRow.status == "running",
+                )
+                .with_for_update()
+            )
+            assert row is not None
+            settle_task_row_success(row, now=datetime.now(UTC))
+        settled = await _task_row(harness, task_id)
+        assert settled.status == "succeeded"
+        assert settled.stage == "done"
+        assert settled.progress_updated_at is not None
     finally:
         await harness.engine.dispose()
 

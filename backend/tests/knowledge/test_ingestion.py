@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from actweave_knowledge import (
+    KNOWLEDGE_CONFLICT,
     KNOWLEDGE_EMBEDDING_FAILED,
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_MODEL_UNAVAILABLE,
@@ -26,8 +27,11 @@ from actweave_knowledge import (
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeChunkPreviewRequest,
     KnowledgeError,
+    KnowledgeReparseRequest,
     KnowledgeSettings,
 )
+from actweave_knowledge.contracts import KNOWLEDGE_LEXICAL_VERSION
+from actweave_knowledge.documents import KnowledgeDocumentService
 from actweave_knowledge.ingestion import (
     PREVIEW_CHUNK_LIMIT,
     ExtractedBlock,
@@ -55,6 +59,7 @@ from actweave_knowledge.persistence.models import (
     KnowledgeTaskRow,
 )
 from actweave_knowledge.persistence.tasks import claim_next_task
+from actweave_knowledge.retrieval import encode_lexical_token, lexical_v1_tokens
 from actweave_knowledge.tasks import KnowledgeTaskClaim, KnowledgeTaskWorker
 from actweave_knowledge.tasks import deletion as deletion_module
 from actweave_knowledge.tasks import worker as worker_module
@@ -741,7 +746,10 @@ class _FakeModelClient:
         self.started = asyncio.Event()
         self.blocker: asyncio.Event | None = None
 
-    async def embed(self, material, texts: list[str]) -> list[list[float]]:  # noqa: ANN001
+    async def embed(self, material, texts: list[str], *, batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
+        # Batch hooks are exercised with the real client in
+        # test_task_progress.py; this double stands for one successful batch.
+        del batch_guard, on_batch_verified
         self.started.set()
         if self.blocker is not None:
             await self.blocker.wait()
@@ -896,6 +904,7 @@ async def _claim(harness: _PipelineHarness) -> KnowledgeTaskClaim:
             claim_token=row.claim_token,  # type: ignore[arg-type]
             attempt_count=row.attempt_count,
             max_attempts=row.max_attempts,
+            reparse_settings=row.reparse_settings,
         )
 
 
@@ -1144,6 +1153,62 @@ async def test_parent_child_ingest_embeds_children_and_leaves_parents_unvectored
 
         task = await _task_row(harness, task_id)
         assert task.status == "succeeded"
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publish_maintains_lexical_fields_on_parents_and_children(postgres_database_url: str) -> None:
+    """T8: the publish transaction derives lexical_v1 tokens for every row.
+
+    Both chunking modes maintain the parent field (fusion scores shortlisted
+    parents), and parent_child rows additionally carry child tokens for the
+    lexical recall route.
+    """
+
+    harness = await _pipeline_harness(postgres_database_url)
+    try:
+        first_paragraph = "".join(f"网络配置第{index}句甲乙丙丁。" for index in range(1, 16))
+        second_paragraph = "".join(f"存储升级第{index}句甲乙丙丁。" for index in range(1, 16))
+        content = f"{first_paragraph}\n\n{second_paragraph}".encode()
+        project_id, base_id, document_id = await _seed_stack(
+            harness,
+            chunking_mode="parent_child",
+            chunk_size=200,
+            chunk_overlap=0,
+            child_chunk_size=100,
+            child_chunk_separator="。",
+            content=content,
+        )
+        await _queue_ingest_task(harness, project_id, document_id)
+
+        await harness.handler(await _claim(harness))
+
+        segments = await _segment_rows(harness, document_id)
+        children = await _child_rows(harness, document_id)
+        assert segments and children
+        rows = [("knowledge_segments", row) for row in segments] + [("knowledge_segment_children", row) for row in children]
+        async with harness.factory() as session:
+            for table, row in rows:
+                own_token = encode_lexical_token(lexical_v1_tokens(row.content)[0])
+                lexical_version, matches_own, matches_foreign = (
+                    await session.execute(
+                        text(
+                            f"""SELECT lexical_version,
+                                       lexical_tsv @@ to_tsquery('simple', :own),
+                                       lexical_tsv @@ to_tsquery('simple', :foreign)
+                                FROM {table} WHERE id = :id"""
+                        ),
+                        {
+                            "own": own_token,
+                            "foreign": encode_lexical_token("不存在的词元"),
+                            "id": row.id,
+                        },
+                    )
+                ).one()
+                assert lexical_version == KNOWLEDGE_LEXICAL_VERSION
+                assert matches_own is True
+                assert matches_foreign is False
     finally:
         await harness.engine.dispose()
 
@@ -1528,6 +1593,301 @@ async def test_worker_timeout_waits_for_blocking_parser_before_retry_and_cleanup
         if run is not None:
             await asyncio.wait_for(run, timeout=10)
         await harness.engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Explicit re-parse of the original file (T3)
+# ---------------------------------------------------------------------------
+
+
+def _reparse_documents_service(harness: _PipelineHarness) -> KnowledgeDocumentService:
+    return KnowledgeDocumentService(
+        session_factory=harness.factory,
+        settings=KnowledgeSettings.model_validate({"enabled": False}),
+        object_store=harness.store,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_reparse_preview_matches_publish_and_freezes_parameters(postgres_database_url: str) -> None:
+    """The preview computed from the stored original equals the published rows,
+    manual text is overwritten only by this explicit operation, and the
+    document's stored parameters swap to the confirmed ones only on publish."""
+
+    harness = await _pipeline_harness(postgres_database_url)
+    try:
+        paragraphs = [f"第{index}段。" + "正文内容" * 60 for index in range(1, 5)]
+        content = "\n\n".join(paragraphs)
+        project_id, _, document_id = await _seed_stack(
+            harness,
+            original_name="reparse.md",
+            content=content.encode(),
+            chunk_size=1000,
+            chunk_overlap=100,
+        )
+        await _queue_ingest_task(harness, project_id, document_id)
+        await harness.handler(await _claim(harness))
+        # A manual edit that an explicit re-parse is allowed to overwrite.
+        async with harness.factory() as session, session.begin():
+            first = await session.scalar(select(KnowledgeSegmentRow).where(KnowledgeSegmentRow.knowledge_document_id == document_id).order_by(KnowledgeSegmentRow.position))
+            assert first is not None
+            first.content = "人工修改过的内容"
+
+        documents = _reparse_documents_service(harness)
+        request = KnowledgeReparseRequest(
+            expected_version=1,
+            chunk_size=300,
+            chunk_overlap=0,
+            chunk_separator="\\n\\n",
+        )
+        previewed = await documents.preview_reparse(project_id, document_id, request)
+        assert previewed.document_version == 1
+        assert previewed.preview.total > 0
+
+        view = await documents.reparse_document(project_id, document_id, request)
+        assert view.status == "queued"
+        assert view.version == 2
+        # The stored parameters stay the old ones until the publish succeeds.
+        assert view.chunk_size == 1000
+        assert view.content_initialized is True
+
+        task = await _open_indexing_task(harness, document_id)
+        assert task.kind == "ingest_document"
+        assert task.target_version == 2
+        assert task.reparse_settings == {
+            "chunk_size": 300,
+            "chunk_overlap": 0,
+            "chunk_separator": "\\n\\n",
+            "remove_extra_spaces": False,
+            "remove_urls_emails": False,
+            "chunking_mode": "general",
+            "child_chunk_size": 500,
+            "child_chunk_separator": "\\n",
+        }
+
+        await harness.handler(await _claim(harness))
+
+        document = await _document_row(harness, document_id)
+        assert document.status == "ready"
+        assert document.version == 2
+        assert document.published_version == 2
+        # Publish swaps the stored parameters together with the rows.
+        assert document.chunk_size == 300
+        assert document.chunk_overlap == 0
+        segments = await _segment_rows(harness, document_id)
+        assert all(segment.document_version == 2 for segment in segments)
+        assert "人工修改过的内容" not in [segment.content for segment in segments]
+        assert [chunk.content for chunk in previewed.preview.chunks] == [segment.content for segment in segments[: len(previewed.preview.chunks)]]
+        assert previewed.preview.total == len(segments)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reparse_admission_rejects_cas_status_open_tasks_and_bad_parameters(postgres_database_url: str) -> None:
+    harness = await _pipeline_harness(postgres_database_url)
+    try:
+        project_id, _, document_id = await _seed_stack(harness)
+        await _queue_ingest_task(harness, project_id, document_id)
+        await harness.handler(await _claim(harness))
+        documents = _reparse_documents_service(harness)
+
+        # Stale expected_version is a CAS conflict.
+        with pytest.raises(KnowledgeError) as stale:
+            await documents.reparse_document(project_id, document_id, KnowledgeReparseRequest(expected_version=7))
+        assert stale.value.code == KNOWLEDGE_CONFLICT
+
+        # Invalid frozen parameters are rejected before anything changes.
+        with pytest.raises(KnowledgeError) as bad:
+            await documents.reparse_document(
+                project_id,
+                document_id,
+                KnowledgeReparseRequest(expected_version=1, chunk_size=1),
+            )
+        assert bad.value.code == KNOWLEDGE_INVALID_REQUEST
+
+        # An open indexing task owns the slot; admission must reject.
+        async with harness.factory() as session, session.begin():
+            session.add(
+                KnowledgeTaskRow(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    resource_id=document_id,
+                    kind="reembed_document",
+                    target_version=1,
+                    status="retry_wait",
+                    attempt_count=1,
+                )
+            )
+        with pytest.raises(KnowledgeError) as open_task:
+            await documents.reparse_document(project_id, document_id, KnowledgeReparseRequest(expected_version=1))
+        assert open_task.value.code == KNOWLEDGE_INVALID_REQUEST
+        async with harness.factory() as session, session.begin():
+            await session.execute(text("DELETE FROM knowledge_tasks WHERE resource_id = :rid AND status = 'retry_wait'"), {"rid": str(document_id)})
+
+        # Processing/deleting documents reject the operation outright.
+        for status in ("processing", "deleting"):
+            async with harness.factory() as session, session.begin():
+                row = await session.get(KnowledgeDocumentRow, document_id)
+                assert row is not None
+                row.status = status
+            with pytest.raises(KnowledgeError) as blocked:
+                await documents.reparse_document(project_id, document_id, KnowledgeReparseRequest(expected_version=1))
+            assert blocked.value.code == KNOWLEDGE_INVALID_REQUEST, status
+        async with harness.factory() as session, session.begin():
+            row = await session.get(KnowledgeDocumentRow, document_id)
+            assert row is not None
+            row.status = "ready"
+
+        # A non-active base stops re-parsing, like retry.
+        async with harness.factory() as session, session.begin():
+            base = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id))
+            assert base is not None
+            base.status = "disabled"
+        with pytest.raises(KnowledgeError) as inactive:
+            await documents.reparse_document(project_id, document_id, KnowledgeReparseRequest(expected_version=1))
+        assert inactive.value.code == KNOWLEDGE_INVALID_REQUEST
+
+        # Nothing changed: same version, no new tasks, rows untouched.
+        document = await _document_row(harness, document_id)
+        assert (document.status, document.version) == ("ready", 1)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reparse_failure_keeps_old_rows_parameters_and_projection(postgres_database_url: str) -> None:
+    """A finally-failed re-parse keeps the published rows, the old stored
+    parameters, and the old published_version; the maintenance listing keeps
+    showing the residual old content instead of an empty page."""
+
+    harness = await _pipeline_harness(postgres_database_url)
+    try:
+        project_id, _, document_id = await _seed_stack(harness, content="旧版本正文内容。".encode())
+        await _queue_ingest_task(harness, project_id, document_id)
+        await harness.handler(await _claim(harness))
+        old_segments = await _segment_rows(harness, document_id)
+        assert len(old_segments) == 1
+
+        documents = _reparse_documents_service(harness)
+        await documents.reparse_document(
+            project_id,
+            document_id,
+            KnowledgeReparseRequest(expected_version=1, chunk_size=300),
+        )
+        harness.client.fail = True
+        while True:
+            claim = await _claim(harness)
+            with pytest.raises(KnowledgeError):
+                await harness.handler(claim)
+            async with harness.factory() as session, session.begin():
+                from actweave_knowledge.persistence.tasks import settle_task_failure
+
+                outcome = await settle_task_failure(
+                    session,
+                    claim.id,
+                    claim.claim_token,
+                    error_message="Embedding 调用失败",
+                    retry_delay_seconds=0,
+                )
+            if outcome == "failed":
+                break
+
+        document = await _document_row(harness, document_id)
+        assert document.status == "failed"
+        assert document.version == 2
+        assert document.published_version == 1
+        # The new parameters never came to explain the old rows.
+        assert document.chunk_size == 1000
+        assert document.segment_count == 1
+        [row] = await _segment_rows(harness, document_id)
+        assert row.content == "旧版本正文内容。"
+        assert row.document_version == 1
+
+        # The read-only maintenance projection still lists the residual rows.
+        views, total = await documents.list_document_segments(project_id, document_id)
+        assert total == 1
+        assert [view.content for view in views] == ["旧版本正文内容。"]
+        assert views[0].document_version == 1
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reparse_retry_inherits_frozen_settings_and_keeps_counters(postgres_database_url: str) -> None:
+    harness = await _pipeline_harness(postgres_database_url)
+    try:
+        project_id, _, document_id = await _seed_stack(harness, content=("第一段。" + "长内容" * 120 + "\n\n第二段。" + "更多内容" * 120).encode())
+        await _queue_ingest_task(harness, project_id, document_id)
+        await harness.handler(await _claim(harness))
+
+        documents = _reparse_documents_service(harness)
+        await documents.reparse_document(
+            project_id,
+            document_id,
+            KnowledgeReparseRequest(expected_version=1, chunk_size=300, chunk_overlap=0),
+        )
+        harness.client.fail = True
+        while True:
+            claim = await _claim(harness)
+            with pytest.raises(KnowledgeError):
+                await harness.handler(claim)
+            async with harness.factory() as session, session.begin():
+                from actweave_knowledge.persistence.tasks import settle_task_failure
+
+                outcome = await settle_task_failure(
+                    session,
+                    claim.id,
+                    claim.claim_token,
+                    error_message="Embedding 调用失败",
+                    retry_delay_seconds=0,
+                )
+            if outcome == "failed":
+                break
+
+        failed = await _document_row(harness, document_id)
+        # Old published rows survive, so the counters keep describing them.
+        assert failed.segment_count > 0
+        old_word_count = failed.word_count
+
+        retried = await documents.retry_document(project_id, document_id)
+        assert retried.status == "queued"
+        assert retried.segment_count == failed.segment_count
+        assert retried.word_count == old_word_count
+
+        task = await _open_indexing_task(harness, document_id)
+        assert task.kind == "ingest_document"
+        assert task.target_version == 3
+        assert task.reparse_settings is not None
+        assert task.reparse_settings["chunk_size"] == 300
+
+        harness.client.fail = False
+        await harness.handler(await _claim(harness))
+
+        document = await _document_row(harness, document_id)
+        assert document.status == "ready"
+        assert document.published_version == 3
+        # The retried publish applies the inherited frozen parameters.
+        assert document.chunk_size == 300
+        segments = await _segment_rows(harness, document_id)
+        assert all(segment.document_version == 3 for segment in segments)
+        assert all(len(segment.content) <= 300 for segment in segments)
+    finally:
+        await harness.engine.dispose()
+
+
+async def _open_indexing_task(harness: _PipelineHarness, document_id: uuid.UUID) -> KnowledgeTaskRow:
+    async with harness.factory() as session:
+        row = await session.scalar(
+            select(KnowledgeTaskRow)
+            .where(
+                KnowledgeTaskRow.resource_id == document_id,
+                KnowledgeTaskRow.status.in_(("queued", "running", "retry_wait")),
+            )
+            .order_by(KnowledgeTaskRow.created_at.desc())
+        )
+        assert row is not None, "expected an open indexing task"
+        return row
 
 
 # ---------------------------------------------------------------------------

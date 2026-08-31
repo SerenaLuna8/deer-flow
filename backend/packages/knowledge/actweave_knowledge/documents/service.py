@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -20,6 +22,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..asyncio_utils import run_sync_to_completion
 from ..authority import KnowledgeProjectAuthority, revalidate_project_authority
 from ..contracts import (
     KNOWLEDGE_CONFLICT,
@@ -29,11 +32,15 @@ from ..contracts import (
     KNOWLEDGE_QUOTA_EXCEEDED,
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeChunkingMode,
+    KnowledgeChunkPreviewRequest,
     KnowledgeDocumentUpload,
     KnowledgeDocumentView,
     KnowledgeError,
+    KnowledgeReparsePreview,
+    KnowledgeReparseRequest,
     KnowledgeSegmentView,
     KnowledgeSettings,
+    KnowledgeTaskProgress,
 )
 from ..persistence.derivations import document_delete_error_expression
 from ..persistence.models import (
@@ -42,7 +49,7 @@ from ..persistence.models import (
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
 )
-from ..persistence.tasks import TASK_OPEN_STATUSES
+from ..persistence.tasks import INDEXING_TASK_KINDS, TASK_OPEN_STATUSES
 from ..storage import DOCUMENT_STORAGE_EXTENSIONS, MinioObjectStore, document_storage_key
 
 logger = logging.getLogger(__name__)
@@ -198,7 +205,63 @@ def _validated_upload(upload: KnowledgeDocumentUpload, settings: KnowledgeSettin
     )
 
 
-def document_view(row: KnowledgeDocumentRow, *, delete_error: str | None) -> KnowledgeDocumentView:
+def _validated_reparse(request: KnowledgeReparseRequest) -> KnowledgeReparseRequest:
+    """Full parameter validation before anything is frozen or downloaded."""
+
+    if type(request.expected_version) is not int or request.expected_version < 1:
+        raise _invalid("expected_version 必须是不小于 1 的整数")
+    chunk_size, chunk_overlap, chunk_separator = validated_chunk_settings(request.chunk_size, request.chunk_overlap, request.chunk_separator)
+    remove_extra_spaces, remove_urls_emails = validated_preprocessing_rules(request.remove_extra_spaces, request.remove_urls_emails)
+    chunking_mode, child_chunk_size, child_chunk_separator = validated_chunking_mode(
+        request.chunking_mode,
+        request.child_chunk_size,
+        request.child_chunk_separator,
+        chunk_size=chunk_size,
+    )
+    return KnowledgeReparseRequest(
+        expected_version=request.expected_version,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        chunk_separator=chunk_separator,
+        remove_extra_spaces=remove_extra_spaces,
+        remove_urls_emails=remove_urls_emails,
+        chunking_mode=chunking_mode,
+        child_chunk_size=child_chunk_size,
+        child_chunk_separator=child_chunk_separator,
+    )
+
+
+def _frozen_reparse_settings(validated: KnowledgeReparseRequest) -> dict:
+    """The task-borne parameter snapshot; the handler applies exactly this."""
+
+    return {
+        "chunk_size": validated.chunk_size,
+        "chunk_overlap": validated.chunk_overlap,
+        "chunk_separator": validated.chunk_separator,
+        "remove_extra_spaces": validated.remove_extra_spaces,
+        "remove_urls_emails": validated.remove_urls_emails,
+        "chunking_mode": validated.chunking_mode,
+        "child_chunk_size": validated.child_chunk_size,
+        "child_chunk_separator": validated.child_chunk_separator,
+    }
+
+
+# Statuses that accept an explicit re-parse: the document must be settled.
+_REPARSABLE_STATUSES = frozenset({"ready", "failed"})
+
+
+def _remove_temp_dir(path: str | Path) -> None:
+    """Best-effort cleanup for a directory created during cancellation."""
+
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def document_view(
+    row: KnowledgeDocumentRow,
+    *,
+    delete_error: str | None,
+    task_progress: KnowledgeTaskProgress | None = None,
+) -> KnowledgeDocumentView:
     """Package-internal view builder, shared with the segment service."""
 
     return KnowledgeDocumentView(
@@ -228,6 +291,10 @@ def document_view(row: KnowledgeDocumentRow, *, delete_error: str | None) -> Kno
         delete_error=delete_error,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        # Derived, never a second stored flag: a manually emptied document
+        # stays initialized while a never-published one does not.
+        content_initialized=row.published_version is not None,
+        task_progress=task_progress,
     )
 
 
@@ -236,6 +303,59 @@ def _document_with_derivations(project_id: UUID):  # noqa: ANN202 - SQLAlchemy s
         KnowledgeDocumentRow,
         document_delete_error_expression(KnowledgeDocumentRow.id).label("delete_error"),
     ).where(KnowledgeDocumentRow.project_id == project_id)
+
+
+def _task_progress_view(row: KnowledgeTaskRow) -> KnowledgeTaskProgress:
+    """Safe projection of one indexing task row; no claim, lease, or storage
+    material crosses this boundary."""
+
+    return KnowledgeTaskProgress(
+        kind=row.kind,  # type: ignore[arg-type]
+        status=row.status,  # type: ignore[arg-type]
+        stage=row.stage,  # type: ignore[arg-type]
+        completed_units=row.completed_units,
+        total_units=row.total_units,
+        attempt_count=row.attempt_count,
+        max_attempts=row.max_attempts,
+        target_version=row.target_version if row.target_version is not None else 0,
+        next_attempt_at=row.available_at if row.status == "retry_wait" else None,
+    )
+
+
+async def indexing_task_progress(
+    session: AsyncSession,
+    project_id: UUID,
+    version_by_document: dict[UUID, int],
+) -> dict[UUID, KnowledgeTaskProgress]:
+    """The open (or finally failed) indexing task bound to each document's
+    current generation.
+
+    Succeeded tasks and tasks targeting another generation project nothing:
+    after a retry bumps the version, the superseded attempt's failure no
+    longer describes the document. When one generation carries both a failed
+    task and a newer one, the newest row wins.
+    """
+
+    if not version_by_document:
+        return {}
+    rows = (
+        await session.execute(
+            select(KnowledgeTaskRow).where(
+                KnowledgeTaskRow.project_id == project_id,
+                KnowledgeTaskRow.kind.in_(INDEXING_TASK_KINDS),
+                KnowledgeTaskRow.resource_id.in_(version_by_document),
+                KnowledgeTaskRow.status != "succeeded",
+            )
+        )
+    ).scalars()
+    newest: dict[UUID, KnowledgeTaskRow] = {}
+    for row in rows:
+        if row.target_version != version_by_document.get(row.resource_id):
+            continue
+        current = newest.get(row.resource_id)
+        if current is None or (row.created_at, row.id.hex) > (current.created_at, current.id.hex):
+            newest[row.resource_id] = row
+    return {document_id: _task_progress_view(row) for document_id, row in newest.items()}
 
 
 class KnowledgeDocumentService:
@@ -539,7 +659,13 @@ class KnowledgeDocumentService:
                     .offset((page - 1) * page_size)
                     .limit(page_size)
                 )
-                views = [document_view(row, delete_error=delete_error) for row, delete_error in rows.all()]
+                page_rows = rows.all()
+                progress = await indexing_task_progress(
+                    session,
+                    project_id,
+                    {row.id: row.version for row, _delete_error in page_rows},
+                )
+                views = [document_view(row, delete_error=delete_error, task_progress=progress.get(row.id)) for row, delete_error in page_rows]
                 return views, int(total or 0)
         except KnowledgeError:
             raise
@@ -553,12 +679,12 @@ class KnowledgeDocumentService:
         *,
         authority: KnowledgeProjectAuthority | None = None,
     ) -> KnowledgeDocumentView:
-        row, delete_error = await self._load_document(
+        row, delete_error, task_progress = await self._load_document(
             project_id,
             document_id,
             authority=authority,
         )
-        return document_view(row, delete_error=delete_error)
+        return document_view(row, delete_error=delete_error, task_progress=task_progress)
 
     async def download_document(
         self,
@@ -570,7 +696,7 @@ class KnowledgeDocumentService:
     ) -> KnowledgeDocumentView:
         """Fetch the original file into ``target_path`` and return the document view."""
 
-        row, delete_error = await self._load_document(
+        row, delete_error, _task_progress = await self._load_document(
             project_id,
             document_id,
             authority=authority,
@@ -602,8 +728,11 @@ class KnowledgeDocumentService:
     ) -> KnowledgeDocumentView:
         """Re-queue a failed document under a new version, in one transaction.
 
-        The version bump makes any still-running old ingest a late result: its
-        publish sees a version mismatch and settles as a no-op.
+        The version bump makes any still-running old task a late result: its
+        publish sees a version mismatch and settles as a no-op. A manual retry
+        inherits the failed operation's semantics — a failed re-embed retries
+        as a re-embed (rows and counters survive), never silently escalating
+        into a re-parse of the original file.
         """
 
         try:
@@ -621,12 +750,176 @@ class KnowledgeDocumentService:
                 base_status = await session.scalar(select(KnowledgeBaseRow.status).where(KnowledgeBaseRow.id == row.knowledge_base_id))
                 if base_status != "active":
                     raise _invalid("所属 Knowledge Base 不是 active 状态，不能重试")
+                last_indexing = (
+                    await session.execute(
+                        select(KnowledgeTaskRow.kind, KnowledgeTaskRow.reparse_settings)
+                        .where(
+                            KnowledgeTaskRow.resource_id == row.id,
+                            KnowledgeTaskRow.kind.in_(INDEXING_TASK_KINDS),
+                        )
+                        .order_by(KnowledgeTaskRow.created_at.desc(), KnowledgeTaskRow.id.desc())
+                        .limit(1)
+                    )
+                ).one_or_none()
+                retry_kind, retry_reparse_settings = last_indexing or ("ingest_document", None)
                 row.version = row.version + 1
                 row.status = "queued"
-                # The old version's segments are dead the moment the version
-                # bumps; a stale count would contradict the segment browser.
-                row.segment_count = 0
-                row.word_count = 0
+                if retry_kind == "ingest_document" and row.published_version is None:
+                    # Nothing was ever published, so there are no rows for the
+                    # counters to describe. A failed re-parse or re-embed keeps
+                    # its published rows visible in maintenance views, so their
+                    # counters must keep describing them.
+                    row.segment_count = 0
+                    row.word_count = 0
+                row.error_message = None
+                row.updated_at = func.now()  # type: ignore[assignment]
+                session.add(
+                    KnowledgeTaskRow(
+                        id=uuid4(),
+                        project_id=project_id,
+                        resource_id=row.id,
+                        kind=retry_kind,
+                        target_version=row.version,
+                        status="queued",
+                        # A failed re-parse retries with the same confirmed
+                        # parameters, never silently reverting to the stored ones.
+                        reparse_settings=retry_reparse_settings,
+                    )
+                )
+                await session.flush()
+                await session.refresh(row)
+                delete_error = await self._derived_delete_error(session, row.id)
+                return document_view(row, delete_error=delete_error)
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            raise _storage_unavailable() from None
+
+    async def preview_reparse(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        request: KnowledgeReparseRequest,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeReparsePreview:
+        """Read-only re-parse preview computed from the stored original file.
+
+        The server resolves the file from the Document's own storage key —
+        never from a client-supplied path — and reuses the upload preview's
+        extract → clean → split, so for identical parameters the preview
+        matches what a confirmed re-parse would publish. Object I/O and
+        parsing run outside PostgreSQL, so authority and the document version
+        are re-checked afterwards before the computed preview may leave.
+        """
+
+        validated = _validated_reparse(request)
+        row, _delete_error, _task_progress = await self._load_document(
+            project_id,
+            document_id,
+            authority=authority,
+        )
+        if row.status not in _REPARSABLE_STATUSES:
+            raise _invalid("仅 ready 或 failed 状态的文档支持重新解析")
+        if row.version != validated.expected_version:
+            raise KnowledgeError(KNOWLEDGE_CONFLICT, "文档已被其他操作更新，请刷新后重试")
+
+        # Deferred import: ingestion.preview imports this module's validators.
+        from ..ingestion.preview import preview_document_chunks
+
+        temp_dir = Path(
+            await run_sync_to_completion(
+                tempfile.mkdtemp,
+                prefix="actweave-knowledge-reparse-",
+                cleanup_on_cancel=_remove_temp_dir,
+            )
+        )
+        try:
+            source_path = temp_dir / f"source{Path(row.original_name).suffix.lower()}"
+            await self._object_store.download_to(row.storage_key, source_path)
+            preview = await preview_document_chunks(
+                KnowledgeChunkPreviewRequest(
+                    original_name=row.original_name,
+                    source_path=source_path,
+                    size_bytes=row.size_bytes,
+                    chunk_size=validated.chunk_size,
+                    chunk_overlap=validated.chunk_overlap,
+                    chunk_separator=validated.chunk_separator,
+                    remove_extra_spaces=validated.remove_extra_spaces,
+                    remove_urls_emails=validated.remove_urls_emails,
+                    chunking_mode=validated.chunking_mode,
+                    child_chunk_size=validated.child_chunk_size,
+                    child_chunk_separator=validated.child_chunk_separator,
+                ),
+                self._settings,
+            )
+        finally:
+            await run_sync_to_completion(shutil.rmtree, temp_dir, ignore_errors=True)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                current_version = await session.scalar(select(KnowledgeDocumentRow.version).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id))
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            raise _storage_unavailable() from None
+        if current_version != validated.expected_version:
+            raise KnowledgeError(KNOWLEDGE_CONFLICT, "文档已被其他操作更新，请刷新后重试")
+        return KnowledgeReparsePreview(
+            document_version=validated.expected_version,
+            preview=preview,
+        )
+
+    async def reparse_document(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        request: KnowledgeReparseRequest,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeDocumentView:
+        """Queue an explicit re-parse of the original file, in one transaction.
+
+        The confirmed parameters are frozen onto the task's dedicated
+        ``reparse_settings``; the document's stored parameter columns are
+        replaced only when the new content publishes successfully, so a
+        failure never leaves new parameters explaining old rows. This is
+        never a model change — the request carries no model field at all.
+        """
+
+        validated = _validated_reparse(request)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id).with_for_update())
+                if row is None:
+                    raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
+                if row.status not in _REPARSABLE_STATUSES:
+                    raise _invalid("仅 ready 或 failed 状态的文档支持重新解析")
+                base_status = await session.scalar(select(KnowledgeBaseRow.status).where(KnowledgeBaseRow.id == row.knowledge_base_id))
+                if base_status != "active":
+                    raise _invalid("所属 Knowledge Base 不是 active 状态，不能重新解析")
+                if row.version != validated.expected_version:
+                    raise KnowledgeError(KNOWLEDGE_CONFLICT, "文档已被其他操作更新，请刷新后重试")
+                open_indexing = await session.scalar(
+                    select(KnowledgeTaskRow.id).where(
+                        KnowledgeTaskRow.resource_id == row.id,
+                        KnowledgeTaskRow.kind.in_(INDEXING_TASK_KINDS),
+                        KnowledgeTaskRow.status.in_(TASK_OPEN_STATUSES),
+                    )
+                )
+                if open_indexing is not None:
+                    raise _invalid("文档存在未完成的索引任务，暂不能重新解析")
+                row.version = row.version + 1
+                row.status = "queued"
                 row.error_message = None
                 row.updated_at = func.now()  # type: ignore[assignment]
                 session.add(
@@ -637,6 +930,7 @@ class KnowledgeDocumentService:
                         kind="ingest_document",
                         target_version=row.version,
                         status="queued",
+                        reparse_settings=_frozen_reparse_settings(validated),
                     )
                 )
                 await session.flush()
@@ -777,7 +1071,14 @@ class KnowledgeDocumentService:
         page_size: int = 20,
         authority: KnowledgeProjectAuthority | None = None,
     ) -> tuple[list[KnowledgeSegmentView], int]:
-        """Published segments of the document's current version, by position."""
+        """Published segments of the document's published generation, by position.
+
+        The published generation — not the admission version — owns the
+        content rows: after a failed re-parse or re-embed the version has
+        moved on while the residual rows stay on ``published_version``, and
+        this read-only projection must keep showing them instead of an empty
+        page. A never-published document has no rows to show.
+        """
 
         page, page_size = _validated_page(page, page_size)
         try:
@@ -787,13 +1088,14 @@ class KnowledgeDocumentService:
                     session,
                     project_id=project_id,
                 )
-                document = (await session.execute(select(KnowledgeDocumentRow.id, KnowledgeDocumentRow.version).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id))).one_or_none()
+                document = (await session.execute(select(KnowledgeDocumentRow.version, KnowledgeDocumentRow.published_version).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id))).one_or_none()
                 if document is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
-                _, current_version = document
+                current_version, published_version = document
+                content_version = published_version if published_version is not None else current_version
                 segment_filter = (
                     KnowledgeSegmentRow.knowledge_document_id == document_id,
-                    KnowledgeSegmentRow.document_version == current_version,
+                    KnowledgeSegmentRow.document_version == content_version,
                 )
                 total = await session.scalar(select(func.count()).select_from(KnowledgeSegmentRow).where(*segment_filter))
                 rows = await session.scalars(select(KnowledgeSegmentRow).where(*segment_filter).order_by(KnowledgeSegmentRow.position, KnowledgeSegmentRow.id).offset((page - 1) * page_size).limit(page_size))
@@ -859,7 +1161,7 @@ class KnowledgeDocumentService:
         document_id: UUID,
         *,
         authority: KnowledgeProjectAuthority | None = None,
-    ) -> tuple[KnowledgeDocumentRow, str | None]:
+    ) -> tuple[KnowledgeDocumentRow, str | None, KnowledgeTaskProgress | None]:
         try:
             async with self._session_factory() as session, session.begin():
                 await revalidate_project_authority(
@@ -868,12 +1170,15 @@ class KnowledgeDocumentService:
                     project_id=project_id,
                 )
                 result = (await session.execute(_document_with_derivations(project_id).where(KnowledgeDocumentRow.id == document_id))).one_or_none()
+                progress: dict[UUID, KnowledgeTaskProgress] = {}
+                if result is not None:
+                    progress = await indexing_task_progress(session, project_id, {result[0].id: result[0].version})
         except SQLAlchemyError:
             raise _storage_unavailable() from None
         if result is None:
             raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
         row, delete_error = result
-        return row, delete_error
+        return row, delete_error, progress.get(row.id)
 
 
 _MAX_BATCH_DOCUMENTS = 100

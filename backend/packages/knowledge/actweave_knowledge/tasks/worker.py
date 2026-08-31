@@ -58,6 +58,9 @@ class KnowledgeTaskClaim:
     attempt_count: int
     max_attempts: int
     storage_key: str | None = None
+    # Frozen re-parse parameters (ingest_document only): the handler applies
+    # these instead of the document's stored columns, which swap on publish.
+    reparse_settings: dict | None = None
 
 
 TaskHandler = Callable[[KnowledgeTaskClaim], Awaitable[None]]
@@ -136,6 +139,7 @@ class KnowledgeTaskWorker:
                         attempt_count=row.attempt_count,
                         max_attempts=row.max_attempts,
                         storage_key=row.storage_key,
+                        reparse_settings=row.reparse_settings,
                     )
                     if row is not None
                     else None

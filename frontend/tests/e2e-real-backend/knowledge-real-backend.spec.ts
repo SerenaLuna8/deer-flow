@@ -79,6 +79,21 @@ async function setEmbeddingFailures(
   expect(response.status(), await response.text()).toBe(200);
 }
 
+async function setRerankFailures(
+  context: BrowserContext,
+  project: ReplayProjectScope,
+  failures: number,
+): Promise<void> {
+  const response = await context.request.post(
+    `${APP}/api/test-only/replay-knowledge/provider/faults`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { rerank_failures: failures },
+    },
+  );
+  expect(response.status(), await response.text()).toBe(200);
+}
+
 async function providerCounters(context: BrowserContext): Promise<{
   embedding_calls: number;
   rerank_calls: number;
@@ -188,7 +203,7 @@ test("the real Worker ingests an upload to ready, rerank owns the final order, a
       .getByTestId("knowledge-segment-list")
       .getByText(MARKER_PHONE, { exact: false }),
   ).toBeVisible();
-  await browser.getByRole("button", { name: "Documents" }).click();
+  await browser.getByRole("button", { name: "Documents", exact: true }).click();
   await expect(rows.getByText("manual.txt").first()).toBeVisible();
 
   // The stored object round-trips byte-identically through MinIO.
@@ -211,6 +226,8 @@ test("the real Worker ingests an upload to ready, rerank owns the final order, a
   await expect(items.first()).toContainText("Retrieval score 1.000", {
     timeout: 30_000,
   });
+  // Without a reranker the score provenance is the cosine domain.
+  await expect(items.first()).toContainText("Cosine");
   await expect(results.getByText(MARKER_PHONE, { exact: false })).toHaveCount(
     0,
   );
@@ -234,6 +251,8 @@ test("the real Worker ingests an upload to ready, rerank owns the final order, a
     timeout: 30_000,
   });
   await expect(items.first()).toContainText("Retrieval score 0.950");
+  // The provenance badge flips with the pipeline: rerank now owns the score.
+  await expect(items.first()).toContainText("Rerank");
   expect(await items.count()).toBeGreaterThanOrEqual(2);
   await expect(items.nth(1)).not.toContainText(MARKER_PHONE);
 
@@ -327,7 +346,7 @@ test("segment edits re-embed for retrieval and disables exclude content at both 
   await createBaseThroughUI(page, "治理知识库");
   await page.getByRole("button", { name: "View documents" }).click();
   await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
-  await page.getByRole("button", { name: "Documents" }).click();
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
   await uploadDocumentThroughUI(page, "govern.txt", buildDocumentText());
 
   const rows = page.getByTestId("knowledge-document-rows");
@@ -344,7 +363,7 @@ test("segment edits re-embed for retrieval and disables exclude content at both 
 
   // Edit a filler segment to carry the marker plus a fresh token: the
   // synchronous re-embed must make the new content retrievable immediately.
-  await page.getByRole("button", { name: "Documents" }).click();
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
   await (await openDocumentActions(page, "govern.txt"))
     .getByRole("menuitem", { name: "View segments" })
     .click();
@@ -383,7 +402,7 @@ test("segment edits re-embed for retrieval and disables exclude content at both 
   );
 
   // Disabling the whole document empties retrieval entirely.
-  await page.getByRole("button", { name: "Documents" }).click();
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
   await rows.getByRole("switch", { name: "Disable govern.txt" }).click();
   await expect(
     rows.getByRole("switch", { name: "Enable govern.txt" }),
@@ -396,7 +415,7 @@ test("segment edits re-embed for retrieval and disables exclude content at both 
   });
 
   // Re-enabling the document restores the enabled segments only.
-  await page.getByRole("button", { name: "Documents" }).click();
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
   await rows.getByRole("switch", { name: "Enable govern.txt" }).click();
   await expect(
     rows.getByRole("switch", { name: "Disable govern.txt" }),
@@ -425,15 +444,25 @@ test("wizard chunk preview matches the segments the real pipeline ingests", asyn
     `巡检班组交接班时核对工具清单并在台账签字确认，${"缺失工具需要在交接记录中注明数量与去向，".repeat(4)}由接班组长复核。`,
   ];
   const documentText = sentences.join("\n");
+  // A decoy first file proves the picker previews the *chosen* file, not
+  // just whichever file happens to be first in the selection.
+  const decoyText = "封面页只有一句与预览无关的话。";
 
   await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
   // "New base" opens the document-first wizard.
   await page.getByRole("button", { name: "New base" }).click();
-  await page.getByLabel("File").setInputFiles({
-    name: "preview.txt",
-    mimeType: "text/plain",
-    buffer: Buffer.from(documentText, "utf-8"),
-  });
+  await page.getByLabel("File").setInputFiles([
+    {
+      name: "cover.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from(decoyText, "utf-8"),
+    },
+    {
+      name: "preview.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from(documentText, "utf-8"),
+    },
+  ]);
   await page.getByRole("button", { name: "Next" }).click();
 
   // Tune every K2 parameter away from its default.
@@ -450,15 +479,17 @@ test("wizard chunk preview matches the segments the real pipeline ingests", asyn
     .getByRole("option", { name: "Replay Knowledge Model · replay/embedding" })
     .click();
 
-  // Parameter edits do not re-upload the full file. One explicit refresh
-  // generates the final-parameter preview used for parity below.
+  // Parameter edits do not re-upload the full file. Picking the second file
+  // in the preview picker switches the preview target and auto-previews it
+  // once with the current parameters — the decoy content must not leak in.
   const previewPanel = page.getByTestId("chunk-preview-panel");
   await expect(
     previewPanel.getByText(
       "Preview is out of date. Refresh to apply the current settings.",
     ),
   ).toBeVisible();
-  await previewPanel.getByRole("button", { name: "Refresh preview" }).click();
+  await previewPanel.getByLabel("Preview file").click();
+  await page.getByRole("option", { name: "preview.txt" }).click();
   const chunkParagraphs = previewPanel.locator("ul li p:last-child");
   let previewChunks: string[] = [];
   await expect
@@ -468,19 +499,22 @@ test("wizard chunk preview matches the segments the real pipeline ingests", asyn
         return (
           previewChunks.length >= 3 &&
           previewChunks.every((text) => !text.includes("https://")) &&
-          previewChunks.every((text) => !/ {2}/.test(text))
+          previewChunks.every((text) => !/ {2}/.test(text)) &&
+          previewChunks.every((text) => !text.includes(decoyText))
         );
       },
       { timeout: 30_000 },
     )
     .toBe(true);
-  await expect(previewPanel.getByText(/chunks in total/)).toBeVisible();
+  await expect(
+    previewPanel.getByText(/Showing \d+ of \d+ chunks/),
+  ).toBeVisible();
 
-  // The real Worker ingests with the same frozen parameters.
+  // The real Worker ingests both files with the same frozen parameters.
   await page.getByRole("button", { name: "Save & process" }).click();
   await expect(page.getByText("Knowledge base created")).toBeVisible();
   const statusList = page.getByTestId("wizard-document-status");
-  await expect(statusList.getByText("Ready")).toBeVisible({
+  await expect(statusList.getByText("Ready")).toHaveCount(2, {
     timeout: 60_000,
   });
   await page.getByRole("button", { name: "Go to documents" }).click();
@@ -525,7 +559,7 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   await createBaseThroughUI(page, "父子知识库");
   await page.getByRole("button", { name: "View documents" }).click();
   await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
-  await page.getByRole("button", { name: "Documents" }).click();
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
 
   // Upload in parent-child mode with an explicit child size and no overlap.
   await page.getByRole("button", { name: "Upload document" }).click();
@@ -553,7 +587,7 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   const firstSegment = list.getByRole("listitem").first();
   await expect(firstSegment).toContainText(MARKER_PHONE);
   await expect(firstSegment).toContainText("夜间值班室位于三号楼一层");
-  await browser.getByRole("button", { name: "Documents" }).click();
+  await browser.getByRole("button", { name: "Documents", exact: true }).click();
 
   // Search without explicit parameters: the base defaults (top_k 4) apply.
   // Cosine favors the filler children, rerank favors the marker parent; the
@@ -574,6 +608,45 @@ test("parent-child upload rolls child hits up to one parent citation and base de
     1,
   );
   expect(await items.count()).toBe(2);
+
+  // The reranked hit carries its provenance badge on the result row.
+  await expect(items.first()).toContainText("Rerank");
+
+  // Hit detail pins the full parent: both complete marker lines are present,
+  // including the tail of line B that a snippet would have cut off.
+  await items
+    .first()
+    .getByRole("button", { name: /View segment #\d+ in full/u })
+    .click();
+  const detail = page.getByTestId("knowledge-hit-detail");
+  const detailContent = detail.getByTestId("knowledge-detail-content");
+  await expect(detailContent).toContainText(MARKER_PHONE);
+  await expect(detailContent).toContainText("凭工牌进入");
+
+  // Both children truly participated in recall (marker-axis embeddings), so
+  // the matched flag must cover the second child too — it cannot be inferred
+  // from list order, only from the per-hit matched_children evidence.
+  const detailChildren = detail.getByTestId("knowledge-detail-children");
+  await expect(detailChildren.getByRole("listitem")).toHaveCount(2);
+  await expect(detailChildren.getByRole("listitem").nth(0)).toContainText(
+    "Matched",
+  );
+  await expect(detailChildren.getByRole("listitem").nth(1)).toContainText(
+    "Matched",
+  );
+  await expect(
+    detail.getByLabel("Child chunks matched in this search"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(detail).toBeHidden();
+
+  // Debug diagnostics expose counts and models but never segment text.
+  const diagnostics = page.getByTestId("knowledge-search-diagnostics");
+  await diagnostics.locator("summary").click();
+  await expect(diagnostics).toContainText("Semantic candidates");
+  await expect(diagnostics).not.toContainText(MARKER_PHONE);
+  await expect(diagnostics).not.toContainText("夜间值班室");
+  await diagnostics.locator("summary").click();
 
   // The finished search lands in the recent-queries log with its hit count.
   const recent = page.getByTestId("knowledge-recent-queries");
@@ -599,6 +672,56 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   await expect(
     page.getByTestId("knowledge-search-results").getByRole("listitem"),
   ).toHaveCount(1);
+
+  // Editing the cited segment behind the page's back moves its content
+  // digest; reopening the pinned detail must surface a conflict, not silently
+  // show different content than the one that was scored.
+  const baseId = new URL(page.url()).searchParams.get("kb");
+  expect(baseId).toBeTruthy();
+  const documentsResponse = await context.request.get(
+    `${APP}/api/projects/${project.id}/knowledge/bases/${baseId}/documents?page=1&page_size=50`,
+  );
+  expect(documentsResponse.status(), await documentsResponse.text()).toBe(200);
+  const documentsBody = (await documentsResponse.json()) as {
+    items: Array<{ id: string; name: string }>;
+  };
+  const documentId = documentsBody.items.find(
+    (item) => item.name === "parent-child.txt",
+  )?.id;
+  expect(documentId).toBeTruthy();
+  const segmentsResponse = await context.request.get(
+    `${APP}/api/projects/${project.id}/knowledge/documents/${documentId}/segments?page=1&page_size=10`,
+  );
+  expect(segmentsResponse.status(), await segmentsResponse.text()).toBe(200);
+  const segmentsBody = (await segmentsResponse.json()) as {
+    items: Array<{ id: string; position: number; content: string }>;
+  };
+  const markerSegment = segmentsBody.items.find((item) =>
+    item.content.includes(MARKER_PHONE),
+  );
+  expect(markerSegment).toBeTruthy();
+  const patchResponse = await context.request.patch(
+    `${APP}/api/projects/${project.id}/knowledge/segments/${markerSegment!.id}`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { content: `${markerSegment!.content}\n补充：值班表每周一更新。` },
+    },
+  );
+  expect(patchResponse.status(), await patchResponse.text()).toBe(200);
+
+  await page
+    .getByTestId("knowledge-search-results")
+    .getByRole("listitem")
+    .first()
+    .getByRole("button", { name: /View segment #\d+ in full/u })
+    .click();
+  const staleDetail = page.getByTestId("knowledge-hit-detail");
+  await expect(
+    staleDetail.getByTestId("knowledge-detail-conflict"),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    staleDetail.getByTestId("knowledge-detail-conflict"),
+  ).toContainText("Run the search again");
 });
 
 test("exhausted embedding retries fail the document and a retry after recovery reaches ready", async ({
@@ -618,8 +741,16 @@ test("exhausted embedding retries fail the document and a retry after recovery r
   await uploadDocumentThroughUI(page, "flaky.txt", buildDocumentText());
 
   const rows = page.getByTestId("knowledge-document-rows");
-  await expect(rows.getByText("Failed")).toBeVisible({ timeout: 90_000 });
+  await expect(rows.getByText("Failed", { exact: true })).toBeVisible({
+    timeout: 90_000,
+  });
   await expect(rows.getByText(/HTTP 500/)).toBeVisible();
+
+  // The status cell carries the real task evidence projected from the worker:
+  // the failing stage and the exhausted attempt counter, not a bare badge.
+  const progress = rows.getByTestId("knowledge-task-progress");
+  await expect(progress).toContainText("Failed during Embedding");
+  await expect(progress).toContainText("Attempt 3/3");
 
   // Recovery: clear the fault, retry through the UI, reach ready for real.
   await setEmbeddingFailures(context, project, 0);
@@ -627,6 +758,45 @@ test("exhausted embedding retries fail the document and a retry after recovery r
     .getByRole("menuitem", { name: "Retry" })
     .click();
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
+});
+
+test("a reranker outage keeps the search error visible until a retry succeeds", async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(180_000);
+  const project = await registerReplayProject(context, APP);
+
+  await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
+  await createBaseThroughUI(page, "故障检索知识库");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
+  await uploadDocumentThroughUI(page, "outage.txt", buildDocumentText());
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
+
+  // Every rerank call fails: the search must land in a persistent, visible
+  // error — never an empty state that could pass for "no hits".
+  await setRerankFailures(context, project, 1000);
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill("如何联系应急值班团队");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const searchError = page.getByTestId("knowledge-search-error");
+  await expect(searchError).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("knowledge-search-results")).toHaveCount(0);
+  await expect(page.getByTestId("knowledge-search-empty")).toHaveCount(0);
+
+  // Clearing the fault and retrying re-runs the same query to success.
+  await setRerankFailures(context, project, 0);
+  await searchError.getByRole("button", { name: "Retry" }).click();
+  await expect(
+    page
+      .getByTestId("knowledge-search-results")
+      .getByText(MARKER_PHONE, { exact: false })
+      .first(),
+  ).toBeVisible({ timeout: 30_000 });
+  await expect(searchError).toHaveCount(0);
 });
 
 test("metadata field values gate retrieval to the matching document", async ({
@@ -640,7 +810,7 @@ test("metadata field values gate retrieval to the matching document", async ({
   await createBaseThroughUI(page, "元数据知识库");
   await page.getByRole("button", { name: "View documents" }).click();
   await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
-  await page.getByRole("button", { name: "Documents" }).click();
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
 
   // Two byte-identical documents: only metadata can tell them apart, so a
   // narrowed result proves the JSONB predicate ran inside real recall SQL.
@@ -664,7 +834,7 @@ test("metadata field values gate retrieval to the matching document", async ({
   ).toBeVisible();
 
   // Assign a different value to each document.
-  await nav.getByRole("button", { name: "Documents" }).click();
+  await nav.getByRole("button", { name: "Documents", exact: true }).click();
   for (const [fileName, value] of [
     ["safety.txt", "安全部"],
     ["ops.txt", "运营部"],
@@ -700,40 +870,124 @@ test("metadata field values gate retrieval to the matching document", async ({
   await expect(
     results.getByText(MARKER_PHONE, { exact: false }).first(),
   ).toBeVisible();
+
+  // Batch metadata: the mixed dept values surface as distinct, one shared
+  // set patches both rows, and the filter proves the write reached recall.
+  await nav.getByRole("button", { name: "Documents", exact: true }).click();
+  await page.getByLabel("Select all documents").check();
+  await page.getByRole("button", { name: "Edit metadata" }).click();
+  const batchDialog = page.getByRole("dialog");
+  await expect(
+    batchDialog.getByText("Batch metadata (2 documents)"),
+  ).toBeVisible();
+  const deptField = batchDialog
+    .getByTestId("knowledge-batch-field")
+    .filter({ hasText: "dept" });
+  await expect(deptField).toContainText("2 distinct values");
+  await deptField.getByLabel("dept mode").click();
+  await page.getByRole("option", { name: "Set" }).click();
+  await deptField.getByLabel("dept value").fill("联合部");
+  await batchDialog.getByRole("button", { name: "Save" }).click();
+  await expect(batchDialog).toBeHidden();
+
+  // The same equals filter now matches both documents on the shared value.
+  await nav.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill("如何联系应急值班团队");
+  await page.getByRole("button", { name: "Add condition" }).click();
+  await page.getByLabel("Condition 1 value").fill("联合部");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(results.getByText("safety.txt").first()).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(results.getByText("ops.txt").first()).toBeVisible();
 });
 
-test("rebuild re-embeds the documents and retrieval serves the new version", async ({
+test("re-embedding keeps segment identity, edits, and disables; reparse replaces them", async ({
   page,
   context,
 }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(300_000);
   const project = await registerReplayProject(context, APP);
 
   await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
   await createBaseThroughUI(page, "重建知识库");
   await page.getByRole("button", { name: "View documents" }).click();
   await setRerankerThroughUI(page, "Replay Knowledge Model · replay/reranker");
-  await page.getByRole("button", { name: "Documents" }).click();
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
   await uploadDocumentThroughUI(page, "rebuild.txt", buildDocumentText());
   const rows = page.getByTestId("knowledge-document-rows");
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
 
+  // Snapshot the published rows straight from the API: UUIDs, contents, and
+  // enabled states are the identity that re-embedding must preserve.
+  const baseId = new URL(page.url()).searchParams.get("kb");
+  expect(baseId).toBeTruthy();
+  const listSegments = async (documentId: string) => {
+    const response = await context.request.get(
+      `${APP}/api/projects/${project.id}/knowledge/documents/${documentId}/segments?page=1&page_size=50`,
+    );
+    expect(response.status(), await response.text()).toBe(200);
+    return (await response.json()) as {
+      items: Array<{
+        id: string;
+        position: number;
+        content: string;
+        enabled: boolean;
+      }>;
+    };
+  };
+  const documentsResponse = await context.request.get(
+    `${APP}/api/projects/${project.id}/knowledge/bases/${baseId}/documents?page=1&page_size=50`,
+  );
+  expect(documentsResponse.status(), await documentsResponse.text()).toBe(200);
+  const documentId = (
+    (await documentsResponse.json()) as {
+      items: Array<{ id: string; name: string }>;
+    }
+  ).items.find((item) => item.name === "rebuild.txt")?.id;
+  expect(documentId).toBeTruthy();
+
+  const original = (await listSegments(documentId!)).items;
+  expect(original.length).toBeGreaterThanOrEqual(2);
+
+  // Manual governance before re-embedding: edit one segment (the marker makes
+  // it rerank-visible) and disable the marker-bearing first segment. Both
+  // must survive the re-embed; only a reparse may undo them.
+  const editedContent = `${RERANK_MARKER}重嵌入保持验证的专用编号是 EMG-3088。`;
+  const editResponse = await context.request.patch(
+    `${APP}/api/projects/${project.id}/knowledge/segments/${original[1]!.id}`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { content: editedContent },
+    },
+  );
+  expect(editResponse.status(), await editResponse.text()).toBe(200);
+  const disableResponse = await context.request.patch(
+    `${APP}/api/projects/${project.id}/knowledge/segments/${original[0]!.id}`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { enabled: false },
+    },
+  );
+  expect(disableResponse.status(), await disableResponse.text()).toBe(200);
+
   const before = await providerCounters(context);
 
-  // The settings rebuild block confirms and requeues every document. The
-  // selector keeps the current configuration: a plain re-embed.
+  // The settings re-embed block confirms and requeues the published document.
+  // The selector keeps the current configuration: a plain re-embed.
   await page.getByRole("button", { name: "Settings" }).click();
   const rebuildSection = page.getByRole("region", { name: "Embedding model" });
   await rebuildSection
-    .getByRole("button", { name: "Rebuild embeddings" })
+    .getByRole("button", { name: "Re-embed documents" })
     .click();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Rebuild", exact: true })
+    .getByRole("button", { name: "Re-embed", exact: true })
     .click();
-  await expect(
-    page.getByText("Rebuild started", { exact: false }),
-  ).toBeVisible();
+  // The admission outcome reports the real accepted count (nothing skipped).
+  await expect(page.getByTestId("knowledge-rebuild-outcome")).toHaveText(
+    "Re-embedding accepted for 1 documents.",
+  );
 
   // The real Worker re-embeds: provider embedding calls must grow.
   await expect
@@ -744,18 +998,93 @@ test("rebuild re-embeds the documents and retrieval serves the new version", asy
 
   // The requeued document walks back to ready.
   const nav = page.getByRole("navigation", { name: "Knowledge base sections" });
-  await nav.getByRole("button", { name: "Documents" }).click();
+  await nav.getByRole("button", { name: "Documents", exact: true }).click();
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
 
-  // Old-version segments are excluded from recall, so a hit here proves the
-  // re-ingested segments serve retrieval end to end.
+  // Identity check: same UUIDs at the same positions, contents preserved
+  // (manual edit included), and the disable is still in force.
+  const reembedded = (await listSegments(documentId!)).items;
+  expect(reembedded.map((item) => item.id)).toEqual(
+    original.map((item) => item.id),
+  );
+  expect(reembedded[1]!.content).toBe(editedContent);
+  expect(reembedded[0]!.content).toBe(original[0]!.content);
+  expect(reembedded.map((item) => item.enabled)).toEqual(
+    original.map((item, index) => (index === 0 ? false : item.enabled)),
+  );
+
+  // The re-embedded vectors serve retrieval: the edited segment still hits.
   await nav.getByRole("button", { name: "Retrieval test" }).click();
-  await page.getByLabel("Query").fill("如何联系应急值班团队");
+  await page.getByLabel("Query").fill("重嵌入保持验证的专用编号");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(
     page
       .getByTestId("knowledge-search-results")
-      .getByText(MARKER_PHONE, { exact: false })
+      .getByText("EMG-3088", { exact: false })
       .first(),
   ).toBeVisible({ timeout: 30_000 });
+
+  // Reparse re-splits the stored original file: the dialog previews the split
+  // with the edited parameters before anything is committed.
+  await nav.getByRole("button", { name: "Documents", exact: true }).click();
+  await (await openDocumentActions(page, "rebuild.txt"))
+    .getByRole("menuitem", { name: "Reparse from original" })
+    .click();
+  const reparseDialog = page.getByRole("dialog");
+  await reparseDialog.getByLabel("Chunk size (characters)").fill("500");
+  await reparseDialog
+    .getByRole("button", { name: "Preview split", exact: true })
+    .click();
+  await expect(
+    reparseDialog.getByText(/Showing \d+ of \d+ chunks/u),
+  ).toBeVisible({ timeout: 30_000 });
+  await reparseDialog
+    .getByRole("button", { name: "Reparse", exact: true })
+    .click();
+  await expect(reparseDialog).toBeHidden();
+  await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
+
+  // Replacement check: brand-new rows from the original file. The manual edit
+  // is gone, the disable is reset, and the marker paragraph is restored.
+  const reparsed = (await listSegments(documentId!)).items;
+  const originalIds = new Set(original.map((item) => item.id));
+  expect(reparsed.length).toBeGreaterThan(0);
+  for (const item of reparsed) {
+    expect(originalIds.has(item.id)).toBe(false);
+    expect(item.enabled).toBe(true);
+    expect(item.content).not.toContain("EMG-3088");
+  }
+  expect(
+    reparsed.some((item) => item.content.includes(MARKER_PHONE)),
+  ).toBe(true);
+
+  // Retrieval serves only the reparsed generation: the marker paragraph hits
+  // again (proving the reparse also reset the manual disable) while the
+  // overwritten manual edit is gone for good.
+  await nav.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill("如何联系应急值班团队");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const finalResults = page.getByTestId("knowledge-search-results");
+  await expect(
+    finalResults.getByText(MARKER_PHONE, { exact: false }).first(),
+  ).toBeVisible({ timeout: 30_000 });
+  await expect(finalResults.getByText("EMG-3088")).toHaveCount(0);
+
+  // The hit detail locates into the maintenance view: the URL carries the
+  // document and segment, and the locate panel pins the same real content.
+  await finalResults
+    .getByRole("listitem")
+    .first()
+    .getByRole("button", { name: /View segment #\d+ in full/u })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Open in documents" })
+    .click();
+  await expect(page).toHaveURL(/doc=/u);
+  await expect(page).toHaveURL(/segment=/u);
+  await expect(page.getByTestId("knowledge-segment-locate")).toContainText(
+    MARKER_PHONE,
+    { timeout: 15_000 },
+  );
 });

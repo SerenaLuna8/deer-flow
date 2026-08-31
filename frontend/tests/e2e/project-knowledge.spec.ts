@@ -83,6 +83,7 @@ type MockBase = {
   default_top_k?: number;
   default_score_threshold?: number;
   reranker_model_id?: string | null;
+  retrieval_mode?: "semantic" | "hybrid";
   /** deleting bases disappear after this many further list polls */
   pollsUntilGone?: number;
 };
@@ -111,6 +112,10 @@ type MockDocument = {
   doc_metadata?: Record<string, string | number>;
   error_message: string | null;
   delete_error: string | null;
+  /** execution generation; reparse bumps it and stale confirmations 409 */
+  version?: number;
+  /** current-generation indexing task progress rendered by the status cell */
+  task_progress?: Record<string, unknown> | null;
   /** statuses the document walks through on subsequent list polls */
   progression?: MockDocument["status"][];
 };
@@ -146,6 +151,7 @@ function baseView(base: MockBase) {
     description: base.description,
     embedding_model_id: MODEL_ID,
     reranker_model_id: base.reranker_model_id ?? null,
+    retrieval_mode: base.retrieval_mode ?? "semantic",
     status: base.status,
     document_count: base.document_count,
     default_top_k: base.default_top_k ?? 4,
@@ -167,7 +173,7 @@ function documentView(document: MockDocument) {
     size_bytes: 2048,
     status: document.status,
     enabled: document.enabled ?? true,
-    version: 1,
+    version: document.version ?? 1,
     chunk_size: 1000,
     chunk_overlap: 100,
     chunk_separator: document.chunk_separator ?? "\\n\\n",
@@ -184,6 +190,7 @@ function documentView(document: MockDocument) {
     doc_metadata: document.doc_metadata ?? {},
     error_message: document.error_message,
     delete_error: document.delete_error,
+    task_progress: document.task_progress ?? null,
     created_at: TIMESTAMP,
     updated_at: TIMESTAMP,
   };
@@ -252,8 +259,19 @@ type KnowledgeMockOptions = {
     code: string;
     message: string;
   };
+  /**
+   * Serve truncated pagination: every documents page after the first comes
+   * back empty while total still reports the full count, so the client's
+   * completeness check must fail instead of publishing a partial list.
+   */
+  documentListTruncated?: boolean;
   /** explicit stateful segments per document id (enables segment CRUD) */
   segments?: Record<string, MockSegment[]>;
+  /** child chunks served by the segment-detail endpoint, per segment id */
+  segmentChildren?: Record<
+    string,
+    Array<{ id: string; position: number; content: string }>
+  >;
   /** seeded query log, newest first; searches prepend to it */
   queries?: MockQuery[];
   /** seeded metadata field definitions */
@@ -276,6 +294,11 @@ async function mockKnowledgeRoutes(
     bases: options.bases ?? [],
     documents: options.documents ?? [],
     segments: new Map(Object.entries(options.segments ?? {})),
+    segmentChildren: new Map(Object.entries(options.segmentChildren ?? {})),
+    // The digest/version the detail endpoint currently serves; tests bump
+    // these to simulate the document changing after a search was scored.
+    detailDigest: "d".repeat(64),
+    detailVersion: 1,
     queries: options.queries ?? [],
     metadataFields: options.metadataFields ?? [],
     uploadCounter: 0,
@@ -289,6 +312,23 @@ async function mockKnowledgeRoutes(
     baseUpdates: [] as Array<Record<string, unknown>>,
     rebuildRequests: [] as Array<Record<string, unknown>>,
     metadataUpdates: [] as Array<Record<string, unknown>>,
+    batchMetadataRequests: [] as Array<{
+      document_ids: string[];
+      values: Record<string, string | number | null>;
+    }>,
+    // One-shot failure for the next batch metadata patch (all-or-nothing).
+    batchMetadataFailure: null as null | {
+      status: number;
+      code: string;
+      message: string;
+    },
+    reparsePreviewRequests: [] as Array<Record<string, unknown>>,
+    reparseRequests: [] as Array<Record<string, unknown>>,
+    // Uploads whose filename contains "reject" fail until a test flips this.
+    acceptRejectedUploads: false,
+    // A "slowrace" search parks here until the test releases it, so late
+    // responses land at a deterministic point in the scenario.
+    releaseSlowSearch: null as null | (() => void),
   };
 
   await page.route("**/api/**", async (route) => {
@@ -561,12 +601,144 @@ async function mockKnowledgeRoutes(
       state.rebuildRequests.push(
         request.postDataJSON() as Record<string, unknown>,
       );
+      let acceptedCount = 0;
+      const skippedIds: string[] = [];
       for (const item of state.documents) {
         if (item.knowledge_base_id !== base.id) continue;
+        // Never-published failed documents stay failed: re-embedding has no
+        // current content to work on, re-parsing is a separate action.
+        if (item.status === "failed" && item.segment_count === 0) {
+          skippedIds.push(item.id);
+          continue;
+        }
         item.status = "queued";
         item.progression = ["processing", "ready"];
+        acceptedCount += 1;
       }
-      return json(route, { item: baseView(base), request_id: "req-rebuild" });
+      return json(route, {
+        item: baseView(base),
+        accepted_document_count: acceptedCount,
+        skipped_document_ids: skippedIds,
+        request_id: "req-rebuild",
+      });
+    }
+
+    const batchMetadataMatch =
+      /\/bases\/([0-9a-f-]{36})\/documents\/metadata$/u.exec(path);
+    if (batchMetadataMatch && method === "PATCH") {
+      const body = request.postDataJSON() as {
+        document_ids: string[];
+        values: Record<string, string | number | null>;
+      };
+      state.batchMetadataRequests.push(body);
+      if (state.batchMetadataFailure) {
+        const failure = state.batchMetadataFailure;
+        state.batchMetadataFailure = null;
+        return knowledgeError(
+          route,
+          failure.status,
+          failure.code,
+          failure.message,
+        );
+      }
+      const targets: MockDocument[] = [];
+      for (const documentId of body.document_ids) {
+        const target = state.documents.find((item) => item.id === documentId);
+        // All-or-nothing: one missing document rejects the whole batch.
+        if (!target || target.knowledge_base_id !== batchMetadataMatch[1]) {
+          return knowledgeError(
+            route,
+            404,
+            "KNOWLEDGE_NOT_FOUND",
+            "文档不存在",
+          );
+        }
+        targets.push(target);
+      }
+      for (const target of targets) {
+        const merged = { ...(target.doc_metadata ?? {}) };
+        for (const [name, value] of Object.entries(body.values)) {
+          if (value === null) delete merged[name];
+          else merged[name] = value;
+        }
+        target.doc_metadata = merged;
+      }
+      return json(route, {
+        items: targets.map(documentView),
+        request_id: "req-batch-metadata",
+      });
+    }
+
+    const reparsePreviewMatch =
+      /\/documents\/([0-9a-f-]{36})\/reparse-preview$/u.exec(path);
+    if (reparsePreviewMatch && method === "POST") {
+      const target = state.documents.find(
+        (item) => item.id === reparsePreviewMatch[1],
+      );
+      if (!target)
+        return knowledgeError(route, 404, "KNOWLEDGE_NOT_FOUND", "文档不存在");
+      const body = request.postDataJSON() as Record<string, unknown>;
+      state.reparsePreviewRequests.push(body);
+      // The real preview re-reads the version after computing: a stale
+      // expected_version never returns a preview, it conflicts.
+      if (body.expected_version !== (target.version ?? 1)) {
+        return knowledgeError(
+          route,
+          409,
+          "KNOWLEDGE_CONFLICT",
+          "文档已被其他操作修改",
+        );
+      }
+      const childContents =
+        body.chunking_mode === "parent_child" ? ["子块甲", "子块乙"] : [];
+      return json(route, {
+        document_version: target.version ?? 1,
+        items: [
+          {
+            position: 1,
+            content: `重解析预览首段 · chunk_size=${String(body.chunk_size)}`,
+            word_count: 42,
+            child_contents: childContents,
+          },
+          {
+            position: 2,
+            content: "重解析预览次段",
+            word_count: 36,
+            child_contents: childContents,
+          },
+        ],
+        total: 5,
+        request_id: "req-reparse-preview",
+      });
+    }
+
+    const reparseMatch = /\/documents\/([0-9a-f-]{36})\/reparse$/u.exec(path);
+    if (reparseMatch && method === "POST") {
+      const target = state.documents.find(
+        (item) => item.id === reparseMatch[1],
+      );
+      if (!target)
+        return knowledgeError(route, 404, "KNOWLEDGE_NOT_FOUND", "文档不存在");
+      const body = request.postDataJSON() as {
+        expected_version: number;
+      } & Record<string, unknown>;
+      state.reparseRequests.push(body);
+      if (body.expected_version !== (target.version ?? 1)) {
+        return knowledgeError(
+          route,
+          409,
+          "KNOWLEDGE_CONFLICT",
+          "文档已被其他操作修改",
+        );
+      }
+      target.version = (target.version ?? 1) + 1;
+      target.status = "queued";
+      target.error_message = null;
+      target.progression = ["processing", "ready"];
+      return json(route, {
+        item: documentView(target),
+        request_id: "req-reparse",
+      });
     }
 
     const documentMetadataMatch =
@@ -622,11 +794,40 @@ async function mockKnowledgeRoutes(
           }
         }
       }
-      return json(route, listPayload(items.map(documentView)));
+      // Real backend pagination: the client must stitch pages itself.
+      const pageNumber = Number.parseInt(
+        url.searchParams.get("page") ?? "1",
+        10,
+      );
+      const pageSize = Number.parseInt(
+        url.searchParams.get("page_size") ?? "100",
+        10,
+      );
+      const pageItems =
+        options.documentListTruncated && pageNumber > 1
+          ? []
+          : items.slice((pageNumber - 1) * pageSize, pageNumber * pageSize);
+      return json(route, {
+        items: pageItems.map(documentView),
+        total: items.length,
+        page: pageNumber,
+        page_size: pageSize,
+        request_id: "req-documents",
+      });
     }
     if (documentsMatch && method === "POST") {
-      state.uploadCounter += 1;
       const form = request.postData() ?? "";
+      const uploadFileName =
+        /name="file"; filename="([^"]+)"/u.exec(form)?.[1] ?? "";
+      if (uploadFileName.includes("reject") && !state.acceptRejectedUploads) {
+        return knowledgeError(
+          route,
+          413,
+          "KNOWLEDGE_QUOTA_EXCEEDED",
+          "文件超出配额",
+        );
+      }
+      state.uploadCounter += 1;
       const uploadedMode = multipartField(form, "chunking_mode");
       const uploadedChildSize = multipartField(form, "child_chunk_size");
       const uploaded: MockDocument = {
@@ -666,6 +867,7 @@ async function mockKnowledgeRoutes(
     if (path === `${knowledgeBase}/chunk-preview` && method === "POST") {
       const form = request.postData() ?? "";
       const fields = {
+        file: /name="file"; filename="([^"]+)"/u.exec(form)?.[1] ?? "",
         chunk_size: multipartField(form, "chunk_size") ?? "",
         chunk_overlap: multipartField(form, "chunk_overlap") ?? "",
         chunk_separator: multipartField(form, "chunk_separator") ?? "",
@@ -686,10 +888,15 @@ async function mockKnowledgeRoutes(
           "文件没有可提取的文本",
         );
       }
+      // Slow files let tests race a replaced preview against its winner.
+      if (fields.file.startsWith("slow")) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
       const parentChild = fields.chunking_mode === "parent_child";
       const contents = [
         `预览分段一 size=${fields.chunk_size} sep=${fields.chunk_separator}`,
         `预览分段二 spaces=${fields.remove_extra_spaces} urls=${fields.remove_urls_emails}`,
+        `预览来源 ${fields.file}`,
       ];
       return json(route, {
         items: contents.map((content, index) => ({
@@ -809,6 +1016,65 @@ async function mockKnowledgeRoutes(
         request_id: "req-retry",
       });
     }
+    // Single-segment detail: validates the base/document/segment lineage so
+    // cross-base id combinations and deleted resources answer 404.
+    const segmentDetailMatch =
+      /\/bases\/([0-9a-f-]{36})\/documents\/([0-9a-f-]{36})\/segments\/([0-9a-f-]{36})$/u.exec(
+        path,
+      );
+    if (segmentDetailMatch && method === "GET") {
+      const [, baseId, documentId, segmentId] = segmentDetailMatch;
+      const owner = state.documents.find(
+        (item) => item.id === documentId && item.knowledge_base_id === baseId,
+      );
+      const segment = (state.segments.get(documentId!) ?? []).find(
+        (item) => item.id === segmentId,
+      );
+      if (!owner || !segment) {
+        return knowledgeError(route, 404, "KNOWLEDGE_NOT_FOUND", "分段不存在");
+      }
+      // A version/digest pin that no longer matches is a conflict: the
+      // caller's score belongs to content this endpoint no longer serves.
+      const expectedVersion = url.searchParams.get("expected_document_version");
+      const expectedDigest = url.searchParams.get("expected_content_digest");
+      if (
+        (expectedVersion !== null &&
+          Number(expectedVersion) !== state.detailVersion) ||
+        (expectedDigest !== null && expectedDigest !== state.detailDigest)
+      ) {
+        return knowledgeError(
+          route,
+          409,
+          "KNOWLEDGE_CONFLICT",
+          "文档内容已更新",
+        );
+      }
+      const childList = state.segmentChildren.get(segmentId!) ?? [];
+      const childPage = Number(url.searchParams.get("child_page") ?? "1");
+      const pageChildren = childList.slice(
+        (childPage - 1) * 50,
+        childPage * 50,
+      );
+      return json(route, {
+        segment: segmentView(segment),
+        knowledge_base_id: baseId,
+        document_id: documentId,
+        document_name: owner.name,
+        content_state: "current",
+        stored_content_version: state.detailVersion,
+        current_document_version: state.detailVersion,
+        children_total: childList.length,
+        child_page: childPage,
+        children: pageChildren.map((child) => ({
+          id: child.id,
+          position: child.position,
+          content: child.content,
+          word_count: child.content.length,
+        })),
+        request_id: "req-segment-detail",
+      });
+    }
+
     const segmentsMatch = /\/documents\/([0-9a-f-]{36})\/segments$/u.exec(path);
     if (segmentsMatch && method === "GET") {
       const documentId = segmentsMatch[1]!;
@@ -922,6 +1188,60 @@ async function mockKnowledgeRoutes(
       } & Record<string, unknown>;
       state.searchRequests.push(body);
       const query = body.query ?? "";
+      const debugDiagnostics = (
+        emptyReason: string | null,
+        citations: Array<Record<string, unknown>>,
+        thresholdFiltered: number,
+      ) =>
+        body.debug === true
+          ? {
+              strategy_version: "m10-v1",
+              lexical_version: 1,
+              target_base_count: 1,
+              effective_top_k: (body.top_k as number | undefined) ?? 10,
+              per_base_route_budget: 50,
+              retrieval_mode:
+                (body.retrieval_mode as string | undefined) ?? "semantic",
+              counts: {
+                semantic_candidates: 3,
+                lexical_candidates:
+                  body.retrieval_mode === "hybrid" ? 2 : 0,
+                parents_deduplicated: 3,
+                threshold_filtered: thresholdFiltered,
+                stale_filtered: 0,
+                returned: citations.length,
+              },
+              timings: {
+                query_embedding_ms: 12,
+                recall_ms: 34,
+                rerank_ms: 56,
+                final_validation_ms: 7,
+              },
+              model_ids: ["10000000-0000-4000-8000-00000000000e"],
+              ranking_method: citations.length > 0 ? "rerank" : null,
+              empty_reason: emptyReason,
+              heterogeneous_without_lexical_evidence: false,
+              hit_diagnostics: citations.map((citation) => ({
+                segment_id: citation.segment_id,
+                local_score: citation.score,
+                local_score_kind: "rerank",
+                score_domain: "reranker:10000000-0000-4000-8000-00000000000e",
+                ranking_method: "rerank",
+                ranking_score: citation.score,
+                matched_children:
+                  citation.segment_id === "60000000-0000-4000-8000-000000000011"
+                    ? [
+                        {
+                          child_id: "61000000-0000-4000-8000-0000000000c2",
+                          position: 2,
+                          route: "lexical",
+                          score: 0.91,
+                        },
+                      ]
+                    : [],
+              })),
+            }
+          : null;
       if (query.includes("rerank-down")) {
         return knowledgeError(
           route,
@@ -930,7 +1250,39 @@ async function mockKnowledgeRoutes(
           "Reranker 服务暂不可用，请稍后重试",
         );
       }
-      if (query.includes("unrelated")) {
+      if (query.includes("slowrace")) {
+        await new Promise<void>((resolve) => {
+          state.releaseSlowSearch = resolve;
+        });
+        return json(route, {
+          citations: [
+            {
+              knowledge_base_id: "40000000-0000-4000-8000-000000000001",
+              knowledge_base_name: "产品手册",
+              document_id: "50000000-0000-4000-8000-000000000001",
+              document_name: "发布说明.pdf",
+              segment_id: "60000000-0000-4000-8000-000000000011",
+              segment_position: 7,
+              snippet: "慢响应旧结果不得回流",
+              score: 0.99,
+              source_position: { page: 7 },
+              document_version: 1,
+              content_digest: "d".repeat(64),
+              score_kind: "rerank",
+            },
+          ],
+          diagnostics: null,
+          request_id: "req-search-slow",
+        });
+      }
+      const emptyKeyword = (
+        [
+          ["unrelated", "no_candidates"],
+          ["notready", "not_ready"],
+          ["staleconflict", "stale_candidates"],
+        ] as const
+      ).find(([keyword]) => query.includes(keyword));
+      if (emptyKeyword) {
         state.queryCounter += 1;
         state.queries.unshift({
           id: `70000000-0000-4000-8000-00000000000${state.queryCounter}`,
@@ -939,7 +1291,11 @@ async function mockKnowledgeRoutes(
           result_count: 0,
           top_score: null,
         });
-        return json(route, { citations: [], request_id: "req-search-empty" });
+        return json(route, {
+          citations: [],
+          diagnostics: debugDiagnostics(emptyKeyword[1], [], 0),
+          request_id: "req-search-empty",
+        });
       }
       // Reranked order deliberately differs from vector order: the page must
       // render exactly this order and these scores.
@@ -954,6 +1310,9 @@ async function mockKnowledgeRoutes(
           snippet: "重排后应当排在第一位的内容",
           score: 0.93,
           source_position: { page: 7 },
+          document_version: 1,
+          content_digest: "d".repeat(64),
+          score_kind: "rerank",
         },
         {
           knowledge_base_id: "40000000-0000-4000-8000-000000000001",
@@ -965,6 +1324,9 @@ async function mockKnowledgeRoutes(
           snippet: "向量召回更靠前、但重排后次序在后的内容",
           score: 0.41,
           source_position: { row: 12 },
+          document_version: 1,
+          content_digest: "e".repeat(64),
+          score_kind: "rerank",
         },
         // Cross-encoder rerankers legally emit negative scores; the panel
         // must render them verbatim instead of clamping or hiding the hit.
@@ -978,6 +1340,9 @@ async function mockKnowledgeRoutes(
           snippet: "重排给出负分、阈值为 0 时仍需展示的内容",
           score: -0.12,
           source_position: { page: 9 },
+          document_version: 1,
+          content_digest: "f".repeat(64),
+          score_kind: "rerank",
         },
       ];
       // Mirrors the backend contract: a positive threshold drops segments
@@ -997,7 +1362,15 @@ async function mockKnowledgeRoutes(
         result_count: citations.length,
         top_score: citations[0]?.score ?? null,
       });
-      return json(route, { citations, request_id: "req-search" });
+      return json(route, {
+        citations,
+        diagnostics: debugDiagnostics(
+          citations.length === 0 ? "filtered_out" : null,
+          citations,
+          rerankedCitations.length - citations.length,
+        ),
+        request_id: "req-search",
+      });
     }
 
     return json(route, { detail: "not found" }, 404);
@@ -1073,12 +1446,14 @@ test("creates a base through the wizard and watches the upload reach ready", asy
   // Entering step 2 generates the initial preview once.
   const previewPanel = page.getByTestId("chunk-preview-panel");
   await expect(
-    previewPanel.getByText("Previewing the first file: handbook.txt"),
+    previewPanel.getByText("Previewing: handbook.txt"),
   ).toBeVisible();
   await expect(
     previewPanel.getByText("预览分段一 size=1000 sep=\\n\\n"),
   ).toBeVisible();
-  await expect(previewPanel.getByText("7 chunks in total")).toBeVisible();
+  await expect(
+    previewPanel.getByText("Showing 3 of 7 chunks"),
+  ).toBeVisible();
   expect(state.previewRequests).toHaveLength(1);
 
   // Returning to the same file and unchanged settings keeps the first result;
@@ -1199,6 +1574,7 @@ test("creates a base through the wizard and watches the upload reach ready", asy
   expect(state.documents.at(-1)?.remove_urls_emails).toBe(false);
   expect(state.documents.at(-1)?.chunking_mode).toBe("general");
   expect(state.previewRequests.at(-1)).toEqual({
+    file: "handbook.txt",
     chunk_size: "1000",
     chunk_overlap: "100",
     chunk_separator: "。",
@@ -2275,6 +2651,70 @@ test("upload dialog sends parent-child chunking parameters", async ({
   expect(state.documents.at(-1)?.child_chunk_separator).toBe("\\n");
 });
 
+test("multi-file upload reports per-file verdicts and retries only the failures", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "产品手册",
+        description: "",
+        status: "active",
+        document_count: 0,
+        delete_error: null,
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Upload document" }).click();
+
+  // One good file plus two the backend rejects (quota) in a single batch.
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("File").setInputFiles([
+    { name: "ok.txt", mimeType: "text/plain", buffer: Buffer.from("正常内容") },
+    {
+      name: "reject-a.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("超配额 A"),
+    },
+    {
+      name: "reject-b.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("超配额 B"),
+    },
+  ]);
+  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
+
+  // Partial failure: per-file verdicts stay visible, the dialog stays open,
+  // and the server's own error message is surfaced verbatim.
+  const outcomes = dialog.getByTestId("upload-outcomes");
+  await expect(outcomes.getByText("ok.txt: uploaded")).toBeVisible();
+  await expect(outcomes.getByText("reject-a.txt: 文件超出配额")).toBeVisible();
+  await expect(outcomes.getByText("reject-b.txt: 文件超出配额")).toBeVisible();
+
+  // Retrying re-sends only the two failures — never the succeeded file.
+  const uploadsBeforeRetry = state.uploadCounter;
+  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
+  await expect(outcomes.getByText("reject-a.txt: 文件超出配额")).toBeVisible();
+  expect(state.uploadCounter).toBe(uploadsBeforeRetry);
+  await expect(outcomes.getByText(/ok\.txt/u)).toHaveCount(0);
+
+  // Once the backend accepts them, the retry drains the queue and closes.
+  state.acceptRejectedUploads = true;
+  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(state.uploadCounter).toBe(uploadsBeforeRetry + 2);
+
+  // All three documents land in the table (mock renames to handbook-N.txt).
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("handbook-1.txt")).toBeVisible();
+  await expect(rows.getByText("handbook-2.txt")).toBeVisible();
+  await expect(rows.getByText("handbook-3.txt")).toBeVisible();
+});
+
 test("retrieval test lists recent queries, refreshes after a search, and backfills on click", async ({
   page,
 }) => {
@@ -2787,7 +3227,7 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
         name: "产品手册",
         description: "",
         status: "active",
-        document_count: 1,
+        document_count: 2,
         delete_error: null,
       },
     ],
@@ -2802,37 +3242,58 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
         error_message: null,
         delete_error: null,
       },
+      {
+        // Never published (failed before its first publish): re-embedding
+        // skips it and the outcome must say so instead of claiming success.
+        id: "50000000-0000-4000-8000-000000000002",
+        knowledge_base_id: BASE_ID,
+        name: "never-published.txt",
+        original_name: "never-published.txt",
+        status: "failed",
+        segment_count: 0,
+        error_message: "Embedding 请求连续失败已耗尽重试",
+        delete_error: null,
+      },
     ],
   });
   await page.goto("/projects/alpha/knowledge");
   await page.getByRole("button", { name: "View documents" }).click();
   await page.getByRole("button", { name: "Settings" }).click();
 
-  // The rebuild block sits under the settings form with its own confirm.
+  // The re-embed block sits under the settings form with its own confirm.
   const rebuildSection = page.getByRole("region", { name: "Embedding model" });
   await expect(rebuildSection).toBeVisible();
   await rebuildSection.getByLabel("Embedding model").click();
   await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
   await rebuildSection
-    .getByRole("button", { name: "Rebuild embeddings" })
+    .getByRole("button", { name: "Re-embed documents" })
     .click();
   const confirm = page.getByRole("dialog");
   await expect(
-    confirm.getByText("Rebuild knowledge base embeddings"),
+    confirm.getByText("Re-embed knowledge base documents"),
   ).toBeVisible();
-  await confirm.getByRole("button", { name: "Rebuild", exact: true }).click();
+  // The confirmation states what is preserved: text, edits, enabled states.
   await expect(
-    page.getByText("Rebuild started; documents will reprocess one by one."),
+    confirm.getByText(/manual edits, and enabled states are preserved/i),
   ).toBeVisible();
+  await confirm.getByRole("button", { name: "Re-embed", exact: true }).click();
+  // The admission outcome reports real counts: accepted and skipped.
+  await expect(page.getByTestId("knowledge-rebuild-outcome")).toHaveText(
+    "Re-embedding accepted for 1 documents; 1 never-published documents were skipped (retry them to parse from the original file).",
+  );
   expect(state.rebuildRequests.at(-1)).toEqual({
     embedding_model_id: MODEL_ID,
   });
 
-  // Every document re-queues and walks back to ready on subsequent polls.
+  // The published document re-queues and walks back to ready on subsequent
+  // polls; the never-published one stays failed rather than pretending.
   await page.getByRole("button", { name: "Documents", exact: true }).click();
   const rows = page.getByTestId("knowledge-document-rows");
   await expect(rows.getByText("guide.txt")).toBeVisible();
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 15_000 });
+  await expect(
+    rows.getByRole("row").filter({ hasText: "never-published.txt" }),
+  ).toContainText("Failed");
 });
 
 test("upload dialog accepts the K4 document formats", async ({ page }) => {
@@ -2859,4 +3320,1284 @@ test("upload dialog accepts the K4 document formats", async ({ page }) => {
     "accept",
     ".pdf,.docx,.txt,.md,.csv,.xlsx,.html,.htm,.pptx,.epub",
   );
+});
+
+// ---------------------------------------------------------------------------
+// T9: URL state, document search, and pagination
+// ---------------------------------------------------------------------------
+
+const T9_BASE_ID = "40000000-0000-4000-8000-000000000001";
+
+function t9Base(overrides: Partial<MockBase> = {}): MockBase {
+  return {
+    id: T9_BASE_ID,
+    name: "产品手册",
+    description: "",
+    status: "active",
+    document_count: 0,
+    delete_error: null,
+    ...overrides,
+  };
+}
+
+function t9Documents(count: number): MockDocument[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `50000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    knowledge_base_id: T9_BASE_ID,
+    name: `doc-${String(index + 1).padStart(3, "0")}.txt`,
+    original_name: `doc-${String(index + 1).padStart(3, "0")}.txt`,
+    status: "ready",
+    segment_count: 3,
+    error_message: null,
+    delete_error: null,
+  }));
+}
+
+test("the URL carries base, view, and document state through reload and history", async ({
+  page,
+}) => {
+  await mockKnowledgeRoutes(page, {
+    bases: [t9Base({ document_count: 3 })],
+    documents: t9Documents(3),
+  });
+  await page.goto("/projects/alpha/knowledge");
+
+  // Opening a base pushes kb= into the URL.
+  await page.getByRole("button", { name: "View documents" }).click();
+  await expect(page).toHaveURL(new RegExp(`kb=${T9_BASE_ID}`));
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("doc-001.txt")).toBeVisible();
+
+  // Switching sections rewrites view=.
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page).toHaveURL(/view=settings/u);
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
+  await expect(page).not.toHaveURL(/view=/u);
+
+  // Opening the segment browser pushes doc=.
+  const menu = await openDocumentActions(page, "doc-002.txt");
+  await menu.getByRole("menuitem", { name: "View segments" }).click();
+  await expect(page.getByTestId("knowledge-segment-browser")).toBeVisible();
+  await expect(page).toHaveURL(/doc=50000000-0000-4000-8000-000000000002/u);
+
+  // A reload restores the same document from the URL alone.
+  await page.reload();
+  await expect(page.getByTestId("knowledge-segment-browser")).toBeVisible();
+  await expect(page.getByText("分段 1 的内容")).toBeVisible();
+
+  // Browser back retraces each pushed location: document → list →
+  // settings → list → base overview.
+  await page.goBack();
+  await expect(page.getByTestId("knowledge-documents-table")).toBeVisible();
+  await expect(page).not.toHaveURL(/doc=/u);
+  await page.goBack();
+  await expect(page).toHaveURL(/view=settings/u);
+  await page.goBack();
+  await page.goBack();
+  await expect(page).not.toHaveURL(/kb=/u);
+  await expect(
+    page.getByRole("button", { name: "View documents" }),
+  ).toBeVisible();
+});
+
+test("filters, sort, and paging work over the complete list and keep keywords out of the URL", async ({
+  page,
+}) => {
+  // 130 documents force two backend pages (100 + 30); the filters must see
+  // rows from both.
+  const documents = t9Documents(130);
+  documents[124]!.status = "failed";
+  documents[124]!.error_message = "Embedding 失败";
+  await mockKnowledgeRoutes(page, {
+    bases: [t9Base({ document_count: documents.length })],
+    documents,
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${T9_BASE_ID}`);
+
+  const pageInfo = page.getByTestId("knowledge-documents-page-info");
+  await expect(pageInfo).toHaveText("Page 1/7 · 130 documents");
+
+  // Paging is a replace navigation on page=.
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(pageInfo).toHaveText("Page 2/7 · 130 documents");
+  await expect(page).toHaveURL(/page=2/u);
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("doc-021.txt")).toBeVisible();
+
+  // The keyword narrows across every backend page but never enters the URL;
+  // applying it resets the page. "12" matches doc-012, doc-112, and
+  // doc-120 … doc-129 — twelve rows, ten of them beyond backend page one.
+  await page.getByRole("searchbox", { name: "Search documents" }).fill("12");
+  await expect(pageInfo).toHaveText("Page 1/1 · 12 documents");
+  await expect(rows.getByText("doc-120.txt")).toBeVisible();
+  await expect(rows.getByText("doc-125.txt")).toBeVisible();
+  expect(page.url()).not.toContain("12");
+  await expect(page).not.toHaveURL(/page=/u);
+
+  // The status filter is URL state and combines with the keyword: row 125
+  // (doc-125) is the only failed document matching "12".
+  await page.getByRole("combobox", { name: "Status" }).click();
+  await page.getByRole("option", { name: "Failed" }).click();
+  await expect(page).toHaveURL(/status=failed/u);
+  await expect(pageInfo).toHaveText("Page 1/1 · 1 documents");
+  await expect(rows.getByText("doc-125.txt")).toBeVisible();
+
+  // Clearing the keyword keeps the failed filter over the complete list.
+  await page.getByRole("searchbox", { name: "Search documents" }).fill("");
+  await expect(pageInfo).toHaveText("Page 1/1 · 1 documents");
+
+  // Sort is URL state too; name descending puts the tail first.
+  await page.getByRole("combobox", { name: "Status" }).click();
+  await page.getByRole("option", { name: "All statuses" }).click();
+  await page.getByRole("combobox", { name: "Sort" }).click();
+  await page.getByRole("option", { name: "Name descending" }).click();
+  await expect(page).toHaveURL(/sort=name_desc/u);
+  await expect(rows.getByText("doc-130.txt")).toBeVisible();
+
+  // A reload restores the safe URL location (sort) with the keyword cleared.
+  await page.getByRole("searchbox", { name: "Search documents" }).fill("12");
+  await page.reload();
+  await expect(page).toHaveURL(/sort=name_desc/u);
+  await expect(
+    page.getByRole("searchbox", { name: "Search documents" }),
+  ).toHaveValue("");
+  await expect(
+    page.getByTestId("knowledge-documents-page-info"),
+  ).toHaveText("Page 1/7 · 130 documents");
+});
+
+test("an incomplete document list is an explicit error, never a partial table", async ({
+  page,
+}) => {
+  await mockKnowledgeRoutes(page, {
+    bases: [t9Base({ document_count: 130 })],
+    documents: t9Documents(130),
+    documentListTruncated: true,
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${T9_BASE_ID}`);
+
+  // The client saw 100 of 130 rows and a premature empty page: it must not
+  // publish the partial list as if it were complete. The generous timeout
+  // covers the query client's retry backoff before the error surfaces.
+  await expect(
+    page.getByText("The list did not load completely. Refresh to retry."),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId("knowledge-documents-table")).toHaveCount(0);
+});
+
+test("unknown base or document ids show inaccessible states instead of cached objects", async ({
+  page,
+}) => {
+  await mockKnowledgeRoutes(page, {
+    bases: [t9Base({ document_count: 1 })],
+    documents: t9Documents(1),
+  });
+
+  // A base id that resolves nowhere is a dead end with a way back — never a
+  // restored object.
+  await page.goto(
+    "/projects/alpha/knowledge?kb=44444444-0000-4000-8000-000000000404",
+  );
+  await expect(
+    page.getByText("This knowledge base does not exist or is inaccessible."),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Back to knowledge bases" }).click();
+  await expect(page.getByText("产品手册")).toBeVisible();
+
+  // Same for a foreign document id inside an accessible base.
+  await page.goto(
+    `/projects/alpha/knowledge?kb=${T9_BASE_ID}&doc=55555555-0000-4000-8000-000000000404`,
+  );
+  await expect(
+    page.getByText("This document does not exist or is inaccessible."),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Back to documents" }).click();
+  await expect(page.getByTestId("knowledge-documents-table")).toBeVisible();
+
+  // A malformed kb is dropped by parsing: the base list renders directly.
+  await page.goto("/projects/alpha/knowledge?kb=not-a-uuid&view=settings");
+  await expect(
+    page.getByRole("button", { name: "View documents" }),
+  ).toBeVisible();
+});
+
+test("deleting the only row of the last page steps the pagination back", async ({
+  page,
+}) => {
+  await mockKnowledgeRoutes(page, {
+    bases: [t9Base({ document_count: 21 })],
+    documents: t9Documents(21),
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${T9_BASE_ID}&page=2`);
+
+  const pageInfo = page.getByTestId("knowledge-documents-page-info");
+  await expect(pageInfo).toHaveText("Page 2/2 · 21 documents");
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("doc-021.txt")).toBeVisible();
+
+  const menu = await openDocumentActions(page, "doc-021.txt");
+  await menu.getByRole("menuitem", { name: "Delete" }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+
+  // The last page vanished with its only row; the URL walks back to page 1.
+  await expect(pageInfo).toHaveText("Page 1/1 · 20 documents");
+  await expect(page).not.toHaveURL(/page=/u);
+  await expect(rows.getByText("doc-001.txt")).toBeVisible();
+});
+
+test("a segment URL locates through the detail endpoint and fails loudly for foreign ids", async ({
+  page,
+}) => {
+  const documents = t9Documents(1);
+  const documentId = documents[0]!.id;
+  await mockKnowledgeRoutes(page, {
+    bases: [t9Base({ document_count: 1 })],
+    documents,
+    segments: {
+      [documentId]: [
+        {
+          id: "60000000-0000-4000-8000-000000000001",
+          position: 1,
+          content: "第一段内容",
+          enabled: true,
+          source_position: { page: 1 },
+        },
+        {
+          id: "60000000-0000-4000-8000-000000000002",
+          position: 2,
+          content: "被定位的第二段内容",
+          enabled: true,
+          source_position: { page: 2 },
+        },
+      ],
+    },
+  });
+
+  // The segment resolves through its detail read — the pinned card shows
+  // the located content next to the regular list.
+  await page.goto(
+    `/projects/alpha/knowledge?kb=${T9_BASE_ID}&doc=${documentId}&segment=60000000-0000-4000-8000-000000000002`,
+  );
+  const locateCard = page.getByTestId("knowledge-segment-locate");
+  await expect(locateCard.getByText("Located segment #2")).toBeVisible();
+  await expect(locateCard.getByText("被定位的第二段内容")).toBeVisible();
+
+  // Dismissing the card strips segment= without touching the rest.
+  await locateCard.getByRole("button", { name: "Dismiss" }).click();
+  await expect(page.getByTestId("knowledge-segment-locate")).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`doc=${documentId}`));
+  await expect(page).not.toHaveURL(/segment=/u);
+
+  // A segment id from another document answers 404: an explicit failure,
+  // not a resurrected object.
+  await page.goto(
+    `/projects/alpha/knowledge?kb=${T9_BASE_ID}&doc=${documentId}&segment=66666666-0000-4000-8000-000000000404`,
+  );
+  await expect(
+    page.getByText(
+      "This segment cannot be located; it may have been deleted or is inaccessible.",
+    ),
+  ).toBeVisible();
+});
+
+test("the preview file picker previews each shown file exactly once", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page);
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+
+  await page.getByLabel("File").setInputFiles([
+    {
+      name: "alpha.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("甲文件内容"),
+    },
+    {
+      name: "beta.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("乙文件内容"),
+    },
+  ]);
+  await expect(page.getByText("2 files selected")).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
+
+  // Entering the step automatically previews the first file, once.
+  const previewPanel = page.getByTestId("chunk-preview-panel");
+  await expect(previewPanel.getByText("Previewing: alpha.txt")).toBeVisible();
+  await expect(previewPanel.getByText("预览来源 alpha.txt")).toBeVisible();
+  await expect(previewPanel.getByText("Showing 3 of 7 chunks")).toBeVisible();
+  expect(state.previewRequests).toHaveLength(1);
+
+  // Picking the other file swaps the panel with exactly one new upload; the
+  // replaced file's chunks disappear immediately.
+  await previewPanel.getByRole("combobox", { name: "Preview file" }).click();
+  await page.getByRole("option", { name: "beta.txt" }).click();
+  await expect(previewPanel.getByText("Previewing: beta.txt")).toBeVisible();
+  await expect(previewPanel.getByText("预览来源 beta.txt")).toBeVisible();
+  await expect(previewPanel.getByText("预览来源 alpha.txt")).toHaveCount(0);
+  expect(state.previewRequests).toHaveLength(2);
+  expect(state.previewRequests.at(-1)?.file).toBe("beta.txt");
+
+  // Step navigation never re-uploads the file that is already shown.
+  await page.getByRole("button", { name: "Previous" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(previewPanel.getByText("预览来源 beta.txt")).toBeVisible();
+  expect(state.previewRequests).toHaveLength(2);
+
+  // Only the current file's preview is kept, so returning to the first file
+  // is a fresh request rather than a cache hit.
+  await previewPanel.getByRole("combobox", { name: "Preview file" }).click();
+  await page.getByRole("option", { name: "alpha.txt" }).click();
+  await expect(previewPanel.getByText("预览来源 alpha.txt")).toBeVisible();
+  expect(state.previewRequests).toHaveLength(3);
+  expect(state.previewRequests.at(-1)?.file).toBe("alpha.txt");
+});
+
+test("a replaced slow preview never overwrites the winner and removing the file clears it", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page);
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+
+  await page.getByLabel("File").setInputFiles([
+    {
+      name: "slow-alpha.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("慢文件内容"),
+    },
+    {
+      name: "beta.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("快文件内容"),
+    },
+  ]);
+  await page.getByRole("button", { name: "Next" }).click();
+
+  // The first file's preview hangs at the mock; switch away while it is
+  // still in flight.
+  const previewPanel = page.getByTestId("chunk-preview-panel");
+  await expect(
+    previewPanel.getByText("Previewing: slow-alpha.txt"),
+  ).toBeVisible();
+  await previewPanel.getByRole("combobox", { name: "Preview file" }).click();
+  await page.getByRole("option", { name: "beta.txt" }).click();
+  await expect(previewPanel.getByText("预览来源 beta.txt")).toBeVisible();
+
+  // The slow response lands after the fast winner and must be discarded.
+  await page.waitForTimeout(900);
+  await expect(previewPanel.getByText("预览来源 beta.txt")).toBeVisible();
+  await expect(previewPanel.getByText("预览来源 slow-alpha.txt")).toHaveCount(
+    0,
+  );
+  expect(state.previewRequests).toHaveLength(2);
+
+  // Removing the previewed file clears its panel; the remaining file
+  // re-previews automatically on return.
+  await page.getByRole("button", { name: "Previous" }).click();
+  await page.getByRole("button", { name: "Remove beta.txt" }).click();
+  await expect(page.getByText("1 file selected")).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(
+    previewPanel.getByText("Previewing: slow-alpha.txt"),
+  ).toBeVisible();
+  await expect(previewPanel.getByText("预览来源 slow-alpha.txt")).toBeVisible({
+    timeout: 5_000,
+  });
+  await expect(previewPanel.getByText("预览来源 beta.txt")).toHaveCount(0);
+  expect(state.previewRequests).toHaveLength(3);
+  expect(state.previewRequests.at(-1)?.file).toBe("slow-alpha.txt");
+});
+
+const T11_BASE = {
+  id: "40000000-0000-4000-8000-000000000001",
+  name: "产品手册",
+  description: "",
+  status: "active" as const,
+  document_count: 1,
+  delete_error: null,
+};
+
+test("results carry rank and score provenance while diagnostics stay collapsed and safe", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page, { bases: [T11_BASE] });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+
+  await page.getByLabel("Query").fill("发布流程");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const results = page.getByTestId("knowledge-search-results");
+  await expect(results.getByRole("listitem")).toHaveCount(3);
+
+  // Every retrieval test asks for the bounded diagnostics; the base override
+  // is absent unless the user forces a route.
+  expect(state.searchRequests.at(-1)?.debug).toBe(true);
+  expect(state.searchRequests.at(-1)).not.toHaveProperty("retrieval_mode");
+
+  // Final rank plus this call's score kind, never a confidence percentage.
+  const first = results.getByRole("listitem").first();
+  await expect(first).toContainText("#1");
+  await expect(first).toContainText("Retrieval score 0.930");
+  await expect(first).toContainText("Rerank");
+  await expect(first).not.toContainText("%");
+
+  // The native threshold score sits in the per-hit disclosure, not the row.
+  await first.getByText("Hit diagnostics").click();
+  await expect(first).toContainText("Native score 0.930");
+  await expect(first).toContainText("Ranking score 0.930");
+
+  // The collapsed panel reveals actual parameters, counts, and timings.
+  const diagnostics = page.getByTestId("knowledge-search-diagnostics");
+  await expect(diagnostics).toBeVisible();
+  await diagnostics.locator("summary").click();
+  await expect(diagnostics).toContainText("m10-v1");
+  await expect(diagnostics).toContainText("Semantic candidates");
+  await expect(diagnostics).toContainText("56 ms");
+  await expect(diagnostics).toContainText(
+    "10000000-0000-4000-8000-00000000000e",
+  );
+  // Result snippets never leak into the diagnostics block.
+  await expect(diagnostics).not.toContainText("重排后应当排在第一位的内容");
+
+  // Forcing a route applies to this one call only.
+  await page.getByRole("combobox", { name: "Retrieval route" }).click();
+  await page.getByRole("option", { name: "Hybrid (this search)" }).click();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect.poll(() => state.searchRequests.length).toBe(2);
+  expect(state.searchRequests.at(-1)?.retrieval_mode).toBe("hybrid");
+  expect(state.searchRequests.at(-1)?.debug).toBe(true);
+});
+
+test("empty reasons are told apart and a failed search persists until retried", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page, { bases: [T11_BASE] });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+
+  // Before the first search the panel says so explicitly.
+  await expect(page.getByTestId("knowledge-search-never")).toBeVisible();
+
+  const searchFor = async (query: string) => {
+    await page.getByLabel("Query").fill(query);
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+  };
+  const empty = page.getByTestId("knowledge-search-empty");
+
+  await searchFor("notready 问题");
+  await expect(empty).toHaveText(
+    "No target document is ready for retrieval yet.",
+  );
+  await searchFor("unrelated 问题");
+  await expect(empty).toHaveText(
+    "Recall produced no candidates for this query.",
+  );
+  await searchFor("staleconflict 问题");
+  await expect(empty).toHaveText(
+    "Candidates changed while the search ran; run it again.",
+  );
+
+  // A threshold that filters everything names the threshold, not "no data".
+  await page.getByLabel("Score threshold").fill("0.95");
+  await searchFor("发布流程");
+  await expect(empty).toHaveText(
+    "Every candidate fell below the score threshold or the metadata filters.",
+  );
+  await page.getByLabel("Score threshold").fill("");
+
+  // A model failure stays in the results area with a retry that resends the
+  // exact same request; results only replace it after a successful search.
+  await searchFor("rerank-down 状况");
+  const error = page.getByTestId("knowledge-search-error");
+  await expect(error).toContainText("Reranker 服务暂不可用，请稍后重试");
+  const requestsBeforeRetry = state.searchRequests.length;
+  await error.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() => state.searchRequests.length).toBe(
+    requestsBeforeRetry + 1,
+  );
+  expect(state.searchRequests.at(-1)?.query).toBe("rerank-down 状况");
+  await expect(error).toContainText("Reranker 服务暂不可用，请稍后重试");
+
+  await searchFor("发布流程");
+  await expect(page.getByTestId("knowledge-search-results")).toBeVisible();
+  await expect(page.getByTestId("knowledge-search-error")).toHaveCount(0);
+});
+
+test("hit detail pins the scored content, highlights true child matches, and locates into documents", async ({
+  page,
+}) => {
+  const DOC_ID = "50000000-0000-4000-8000-000000000001";
+  const SEG_ID = "60000000-0000-4000-8000-000000000011";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [T11_BASE],
+    documents: [
+      {
+        id: DOC_ID,
+        knowledge_base_id: T11_BASE.id,
+        name: "发布说明.pdf",
+        original_name: "发布说明.pdf",
+        status: "ready",
+        segment_count: 1,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+    segments: {
+      [DOC_ID]: [
+        {
+          id: SEG_ID,
+          position: 7,
+          content: "完整原始分段正文，比检索片段更长。",
+          enabled: true,
+          source_position: { page: 7 },
+        },
+      ],
+    },
+    segmentChildren: {
+      [SEG_ID]: [
+        {
+          id: "61000000-0000-4000-8000-0000000000c1",
+          position: 1,
+          content: "子块一正文",
+        },
+        {
+          id: "61000000-0000-4000-8000-0000000000c2",
+          position: 2,
+          content: "子块二正文",
+        },
+      ],
+    },
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill("发布流程");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+
+  // The detail dialog shows the full original segment — not the snippet —
+  // and highlights exactly the children this search matched (C-2, not C-1).
+  const results = page.getByTestId("knowledge-search-results");
+  await results
+    .getByRole("button", { name: "View segment #7 in full" })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByTestId("knowledge-detail-content"),
+  ).toHaveText("完整原始分段正文，比检索片段更长。");
+  await expect(dialog.getByText("Child chunks (2)")).toBeVisible();
+  const children = dialog.getByTestId("knowledge-detail-children");
+  await expect(children.getByRole("listitem")).toHaveCount(2);
+  await expect(children.getByRole("listitem").nth(1)).toContainText(
+    "Matched · Lexical · 0.910",
+  );
+  await expect(children.getByRole("listitem").first()).not.toContainText(
+    "Matched",
+  );
+
+  // Escape closes the dialog and returns focus to the page.
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
+  // Once the document changes, the pinned read conflicts loudly instead of
+  // explaining the old score with new text.
+  state.detailDigest = "x".repeat(64);
+  await results
+    .getByRole("button", { name: "View segment #7 in full" })
+    .click();
+  await expect(page.getByTestId("knowledge-detail-conflict")).toHaveText(
+    "The document changed after this result was scored. Run the search again to see current content.",
+  );
+  await page.keyboard.press("Escape");
+
+  // With current content again, the detail locates into the documents view.
+  state.detailDigest = "d".repeat(64);
+  await results
+    .getByRole("button", { name: "View segment #7 in full" })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Open in documents" })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`doc=${DOC_ID}`));
+  await expect(page).toHaveURL(new RegExp(`segment=${SEG_ID}`));
+  await expect(page.getByTestId("knowledge-segment-locate")).toContainText(
+    "完整原始分段正文",
+  );
+});
+
+test("a search that settles after a reranker change cannot resurrect its results", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page, { bases: [T11_BASE] });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+
+  // The search parks server-side; the panel is pending.
+  await page.getByLabel("Query").fill("slowrace 旧配置查询");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect.poll(() => state.releaseSlowSearch !== null).toBe(true);
+  await expect(page.getByRole("button", { name: "Searching…" })).toBeVisible();
+
+  // While it is in flight, the reranker binding changes: whatever that old
+  // call returns is scored under a configuration that no longer exists.
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("Reranker model").click();
+  await page
+    .getByRole("option", { name: "SiliconFlow · BAAI/bge-reranker-v2-m3" })
+    .click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await expect(page.getByTestId("knowledge-search-never")).toBeVisible();
+
+  // Now the stale response arrives — the panel must stay never-searched
+  // instead of resurrecting results scored under the old binding.
+  state.releaseSlowSearch!();
+  state.releaseSlowSearch = null;
+  await page.waitForTimeout(400);
+  await expect(page.getByTestId("knowledge-search-never")).toBeVisible();
+  await expect(page.getByText("慢响应旧结果不得回流")).toHaveCount(0);
+
+  // A fresh search under the new binding wins normally.
+  await page.getByLabel("Query").fill("发布流程");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(
+    page.getByTestId("knowledge-search-results").getByRole("listitem"),
+  ).toHaveCount(3);
+});
+
+test("task progress shows stages, counts, and attempts, and a new attempt restarts from zero", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const progress = (patch: Record<string, unknown>) => ({
+    kind: "ingest_document",
+    status: "running",
+    stage: "embedding",
+    completed_units: 40,
+    total_units: 120,
+    attempt_count: 1,
+    max_attempts: 3,
+    target_version: 1,
+    next_attempt_at: null,
+    ...patch,
+  });
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "进度知识库",
+        description: "",
+        status: "active",
+        document_count: 5,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-000000000001",
+        knowledge_base_id: BASE_ID,
+        name: "embedding.txt",
+        original_name: "embedding.txt",
+        status: "processing",
+        segment_count: 0,
+        error_message: null,
+        delete_error: null,
+        task_progress: progress({}),
+      },
+      {
+        id: "50000000-0000-4000-8000-000000000002",
+        knowledge_base_id: BASE_ID,
+        name: "retrywait.txt",
+        original_name: "retrywait.txt",
+        status: "processing",
+        segment_count: 0,
+        error_message: null,
+        delete_error: null,
+        task_progress: progress({
+          status: "retry_wait",
+          attempt_count: 2,
+          next_attempt_at: "2026-08-30T13:00:00Z",
+        }),
+      },
+      {
+        id: "50000000-0000-4000-8000-000000000003",
+        knowledge_base_id: BASE_ID,
+        name: "exhausted.txt",
+        original_name: "exhausted.txt",
+        status: "failed",
+        segment_count: 0,
+        error_message: "Embedding 请求连续失败已耗尽重试",
+        delete_error: null,
+        task_progress: progress({ status: "failed", attempt_count: 3 }),
+      },
+      {
+        id: "50000000-0000-4000-8000-000000000004",
+        knowledge_base_id: BASE_ID,
+        name: "done.txt",
+        original_name: "done.txt",
+        status: "ready",
+        segment_count: 4,
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: "50000000-0000-4000-8000-000000000005",
+        knowledge_base_id: BASE_ID,
+        name: "reading.txt",
+        original_name: "reading.txt",
+        status: "processing",
+        segment_count: 0,
+        error_message: null,
+        delete_error: null,
+        task_progress: progress({
+          kind: "reembed_document",
+          stage: "reading_source",
+          completed_units: 0,
+          total_units: null,
+        }),
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  // The lifecycle summary counts every state separately: a failed terminal
+  // state is never folded into success.
+  const summary = page.getByTestId("knowledge-processing-summary");
+  await expect(summary).toContainText("2 processing");
+  await expect(summary).toContainText("1 waiting to retry");
+  await expect(summary).toContainText("1 failed");
+  await expect(summary).toContainText("1 ready");
+
+  const rows = page.getByTestId("knowledge-document-rows");
+  const rowFor = (name: string) =>
+    rows.getByRole("row").filter({ hasText: name });
+
+  // Verified batch counts for a countable stage; never a percentage.
+  await expect(rowFor("embedding.txt")).toContainText("Ingest · Embedding");
+  await expect(rowFor("embedding.txt")).toContainText("40/120");
+  await expect(rowFor("embedding.txt")).not.toContainText("%");
+
+  // A stage without a verifiable total renders indeterminate: no counter.
+  await expect(rowFor("reading.txt")).toContainText("Re-embed · Reading source");
+  await expect(rowFor("reading.txt")).not.toContainText("0/");
+
+  // retry_wait names the wait and the attempt it will start.
+  await expect(rowFor("retrywait.txt")).toContainText(
+    "Waiting for automatic retry",
+  );
+  await expect(rowFor("retrywait.txt")).toContainText("Attempt 2/3");
+
+  // Exhausted retries keep the failing stage on screen.
+  await expect(rowFor("exhausted.txt")).toContainText(
+    "Failed during Embedding",
+  );
+  await expect(rowFor("exhausted.txt")).toContainText("Attempt 3/3");
+
+  // The retry-wait document claims its next attempt: progress restarts from
+  // zero — the old attempt's 40 verified units must not ride along.
+  const retryDocument = state.documents.find(
+    (item) => item.name === "retrywait.txt",
+  )!;
+  retryDocument.task_progress = progress({
+    attempt_count: 2,
+    completed_units: 0,
+  });
+  await expect(rowFor("retrywait.txt")).toContainText("0/120", {
+    timeout: 10_000,
+  });
+  await expect(rowFor("retrywait.txt")).toContainText("Attempt 2/3");
+  await expect(rowFor("retrywait.txt")).not.toContainText("40/120");
+
+  // Finishing drops the progress line and moves the summary counts: the
+  // claimed retry is a plain "processing" now, so two documents remain
+  // active and the retry-wait bucket is gone.
+  const embeddingDocument = state.documents.find(
+    (item) => item.name === "embedding.txt",
+  )!;
+  embeddingDocument.status = "ready";
+  embeddingDocument.segment_count = 4;
+  embeddingDocument.task_progress = null;
+  await expect(summary).toContainText("2 ready", { timeout: 10_000 });
+  await expect(summary).toContainText("2 processing");
+  await expect(summary).not.toContainText("waiting to retry");
+  await expect(
+    rowFor("embedding.txt").getByTestId("knowledge-task-progress"),
+  ).toHaveCount(0);
+});
+
+test("batch metadata shows mixed values and applies one all-or-nothing patch", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const documents: MockDocument[] = [
+    {
+      id: "50000000-0000-4000-8000-000000000001",
+      knowledge_base_id: BASE_ID,
+      name: "运维手册.txt",
+      original_name: "运维手册.txt",
+      status: "ready",
+      segment_count: 3,
+      error_message: null,
+      delete_error: null,
+      doc_metadata: { category: "运维", priority: 2 },
+    },
+    {
+      id: "50000000-0000-4000-8000-000000000002",
+      knowledge_base_id: BASE_ID,
+      name: "研发手册.txt",
+      original_name: "研发手册.txt",
+      status: "ready",
+      segment_count: 3,
+      error_message: null,
+      delete_error: null,
+      doc_metadata: { category: "研发", priority: 2 },
+    },
+  ];
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "批量知识库",
+        description: "",
+        status: "active",
+        document_count: 2,
+        delete_error: null,
+      },
+    ],
+    documents,
+    metadataFields: [
+      {
+        id: "80000000-0000-4000-8000-000000000001",
+        knowledge_base_id: BASE_ID,
+        name: "category",
+        field_type: "string",
+      },
+      {
+        id: "80000000-0000-4000-8000-000000000002",
+        knowledge_base_id: BASE_ID,
+        name: "priority",
+        field_type: "number",
+      },
+      {
+        id: "80000000-0000-4000-8000-000000000003",
+        knowledge_base_id: BASE_ID,
+        name: "due",
+        field_type: "time",
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  await page.getByLabel("Select all documents").check();
+  await page.getByRole("button", { name: "Edit metadata" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Batch metadata (2 documents)")).toBeVisible();
+
+  // Divergent values are reported, never flattened into a fake blank; a
+  // shared value pre-fills its input once the field is switched to set.
+  const fieldBoxes = dialog.getByTestId("knowledge-batch-field");
+  await expect(fieldBoxes.filter({ hasText: "category" })).toContainText(
+    "2 distinct values",
+  );
+
+  // Nothing edited yet: the all-or-nothing patch has nothing to send.
+  await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
+
+  await fieldBoxes
+    .filter({ hasText: "category" })
+    .getByLabel("category mode")
+    .click();
+  await page.getByRole("option", { name: "Set" }).click();
+  await fieldBoxes
+    .filter({ hasText: "category" })
+    .getByLabel("category value")
+    .fill("统一分类");
+  await expect(
+    fieldBoxes.filter({ hasText: "category" }).getByText(
+      "Overwrites this field on 2 documents",
+    ),
+  ).toBeVisible();
+
+  await fieldBoxes
+    .filter({ hasText: "priority" })
+    .getByLabel("priority mode")
+    .click();
+  await page.getByRole("option", { name: "Clear" }).click();
+
+  // The shared priority value pre-filled as 2 — but clear ignores drafts.
+  // Server rejects the first submission: the whole batch rolls back and the
+  // dialog keeps the edited form for a retry.
+  state.batchMetadataFailure = {
+    status: 409,
+    code: "KNOWLEDGE_CONFLICT",
+    message: "字段定义已变化，请重试",
+  };
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await expect(dialog.getByText("字段定义已变化，请重试")).toBeVisible();
+  expect(state.batchMetadataRequests).toHaveLength(1);
+
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await expect(dialog).toBeHidden();
+  expect(state.batchMetadataRequests).toHaveLength(2);
+  expect(state.batchMetadataRequests.at(-1)).toEqual({
+    document_ids: [
+      "50000000-0000-4000-8000-000000000001",
+      "50000000-0000-4000-8000-000000000002",
+    ],
+    // Only explicitly edited fields travel: set category, clear priority,
+    // and the untouched "due" never appears.
+    values: { category: "统一分类", priority: null },
+  });
+
+  // Reopening proves the patch landed: one shared value, no mixed marker.
+  await page.getByLabel("Select all documents").check();
+  await page.getByRole("button", { name: "Edit metadata" }).click();
+  const reopened = page.getByRole("dialog");
+  await expect(
+    reopened.getByTestId("knowledge-batch-field").filter({
+      hasText: "category",
+    }),
+  ).not.toContainText("distinct values");
+});
+
+test("reparse previews the split, freezes parameters, and a stale confirmation conflicts", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const DOC_ID = "50000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "重解析知识库",
+        description: "",
+        status: "active",
+        document_count: 1,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: DOC_ID,
+        knowledge_base_id: BASE_ID,
+        name: "重解析文档.txt",
+        original_name: "重解析文档.txt",
+        status: "ready",
+        segment_count: 4,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  await page
+    .getByRole("button", { name: "Actions for 重解析文档.txt" })
+    .click();
+  await page.getByRole("menuitem", { name: "Reparse from original" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Reparse 重解析文档.txt")).toBeVisible();
+  // The confirmation names what is destroyed and what it costs.
+  await expect(
+    dialog.getByText(/Manual segment edits and per-segment disables/),
+  ).toBeVisible();
+
+  // Server-side preview with the edited parameters.
+  await dialog.getByLabel("Chunk size (characters)").fill("600");
+  await dialog.getByRole("button", { name: "Preview split" }).click();
+  const preview = dialog.getByTestId("knowledge-reparse-preview");
+  await expect(preview).toContainText("Showing 2 of 5 chunks");
+  await expect(preview).toContainText("重解析预览首段 · chunk_size=600");
+  expect(state.reparsePreviewRequests.at(-1)).toMatchObject({
+    expected_version: 1,
+    chunk_size: 600,
+    chunking_mode: "general",
+  });
+
+  // Editing a parameter retires the preview: it described another reparse.
+  await dialog.getByLabel("Chunk overlap (characters)").fill("50");
+  await expect(preview).toHaveCount(0);
+
+  // The document changes elsewhere; the stale confirmation must conflict,
+  // keep the dialog and its parameters, and refresh the authoritative row.
+  state.documents[0]!.version = 2;
+  const authorityRefresh = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      response.url().includes(`/bases/${BASE_ID}/documents?page=`),
+  );
+  await dialog.getByRole("button", { name: "Reparse", exact: true }).click();
+  await expect(
+    dialog.getByTestId("knowledge-reparse-conflict"),
+  ).toBeVisible();
+  expect(state.reparseRequests).toHaveLength(1);
+  expect(state.reparseRequests.at(-1)).toMatchObject({ expected_version: 1 });
+  await expect(dialog.getByLabel("Chunk size (characters)")).toHaveValue(
+    "600",
+  );
+
+  // Re-confirming against the refreshed version freezes the parameters.
+  await authorityRefresh;
+  await dialog.getByRole("button", { name: "Reparse", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(state.reparseRequests.at(-1)).toMatchObject({
+    expected_version: 2,
+    chunk_size: 600,
+    chunk_overlap: 50,
+    chunk_separator: "\\n\\n",
+    chunking_mode: "general",
+  });
+
+  // The accepted reparse queues the document and it reaches ready again.
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("Ready")).toBeVisible({ timeout: 15_000 });
+});
+
+test("a stale reparse preview conflicts, refreshes the version, and the next attempt succeeds", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const DOC_ID = "50000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "重解析知识库",
+        description: "",
+        status: "active",
+        document_count: 1,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: DOC_ID,
+        knowledge_base_id: BASE_ID,
+        name: "重解析文档.txt",
+        original_name: "重解析文档.txt",
+        status: "ready",
+        segment_count: 4,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page
+    .getByRole("button", { name: "Actions for 重解析文档.txt" })
+    .click();
+  await page.getByRole("menuitem", { name: "Reparse from original" }).click();
+  const dialog = page.getByRole("dialog");
+  const preview = dialog.getByTestId("knowledge-reparse-preview");
+
+  await dialog.getByRole("button", { name: "Preview split" }).click();
+  await expect(preview).toBeVisible();
+  expect(state.reparsePreviewRequests.at(-1)).toMatchObject({
+    expected_version: 1,
+  });
+
+  // The document changes elsewhere. A stale preview attempt must conflict,
+  // keep the parameter form, and refresh the authoritative row — exactly
+  // what the conflict copy promises — instead of pinning the old version.
+  state.documents[0]!.version = 2;
+  const authorityRefresh = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      response.url().includes(`/bases/${BASE_ID}/documents?page=`),
+  );
+  await dialog.getByRole("button", { name: "Preview split" }).click();
+  await expect(dialog.getByTestId("knowledge-reparse-conflict")).toBeVisible();
+  await authorityRefresh;
+
+  // Re-previewing against the refreshed version succeeds and retires the
+  // conflict notice.
+  await expect(async () => {
+    await dialog.getByRole("button", { name: "Preview split" }).click();
+    await expect(preview).toBeVisible({ timeout: 2_000 });
+  }).toPass();
+  expect(state.reparsePreviewRequests.at(-1)).toMatchObject({
+    expected_version: 2,
+  });
+  await expect(dialog.getByTestId("knowledge-reparse-conflict")).toHaveCount(
+    0,
+  );
+});
+
+test("a batch metadata conflict refreshes the selection for re-confirmation", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const KEPT_ID = "50000000-0000-4000-8000-000000000001";
+  const GONE_ID = "50000000-0000-4000-8000-000000000002";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "批量知识库",
+        description: "",
+        status: "active",
+        document_count: 2,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: KEPT_ID,
+        knowledge_base_id: BASE_ID,
+        name: "保留文档.txt",
+        original_name: "保留文档.txt",
+        status: "ready",
+        segment_count: 3,
+        error_message: null,
+        delete_error: null,
+        doc_metadata: { category: "运维" },
+      },
+      {
+        id: GONE_ID,
+        knowledge_base_id: BASE_ID,
+        name: "消失文档.txt",
+        original_name: "消失文档.txt",
+        status: "ready",
+        segment_count: 3,
+        error_message: null,
+        delete_error: null,
+        doc_metadata: { category: "研发" },
+      },
+    ],
+    metadataFields: [
+      {
+        id: "80000000-0000-4000-8000-000000000001",
+        knowledge_base_id: BASE_ID,
+        name: "category",
+        field_type: "string",
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  await page.getByLabel("Select all documents").check();
+  await page.getByRole("button", { name: "Edit metadata" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Batch metadata (2 documents)")).toBeVisible();
+
+  const fieldBoxes = dialog.getByTestId("knowledge-batch-field");
+  await fieldBoxes
+    .filter({ hasText: "category" })
+    .getByLabel("category mode")
+    .click();
+  await page.getByRole("option", { name: "Set" }).click();
+  await fieldBoxes
+    .filter({ hasText: "category" })
+    .getByLabel("category value")
+    .fill("统一分类");
+
+  // One selected document is deleted elsewhere. The all-or-nothing patch
+  // rejects; the dialog must keep the edited form but refresh the
+  // authoritative rows so re-confirmation runs against what still exists.
+  state.documents.splice(
+    state.documents.findIndex((item) => item.id === GONE_ID),
+    1,
+  );
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await expect(dialog.getByText("文档不存在")).toBeVisible();
+  await expect(dialog.getByText("Batch metadata (1 documents)")).toBeVisible();
+  await expect(
+    fieldBoxes.filter({ hasText: "category" }).getByLabel("category value"),
+  ).toHaveValue("统一分类");
+
+  // Re-confirming submits only the surviving selection.
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await expect(dialog).toBeHidden();
+  expect(state.batchMetadataRequests.at(-1)).toEqual({
+    document_ids: [KEPT_ID],
+    values: { category: "统一分类" },
+  });
+});
+
+test("the document metadata dialog follows the authoritative row after a conflict", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const KEPT_ID = "50000000-0000-4000-8000-000000000001";
+  const GONE_ID = "50000000-0000-4000-8000-000000000002";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "产品手册",
+        description: "",
+        status: "active",
+        document_count: 2,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: KEPT_ID,
+        knowledge_base_id: BASE_ID,
+        name: "保留文档.txt",
+        original_name: "保留文档.txt",
+        status: "ready",
+        segment_count: 2,
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: GONE_ID,
+        knowledge_base_id: BASE_ID,
+        name: "消失文档.txt",
+        original_name: "消失文档.txt",
+        status: "ready",
+        segment_count: 2,
+        doc_metadata: { author: "旧作者" },
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+    metadataFields: [
+      {
+        id: "80000000-0000-4000-8000-000000000091",
+        knowledge_base_id: BASE_ID,
+        name: "author",
+        field_type: "string",
+      },
+    ],
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  await (await openDocumentActions(page, "消失文档.txt"))
+    .getByRole("menuitem", { name: "Metadata" })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Edit metadata · 消失文档.txt")).toBeVisible();
+  await dialog.getByLabel(/author/u).fill("张三");
+
+  // The document is deleted elsewhere. The failed save must refresh the
+  // authoritative list; with the row gone there is nothing to re-confirm
+  // against, so the stale dialog closes instead of retrying forever.
+  state.documents.splice(
+    state.documents.findIndex((item) => item.id === GONE_ID),
+    1,
+  );
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("消失文档.txt")).toHaveCount(0);
+  await expect(rows.getByText("保留文档.txt")).toBeVisible();
 });

@@ -19,6 +19,11 @@ from .models import KnowledgeDocumentRow, KnowledgeTaskRow
 
 TASK_OPEN_STATUSES = ("queued", "running", "retry_wait")
 
+# Kinds whose permanent failure must surface on the document itself: the
+# document was taken out of ``ready`` for this work, so an exhausted task
+# marks it ``failed`` (rows and published_version stay untouched).
+INDEXING_TASK_KINDS = ("ingest_document", "reembed_document")
+
 _CLAIMABLE_STATUSES = ("queued", "retry_wait")
 _EXPIRED_LEASE_MESSAGE = "任务租约到期，Worker 可能已中断"
 DEFAULT_INACTIVE_PROJECT_PAUSE_SECONDS = 60
@@ -66,6 +71,12 @@ async def claim_next_task(
             claim_token=claim_token,
             lease_until=moment + timedelta(seconds=lease_seconds),
             attempt_count=KnowledgeTaskRow.attempt_count + 1,
+            # A new attempt starts from zero: stale progress of a lost or
+            # failed attempt never accumulates into this one.
+            stage="queued",
+            completed_units=0,
+            total_units=None,
+            progress_updated_at=moment,
             updated_at=moment,
         )
     )
@@ -133,14 +144,17 @@ def settle_task_row_success(row: KnowledgeTaskRow, *, now: datetime) -> None:
     """Flip a locked, still-owned ``running`` row to ``succeeded`` in place.
 
     For handlers that settle inside their own publish transaction; the caller
-    must have loaded ``row`` FOR UPDATE with the claim-token guard.
+    must have loaded ``row`` FOR UPDATE with the claim-token guard. ``done``
+    is stamped here — with the publish commit — and nowhere earlier.
     """
 
     row.status = "succeeded"
+    row.stage = "done"
     row.claim_token = None
     row.lease_until = None
     row.error_message = None
     row.finished_at = now
+    row.progress_updated_at = now
     row.updated_at = now
 
 
@@ -163,10 +177,53 @@ async def settle_task_success(
         )
         .values(
             status="succeeded",
+            stage="done",
             claim_token=None,
             lease_until=None,
             error_message=None,
             finished_at=moment,
+            progress_updated_at=moment,
+            updated_at=moment,
+        )
+    )
+    return result.rowcount == 1
+
+
+async def update_task_progress(
+    session: AsyncSession,
+    *,
+    task_id: UUID,
+    claim_token: UUID,
+    attempt_count: int,
+    target_version: int | None,
+    stage: str,
+    completed_units: int,
+    total_units: int | None,
+    now: datetime | None = None,
+) -> bool:
+    """Persist verified progress of the current attempt; False when stale.
+
+    The update matches only the row still owned by this exact claim, attempt,
+    and target version, so progress arriving after the lease was re-claimed
+    (or after a retry started a newer attempt) can never overwrite the
+    current attempt's counters.
+    """
+
+    moment = now or datetime.now(UTC)
+    result = await session.execute(
+        update(KnowledgeTaskRow)
+        .where(
+            KnowledgeTaskRow.id == task_id,
+            KnowledgeTaskRow.claim_token == claim_token,
+            KnowledgeTaskRow.status == "running",
+            KnowledgeTaskRow.attempt_count == attempt_count,
+            KnowledgeTaskRow.target_version == target_version,
+        )
+        .values(
+            stage=stage,
+            completed_units=completed_units,
+            total_units=total_units,
+            progress_updated_at=moment,
             updated_at=moment,
         )
     )
@@ -186,8 +243,8 @@ async def settle_task_failure(
 
     Returns the resulting status: ``"retry_wait"`` while attempts remain,
     ``"failed"`` when the budget is spent, or ``None`` when the claim was
-    lost. A finally-failed ``ingest_document`` task also marks its document
-    ``failed`` so the failure is explainable in document views.
+    lost. A finally-failed indexing task (ingest or re-embed) also marks its
+    document ``failed`` so the failure is explainable in document views.
     """
 
     moment = now or datetime.now(UTC)
@@ -209,8 +266,8 @@ async def settle_task_failure(
     if row.attempt_count >= row.max_attempts:
         row.status = "failed"
         row.finished_at = moment
-        if row.kind == "ingest_document":
-            await _mark_ingest_document_failed(
+        if row.kind in INDEXING_TASK_KINDS:
+            await _mark_indexed_document_failed(
                 session,
                 document_id=row.resource_id,
                 target_version=row.target_version,
@@ -254,8 +311,8 @@ async def recover_expired_tasks(
             # from an earlier retry would misattribute the permanent failure.
             row.error_message = _EXPIRED_LEASE_MESSAGE
             row.finished_at = moment
-            if row.kind == "ingest_document":
-                await _mark_ingest_document_failed(
+            if row.kind in INDEXING_TASK_KINDS:
+                await _mark_indexed_document_failed(
                     session,
                     document_id=row.resource_id,
                     target_version=row.target_version,
@@ -268,7 +325,7 @@ async def recover_expired_tasks(
     return len(expired)
 
 
-async def _mark_ingest_document_failed(
+async def _mark_indexed_document_failed(
     session: AsyncSession,
     *,
     document_id: UUID,
@@ -276,7 +333,7 @@ async def _mark_ingest_document_failed(
     error_message: str,
     now: datetime,
 ) -> None:
-    """Mark the ingested document failed if it still matches the task version."""
+    """Mark the indexed document failed if it still matches the task version."""
 
     await session.execute(
         update(KnowledgeDocumentRow)

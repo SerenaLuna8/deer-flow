@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import Path
 
@@ -183,6 +184,13 @@ async def test_reaper_deletes_only_inactive_proven_owners_and_is_idempotent(
         active_identity, active = await _owner(root, state="materialized")
         await _seed_active_attempt(engine, active_identity)
         _unknown_identity, unknown = await _owner(root, state="acquiring")
+
+        # The zero-grace comparison pits the owners' process-clock updated_at
+        # against PostgreSQL clock_timestamp(); give the wall clock a moment
+        # so a sub-millisecond cross-clock skew cannot park fresh owners in
+        # preserved_grace and flake the dispositions below under full-suite
+        # load.
+        await asyncio.sleep(0.1)
 
         report = await RunSkillTreeOrphanReaper(
             engine=engine,

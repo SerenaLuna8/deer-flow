@@ -8,7 +8,13 @@ import {
   UploadCloudIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type DragEvent } from "react";
+import {
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+  type DragEvent,
+} from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -44,11 +50,16 @@ import {
   useUploadKnowledgeDocument,
 } from "@/core/knowledge/hooks";
 import {
+  KNOWLEDGE_PREVIEW_IDLE,
+  knowledgePreviewReducer,
+  previewParamsEqual,
+  type KnowledgePreviewParams,
+} from "@/core/knowledge/preview-identity";
+import {
   DEFAULT_CHILD_CHUNK_SEPARATOR,
   DEFAULT_CHUNK_SEPARATOR,
   type KnowledgeBaseItem,
   type KnowledgeChunkingMode,
-  type PreviewKnowledgeChunksInput,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
@@ -96,24 +107,6 @@ function formatSizeBytes(sizeBytes: number): string {
     return `${(sizeBytes / 1024).toFixed(1)} KB`;
   }
   return `${sizeBytes} B`;
-}
-
-function previewInputsMatch(
-  left: PreviewKnowledgeChunksInput | undefined,
-  right: PreviewKnowledgeChunksInput | null,
-): boolean {
-  if (!left || !right) return false;
-  return (
-    left.file === right.file &&
-    left.chunk_size === right.chunk_size &&
-    left.chunk_overlap === right.chunk_overlap &&
-    left.chunk_separator === right.chunk_separator &&
-    left.remove_extra_spaces === right.remove_extra_spaces &&
-    left.remove_urls_emails === right.remove_urls_emails &&
-    left.chunking_mode === right.chunking_mode &&
-    left.child_chunk_size === right.child_chunk_size &&
-    left.child_chunk_separator === right.child_chunk_separator
-  );
 }
 
 /** Merge newly picked files, replacing entries with the same name. */
@@ -197,6 +190,7 @@ export function KnowledgeCreateWizard({
 
   const [step, setStep] = useState<WizardStep>(1);
   const [files, setFiles] = useState<File[]>([]);
+  const [previewFileName, setPreviewFileName] = useState<string | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -244,6 +238,12 @@ export function KnowledgeCreateWizard({
   const upload = useUploadKnowledgeDocument(scope);
   const documents = useKnowledgeDocuments(scope, createdBase?.id ?? null);
   const preview = useKnowledgeChunkPreview(scope);
+  const [previewState, dispatchPreview] = useReducer(
+    knowledgePreviewReducer,
+    KNOWLEDGE_PREVIEW_IDLE,
+  );
+  const previewSequenceRef = useRef(0);
+  const autoPreviewedFileRef = useRef<File | null>(null);
   const isSubmitting =
     submissionInFlightScopeKey === scopeKey || createBase.isPending;
 
@@ -267,14 +267,17 @@ export function KnowledgeCreateWizard({
     separatorValid &&
     childParamsValid;
 
-  const previewFile = files[0] ?? null;
-  // Preview requests are deliberate full-file uploads. Entering step 2 starts
-  // one request; later edits only make that exact response stale until the
-  // user explicitly refreshes it.
-  const currentPreviewInput: PreviewKnowledgeChunksInput | null =
-    previewFile && chunkParamsValid && separatorValid && childParamsValid
+  // Any selected file can be previewed; the picker falls back to the first
+  // file when its selection was removed.
+  const previewFile =
+    files.find((file) => file.name === previewFileName) ?? files[0] ?? null;
+  // Preview requests are deliberate full-file uploads carrying a full
+  // identity (File, parameter snapshot, scope, sequence). Showing a file
+  // starts one request; later edits only make that exact response stale
+  // until the user explicitly refreshes it.
+  const currentPreviewParams: KnowledgePreviewParams | null =
+    chunkParamsValid && separatorValid && childParamsValid
       ? {
-          file: previewFile,
           chunk_size: parsedChunkSize,
           chunk_overlap: parsedChunkOverlap,
           chunk_separator: chunkSeparator,
@@ -291,31 +294,81 @@ export function KnowledgeCreateWizard({
             : {}),
         }
       : null;
-  const previewMatchesFile = preview.variables?.file === previewFile;
+  const previewMatchesFile =
+    previewFile !== null && previewState.current?.file === previewFile;
   const previewIsStale =
     previewMatchesFile &&
-    !previewInputsMatch(preview.variables, currentPreviewInput);
-  const visiblePreviewData = previewMatchesFile ? preview.data : undefined;
+    currentPreviewParams !== null &&
+    previewState.current !== null &&
+    !previewParamsEqual(previewState.current.params, currentPreviewParams);
+  const previewLoading =
+    previewMatchesFile && previewState.status === "loading";
+  const visiblePreviewData = previewMatchesFile ? previewState.data : null;
   const visiblePreviewError =
-    previewMatchesFile && !previewIsStale ? preview.error : null;
+    previewMatchesFile && !previewIsStale && previewState.status === "error"
+      ? previewState.error
+      : null;
 
   const requestCurrentPreview = () => {
-    if (!currentPreviewInput) return;
-    preview.mutate(currentPreviewInput);
+    if (previewFile === null || currentPreviewParams === null) return;
+    previewSequenceRef.current += 1;
+    const identity = {
+      file: previewFile,
+      params: currentPreviewParams,
+      scopeKey,
+      sequence: previewSequenceRef.current,
+    };
+    dispatchPreview({ type: "requested", identity });
+    // mutateAsync settles even after a newer call replaces this one; the
+    // reducer's sequence guard is what discards such latecomers.
+    preview.mutateAsync({ file: identity.file, ...identity.params }).then(
+      (data) =>
+        dispatchPreview({
+          type: "resolved",
+          scopeKey: identity.scopeKey,
+          sequence: identity.sequence,
+          data,
+        }),
+      (error: unknown) =>
+        dispatchPreview({
+          type: "failed",
+          scopeKey: identity.scopeKey,
+          sequence: identity.sequence,
+          error,
+        }),
+    );
   };
 
-  const enterConfigureStep = () => {
-    setStep(2);
-    // The automatic upload belongs only to a first-file change. Returning to
-    // the same file preserves success/error/stale state; later parameter edits
-    // still require the explicit refresh action.
-    if (!previewMatchesFile && currentPreviewInput) {
-      preview.mutate(currentPreviewInput);
+  // Leaving the scope orphans every in-flight preview response.
+  useEffect(() => {
+    dispatchPreview({ type: "scope_changed", scopeKey });
+  }, [scopeKey]);
+
+  // One automatic preview per newly shown File object (first entry, picker
+  // switch, or same-name replacement). The ref both keeps the effect
+  // re-entrant under strict mode and leaves invalid-parameter states free to
+  // fire once the settings become valid again.
+  useEffect(() => {
+    if (step !== 2 || previewFile === null) return;
+    if (autoPreviewedFileRef.current === previewFile) return;
+    if (previewState.current?.file === previewFile) {
+      autoPreviewedFileRef.current = previewFile;
+      return;
     }
-  };
+    if (currentPreviewParams === null) return;
+    autoPreviewedFileRef.current = previewFile;
+    requestCurrentPreview();
+  });
 
   const addFiles = (added: File[]) => {
     if (added.length === 0) return;
+    // A same-name pick replaces the File object; its old preview (or a still
+    // running request) must not survive the replacement.
+    for (const file of files) {
+      if (added.some((candidate) => candidate.name === file.name)) {
+        dispatchPreview({ type: "file_removed", file });
+      }
+    }
     const next = mergeFiles(files, added);
     setFiles(next);
     if (!nameTouched) {
@@ -523,13 +576,19 @@ export function KnowledgeCreateWizard({
                         size="icon"
                         className="size-7 shrink-0"
                         aria-label={wizard.removeFile(file.name)}
-                        onClick={() =>
+                        onClick={() => {
+                          // A removed file's preview (or in-flight response)
+                          // must never be shown again.
+                          dispatchPreview({ type: "file_removed", file });
+                          if (file.name === previewFileName) {
+                            setPreviewFileName(null);
+                          }
                           setFiles((current) =>
                             current.filter(
                               (candidate) => candidate.name !== file.name,
                             ),
-                          )
-                        }
+                          );
+                        }}
                       >
                         <XIcon aria-hidden className="size-3.5" />
                       </Button>
@@ -544,7 +603,7 @@ export function KnowledgeCreateWizard({
             <Button
               type="button"
               disabled={files.length === 0}
-              onClick={enterConfigureStep}
+              onClick={() => setStep(2)}
             >
               {wizard.next}
             </Button>
@@ -839,7 +898,7 @@ export function KnowledgeCreateWizard({
             aria-label={wizard.previewTitle}
             className="min-w-0 space-y-3 lg:border-l lg:pl-8"
             data-testid="chunk-preview-panel"
-            aria-busy={preview.isPending}
+            aria-busy={previewLoading}
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="space-y-1">
@@ -849,7 +908,10 @@ export function KnowledgeCreateWizard({
                   </h2>
                   {visiblePreviewData ? (
                     <span className="text-muted-foreground text-xs tabular-nums">
-                      {wizard.previewTotal(visiblePreviewData.total)}
+                      {wizard.previewShowing(
+                        visiblePreviewData.items.length,
+                        visiblePreviewData.total,
+                      )}
                     </span>
                   ) : null}
                 </div>
@@ -864,27 +926,47 @@ export function KnowledgeCreateWizard({
                 variant="outline"
                 size="sm"
                 disabled={
-                  isSubmitting || !currentPreviewInput || preview.isPending
+                  isSubmitting ||
+                  previewFile === null ||
+                  currentPreviewParams === null ||
+                  previewLoading
                 }
                 onClick={requestCurrentPreview}
               >
                 <RefreshCwIcon
                   aria-hidden
-                  className={cn(
-                    "size-3.5",
-                    preview.isPending && "animate-spin",
-                  )}
+                  className={cn("size-3.5", previewLoading && "animate-spin")}
                 />
-                {preview.isPending
-                  ? wizard.previewLoading
-                  : wizard.previewRefresh}
+                {previewLoading ? wizard.previewLoading : wizard.previewRefresh}
               </Button>
             </div>
-            {preview.isPending ? (
+            {files.length > 1 ? (
+              <Select
+                value={previewFile?.name ?? ""}
+                disabled={isSubmitting}
+                onValueChange={setPreviewFileName}
+              >
+                <SelectTrigger
+                  size="sm"
+                  aria-label={wizard.previewPickFile}
+                  className="w-full max-w-sm"
+                >
+                  <SelectValue placeholder={wizard.previewPickFile} />
+                </SelectTrigger>
+                <SelectContent>
+                  {files.map((file) => (
+                    <SelectItem key={file.name} value={file.name}>
+                      {file.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : null}
+            {previewLoading ? (
               <p role="status" className="text-muted-foreground text-xs">
                 {wizard.previewLoading}
               </p>
-            ) : !currentPreviewInput ? (
+            ) : currentPreviewParams === null ? (
               <p role="status" className="text-destructive text-xs">
                 {wizard.previewInvalid}
               </p>

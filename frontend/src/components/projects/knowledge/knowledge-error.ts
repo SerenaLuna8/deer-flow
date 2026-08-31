@@ -13,6 +13,7 @@ export function knowledgeErrorMessage(
     if (error.serverMessage) return error.serverMessage;
     if (error.code === "NETWORK_ERROR") return messages.network;
     if (error.code === "INVALID_RESPONSE") return messages.invalidResponse;
+    if (error.code === "INCOMPLETE_LIST") return messages.incompleteList;
   }
   return messages.generic;
 }

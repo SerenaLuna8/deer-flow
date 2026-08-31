@@ -43,14 +43,19 @@ from actweave_knowledge import (
     KnowledgeDocumentUpload,
     KnowledgeDocumentView,
     KnowledgeError,
+    KnowledgeMetadataBatchPatch,
     KnowledgeMetadataFieldView,
     KnowledgeMetadataFilter,
     KnowledgeModule,
     KnowledgeQueryView,
+    KnowledgeReparseRequest,
+    KnowledgeSearchDiagnostics,
     KnowledgeSearchRequest,
     KnowledgeSegmentCreate,
+    KnowledgeSegmentDetail,
     KnowledgeSegmentUpdate,
     KnowledgeSegmentView,
+    KnowledgeTaskProgress,
 )
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -310,6 +315,8 @@ class KnowledgeBaseCreateRequest(_StrictModel):
     embedding_model_id: Annotated[uuid.UUID, Field(strict=False)]
     reranker_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
     description: str = ""
+    # hybrid adds the lexical recall route; semantic is the default.
+    retrieval_mode: Literal["semantic", "hybrid"] = "semantic"
 
 
 class KnowledgeBaseUpdateRequest(_StrictModel):
@@ -322,6 +329,7 @@ class KnowledgeBaseUpdateRequest(_StrictModel):
     # Optional reranker rebinding: set an ID, or clear the binding entirely.
     reranker_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
     clear_reranker_model: bool = False
+    retrieval_mode: Literal["semantic", "hybrid"] | None = None
 
 
 class KnowledgeBaseRebuildRequest(_StrictModel):
@@ -338,6 +346,7 @@ class KnowledgeBaseItemResponse(_StrictModel):
     description: str
     embedding_model_id: uuid.UUID
     reranker_model_id: uuid.UUID | None
+    retrieval_mode: Literal["semantic", "hybrid"]
     status: Literal["active", "disabled", "deleting"]
     document_count: int
     default_top_k: int
@@ -358,6 +367,40 @@ class KnowledgeBaseListResponse(_StrictModel):
 class KnowledgeBaseMutationResponse(_StrictModel):
     item: KnowledgeBaseItemResponse
     request_id: str
+
+
+class KnowledgeBaseRebuildResponse(_StrictModel):
+    """Re-embed admission outcome: the rebound base plus per-document counts."""
+
+    item: KnowledgeBaseItemResponse
+    accepted_document_count: int
+    # Never-published failed documents stay failed; re-parsing the original
+    # file is a separate explicit action, so the UI can list them.
+    skipped_document_ids: list[uuid.UUID]
+    request_id: str
+
+
+class KnowledgeTaskProgressResponse(_StrictModel):
+    """Progress of the open indexing task bound to the document's current
+    generation; ``total_units`` stays null while no verifiable total exists."""
+
+    kind: Literal["ingest_document", "reembed_document"]
+    status: Literal["queued", "running", "retry_wait", "failed"]
+    stage: Literal[
+        "queued",
+        "reading_source",
+        "extracting_splitting",
+        "loading_segments",
+        "embedding",
+        "publishing",
+        "done",
+    ]
+    completed_units: int
+    total_units: int | None
+    attempt_count: int
+    max_attempts: int
+    target_version: int
+    next_attempt_at: datetime | None
 
 
 class KnowledgeDocumentItemResponse(_StrictModel):
@@ -385,6 +428,7 @@ class KnowledgeDocumentItemResponse(_StrictModel):
     doc_metadata: dict[str, Any]
     error_message: str | None
     delete_error: str | None
+    task_progress: KnowledgeTaskProgressResponse | None
     created_at: datetime
     updated_at: datetime
 
@@ -449,6 +493,35 @@ class KnowledgeDocumentMetadataRequest(_StrictModel):
     values: dict[str, str | int | float | None]
 
 
+class KnowledgeDocumentsMetadataPatchRequest(_StrictModel):
+    """One bounded common patch for documents of one base (all-or-nothing).
+
+    Untouched keys stay, ``null`` removes the key, builtin field names are
+    rejected; document/field caps and type checks live in the package.
+    """
+
+    document_ids: list[Annotated[uuid.UUID, Field(strict=False)]]
+    values: dict[str, str | int | float | None]
+
+
+class KnowledgeFilterFieldItemResponse(_StrictModel):
+    kind: Literal["custom", "builtin"]
+    name: str
+    field_type: Literal["string", "number", "time"]
+    operators: list[Literal["eq", "contains", "gte", "lte"]]
+    writable: bool
+
+
+class KnowledgeBaseFilterFieldsResponse(_StrictModel):
+    knowledge_base_id: uuid.UUID
+    fields: list[KnowledgeFilterFieldItemResponse]
+
+
+class KnowledgeFilterFieldsResponse(_StrictModel):
+    bases: list[KnowledgeBaseFilterFieldsResponse]
+    request_id: str
+
+
 _BATCH_DOCUMENT_IDS = Annotated[
     list[Annotated[uuid.UUID, Field(strict=False)]],
     Field(min_length=1, max_length=100),
@@ -477,6 +550,27 @@ class KnowledgeChunkPreviewItemResponse(_StrictModel):
 
 
 class KnowledgeChunkPreviewResponse(_StrictModel):
+    items: list[KnowledgeChunkPreviewItemResponse]
+    total: int
+    request_id: str
+
+
+class KnowledgeDocumentReparseRequest(_StrictModel):
+    """Explicit re-parse of the stored original file; never a model change."""
+
+    expected_version: int
+    chunk_size: int = 1000
+    chunk_overlap: int = 100
+    chunk_separator: str = KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR
+    remove_extra_spaces: bool = False
+    remove_urls_emails: bool = False
+    chunking_mode: Literal["general", "parent_child"] = "general"
+    child_chunk_size: int = 500
+    child_chunk_separator: str = KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
+
+
+class KnowledgeReparsePreviewResponse(_StrictModel):
+    document_version: int
     items: list[KnowledgeChunkPreviewItemResponse]
     total: int
     request_id: str
@@ -522,6 +616,9 @@ class KnowledgeMetadataFilterBody(_StrictModel):
     name: str
     operator: Literal["eq", "contains", "gte", "lte"]
     value: str | int | float
+    # builtin targets the read-only document authority fields; custom (the
+    # default) targets the base's defined doc_metadata fields.
+    field_kind: Literal["custom", "builtin"] = "custom"
 
 
 class KnowledgeSearchRequestBody(_StrictModel):
@@ -557,6 +654,11 @@ class KnowledgeSearchRequestBody(_StrictModel):
         ]
         | None
     ) = None
+    # Per-call route override for the test panel; omit to follow each base's
+    # configured retrieval_mode.
+    retrieval_mode: Literal["semantic", "hybrid"] | None = None
+    # Adds the bounded safe diagnostics to this one response; never persisted.
+    debug: bool = False
 
 
 class KnowledgeCitationResponse(_StrictModel):
@@ -569,10 +671,89 @@ class KnowledgeCitationResponse(_StrictModel):
     snippet: str
     score: float
     source_position: dict[str, Any]
+    # New writes always provide these; the fields stay optional so historical
+    # citations without them still render as short quotes.
+    document_version: int | None = None
+    content_digest: str | None = None
+    score_kind: Literal["cosine", "rerank", "rank_fusion"] | None = None
+
+
+class KnowledgeMatchedChildResponse(_StrictModel):
+    child_id: uuid.UUID
+    position: int
+    route: Literal["semantic", "lexical"]
+    score: float
+
+
+class KnowledgeHitDiagnosticsResponse(_StrictModel):
+    """Per-hit safe evidence: ids and scores only, no passage or child text."""
+
+    segment_id: uuid.UUID
+    local_score: float
+    local_score_kind: Literal["cosine", "rerank"]
+    score_domain: str
+    ranking_method: Literal["cosine", "rerank", "rank_fusion"]
+    ranking_score: float
+    matched_children: list[KnowledgeMatchedChildResponse]
+
+
+class KnowledgeRouteCountsResponse(_StrictModel):
+    semantic_candidates: int
+    lexical_candidates: int
+    parents_deduplicated: int
+    threshold_filtered: int
+    stale_filtered: int
+    returned: int
+
+
+class KnowledgeSearchTimingsResponse(_StrictModel):
+    query_embedding_ms: float
+    recall_ms: float
+    rerank_ms: float
+    final_validation_ms: float
+
+
+class KnowledgeSearchDiagnosticsResponse(_StrictModel):
+    strategy_version: str
+    lexical_version: int
+    target_base_count: int
+    effective_top_k: int
+    per_base_route_budget: int
+    retrieval_mode: Literal["semantic", "hybrid"]
+    counts: KnowledgeRouteCountsResponse
+    timings: KnowledgeSearchTimingsResponse
+    model_ids: list[uuid.UUID]
+    ranking_method: Literal["cosine", "rerank", "rank_fusion"] | None
+    empty_reason: Literal["not_ready", "no_candidates", "filtered_out", "stale_candidates"] | None
+    heterogeneous_without_lexical_evidence: bool
+    hit_diagnostics: list[KnowledgeHitDiagnosticsResponse]
 
 
 class KnowledgeSearchResponse(_StrictModel):
     citations: list[KnowledgeCitationResponse]
+    # Present only when the request asked for debug diagnostics.
+    diagnostics: KnowledgeSearchDiagnosticsResponse | None = None
+    request_id: str
+
+
+class KnowledgeSegmentChildResponse(_StrictModel):
+    id: uuid.UUID
+    position: int
+    content: str
+    word_count: int
+
+
+class KnowledgeSegmentDetailResponse(_StrictModel):
+    segment: KnowledgeSegmentItemResponse
+    knowledge_base_id: uuid.UUID
+    document_id: uuid.UUID
+    document_name: str
+    content_state: Literal["current", "stale"]
+    stored_content_version: int
+    current_document_version: int
+    children_total: int
+    child_page: int
+    children: list[KnowledgeSegmentChildResponse]
     request_id: str
 
 
@@ -619,6 +800,7 @@ def _base_response(view: KnowledgeBaseView) -> KnowledgeBaseItemResponse:
         description=view.description,
         embedding_model_id=view.embedding_model_id,
         reranker_model_id=view.reranker_model_id,
+        retrieval_mode=view.retrieval_mode,
         status=view.status,
         document_count=view.document_count,
         default_top_k=view.default_top_k,
@@ -626,6 +808,22 @@ def _base_response(view: KnowledgeBaseView) -> KnowledgeBaseItemResponse:
         delete_error=view.delete_error,
         created_at=view.created_at,
         updated_at=view.updated_at,
+    )
+
+
+def _task_progress_response(progress: KnowledgeTaskProgress | None) -> KnowledgeTaskProgressResponse | None:
+    if progress is None:
+        return None
+    return KnowledgeTaskProgressResponse(
+        kind=progress.kind,
+        status=progress.status,
+        stage=progress.stage,
+        completed_units=progress.completed_units,
+        total_units=progress.total_units,
+        attempt_count=progress.attempt_count,
+        max_attempts=progress.max_attempts,
+        target_version=progress.target_version,
+        next_attempt_at=progress.next_attempt_at,
     )
 
 
@@ -655,6 +853,7 @@ def _document_response(view: KnowledgeDocumentView) -> KnowledgeDocumentItemResp
         doc_metadata=view.doc_metadata,
         error_message=view.error_message,
         delete_error=view.delete_error,
+        task_progress=_task_progress_response(view.task_progress),
         created_at=view.created_at,
         updated_at=view.updated_at,
     )
@@ -733,6 +932,7 @@ async def create_knowledge_base(
                 embedding_model_id=body.embedding_model_id,
                 reranker_model_id=body.reranker_model_id,
                 description=body.description,
+                retrieval_mode=body.retrieval_mode,
             ),
             authority=_knowledge_edit_authority(context),
         )
@@ -802,6 +1002,7 @@ async def update_knowledge_base(
                 default_score_threshold=body.default_score_threshold,
                 reranker_model_id=body.reranker_model_id,
                 clear_reranker_model=body.clear_reranker_model,
+                retrieval_mode=body.retrieval_mode,
             ),
             authority=_knowledge_edit_authority(context),
         )
@@ -810,17 +1011,17 @@ async def update_knowledge_base(
     return KnowledgeBaseMutationResponse(item=_base_response(view), request_id=context.request_id)
 
 
-@project_router.post("/bases/{base_id}/rebuild", response_model=KnowledgeBaseMutationResponse)
+@project_router.post("/bases/{base_id}/rebuild", response_model=KnowledgeBaseRebuildResponse)
 async def rebuild_knowledge_base(
     base_id: uuid.UUID,
     body: KnowledgeBaseRebuildRequest,
     context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
-) -> KnowledgeBaseMutationResponse:
-    """Rebind the embedding model and queue every document for re-embedding."""
+) -> KnowledgeBaseRebuildResponse:
+    """Rebind the embedding model and re-embed the current content."""
 
     try:
-        view = await module.rebuild_knowledge_base(
+        result = await module.rebuild_knowledge_base(
             context.project_id,
             base_id,
             embedding_model_id=body.embedding_model_id,
@@ -828,7 +1029,53 @@ async def rebuild_knowledge_base(
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
-    return KnowledgeBaseMutationResponse(item=_base_response(view), request_id=context.request_id)
+    return KnowledgeBaseRebuildResponse(
+        item=_base_response(result.base),
+        accepted_document_count=result.accepted_document_count,
+        skipped_document_ids=list(result.skipped_document_ids),
+        request_id=context.request_id,
+    )
+
+
+@project_router.get("/filter-fields", response_model=KnowledgeFilterFieldsResponse)
+async def list_knowledge_filter_fields(
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_read)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+    base_ids: Annotated[list[uuid.UUID] | None, Query()] = None,
+) -> KnowledgeFilterFieldsResponse:
+    """Discover the filterable builtin/custom fields per active base.
+
+    Definitions only — never values scanned from documents. A scope wider
+    than the discovery budget is refused with a hint to narrow ``base_ids``.
+    """
+
+    try:
+        bases = await module.list_filter_fields(
+            context.project_id,
+            base_ids,
+            authority=_knowledge_read_authority(context),
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
+    return KnowledgeFilterFieldsResponse(
+        bases=[
+            KnowledgeBaseFilterFieldsResponse(
+                knowledge_base_id=entry.knowledge_base_id,
+                fields=[
+                    KnowledgeFilterFieldItemResponse(
+                        kind=field.kind,
+                        name=field.name,
+                        field_type=field.field_type,
+                        operators=list(field.operators),
+                        writable=field.writable,
+                    )
+                    for field in entry.fields
+                ],
+            )
+            for entry in bases
+        ],
+        request_id=context.request_id,
+    )
 
 
 @project_router.get("/bases/{base_id}/metadata-fields", response_model=KnowledgeMetadataFieldListResponse)
@@ -928,6 +1175,33 @@ async def set_knowledge_document_metadata(
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
+
+
+@project_router.patch("/bases/{base_id}/documents/metadata", response_model=KnowledgeDocumentBatchResponse)
+async def set_knowledge_documents_metadata(
+    base_id: uuid.UUID,
+    body: KnowledgeDocumentsMetadataPatchRequest,
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+) -> KnowledgeDocumentBatchResponse:
+    """Apply one common metadata patch to documents of one base, all-or-nothing."""
+
+    try:
+        views = await module.set_documents_metadata(
+            context.project_id,
+            base_id,
+            KnowledgeMetadataBatchPatch(
+                document_ids=tuple(body.document_ids),
+                values=dict(body.values),
+            ),
+            authority=_knowledge_edit_authority(context),
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
+    return KnowledgeDocumentBatchResponse(
+        items=[_document_response(view) for view in views],
+        request_id=context.request_id,
+    )
 
 
 @project_router.post("/bases/{base_id}/documents", response_model=KnowledgeDocumentMutationResponse)
@@ -1177,6 +1451,73 @@ async def retry_knowledge_document(
     return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
 
 
+def _reparse_request(body: KnowledgeDocumentReparseRequest) -> KnowledgeReparseRequest:
+    return KnowledgeReparseRequest(
+        expected_version=body.expected_version,
+        chunk_size=body.chunk_size,
+        chunk_overlap=body.chunk_overlap,
+        chunk_separator=body.chunk_separator,
+        remove_extra_spaces=body.remove_extra_spaces,
+        remove_urls_emails=body.remove_urls_emails,
+        chunking_mode=body.chunking_mode,
+        child_chunk_size=body.child_chunk_size,
+        child_chunk_separator=body.child_chunk_separator,
+    )
+
+
+@project_router.post("/documents/{document_id}/reparse-preview", response_model=KnowledgeReparsePreviewResponse)
+async def preview_knowledge_document_reparse(
+    document_id: uuid.UUID,
+    body: KnowledgeDocumentReparseRequest,
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+) -> KnowledgeReparsePreviewResponse:
+    """Server-side preview from the stored original; writes nothing."""
+
+    try:
+        previewed = await module.preview_document_reparse(
+            context.project_id,
+            document_id,
+            _reparse_request(body),
+            authority=_knowledge_edit_authority(context),
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
+    return KnowledgeReparsePreviewResponse(
+        document_version=previewed.document_version,
+        items=[
+            KnowledgeChunkPreviewItemResponse(
+                position=chunk.position,
+                content=chunk.content,
+                word_count=chunk.word_count,
+                child_contents=list(chunk.child_contents),
+            )
+            for chunk in previewed.preview.chunks
+        ],
+        total=previewed.preview.total,
+        request_id=context.request_id,
+    )
+
+
+@project_router.post("/documents/{document_id}/reparse", response_model=KnowledgeDocumentMutationResponse)
+async def reparse_knowledge_document(
+    document_id: uuid.UUID,
+    body: KnowledgeDocumentReparseRequest,
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+) -> KnowledgeDocumentMutationResponse:
+    try:
+        view = await module.reparse_document(
+            context.project_id,
+            document_id,
+            _reparse_request(body),
+            authority=_knowledge_edit_authority(context),
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
+    return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
+
+
 @project_router.patch("/documents/{document_id}", response_model=KnowledgeDocumentMutationResponse)
 async def rename_knowledge_document(
     document_id: uuid.UUID,
@@ -1352,8 +1693,10 @@ async def search_knowledge(
                 knowledge_base_ids=(tuple(body.knowledge_base_ids) if body.knowledge_base_ids is not None else None),
                 top_k=body.top_k,
                 score_threshold=body.score_threshold,
+                retrieval_mode=body.retrieval_mode,
                 source="retrieval_test",
-                metadata_filters=(tuple(KnowledgeMetadataFilter(name=item.name, operator=item.operator, value=item.value) for item in body.metadata_filters) if body.metadata_filters is not None else None),
+                metadata_filters=(tuple(KnowledgeMetadataFilter(name=item.name, operator=item.operator, value=item.value, field_kind=item.field_kind) for item in body.metadata_filters) if body.metadata_filters is not None else None),
+                debug=body.debug,
             ),
             authority=_knowledge_read_authority(context),
         )
@@ -1361,8 +1704,41 @@ async def search_knowledge(
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeSearchResponse(
         citations=[_citation_response(citation) for citation in result.citations],
+        diagnostics=(_search_diagnostics_response(result.diagnostics) if result.diagnostics is not None else None),
         request_id=context.request_id,
     )
+
+
+@project_router.get(
+    "/bases/{base_id}/documents/{document_id}/segments/{segment_id}",
+    response_model=KnowledgeSegmentDetailResponse,
+)
+async def get_knowledge_segment_detail(
+    base_id: uuid.UUID,
+    document_id: uuid.UUID,
+    segment_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_read)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+    expected_document_version: Annotated[int | None, Query(ge=1)] = None,
+    expected_content_digest: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+    child_page: Annotated[int, Query(ge=1)] = 1,
+) -> KnowledgeSegmentDetailResponse:
+    """Authoritative single-segment read; hit expectations turn drift into 409."""
+
+    try:
+        detail = await module.get_segment_detail(
+            context.project_id,
+            base_id,
+            document_id,
+            segment_id,
+            expected_document_version=expected_document_version,
+            expected_content_digest=expected_content_digest,
+            child_page=child_page,
+            authority=_knowledge_read_authority(context),
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
+    return _segment_detail_response(detail, context.request_id)
 
 
 @project_router.get("/bases/{base_id}/queries", response_model=KnowledgeQueryListResponse)
@@ -1418,6 +1794,82 @@ def _citation_response(citation: KnowledgeCitation) -> KnowledgeCitationResponse
         snippet=citation.snippet,
         score=citation.score,
         source_position=citation.source_position,
+        document_version=citation.document_version,
+        content_digest=citation.content_digest,
+        score_kind=citation.score_kind,
+    )
+
+
+def _search_diagnostics_response(diagnostics: KnowledgeSearchDiagnostics) -> KnowledgeSearchDiagnosticsResponse:
+    return KnowledgeSearchDiagnosticsResponse(
+        strategy_version=diagnostics.strategy_version,
+        lexical_version=diagnostics.lexical_version,
+        target_base_count=diagnostics.target_base_count,
+        effective_top_k=diagnostics.effective_top_k,
+        per_base_route_budget=diagnostics.per_base_route_budget,
+        retrieval_mode=diagnostics.retrieval_mode,
+        counts=KnowledgeRouteCountsResponse(
+            semantic_candidates=diagnostics.counts.semantic_candidates,
+            lexical_candidates=diagnostics.counts.lexical_candidates,
+            parents_deduplicated=diagnostics.counts.parents_deduplicated,
+            threshold_filtered=diagnostics.counts.threshold_filtered,
+            stale_filtered=diagnostics.counts.stale_filtered,
+            returned=diagnostics.counts.returned,
+        ),
+        timings=KnowledgeSearchTimingsResponse(
+            query_embedding_ms=diagnostics.timings.query_embedding_ms,
+            recall_ms=diagnostics.timings.recall_ms,
+            rerank_ms=diagnostics.timings.rerank_ms,
+            final_validation_ms=diagnostics.timings.final_validation_ms,
+        ),
+        model_ids=list(diagnostics.model_ids),
+        ranking_method=diagnostics.ranking_method,
+        empty_reason=diagnostics.empty_reason,
+        heterogeneous_without_lexical_evidence=diagnostics.heterogeneous_without_lexical_evidence,
+        hit_diagnostics=[
+            KnowledgeHitDiagnosticsResponse(
+                segment_id=entry.segment_id,
+                local_score=entry.local_score,
+                local_score_kind=entry.local_score_kind,
+                score_domain=entry.score_domain,
+                ranking_method=entry.ranking_method,
+                ranking_score=entry.ranking_score,
+                matched_children=[
+                    KnowledgeMatchedChildResponse(
+                        child_id=child.child_id,
+                        position=child.position,
+                        route=child.route,
+                        score=child.score,
+                    )
+                    for child in entry.matched_children
+                ],
+            )
+            for entry in diagnostics.hit_diagnostics
+        ],
+    )
+
+
+def _segment_detail_response(detail: KnowledgeSegmentDetail, request_id: str) -> KnowledgeSegmentDetailResponse:
+    return KnowledgeSegmentDetailResponse(
+        segment=_segment_response(detail.segment),
+        knowledge_base_id=detail.knowledge_base_id,
+        document_id=detail.document_id,
+        document_name=detail.document_name,
+        content_state=detail.content_state,
+        stored_content_version=detail.stored_content_version,
+        current_document_version=detail.current_document_version,
+        children_total=detail.children_total,
+        child_page=detail.child_page,
+        children=[
+            KnowledgeSegmentChildResponse(
+                id=child.id,
+                position=child.position,
+                content=child.content,
+                word_count=child.word_count,
+            )
+            for child in detail.children
+        ],
+        request_id=request_id,
     )
 
 
@@ -1433,9 +1885,13 @@ __all__ = [
     "KnowledgeDocumentBatchStatusRequest",
     "KnowledgeDocumentItemResponse",
     "KnowledgeDocumentListResponse",
+    "KnowledgeBaseFilterFieldsResponse",
     "KnowledgeDocumentMetadataRequest",
     "KnowledgeDocumentMutationResponse",
     "KnowledgeDocumentRenameRequest",
+    "KnowledgeDocumentsMetadataPatchRequest",
+    "KnowledgeFilterFieldItemResponse",
+    "KnowledgeFilterFieldsResponse",
     "KnowledgeHealthResponse",
     "KnowledgeMetadataFieldCreateRequest",
     "KnowledgeMetadataFieldDeleteResponse",

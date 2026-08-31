@@ -304,19 +304,36 @@ generator; a necessary local patch needs focused coverage and an explanation.
 - All chunk parameters (size, overlap, separator, pre-processing rules,
   chunking mode with child size/separator) are
   immutable after upload and retry reuses them; the wizard's step 2 and the
-  upload dialog expose the same controls, and the wizard renders one initial
-  chunk preview of the first selected file via the stateless `chunk-preview`
-  endpoint when the user enters that step. Later parameter edits keep the last
-  preview visible as stale and require an explicit refresh, so the browser does
-  not repeatedly upload the complete file (failures surface inline; a refresh
-  retries; parent_child mode nests child chunks under each parent). Child fields
+  upload dialog expose the same controls. The wizard preview panel carries a
+  file picker over the selected files: each newly shown `File` object
+  auto-previews exactly once via the stateless `chunk-preview` endpoint, and
+  later parameter edits keep the last preview visible as stale requiring an
+  explicit refresh, so the browser does not repeatedly upload complete files
+  (failures surface inline and never pose as a valid preview). Preview
+  identity (`core/knowledge/preview-identity.ts`) tracks the File object,
+  parameter snapshot, scope generation, and a monotonic request sequence, so
+  a late response from a replaced request can never overwrite the current
+  winner (fast A→B switches, re-submitted parameters, removed or same-name
+  replaced files, scope changes). Child fields
   render only in parent_child mode and are omitted from general-mode
   requests. The separator inputs hold the escaped form the backend decodes
   (`\n\n` and `\n` by default). The upload dialog submits multiple files
-  sequentially and reports one verdict per file. Search labels scores with the
-  neutral "Retrieval score" wording: a base with a bound reranker shows
-  reranker relevance (which may be negative and renders as-is), while a base
-  without one shows cosine similarity, so the label promises neither.
+  sequentially, reports one verdict per file, and keeps only the failed files
+  queued for a retry that never re-uploads the succeeded ones. Search labels
+  scores with the
+  neutral "Retrieval score" wording plus a `score_kind` provenance badge
+  (Cosine, Rerank, or Rank fusion — never a "confidence" percentage); result
+  rows show the final rank, and a collapsed diagnostics disclosure exposes
+  strategy/budget/count/timing/model details without any segment text. Hit
+  detail pins the full scored segment via the authoritative detail read with
+  the result's expected version/digest — drift shows a "run the search again"
+  conflict instead of silently newer content — highlights the truly matched
+  children from the response evidence (never inferred from list order), and
+  locates into the documents view. Never-searched, no-hits, filtered-empty,
+  not-ready, and stale-content empty states are distinct; a model failure
+  stays visible with a Retry that re-sends the last input, and a base config
+  change (embedding/reranker/mode/defaults) resets results so a late slow
+  response cannot resurrect them.
 - The retrieval test's top_k and threshold inputs are optional: empty inputs
   omit the field so the backend resolves the base defaults (placeholders show
   them), which are edited in the base settings panel. Metadata filter rows
@@ -330,14 +347,33 @@ generator; a necessary local patch needs focused coverage and an explanation.
   per-base field definitions (add with type, rename, delete with confirm);
   each document row's Metadata dialog assigns typed values (text, number,
   datetime-local mapped to epoch seconds) where an emptied stored value
-  sends an explicit null and untouched fields are omitted. The settings
+  sends an explicit null and untouched fields are omitted. The batch bar's
+  metadata dialog edits the current selection with per-field keep/set/clear
+  modes, reports mixed values as "n distinct values" instead of a fake
+  blank, submits only explicitly edited fields in one all-or-nothing patch,
+  and on a 409 conflict keeps the unsaved form while refreshing the
+  authoritative rows for re-confirmation. The settings
   panel binds or clears the optional reranker model (effective on save, no
   rebuild; the search panel drops stale results on the change), and its
-  rebuild block confirms before POSTing the selected embedding model;
-  documents then repoll back to ready.
+  re-embed block confirms what is preserved (text, manual edits, enabled
+  states) before POSTing the selected embedding model, then reports the real
+  admission outcome (accepted count plus skipped never-published documents);
+  documents then repoll back to ready. Each document row's "Reparse from
+  original" action opens a dialog prefilled with the document's frozen chunk
+  parameters: edits invalidate the server-side preview, submission carries
+  `expected_version`, and a conflict keeps the form, retires the preview, and
+  refreshes the authoritative row for an explicit re-confirmation.
 - The documents table carries per-row enabled switches, rename, a characters
   column, and (with `shared_assets.edit`) row checkboxes with a batch bar for
-  enable/disable/delete; rows in `deleting` are not selectable. "View
+  enable/disable/delete plus batch metadata; rows in `deleting` are not
+  selectable. Knowledge workspace state (base, view, document, segment,
+  status filter, sort, page) lives in the URL for deep links and history;
+  the document list is searched/filtered/sorted client-side over a
+  completeness-checked full fetch (an incomplete multi-page read is an
+  explicit error, never a partial table). Status cells render the projected
+  real task progress (kind, stage, verified counts, attempt, retry wait) and
+  a summary bar above the table counts processing/retry-wait/failed/ready
+  documents without folding failures into success. "View
   segments" replaces the table in place with the segment browser
   (`knowledge-segments-browser.tsx`): list with word counts and manual badges,
   enable toggles, edit and add dialogs (4000-character ceiling mirroring the

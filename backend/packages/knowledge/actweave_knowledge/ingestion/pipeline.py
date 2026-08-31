@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..asyncio_utils import run_sync_to_completion
 from ..contracts import (
     KNOWLEDGE_EMBEDDING_FAILED,
+    KNOWLEDGE_LEXICAL_VERSION,
     KNOWLEDGE_PARSE_FAILED,
     KNOWLEDGE_QUOTA_EXCEEDED,
     KNOWLEDGE_STORAGE_UNAVAILABLE,
@@ -43,9 +44,11 @@ from ..persistence.models import (
     KnowledgeTaskRow,
 )
 from ..persistence.tasks import settle_task_row_success
+from ..retrieval.lexical import lexical_index_input
 from ..storage import MinioObjectStore
 from ..tasks.worker import KnowledgeTaskClaim
 from .preview import extract_clean_split
+from .progress import KnowledgeTaskProgressReporter
 from .splitter import SegmentDraft
 
 logger = logging.getLogger(__name__)
@@ -72,6 +75,10 @@ class _PreparedIngest:
     child_chunk_size: int
     child_chunk_separator: str
     material: KnowledgeEmbeddingMaterial
+    # True when the parameters above come from the task's frozen
+    # reparse_settings: the publish transaction then swaps the document's
+    # stored parameter columns together with the rows.
+    from_reparse: bool = False
 
 
 def _extract_and_split(
@@ -136,6 +143,10 @@ class KnowledgeIngestionHandler:
         prepared = await self._begin_processing(claim)
         if prepared is None:
             return
+        # Stage and batch progress live in short claim-guarded transactions;
+        # a no-op claim above never reports a stage.
+        progress = KnowledgeTaskProgressReporter(self._session_factory, claim)
+        await progress.advance_stage("reading_source")
         temp_dir = Path(
             await run_sync_to_completion(
                 tempfile.mkdtemp,
@@ -146,6 +157,7 @@ class KnowledgeIngestionHandler:
         try:
             source_path = temp_dir / f"source{Path(prepared.original_name).suffix.lower()}"
             await self._object_store.download_to(prepared.storage_key, source_path)
+            await progress.advance_stage("extracting_splitting")
             drafts = await run_sync_to_completion(
                 _extract_and_split,
                 source_path,
@@ -169,15 +181,29 @@ class KnowledgeIngestionHandler:
                         f"父子分块产生 {child_count} 个子块向量条目，超过上限 {self._settings.max_segments_per_document}",
                     )
                 child_contents = [content for draft in drafts for content in draft.children]
-                child_vectors = await self._model_client.embed(prepared.material, child_contents)
+                await progress.begin_embedding(len(child_contents))
+                child_vectors = await self._model_client.embed(
+                    prepared.material,
+                    child_contents,
+                    batch_guard=progress.ensure_claim_alive,
+                    on_batch_verified=progress.add_verified_units,
+                )
                 if len(child_vectors) != len(child_contents):  # the client validates per batch; belt and braces
                     raise KnowledgeError(KNOWLEDGE_EMBEDDING_FAILED, "Embedding 返回数量与子块数量不一致")
-                await self._publish(claim, drafts, parent_vectors=None, child_vectors=child_vectors)
+                await progress.advance_stage("publishing")
+                await self._publish(claim, prepared, drafts, parent_vectors=None, child_vectors=child_vectors)
             else:
-                vectors = await self._model_client.embed(prepared.material, [draft.content for draft in drafts])
+                await progress.begin_embedding(len(drafts))
+                vectors = await self._model_client.embed(
+                    prepared.material,
+                    [draft.content for draft in drafts],
+                    batch_guard=progress.ensure_claim_alive,
+                    on_batch_verified=progress.add_verified_units,
+                )
                 if len(vectors) != len(drafts):  # the client validates per batch; belt and braces
                     raise KnowledgeError(KNOWLEDGE_EMBEDDING_FAILED, "Embedding 返回数量与分段数量不一致")
-                await self._publish(claim, drafts, parent_vectors=vectors, child_vectors=None)
+                await progress.advance_stage("publishing")
+                await self._publish(claim, prepared, drafts, parent_vectors=vectors, child_vectors=None)
         finally:
             # Blocking adapters join started work before propagating
             # cancellation, so cleanup cannot race a thread that is still
@@ -205,6 +231,25 @@ class KnowledgeIngestionHandler:
                 material = await self._model_port.embedding_material(session, embedding_model_id)
                 document.status = "processing"
                 document.updated_at = func.now()  # type: ignore[assignment]
+                # An explicit re-parse carries its confirmed parameters on the
+                # task; the stored columns keep describing the published rows
+                # until this attempt actually publishes.
+                frozen = claim.reparse_settings
+                if frozen is not None:
+                    return _PreparedIngest(
+                        storage_key=document.storage_key,
+                        original_name=document.original_name,
+                        chunk_size=frozen["chunk_size"],
+                        chunk_overlap=frozen["chunk_overlap"],
+                        chunk_separator=frozen["chunk_separator"],
+                        remove_extra_spaces=frozen["remove_extra_spaces"],
+                        remove_urls_emails=frozen["remove_urls_emails"],
+                        chunking_mode=frozen["chunking_mode"],
+                        child_chunk_size=frozen["child_chunk_size"],
+                        child_chunk_separator=frozen["child_chunk_separator"],
+                        material=material,
+                        from_reparse=True,
+                    )
                 return _PreparedIngest(
                     storage_key=document.storage_key,
                     original_name=document.original_name,
@@ -226,6 +271,7 @@ class KnowledgeIngestionHandler:
     async def _publish(
         self,
         claim: KnowledgeTaskClaim,
+        prepared: _PreparedIngest,
         drafts: list[SegmentDraft],
         *,
         parent_vectors: list[list[float]] | None,
@@ -235,7 +281,9 @@ class KnowledgeIngestionHandler:
 
         Exactly one of ``parent_vectors`` (general mode) and ``child_vectors``
         (parent_child mode, flattened in draft order) is provided. Deleting the
-        old segments cascades to their child rows in the database.
+        old segments cascades to their child rows in the database. A re-parse
+        publish also swaps the document's stored parameter columns, in the
+        same transaction as the rows they describe.
         """
 
         try:
@@ -274,6 +322,11 @@ class KnowledgeIngestionHandler:
                             word_count=len(draft.content),
                             source_position=draft.source_position,
                             embedding=(parent_vectors[index] if parent_vectors is not None else None),
+                            # lexical_v1 is derived from the text inside the
+                            # publish transaction: the lexical route never
+                            # sees a published row without current tokens.
+                            lexical_tsv=func.to_tsvector("simple", lexical_index_input(draft.content)),
+                            lexical_version=KNOWLEDGE_LEXICAL_VERSION,
                         )
                         for index, (segment_id, draft) in enumerate(zip(segment_ids, drafts, strict=True))
                     ]
@@ -299,15 +352,29 @@ class KnowledgeIngestionHandler:
                                     content=content,
                                     word_count=len(content),
                                     embedding=child_vectors[cursor],
+                                    lexical_tsv=func.to_tsvector("simple", lexical_index_input(content)),
+                                    lexical_version=KNOWLEDGE_LEXICAL_VERSION,
                                 )
                             )
                             cursor += 1
                     if cursor != len(child_vectors):  # pragma: no cover - embed step sized the list
                         raise KnowledgeError(KNOWLEDGE_EMBEDDING_FAILED, "子块向量数量与子块数量不一致")
                     session.add_all(child_rows)
+                if prepared.from_reparse:
+                    document.chunk_size = prepared.chunk_size
+                    document.chunk_overlap = prepared.chunk_overlap
+                    document.chunk_separator = prepared.chunk_separator
+                    document.remove_extra_spaces = prepared.remove_extra_spaces
+                    document.remove_urls_emails = prepared.remove_urls_emails
+                    document.chunking_mode = prepared.chunking_mode
+                    document.child_chunk_size = prepared.child_chunk_size
+                    document.child_chunk_separator = prepared.child_chunk_separator
                 document.status = "ready"
                 document.segment_count = len(drafts)
                 document.word_count = sum(len(draft.content) for draft in drafts)
+                # The successful publish records its execution generation;
+                # ``content_initialized`` in DTOs derives from this value.
+                document.published_version = document.version
                 document.error_message = None
                 document.updated_at = moment
                 settle_task_row_success(task, now=moment)

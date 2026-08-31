@@ -544,6 +544,19 @@ async def test_open_task_partial_uniques_and_kind_rules(
                     session.add(_task(project_id=project_id, resource_id=resource_id))
                     await session.flush()
 
+            # A different indexing kind must not slip past the open slot: one
+            # document/version admits one open indexing operation, period.
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    session.add(
+                        _task(
+                            project_id=project_id,
+                            resource_id=resource_id,
+                            kind="reembed_document",
+                        )
+                    )
+                    await session.flush()
+
             # Same document, next version stays open in parallel.
             session.add(_task(project_id=project_id, resource_id=resource_id, target_version=2))
             await session.flush()

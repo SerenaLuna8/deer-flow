@@ -566,14 +566,32 @@ recreated explicitly, never repaired in place.
   `KNOWLEDGE_CONFLICT` when a re-ingest or delete won the race. A disabled
   document or segment is excluded from retrieval candidates without touching
   its vectors; `word_count` tracks segment characters and aggregates onto the
-  document row. Per-base metadata field definitions
+  document row.   Per-base metadata field definitions
   (`knowledge_metadata_fields`, string/number/time) validate typed values
   written into `knowledge_documents.doc_metadata` (JSONB, GIN-indexed);
   field rename and delete rewrite document keys in the same transaction.
-  Base rebuild synchronously rebinds the embedding Provider Model, then bumps
-  every document version and requeues it through the normal ingest task, so
-  stale-version tasks no-op and old segments leave recall until re-ingest
-  completes.
+  Batch metadata assignment (`PATCH .../documents/metadata`) writes only the
+  explicitly submitted fields across the selection in one all-or-nothing
+  transaction; field discovery (`GET .../filter-fields`) returns builtin and
+  custom definitions with `field_kind`, and the read-only
+  `knowledge_metadata_fields` Agent tool returns definitions only, never
+  values. Reprocessing is two explicit entry points with distinct
+  preservation contracts: base rebuild (re-embed) rebinds the embedding
+  Provider Model and queues `reembed_document` tasks for published documents
+  only (admission reports accepted/skipped counts) — the handler is
+  constructed without extractor or object-store access, keeps Segment
+  UUIDs/text/positions/enabled states/manual edits, regenerates vectors, and
+  flips the whole generation in one version-checked publish; document reparse
+  (`POST .../reparse-preview` + `POST .../reparse`) re-splits the stored
+  original file with edited parameters under an `expected_version` CAS,
+  freezes the parameters on the task, writes them back to the document row on
+  publish, and replaces every segment row (manual edits and disables are
+  overwritten). Retry inherits the latest indexing task's kind and frozen
+  reparse settings. Indexing tasks record real progress (stage, verified
+  batch counts, attempt) that projects to the API only for the current
+  document generation; ingest and reembed embedding loops re-check authority
+  before every provider batch so lease loss or revocation stops undispatched
+  work.
 - Every Project-facing Knowledge read carries the server-issued Project
   authority into the transaction that reads bases, metadata, Documents,
   Segments, or query history; request-admission context alone is never read
@@ -594,7 +612,35 @@ recreated explicitly, never repaired in place.
   stored on `knowledge_bases`. Optional `metadata_filters`
   (eq/contains/gte/lte against defined fields, AND-combined, max 10) gate
   both recall paths and are validated against the base's field definitions
-  before SQL. Every completed search with searchable bases appends a
+  before SQL.
+  Per-base candidate budgeting caps every base at
+  `C = min(min(100, max(20, 5*top_k)), floor(400/N))` for N target bases and
+  rejects the search when `C < 1`. Final ordering is three-branch: one shared
+  non-null reranker (or no reranker anywhere with one shared embedding) keeps
+  native ordering and native `citation.score`; heterogeneous score domains
+  rank-fuse with `61/2 × 1/(60+domain_rank)` over per-domain shared ranks
+  (ties broken only by stable identity, never fabricated score deltas), and
+  `score_kind` (`cosine|rerank|rank_fusion`) plus `local_score` preserve the
+  native evidence. Base `retrieval_mode` (`semantic|hybrid`, request-level
+  override never persists) adds a `lexical_v1` path for hybrid bases:
+  deterministic tokenizer (Chinese bigrams, ASCII terms, business identifier
+  and IP rules, byte caps) over PostgreSQL `tsvector`/GIN, per-base RRF merge
+  (k=60) of the lexical and vector paths before the C cut, >128 deduplicated
+  query tokens rejected explicitly, and any in-scope row with a stale
+  `lexical_version` failing with `KNOWLEDGE_CONFLICT` instead of silently
+  degrading. Lexical columns are maintained in the same transaction as every
+  content write (publish, reparse, segment edit/add, child re-split);
+  re-embedding leaves them byte-identical. The search snapshots each base's
+  model bindings and re-verifies them before provider dispatch and at the
+  final review — a mid-search rebind is a `KNOWLEDGE_CONFLICT`, and the final
+  unified review drops stale candidates while backfilling true
+  `matched_children`. Request-level `debug` returns safe diagnostics only in
+  that response (strategy, budgets, real counts, monotonic timings, model
+  ids, per-hit local scores, four-valued `empty_reason`; never segment text).
+  Citations carry `document_version`/`content_digest` plus `score_kind`; the
+  segment detail endpoint pages children and answers `KNOWLEDGE_CONFLICT`
+  when the caller's expected version/digest drifted. The agent tool packs
+  full passages under a 64 KiB UTF-8 JSON budget with `omitted_count`. Every completed search with searchable bases appends a
   `knowledge_queries` row bound to the trusted `project_id + owner_user_id`
   (source `agent` or `retrieval_test`); recent-query reads return only that
   actor's raw query text. Query text follows owner-private retention:

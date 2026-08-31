@@ -29,6 +29,7 @@ from actweave_knowledge import (
     KnowledgeSegmentView,
     KnowledgeSettings,
 )
+from actweave_knowledge.contracts import KNOWLEDGE_LEXICAL_VERSION
 from actweave_knowledge.documents import KnowledgeDocumentService
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
@@ -37,6 +38,7 @@ from actweave_knowledge.persistence.models import (
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
 )
+from actweave_knowledge.retrieval import encode_lexical_token
 from actweave_knowledge.segments import KnowledgeSegmentService
 from actweave_knowledge.segments.service import MAX_SEGMENT_CONTENT_CHARS
 from fastapi import FastAPI
@@ -63,13 +65,17 @@ class _ScriptedEmbedClient:
         self.embed_calls: list[list[str]] = []
         self.before_embed = None
 
-    async def embed(self, material, texts: list[str]) -> list[list[float]]:  # noqa: ANN001
+    async def embed(self, material, texts: list[str], *, batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
+        if batch_guard is not None:
+            await batch_guard()
         self.embed_calls.append(list(texts))
         if self.before_embed is not None:
             await self.before_embed()
+        if on_batch_verified is not None:
+            await on_batch_verified(len(texts))
         return [list(self.vector) for _ in texts]
 
-    async def rerank(self, material, query, documents, top_n):  # noqa: ANN001
+    async def rerank(self, material, query, documents, top_n, *, batch_guard=None):  # noqa: ANN001
         raise AssertionError("segment governance never reranks")
 
 
@@ -282,6 +288,78 @@ async def test_update_segment_content_reembeds_and_reconciles_word_counts(postgr
         document = await _document_row_of(harness, seeded.document_id)
         assert document.word_count == len("全新的分段内容") + len("第二段")
         assert document.segment_count == 2
+    finally:
+        await harness.engine.dispose()
+
+
+async def _lexical_state(harness: _Harness, table: str, row_id: uuid.UUID, term: str) -> tuple[int, bool]:
+    """(lexical_version, whether the row's tsvector matches ``term``)."""
+
+    async with harness.factory() as session:
+        row = (
+            await session.execute(
+                text(f"SELECT lexical_version, lexical_tsv @@ to_tsquery('simple', :token) FROM {table} WHERE id = :id"),
+                {"token": encode_lexical_token(term), "id": row_id},
+            )
+        ).one()
+    return int(row[0]), bool(row[1])
+
+
+@pytest.mark.asyncio
+async def test_content_writes_maintain_lexical_fields_in_the_same_transaction(postgres_database_url: str) -> None:
+    """T8: edits and manual additions refresh lexical_v1 fields with the text."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        seeded = await _seed_ready_document(harness, segments=["旧版网络说明"])
+        await harness.service.update_segment(
+            seeded.project_id,
+            seeded.segment_ids[0],
+            KnowledgeSegmentUpdate(content="新版存储指南"),
+        )
+        version, hits_new = await _lexical_state(harness, "knowledge_segments", seeded.segment_ids[0], "存储")
+        assert version == KNOWLEDGE_LEXICAL_VERSION
+        assert hits_new is True
+        _, hits_old = await _lexical_state(harness, "knowledge_segments", seeded.segment_ids[0], "网络")
+        assert hits_old is False
+
+        created = await harness.service.create_segment(
+            seeded.project_id,
+            seeded.document_id,
+            KnowledgeSegmentCreate(content="手工新增错误码e404"),
+        )
+        version, hits_created = await _lexical_state(harness, "knowledge_segments", created.id, "e404")
+        assert version == KNOWLEDGE_LEXICAL_VERSION
+        assert hits_created is True
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_parent_child_content_edit_refreshes_child_lexical_fields(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        seeded = await _seed_ready_document(harness, segments=["网络说明"], chunking_mode="parent_child")
+        await harness.service.update_segment(
+            seeded.project_id,
+            seeded.segment_ids[0],
+            KnowledgeSegmentUpdate(content="存储指南"),
+        )
+        parent_version, parent_hits = await _lexical_state(harness, "knowledge_segments", seeded.segment_ids[0], "存储")
+        assert parent_version == KNOWLEDGE_LEXICAL_VERSION
+        assert parent_hits is True
+        async with harness.factory() as session:
+            child_rows = (
+                await session.execute(
+                    text(
+                        """SELECT lexical_version, lexical_tsv @@ to_tsquery('simple', :token)
+                           FROM knowledge_segment_children WHERE knowledge_segment_id = :id"""
+                    ),
+                    {"token": encode_lexical_token("存储"), "id": seeded.segment_ids[0]},
+                )
+            ).all()
+        assert child_rows
+        assert all(int(version) == KNOWLEDGE_LEXICAL_VERSION and bool(hits) for version, hits in child_rows)
     finally:
         await harness.engine.dispose()
 

@@ -883,7 +883,14 @@ export type KnowledgeCitation = {
   snippet: string;
   score: number;
   source_position: Record<string, unknown>;
+  // New writes always provide these; historical citations legally lack them
+  // and render as short quotes with unknown provenance.
+  document_version?: number;
+  content_digest?: string;
+  score_kind?: "cosine" | "rerank" | "rank_fusion";
 };
+
+const KNOWLEDGE_SCORE_KINDS = new Set(["cosine", "rerank", "rank_fusion"]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -910,6 +917,22 @@ function parseKnowledgeCitations(
     const snippet = candidate.snippet;
     const score = candidate.score;
     const sourcePosition = candidate.source_position;
+    // T5 provenance fields: optional for historical citations (absent or
+    // null), but a present value with the wrong shape still rejects the
+    // whole payload — a corrupted message never half-parses.
+    const documentVersion = candidate.document_version ?? undefined;
+    const contentDigest = candidate.content_digest ?? undefined;
+    const scoreKind = candidate.score_kind ?? undefined;
+    if (
+      (documentVersion !== undefined &&
+        (typeof documentVersion !== "number" ||
+          !Number.isSafeInteger(documentVersion))) ||
+      (contentDigest !== undefined && typeof contentDigest !== "string") ||
+      (scoreKind !== undefined &&
+        (typeof scoreKind !== "string" || !KNOWLEDGE_SCORE_KINDS.has(scoreKind)))
+    ) {
+      return undefined;
+    }
     if (
       typeof knowledgeBaseId !== "string" ||
       knowledgeBaseId.length === 0 ||
@@ -938,6 +961,15 @@ function parseKnowledgeCitations(
       snippet,
       score,
       source_position: sourcePosition,
+      ...(documentVersion !== undefined
+        ? { document_version: documentVersion }
+        : {}),
+      ...(contentDigest !== undefined
+        ? { content_digest: contentDigest }
+        : {}),
+      ...(scoreKind !== undefined
+        ? { score_kind: scoreKind as KnowledgeCitation["score_kind"] }
+        : {}),
     });
   }
   return citations;

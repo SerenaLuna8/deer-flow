@@ -1,16 +1,21 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
   DownloadIcon,
+  FileCog2Icon,
   ListTreeIcon,
   MoreHorizontalIcon,
   PencilIcon,
   RotateCcwIcon,
+  SearchIcon,
   TagsIcon,
   Trash2Icon,
   UploadIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,6 +34,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -39,6 +51,7 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import {
   isKnowledgeAuthorityBoundaryError,
+  isKnowledgeConflictError,
   knowledgeDocumentDownloadURL,
 } from "@/core/knowledge/api";
 import {
@@ -54,16 +67,28 @@ import {
   KNOWLEDGE_CHUNK_SIZE_MIN,
 } from "@/core/knowledge/chunk-settings";
 import {
+  deriveKnowledgeDocumentList,
+  type KnowledgeDocumentListView,
+} from "@/core/knowledge/document-list";
+import {
   useDeleteKnowledgeDocument,
   useDeleteKnowledgeDocuments,
   useKnowledgeDocuments,
   useKnowledgeMetadataFields,
+  usePreviewKnowledgeDocumentReparse,
   useRenameKnowledgeDocument,
+  useReparseKnowledgeDocument,
   useRetryKnowledgeDocument,
   useSetKnowledgeDocumentMetadata,
   useSetKnowledgeDocumentsEnabled,
+  useSetKnowledgeDocumentsMetadata,
   useUploadKnowledgeDocument,
 } from "@/core/knowledge/hooks";
+import type {
+  KnowledgeDocumentSort,
+  KnowledgeNavigationState,
+} from "@/core/knowledge/navigation";
+import { knowledgeQueryKey } from "@/core/knowledge/query-keys";
 import {
   DEFAULT_CHILD_CHUNK_SEPARATOR,
   DEFAULT_CHUNK_SEPARATOR,
@@ -72,6 +97,9 @@ import {
   type KnowledgeDocumentItem,
   type KnowledgeDocumentStatus,
   type KnowledgeMetadataFieldItem,
+  type KnowledgeReparseInput,
+  type KnowledgeReparsePreviewResponse,
+  type KnowledgeTaskProgress,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
 
@@ -125,35 +153,125 @@ function DocumentErrorMessage({ message }: { message: string }) {
   );
 }
 
+/**
+ * The open indexing attempt as the server reports it: stage, verified batch
+ * counts, and the attempt number. Stages without a verifiable total render
+ * indeterminate (no counter, never a simulated percentage), and a failed
+ * task keeps its failing stage on screen.
+ */
+function TaskProgressLine({ progress }: { progress: KnowledgeTaskProgress }) {
+  const { t } = useI18n();
+  const labels = t.knowledge.documents.progress;
+  const stageLabel = labels.stages[progress.stage];
+  const parts: string[] = [
+    `${labels.kinds[progress.kind]} · ${
+      progress.status === "failed"
+        ? labels.failedDuring(stageLabel)
+        : stageLabel
+    }`,
+  ];
+  if (progress.total_units !== null) {
+    parts.push(labels.units(progress.completed_units, progress.total_units));
+  }
+  if (
+    progress.attempt_count > 1 ||
+    progress.status === "retry_wait" ||
+    progress.status === "failed"
+  ) {
+    parts.push(labels.attempt(progress.attempt_count, progress.max_attempts));
+  }
+  return (
+    <div
+      className="text-muted-foreground mt-1 text-xs"
+      data-testid="knowledge-task-progress"
+    >
+      <span>{parts.join(" · ")}</span>
+      {progress.status === "retry_wait" ? (
+        <span className="block">
+          {progress.next_attempt_at
+            ? labels.retryWaitAt(
+                new Date(progress.next_attempt_at).toLocaleTimeString(),
+              )
+            : labels.retryWaitSoon}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function KnowledgeDocumentsView({
   scope,
   base,
   canEdit,
+  navState,
+  onNavigate,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
   canEdit: boolean;
+  navState: KnowledgeNavigationState;
+  onNavigate: (
+    next: KnowledgeNavigationState,
+    mode: "push" | "replace",
+  ) => void;
 }) {
+  const { t } = useI18n();
+  const labels = t.knowledge;
   const documents = useKnowledgeDocuments(scope, base.id);
-  const [browsingId, setBrowsingId] = useState<string | null>(null);
 
   // Resolved from the live list so segment mutations (which invalidate the
-  // documents query) keep the header counts fresh while browsing.
+  // documents query) keep the header counts fresh while browsing. The URL
+  // names the document; a deleted or foreign id shows "inaccessible" and
+  // never falls back to a cached object.
   const browsing =
-    browsingId === null
+    navState.doc === null
       ? null
-      : (documents.data?.items.find((item) => item.id === browsingId) ?? null);
+      : (documents.data?.items.find((item) => item.id === navState.doc) ??
+        null);
 
-  if (browsing) {
+  // Returning to the list keeps status/sort/page so the previous location
+  // is restored; the transient keyword lives below and survives on its own.
+  const closeBrowser = () =>
+    onNavigate({ ...navState, doc: null, segment: null }, "push");
+
+  // Without list data the browser cannot resolve its document. A pending
+  // first load shows a skeleton; a blocking failure (including authority
+  // loss, which conceals the cached rows) falls through to the table so its
+  // error rendering owns the message instead of a misleading "not found".
+  if (navState.doc !== null && documents.data !== undefined) {
+    if (browsing === null) {
+      return (
+        <div className="rounded-xl border border-dashed px-4 py-12 text-center">
+          <p className="text-muted-foreground text-sm">
+            {labels.documents.notFound}
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            className="mt-4"
+            onClick={closeBrowser}
+          >
+            {labels.documents.backToList}
+          </Button>
+        </div>
+      );
+    }
     return (
       <KnowledgeSegmentsBrowser
         scope={scope}
         base={base}
         document={browsing}
         canEdit={canEdit}
-        onBack={() => setBrowsingId(null)}
+        onBack={closeBrowser}
+        locateSegmentId={navState.segment}
+        onDismissLocate={() =>
+          onNavigate({ ...navState, segment: null }, "replace")
+        }
       />
     );
+  }
+  if (navState.doc !== null && documents.error === null) {
+    return <Skeleton className="h-40 rounded-xl" />;
   }
 
   return (
@@ -162,7 +280,11 @@ export function KnowledgeDocumentsView({
       base={base}
       canEdit={canEdit}
       documents={documents}
-      onBrowse={(document) => setBrowsingId(document.id)}
+      navState={navState}
+      onNavigate={onNavigate}
+      onBrowse={(document) =>
+        onNavigate({ ...navState, doc: document.id }, "push")
+      }
     />
   );
 }
@@ -172,12 +294,19 @@ function DocumentsTable({
   base,
   canEdit,
   documents,
+  navState,
+  onNavigate,
   onBrowse,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
   canEdit: boolean;
   documents: ReturnType<typeof useKnowledgeDocuments>;
+  navState: KnowledgeNavigationState;
+  onNavigate: (
+    next: KnowledgeNavigationState,
+    mode: "push" | "replace",
+  ) => void;
   onBrowse: (document: KnowledgeDocumentItem) => void;
 }) {
   const { t } = useI18n();
@@ -189,15 +318,68 @@ function DocumentsTable({
   const [uploadOpen, setUploadOpen] = useState(false);
   const [deleting, setDeleting] = useState<KnowledgeDocumentItem | null>(null);
   const [renaming, setRenaming] = useState<KnowledgeDocumentItem | null>(null);
-  const [editingMetadata, setEditingMetadata] =
-    useState<KnowledgeDocumentItem | null>(null);
+  // Metadata and reparse dialogs track ids, not row objects: conflicts
+  // refresh the authoritative row and the dialogs must re-read the live
+  // version instead of a snapshot taken when they opened.
+  const [editingMetadataId, setEditingMetadataId] = useState<string | null>(
+    null,
+  );
+  const [reparsingId, setReparsingId] = useState<string | null>(null);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [batchMetadataOpen, setBatchMetadataOpen] = useState(false);
+  // Content-typed state: never written to the URL or browser storage. It
+  // survives opening a document and coming back (the component stays
+  // mounted), and resets with the component on a base switch or reload.
+  const [keyword, setKeyword] = useState("");
 
   const items = documents.data?.items ?? [];
+  // Keyword/status filtering, ordering, and paging all run over the complete
+  // authoritative list — the API layer fails loudly when it cannot page to
+  // completion, so this is never just the first backend page.
+  const derived: KnowledgeDocumentListView = deriveKnowledgeDocumentList(
+    items,
+    {
+      keyword,
+      status: navState.status,
+      sort: navState.sort,
+      page: navState.page,
+    },
+  );
+
+  // Deleting the last row of the final page (or any list shrink) walks the
+  // URL back to the nearest legal page.
+  useEffect(() => {
+    if (documents.data !== undefined && derived.page !== navState.page) {
+      onNavigate({ ...navState, page: derived.page }, "replace");
+    }
+  }, [derived.page, documents.data, navState, onNavigate]);
+
+  // Selection is scoped to the visible page: page turns and filter changes
+  // clear it so hidden rows can never ride along into a batch operation.
+  useEffect(() => {
+    setSelected(new Set());
+  }, [derived.page, navState.status, navState.sort, keyword]);
+
+  // Lifecycle summary over the complete list, not the visible page. A failed
+  // document is a terminal state of its own — the summary never folds it
+  // into "done".
+  const summaryCounts = { processing: 0, retryWait: 0, failed: 0, ready: 0 };
+  for (const item of items) {
+    if (item.status === "ready") summaryCounts.ready += 1;
+    else if (item.status === "failed") summaryCounts.failed += 1;
+    else if (item.status === "deleting") continue;
+    else if (item.task_progress?.status === "retry_wait")
+      summaryCounts.retryWait += 1;
+    else summaryCounts.processing += 1;
+  }
+  const summaryActive =
+    summaryCounts.processing + summaryCounts.retryWait + summaryCounts.failed >
+    0;
+
   // Deleting documents reject batch operations server-side, so they are not
   // selectable; stale ids from removed rows drop out here as well.
-  const selectableIds = items
+  const selectableIds = derived.rows
     .filter((item) => item.status !== "deleting")
     .map((item) => item.id);
   const selectedIds = selectableIds.filter((id) => selected.has(id));
@@ -222,6 +404,18 @@ function DocumentsTable({
       else next.delete(documentId);
       return next;
     });
+  };
+
+  // Filter changes reset the page: the old page number described another
+  // result set. Both are replace navigations, not history entries.
+  const setStatusFilter = (status: KnowledgeDocumentStatus | null) =>
+    onNavigate({ ...navState, status, page: 1 }, "replace");
+  const setSort = (sort: KnowledgeDocumentSort) =>
+    onNavigate({ ...navState, sort, page: 1 }, "replace");
+  const setPage = (page: number) => onNavigate({ ...navState, page }, "replace");
+  const setKeywordFilter = (next: string) => {
+    setKeyword(next);
+    if (navState.page !== 1) onNavigate({ ...navState, page: 1 }, "replace");
   };
 
   const closeDeleteDialog = () => {
@@ -249,6 +443,84 @@ function DocumentsTable({
             {labels.documents.uploadButton}
           </Button>
         ) : null}
+      </div>
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="relative min-w-0 flex-1 sm:max-w-72">
+          <SearchIcon
+            aria-hidden
+            className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2"
+          />
+          <Input
+            type="search"
+            className="pl-8"
+            value={keyword}
+            placeholder={labels.documents.searchPlaceholder}
+            aria-label={labels.documents.searchAria}
+            onChange={(event) => setKeywordFilter(event.target.value)}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <Select
+            value={navState.status ?? "all"}
+            onValueChange={(value) =>
+              setStatusFilter(
+                value === "all" ? null : (value as KnowledgeDocumentStatus),
+              )
+            }
+          >
+            <SelectTrigger
+              className="w-36"
+              aria-label={labels.documents.statusFilterLabel}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">
+                {labels.documents.statusFilterAll}
+              </SelectItem>
+              {(
+                [
+                  "ready",
+                  "processing",
+                  "queued",
+                  "uploading",
+                  "failed",
+                  "deleting",
+                ] as const
+              ).map((status) => (
+                <SelectItem key={status} value={status}>
+                  {labels.documentStatus[status]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={navState.sort}
+            onValueChange={(value) => setSort(value as KnowledgeDocumentSort)}
+          >
+            <SelectTrigger
+              className="w-36"
+              aria-label={labels.documents.sortLabel}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(
+                [
+                  "created_desc",
+                  "created_asc",
+                  "name_asc",
+                  "name_desc",
+                ] as const
+              ).map((sort) => (
+                <SelectItem key={sort} value={sort}>
+                  {labels.documents.sortOptions[sort]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {retryDocument.error ? (
@@ -279,6 +551,36 @@ function DocumentsTable({
             {t.common.retry}
           </Button>
         </div>
+      ) : null}
+
+      {summaryActive ? (
+        <p
+          data-testid="knowledge-processing-summary"
+          className="flex flex-wrap gap-x-3 gap-y-1 text-xs"
+        >
+          {summaryCounts.processing > 0 ? (
+            <span className="text-muted-foreground">
+              {labels.documents.processingSummary.processing(
+                summaryCounts.processing,
+              )}
+            </span>
+          ) : null}
+          {summaryCounts.retryWait > 0 ? (
+            <span className="text-muted-foreground">
+              {labels.documents.processingSummary.retryWait(
+                summaryCounts.retryWait,
+              )}
+            </span>
+          ) : null}
+          {summaryCounts.failed > 0 ? (
+            <span className="text-destructive font-medium">
+              {labels.documents.processingSummary.failed(summaryCounts.failed)}
+            </span>
+          ) : null}
+          <span className="text-muted-foreground">
+            {labels.documents.processingSummary.ready(summaryCounts.ready)}
+          </span>
+        </p>
       ) : null}
 
       {canEdit && selectedIds.length > 0 ? (
@@ -324,6 +626,15 @@ function DocumentsTable({
               type="button"
               variant="outline"
               size="sm"
+              disabled={batchPending}
+              onClick={() => setBatchMetadataOpen(true)}
+            >
+              {labels.documents.batchMetadata}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
               className="text-destructive"
               disabled={batchPending}
               onClick={() => setBatchDeleteOpen(true)}
@@ -351,6 +662,10 @@ function DocumentsTable({
       ) : items.length === 0 ? (
         <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm">
           {labels.documents.empty}
+        </p>
+      ) : derived.filteredTotal === 0 ? (
+        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm">
+          {labels.documents.filteredEmpty}
         </p>
       ) : (
         <div
@@ -403,7 +718,7 @@ function DocumentsTable({
               </tr>
             </thead>
             <tbody data-testid="knowledge-document-rows">
-              {items.map((document) => (
+              {derived.rows.map((document) => (
                 <tr key={document.id} className="group border-t align-top">
                   {canEdit ? (
                     <td className="px-3 py-3">
@@ -441,6 +756,9 @@ function DocumentsTable({
                     <Badge variant={documentStatusVariant(document.status)}>
                       {labels.documentStatus[document.status]}
                     </Badge>
+                    {document.task_progress ? (
+                      <TaskProgressLine progress={document.task_progress} />
+                    ) : null}
                     {document.status === "failed" && document.error_message ? (
                       <DocumentErrorMessage message={document.error_message} />
                     ) : null}
@@ -553,10 +871,22 @@ function DocumentsTable({
                             ) : null}
                             {canEdit && document.status !== "deleting" ? (
                               <DropdownMenuItem
-                                onSelect={() => setEditingMetadata(document)}
+                                onSelect={() =>
+                                  setEditingMetadataId(document.id)
+                                }
                               >
                                 <TagsIcon aria-hidden className="size-4" />
                                 {labels.documents.metadataAction}
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canEdit &&
+                            (document.status === "ready" ||
+                              document.status === "failed") ? (
+                              <DropdownMenuItem
+                                onSelect={() => setReparsingId(document.id)}
+                              >
+                                <FileCog2Icon aria-hidden className="size-4" />
+                                {labels.documents.reparse}
                               </DropdownMenuItem>
                             ) : null}
                             {canEdit ? (
@@ -580,6 +910,40 @@ function DocumentsTable({
         </div>
       )}
 
+      {derived.filteredTotal > 0 ? (
+        <div className="text-muted-foreground flex items-center justify-between gap-2 text-sm">
+          <span data-testid="knowledge-documents-page-info">
+            {labels.documents.pageInfo(
+              derived.page,
+              derived.pageCount,
+              derived.filteredTotal,
+            )}
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={derived.page <= 1}
+              onClick={() => setPage(derived.page - 1)}
+            >
+              <ChevronLeftIcon aria-hidden className="size-4" />
+              {labels.documents.previousPage}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={derived.page >= derived.pageCount}
+              onClick={() => setPage(derived.page + 1)}
+            >
+              {labels.documents.nextPage}
+              <ChevronRightIcon aria-hidden className="size-4" />
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       {canEdit ? (
         <UploadDocumentDialog
           scope={scope}
@@ -598,12 +962,30 @@ function DocumentsTable({
         />
       ) : null}
 
-      {editingMetadata ? (
+      {editingMetadataId !== null ? (
         <DocumentMetadataDialog
           scope={scope}
           base={base}
-          document={editingMetadata}
-          onClose={() => setEditingMetadata(null)}
+          document={items.find((item) => item.id === editingMetadataId) ?? null}
+          onClose={() => setEditingMetadataId(null)}
+        />
+      ) : null}
+
+      {batchMetadataOpen && selectedIds.length > 0 ? (
+        <BatchMetadataDialog
+          scope={scope}
+          base={base}
+          documents={derived.rows.filter((row) => selected.has(row.id))}
+          onClose={() => setBatchMetadataOpen(false)}
+        />
+      ) : null}
+
+      {reparsingId !== null ? (
+        <ReparseDocumentDialog
+          scope={scope}
+          base={base}
+          document={items.find((item) => item.id === reparsingId) ?? null}
+          onClose={() => setReparsingId(null)}
         />
       ) : null}
 
@@ -825,7 +1207,7 @@ function DocumentMetadataDialog({
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
-  document: KnowledgeDocumentItem;
+  document: KnowledgeDocumentItem | null;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -835,6 +1217,13 @@ function DocumentMetadataDialog({
   // Keyed by field name; entries appear lazily as the user edits so field
   // definitions can finish loading without wiping typed values.
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  // The row disappeared (deleted elsewhere): nothing to confirm against.
+  useEffect(() => {
+    if (document === null) onClose();
+  }, [document, onClose]);
+
+  if (document === null) return null;
 
   const fieldItems = fields.data ?? [];
   const textFor = (field: KnowledgeMetadataFieldItem): string =>
@@ -961,6 +1350,629 @@ function DocumentMetadataDialog({
               {setMetadata.isPending
                 ? labels.common.saving
                 : labels.common.save}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+type BatchMetadataMode = "keep" | "set" | "clear";
+
+/**
+ * One common patch across the current selection. Every field starts in
+ * "keep"; only fields the user explicitly switches to set/clear enter the
+ * submitted values, so an untouched field can never be wiped by accident.
+ */
+function BatchMetadataDialog({
+  scope,
+  base,
+  documents,
+  onClose,
+}: {
+  scope: ProjectClientScope;
+  base: KnowledgeBaseItem;
+  documents: KnowledgeDocumentItem[];
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge;
+  const fields = useKnowledgeMetadataFields(scope, base.id);
+  const setMetadata = useSetKnowledgeDocumentsMetadata(scope);
+  const [modes, setModes] = useState<Record<string, BatchMetadataMode>>({});
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  const fieldItems = fields.data ?? [];
+  const modeFor = (name: string): BatchMetadataMode => modes[name] ?? "keep";
+
+  // Current values across the selection: one shared value pre-fills the set
+  // input, mixed values are reported as a count instead of a fake blank.
+  const currentSummary = (
+    field: KnowledgeMetadataFieldItem,
+  ): { shared: string | number | undefined; distinct: number } => {
+    const seen = new Map<string, string | number | undefined>();
+    for (const document of documents) {
+      const value = document.doc_metadata[field.name];
+      seen.set(JSON.stringify(value ?? null), value);
+    }
+    return {
+      shared: seen.size === 1 ? [...seen.values()][0] : undefined,
+      distinct: seen.size,
+    };
+  };
+
+  const textFor = (field: KnowledgeMetadataFieldItem): string =>
+    drafts[field.name] ??
+    metadataInputText(field, currentSummary(field).shared);
+
+  const invalidNames = fieldItems
+    .filter((field) => {
+      if (modeFor(field.name) !== "set") return false;
+      const value = metadataInputValue(field, textFor(field));
+      // In a batch "set", an empty value is not a clear — that intent has
+      // its own mode — so it is simply invalid.
+      return value === undefined || value === null;
+    })
+    .map((field) => field.name);
+
+  const editedCount = fieldItems.filter(
+    (field) => modeFor(field.name) !== "keep",
+  ).length;
+
+  const submit = () => {
+    if (invalidNames.length > 0) return;
+    const values: Record<string, string | number | null> = {};
+    for (const field of fieldItems) {
+      const mode = modeFor(field.name);
+      if (mode === "clear") {
+        values[field.name] = null;
+      } else if (mode === "set") {
+        const next = metadataInputValue(field, textFor(field));
+        if (next === undefined || next === null) return;
+        values[field.name] = next;
+      }
+    }
+    if (Object.keys(values).length === 0) {
+      onClose();
+      return;
+    }
+    setMetadata.mutate(
+      {
+        baseId: base.id,
+        input: {
+          document_ids: documents.map((document) => document.id),
+          values,
+        },
+      },
+      { onSuccess: () => onClose() },
+    );
+  };
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent className="max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>
+            {labels.documents.batchMetadataTitle(documents.length)}
+          </DialogTitle>
+          <DialogDescription>
+            {labels.documents.batchMetadataDescription}
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="grid gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit();
+          }}
+        >
+          {fields.isLoading ? (
+            <Skeleton className="h-20 rounded-lg" />
+          ) : fields.error ? (
+            <p role="alert" className="text-destructive text-sm">
+              {knowledgeErrorMessage(fields.error, labels.errors)}
+            </p>
+          ) : fieldItems.length === 0 ? (
+            <p className="text-muted-foreground text-sm">
+              {labels.documents.metadataEmpty}
+            </p>
+          ) : (
+            fieldItems.map((field) => {
+              const summary = currentSummary(field);
+              const mode = modeFor(field.name);
+              return (
+                <div
+                  key={field.id}
+                  className="grid gap-1.5 text-sm"
+                  data-testid="knowledge-batch-field"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">
+                      {field.name}
+                      <span className="text-muted-foreground ml-2 text-xs font-normal">
+                        {
+                          labels.metadata[
+                            field.field_type === "string"
+                              ? "typeString"
+                              : field.field_type === "number"
+                                ? "typeNumber"
+                                : "typeTime"
+                          ]
+                        }
+                      </span>
+                    </span>
+                    {summary.distinct > 1 ? (
+                      <span className="text-muted-foreground text-xs">
+                        {labels.documents.batchMetadataMixedValues(
+                          summary.distinct,
+                        )}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <Select
+                      value={mode}
+                      onValueChange={(value) =>
+                        setModes((current) => ({
+                          ...current,
+                          [field.name]: value as BatchMetadataMode,
+                        }))
+                      }
+                    >
+                      <SelectTrigger
+                        className="w-28 shrink-0"
+                        aria-label={`${field.name} mode`}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="keep">
+                          {labels.documents.batchMetadataModeKeep}
+                        </SelectItem>
+                        <SelectItem value="set">
+                          {labels.documents.batchMetadataModeSet}
+                        </SelectItem>
+                        <SelectItem value="clear">
+                          {labels.documents.batchMetadataModeClear}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {mode === "set" ? (
+                      <Input
+                        type={
+                          field.field_type === "number"
+                            ? "number"
+                            : field.field_type === "time"
+                              ? "datetime-local"
+                              : "text"
+                        }
+                        maxLength={
+                          field.field_type === "string" ? 500 : undefined
+                        }
+                        step={field.field_type === "number" ? "any" : undefined}
+                        value={textFor(field)}
+                        aria-label={`${field.name} value`}
+                        aria-invalid={
+                          invalidNames.includes(field.name) || undefined
+                        }
+                        onChange={(event) =>
+                          setDrafts((current) => ({
+                            ...current,
+                            [field.name]: event.target.value,
+                          }))
+                        }
+                      />
+                    ) : null}
+                  </div>
+                  {mode !== "keep" ? (
+                    <p className="text-muted-foreground text-xs">
+                      {labels.documents.batchMetadataOverwrite(
+                        documents.length,
+                      )}
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+          {setMetadata.error ? (
+            <p role="alert" className="text-destructive text-sm">
+              {knowledgeErrorMessage(setMetadata.error, labels.errors)}
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>
+              {labels.common.cancel}
+            </Button>
+            <Button
+              type="submit"
+              disabled={
+                setMetadata.isPending ||
+                fieldItems.length === 0 ||
+                editedCount === 0 ||
+                invalidNames.length > 0
+              }
+            >
+              {setMetadata.isPending
+                ? labels.common.saving
+                : labels.common.save}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Explicit re-parse of the stored original file. The dialog reads the live
+ * document row: a version conflict refreshes the authoritative data and the
+ * user re-confirms against the new version, keeping their unsaved parameters.
+ */
+function ReparseDocumentDialog({
+  scope,
+  base,
+  document,
+  onClose,
+}: {
+  scope: ProjectClientScope;
+  base: KnowledgeBaseItem;
+  document: KnowledgeDocumentItem | null;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge;
+  const queryClient = useQueryClient();
+  const preview = usePreviewKnowledgeDocumentReparse(scope);
+  const reparse = useReparseKnowledgeDocument(scope);
+  const [chunkSize, setChunkSize] = useState(
+    String(document?.chunk_size ?? 1000),
+  );
+  const [chunkOverlap, setChunkOverlap] = useState(
+    String(document?.chunk_overlap ?? 100),
+  );
+  const [chunkSeparator, setChunkSeparator] = useState(
+    document?.chunk_separator ?? DEFAULT_CHUNK_SEPARATOR,
+  );
+  const [chunkingMode, setChunkingMode] = useState<KnowledgeChunkingMode>(
+    document?.chunking_mode ?? "general",
+  );
+  const [childChunkSize, setChildChunkSize] = useState(
+    String(document?.child_chunk_size ?? 500),
+  );
+  const [childChunkSeparator, setChildChunkSeparator] = useState(
+    document?.child_chunk_separator ?? DEFAULT_CHILD_CHUNK_SEPARATOR,
+  );
+  const [removeExtraSpaces, setRemoveExtraSpaces] = useState(
+    document?.remove_extra_spaces ?? false,
+  );
+  const [removeUrlsEmails, setRemoveUrlsEmails] = useState(
+    document?.remove_urls_emails ?? false,
+  );
+  // Sticky conflict notice: it must survive the authority refresh, which
+  // resets the mutation error it would otherwise derive from.
+  const [staleConflict, setStaleConflict] = useState(false);
+
+  // The row disappeared (deleted elsewhere): nothing to confirm against.
+  useEffect(() => {
+    if (document === null) onClose();
+  }, [document, onClose]);
+
+  // A parameter edit or a version change invalidates the preview on screen —
+  // it described a different reparse than the one now up for confirmation.
+  const resetPreview = preview.reset;
+  useEffect(() => {
+    resetPreview();
+  }, [
+    chunkSize,
+    chunkOverlap,
+    chunkSeparator,
+    chunkingMode,
+    childChunkSize,
+    childChunkSeparator,
+    removeExtraSpaces,
+    removeUrlsEmails,
+    document?.version,
+    resetPreview,
+  ]);
+
+  if (document === null) return null;
+
+  const parsedChunkSize = Number.parseInt(chunkSize, 10);
+  const parsedChunkOverlap = Number.parseInt(chunkOverlap, 10);
+  const parsedChildChunkSize = Number.parseInt(childChunkSize, 10);
+  const childParamsValid =
+    chunkingMode === "general" ||
+    (isChildChunkSizeValid(parsedChildChunkSize, parsedChunkSize) &&
+      isChunkSeparatorValid(childChunkSeparator));
+  const paramsValid =
+    isChunkSizeValid(parsedChunkSize) &&
+    isChunkOverlapValid(parsedChunkOverlap, parsedChunkSize) &&
+    isChunkSeparatorValid(chunkSeparator) &&
+    childParamsValid;
+
+  const buildInput = (): KnowledgeReparseInput => ({
+    expected_version: document.version,
+    chunk_size: parsedChunkSize,
+    chunk_overlap: parsedChunkOverlap,
+    chunk_separator: chunkSeparator,
+    remove_extra_spaces: removeExtraSpaces,
+    remove_urls_emails: removeUrlsEmails,
+    chunking_mode: chunkingMode,
+    ...(chunkingMode === "parent_child"
+      ? {
+          child_chunk_size: parsedChildChunkSize,
+          child_chunk_separator: childChunkSeparator,
+        }
+      : {}),
+  });
+
+  const conflict =
+    isKnowledgeConflictError(reparse.error) ||
+    isKnowledgeConflictError(preview.error) ||
+    staleConflict;
+
+  // A version conflict means the attempt was based on a stale row: refresh
+  // the authority so the dialog re-reads the current version, and let the
+  // user re-confirm with their edits intact. The sticky flag keeps the
+  // notice visible after the refresh clears the mutation error behind it.
+  const refreshStaleAuthority = (error: unknown) => {
+    if (isKnowledgeConflictError(error)) {
+      setStaleConflict(true);
+      void queryClient.invalidateQueries({
+        queryKey: knowledgeQueryKey(scope, "documents", "list", base.id),
+      });
+    }
+  };
+
+  const submit = () => {
+    if (!paramsValid) return;
+    setStaleConflict(false);
+    reparse.mutate(
+      { documentId: document.id, baseId: base.id, input: buildInput() },
+      {
+        onSuccess: () => onClose(),
+        onError: refreshStaleAuthority,
+      },
+    );
+  };
+
+  const requestPreview = () => {
+    setStaleConflict(false);
+    preview.mutate(
+      { documentId: document.id, input: buildInput() },
+      { onError: refreshStaleAuthority },
+    );
+  };
+
+  const previewData: KnowledgeReparsePreviewResponse | null =
+    preview.data ?? null;
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>
+            {labels.documents.reparseTitle(document.name)}
+          </DialogTitle>
+          <DialogDescription>
+            {labels.documents.reparseWarning}
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="grid gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit();
+          }}
+        >
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-1.5 text-sm">
+              <span className="font-medium">
+                {labels.documents.chunkSizeLabel}
+              </span>
+              <Input
+                type="number"
+                min={KNOWLEDGE_CHUNK_SIZE_MIN}
+                max={KNOWLEDGE_CHUNK_SIZE_MAX}
+                value={chunkSize}
+                aria-invalid={!isChunkSizeValid(parsedChunkSize) || undefined}
+                onChange={(event) => setChunkSize(event.target.value)}
+              />
+            </label>
+            <label className="grid gap-1.5 text-sm">
+              <span className="font-medium">
+                {labels.documents.chunkOverlapLabel}
+              </span>
+              <Input
+                type="number"
+                min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
+                max={KNOWLEDGE_CHUNK_OVERLAP_MAX}
+                value={chunkOverlap}
+                aria-invalid={
+                  !isChunkOverlapValid(parsedChunkOverlap, parsedChunkSize) ||
+                  undefined
+                }
+                onChange={(event) => setChunkOverlap(event.target.value)}
+              />
+            </label>
+          </div>
+          <label className="grid gap-1.5 text-sm">
+            <span className="font-medium">
+              {labels.documents.chunkSeparatorLabel}
+            </span>
+            <Input
+              value={chunkSeparator}
+              aria-invalid={!isChunkSeparatorValid(chunkSeparator) || undefined}
+              onChange={(event) => setChunkSeparator(event.target.value)}
+            />
+          </label>
+          <fieldset className="grid gap-2 text-sm">
+            <legend className="font-medium">
+              {labels.documents.chunkingModeLabel}
+            </legend>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="reparse-chunking-mode"
+                className="accent-primary size-4"
+                checked={chunkingMode === "general"}
+                onChange={() => setChunkingMode("general")}
+              />
+              {labels.documents.chunkingModeGeneral}
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="reparse-chunking-mode"
+                className="accent-primary size-4"
+                checked={chunkingMode === "parent_child"}
+                onChange={() => setChunkingMode("parent_child")}
+              />
+              {labels.documents.chunkingModeParentChild}
+            </label>
+          </fieldset>
+          {chunkingMode === "parent_child" ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1.5 text-sm">
+                <span className="font-medium">
+                  {labels.documents.childChunkSizeLabel}
+                </span>
+                <Input
+                  type="number"
+                  min={KNOWLEDGE_CHILD_CHUNK_SIZE_MIN}
+                  max={KNOWLEDGE_CHILD_CHUNK_SIZE_MAX}
+                  value={childChunkSize}
+                  aria-invalid={
+                    !isChildChunkSizeValid(
+                      parsedChildChunkSize,
+                      parsedChunkSize,
+                    ) || undefined
+                  }
+                  onChange={(event) => setChildChunkSize(event.target.value)}
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm">
+                <span className="font-medium">
+                  {labels.documents.childChunkSeparatorLabel}
+                </span>
+                <Input
+                  value={childChunkSeparator}
+                  aria-invalid={
+                    !isChunkSeparatorValid(childChunkSeparator) || undefined
+                  }
+                  onChange={(event) =>
+                    setChildChunkSeparator(event.target.value)
+                  }
+                />
+              </label>
+            </div>
+          ) : null}
+          <div className="grid gap-2 text-sm">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                className="accent-primary size-4"
+                checked={removeExtraSpaces}
+                onChange={(event) => setRemoveExtraSpaces(event.target.checked)}
+              />
+              {labels.documents.removeExtraSpacesLabel}
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                className="accent-primary size-4"
+                checked={removeUrlsEmails}
+                onChange={(event) => setRemoveUrlsEmails(event.target.checked)}
+              />
+              {labels.documents.removeUrlsEmailsLabel}
+            </label>
+          </div>
+
+          <div className="space-y-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={preview.isPending || !paramsValid}
+              onClick={requestPreview}
+            >
+              {preview.isPending
+                ? labels.wizard.previewLoading
+                : labels.documents.reparsePreviewButton}
+            </Button>
+            {preview.error && !conflict ? (
+              <p role="alert" className="text-destructive text-sm">
+                {knowledgeErrorMessage(preview.error, labels.errors)}
+              </p>
+            ) : null}
+            {previewData ? (
+              <div
+                className="border-border max-h-56 space-y-2 overflow-y-auto rounded-lg border p-3"
+                data-testid="knowledge-reparse-preview"
+              >
+                <p className="text-muted-foreground text-xs">
+                  {labels.documents.reparsePreviewShowing(
+                    previewData.items.length,
+                    previewData.total,
+                  )}
+                </p>
+                {previewData.items.map((item) => (
+                  <div key={item.position} className="space-y-1">
+                    <p className="text-muted-foreground text-xs font-medium">
+                      {labels.wizard.previewChunkLabel(item.position)} ·{" "}
+                      {labels.wizard.previewCharacters(item.word_count)}
+                      {item.child_contents.length > 0
+                        ? ` · ${labels.wizard.previewChildCount(item.child_contents.length)}`
+                        : ""}
+                    </p>
+                    <p className="line-clamp-3 text-xs break-words whitespace-pre-wrap">
+                      {item.content}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          {conflict ? (
+            <p
+              role="alert"
+              className="text-destructive text-sm"
+              data-testid="knowledge-reparse-conflict"
+            >
+              {labels.documents.reparseConflict}
+            </p>
+          ) : null}
+          {reparse.error && !conflict ? (
+            <p role="alert" className="text-destructive text-sm">
+              {knowledgeErrorMessage(reparse.error, labels.errors)}
+            </p>
+          ) : null}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>
+              {labels.common.cancel}
+            </Button>
+            <Button
+              type="submit"
+              variant="destructive"
+              disabled={reparse.isPending || !paramsValid}
+            >
+              {reparse.isPending
+                ? labels.documents.reparsePending
+                : labels.documents.reparseSubmit}
             </Button>
           </DialogFooter>
         </form>

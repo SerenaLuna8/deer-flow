@@ -13,6 +13,7 @@ malformed payloads become ``KNOWLEDGE_EMBEDDING_FAILED`` or
 from __future__ import annotations
 
 import math
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -37,6 +38,15 @@ RERANK_PROBE_DOCUMENTS = (
 # Connection probes run inside admin requests (and while the update flow holds
 # a row lock), so they never use the full production timeout of up to 300s.
 PROBE_TIMEOUT_SECONDS_CAP = 30
+
+# Runs before every provider dispatch — including the client's single internal
+# retry — so callers revalidate authority or a task lease at real batch
+# granularity. It stops undispatched work by raising.
+BatchGuard = Callable[[], Awaitable[None]]
+
+# Receives the size of one embedding batch after its response validated; the
+# ingest handlers persist verified progress through it.
+BatchVerified = Callable[[int], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +73,20 @@ class KnowledgeModelClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def embed(self, material: KnowledgeEmbeddingMaterial, texts: list[str]) -> list[list[float]]:
-        """Embed ``texts`` in input order, batching by ``max_batch``."""
+    async def embed(
+        self,
+        material: KnowledgeEmbeddingMaterial,
+        texts: list[str],
+        *,
+        batch_guard: BatchGuard | None = None,
+        on_batch_verified: BatchVerified | None = None,
+    ) -> list[list[float]]:
+        """Embed ``texts`` in input order, batching by ``max_batch``.
+
+        ``batch_guard`` runs before every dispatch attempt (a guard failure
+        leaves the remaining batches undispatched); ``on_batch_verified``
+        receives each batch size after its response validated.
+        """
 
         if not texts:
             return []
@@ -83,6 +105,7 @@ class KnowledgeModelClient:
                     "encoding_format": "float",
                 },
                 failure_code=KNOWLEDGE_EMBEDDING_FAILED,
+                batch_guard=batch_guard,
             )
             vectors.extend(
                 _validated_embedding_batch(
@@ -91,6 +114,8 @@ class KnowledgeModelClient:
                     dimension=material.dimension,
                 )
             )
+            if on_batch_verified is not None:
+                await on_batch_verified(len(batch))
         return vectors
 
     async def rerank(
@@ -99,12 +124,16 @@ class KnowledgeModelClient:
         query: str,
         documents: list[str],
         top_n: int,
+        *,
+        batch_guard: BatchGuard | None = None,
     ) -> list[RerankScore]:
         """Score ``documents`` against ``query`` and return the best ``top_n``.
 
         Candidates are batched by ``max_batch`` with per-batch
         ``top_n = min(top_n, batch size)``; batch-local indexes are mapped back
         through the batch offset and batches merge by ``relevance_score``.
+        ``batch_guard`` runs before every dispatch attempt and stops
+        undispatched batches by raising.
         """
 
         if not documents or top_n < 1:
@@ -126,6 +155,7 @@ class KnowledgeModelClient:
                     "return_documents": False,
                 },
                 failure_code=KNOWLEDGE_RERANK_FAILED,
+                batch_guard=batch_guard,
             )
             merged.extend(
                 _validated_rerank_batch(
@@ -184,13 +214,21 @@ class KnowledgeModelClient:
         path: str,
         body: dict[str, Any],
         failure_code: str,
+        batch_guard: BatchGuard | None = None,
     ) -> Any:
-        """POST once, retrying a single time on transport errors, 429 and 5xx."""
+        """POST once, retrying a single time on transport errors, 429 and 5xx.
+
+        ``batch_guard`` runs before each attempt — the initial dispatch and
+        the internal retry — so a revoked authority or lost lease stops the
+        request instead of spending another provider call.
+        """
 
         url = base_url.rstrip("/") + path
         headers = {"Authorization": f"Bearer {api_key}"}
         timeout = httpx.Timeout(request_timeout_seconds)
         for attempt in (1, 2):
+            if batch_guard is not None:
+                await batch_guard()
             try:
                 response = await self._http.post(url, json=body, headers=headers, timeout=timeout)
             except httpx.HTTPError:

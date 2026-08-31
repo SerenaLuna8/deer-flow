@@ -11,6 +11,7 @@ rerank inside a search. HTTP tests pin the route contract over ASGI.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import uuid
@@ -22,16 +23,19 @@ from typing import Any
 import httpx
 import pytest
 from actweave_knowledge import (
+    KNOWLEDGE_CONFLICT,
     KNOWLEDGE_EMBEDDING_FAILED,
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_NOT_FOUND,
     KNOWLEDGE_RERANK_FAILED,
     KNOWLEDGE_SEARCH_FAILED,
+    KNOWLEDGE_STRATEGY_VERSION,
     KnowledgeCitation,
     KnowledgeError,
     KnowledgeMetadataFilter,
     KnowledgeQueryView,
+    KnowledgeSearchHit,
     KnowledgeSearchRequest,
     KnowledgeSearchResult,
 )
@@ -39,6 +43,7 @@ from actweave_knowledge.models.client import KnowledgeModelClient, RerankScore
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
+    KnowledgeMetadataFieldRow,
     KnowledgeQueryRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
@@ -91,13 +96,21 @@ class _ScriptedClient:
         self.embed_error: KnowledgeError | None = None
         self.rerank_error: KnowledgeError | None = None
 
-    async def embed(self, material, texts: list[str]) -> list[list[float]]:  # noqa: ANN001
+    async def embed(self, material, texts: list[str], *, batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
+        # The real client runs the guard before dispatching; a guard failure
+        # therefore means the call never reached the provider.
+        if batch_guard is not None:
+            await batch_guard()
         self.embed_calls.append((material.model_id, list(texts)))
         if self.embed_error is not None:
             raise self.embed_error
+        if on_batch_verified is not None:
+            await on_batch_verified(len(texts))
         return [list(self.query_vectors[material.model_id]) for _ in texts]
 
-    async def rerank(self, material, query: str, documents: list[str], top_n: int) -> list[RerankScore]:  # noqa: ANN001
+    async def rerank(self, material, query: str, documents: list[str], top_n: int, *, batch_guard=None) -> list[RerankScore]:  # noqa: ANN001
+        if batch_guard is not None:
+            await batch_guard()
         self.rerank_calls.append((material.model_id, query, list(documents), top_n))
         if self.rerank_error is not None:
             raise self.rerank_error
@@ -435,6 +448,15 @@ def test_calculate_candidate_k_applies_floor_scale_and_ceiling() -> None:
             {"metadata_filters": tuple(KnowledgeMetadataFilter(name=f"f{index}", operator="eq", value=1) for index in range(11))},
             "10",
         ),
+        # T6: field_kind is a closed vocabulary; builtin names, operators and
+        # value types are a frozen contract, so mistakes fail fast instead of
+        # silently matching nothing.
+        ({"metadata_filters": (KnowledgeMetadataFilter(name="f", operator="eq", value="x", field_kind="magic"),)}, "field_kind"),  # type: ignore[arg-type]
+        ({"metadata_filters": (KnowledgeMetadataFilter(name="uploader", operator="eq", value="x", field_kind="builtin"),)}, "内建"),
+        ({"metadata_filters": (KnowledgeMetadataFilter(name="document_name", operator="gte", value=1, field_kind="builtin"),)}, "不支持"),
+        ({"metadata_filters": (KnowledgeMetadataFilter(name="uploaded_at", operator="contains", value="x", field_kind="builtin"),)}, "不支持"),
+        ({"metadata_filters": (KnowledgeMetadataFilter(name="uploaded_at", operator="eq", value="昨天", field_kind="builtin"),)}, "数字"),
+        ({"metadata_filters": (KnowledgeMetadataFilter(name="document_name", operator="eq", value=5, field_kind="builtin"),)}, "字符串"),
     ],
 )
 async def test_search_rejects_invalid_requests(postgres_database_url: str, overrides: dict[str, Any], fragment: str) -> None:
@@ -671,10 +693,13 @@ async def test_search_groups_bases_by_model_pair_and_merges_globally(postgres_da
 
         result = await harness.service.search(_request(project_id, top_k=2))
 
-        assert [(citation.snippet, citation.score) for citation in result.citations] == [
-            ("大维度段落", 0.9),
-            ("小维度段落", 0.4),
-        ]
+        # Two different rerankers are two score domains (T7): each candidate
+        # is rank 1 at home, so both fuse to 61/2 * 1/61 = 0.5 — the raw 0.9
+        # and 0.4 are never compared numerically across models.
+        assert {citation.snippet for citation in result.citations} == {"大维度段落", "小维度段落"}
+        assert all(citation.score == pytest.approx(0.5) for citation in result.citations)
+        assert all(citation.score_kind == "rank_fusion" for citation in result.citations)
+        assert {hit.citation.snippet: hit.local_score for hit in result.hits} == {"大维度段落": 0.9, "小维度段落": 0.4}
         assert sorted(call[0] for call in harness.client.embed_calls) == sorted([small_embedding, large_embedding])
         assert len(harness.client.rerank_calls) == 2
     finally:
@@ -714,7 +739,8 @@ async def _seed_two_model_groups(harness: _RetrievalHarness) -> tuple[uuid.UUID,
 
 @pytest.mark.asyncio
 async def test_global_top_k_truncates_across_model_groups(postgres_database_url: str) -> None:
-    """Each group may keep top_k; the merged result still cuts to a global top_k."""
+    """Each domain ranks its own candidates; the fused merge still cuts to a
+    global top_k, keeping both domains' first places over any second place."""
 
     harness = await _harness(postgres_database_url)
     try:
@@ -730,10 +756,10 @@ async def test_global_top_k_truncates_across_model_groups(postgres_database_url:
 
         result = await harness.service.search(_request(project_id, top_k=2))
 
-        assert [(citation.snippet, citation.score) for citation in result.citations] == [
-            ("大一", 0.9),
-            ("小一", 0.8),
-        ]
+        # 大一 and 小一 are each rank 1 in their own domain (fused 0.5); 大二
+        # and 小二 are rank 2 (fused 61/2/62) and fall past the global top_k.
+        assert {citation.snippet for citation in result.citations} == {"大一", "小一"}
+        assert all(citation.score == pytest.approx(0.5) for citation in result.citations)
     finally:
         await harness.engine.dispose()
 
@@ -904,11 +930,14 @@ async def test_mixed_rerank_and_rerank_free_groups_share_one_embedding_and_merge
 
         result = await harness.service.search(_request(project_id, top_k=3, score_threshold=0.0))
 
-        # 0.9 (cosine) > 0.5 (rerank) > 0.3 (cosine); one embed serves both groups.
-        assert [citation.snippet for citation in result.citations] == ["高余弦段落", "重排段落", "低余弦段落"]
-        assert result.citations[0].score == pytest.approx(0.9)
-        assert result.citations[1].score == pytest.approx(0.5)
-        assert result.citations[2].score == pytest.approx(0.3)
+        # rerank:R and cosine:E are two score domains (T7 fusion): 重排段落 and
+        # 高余弦段落 are each rank 1 at home (fused 0.5), 低余弦段落 is cosine
+        # rank 2 (fused 61/2/62) — the raw 0.9/0.5/0.3 are never compared.
+        assert {citation.snippet for citation in result.citations[:2]} == {"高余弦段落", "重排段落"}
+        assert result.citations[2].snippet == "低余弦段落"
+        assert all(citation.score == pytest.approx(0.5) for citation in result.citations[:2])
+        assert result.citations[2].score == pytest.approx(61 / 2 / 62)
+        assert {hit.citation.snippet: hit.local_score for hit in result.hits} == {"高余弦段落": pytest.approx(0.9), "重排段落": 0.5, "低余弦段落": pytest.approx(0.3)}
         assert len(harness.client.embed_calls) == 1
         assert len(harness.client.rerank_calls) == 1
         (_, _, submitted, _) = harness.client.rerank_calls[0]
@@ -1590,8 +1619,8 @@ async def test_search_revalidates_authority_after_provider_work_before_returning
         authority = _Authority(project_id)
         original_rerank = harness.client.rerank
 
-        async def _rerank_then_revoke(material, query, documents, top_n):  # noqa: ANN001, ANN202
-            scores = await original_rerank(material, query, documents, top_n)
+        async def _rerank_then_revoke(material, query, documents, top_n, **hooks):  # noqa: ANN001, ANN202
+            scores = await original_rerank(material, query, documents, top_n, **hooks)
             authority.revoked = True
             return scores
 
@@ -1642,8 +1671,8 @@ async def test_search_revalidates_after_embedding_before_segment_text_reaches_re
         authority = _Authority(project_id)
         original_embed = harness.client.embed
 
-        async def _embed_then_revoke(material, texts):  # noqa: ANN001, ANN202
-            vectors = await original_embed(material, texts)
+        async def _embed_then_revoke(material, texts, **hooks):  # noqa: ANN001, ANN202
+            vectors = await original_embed(material, texts, **hooks)
             authority.revoked = True
             return vectors
 
@@ -1696,8 +1725,9 @@ async def test_search_revalidates_before_each_model_group_embedding(
             query: str,
             documents: list[str],
             top_n: int,
+            **hooks,  # noqa: ANN003
         ):
-            scores = await original_rerank(material, query, documents, top_n)
+            scores = await original_rerank(material, query, documents, top_n, **hooks)
             authority.revoked = True
             return scores
 
@@ -1919,18 +1949,34 @@ class _FakeSearchModule:
         self.requests: list[KnowledgeSearchRequest] = []
         self.query_calls: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID, int, int]] = []
         self.error: KnowledgeError | None = None
+        passage = "安装前请确认电源已断开。"
+        digest = hashlib.sha256(passage.encode("utf-8")).hexdigest()
+        citation = KnowledgeCitation(
+            knowledge_base_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
+            knowledge_base_name="产品手册",
+            document_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
+            document_name="安装指南.pdf",
+            segment_id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
+            segment_position=3,
+            snippet=passage,
+            score=0.91,
+            source_position={"page": 12},
+            document_version=1,
+            content_digest=digest,
+            score_kind="cosine",
+        )
         self.result = KnowledgeSearchResult(
-            citations=(
-                KnowledgeCitation(
-                    knowledge_base_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
-                    knowledge_base_name="产品手册",
-                    document_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
-                    document_name="安装指南.pdf",
-                    segment_id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
-                    segment_position=3,
-                    snippet="安装前请确认电源已断开。",
-                    score=0.91,
-                    source_position={"page": 12},
+            hits=(
+                KnowledgeSearchHit(
+                    citation=citation,
+                    passage=passage,
+                    document_version=1,
+                    content_digest=digest,
+                    local_score=0.91,
+                    local_score_kind="cosine",
+                    score_domain="embedding:test",
+                    ranking_method="cosine",
+                    ranking_score=0.91,
                 ),
             )
         )
@@ -2015,10 +2061,16 @@ async def test_http_search_round_trips_the_module_result() -> None:
                 "snippet": citation.snippet,
                 "score": citation.score,
                 "source_position": citation.source_position,
+                "document_version": 1,
+                "content_digest": citation.content_digest,
+                "score_kind": "cosine",
             }
         ],
+        "diagnostics": None,
         "request_id": _REQUEST_ID,
     }
+    # The plain response never leaks the full passage: only the short quote.
+    assert "passage" not in response.text
 
 
 @pytest.mark.asyncio
@@ -2074,6 +2126,29 @@ async def test_http_search_forwards_an_optional_score_threshold_override() -> No
 
 
 @pytest.mark.asyncio
+async def test_http_search_forwards_the_retrieval_mode_override() -> None:
+    """The retrieval test panel may force semantic/hybrid for one call; the
+    per-base configuration is never touched by this route."""
+
+    module = _FakeSearchModule()
+    async with _client(_app(module)) as client:
+        omitted = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "问"})
+        hybrid = await client.post(
+            f"/api/projects/{_PROJECT_ID}/knowledge/search",
+            json={"query": "问", "retrieval_mode": "hybrid"},
+        )
+        invalid = await client.post(
+            f"/api/projects/{_PROJECT_ID}/knowledge/search",
+            json={"query": "问", "retrieval_mode": "fancy"},
+        )
+
+    assert omitted.status_code == 200
+    assert hybrid.status_code == 200
+    assert [request.retrieval_mode for request in module.requests] == [None, "hybrid"]
+    assert invalid.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_http_search_bounds_the_knowledge_base_ids_list() -> None:
     """Empty means "say null instead"; oversized lists never reach the module."""
 
@@ -2109,6 +2184,99 @@ async def test_http_search_labels_requests_as_retrieval_test() -> None:
 
     assert response.status_code == 200
     assert module.requests[0].source == "retrieval_test"
+
+
+@pytest.mark.asyncio
+async def test_http_search_debug_round_trips_the_safe_hit_diagnostics() -> None:
+    """debug=true adds bounded per-hit evidence; passages and child text stay out."""
+
+    from dataclasses import replace as dataclass_replace
+
+    from actweave_knowledge import (
+        KnowledgeHitDiagnostics,
+        KnowledgeMatchedChild,
+        KnowledgeRouteCounts,
+        KnowledgeSearchDiagnostics,
+        KnowledgeSearchTimings,
+    )
+
+    module = _FakeSearchModule()
+    hit = module.result.hits[0]
+    child = KnowledgeMatchedChild(
+        child_id=uuid.UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+        position=2,
+        route="semantic",
+        score=0.88,
+    )
+    debug_hit = dataclass_replace(hit, matched_children=(child,))
+    embedding_model_id = uuid.UUID("12121212-1212-4121-8121-121212121212")
+    module.result = KnowledgeSearchResult(
+        hits=(debug_hit,),
+        diagnostics=KnowledgeSearchDiagnostics(
+            strategy_version=KNOWLEDGE_STRATEGY_VERSION,
+            lexical_version=1,
+            target_base_count=1,
+            effective_top_k=4,
+            per_base_route_budget=20,
+            retrieval_mode="semantic",
+            counts=KnowledgeRouteCounts(returned=1),
+            timings=KnowledgeSearchTimings(),
+            model_ids=(embedding_model_id,),
+            ranking_method="cosine",
+            hit_diagnostics=(
+                KnowledgeHitDiagnostics(
+                    segment_id=debug_hit.citation.segment_id,
+                    local_score=debug_hit.local_score,
+                    local_score_kind=debug_hit.local_score_kind,
+                    score_domain=debug_hit.score_domain,
+                    ranking_method=debug_hit.ranking_method,
+                    ranking_score=debug_hit.ranking_score,
+                    matched_children=(child,),
+                ),
+            ),
+        ),
+    )
+    async with _client(_app(module)) as client:
+        debug = await client.post(
+            f"/api/projects/{_PROJECT_ID}/knowledge/search",
+            json={"query": "问", "debug": True},
+        )
+        plain = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "问"})
+
+    assert debug.status_code == 200
+    assert plain.status_code == 200
+    assert module.requests[0].debug is True
+    assert module.requests[1].debug is False
+
+    diagnostics = debug.json()["diagnostics"]
+    assert diagnostics["strategy_version"] == KNOWLEDGE_STRATEGY_VERSION
+    assert diagnostics["target_base_count"] == 1
+    assert diagnostics["effective_top_k"] == 4
+    assert diagnostics["retrieval_mode"] == "semantic"
+    assert diagnostics["model_ids"] == [str(embedding_model_id)]
+    assert diagnostics["ranking_method"] == "cosine"
+    assert diagnostics["counts"]["returned"] == 1
+    assert diagnostics["timings"]["recall_ms"] == 0.0
+    assert diagnostics["empty_reason"] is None
+    [entry] = diagnostics["hit_diagnostics"]
+    assert entry == {
+        "segment_id": str(debug_hit.citation.segment_id),
+        "local_score": 0.91,
+        "local_score_kind": "cosine",
+        "score_domain": "embedding:test",
+        "ranking_method": "cosine",
+        "ranking_score": 0.91,
+        "matched_children": [
+            {
+                "child_id": str(child.child_id),
+                "position": 2,
+                "route": "semantic",
+                "score": 0.88,
+            }
+        ],
+    }
+    # Bounded evidence only: no passage or child text in the debug payload.
+    assert "安装前请确认电源已断开" not in json.dumps(diagnostics, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -2398,5 +2566,481 @@ async def test_metadata_filters_gate_parent_child_recall(postgres_database_url: 
         # The excluded parent never reached the reranker.
         (_, _, submitted, _) = harness.client.rerank_calls[-1]
         assert submitted == ["工程父块内容"]
+    finally:
+        await harness.engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# T5: real matched children, final review, debug hit diagnostics
+# ---------------------------------------------------------------------------
+
+
+async def _seed_matched_children_project(harness: _RetrievalHarness) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """One rerank-free base mixing a parent_child and a general document.
+
+    Parent 甲 has four children with distinct cosine scores against [1,0,0]
+    (1.0, 0.8, 0.6, 0.0); parent 乙 and the general segment score 1.0.
+    Returns (project_id, base_id, embedding_model_id).
+    """
+
+    async with harness.factory() as session, session.begin():
+        project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        embedding_id, _rerank_id = await _seed_models(session)
+        base = _base_row(project_id, embedding_id, None, name="子命中库", default_score_threshold=0.0)
+        session.add(base)
+        await session.flush()
+        await _seed_parent_child_document(
+            session,
+            project_id,
+            base.id,
+            name="父子文档",
+            parents=[
+                (
+                    "父块甲的完整内容",
+                    [
+                        ("甲子一", [1.0, 0.0, 0.0]),
+                        ("甲子二", [0.8, 0.6, 0.0]),
+                        ("甲子三", [0.6, 0.8, 0.0]),
+                        ("甲子四", [0.0, 1.0, 0.0]),
+                    ],
+                ),
+                ("父块乙的完整内容", [("乙子一", [1.0, 0.0, 0.0])]),
+            ],
+        )
+        general_document = _document_row(project_id, base.id, name="普通文档")
+        session.add(general_document)
+        await session.flush()
+        session.add(_segment_row(general_document, position=1, content="普通模式段落", embedding=[1.0, 0.0, 0.0]))
+    harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
+    return project_id, base.id, embedding_id
+
+
+@pytest.mark.asyncio
+async def test_parent_child_hits_carry_real_matched_children_from_the_recall_snapshot(postgres_database_url: str) -> None:
+    """Hits expose the really-recalled child ids/scores; general hits stay empty."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, _, _ = await _seed_matched_children_project(harness)
+
+        result = await harness.service.search(_request(project_id, top_k=4))
+
+        hits_by_snippet = {hit.citation.snippet: hit for hit in result.hits}
+        assert set(hits_by_snippet) == {"父块甲的完整内容", "父块乙的完整内容", "普通模式段落"}
+
+        async with harness.factory() as session:
+            child_rows = list((await session.scalars(select(KnowledgeSegmentChildRow))).all())
+        child_ids_by_content = {row.content: row.id for row in child_rows}
+
+        strong = hits_by_snippet["父块甲的完整内容"].matched_children
+        # At most three really-recalled children, best score first, never
+        # reconstructed after the fact: ids must be the seeded child rows.
+        assert [child.child_id for child in strong] == [
+            child_ids_by_content["甲子一"],
+            child_ids_by_content["甲子二"],
+            child_ids_by_content["甲子三"],
+        ]
+        assert [child.position for child in strong] == [1, 2, 3]
+        assert all(child.route == "semantic" for child in strong)
+        assert [child.score for child in strong] == [
+            pytest.approx(1.0),
+            pytest.approx(0.8),
+            pytest.approx(0.6),
+        ]
+
+        [only] = hits_by_snippet["父块乙的完整内容"].matched_children
+        assert only.child_id == child_ids_by_content["乙子一"]
+        assert only.score == pytest.approx(1.0)
+
+        assert hits_by_snippet["普通模式段落"].matched_children == ()
+    finally:
+        await harness.engine.dispose()
+
+
+def _rerank_side_effect(harness: _RetrievalHarness, side_effect) -> None:  # noqa: ANN001
+    """Run ``side_effect()`` after the reranker scores, before the final review."""
+
+    original_rerank = harness.client.rerank
+    fired = False
+
+    async def _rerank_then_mutate(material, query, documents, top_n, **hooks):  # noqa: ANN001, ANN202
+        nonlocal fired
+        scores = await original_rerank(material, query, documents, top_n, **hooks)
+        if not fired:
+            fired = True
+            await side_effect()
+        return scores
+
+    harness.client.rerank = _rerank_then_mutate  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_final_review_drops_hits_whose_content_changed_during_provider_wait(postgres_database_url: str) -> None:
+    """A segment edited between recall and return is dropped, never backfilled."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, _, _, _ = await _seed_single_base(
+            harness,
+            segments=[("第一段原文", [1.0, 0.0, 0.0]), ("第二段原文", [0.9, 0.43589, 0.0])],
+        )
+
+        async def _edit_first_segment() -> None:
+            async with harness.factory() as session, session.begin():
+                segment = await session.scalar(select(KnowledgeSegmentRow).where(KnowledgeSegmentRow.content == "第一段原文"))
+                assert segment is not None
+                segment.content = "第一段被并发编辑后的新内容"
+
+        _rerank_side_effect(harness, _edit_first_segment)
+
+        result = await harness.service.search(_request(project_id, top_k=2, query="并发编辑"))
+
+        # The stale hit is dropped without backfilling; fewer than top_k return.
+        assert [hit.citation.snippet for hit in result.hits] == ["第二段原文"]
+
+        rows = await _query_rows(harness, project_id)
+        assert [(row.query, row.result_count) for row in rows] == [("并发编辑", 1)]
+        async with harness.factory() as session:
+            edited = await session.scalar(select(KnowledgeSegmentRow).where(KnowledgeSegmentRow.position == 1))
+            kept = await session.scalar(select(KnowledgeSegmentRow).where(KnowledgeSegmentRow.position == 2))
+        assert edited is not None and edited.hit_count == 0
+        assert kept is not None and kept.hit_count == 1
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("which", ["segment_disabled", "document_disabled", "document_reingested"])
+async def test_final_review_drops_rows_that_left_recall_scope_during_provider_wait(postgres_database_url: str, which: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        # Two documents so a document-level change only strips its own hit.
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+            embedding_id, rerank_id = await _seed_models(session)
+            base = _base_row(project_id, embedding_id, rerank_id, name="复核范围库")
+            session.add(base)
+            await session.flush()
+            target_document = _document_row(project_id, base.id, name="目标文档")
+            bystander_document = _document_row(project_id, base.id, name="陪跑文档")
+            session.add_all([target_document, bystander_document])
+            await session.flush()
+            session.add(_segment_row(target_document, position=1, content="目标段落", embedding=[1.0, 0.0, 0.0]))
+            session.add(_segment_row(bystander_document, position=1, content="陪跑段落", embedding=[0.9, 0.43589, 0.0]))
+        harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
+
+        async def _mutate() -> None:
+            async with harness.factory() as session, session.begin():
+                segment = await session.scalar(select(KnowledgeSegmentRow).where(KnowledgeSegmentRow.content == "目标段落"))
+                assert segment is not None
+                if which == "segment_disabled":
+                    segment.enabled = False
+                elif which == "document_disabled":
+                    document = await session.get(KnowledgeDocumentRow, segment.knowledge_document_id)
+                    assert document is not None
+                    document.enabled = False
+                else:
+                    document = await session.get(KnowledgeDocumentRow, segment.knowledge_document_id)
+                    assert document is not None
+                    document.version = document.version + 1
+
+        _rerank_side_effect(harness, _mutate)
+
+        result = await harness.service.search(_request(project_id, top_k=2))
+
+        assert [hit.citation.snippet for hit in result.hits] == ["陪跑段落"]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_final_review_reapplies_metadata_filters_but_keeps_renamed_documents(postgres_database_url: str) -> None:
+    """Metadata reassignment during rerank drops the hit; a rename never does."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id = await _seed_metadata_documents(harness)
+
+        async def _reassign_and_rename() -> None:
+            async with harness.factory() as session, session.begin():
+                engineering = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.name == "工程文档"))
+                assert engineering is not None
+                # Reassignment does not bump the content generation, so only
+                # the re-applied hard filter can catch it.
+                engineering.doc_metadata = {"部门": "已转出", "year": 2024}
+                engineering.name = "工程文档（已改名）"
+
+        _rerank_side_effect(harness, _reassign_and_rename)
+
+        result = await harness.service.search(
+            _request(
+                project_id,
+                metadata_filters=(KnowledgeMetadataFilter(name="部门", operator="eq", value="工程"),),
+            )
+        )
+        assert result.hits == ()
+
+        # A rename alone (no metadata change) never drops the hit: the second
+        # search filters on the year the renamed document still carries.
+        result = await harness.service.search(
+            _request(
+                project_id,
+                metadata_filters=(KnowledgeMetadataFilter(name="year", operator="lte", value=2024),),
+            )
+        )
+        assert [hit.citation.snippet for hit in result.hits] == ["工程段落"]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("which", ["embedding", "reranker"])
+async def test_final_review_conflicts_when_the_base_rebinds_models_mid_search(postgres_database_url: str, which: str) -> None:
+    """A strategy change during provider work is a conflict, not a silent result."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, _, _ = await _seed_single_base(
+            harness,
+            segments=[("换绑期间的段落", [1.0, 0.0, 0.0])],
+        )
+
+        async def _rebind() -> None:
+            async with harness.factory() as session, session.begin():
+                other_embedding_id, other_rerank_id = await _seed_models(session)
+                base = await session.get(KnowledgeBaseRow, base_id)
+                assert base is not None
+                if which == "embedding":
+                    base.embedding_model_id = other_embedding_id
+                else:
+                    base.reranker_model_id = other_rerank_id
+
+        _rerank_side_effect(harness, _rebind)
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.search(_request(project_id))
+
+        assert error.value.code == KNOWLEDGE_CONFLICT
+        assert await _query_rows(harness, project_id) == []
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_final_review_drops_hits_whose_matched_children_were_replaced(postgres_database_url: str) -> None:
+    """Child identities are re-verified: swapped child rows invalidate the hit."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        async with harness.factory() as session, session.begin():
+            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+            embedding_id, rerank_id = await _seed_models(session)
+            base = _base_row(project_id, embedding_id, rerank_id, name="子替换库")
+            session.add(base)
+            await session.flush()
+            await _seed_parent_child_document(
+                session,
+                project_id,
+                base.id,
+                name="父子文档",
+                parents=[("父块内容", [("子块", [1.0, 0.0, 0.0])])],
+            )
+        harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
+
+        async def _swap_child_rows() -> None:
+            async with harness.factory() as session, session.begin():
+                child = await session.scalar(select(KnowledgeSegmentChildRow))
+                assert child is not None
+                replacement = KnowledgeSegmentChildRow(
+                    id=uuid.uuid4(),
+                    project_id=child.project_id,
+                    knowledge_base_id=child.knowledge_base_id,
+                    knowledge_document_id=child.knowledge_document_id,
+                    knowledge_segment_id=child.knowledge_segment_id,
+                    document_version=child.document_version,
+                    position=child.position,
+                    content=child.content,
+                    word_count=child.word_count,
+                    embedding=[1.0, 0.0, 0.0],
+                )
+                await session.delete(child)
+                await session.flush()
+                session.add(replacement)
+
+        _rerank_side_effect(harness, _swap_child_rows)
+
+        result = await harness.service.search(_request(project_id))
+
+        assert result.hits == ()
+        rows = await _query_rows(harness, project_id)
+        assert [row.result_count for row in rows] == [0]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_debug_search_projects_hit_diagnostics_for_the_final_hits_only(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, _, embedding_id = await _seed_matched_children_project(harness)
+
+        plain = await harness.service.search(_request(project_id, top_k=2))
+        assert plain.diagnostics is None
+
+        result = await harness.service.search(_request(project_id, top_k=2, debug=True))
+
+        diagnostics = result.diagnostics
+        assert diagnostics is not None
+        assert diagnostics.strategy_version == KNOWLEDGE_STRATEGY_VERSION
+        assert diagnostics.target_base_count == 1
+        assert diagnostics.effective_top_k == 2
+        assert diagnostics.retrieval_mode == "semantic"
+        assert diagnostics.model_ids == (embedding_id,)
+        assert diagnostics.ranking_method == "cosine"
+
+        assert len(result.hits) == 2
+        assert [entry.segment_id for entry in diagnostics.hit_diagnostics] == [hit.citation.segment_id for hit in result.hits]
+        for entry, hit in zip(diagnostics.hit_diagnostics, result.hits, strict=True):
+            assert entry.local_score == hit.local_score
+            assert entry.local_score_kind == hit.local_score_kind
+            assert entry.score_domain == hit.score_domain
+            assert entry.ranking_method == hit.ranking_method
+            assert entry.ranking_score == hit.ranking_score
+            assert entry.matched_children == hit.matched_children
+    finally:
+        await harness.engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# T6: builtin filter fields (document authority columns)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_builtin_filter_documents(harness: _RetrievalHarness) -> uuid.UUID:
+    """Two documents whose authority columns differ; identical vectors.
+
+    发布说明: original 发布说明.PDF, uploaded 2026-08-01, custom metadata
+    {"file_type": "规范"}. 安装手册: original install.md, uploaded 2026-08-20.
+    A custom field named file_type coexists with the builtin one.
+    """
+
+    async with harness.factory() as session, session.begin():
+        project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        embedding_id, _ = await _seed_models(session)
+        base = _base_row(project_id, embedding_id, None, name="内建过滤库")
+        session.add(base)
+        await session.flush()
+        session.add(
+            KnowledgeMetadataFieldRow(
+                id=uuid.uuid4(),
+                project_id=project_id,
+                knowledge_base_id=base.id,
+                name="file_type",
+                field_type="string",
+            )
+        )
+
+        release = _document_row(project_id, base.id, name="发布说明")
+        release.original_name = "发布说明.PDF"
+        release.created_at = datetime(2026, 8, 1, 8, 0, tzinfo=UTC)
+        release.doc_metadata = {"file_type": "规范"}
+        manual = _document_row(project_id, base.id, name="安装手册")
+        manual.original_name = "install.md"
+        manual.created_at = datetime(2026, 8, 20, 8, 0, tzinfo=UTC)
+        session.add_all([release, manual])
+        await session.flush()
+
+        vector = [1.0, 0.0, 0.0]
+        session.add_all(
+            [
+                _segment_row(release, position=1, content="发布段落", embedding=vector),
+                _segment_row(manual, position=1, content="安装段落", embedding=vector),
+            ]
+        )
+    harness.client.query_vectors[embedding_id] = vector
+    return project_id
+
+
+@pytest.mark.asyncio
+async def test_builtin_filters_project_document_authority_columns(postgres_database_url: str) -> None:
+    """Builtin conditions read the live document columns, never doc_metadata."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id = await _seed_builtin_filter_documents(harness)
+
+        async def _snippets(*filters: KnowledgeMetadataFilter) -> list[str]:
+            result = await harness.service.search(_request(project_id, metadata_filters=filters))
+            return sorted(hit.citation.snippet for hit in result.hits)
+
+        name_hits = await _snippets(KnowledgeMetadataFilter(name="document_name", operator="contains", value="发布", field_kind="builtin"))
+        assert name_hits == ["发布段落"]
+
+        # The extension is matched case-insensitively (.PDF → pdf).
+        type_hits = await _snippets(KnowledgeMetadataFilter(name="file_type", operator="eq", value="pdf", field_kind="builtin"))
+        assert type_hits == ["发布段落"]
+
+        cutoff = datetime(2026, 8, 10, 0, 0, tzinfo=UTC).timestamp()
+        newer = await _snippets(KnowledgeMetadataFilter(name="uploaded_at", operator="gte", value=cutoff, field_kind="builtin"))
+        assert newer == ["安装段落"]
+        older = await _snippets(KnowledgeMetadataFilter(name="uploaded_at", operator="lte", value=cutoff, field_kind="builtin"))
+        assert older == ["发布段落"]
+
+        everyone = await _snippets(KnowledgeMetadataFilter(name="source_type", operator="eq", value="file_upload", field_kind="builtin"))
+        assert everyone == ["发布段落", "安装段落"]
+        nobody = await _snippets(KnowledgeMetadataFilter(name="source_type", operator="eq", value="s3", field_kind="builtin"))
+        assert nobody == []
+
+        # The custom field of the same name addresses doc_metadata, not the
+        # extension: only 发布说明 carries {"file_type": "规范"}.
+        custom_hits = await _snippets(KnowledgeMetadataFilter(name="file_type", operator="eq", value="规范"))
+        assert custom_hits == ["发布段落"]
+        custom_pdf = await _snippets(KnowledgeMetadataFilter(name="file_type", operator="eq", value="pdf"))
+        assert custom_pdf == []
+
+        # Builtin and custom conditions AND together like any other filters.
+        combined = await _snippets(
+            KnowledgeMetadataFilter(name="document_name", operator="contains", value="发布", field_kind="builtin"),
+            KnowledgeMetadataFilter(name="file_type", operator="eq", value="规范"),
+        )
+        assert combined == ["发布段落"]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_final_review_reapplies_builtin_filters_after_document_rename(postgres_database_url: str) -> None:
+    """A rename during provider wait must not leak past a document_name filter."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, _, _, _ = await _seed_single_base(
+            harness,
+            segments=[("发布相关段落", [1.0, 0.0, 0.0])],
+        )
+        async with harness.factory() as session, session.begin():
+            document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id))
+            assert document is not None
+            document.name = "发布说明"
+
+        name_filter = KnowledgeMetadataFilter(name="document_name", operator="contains", value="发布", field_kind="builtin")
+
+        # Positive control: without concurrent mutation the filter matches.
+        control = await harness.service.search(_request(project_id, metadata_filters=(name_filter,)))
+        assert [hit.citation.snippet for hit in control.hits] == ["发布相关段落"]
+
+        async def _rename_document() -> None:
+            async with harness.factory() as session, session.begin():
+                row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id))
+                assert row is not None
+                row.name = "安装说明"
+
+        _rerank_side_effect(harness, _rename_document)
+
+        result = await harness.service.search(_request(project_id, metadata_filters=(name_filter,)))
+
+        assert result.hits == ()
+        rows = await _query_rows(harness, project_id)
+        assert [row.result_count for row in rows] == [1, 0]
     finally:
         await harness.engine.dispose()

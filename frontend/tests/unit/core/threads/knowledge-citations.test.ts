@@ -161,6 +161,64 @@ test("rejects the whole payload when any citation entry is malformed", () => {
   }
 });
 
+test("keeps T5 provenance fields when valid and tolerates their absence", () => {
+  const enriched = {
+    ...citation("seg-new"),
+    document_version: 3,
+    content_digest: "a".repeat(64),
+    score_kind: "rerank",
+  };
+  const historical = citation("seg-old", 2);
+  const nullified = {
+    ...citation("seg-null", 3),
+    document_version: null,
+    content_digest: null,
+    score_kind: null,
+  };
+  const projected = attachKnowledgeCitationsToFinalAiMessages([
+    knowledgeToolMessage("t-1", "run-1", [enriched, historical, nullified]),
+    aiMessage("ai-1", "run-1", "回答"),
+  ]);
+
+  const parsed = readKnowledgeCitations(
+    projected.find((m) => m.id === "ai-1")!,
+  );
+  expect(parsed.map((item) => item.segment_id)).toEqual([
+    "seg-new",
+    "seg-old",
+    "seg-null",
+  ]);
+  expect(parsed[0]?.document_version).toBe(3);
+  expect(parsed[0]?.content_digest).toBe("a".repeat(64));
+  expect(parsed[0]?.score_kind).toBe("rerank");
+  // Historical and null-bearing citations parse with the fields absent.
+  expect(parsed[1]?.document_version).toBeUndefined();
+  expect(parsed[1]?.score_kind).toBeUndefined();
+  expect(parsed[2]?.document_version).toBeUndefined();
+  expect(parsed[2]?.content_digest).toBeUndefined();
+  expect(parsed[2]?.score_kind).toBeUndefined();
+});
+
+test("rejects the whole payload when a T5 provenance field is malformed", () => {
+  const badCases: unknown[] = [
+    [{ ...citation("seg-1"), document_version: 1.5 }],
+    [{ ...citation("seg-1"), document_version: "3" }],
+    [{ ...citation("seg-1"), content_digest: 42 }],
+    [{ ...citation("seg-1"), score_kind: "similarity" }],
+    [{ ...citation("seg-1"), score_kind: 1 }],
+  ];
+
+  for (const bad of badCases) {
+    const messages: Message[] = [
+      knowledgeToolMessage("t-1", "run-1", bad),
+      aiMessage("ai-1", "run-1", "回答"),
+    ];
+    expect(attachKnowledgeCitationsToFinalAiMessages(messages)).toEqual(
+      messages,
+    );
+  }
+});
+
 test("ignores other tools and leaves runs without a visible AI text message untouched", () => {
   const otherTool = {
     type: "tool",

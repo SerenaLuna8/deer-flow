@@ -226,14 +226,17 @@ export const enUS: Translations = {
       rebuildSectionTitle: "Embedding model",
       rebuildModelLabel: "Embedding model",
       rebuildHint:
-        "Rebuilding rebinds the embedding model and re-embeds every document one by one; documents are excluded from retrieval until they finish.",
-      rebuildButton: "Rebuild embeddings",
-      rebuildPending: "Rebuilding…",
-      rebuildStarted: "Rebuild started; documents will reprocess one by one.",
-      rebuildConfirmTitle: "Rebuild knowledge base embeddings",
+        "Re-embedding keeps every segment's text, identity, and enabled state (manual edits included) and only regenerates vectors; documents are excluded from retrieval until they finish. Pick a different model to rebind, or keep the current one to re-embed as is.",
+      rebuildButton: "Re-embed documents",
+      rebuildPending: "Submitting…",
+      rebuildOutcome: (accepted, skipped) =>
+        skipped > 0
+          ? `Re-embedding accepted for ${accepted} documents; ${skipped} never-published documents were skipped (retry them to parse from the original file).`
+          : `Re-embedding accepted for ${accepted} documents.`,
+      rebuildConfirmTitle: "Re-embed knowledge base documents",
       rebuildConfirmDescription: (name) =>
-        `This rebinds "${name}" to the selected embedding model and re-embeds every document. Documents are excluded from retrieval while rebuilding.`,
-      rebuildConfirm: "Rebuild",
+        `This re-embeds every published document of "${name}" with the selected model. Segment text, manual edits, and enabled states are preserved; only vectors are regenerated. Documents are excluded from retrieval while they process, and embedding calls incur model cost.`,
+      rebuildConfirm: "Re-embed",
     },
     wizard: {
       heroTitle: "Create your first knowledge base",
@@ -268,14 +271,16 @@ export const enUS: Translations = {
       uploadFailedNote:
         "These files failed to upload; you can upload them again from the documents page:",
       previewTitle: "Chunk preview",
-      previewHint: (fileName) => `Previewing the first file: ${fileName}`,
+      previewHint: (fileName) => `Previewing: ${fileName}`,
+      previewPickFile: "Preview file",
       previewLoading: "Generating preview…",
       previewRefresh: "Refresh preview",
       previewStale:
         "Preview is out of date. Refresh to apply the current settings.",
       previewInvalid:
         "Fix the invalid chunk settings before refreshing the preview.",
-      previewTotal: (total) => `${total} chunks in total`,
+      previewShowing: (count, total) =>
+        `Showing ${count} of ${total} chunks`,
       previewChunkLabel: (position) =>
         `Chunk-${String(position).padStart(2, "0")}`,
       previewCharacters: (count) => `${count} characters`,
@@ -289,6 +294,8 @@ export const enUS: Translations = {
       settings: "Settings",
       settingsSaved: "Saved.",
       metadata: "Metadata",
+      baseNotFound: "This knowledge base does not exist or is inaccessible.",
+      backToBases: "Back to knowledge bases",
     },
     metadata: {
       title: "Metadata fields",
@@ -318,6 +325,24 @@ export const enUS: Translations = {
     documents: {
       title: (baseName) => `${baseName} · Documents`,
       empty: "No documents yet. Upload one to get started.",
+      filteredEmpty: "No documents match the current filters.",
+      notFound: "This document does not exist or is inaccessible.",
+      backToList: "Back to documents",
+      searchPlaceholder: "Search by name or original file name",
+      searchAria: "Search documents",
+      statusFilterLabel: "Status",
+      statusFilterAll: "All statuses",
+      sortLabel: "Sort",
+      sortOptions: {
+        created_desc: "Newest first",
+        created_asc: "Oldest first",
+        name_asc: "Name ascending",
+        name_desc: "Name descending",
+      },
+      pageInfo: (page, pageCount, total) =>
+        `Page ${page}/${pageCount} · ${total} documents`,
+      previousPage: "Previous",
+      nextPage: "Next",
       uploadButton: "Upload document",
       uploadTitle: "Upload document",
       uploadDescription:
@@ -392,6 +417,53 @@ export const enUS: Translations = {
       metadataEmpty:
         "This knowledge base has no metadata fields yet. Define them under Metadata first.",
       metadataClearHint: "Leave a value empty to clear that field.",
+      processingSummary: {
+        processing: (count) => `${count} processing`,
+        retryWait: (count) => `${count} waiting to retry`,
+        failed: (count) => `${count} failed`,
+        ready: (count) => `${count} ready`,
+      },
+      progress: {
+        kinds: {
+          ingest_document: "Ingest",
+          reembed_document: "Re-embed",
+        },
+        stages: {
+          queued: "Queued",
+          reading_source: "Reading source",
+          extracting_splitting: "Extracting and splitting",
+          loading_segments: "Loading segments",
+          embedding: "Embedding",
+          publishing: "Publishing",
+          done: "Done",
+        },
+        units: (done, total) => `${done}/${total}`,
+        attempt: (current, max) => `Attempt ${current}/${max}`,
+        retryWaitAt: (time) => `Waiting for automatic retry · ${time}`,
+        retryWaitSoon: "Waiting for automatic retry",
+        failedDuring: (stage) => `Failed during ${stage}`,
+      },
+      batchMetadata: "Edit metadata",
+      batchMetadataTitle: (count) => `Batch metadata (${count} documents)`,
+      batchMetadataDescription:
+        "Choose keep, set, or clear per field. Only explicitly edited fields are submitted, in one all-or-nothing patch across the selection.",
+      batchMetadataMixedValues: (count) => `${count} distinct values`,
+      batchMetadataModeKeep: "Keep",
+      batchMetadataModeSet: "Set",
+      batchMetadataModeClear: "Clear",
+      batchMetadataOverwrite: (count) =>
+        `Overwrites this field on ${count} documents`,
+      reparse: "Reparse from original",
+      reparseTitle: (name) => `Reparse ${name}`,
+      reparseWarning:
+        "Reparses the stored original file with the parameters below and replaces every segment. Manual segment edits and per-segment disables are overwritten, re-embedding incurs model cost, and the document is not searchable while it processes.",
+      reparsePreviewButton: "Preview split",
+      reparsePreviewShowing: (shown, total) =>
+        `Showing ${shown} of ${total} chunks`,
+      reparseSubmit: "Reparse",
+      reparsePending: "Submitting…",
+      reparseConflict:
+        "The document changed outside this dialog. The latest parameters and version were reloaded; review and confirm again.",
     },
     segments: {
       title: (documentName) => `${documentName} · Segments`,
@@ -420,6 +492,12 @@ export const enUS: Translations = {
       disableAria: (position) => `Disable segment #${position}`,
       wordCount: (count) => `${count.toLocaleString()} characters`,
       manualBadge: "Manual",
+      locatedTitle: (position) => `Located segment #${position}`,
+      locateFailed:
+        "This segment cannot be located; it may have been deleted or is inaccessible.",
+      locateStale:
+        "This segment belongs to an earlier document version; the content may have changed.",
+      dismissLocate: "Dismiss",
     },
     sourcePosition: {
       page: (page) => `Page ${page}`,
@@ -475,6 +553,69 @@ export const enUS: Translations = {
         gte: "≥",
         lte: "≤",
       },
+      retrievalModeLabel: "Retrieval route",
+      retrievalModes: {
+        default: "Base default",
+        semantic: "Semantic only (this search)",
+        hybrid: "Hybrid (this search)",
+      },
+      neverSearched:
+        "Run a query to test retrieval; results and diagnostics appear here.",
+      retry: "Retry",
+      scoreKinds: {
+        cosine: "Cosine",
+        rerank: "Rerank",
+        rank_fusion: "Rank fusion",
+        unknown: "Unknown provenance",
+      },
+      emptyReasons: {
+        not_ready: "No target document is ready for retrieval yet.",
+        no_candidates: "Recall produced no candidates for this query.",
+        filtered_out:
+          "Every candidate fell below the score threshold or the metadata filters.",
+        stale_candidates:
+          "Candidates changed while the search ran; run it again.",
+      },
+      diagnostics: {
+        title: "Diagnostics",
+        strategyVersion: "Strategy version",
+        retrievalMode: "Retrieval mode",
+        targetBases: "Target bases",
+        routeBudget: "Per-base route budget",
+        models: "Models",
+        semanticCandidates: "Semantic candidates",
+        lexicalCandidates: "Lexical candidates",
+        parentsDeduplicated: "Parents after dedup",
+        thresholdFiltered: "Filtered by threshold",
+        staleFiltered: "Dropped as stale",
+        returned: "Returned",
+        embeddingMs: "Query embedding",
+        recallMs: "Recall",
+        rerankMs: "Rerank",
+        finalValidationMs: "Final validation",
+        heterogeneousWarning:
+          "Heterogeneous score domains without lexical evidence: ordering merges per-domain ranks only.",
+      },
+      hitDiagnosticsSummary: "Hit diagnostics",
+      localScore: (score) => `Native score ${score.toFixed(3)}`,
+      rankingScore: (score) => `Ranking score ${score.toFixed(3)}`,
+      openDetail: (position) => `View segment #${position} in full`,
+      detail: {
+        title: "Segment detail",
+        conflict:
+          "The document changed after this result was scored. Run the search again to see current content.",
+        staleContent:
+          "This stored row is stale relative to the current document version.",
+        disabledBadge: "Disabled",
+        matchedChildrenTitle: "Child chunks matched in this search",
+        childrenTitle: (total) => `Child chunks (${total})`,
+        matchedBadge: "Matched",
+        routes: {
+          semantic: "Semantic",
+          lexical: "Lexical",
+        },
+        locate: "Open in documents",
+      },
     },
     citations: {
       summary: (count) =>
@@ -486,6 +627,7 @@ export const enUS: Translations = {
       generic: "The operation failed. Please try again.",
       network: "Network error. Check your connection and retry.",
       invalidResponse: "The server returned an unexpected response.",
+      incompleteList: "The list did not load completely. Refresh to retry.",
     },
   },
 

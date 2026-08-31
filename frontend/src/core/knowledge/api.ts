@@ -6,6 +6,7 @@ import { getBackendBaseURL } from "@/core/config";
 import {
   knowledgeBaseListResponseSchema,
   knowledgeBaseMutationResponseSchema,
+  knowledgeBaseRebuildResponseSchema,
   knowledgeChunkPreviewResponseSchema,
   knowledgeDocumentBatchResponseSchema,
   knowledgeDocumentListResponseSchema,
@@ -16,23 +17,30 @@ import {
   knowledgeMetadataFieldMutationResponseSchema,
   knowledgeModelOptionsResponseSchema,
   knowledgeQueryListResponseSchema,
+  knowledgeReparsePreviewResponseSchema,
   knowledgeSearchResponseSchema,
+  knowledgeSegmentDetailResponseSchema,
   knowledgeSegmentListResponseSchema,
   knowledgeSegmentMutationResponseSchema,
   type CreateKnowledgeBaseInput,
   type CreateKnowledgeMetadataFieldInput,
   type KnowledgeBaseItem,
   type KnowledgeBaseListResponse,
+  type KnowledgeBaseRebuildResponse,
   type KnowledgeChunkingMode,
   type KnowledgeChunkPreviewResponse,
   type KnowledgeDocumentItem,
   type KnowledgeDocumentListResponse,
+  type KnowledgeDocumentsMetadataInput,
   type KnowledgeHealthResponse,
   type KnowledgeMetadataFieldItem,
   type KnowledgeModelOptions,
   type KnowledgeQueryListResponse,
+  type KnowledgeReparseInput,
+  type KnowledgeReparsePreviewResponse,
   type KnowledgeSearchInput,
   type KnowledgeSearchResponse,
+  type KnowledgeSegmentDetailResponse,
   type KnowledgeSegmentItem,
   type KnowledgeSegmentListResponse,
   type PreviewKnowledgeChunksInput,
@@ -48,7 +56,8 @@ export class KnowledgeApiError extends Error {
     | "AUTH_REQUIRED"
     | "NETWORK_ERROR"
     | "REQUEST_FAILED"
-    | "INVALID_RESPONSE";
+    | "INVALID_RESPONSE"
+    | "INCOMPLETE_LIST";
   /** Backend `KNOWLEDGE_*` error code from the error envelope, if present. */
   readonly knowledgeCode: string | null;
   /** Backend-provided user-facing message, if present. */
@@ -215,6 +224,12 @@ const LIST_MAX_PAGES = 20;
  * Lists page to completion: the backend allows more rows than one page
  * (up to 500 documents per base), and a silently truncated list would make
  * the overflow rows invisible and unmanageable.
+ *
+ * Completeness is checked against the server-reported total. A premature
+ * empty page or the local page cap without reaching that total raises an
+ * explicit `INCOMPLETE_LIST` error instead of publishing a partial list —
+ * callers filter and paginate over this result as if it were everything,
+ * and a silent partial would quietly hide the missing rows.
  */
 async function listAllPages<Item, R extends { items: Item[]; total: number }>(
   pageURL: (page: number) => string,
@@ -230,12 +245,15 @@ async function listAllPages<Item, R extends { items: Item[]; total: number }>(
     );
     const parsed = await readKnowledgeResponse(response, schema);
     items.push(...parsed.items);
-    const done =
-      items.length >= parsed.total ||
-      parsed.items.length === 0 ||
-      page >= LIST_MAX_PAGES;
-    if (done) {
+    if (items.length >= parsed.total) {
       return { ...parsed, items, page: 1 };
+    }
+    if (parsed.items.length === 0 || page >= LIST_MAX_PAGES) {
+      throw new KnowledgeApiError(
+        response.status,
+        "INCOMPLETE_LIST",
+        "Knowledge list is incomplete.",
+      );
     }
     page += 1;
   }
@@ -618,6 +636,10 @@ export async function searchKnowledge(
   ) {
     body.metadata_filters = input.metadata_filters;
   }
+  if (input.retrieval_mode !== undefined) {
+    body.retrieval_mode = input.retrieval_mode;
+  }
+  if (input.debug === true) body.debug = true;
   const response = await requestKnowledge(
     `${knowledgeBaseURL(projectId)}/search`,
     jsonRequestInit("POST", body, signal),
@@ -625,22 +647,51 @@ export async function searchKnowledge(
   return readKnowledgeResponse(response, knowledgeSearchResponseSchema);
 }
 
-/** Rebinds the base's embedding model and queues every document for re-embedding. */
+export async function getKnowledgeSegmentDetail(
+  projectId: string,
+  baseId: string,
+  documentId: string,
+  segmentId: string,
+  options?: {
+    expectedDocumentVersion?: number;
+    expectedContentDigest?: string;
+    childPage?: number;
+  },
+  signal?: AbortSignal,
+): Promise<KnowledgeSegmentDetailResponse> {
+  const params = new URLSearchParams();
+  if (options?.expectedDocumentVersion !== undefined) {
+    params.set(
+      "expected_document_version",
+      String(options.expectedDocumentVersion),
+    );
+  }
+  if (options?.expectedContentDigest !== undefined) {
+    params.set("expected_content_digest", options.expectedContentDigest);
+  }
+  if (options?.childPage !== undefined) {
+    params.set("child_page", String(options.childPage));
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  const response = await requestKnowledge(
+    `${knowledgeBaseURL(projectId)}/bases/${encodeURIComponent(baseId)}/documents/${encodeURIComponent(documentId)}/segments/${encodeURIComponent(segmentId)}${query}`,
+    signal ? { signal } : undefined,
+  );
+  return readKnowledgeResponse(response, knowledgeSegmentDetailResponseSchema);
+}
+
+/** Rebinds the base's embedding model and re-embeds the current content. */
 export async function rebuildKnowledgeBase(
   projectId: string,
   baseId: string,
   embeddingModelId: string,
   signal?: AbortSignal,
-): Promise<KnowledgeBaseItem> {
+): Promise<KnowledgeBaseRebuildResponse> {
   const response = await requestKnowledge(
     `${knowledgeBaseURL(projectId)}/bases/${encodeURIComponent(baseId)}/rebuild`,
     jsonRequestInit("POST", { embedding_model_id: embeddingModelId }, signal),
   );
-  const parsed = await readKnowledgeResponse(
-    response,
-    knowledgeBaseMutationResponseSchema,
-  );
-  return parsed.item;
+  return readKnowledgeResponse(response, knowledgeBaseRebuildResponseSchema);
 }
 
 export async function listKnowledgeMetadataFields(
@@ -720,6 +771,60 @@ export async function setKnowledgeDocumentMetadata(
   const response = await requestKnowledge(
     `${knowledgeBaseURL(projectId)}/documents/${encodeURIComponent(documentId)}/metadata`,
     jsonRequestInit("PATCH", input, signal),
+  );
+  const parsed = await readKnowledgeResponse(
+    response,
+    knowledgeDocumentMutationResponseSchema,
+  );
+  return parsed.item;
+}
+
+/**
+ * One common metadata patch across documents of one base, all-or-nothing:
+ * untouched keys stay, null clears a key, and any rejected document rolls
+ * back the whole batch server-side.
+ */
+export async function setKnowledgeDocumentsMetadata(
+  projectId: string,
+  baseId: string,
+  input: KnowledgeDocumentsMetadataInput,
+  signal?: AbortSignal,
+): Promise<KnowledgeDocumentItem[]> {
+  const response = await requestKnowledge(
+    `${knowledgeBaseURL(projectId)}/bases/${encodeURIComponent(baseId)}/documents/metadata`,
+    jsonRequestInit("PATCH", input, signal),
+  );
+  const parsed = await readKnowledgeResponse(
+    response,
+    knowledgeDocumentBatchResponseSchema,
+  );
+  return parsed.items;
+}
+
+/** Server-side re-parse preview of the stored original file. */
+export async function previewKnowledgeDocumentReparse(
+  projectId: string,
+  documentId: string,
+  input: KnowledgeReparseInput,
+  signal?: AbortSignal,
+): Promise<KnowledgeReparsePreviewResponse> {
+  const response = await requestKnowledge(
+    `${knowledgeBaseURL(projectId)}/documents/${encodeURIComponent(documentId)}/reparse-preview`,
+    jsonRequestInit("POST", input, signal),
+  );
+  return readKnowledgeResponse(response, knowledgeReparsePreviewResponseSchema);
+}
+
+/** Confirmed re-parse: freezes the submitted parameters into the task. */
+export async function reparseKnowledgeDocument(
+  projectId: string,
+  documentId: string,
+  input: KnowledgeReparseInput,
+  signal?: AbortSignal,
+): Promise<KnowledgeDocumentItem> {
+  const response = await requestKnowledge(
+    `${knowledgeBaseURL(projectId)}/documents/${encodeURIComponent(documentId)}/reparse`,
+    jsonRequestInit("POST", input, signal),
   );
   const parsed = await readKnowledgeResponse(
     response,

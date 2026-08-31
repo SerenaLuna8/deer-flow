@@ -21,6 +21,7 @@ import {
   deleteKnowledgeMetadataField,
   deleteKnowledgeSegment,
   fetchKnowledgeHealth,
+  getKnowledgeSegmentDetail,
   isKnowledgeAuthorityBoundaryError,
   isKnowledgeConflictError,
   listKnowledgeBaseQueries,
@@ -30,13 +31,16 @@ import {
   listKnowledgeMetadataFields,
   listKnowledgeModelOptions,
   previewKnowledgeChunks,
+  previewKnowledgeDocumentReparse,
   rebuildKnowledgeBase,
   renameKnowledgeDocument,
   renameKnowledgeMetadataField,
+  reparseKnowledgeDocument,
   retryKnowledgeDocument,
   searchKnowledge,
   setKnowledgeDocumentMetadata,
   setKnowledgeDocumentsEnabled,
+  setKnowledgeDocumentsMetadata,
   updateKnowledgeBase,
   updateKnowledgeSegment,
   uploadKnowledgeDocument,
@@ -48,6 +52,8 @@ import {
   type CreateKnowledgeMetadataFieldInput,
   type KnowledgeBaseListResponse,
   type KnowledgeDocumentListResponse,
+  type KnowledgeDocumentsMetadataInput,
+  type KnowledgeReparseInput,
   type KnowledgeSearchInput,
   type PreviewKnowledgeChunksInput,
   type SetKnowledgeDocumentMetadataInput,
@@ -588,6 +594,18 @@ export function useDeleteKnowledgeMetadataField(scope: ProjectClientScope) {
   });
 }
 
+/**
+ * A rejected metadata write that hit a conflict or a vanished selection was
+ * confirmed against stale rows: refresh the authoritative documents so
+ * re-confirmation sees current state, while the dialog keeps its unsaved
+ * form values.
+ */
+function metadataWriteHitStaleRows(error: unknown): boolean {
+  return (
+    isKnowledgeConflictError(error) || isKnowledgeAuthorityBoundaryError(error)
+  );
+}
+
 export function useSetKnowledgeDocumentMetadata(scope: ProjectClientScope) {
   const invalidate = useInvalidateKnowledge(scope);
   return useMutation({
@@ -601,6 +619,158 @@ export function useSetKnowledgeDocumentMetadata(scope: ProjectClientScope) {
       input: SetKnowledgeDocumentMetadataInput;
     }) => setKnowledgeDocumentMetadata(scope.projectId, documentId, input),
     onSuccess: (_item, variables) => invalidate.documents(variables.baseId),
+    onError: (error, variables) => {
+      if (metadataWriteHitStaleRows(error)) {
+        void invalidate.documents(variables.baseId);
+      }
+    },
+  });
+}
+
+/** One all-or-nothing metadata patch across the selected documents. */
+export function useSetKnowledgeDocumentsMetadata(scope: ProjectClientScope) {
+  const invalidate = useInvalidateKnowledge(scope);
+  return useMutation({
+    mutationKey: knowledgeQueryKey(scope, "mutation", "documents-metadata"),
+    mutationFn: ({
+      baseId,
+      input,
+    }: {
+      baseId: string;
+      input: KnowledgeDocumentsMetadataInput;
+    }) => setKnowledgeDocumentsMetadata(scope.projectId, baseId, input),
+    onSuccess: (_items, variables) => invalidate.documents(variables.baseId),
+    onError: (error, variables) => {
+      if (metadataWriteHitStaleRows(error)) {
+        void invalidate.documents(variables.baseId);
+      }
+    },
+  });
+}
+
+/**
+ * Server-side re-parse preview of the stored original file. A mutation, not a
+ * query: it must run only on the user's explicit request and never revive
+ * from a cache — the preview is tied to the exact submitted parameters.
+ */
+export function usePreviewKnowledgeDocumentReparse(scope: ProjectClientScope) {
+  return useMutation({
+    mutationKey: knowledgeQueryKey(scope, "mutation", "reparse-preview"),
+    mutationFn: ({
+      documentId,
+      input,
+    }: {
+      documentId: string;
+      input: KnowledgeReparseInput;
+    }) => previewKnowledgeDocumentReparse(scope.projectId, documentId, input),
+  });
+}
+
+export function useReparseKnowledgeDocument(scope: ProjectClientScope) {
+  const invalidate = useInvalidateKnowledge(scope);
+  return useMutation({
+    mutationKey: knowledgeQueryKey(scope, "mutation", "reparse-document"),
+    mutationFn: ({
+      documentId,
+      input,
+    }: {
+      documentId: string;
+      baseId: string;
+      input: KnowledgeReparseInput;
+    }) => reparseKnowledgeDocument(scope.projectId, documentId, input),
+    onSuccess: (_item, variables) => invalidate.documents(variables.baseId),
+  });
+}
+
+/**
+ * Locates one segment via its detail endpoint — never by walking the base's
+ * pages. The backend validates the base/document/segment lineage, so a
+ * cross-base id combination or a deleted resource answers 404 instead of
+ * resurrecting a stale object; that failure is terminal (no retries).
+ */
+export function useKnowledgeSegmentLocate(
+  scope: ProjectClientScope,
+  baseId: string,
+  documentId: string,
+  segmentId: string | null,
+) {
+  return useQuery({
+    queryKey: knowledgeQueryKey(
+      scope,
+      "segment-locate",
+      baseId,
+      documentId,
+      segmentId,
+    ),
+    queryFn: ({ signal }) =>
+      getKnowledgeSegmentDetail(
+        scope.projectId,
+        baseId,
+        documentId,
+        segmentId ?? "",
+        undefined,
+        signal,
+      ),
+    enabled: segmentId !== null,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export type KnowledgeSearchHitDetailInput = {
+  baseId: string;
+  documentId: string;
+  segmentId: string;
+  /** Version/digest the hit's score was computed for; null skips the pin. */
+  expectedDocumentVersion: number | null;
+  expectedContentDigest: string | null;
+  childPage: number;
+};
+
+/**
+ * Detail read pinned to the exact content a search hit scored. A version or
+ * digest mismatch is a terminal KNOWLEDGE_CONFLICT: the panel asks for a new
+ * search instead of explaining old scores with new text. Nothing is cached
+ * past the dialog (gcTime 0), so a closed detail can never resurface.
+ */
+export function useKnowledgeSearchHitDetail(
+  scope: ProjectClientScope,
+  input: KnowledgeSearchHitDetailInput | null,
+) {
+  return useQuery({
+    queryKey: knowledgeQueryKey(
+      scope,
+      "search-hit-detail",
+      input?.baseId,
+      input?.documentId,
+      input?.segmentId,
+      input?.expectedDocumentVersion,
+      input?.expectedContentDigest,
+      input?.childPage,
+    ),
+    queryFn: ({ signal }) => {
+      if (input === null) throw new Error("disabled");
+      return getKnowledgeSegmentDetail(
+        scope.projectId,
+        input.baseId,
+        input.documentId,
+        input.segmentId,
+        {
+          ...(input.expectedDocumentVersion !== null
+            ? { expectedDocumentVersion: input.expectedDocumentVersion }
+            : {}),
+          ...(input.expectedContentDigest !== null
+            ? { expectedContentDigest: input.expectedContentDigest }
+            : {}),
+          childPage: input.childPage,
+        },
+        signal,
+      );
+    },
+    enabled: input !== null,
+    retry: false,
+    refetchOnWindowFocus: false,
+    gcTime: 0,
   });
 }
 

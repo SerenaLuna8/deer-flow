@@ -41,6 +41,11 @@ import {
   useRenameKnowledgeMetadataField,
   useUpdateKnowledgeBase,
 } from "@/core/knowledge/hooks";
+import {
+  KNOWLEDGE_DEFAULT_SORT,
+  type KnowledgeNavigationState,
+  type KnowledgeView,
+} from "@/core/knowledge/navigation";
 import type {
   KnowledgeBaseItem,
   KnowledgeMetadataFieldItem,
@@ -53,7 +58,7 @@ import { KnowledgeDocumentsView } from "./knowledge-documents-view";
 import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeSearchPanel } from "./knowledge-search-panel";
 
-type DetailSection = "documents" | "search" | "metadata" | "settings";
+type DetailSection = KnowledgeView;
 
 /** Sentinel for the unbound reranker; Radix Select items cannot be "". */
 const RERANKER_NONE = "none";
@@ -61,21 +66,45 @@ const RERANKER_NONE = "none";
 /**
  * In-base layout: a secondary menu (documents / retrieval test / settings)
  * beside the section content, mirroring Dify's in-knowledge-base navigation.
+ * The active section comes from the URL (`view=`); switching sections and
+ * leaving the base are resource moves, so both push history entries.
  */
 export function KnowledgeBaseDetail({
   scope,
   base,
   canEdit,
-  onBack,
+  navState,
+  onNavigate,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
   canEdit: boolean;
-  onBack: () => void;
+  navState: KnowledgeNavigationState;
+  onNavigate: (
+    next: KnowledgeNavigationState,
+    mode: "push" | "replace",
+  ) => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
-  const [section, setSection] = useState<DetailSection>("documents");
+  const section = navState.view;
+  const setSection = (next: DetailSection) => {
+    if (next === section) return;
+    // Switching sections drops document-list state; navigation parsing
+    // would discard it on the way back in anyway.
+    onNavigate(
+      {
+        ...navState,
+        view: next,
+        doc: null,
+        segment: null,
+        status: null,
+        sort: KNOWLEDGE_DEFAULT_SORT,
+        page: 1,
+      },
+      "push",
+    );
+  };
 
   const menuItems: Array<{
     id: DetailSection;
@@ -108,7 +137,20 @@ export function KnowledgeBaseDetail({
           variant="ghost"
           size="sm"
           aria-label={labels.common.back}
-          onClick={onBack}
+          onClick={() =>
+            onNavigate(
+              {
+                kb: null,
+                view: "documents",
+                doc: null,
+                segment: null,
+                status: null,
+                sort: KNOWLEDGE_DEFAULT_SORT,
+                page: 1,
+              },
+              "push",
+            )
+          }
         >
           <ArrowLeftIcon aria-hidden className="size-4" />
           {labels.page.title}
@@ -155,10 +197,33 @@ export function KnowledgeBaseDetail({
 
       <div className="min-w-0 flex-1">
         {section === "documents" ? (
-          <KnowledgeDocumentsView scope={scope} base={base} canEdit={canEdit} />
+          <KnowledgeDocumentsView
+            scope={scope}
+            base={base}
+            canEdit={canEdit}
+            navState={navState}
+            onNavigate={onNavigate}
+          />
         ) : null}
         {section === "search" ? (
-          <KnowledgeSearchPanel scope={scope} base={base} />
+          <KnowledgeSearchPanel
+            scope={scope}
+            base={base}
+            onLocateSegment={(documentId, segmentId) =>
+              onNavigate(
+                {
+                  ...navState,
+                  view: "documents",
+                  doc: documentId,
+                  segment: segmentId,
+                  status: null,
+                  sort: KNOWLEDGE_DEFAULT_SORT,
+                  page: 1,
+                },
+                "push",
+              )
+            }
+          />
         ) : null}
         {section === "metadata" && canEdit ? (
           <KnowledgeMetadataPanel scope={scope} base={base} />
@@ -439,9 +504,16 @@ function KnowledgeRebuildSection({
           {knowledgeErrorMessage(rebuild.error, labels.errors)}
         </p>
       ) : null}
-      {rebuild.isSuccess ? (
-        <p role="status" className="text-success text-sm">
-          {labels.bases.rebuildStarted}
+      {rebuild.data ? (
+        <p
+          role="status"
+          className="text-success text-sm"
+          data-testid="knowledge-rebuild-outcome"
+        >
+          {labels.bases.rebuildOutcome(
+            rebuild.data.accepted_document_count,
+            rebuild.data.skipped_document_ids.length,
+          )}
         </p>
       ) : null}
       <div>

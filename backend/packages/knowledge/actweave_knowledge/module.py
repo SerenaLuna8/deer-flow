@@ -18,6 +18,7 @@ from .contracts import (
     KNOWLEDGE_DISABLED,
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeBaseCreate,
+    KnowledgeBaseFilterFields,
     KnowledgeBaseUpdate,
     KnowledgeBaseView,
     KnowledgeChunkPreview,
@@ -26,19 +27,28 @@ from .contracts import (
     KnowledgeDocumentView,
     KnowledgeError,
     KnowledgeHealth,
+    KnowledgeMetadataBatchPatch,
     KnowledgeMetadataFieldType,
     KnowledgeMetadataFieldView,
     KnowledgeModelPort,
     KnowledgeQueryView,
+    KnowledgeRebuildResult,
+    KnowledgeReparsePreview,
+    KnowledgeReparseRequest,
     KnowledgeSearchRequest,
     KnowledgeSearchResult,
     KnowledgeSegmentCreate,
+    KnowledgeSegmentDetail,
     KnowledgeSegmentUpdate,
     KnowledgeSegmentView,
     KnowledgeSettings,
 )
 from .documents import KnowledgeDocumentService
-from .ingestion import KnowledgeIngestionHandler, preview_document_chunks
+from .ingestion import (
+    KnowledgeIngestionHandler,
+    KnowledgeReembedHandler,
+    preview_document_chunks,
+)
 from .metadata import KnowledgeMetadataService
 from .models import KnowledgeModelClient
 from .persistence.models import KnowledgeBaseRow
@@ -247,7 +257,7 @@ class KnowledgeModule:
         *,
         embedding_model_id: UUID,
         authority: KnowledgeProjectAuthority,
-    ) -> KnowledgeBaseView:
+    ) -> KnowledgeRebuildResult:
         return await self._base_service.rebuild_knowledge_base(
             project_id,
             base_id,
@@ -267,6 +277,19 @@ class KnowledgeModule:
         return await self._metadata_service.list_metadata_fields(
             project_id,
             base_id,
+            authority=authority,
+        )
+
+    async def list_filter_fields(
+        self,
+        project_id: UUID,
+        base_ids: list[UUID] | tuple[UUID, ...] | None = None,
+        *,
+        authority: KnowledgeProjectAuthority,
+    ) -> list[KnowledgeBaseFilterFields]:
+        return await self._metadata_service.list_filter_fields(
+            project_id,
+            base_ids,
             authority=authority,
         )
 
@@ -327,6 +350,21 @@ class KnowledgeModule:
             project_id,
             document_id,
             values,
+            authority=authority,
+        )
+
+    async def set_documents_metadata(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        patch: KnowledgeMetadataBatchPatch,
+        *,
+        authority: KnowledgeProjectAuthority,
+    ) -> list[KnowledgeDocumentView]:
+        return await self._metadata_service.set_documents_metadata(
+            project_id,
+            base_id,
+            patch,
             authority=authority,
         )
 
@@ -404,6 +442,36 @@ class KnowledgeModule:
         return await self._documents().retry_document(
             project_id,
             document_id,
+            authority=authority,
+        )
+
+    async def preview_document_reparse(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        request: KnowledgeReparseRequest,
+        *,
+        authority: KnowledgeProjectAuthority,
+    ) -> KnowledgeReparsePreview:
+        return await self._documents().preview_reparse(
+            project_id,
+            document_id,
+            request,
+            authority=authority,
+        )
+
+    async def reparse_document(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        request: KnowledgeReparseRequest,
+        *,
+        authority: KnowledgeProjectAuthority,
+    ) -> KnowledgeDocumentView:
+        return await self._documents().reparse_document(
+            project_id,
+            document_id,
+            request,
             authority=authority,
         )
 
@@ -550,6 +618,29 @@ class KnowledgeModule:
             authority=authority,
         )
 
+    async def get_segment_detail(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        document_id: UUID,
+        segment_id: UUID,
+        *,
+        expected_document_version: int | None = None,
+        expected_content_digest: str | None = None,
+        child_page: int = 1,
+        authority: KnowledgeProjectAuthority,
+    ) -> KnowledgeSegmentDetail:
+        return await self._segments().get_segment_detail(
+            project_id,
+            base_id,
+            document_id,
+            segment_id,
+            expected_document_version=expected_document_version,
+            expected_content_digest=expected_content_digest,
+            child_page=child_page,
+            authority=authority,
+        )
+
     # -- search ----------------------------------------------------------------
 
     async def search(
@@ -608,6 +699,13 @@ class KnowledgeModule:
                 session_factory=self._session_factory,
                 settings=self._settings,
                 object_store=object_store,
+                model_client=self._model_client,
+                model_port=self._model_port,
+            ),
+            # Re-embedding reads current rows only: no object store on purpose,
+            # so it structurally cannot re-parse the original file.
+            "reembed_document": KnowledgeReembedHandler(
+                session_factory=self._session_factory,
                 model_client=self._model_client,
                 model_port=self._model_port,
             ),

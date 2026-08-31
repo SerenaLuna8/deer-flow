@@ -30,6 +30,7 @@ from ..contracts import (
     KnowledgeBaseView,
     KnowledgeError,
     KnowledgeModelPort,
+    KnowledgeRebuildResult,
     KnowledgeSettings,
 )
 from ..persistence.derivations import delete_error_expression, document_count_expression
@@ -95,6 +96,7 @@ def _view(row: KnowledgeBaseRow, *, document_count: int, delete_error: str | Non
         description=row.description,
         embedding_model_id=row.embedding_model_id,
         reranker_model_id=row.reranker_model_id,
+        retrieval_mode=row.retrieval_mode,  # type: ignore[arg-type]
         status=row.status,  # type: ignore[arg-type]
         document_count=document_count,
         default_top_k=row.default_top_k,
@@ -168,6 +170,8 @@ class KnowledgeBaseService:
                 reranker_model_id = create.reranker_model_id
                 if reranker_model_id is not None:
                     await self._model_port.lock_model_for_binding(session, reranker_model_id, "rerank")
+                if create.retrieval_mode not in ("semantic", "hybrid"):
+                    raise _invalid("retrieval_mode 只能是 semantic 或 hybrid")
                 row = KnowledgeBaseRow(
                     id=uuid4(),
                     project_id=project_id,
@@ -176,6 +180,7 @@ class KnowledgeBaseService:
                     embedding_model_id=create.embedding_model_id,
                     reranker_model_id=reranker_model_id,
                     status="active",
+                    retrieval_mode=create.retrieval_mode,
                 )
                 session.add(row)
                 await session.flush()
@@ -264,6 +269,10 @@ class KnowledgeBaseService:
             if type(threshold) not in (int, float) or not 0 <= float(threshold) <= 1:
                 raise _invalid("default_score_threshold 必须在 0..1 之间")
             changes["default_score_threshold"] = float(threshold)
+        if update.retrieval_mode is not None:
+            if update.retrieval_mode not in ("semantic", "hybrid"):
+                raise _invalid("retrieval_mode 只能是 semantic 或 hybrid")
+            changes["retrieval_mode"] = update.retrieval_mode
         if update.reranker_model_id is not None and update.clear_reranker_model:
             raise _invalid("reranker_model_id 与 clear_reranker_model 不能同时设置")
         if update.reranker_model_id is not None and not isinstance(update.reranker_model_id, UUID):
@@ -317,17 +326,18 @@ class KnowledgeBaseService:
         *,
         embedding_model_id: UUID,
         authority: KnowledgeProjectAuthority | None = None,
-    ) -> KnowledgeBaseView:
-        """Rebind the base to an embedding model and re-embed every document.
+    ) -> KnowledgeRebuildResult:
+        """Rebind the embedding model and re-embed the current content.
 
-        All in one transaction: the base points at the new embedding model and
-        each document is version-bumped back to ``queued`` with a fresh ingest
-        task, so a still-running old ingest becomes a late result that never
-        publishes. Old segments stop matching recall immediately (their
-        document is no longer ``ready``), which keeps mixed-dimension vectors
-        out of the query path; each document returns to retrieval as soon as
-        its re-ingestion publishes. Re-running with the same model is
-        allowed — it is a plain re-embed of the whole base.
+        One transaction locks the base, then every document in UUID order.
+        Any in-flight document (uploading, queued, processing, deleting) or
+        open indexing task rejects the whole operation — changing the vector
+        space must not race an upload or another (re)build. Initialized
+        ready/failed documents bump their version to ``queued`` with one
+        ``reembed_document`` task each, keeping rows and counters; documents
+        that never published are skipped and stay failed (re-parsing the
+        original file is a separate, explicit decision). Re-running with the
+        same model is allowed — it is a plain re-embed of the whole base.
         """
 
         if not isinstance(embedding_model_id, UUID):
@@ -344,28 +354,39 @@ class KnowledgeBaseService:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
                 if row.status == "deleting":
                     raise _invalid("Knowledge Base 正在删除，不能重建")
+                documents = (await session.scalars(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == base_id).order_by(KnowledgeDocumentRow.id).with_for_update())).all()
+                blocking = sorted({document.status for document in documents if document.status not in ("ready", "failed")})
+                if blocking:
+                    raise _invalid(f"存在 {'/'.join(blocking)} 状态的文档，请先等待或处理后再重嵌入")
+                open_indexing = (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(KnowledgeTaskRow)
+                        .where(
+                            KnowledgeTaskRow.resource_id.in_([document.id for document in documents]),
+                            KnowledgeTaskRow.kind.in_(("ingest_document", "reembed_document")),
+                            KnowledgeTaskRow.status.in_(TASK_OPEN_STATUSES),
+                        )
+                    )
+                    if documents
+                    else 0
+                )
+                if open_indexing:
+                    raise _invalid("存在未完成的索引任务，请先等待或处理后再重嵌入")
                 await self._model_port.lock_model_for_binding(session, embedding_model_id, "embedding")
                 row.embedding_model_id = embedding_model_id
                 row.updated_at = func.now()  # type: ignore[assignment]
-                documents = (
-                    await session.scalars(
-                        select(KnowledgeDocumentRow)
-                        .where(
-                            KnowledgeDocumentRow.knowledge_base_id == base_id,
-                            # ``uploading`` rows are mid-upload (their ingest
-                            # task will read the new configuration anyway) and
-                            # ``deleting`` rows are on their way out.
-                            KnowledgeDocumentRow.status.in_(("queued", "processing", "ready", "failed")),
-                        )
-                        .order_by(KnowledgeDocumentRow.id)
-                        .with_for_update()
-                    )
-                ).all()
+                accepted = 0
+                skipped: list[UUID] = []
                 for document in documents:
+                    if document.published_version is None:
+                        # Never published: there is no current content to
+                        # re-embed, and re-parsing must stay explicit.
+                        skipped.append(document.id)
+                        continue
                     document.version = document.version + 1
                     document.status = "queued"
-                    document.segment_count = 0
-                    document.word_count = 0
+                    # Rows survive; the counters keep describing them.
                     document.error_message = None
                     document.updated_at = func.now()  # type: ignore[assignment]
                     session.add(
@@ -373,11 +394,12 @@ class KnowledgeBaseService:
                             id=uuid4(),
                             project_id=project_id,
                             resource_id=document.id,
-                            kind="ingest_document",
+                            kind="reembed_document",
                             target_version=document.version,
                             status="queued",
                         )
                     )
+                    accepted += 1
                 await session.flush()
                 await session.refresh(row)
                 document_count, delete_error = (
@@ -388,7 +410,11 @@ class KnowledgeBaseService:
                         ).where(KnowledgeBaseRow.id == base_id)
                     )
                 ).one()
-                return _view(row, document_count=int(document_count), delete_error=delete_error)
+                return KnowledgeRebuildResult(
+                    base=_view(row, document_count=int(document_count), delete_error=delete_error),
+                    accepted_document_count=accepted,
+                    skipped_document_ids=tuple(skipped),
+                )
         except IntegrityError:
             # The RESTRICT foreign key caught a model deleted between the
             # binding lock and the commit.

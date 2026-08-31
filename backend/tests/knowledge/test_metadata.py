@@ -8,6 +8,7 @@ over ASGI with a recording fake module.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -15,13 +16,19 @@ from typing import Any
 import httpx
 import pytest
 from actweave_knowledge import (
+    KNOWLEDGE_BUILTIN_FILTER_FIELDS,
+    KNOWLEDGE_FILTER_OPERATORS_BY_TYPE,
     KNOWLEDGE_INVALID_REQUEST,
+    KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS,
+    KNOWLEDGE_MAX_BATCH_METADATA_FIELDS,
+    KNOWLEDGE_MAX_FILTER_DISCOVERY_BASES,
     KNOWLEDGE_MAX_METADATA_FIELDS_PER_BASE,
     KNOWLEDGE_NAME_CONFLICT,
     KNOWLEDGE_NOT_FOUND,
     KNOWLEDGE_QUOTA_EXCEEDED,
     KnowledgeDocumentView,
     KnowledgeError,
+    KnowledgeMetadataBatchPatch,
     KnowledgeMetadataFieldView,
 )
 from actweave_knowledge.metadata import KnowledgeMetadataService
@@ -368,6 +375,404 @@ async def test_delete_field_strips_the_key_from_documents(postgres_database_url:
 
 
 # ---------------------------------------------------------------------------
+# T6: filter-field discovery (builtin + custom)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_filter_field_discovery_lists_builtin_then_custom_fields(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        await harness.service.create_metadata_field(project_id, base_id, name="来源", field_type="string")
+        await harness.service.create_metadata_field(project_id, base_id, name="发布时间", field_type="time")
+
+        discovered = await harness.service.list_filter_fields(project_id)
+
+        assert [entry.knowledge_base_id for entry in discovered] == [base_id]
+        fields = discovered[0].fields
+        builtin = [field for field in fields if field.kind == "builtin"]
+        custom = [field for field in fields if field.kind == "custom"]
+        # Builtins come first, in the frozen contract order, never writable.
+        assert [field.name for field in fields[: len(builtin)]] == list(KNOWLEDGE_BUILTIN_FILTER_FIELDS)
+        assert [(field.name, field.field_type, field.writable) for field in builtin] == [
+            ("document_name", "string", False),
+            ("uploaded_at", "time", False),
+            ("file_type", "string", False),
+            ("source_type", "string", False),
+        ]
+        assert [(field.name, field.field_type, field.writable) for field in custom] == [
+            ("来源", "string", True),
+            ("发布时间", "time", True),
+        ]
+        for field in fields:
+            assert field.operators == KNOWLEDGE_FILTER_OPERATORS_BY_TYPE[field.field_type]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_filter_field_discovery_scopes_to_requested_active_bases(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        other_project, other_base = await _seed_base(harness)
+        sibling_model_id, _ = await seed_registry_models(harness.factory)
+        async with harness.factory() as session, session.begin():
+            second = KnowledgeBaseRow(
+                id=uuid.uuid4(),
+                project_id=project_id,
+                name=f"base-{uuid.uuid4().hex[:6]}",
+                embedding_model_id=sibling_model_id,
+                status="active",
+            )
+            deleting = KnowledgeBaseRow(
+                id=uuid.uuid4(),
+                project_id=project_id,
+                name=f"base-{uuid.uuid4().hex[:6]}",
+                embedding_model_id=sibling_model_id,
+                status="deleting",
+            )
+            session.add_all([second, deleting])
+
+        # Omitted scope: every active base of this project, nothing else.
+        discovered = await harness.service.list_filter_fields(project_id)
+        assert {entry.knowledge_base_id for entry in discovered} == {base_id, second.id}
+
+        # Explicit scope narrows to exactly the requested bases.
+        narrowed = await harness.service.list_filter_fields(project_id, base_ids=[second.id])
+        assert [entry.knowledge_base_id for entry in narrowed] == [second.id]
+
+        # Unknown, deleting, and cross-project ids are a broken resource chain.
+        for bad in (uuid.uuid4(), deleting.id, other_base):
+            with pytest.raises(KnowledgeError) as error:
+                await harness.service.list_filter_fields(project_id, base_ids=[base_id, bad])
+            assert error.value.code == KNOWLEDGE_NOT_FOUND
+        del other_project
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_filter_field_discovery_over_budget_requires_narrowing(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        model_id, _ = await seed_registry_models(harness.factory)
+        async with harness.factory() as session, session.begin():
+            for index in range(KNOWLEDGE_MAX_FILTER_DISCOVERY_BASES):
+                session.add(
+                    KnowledgeBaseRow(
+                        id=uuid.uuid4(),
+                        project_id=project_id,
+                        name=f"extra-{index}-{uuid.uuid4().hex[:6]}",
+                        embedding_model_id=model_id,
+                        status="active",
+                    )
+                )
+
+        # 21 active bases: the full-project scope must refuse, not truncate.
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.list_filter_fields(project_id)
+        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
+        assert "base_ids" in error.value.message
+
+        # An explicit over-long list refuses the same way.
+        async with harness.factory() as session:
+            all_ids = list((await session.scalars(select(KnowledgeBaseRow.id).where(KnowledgeBaseRow.project_id == project_id))).all())
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.list_filter_fields(project_id, base_ids=all_ids)
+        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
+
+        # Narrowing to one base works.
+        narrowed = await harness.service.list_filter_fields(project_id, base_ids=[base_id])
+        assert [entry.knowledge_base_id for entry in narrowed] == [base_id]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_filter_field_discovery_revalidates_project_authority(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, _ = await _seed_base(harness)
+
+        class _RevokedAuthority:
+            def __init__(self) -> None:
+                self.project_id = project_id
+                self.actor_user_id = uuid.uuid4()
+
+            async def revalidate(self, session) -> None:  # noqa: ANN001
+                del session
+                raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "资源不存在")
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.list_filter_fields(project_id, authority=_RevokedAuthority())  # type: ignore[arg-type]
+        assert error.value.code == KNOWLEDGE_NOT_FOUND
+    finally:
+        await harness.engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# T6: bounded batch metadata assignment
+# ---------------------------------------------------------------------------
+
+
+async def _seed_batch_documents(harness: _Harness, count: int = 3) -> tuple[uuid.UUID, uuid.UUID, list[uuid.UUID]]:
+    """Base with 部门(string)/year(number) fields plus ``count`` ready documents."""
+
+    project_id, base_id = await _seed_base(harness)
+    await harness.service.create_metadata_field(project_id, base_id, name="部门", field_type="string")
+    await harness.service.create_metadata_field(project_id, base_id, name="year", field_type="number")
+    document_ids: list[uuid.UUID] = []
+    async with harness.factory() as session, session.begin():
+        for index in range(count):
+            document = _document_row(project_id, base_id, name=f"文档{index}")
+            session.add(document)
+            document_ids.append(document.id)
+    return project_id, base_id, document_ids
+
+
+@pytest.mark.asyncio
+async def test_batch_metadata_patch_applies_common_patch_in_input_order(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, document_ids = await _seed_batch_documents(harness)
+        first, second, bystander = document_ids
+        await harness.service.set_document_metadata(project_id, first, {"部门": "旧部门", "year": 2000})
+        await harness.service.set_document_metadata(project_id, second, {"year": 2001})
+        await harness.service.set_document_metadata(project_id, bystander, {"部门": "保持"})
+
+        views = await harness.service.set_documents_metadata(
+            project_id,
+            base_id,
+            KnowledgeMetadataBatchPatch(document_ids=(second, first), values={"部门": "工程", "year": None}),
+        )
+
+        # Results come back in input order; untouched keys stay, null clears.
+        assert [view.id for view in views] == [second, first]
+        assert views[0].doc_metadata == {"部门": "工程"}
+        assert views[1].doc_metadata == {"部门": "工程"}
+        assert await _doc_metadata(harness, bystander) == {"部门": "保持"}
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_metadata_patch_validates_bounds_and_rejects_builtin_names(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, document_ids = await _seed_batch_documents(harness)
+        target = document_ids[0]
+
+        cases: list[tuple[KnowledgeMetadataBatchPatch, str]] = [
+            (KnowledgeMetadataBatchPatch(document_ids=(), values={"部门": "x"}), "document_ids"),
+            (
+                KnowledgeMetadataBatchPatch(
+                    document_ids=tuple(uuid.uuid4() for _ in range(KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS + 1)),
+                    values={"部门": "x"},
+                ),
+                str(KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS),
+            ),
+            (KnowledgeMetadataBatchPatch(document_ids=(target, target), values={"部门": "x"}), "重复"),
+            (KnowledgeMetadataBatchPatch(document_ids=(target,), values={}), "values"),
+            (
+                KnowledgeMetadataBatchPatch(
+                    document_ids=(target,),
+                    values={f"f{index}": "x" for index in range(KNOWLEDGE_MAX_BATCH_METADATA_FIELDS + 1)},
+                ),
+                str(KNOWLEDGE_MAX_BATCH_METADATA_FIELDS),
+            ),
+            # Builtin names are not addressable by writes: there is no custom
+            # definition behind them unless the project created one.
+            (KnowledgeMetadataBatchPatch(document_ids=(target,), values={"uploaded_at": 1}), "内建"),
+            (KnowledgeMetadataBatchPatch(document_ids=(target,), values={"未定义": "x"}), "未定义"),
+            (KnowledgeMetadataBatchPatch(document_ids=(target,), values={"year": "2026"}), "数字"),
+        ]
+        for patch, fragment in cases:
+            with pytest.raises(KnowledgeError) as error:
+                await harness.service.set_documents_metadata(project_id, base_id, patch)
+            assert error.value.code == KNOWLEDGE_INVALID_REQUEST, patch
+            assert fragment in error.value.message, patch
+        assert await _doc_metadata(harness, target) == {}
+
+        # A custom field may reuse a builtin name; writes then address the
+        # custom field, never the authority column.
+        await harness.service.create_metadata_field(project_id, base_id, name="file_type", field_type="string")
+        views = await harness.service.set_documents_metadata(
+            project_id,
+            base_id,
+            KnowledgeMetadataBatchPatch(document_ids=(target,), values={"file_type": "内部规范"}),
+        )
+        assert views[0].doc_metadata == {"file_type": "内部规范"}
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_metadata_patch_rolls_back_the_whole_batch_on_any_conflict(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, document_ids = await _seed_batch_documents(harness)
+        healthy, other, _ = document_ids
+
+        # A foreign-base document id poisons the whole batch.
+        foreign_project, foreign_base = await _seed_base(harness)
+        async with harness.factory() as session, session.begin():
+            foreign_document = _document_row(foreign_project, foreign_base, name="别库")
+            session.add(foreign_document)
+            deleting_document = _document_row(project_id, base_id, name="删除中", status="deleting")
+            session.add(deleting_document)
+
+        cases: list[tuple[tuple[uuid.UUID, ...], str]] = [
+            ((healthy, uuid.uuid4()), KNOWLEDGE_NOT_FOUND),
+            ((healthy, foreign_document.id), KNOWLEDGE_NOT_FOUND),
+            ((healthy, deleting_document.id), KNOWLEDGE_INVALID_REQUEST),
+        ]
+        for ids, expected_code in cases:
+            with pytest.raises(KnowledgeError) as error:
+                await harness.service.set_documents_metadata(
+                    project_id,
+                    base_id,
+                    KnowledgeMetadataBatchPatch(document_ids=ids, values={"部门": "不应落地"}),
+                )
+            assert error.value.code == expected_code, ids
+            # The healthy document must not keep any partial write.
+            assert await _doc_metadata(harness, healthy) == {}, ids
+        assert await _doc_metadata(harness, foreign_document.id) == {}
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_metadata_patch_never_queues_tasks_or_touches_content(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, document_ids = await _seed_batch_documents(harness)
+        target = document_ids[0]
+        async with harness.factory() as session:
+            version_before = await session.scalar(select(KnowledgeDocumentRow.version).where(KnowledgeDocumentRow.id == target))
+
+        await harness.service.set_documents_metadata(
+            project_id,
+            base_id,
+            KnowledgeMetadataBatchPatch(document_ids=(target,), values={"部门": "工程"}),
+        )
+
+        async with harness.factory() as session:
+            task_count = await session.scalar(text("SELECT count(*) FROM knowledge_tasks"))
+            version_after = await session.scalar(select(KnowledgeDocumentRow.version).where(KnowledgeDocumentRow.id == target))
+        # Metadata assignment is not a content change: no re-embed task, no
+        # new content generation.
+        assert task_count == 0
+        assert version_after == version_before
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rename_and_assignment_never_resurrect_old_keys(postgres_database_url: str) -> None:
+    """Field mutations and assignments share one lock order (base first).
+
+    Whatever interleaving wins, a document may never keep a metadata key
+    that has no live field definition — the old name must not flow back
+    after a rename.
+    """
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, document_ids = await _seed_batch_documents(harness)
+        listed = await harness.service.list_metadata_fields(project_id, base_id)
+        field_id = next(field.id for field in listed if field.name == "部门")
+
+        async def _assign(round_index: int) -> None:
+            try:
+                await harness.service.set_documents_metadata(
+                    project_id,
+                    base_id,
+                    KnowledgeMetadataBatchPatch(
+                        document_ids=tuple(document_ids),
+                        values={"部门": f"值{round_index}"},
+                    ),
+                )
+                await harness.service.set_document_metadata(project_id, document_ids[0], {"部门": f"单写{round_index}"})
+            except KnowledgeError as error:
+                # The rename may win the race; the stale name is then simply
+                # undefined for this batch — a full, clean rejection.
+                assert error.code == KNOWLEDGE_INVALID_REQUEST
+
+        async def _flip(round_index: int) -> None:
+            new_name = "部门2" if round_index % 2 == 0 else "部门"
+            await harness.service.rename_metadata_field(project_id, field_id, name=new_name)
+
+        for round_index in range(4):
+            await asyncio.gather(_assign(round_index), _flip(round_index))
+            async with harness.factory() as session:
+                defined = set((await session.scalars(select(KnowledgeMetadataFieldRow.name).where(KnowledgeMetadataFieldRow.knowledge_base_id == base_id))).all())
+                rows = (await session.scalars(select(KnowledgeDocumentRow.doc_metadata).where(KnowledgeDocumentRow.knowledge_base_id == base_id))).all()
+            for metadata in rows:
+                assert set(metadata).issubset(defined), (metadata, defined)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_field_rewrite_and_batch_governance_share_document_lock_order(postgres_database_url: str) -> None:
+    """A rename's bulk key rewrite takes document locks in UUID order.
+
+    Batch enable/disable/delete locks document rows ordered by UUID without
+    the base entry lock, so a scan-ordered bulk ``UPDATE`` could form a lock
+    cycle with it. Reproduce that exact interleaving — the governance side
+    holds the smaller UUID and requests the larger one while the rename is
+    mid-flight — and require the rename to queue behind the held row instead
+    of deadlocking either side.
+    """
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        created = await harness.service.create_metadata_field(project_id, base_id, name="部门", field_type="string")
+        first_id, second_id = sorted((uuid.uuid4(), uuid.uuid4()))
+        async with harness.factory() as session, session.begin():
+            # Insert the larger UUID first: a scan-ordered lock walk would be
+            # the exact reverse of the UUID order used by batch governance.
+            for document_id in (second_id, first_id):
+                row = _document_row(project_id, base_id, name=f"doc-{document_id.hex[:6]}")
+                row.id = document_id
+                row.doc_metadata = {"部门": "工程"}
+                session.add(row)
+
+        governance = harness.factory()
+        rename: asyncio.Task | None = None
+        try:
+            # Batch governance's first lock: the smaller UUID.
+            await governance.execute(select(KnowledgeDocumentRow.id).where(KnowledgeDocumentRow.id == first_id).with_for_update())
+            rename = asyncio.create_task(harness.service.rename_metadata_field(project_id, created.id, name="部门2"))
+            for _ in range(200):
+                async with harness.factory() as watch:
+                    blocked = await watch.scalar(text("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%knowledge_documents%'"))
+                if blocked:
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                pytest.fail("rename never queued behind the held document row")
+            # Batch governance's second lock: the larger UUID. With opposite
+            # lock orders this is the deadlock edge; with the unified order it
+            # is granted immediately because the rename holds no document row.
+            await governance.execute(select(KnowledgeDocumentRow.id).where(KnowledgeDocumentRow.id == second_id).with_for_update())
+            await governance.rollback()
+        finally:
+            await governance.close()
+
+        renamed = await asyncio.wait_for(rename, timeout=15)
+        assert renamed.name == "部门2"
+        for document_id in (first_id, second_id):
+            assert await _doc_metadata(harness, document_id) == {"部门2": "工程"}
+    finally:
+        await harness.engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # HTTP contract for the K4 routes
 # ---------------------------------------------------------------------------
 
@@ -460,6 +865,27 @@ class _FakeModule:
         applied = {key: value for key, value in values.items() if value is not None}
         return _document_view(doc_metadata=applied)
 
+    async def list_filter_fields(self, project_id, base_ids=None, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
+        self._record("filter_fields", (project_id, base_ids))
+        from actweave_knowledge import KnowledgeBaseFilterFields, KnowledgeFilterFieldView
+
+        return [
+            KnowledgeBaseFilterFields(
+                knowledge_base_id=_BASE_ID,
+                fields=(
+                    KnowledgeFilterFieldView(kind="builtin", name="document_name", field_type="string", operators=("eq", "contains"), writable=False),
+                    KnowledgeFilterFieldView(kind="custom", name="部门", field_type="string", operators=("eq", "contains"), writable=True),
+                ),
+            )
+        ]
+
+    async def set_documents_metadata(self, project_id, base_id, patch, *, authority):  # noqa: ANN001
+        assert authority.project_id == project_id
+        self._record("batch_metadata", (project_id, base_id, patch))
+        applied = {key: value for key, value in patch.values.items() if value is not None}
+        return [_document_view(id=document_id, doc_metadata=applied) for document_id in patch.document_ids]
+
 
 def _app(module: _FakeModule) -> FastAPI:
     app = FastAPI()
@@ -543,3 +969,76 @@ async def test_http_metadata_routes_reject_bad_bodies_and_map_package_errors() -
         assert missing.status_code == 404
         assert missing.json()["detail"]["code"] == KNOWLEDGE_NOT_FOUND
         assert missing.json()["detail"]["request_id"] == _REQUEST_ID
+
+
+@pytest.mark.asyncio
+async def test_http_filter_fields_round_trips_the_discovery_view() -> None:
+    module = _FakeModule()
+    async with _client(_app(module)) as client:
+        everything = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/filter-fields")
+        narrowed = await client.get(
+            f"/api/projects/{_PROJECT_ID}/knowledge/filter-fields",
+            params={"base_ids": [str(_BASE_ID)]},
+        )
+
+    assert everything.status_code == 200
+    assert everything.json() == {
+        "bases": [
+            {
+                "knowledge_base_id": str(_BASE_ID),
+                "fields": [
+                    {"kind": "builtin", "name": "document_name", "field_type": "string", "operators": ["eq", "contains"], "writable": False},
+                    {"kind": "custom", "name": "部门", "field_type": "string", "operators": ["eq", "contains"], "writable": True},
+                ],
+            }
+        ],
+        "request_id": _REQUEST_ID,
+    }
+    assert narrowed.status_code == 200
+    assert [verb for verb, _payload in module.calls] == ["filter_fields", "filter_fields"]
+    assert module.calls[0][1] == (_PROJECT_ID, None)
+    assert module.calls[1][1] == (_PROJECT_ID, [_BASE_ID])
+
+
+@pytest.mark.asyncio
+async def test_http_batch_metadata_patch_round_trips_and_maps_errors() -> None:
+    from actweave_knowledge import KNOWLEDGE_INVALID_REQUEST as INVALID
+
+    module = _FakeModule()
+    second_id = uuid.uuid4()
+    async with _client(_app(module)) as client:
+        applied = await client.patch(
+            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/documents/metadata",
+            json={
+                "document_ids": [str(_DOCUMENT_ID), str(second_id)],
+                "values": {"部门": "工程", "year": None},
+            },
+        )
+        bad_body = await client.patch(
+            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/documents/metadata",
+            json={"document_ids": [str(_DOCUMENT_ID)], "values": {"部门": ["列表"]}},
+        )
+
+        module.error = KnowledgeError(INVALID, "uploaded_at 是只读内建字段，不能通过元数据赋值写入")
+        builtin_write = await client.patch(
+            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/documents/metadata",
+            json={"document_ids": [str(_DOCUMENT_ID)], "values": {"uploaded_at": 1}},
+        )
+
+    assert applied.status_code == 200
+    items = applied.json()["items"]
+    assert [item["id"] for item in items] == [str(_DOCUMENT_ID), str(second_id)]
+    assert items[0]["doc_metadata"] == {"部门": "工程"}
+    assert applied.json()["request_id"] == _REQUEST_ID
+    # The package DTO arrives intact: tuple ids plus the null-clearing key.
+    _, (_, base_id, patch) = module.calls[0]
+    assert base_id == _BASE_ID
+    assert patch.document_ids == (_DOCUMENT_ID, second_id)
+    assert patch.values == {"部门": "工程", "year": None}
+
+    assert bad_body.status_code == 422
+    # Package invalid-request errors map to 422 with the structured detail;
+    # the shape validation 422 above has no such envelope.
+    assert builtin_write.status_code == 422
+    assert builtin_write.json()["detail"]["code"] == INVALID
+    assert "内建" in builtin_write.json()["detail"]["message"]

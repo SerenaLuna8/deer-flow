@@ -130,10 +130,48 @@ async def test_create_then_get_round_trips_the_view(postgres_database_url: str) 
         # K3: new bases carry the schema's retrieval defaults.
         assert created.default_top_k == 4
         assert created.default_score_threshold == 0.2
+        assert created.retrieval_mode == "semantic"
         assert created.delete_error is None
 
         fetched = await harness.service.get_knowledge_base(project_id, created.id)
         assert fetched == created
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retrieval_mode_round_trips_and_validates(postgres_database_url: str) -> None:
+    """T8: hybrid is an explicit per-base choice on create or update."""
+
+    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
+    try:
+        created = await harness.service.create_knowledge_base(
+            project_id,
+            KnowledgeBaseCreate(name="混合库", embedding_model_id=embedding_model_id, retrieval_mode="hybrid"),
+        )
+        assert created.retrieval_mode == "hybrid"
+
+        updated = await harness.service.update_knowledge_base(
+            project_id,
+            created.id,
+            KnowledgeBaseUpdate(retrieval_mode="semantic"),
+        )
+        assert updated.retrieval_mode == "semantic"
+
+        with pytest.raises(KnowledgeError) as bad_create:
+            await harness.service.create_knowledge_base(
+                project_id,
+                KnowledgeBaseCreate(name="非法模式", embedding_model_id=embedding_model_id, retrieval_mode="fancy"),  # type: ignore[arg-type]
+            )
+        assert bad_create.value.code == KNOWLEDGE_INVALID_REQUEST
+
+        with pytest.raises(KnowledgeError) as bad_update:
+            await harness.service.update_knowledge_base(
+                project_id,
+                created.id,
+                KnowledgeBaseUpdate(retrieval_mode="fancy"),  # type: ignore[arg-type]
+            )
+        assert bad_update.value.code == KNOWLEDGE_INVALID_REQUEST
     finally:
         await harness.engine.dispose()
 
@@ -578,7 +616,15 @@ async def test_update_rejects_a_base_that_is_being_deleted(postgres_database_url
 # ---------------------------------------------------------------------------
 
 
-def _seed_document(project_id: uuid.UUID, base_id: uuid.UUID, *, name: str, status: str, version: int = 1) -> KnowledgeDocumentRow:
+def _seed_document(
+    project_id: uuid.UUID,
+    base_id: uuid.UUID,
+    *,
+    name: str,
+    status: str,
+    version: int = 1,
+    published_version: int | None = 1,
+) -> KnowledgeDocumentRow:
     document_id = uuid.uuid4()
     return KnowledgeDocumentRow(
         id=document_id,
@@ -590,6 +636,7 @@ def _seed_document(project_id: uuid.UUID, base_id: uuid.UUID, *, name: str, stat
         size_bytes=10,
         status=status,
         version=version,
+        published_version=published_version,
         chunk_size=1000,
         chunk_overlap=100,
         segment_count=7,
@@ -599,48 +646,81 @@ def _seed_document(project_id: uuid.UUID, base_id: uuid.UUID, *, name: str, stat
 
 
 @pytest.mark.asyncio
-async def test_rebuild_rebinds_the_embedding_model_and_requeues_every_document(postgres_database_url: str) -> None:
-    """Ready/processing/failed documents requeue; uploading/deleting stay put."""
+async def test_rebuild_rebinds_and_queues_reembed_for_initialized_documents(postgres_database_url: str) -> None:
+    """Initialized ready/failed documents queue ``reembed_document`` with
+    their rows and counters intact; a never-published failed document is
+    skipped and listed in the result instead of being silently re-parsed."""
 
     harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
     try:
         created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="重建库", embedding_model_id=embedding_model_id))
         new_embedding_model_id, _ = await seed_registry_models(harness.factory)
         async with harness.factory() as session, session.begin():
-            ready = _seed_document(project_id, created.id, name="ready", status="ready", version=2)
-            processing = _seed_document(project_id, created.id, name="processing", status="processing")
-            failed = _seed_document(project_id, created.id, name="failed", status="failed", version=4)
-            uploading = _seed_document(project_id, created.id, name="uploading", status="uploading")
-            deleting = _seed_document(project_id, created.id, name="deleting", status="deleting", version=3)
-            session.add_all([ready, processing, failed, uploading, deleting])
+            ready = _seed_document(project_id, created.id, name="ready", status="ready", version=2, published_version=2)
+            failed = _seed_document(project_id, created.id, name="failed", status="failed", version=4, published_version=3)
+            never_published = _seed_document(project_id, created.id, name="never", status="failed", published_version=None)
+            session.add_all([ready, failed, never_published])
 
-        view = await harness.service.rebuild_knowledge_base(project_id, created.id, embedding_model_id=new_embedding_model_id)
+        result = await harness.service.rebuild_knowledge_base(project_id, created.id, embedding_model_id=new_embedding_model_id)
 
-        assert view.embedding_model_id == new_embedding_model_id
+        assert result.base.embedding_model_id == new_embedding_model_id
+        assert result.accepted_document_count == 2
+        assert result.skipped_document_ids == (never_published.id,)
         async with harness.factory() as session:
             documents = {row.name: row for row in (await session.scalars(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == created.id))).all()}
-            tasks = (await session.scalars(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind == "ingest_document", KnowledgeTaskRow.project_id == project_id))).all()
+            tasks = (await session.scalars(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind == "reembed_document", KnowledgeTaskRow.project_id == project_id))).all()
 
-        for name, old_version in (("ready", 2), ("processing", 1), ("failed", 4)):
+        for name, old_version in (("ready", 2), ("failed", 4)):
             document = documents[name]
             assert document.status == "queued", name
             assert document.version == old_version + 1, name
-            assert document.segment_count == 0
-            assert document.word_count == 0
+            # Content rows survive a re-embed; the counters keep describing them.
+            assert document.segment_count == 7
+            assert document.word_count == 1200
             assert document.error_message is None
-        assert documents["uploading"].status == "uploading"
-        assert documents["uploading"].version == 1
-        assert documents["uploading"].segment_count == 7
-        assert documents["deleting"].status == "deleting"
-        assert documents["deleting"].version == 3
+        assert documents["never"].status == "failed"
+        assert documents["never"].version == 1
+        assert documents["never"].error_message == "旧的失败原因"
 
         queued = {(task.resource_id, task.target_version) for task in tasks}
         assert queued == {
             (documents["ready"].id, 3),
-            (documents["processing"].id, 2),
             (documents["failed"].id, 5),
         }
         assert all(task.status == "queued" for task in tasks)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_rejects_in_flight_documents(postgres_database_url: str) -> None:
+    """Uploading/queued/processing/deleting documents reject the rebuild:
+    changing the vector space must not race an upload or another build."""
+
+    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
+    try:
+        for blocking_status in ("uploading", "queued", "processing", "deleting"):
+            created = await harness.service.create_knowledge_base(
+                project_id,
+                KnowledgeBaseCreate(name=f"拒绝-{blocking_status}", embedding_model_id=embedding_model_id),
+            )
+            async with harness.factory() as session, session.begin():
+                session.add(_seed_document(project_id, created.id, name="ready", status="ready"))
+                session.add(
+                    _seed_document(
+                        project_id,
+                        created.id,
+                        name=blocking_status,
+                        status=blocking_status,
+                        published_version=None,
+                    )
+                )
+            with pytest.raises(KnowledgeError) as error:
+                await harness.service.rebuild_knowledge_base(project_id, created.id, embedding_model_id=embedding_model_id)
+            assert error.value.code == KNOWLEDGE_INVALID_REQUEST, blocking_status
+        async with harness.factory() as session:
+            tasks = (await session.scalars(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind.in_(("ingest_document", "reembed_document"))))).all()
+        assert tasks == []
     finally:
         await harness.engine.dispose()
 
@@ -653,9 +733,11 @@ async def test_rebuild_with_the_same_model_is_a_plain_re_embed(postgres_database
         async with harness.factory() as session, session.begin():
             session.add(_seed_document(project_id, created.id, name="doc", status="ready"))
 
-        view = await harness.service.rebuild_knowledge_base(project_id, created.id, embedding_model_id=embedding_model_id)
+        result = await harness.service.rebuild_knowledge_base(project_id, created.id, embedding_model_id=embedding_model_id)
 
-        assert view.embedding_model_id == embedding_model_id
+        assert result.base.embedding_model_id == embedding_model_id
+        assert result.accepted_document_count == 1
+        assert result.skipped_document_ids == ()
         async with harness.factory() as session:
             document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == created.id))
             assert document is not None
@@ -703,7 +785,7 @@ async def test_rebuild_rejects_missing_bases_bad_models_and_deleting_bases(postg
 
         # No rejected call left a task behind.
         async with harness.factory() as session:
-            tasks = (await session.scalars(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind == "ingest_document"))).all()
+            tasks = (await session.scalars(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind.in_(("ingest_document", "reembed_document"))))).all()
         assert tasks == []
     finally:
         await harness.engine.dispose()

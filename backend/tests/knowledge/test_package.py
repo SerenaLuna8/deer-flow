@@ -37,6 +37,38 @@ PUBLIC_EXPORTS = [
     "KnowledgeSearchResult",
     "KnowledgeCitation",
     "KnowledgeHealth",
+    # M10 T1: hit / diagnostics / detail / reprocessing / metadata contracts.
+    "KnowledgeSearchHit",
+    "KnowledgeMatchedChild",
+    "KnowledgeSearchDiagnostics",
+    "KnowledgeHitDiagnostics",
+    "KnowledgeRouteCounts",
+    "KnowledgeSearchTimings",
+    "KnowledgeSegmentDetail",
+    "KnowledgeSegmentChildView",
+    "KnowledgeReparseRequest",
+    "KnowledgeReparsePreview",
+    "KnowledgeTaskProgress",
+    # M10 T2: base-level re-embed admission outcome.
+    "KnowledgeRebuildResult",
+    "KnowledgeFilterFieldView",
+    "KnowledgeBaseFilterFields",
+    "KnowledgeMetadataBatchPatch",
+    "KnowledgeScoreKind",
+    "KnowledgeRetrievalMode",
+    "KnowledgeRecallRoute",
+    "KnowledgeEmptyReason",
+    "KnowledgeContentState",
+    "KnowledgeTaskStage",
+    "KnowledgeFilterFieldKind",
+    "KNOWLEDGE_GLOBAL_PARENT_CANDIDATE_BUDGET",
+    "KNOWLEDGE_MAX_MATCHED_CHILDREN",
+    "KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE",
+    "KNOWLEDGE_LEXICAL_VERSION",
+    "KNOWLEDGE_STRATEGY_VERSION",
+    "KNOWLEDGE_BUILTIN_FILTER_FIELDS",
+    "KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS",
+    "KNOWLEDGE_MAX_BATCH_METADATA_FIELDS",
 ]
 
 
@@ -248,6 +280,128 @@ def test_search_request_is_frozen_and_defaults_are_unset() -> None:
     assert request.score_threshold is None
     with pytest.raises(Exception):
         request.query = "changed"  # type: ignore[misc]
+
+
+def _sample_hit(score: float = 0.9):
+    from actweave_knowledge import KnowledgeCitation, KnowledgeSearchHit
+
+    citation = KnowledgeCitation(
+        knowledge_base_id=uuid4(),
+        knowledge_base_name="产品手册",
+        document_id=uuid4(),
+        document_name="发布说明.pdf",
+        segment_id=uuid4(),
+        segment_position=1,
+        snippet="短摘要",
+        score=score,
+        document_version=3,
+        content_digest="a" * 64,
+        score_kind="rerank",
+    )
+    return KnowledgeSearchHit(
+        citation=citation,
+        passage="完整的父分段正文，包含第 320 字符之后的答案内容。",
+        document_version=3,
+        content_digest="a" * 64,
+        local_score=score,
+        local_score_kind="rerank",
+        score_domain=f"rerank:{citation.knowledge_base_id}",
+        ranking_method="rerank",
+        ranking_score=score,
+    )
+
+
+class TestM10ContractShapes:
+    """T1 gates: hits are the single result source and new DTOs hold shape."""
+
+    def test_search_result_derives_citations_from_hits_only(self) -> None:
+        from actweave_knowledge import KnowledgeSearchResult
+
+        hit = _sample_hit()
+        result = KnowledgeSearchResult(hits=(hit,))
+        assert result.citations == (hit.citation,)
+        with pytest.raises(TypeError):
+            KnowledgeSearchResult(citations=(hit.citation,))  # type: ignore[call-arg]
+
+    def test_citation_keeps_optional_provenance_for_old_messages(self) -> None:
+        from actweave_knowledge import KnowledgeCitation
+
+        legacy = KnowledgeCitation(
+            knowledge_base_id=uuid4(),
+            knowledge_base_name="旧库",
+            document_id=uuid4(),
+            document_name="旧文档",
+            segment_id=uuid4(),
+            segment_position=2,
+            snippet="旧摘要",
+            score=0.5,
+        )
+        assert legacy.document_version is None
+        assert legacy.content_digest is None
+        assert legacy.score_kind is None
+
+    def test_metadata_filter_defaults_to_custom_field_kind(self) -> None:
+        from actweave_knowledge import KnowledgeMetadataFilter
+
+        item = KnowledgeMetadataFilter(name="部门", operator="eq", value="工程")
+        assert item.field_kind == "custom"
+        builtin = KnowledgeMetadataFilter(
+            name="document_name",
+            operator="contains",
+            value="发布",
+            field_kind="builtin",
+        )
+        assert builtin.field_kind == "builtin"
+
+    def test_base_dtos_carry_retrieval_mode_with_semantic_default(self) -> None:
+        from actweave_knowledge import KnowledgeBaseCreate, KnowledgeBaseUpdate
+
+        create = KnowledgeBaseCreate(name="库", embedding_model_id=uuid4())
+        assert create.retrieval_mode == "semantic"
+        update = KnowledgeBaseUpdate()
+        assert update.retrieval_mode is None
+
+    def test_search_request_supports_debug_and_one_shot_mode_override(self) -> None:
+        from actweave_knowledge import KnowledgeSearchRequest
+
+        request = KnowledgeSearchRequest(
+            project_id=uuid4(),
+            owner_user_id=uuid4(),
+            query="混合检索",
+        )
+        assert request.retrieval_mode is None
+        assert request.debug is False
+
+    def test_reparse_request_freezes_expected_version_and_chunk_settings(self) -> None:
+        from actweave_knowledge import KnowledgeReparseRequest
+
+        request = KnowledgeReparseRequest(expected_version=4)
+        assert request.expected_version == 4
+        assert request.chunking_mode == "general"
+        assert request.chunk_size == 1000
+
+    def test_task_progress_projection_never_carries_execution_material(self) -> None:
+        import dataclasses
+
+        from actweave_knowledge import KnowledgeTaskProgress
+
+        names = {f.name for f in dataclasses.fields(KnowledgeTaskProgress)}
+        assert {"stage", "completed_units", "total_units", "attempt_count"} <= names
+        assert not names & {"claim_token", "lease_until", "storage_key"}
+
+    def test_frozen_constants_match_the_t0_baseline_fixture(self) -> None:
+        import json as json_module
+
+        import actweave_knowledge as pkg
+
+        baseline = json_module.loads((Path(__file__).parent / "fixtures" / "m10_contract_baseline.json").read_text(encoding="utf-8"))
+        assert pkg.KNOWLEDGE_GLOBAL_PARENT_CANDIDATE_BUDGET == baseline["candidate_budget"]["global_parent_budget"]
+        assert pkg.KNOWLEDGE_MAX_MATCHED_CHILDREN == baseline["child_match_projection"]["max_matched_children_per_hit"]
+        assert pkg.KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE == baseline["segment_detail"]["child_page_size_max"]
+        assert pkg.KNOWLEDGE_LEXICAL_VERSION == baseline["lexical_v1"]["lexical_version"]
+        assert tuple(baseline["metadata_contract"]["builtin_fields"]) == pkg.KNOWLEDGE_BUILTIN_FILTER_FIELDS
+        assert pkg.KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS == baseline["metadata_contract"]["batch_limits"]["max_documents"]
+        assert pkg.KNOWLEDGE_MAX_BATCH_METADATA_FIELDS == baseline["metadata_contract"]["batch_limits"]["max_fields"]
 
 
 def _stub_module_with_health(*, storage_ok: bool):

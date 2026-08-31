@@ -5,6 +5,14 @@ import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -15,20 +23,28 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/core/i18n/hooks";
+import { isKnowledgeConflictError } from "@/core/knowledge/api";
 import {
   useKnowledgeBaseQueries,
   useKnowledgeMetadataFields,
   useKnowledgeSearch,
+  useKnowledgeSearchHitDetail,
 } from "@/core/knowledge/hooks";
 import { formatKnowledgeSourcePosition } from "@/core/knowledge/source-position";
 import type {
   KnowledgeBaseItem,
+  KnowledgeHitDiagnostics,
   KnowledgeMetadataFieldItem,
   KnowledgeMetadataFilterInput,
   KnowledgeMetadataFilterOperator,
+  KnowledgeRetrievalMode,
+  KnowledgeSearchCitation,
+  KnowledgeSearchDiagnostics,
   KnowledgeSearchInput,
+  KnowledgeSearchResponse,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
+import { cn } from "@/lib/utils";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
 
@@ -71,9 +87,12 @@ function filterDraftValue(
 export function KnowledgeSearchPanel({
   scope,
   base,
+  onLocateSegment,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
+  /** Jumps to the documents view pinned to this segment. */
+  onLocateSegment?: (documentId: string, segmentId: string) => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
@@ -83,16 +102,32 @@ export function KnowledgeSearchPanel({
   // Empty inputs defer to the base defaults resolved server-side.
   const [topK, setTopK] = useState("");
   const [threshold, setThreshold] = useState("");
+  const [retrievalMode, setRetrievalMode] = useState<
+    "default" | KnowledgeRetrievalMode
+  >("default");
   const [filters, setFilters] = useState<FilterDraft[]>([]);
   const [nextFilterKey, setNextFilterKey] = useState(1);
+  /** Last submitted input, kept so an error can be retried verbatim. */
+  const [lastInput, setLastInput] = useState<KnowledgeSearchInput | null>(null);
+  const [openHit, setOpenHit] = useState<KnowledgeSearchCitation | null>(null);
 
-  // Rebinding or clearing the reranker changes what the scores mean; stale
-  // results must not sit next to the new setting. Search again to compare.
-  const rerankerBinding = base.reranker_model_id ?? null;
+  // Any change to what the scores mean — reranker or embedding rebind, mode
+  // or default changes, rebuild/reparse generations — must not leave stale
+  // results (or an open detail) next to the new configuration.
+  const baseConfigKey = [
+    base.embedding_model_id,
+    base.reranker_model_id ?? "",
+    base.retrieval_mode,
+    base.default_top_k,
+    base.default_score_threshold,
+    base.updated_at,
+  ].join("|");
   const resetSearch = search.reset;
   useEffect(() => {
     resetSearch();
-  }, [rerankerBinding, resetSearch]);
+    setLastInput(null);
+    setOpenHit(null);
+  }, [baseConfigKey, resetSearch]);
 
   const parsedTopK = topK.trim() === "" ? undefined : Number.parseInt(topK, 10);
   const topKValid =
@@ -149,15 +184,19 @@ export function KnowledgeSearchPanel({
           {labels.search.description}
         </p>
       </div>
+      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
       <form
         className="grid gap-4"
         onSubmit={(event) => {
           event.preventDefault();
           if (!query.trim() || !topKValid || !thresholdValid || !filtersValid)
             return;
+          // The retrieval test always asks for the bounded safe diagnostics;
+          // they exist only in this response and are never logged.
           const input: KnowledgeSearchInput = {
             query: query.trim(),
             knowledge_base_ids: [base.id],
+            debug: true,
           };
           if (parsedTopK !== undefined) {
             input.top_k = parsedTopK;
@@ -165,9 +204,14 @@ export function KnowledgeSearchPanel({
           if (parsedThreshold !== undefined) {
             input.score_threshold = parsedThreshold;
           }
+          if (retrievalMode !== "default") {
+            input.retrieval_mode = retrievalMode;
+          }
           if (filterInputs.length > 0) {
             input.metadata_filters = filterInputs;
           }
+          setLastInput(input);
+          setOpenHit(null);
           search.mutate(input);
         }}
       >
@@ -212,6 +256,32 @@ export function KnowledgeSearchPanel({
             </span>
           </label>
         </div>
+        <label className="grid gap-1.5 text-sm">
+          <span className="font-medium">
+            {labels.search.retrievalModeLabel}
+          </span>
+          <Select
+            value={retrievalMode}
+            onValueChange={(value) =>
+              setRetrievalMode(value as "default" | KnowledgeRetrievalMode)
+            }
+          >
+            <SelectTrigger aria-label={labels.search.retrievalModeLabel}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="default">
+                {labels.search.retrievalModes.default}
+              </SelectItem>
+              <SelectItem value="semantic">
+                {labels.search.retrievalModes.semantic}
+              </SelectItem>
+              <SelectItem value="hybrid">
+                {labels.search.retrievalModes.hybrid}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </label>
         <fieldset className="grid gap-2 text-sm">
           <legend className="font-medium">{labels.search.filtersLabel}</legend>
           {filters.length > 0 ? (
@@ -344,73 +414,485 @@ export function KnowledgeSearchPanel({
         </div>
       </form>
 
-      {search.error ? (
-        <p role="alert" className="text-destructive text-sm">
-          {knowledgeErrorMessage(search.error, labels.errors)}
-        </p>
-      ) : null}
+      <div
+        className="min-w-0 space-y-3"
+        data-testid="knowledge-search-outcome"
+      >
+        {search.error ? (
+          <div
+            role="alert"
+            data-testid="knowledge-search-error"
+            className="border-destructive/40 bg-destructive/5 space-y-3 rounded-xl border px-4 py-4"
+          >
+            <p className="text-destructive text-sm">
+              {knowledgeErrorMessage(search.error, labels.errors)}
+            </p>
+            {lastInput ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={search.isPending}
+                onClick={() => search.mutate(lastInput)}
+              >
+                {labels.search.retry}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
 
-      {search.data ? (
-        search.data.citations.length === 0 ? (
+        {search.isPending ? (
+          <Skeleton aria-hidden className="h-40 rounded-xl" />
+        ) : null}
+
+        {!search.isPending && search.error === null && !search.data ? (
           <p
             className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm"
-            data-testid="knowledge-search-empty"
+            data-testid="knowledge-search-never"
           >
-            {labels.search.empty}
+            {labels.search.neverSearched}
           </p>
-        ) : (
-          <section
-            aria-label={labels.search.resultsTitle(
-              search.data.citations.length,
-            )}
-            className="space-y-2"
-          >
-            <h3 className="text-sm font-semibold">
-              {labels.search.resultsTitle(search.data.citations.length)}
-            </h3>
-            <ol className="grid gap-2" data-testid="knowledge-search-results">
-              {search.data.citations.map((citation) => {
-                const position = formatKnowledgeSourcePosition(
-                  citation.source_position,
-                  labels.sourcePosition,
-                );
-                return (
-                  <li
-                    key={citation.segment_id}
-                    className="border-border rounded-xl border p-4"
-                  >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="text-foreground truncate text-sm font-medium">
-                        {citation.document_name}
-                      </span>
-                      <span className="text-muted-foreground truncate text-xs">
-                        {citation.knowledge_base_name}
-                      </span>
-                      <Badge variant="secondary" className="ml-auto shrink-0">
-                        {labels.search.score(citation.score)}
-                      </Badge>
-                    </div>
-                    <div className="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-xs">
-                      <span>
-                        {labels.citations.segmentPosition(
-                          citation.segment_position,
-                        )}
-                      </span>
-                      {position ? <span>· {position}</span> : null}
-                    </div>
-                    <p className="text-muted-foreground mt-2 text-sm leading-6 whitespace-pre-wrap">
-                      {citation.snippet}
-                    </p>
-                  </li>
-                );
-              })}
-            </ol>
-          </section>
-        )
+        ) : null}
+
+        {search.data && !search.isPending ? (
+          <SearchOutcome
+            data={search.data}
+            onOpenHit={setOpenHit}
+          />
+        ) : null}
+      </div>
+      </div>
+
+      {openHit ? (
+        <SearchHitDetailDialog
+          scope={scope}
+          baseId={base.id}
+          citation={openHit}
+          hitDiagnostics={search.data?.diagnostics?.hit_diagnostics.find(
+            (hit) => hit.segment_id === openHit.segment_id,
+          )}
+          onClose={() => setOpenHit(null)}
+          onLocate={
+            onLocateSegment
+              ? (documentId, segmentId) => {
+                  setOpenHit(null);
+                  onLocateSegment(documentId, segmentId);
+                }
+              : undefined
+          }
+        />
       ) : null}
 
       <RecentQueriesSection scope={scope} base={base} onPick={setQuery} />
     </section>
+  );
+}
+
+/** Results, per-hit provenance, and the collapsed safe diagnostics. */
+function SearchOutcome({
+  data,
+  onOpenHit,
+}: {
+  data: KnowledgeSearchResponse;
+  onOpenHit: (citation: KnowledgeSearchCitation) => void;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge;
+  const diagnostics = data.diagnostics;
+  const hitBySegment = new Map(
+    (diagnostics?.hit_diagnostics ?? []).map((hit) => [hit.segment_id, hit]),
+  );
+
+  if (data.citations.length === 0) {
+    const reason = diagnostics?.empty_reason ?? null;
+    return (
+      <p
+        className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm"
+        data-testid="knowledge-search-empty"
+      >
+        {reason ? labels.search.emptyReasons[reason] : labels.search.empty}
+      </p>
+    );
+  }
+
+  return (
+    <section
+      aria-label={labels.search.resultsTitle(data.citations.length)}
+      className="space-y-3"
+    >
+      <h3 className="text-sm font-semibold">
+        {labels.search.resultsTitle(data.citations.length)}
+      </h3>
+      <ol className="grid gap-2" data-testid="knowledge-search-results">
+        {data.citations.map((citation, index) => {
+          const position = formatKnowledgeSourcePosition(
+            citation.source_position,
+            labels.sourcePosition,
+          );
+          const hit = hitBySegment.get(citation.segment_id);
+          return (
+            <li
+              key={citation.segment_id}
+              className="border-border rounded-xl border p-4"
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="text-muted-foreground text-xs font-medium tabular-nums">
+                  #{index + 1}
+                </span>
+                <span className="text-foreground truncate text-sm font-medium">
+                  {citation.document_name}
+                </span>
+                <span className="text-muted-foreground truncate text-xs">
+                  {citation.knowledge_base_name}
+                </span>
+                <Badge variant="secondary" className="ml-auto shrink-0">
+                  {labels.search.score(citation.score)}
+                </Badge>
+                <Badge variant="outline" className="shrink-0">
+                  {labels.search.scoreKinds[citation.score_kind ?? "unknown"]}
+                </Badge>
+              </div>
+              <div className="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-xs">
+                <span>
+                  {labels.citations.segmentPosition(citation.segment_position)}
+                </span>
+                {position ? <span>· {position}</span> : null}
+              </div>
+              <p className="text-muted-foreground mt-2 text-sm leading-6 whitespace-pre-wrap">
+                {citation.snippet}
+              </p>
+              <div className="mt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onOpenHit(citation)}
+                >
+                  {labels.search.openDetail(citation.segment_position)}
+                </Button>
+              </div>
+              {hit ? (
+                <details className="mt-2 text-xs">
+                  <summary className="text-muted-foreground cursor-pointer">
+                    {labels.search.hitDiagnosticsSummary}
+                  </summary>
+                  <div className="text-muted-foreground mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
+                    <span>
+                      {labels.search.localScore(hit.local_score)} ·{" "}
+                      {labels.search.scoreKinds[hit.local_score_kind]}
+                    </span>
+                    <span>
+                      {labels.search.rankingScore(hit.ranking_score)} ·{" "}
+                      {labels.search.scoreKinds[hit.ranking_method]}
+                    </span>
+                    {hit.matched_children.map((child) => (
+                      <span key={child.child_id} className="tabular-nums">
+                        C-{child.position} ·{" "}
+                        {labels.search.detail.routes[child.route]} ·{" "}
+                        {child.score.toFixed(3)}
+                      </span>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
+            </li>
+          );
+        })}
+      </ol>
+      {diagnostics ? <SearchDiagnosticsDisclosure diagnostics={diagnostics} /> : null}
+    </section>
+  );
+}
+
+/** The bounded safe diagnostics for this one response, collapsed by default. */
+function SearchDiagnosticsDisclosure({
+  diagnostics,
+}: {
+  diagnostics: KnowledgeSearchDiagnostics;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge.search.diagnostics;
+  const rows: Array<[string, string]> = [
+    [labels.strategyVersion, diagnostics.strategy_version],
+    [labels.retrievalMode, diagnostics.retrieval_mode],
+    [labels.targetBases, String(diagnostics.target_base_count)],
+    [labels.routeBudget, String(diagnostics.per_base_route_budget)],
+    [labels.models, diagnostics.model_ids.join(", ") || "—"],
+    [labels.semanticCandidates, String(diagnostics.counts.semantic_candidates)],
+    [labels.lexicalCandidates, String(diagnostics.counts.lexical_candidates)],
+    [
+      labels.parentsDeduplicated,
+      String(diagnostics.counts.parents_deduplicated),
+    ],
+    [labels.thresholdFiltered, String(diagnostics.counts.threshold_filtered)],
+    [labels.staleFiltered, String(diagnostics.counts.stale_filtered)],
+    [labels.returned, String(diagnostics.counts.returned)],
+    [
+      labels.embeddingMs,
+      `${diagnostics.timings.query_embedding_ms.toFixed(0)} ms`,
+    ],
+    [labels.recallMs, `${diagnostics.timings.recall_ms.toFixed(0)} ms`],
+    [labels.rerankMs, `${diagnostics.timings.rerank_ms.toFixed(0)} ms`],
+    [
+      labels.finalValidationMs,
+      `${diagnostics.timings.final_validation_ms.toFixed(0)} ms`,
+    ],
+  ];
+  return (
+    <details
+      className="rounded-xl border px-4 py-3"
+      data-testid="knowledge-search-diagnostics"
+    >
+      <summary className="cursor-pointer text-sm font-medium">
+        {labels.title}
+      </summary>
+      {diagnostics.heterogeneous_without_lexical_evidence ? (
+        <p
+          role="note"
+          className="mt-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-300/30 dark:bg-amber-950/40 dark:text-amber-200"
+        >
+          {labels.heterogeneousWarning}
+        </p>
+      ) : null}
+      <dl className="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+        {rows.map(([term, value]) => (
+          <div key={term} className="flex items-baseline justify-between gap-3">
+            <dt className="text-muted-foreground">{term}</dt>
+            <dd className="truncate text-right font-mono">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
+/** Mirrors the backend's child page cap on the segment detail endpoint. */
+const SEGMENT_CHILD_PAGE_SIZE = 50;
+
+/**
+ * Full original segment for one hit, pinned to the version/digest the score
+ * was computed for. A conflict means the document moved on — the dialog asks
+ * for a fresh search instead of showing new text under an old score. Matched
+ * children are highlighted strictly by the identities this search returned.
+ */
+function SearchHitDetailDialog({
+  scope,
+  baseId,
+  citation,
+  hitDiagnostics,
+  onClose,
+  onLocate,
+}: {
+  scope: ProjectClientScope;
+  baseId: string;
+  citation: KnowledgeSearchCitation;
+  hitDiagnostics: KnowledgeHitDiagnostics | undefined;
+  onClose: () => void;
+  onLocate?: (documentId: string, segmentId: string) => void;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge;
+  const detailLabels = labels.search.detail;
+  const [childPage, setChildPage] = useState(1);
+  const detail = useKnowledgeSearchHitDetail(scope, {
+    baseId,
+    documentId: citation.document_id,
+    segmentId: citation.segment_id,
+    expectedDocumentVersion: citation.document_version,
+    expectedContentDigest: citation.content_digest,
+    childPage,
+  });
+  const conflict =
+    detail.error !== null && isKnowledgeConflictError(detail.error);
+  const matchedById = new Map(
+    (hitDiagnostics?.matched_children ?? []).map((child) => [
+      child.child_id,
+      child,
+    ]),
+  );
+  const data = detail.data;
+  const childPageCount = data
+    ? Math.max(1, Math.ceil(data.children_total / SEGMENT_CHILD_PAGE_SIZE))
+    : 1;
+  const sourcePosition = data
+    ? formatKnowledgeSourcePosition(
+        data.segment.source_position,
+        labels.sourcePosition,
+      )
+    : null;
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent className="flex max-h-[85vh] flex-col gap-4 overflow-hidden sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{detailLabels.title}</DialogTitle>
+          <DialogDescription className="truncate">
+            {citation.document_name} ·{" "}
+            {labels.citations.segmentPosition(citation.segment_position)}
+          </DialogDescription>
+        </DialogHeader>
+        <div
+          className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1"
+          aria-busy={detail.isLoading}
+          data-testid="knowledge-hit-detail"
+        >
+          {conflict ? (
+            <p
+              role="alert"
+              data-testid="knowledge-detail-conflict"
+              className="text-destructive text-sm"
+            >
+              {detailLabels.conflict}
+            </p>
+          ) : detail.error ? (
+            <p role="alert" className="text-destructive text-sm">
+              {knowledgeErrorMessage(detail.error, labels.errors)}
+            </p>
+          ) : data === undefined ? (
+            <Skeleton className="h-40 rounded-xl" />
+          ) : (
+            <>
+              {data.content_state === "stale" ? (
+                <p
+                  role="alert"
+                  className="rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-300/30 dark:bg-amber-950/40 dark:text-amber-200"
+                >
+                  {detailLabels.staleContent}
+                </p>
+              ) : null}
+              <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
+                {!data.segment.enabled ? (
+                  <Badge variant="outline">{detailLabels.disabledBadge}</Badge>
+                ) : null}
+                <span>{labels.segments.wordCount(data.segment.word_count)}</span>
+                {sourcePosition ? <span>· {sourcePosition}</span> : null}
+              </div>
+              <p
+                className="text-sm leading-6 break-words whitespace-pre-wrap"
+                data-testid="knowledge-detail-content"
+              >
+                {data.segment.content}
+              </p>
+              {hitDiagnostics && hitDiagnostics.matched_children.length > 0 ? (
+                <section
+                  aria-label={detailLabels.matchedChildrenTitle}
+                  className="space-y-1.5"
+                >
+                  <h4 className="text-xs font-semibold">
+                    {detailLabels.matchedChildrenTitle}
+                  </h4>
+                  <ul className="text-muted-foreground grid gap-1 text-xs">
+                    {hitDiagnostics.matched_children.map((child) => (
+                      <li key={child.child_id} className="tabular-nums">
+                        C-{child.position} ·{" "}
+                        {detailLabels.routes[child.route]} ·{" "}
+                        {child.score.toFixed(3)}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+              {data.children_total > 0 ? (
+                <section
+                  aria-label={detailLabels.childrenTitle(data.children_total)}
+                  className="space-y-1.5"
+                >
+                  <h4 className="text-xs font-semibold">
+                    {detailLabels.childrenTitle(data.children_total)}
+                  </h4>
+                  <ol
+                    className="grid gap-1.5"
+                    data-testid="knowledge-detail-children"
+                  >
+                    {data.children.map((child) => {
+                      const matched = matchedById.get(child.id);
+                      return (
+                        <li
+                          key={child.id}
+                          className={cn(
+                            "rounded-lg border px-3 py-2",
+                            matched &&
+                              "border-selection bg-selection-subtle/40",
+                          )}
+                        >
+                          <p className="text-muted-foreground flex flex-wrap items-center gap-2 text-[10px] font-medium tabular-nums">
+                            C-{child.position}
+                            {matched ? (
+                              <Badge variant="secondary" className="text-[10px]">
+                                {detailLabels.matchedBadge} ·{" "}
+                                {detailLabels.routes[matched.route]} ·{" "}
+                                {matched.score.toFixed(3)}
+                              </Badge>
+                            ) : null}
+                          </p>
+                          <p className="mt-0.5 text-xs break-words whitespace-pre-wrap">
+                            {child.content}
+                          </p>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  {childPageCount > 1 ? (
+                    <div className="flex items-center justify-between gap-2 pt-1 text-xs">
+                      <span className="text-muted-foreground tabular-nums">
+                        {labels.segments.pageInfo(
+                          data.child_page,
+                          childPageCount,
+                          data.children_total,
+                        )}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={childPage <= 1}
+                          onClick={() => setChildPage((page) => page - 1)}
+                        >
+                          {labels.segments.previousPage}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={childPage >= childPageCount}
+                          onClick={() => setChildPage((page) => page + 1)}
+                        >
+                          {labels.segments.nextPage}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+            </>
+          )}
+        </div>
+        <DialogFooter className="gap-2 sm:justify-between">
+          {onLocate ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() =>
+                onLocate(citation.document_id, citation.segment_id)
+              }
+            >
+              {detailLabels.locate}
+            </Button>
+          ) : (
+            <span aria-hidden />
+          )}
+          <Button type="button" variant="ghost" onClick={onClose}>
+            {labels.segments.close}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

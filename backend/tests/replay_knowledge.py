@@ -221,6 +221,7 @@ class KnowledgeReplayState:
     embedding_calls: int = 0
     rerank_calls: int = 0
     embedding_failures_remaining: int = 0
+    rerank_failures_remaining: int = 0
 
     def snapshot(self) -> dict[str, int]:
         with self.lock:
@@ -228,6 +229,7 @@ class KnowledgeReplayState:
                 "embedding_calls": self.embedding_calls,
                 "rerank_calls": self.rerank_calls,
                 "embedding_failures_remaining": self.embedding_failures_remaining,
+                "rerank_failures_remaining": self.rerank_failures_remaining,
             }
 
 
@@ -291,6 +293,9 @@ def _build_provider_app(state: KnowledgeReplayState):
         body = await request.json()
         with state.lock:
             state.rerank_calls += 1
+            if state.rerank_failures_remaining > 0:
+                state.rerank_failures_remaining -= 1
+                return JSONResponse({"error": "replay rerank fault"}, status_code=500)
         return {"results": replay_rerank_results(list(body["documents"]), int(body["top_n"]))}
 
     return app
@@ -369,7 +374,8 @@ def build_replay_knowledge_router(
     class ProviderFaults(BaseModel):
         model_config = ConfigDict(extra="forbid")
 
-        embedding_failures: int = Field(ge=0, le=1000)
+        embedding_failures: int = Field(default=0, ge=0, le=1000)
+        rerank_failures: int = Field(default=0, ge=0, le=1000)
 
     router = APIRouter(
         prefix="/api/test-only/replay-knowledge",
@@ -382,8 +388,11 @@ def build_replay_knowledge_router(
 
     @router.post("/provider/faults")
     async def set_provider_faults(faults: ProviderFaults) -> dict[str, int]:
+        """Replace the whole fault-injection state with the posted values."""
+
         with state.lock:
             state.embedding_failures_remaining = faults.embedding_failures
+            state.rerank_failures_remaining = faults.rerank_failures
         return state.snapshot()
 
     @router.get("/objects")

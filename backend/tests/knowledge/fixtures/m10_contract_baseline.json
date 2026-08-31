@@ -1,0 +1,118 @@
+{
+  "_comment": "M10 T0 frozen contract samples. Values mirror docs/superpowers/specs/2026-08-30-rag-knowledge-m10-quality-workbench-design.md; tests recompute every formula example so a drifted constant fails loudly. Implementation tasks (T1+) must consume these exact values instead of re-deciding them inline.",
+  "m9_acceptance": {
+    "commit": "063b345b6325a5447314ba9d23ed91940ef54fcb",
+    "branch": "rag-knowledge",
+    "worktree_clean_at_t0": true,
+    "verified_gates": [
+      "backend focused suite 205 passed",
+      "backend knowledge + model runtime 552 passed",
+      "frontend pnpm check clean",
+      "frontend unit 1066 passed",
+      "e2e project-knowledge / admin-system-settings-drafts / admin-model-registry passed"
+    ]
+  },
+  "score_contract": {
+    "score_kinds": ["cosine", "rerank", "rank_fusion"],
+    "score_domains": {
+      "cosine": [-1.0, 1.0],
+      "rerank": [0.0, 1.0],
+      "rank_fusion": [0.0, 1.0]
+    },
+    "threshold_semantics": "zero_disables_filtering_negative_scores_pass",
+    "threshold_applies_to_local_score_only": true
+  },
+  "rank_fusion": {
+    "rrf_k": 60,
+    "formula": "61/2*(1/(60+domain_rank)+1/(60+lexical_rank)); missing lexical evidence contributes 0",
+    "rank_semantics": "RANK with shared places (1,1,3), never row_number over input order",
+    "examples": [
+      { "domain_rank": 1, "lexical_rank": 1, "expected": 1.0 },
+      { "domain_rank": 1, "lexical_rank": null, "expected": 0.5 },
+      { "domain_rank": 2, "lexical_rank": 3, "expected": 0.976062467 },
+      { "domain_rank": 400, "lexical_rank": null, "expected": 0.066304348 }
+    ]
+  },
+  "candidate_budget": {
+    "global_parent_budget": 400,
+    "max_recall_items_both_routes": 800,
+    "per_base_route_formula": "C=min(min(100,max(20,5*top_k)),floor(400/N))",
+    "examples": [
+      { "top_k": 6, "target_bases": 3, "expected_c": 30 },
+      { "top_k": 20, "target_bases": 1, "expected_c": 100 },
+      { "top_k": 1, "target_bases": 25, "expected_c": 16 },
+      { "top_k": 4, "target_bases": 30, "expected_c": 13 }
+    ]
+  },
+  "task_contract": {
+    "existing_kinds": [
+      "ingest_document",
+      "delete_document",
+      "delete_document_object",
+      "delete_knowledge_base"
+    ],
+    "new_kind": "reembed_document",
+    "reparse_settings_allowed_kinds": ["ingest_document"],
+    "stages": [
+      "queued",
+      "reading_source",
+      "extracting_splitting",
+      "loading_segments",
+      "embedding",
+      "publishing",
+      "done"
+    ],
+    "retry_keeps_operation_kind": true
+  },
+  "metadata_contract": {
+    "field_kinds": ["custom", "builtin"],
+    "default_field_kind": "custom",
+    "builtin_fields": ["document_name", "uploaded_at", "file_type", "source_type"],
+    "builtin_writable": false,
+    "batch_limits": { "max_documents": 100, "max_fields": 20 },
+    "agent_discovery_limits": { "max_bases": 20, "max_fields_per_base": 24 }
+  },
+  "versioning": {
+    "cas_error_code": "KNOWLEDGE_CONFLICT",
+    "detail_expected_fields": ["expected_document_version", "expected_content_digest"],
+    "reparse_expected_field": "expected_version",
+    "content_digest_algorithm": "sha256_of_utf8_text"
+  },
+  "context_budget": {
+    "tool_message_max_bytes": 65536,
+    "segment_max_chars": 4000,
+    "packing": "whole_segments_only_skip_and_report_omitted_count"
+  },
+  "lexical_v1": {
+    "lexical_version": 1,
+    "postgres_ts_config": "simple",
+    "rank_function": "ts_rank_cd(..., 2)",
+    "token_byte_limit": 128,
+    "long_token_encoding": "h+sha256hex",
+    "normal_token_encoding": "x+hex",
+    "query_token_limit": 128,
+    "derived_input_limit_bytes": 262144,
+    "token_examples": [
+      { "text": "ＡB-12", "tokens": ["ab-12", "ab", "12"] },
+      { "text": "网络", "tokens": ["网", "网络", "络"] }
+    ]
+  },
+  "retrieval_modes": ["semantic", "hybrid"],
+  "default_retrieval_mode": "semantic",
+  "child_match_projection": { "max_matched_children_per_hit": 3 },
+  "segment_detail": { "child_page_size_max": 50 },
+  "url_state_whitelist": ["kb", "view", "doc", "segment", "status", "sort", "page"],
+  "empty_reasons": ["not_ready", "no_candidates", "filtered_out", "stale_candidates"],
+  "heterogeneous_diagnostic": "heterogeneous_without_lexical_evidence",
+  "delivery_constraints": {
+    "existing_database_rebuild_authorized": false,
+    "m9_reset_authorization_inherited": false,
+    "supported_install_path": "fresh_empty_database_schema_v1",
+    "tests_use_isolated_throwaway_databases": true
+  },
+  "t14_real_quality_gate": {
+    "labeled_corpus_available": false,
+    "real_provider_budget_confirmed": false,
+    "status": "blocked_pending_operator_input_does_not_block_t1_to_t13"
+  }
+}
