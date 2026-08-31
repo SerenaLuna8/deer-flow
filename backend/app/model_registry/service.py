@@ -569,6 +569,13 @@ class ModelRegistryService:
         # generation order. A timeout-only change is retrieval-scoped and
         # never takes the catalog lock.
         touches_text_models = cleaned_name is not None or cleaned_base_url is not None or plaintext is not None
+        # Any request that carries a material field will write it back below,
+        # even when the carried value equals the frozen one (the admin dialog
+        # always submits base_url and timeout). Such a write-back must still
+        # be settled against the frozen material, or it would silently revert
+        # a concurrent base_url/timeout/Key update committed between freeze
+        # and settle and orphan its origin-bound ciphertext.
+        writes_material = cleaned_base_url is not None or timeout is not None or plaintext is not None
 
         # Settle: re-lock, compare with the frozen snapshot, then commit.
         try:
@@ -579,21 +586,20 @@ class ModelRegistryService:
                 if provider is None:
                     raise _not_found()
                 current_models = await self._provider_models(session, provider_id, for_update=True)
-                if material_changed:
-                    if not _provider_matches(provider, frozen):
-                        raise _conflict()
-                    if tuple(_freeze_model(model) for model in current_models) != frozen_models:
-                        raise _conflict()
+                if writes_material and not _provider_matches(provider, frozen):
+                    raise _conflict()
+                if material_changed and tuple(_freeze_model(model) for model in current_models) != frozen_models:
+                    raise _conflict()
                 if base_url_changed and await self._any_embedding_in_use(session, current_models):
                     raise _invalid("该供应商存在被知识库引用的 Embedding 模型，不能修改服务地址")
                 name_changed = cleaned_name is not None and provider.name != cleaned_name
                 if cleaned_name is not None:
                     provider.name = cleaned_name
-                # Assign only caller-provided fields: a rename-only settle
-                # skips the material comparison above, so writing back the
-                # frozen endpoint values here would silently revert a
-                # concurrent base_url/timeout/Key update committed between
-                # freeze and settle (and orphan its origin-bound ciphertext).
+                # Assign only caller-provided fields: a settle that carries no
+                # material field at all (true rename-only) skips the material
+                # comparison above and must not write endpoint values back,
+                # while any carried material field was settled against the
+                # frozen snapshot before reaching this point.
                 if cleaned_base_url is not None:
                     provider.base_url = new_base_url
                 if timeout is not None:

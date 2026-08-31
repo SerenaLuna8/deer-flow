@@ -648,3 +648,98 @@ async def test_rename_only_settle_preserves_a_concurrent_key_rotation(
         assert await _model_generation_key(harness.factory, model_id) == "race-key-two"
     finally:
         await harness.seed.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dialog_shaped_rename_conflicts_instead_of_reverting_a_racing_endpoint_change(
+    migrated_postgres_database_url: str,
+) -> None:
+    """Carried-but-unchanged endpoint fields settle as 409 over a racing URL+Key update.
+
+    The admin dialog always submits base_url and request_timeout_seconds, so a
+    rename carries the (possibly stale) endpoint values it displayed. Writing
+    them back after a concurrent URL+Key update would revert the provider row
+    under a ciphertext bound to the new origin; the settle must conflict.
+    """
+
+    harness = await _harness(migrated_postgres_database_url)
+    try:
+        provider_id = await _create_provider(
+            harness,
+            name="Dialog Race Provider",
+            api_key="dialog-key-one",
+        )
+        model_id = await _create_text_model(
+            harness,
+            provider_id,
+            display_name="Dialog race model",
+        )
+
+        moved_url = "https://fanout-moved.invalid/v1"
+        move_done = {"value": False}
+
+        async def move_endpoint_between_freeze_and_settle() -> None:
+            if move_done["value"]:
+                return
+            move_done["value"] = True
+            await harness.registry.update_provider(
+                harness.context_b,
+                provider_id,
+                base_url=moved_url,
+                api_key="dialog-key-two",
+            )
+
+        class _HookedFactory:
+            """Awaits the endpoint move right before the rename's settle session."""
+
+            def __init__(self, inner) -> None:  # noqa: ANN001
+                self._inner = inner
+                self._calls = 0
+
+            def __call__(self):  # noqa: ANN204
+                self._calls += 1
+                session = self._inner()
+                if self._calls != 2:
+                    return session
+
+                class _Wrapped:
+                    async def __aenter__(self):  # noqa: ANN204
+                        await move_endpoint_between_freeze_and_settle()
+                        return await session.__aenter__()
+
+                    async def __aexit__(self, *args):  # noqa: ANN002, ANN204
+                        return await session.__aexit__(*args)
+
+                return _Wrapped()
+
+        racing_registry = ModelRegistryService(
+            _HookedFactory(harness.factory),  # type: ignore[arg-type]
+            secret_key=_SECRET_KEY,
+            client=object(),  # type: ignore[arg-type]
+            model_in_use=_never_in_use,
+            audit_service=None,
+        )
+        with pytest.raises(KnowledgeError) as conflict:
+            await racing_registry.update_provider(
+                harness.context_a,
+                provider_id,
+                name="Dialog Race Provider Renamed",
+                base_url=_BASE_URL,
+                request_timeout_seconds=30,
+            )
+        assert conflict.value.code == KNOWLEDGE_CONFLICT
+
+        # The racing update survives untouched: the provider row keeps the new
+        # origin, its ciphertext still materializes against that origin, the
+        # bound model carries the fanned-out copy, and the rejected rename
+        # left no partial write behind.
+        async with harness.factory() as session:
+            provider = await session.get(ModelProviderRow, provider_id)
+            assert provider is not None
+            assert provider.name == "Dialog Race Provider"
+            assert provider.base_url == moved_url
+        assert await _provider_key(harness.factory, provider_id) == "dialog-key-two"
+        assert await _model_generation_key(harness.factory, model_id) == "dialog-key-two"
+        assert (await _model_state(harness.factory, model_id))["base_url"] == moved_url
+    finally:
+        await harness.seed.engine.dispose()

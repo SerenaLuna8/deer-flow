@@ -92,12 +92,16 @@ async function mockModelManagementRoutes(
     textModels?: MockTextModel[];
     models?: MockProviderModel[];
     providerDeleteConflictMessage?: string;
+    providerUpdateConflictsOnce?: boolean;
   } = {},
 ) {
   const state = {
     providers: [...(initial.providers ?? [])],
     textModels: [...(initial.textModels ?? [])],
     models: [...(initial.models ?? [])],
+    providerUpdateConflictsRemaining: initial.providerUpdateConflictsOnce
+      ? 1
+      : 0,
     providerCreates: [] as Array<Record<string, unknown>>,
     providerUpdates: [] as Array<Record<string, unknown>>,
     candidateTests: [] as Array<Record<string, unknown>>,
@@ -293,6 +297,19 @@ async function mockModelManagementRoutes(
       if (!target) return json(route, { detail: "not found" }, 404);
       const body = request.postDataJSON() as Record<string, unknown>;
       state.providerUpdates.push(body);
+      if (state.providerUpdateConflictsRemaining > 0) {
+        state.providerUpdateConflictsRemaining -= 1;
+        return json(
+          route,
+          {
+            detail: {
+              code: "KNOWLEDGE_CONFLICT",
+              message: "绑定模型正被使用，请稍后重试",
+            },
+          },
+          409,
+        );
+      }
       if (typeof body.name === "string") target.name = body.name;
       if (typeof body.base_url === "string") target.base_url = body.base_url;
       if (typeof body.request_timeout_seconds === "number")
@@ -731,5 +748,39 @@ test("editing keeps the saved key when blank and demands a new key with a new en
   expect(state.providerUpdates[1]).toMatchObject({
     base_url: "https://other.example.test/v1",
     api_key: "sk-rotated-secret",
+  });
+});
+
+test("a failed save keeps the entered key so the retry still rotates it", async ({
+  page,
+}) => {
+  const state = await mockModelManagementRoutes(page, {
+    providers: [providerFixture()],
+    textModels: [textModelFixture()],
+    providerUpdateConflictsOnce: true,
+  });
+  await page.goto("/admin/settings/models");
+
+  // Rotate the key; the first save hits a 409 fan-out conflict.
+  await providerCard(page, "SiliconFlow")
+    .getByRole("button", { name: "Edit", exact: true })
+    .first()
+    .click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("API Key").fill("sk-retry-secret");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog.getByText("绑定模型正被使用，请稍后重试")).toBeVisible();
+
+  // The dialog stays open with the key intact, so the retry is still a
+  // rotation instead of silently degrading to a rename-only update.
+  await expect(dialog.getByLabel("API Key")).toHaveValue("sk-retry-secret");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(state.providerUpdates).toHaveLength(2);
+  expect(state.providerUpdates[0]).toMatchObject({
+    api_key: "sk-retry-secret",
+  });
+  expect(state.providerUpdates[1]).toMatchObject({
+    api_key: "sk-retry-secret",
   });
 });

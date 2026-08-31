@@ -412,7 +412,6 @@ export function ProviderEditorDialog({
     }
     setValidationError(null);
     const apiKey = draft.apiKey;
-    setDraft((current) => ({ ...current, apiKey: "" }));
     try {
       if (target === null) {
         await create.execute({
@@ -434,9 +433,13 @@ export function ProviderEditorDialog({
           },
         });
       }
+      // The write-only secret leaves state on success or close, both via
+      // close(); a failed submit keeps the entered key so a retry (for
+      // example after a 409 fan-out conflict) still rotates it instead of
+      // silently degrading to a rename-only update.
       close();
     } catch {
-      // The hook records the error for display; the key was already cleared.
+      // The hook records the error for display; the key stays for retry.
     }
   };
 
