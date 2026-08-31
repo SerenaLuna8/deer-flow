@@ -45,6 +45,7 @@ import {
   useKnowledgeChunkPreview,
   useKnowledgeDocuments,
   useKnowledgeModelOptions,
+  useUpdateKnowledgeBase,
   useUploadKnowledgeDocument,
 } from "@/core/knowledge/hooks";
 import {
@@ -72,8 +73,6 @@ import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeFileTypeIcon } from "./knowledge-file-type-icon";
 import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
 
-const ACCEPTED_EXTENSIONS = KNOWLEDGE_UPLOAD_ACCEPT;
-
 type WizardStep = 1 | 2 | 3;
 
 type UploadFailure = {
@@ -85,6 +84,7 @@ type KnowledgeSubmissionSnapshot = {
   files: File[];
   name: string;
   description: string;
+  displayName?: string;
   embeddingModelId: string;
   rerankerModelId: string;
   retrievalMode: KnowledgeRetrievalMode;
@@ -171,31 +171,44 @@ function StepIndicator({
 
 export function KnowledgeCreateWizard({
   scope,
+  existingBase,
   onExit,
   onCreateEmpty,
   onFinished,
 }: {
   scope: ProjectClientScope;
+  existingBase?: KnowledgeBaseItem;
   onExit: () => void;
   /** Switches to the plain "empty base" dialog outside the wizard. */
-  onCreateEmpty: () => void;
+  onCreateEmpty?: () => void;
   onFinished: (base: KnowledgeBaseItem) => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
   const wizard = labels.wizard;
+  const isExistingUpload = existingBase !== undefined;
+  const modelsLocked =
+    existingBase !== undefined && existingBase.embedding_model_id !== null;
 
   const [step, setStep] = useState<WizardStep>(1);
   const [files, setFiles] = useState<File[]>([]);
   const [previewFileName, setPreviewFileName] = useState<string | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
-  const [name, setName] = useState("");
+  const [name, setName] = useState(existingBase?.name ?? "");
   const [nameTouched, setNameTouched] = useState(false);
-  const [description, setDescription] = useState("");
-  const [embeddingModelId, setEmbeddingModelId] = useState("");
-  const [rerankerModelId, setRerankerModelId] = useState("");
-  const [retrievalMode, setRetrievalMode] =
-    useState<KnowledgeRetrievalMode>("semantic");
+  const [description, setDescription] = useState(
+    existingBase?.description ?? "",
+  );
+  const [displayName, setDisplayName] = useState("");
+  const [embeddingModelId, setEmbeddingModelId] = useState(
+    existingBase?.embedding_model_id ?? "",
+  );
+  const [rerankerModelId, setRerankerModelId] = useState(
+    existingBase?.reranker_model_id ?? "",
+  );
+  const [retrievalMode, setRetrievalMode] = useState<KnowledgeRetrievalMode>(
+    existingBase?.retrieval_mode ?? "semantic",
+  );
   const [chunkSize, setChunkSize] = useState("1000");
   const [chunkOverlap, setChunkOverlap] = useState("100");
   const [chunkSeparator, setChunkSeparator] = useState(DEFAULT_CHUNK_SEPARATOR);
@@ -211,6 +224,8 @@ export function KnowledgeCreateWizard({
     null,
   );
   const [uploadingIndex, setUploadingIndex] = useState<number | null>(null);
+  const [uploadingTotal, setUploadingTotal] = useState(0);
+  const [uploadedDocumentIds, setUploadedDocumentIds] = useState<string[]>([]);
   const [uploadFailures, setUploadFailures] = useState<UploadFailure[]>([]);
   const [submissionSnapshot, setSubmissionSnapshot] =
     useState<KnowledgeSubmissionSnapshot | null>(null);
@@ -235,6 +250,7 @@ export function KnowledgeCreateWizard({
 
   const options = useKnowledgeModelOptions(scope, step === 2);
   const createBase = useCreateKnowledgeBase(scope);
+  const updateBase = useUpdateKnowledgeBase(scope);
   const upload = useUploadKnowledgeDocument(scope);
   const documents = useKnowledgeDocuments(scope, createdBase?.id ?? null);
   const preview = useKnowledgeChunkPreview(scope);
@@ -245,7 +261,21 @@ export function KnowledgeCreateWizard({
   const previewSequenceRef = useRef(0);
   const autoPreviewedFileRef = useRef<File | null>(null);
   const isSubmitting =
-    submissionInFlightScopeKey === scopeKey || createBase.isPending;
+    submissionInFlightScopeKey === scopeKey ||
+    createBase.isPending ||
+    updateBase.isPending;
+  const effectiveEmbeddingModelId = modelsLocked
+    ? existingBase.embedding_model_id
+    : embeddingModelId;
+  const effectiveRerankerModelId = modelsLocked
+    ? (existingBase.reranker_model_id ?? "")
+    : rerankerModelId;
+  const effectiveRetrievalMode = modelsLocked
+    ? existingBase.retrieval_mode
+    : retrievalMode;
+  const initializationError = isExistingUpload
+    ? updateBase.error
+    : createBase.error;
 
   const parsedChunkSize = Number.parseInt(chunkSize, 10);
   const parsedChunkOverlap = Number.parseInt(chunkOverlap, 10);
@@ -261,8 +291,8 @@ export function KnowledgeCreateWizard({
     (isChildChunkSizeValid(parsedChildChunkSize, parsedChunkSize) &&
       isChunkSeparatorValid(childChunkSeparator));
   const configureValid =
-    name.trim().length > 0 &&
-    embeddingModelId !== "" &&
+    (isExistingUpload || name.trim().length > 0) &&
+    !!effectiveEmbeddingModelId &&
     chunkParamsValid &&
     separatorValid &&
     childParamsValid;
@@ -371,7 +401,7 @@ export function KnowledgeCreateWizard({
     }
     const next = mergeFiles(files, added);
     setFiles(next);
-    if (!nameTouched) {
+    if (!isExistingUpload && !nameTouched) {
       // Derived names obey the same backend limit as typed ones.
       setName(
         fileBaseName(next[0]?.name ?? "").slice(
@@ -389,14 +419,43 @@ export function KnowledgeCreateWizard({
     addFiles(Array.from(event.dataTransfer.files));
   };
 
-  const startProcessing = async () => {
-    if (
-      !configureValid ||
-      files.length === 0 ||
-      submissionInFlightRef.current
-    ) {
-      return;
-    }
+  const startProcessing = async (retryFailedOnly = false) => {
+    if (submissionInFlightRef.current) return;
+    if (!retryFailedOnly && (!configureValid || files.length === 0)) return;
+
+    const snapshot: KnowledgeSubmissionSnapshot | null = retryFailedOnly
+      ? submissionSnapshot
+      : {
+          files: [...files],
+          name: existingBase?.name ?? name.trim(),
+          description: existingBase?.description ?? description.trim(),
+          ...(isExistingUpload && files.length === 1 && displayName.trim()
+            ? { displayName: displayName.trim() }
+            : {}),
+          embeddingModelId: effectiveEmbeddingModelId ?? "",
+          rerankerModelId: effectiveRerankerModelId,
+          retrievalMode: effectiveRetrievalMode,
+          chunkSize: parsedChunkSize,
+          chunkOverlap: parsedChunkOverlap,
+          chunkSeparator,
+          chunkingMode,
+          ...(chunkingMode === "parent_child"
+            ? {
+                childChunkSize: parsedChildChunkSize,
+                childChunkSeparator,
+              }
+            : {}),
+          removeExtraSpaces,
+          removeUrlsEmails,
+        };
+    if (snapshot === null || (retryFailedOnly && createdBase === null)) return;
+    const pendingFiles = retryFailedOnly
+      ? snapshot.files.filter((file) =>
+          uploadFailures.some((failure) => failure.fileName === file.name),
+        )
+      : snapshot.files;
+    if (pendingFiles.length === 0) return;
+
     submissionInFlightRef.current = true;
     setSubmissionInFlightScopeKey(scopeKey);
     const submissionGeneration = submissionGenerationRef.current + 1;
@@ -406,57 +465,62 @@ export function KnowledgeCreateWizard({
       mountedRef.current &&
       scopeKeyRef.current === submissionScopeKey &&
       submissionGenerationRef.current === submissionGeneration;
-    const snapshot: KnowledgeSubmissionSnapshot = {
-      files: [...files],
-      name: name.trim(),
-      description: description.trim(),
-      embeddingModelId,
-      rerankerModelId,
-      retrievalMode,
-      chunkSize: parsedChunkSize,
-      chunkOverlap: parsedChunkOverlap,
-      chunkSeparator,
-      chunkingMode,
-      ...(chunkingMode === "parent_child"
-        ? {
-            childChunkSize: parsedChildChunkSize,
-            childChunkSeparator,
-          }
-        : {}),
-      removeExtraSpaces,
-      removeUrlsEmails,
-    };
-    setSubmissionSnapshot(snapshot);
+    if (!retryFailedOnly) {
+      setSubmissionSnapshot(snapshot);
+      setUploadedDocumentIds([]);
+    }
     try {
-      let base: KnowledgeBaseItem;
-      try {
-        base = await createBase.mutateAsync({
-          name: snapshot.name,
-          embedding_model_id: snapshot.embeddingModelId,
-          ...(snapshot.rerankerModelId
-            ? { reranker_model_id: snapshot.rerankerModelId }
-            : {}),
-          retrieval_mode: snapshot.retrievalMode,
-          description: snapshot.description,
-        });
-      } catch {
-        // The mutation error renders in step 2.
-        if (isSubmissionCurrent()) setSubmissionSnapshot(null);
-        return;
+      let base = retryFailedOnly ? createdBase : (existingBase ?? null);
+      if (!retryFailedOnly) {
+        try {
+          if (existingBase) {
+            // A configured base owns its models. An empty base gets exactly
+            // one atomic initial configuration before any file is uploaded.
+            if (existingBase.embedding_model_id === null) {
+              base = await updateBase.mutateAsync({
+                baseId: existingBase.id,
+                input: {
+                  embedding_model_id: snapshot.embeddingModelId,
+                  retrieval_mode: snapshot.retrievalMode,
+                  ...(snapshot.rerankerModelId
+                    ? { reranker_model_id: snapshot.rerankerModelId }
+                    : {}),
+                },
+              });
+            }
+          } else {
+            base = await createBase.mutateAsync({
+              name: snapshot.name,
+              embedding_model_id: snapshot.embeddingModelId,
+              ...(snapshot.rerankerModelId
+                ? { reranker_model_id: snapshot.rerankerModelId }
+                : {}),
+              retrieval_mode: snapshot.retrievalMode,
+              description: snapshot.description,
+            });
+          }
+        } catch {
+          // Keep the selected files and configuration in step 2 on failure.
+          if (isSubmissionCurrent()) setSubmissionSnapshot(null);
+          return;
+        }
       }
-      if (!isSubmissionCurrent()) return;
+      if (base === null || !isSubmissionCurrent()) return;
       setCreatedBase(base);
       setStep(3);
+      setUploadFailures([]);
+      setUploadingTotal(pendingFiles.length);
 
       const failures: UploadFailure[] = [];
-      for (const [index, file] of snapshot.files.entries()) {
+      for (const [index, file] of pendingFiles.entries()) {
         if (!isSubmissionCurrent()) return;
         setUploadingIndex(index);
         try {
-          await upload.mutateAsync({
+          const document = await upload.mutateAsync({
             baseId: base.id,
             input: {
               file,
+              ...(snapshot.displayName ? { name: snapshot.displayName } : {}),
               chunk_size: snapshot.chunkSize,
               chunk_overlap: snapshot.chunkOverlap,
               chunk_separator: snapshot.chunkSeparator,
@@ -471,6 +535,10 @@ export function KnowledgeCreateWizard({
                 : {}),
             },
           });
+          if (!isSubmissionCurrent()) return;
+          setUploadedDocumentIds((current) =>
+            current.includes(document.id) ? current : [...current, document.id],
+          );
         } catch (error) {
           if (!isSubmissionCurrent()) return;
           failures.push({
@@ -492,22 +560,29 @@ export function KnowledgeCreateWizard({
 
   const selectedEmbeddingOption = options.data?.embedding_models.find(
     (option) =>
-      option.id === (submissionSnapshot?.embeddingModelId ?? embeddingModelId),
+      option.id ===
+      (submissionSnapshot?.embeddingModelId ?? effectiveEmbeddingModelId),
   );
   const modelDisplayName = selectedEmbeddingOption
     ? `${selectedEmbeddingOption.provider_name} · ${selectedEmbeddingOption.model_name}`
-    : "";
+    : wizard.configuredModelUnavailable;
   const selectedRerankerOption = options.data?.reranker_models.find(
     (option) =>
-      option.id === (submissionSnapshot?.rerankerModelId ?? rerankerModelId),
+      option.id ===
+      (submissionSnapshot?.rerankerModelId ?? effectiveRerankerModelId),
   );
   const rerankerDisplayName = selectedRerankerOption
     ? `${selectedRerankerOption.provider_name} · ${selectedRerankerOption.model_name}`
-    : labels.bases.rerankerNone;
+    : (submissionSnapshot?.rerankerModelId ?? effectiveRerankerModelId)
+      ? wizard.configuredModelUnavailable
+      : labels.bases.rerankerNone;
 
   return (
     <section
-      aria-label={wizard.uploadCreateTitle}
+      data-testid="knowledge-create-wizard"
+      aria-label={
+        isExistingUpload ? wizard.uploadExistingTitle : wizard.uploadCreateTitle
+      }
       className={cn(
         "flex min-h-0 flex-col text-[13px]",
         step === 2 && "lg:h-[calc(100dvh-3rem)]",
@@ -524,26 +599,28 @@ export function KnowledgeCreateWizard({
           aria-label={labels.common.back}
         >
           <ArrowLeftIcon aria-hidden className="size-4" />
-          {labels.page.title}
+          {existingBase?.name ?? labels.page.title}
         </Button>
         <StepIndicator step={step} labels={wizard.steps} />
         <span aria-hidden className="hidden md:block" />
       </div>
 
       {step === 1 ? (
-        <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto py-6">
+        <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto py-10 [&>div]:max-w-[640px]">
           <div className="space-y-3">
             <h2 className="text-base font-semibold tracking-tight">
               {wizard.sourceSectionTitle}
             </h2>
             <label
-              className="border-border/80 bg-muted/25 flex cursor-pointer flex-col items-center gap-2 rounded-lg border border-dashed px-6 py-14 text-center transition-colors focus-within:ring-2 focus-within:ring-blue-500/20 hover:border-blue-400 hover:bg-blue-50/40"
+              className="border-border/80 bg-muted/25 flex cursor-pointer flex-col items-center gap-2 rounded-lg border border-dashed px-6 py-5 text-center transition-colors focus-within:ring-2 focus-within:ring-blue-500/20 hover:border-blue-400 hover:bg-blue-50/40"
               onDragOver={(event) => event.preventDefault()}
               onDrop={handleDrop}
             >
-              <UploadCloudIcon aria-hidden className="size-8 text-blue-600" />
-              <span className="text-[13px] font-medium">
-                {wizard.dropzoneTitle}
+              <span className="flex items-center gap-2">
+                <UploadCloudIcon aria-hidden className="size-5 text-blue-600" />
+                <span className="text-[13px] font-medium">
+                  {wizard.dropzoneTitle}
+                </span>
               </span>
               <span className="text-muted-foreground text-xs leading-5">
                 {labels.documents.uploadDescription}
@@ -552,7 +629,7 @@ export function KnowledgeCreateWizard({
                 key={fileInputKey}
                 type="file"
                 multiple
-                accept={ACCEPTED_EXTENSIONS}
+                accept={KNOWLEDGE_UPLOAD_ACCEPT}
                 aria-label={labels.documents.fileLabel}
                 className="sr-only"
                 onChange={(event) =>
@@ -622,16 +699,18 @@ export function KnowledgeCreateWizard({
             </Button>
           </div>
 
-          <div className="border-border/70 border-t pt-4">
-            <button
-              type="button"
-              className="flex items-center gap-1.5 rounded-lg text-[13px] text-blue-600 hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500/20 focus-visible:outline-none"
-              onClick={onCreateEmpty}
-            >
-              <FolderPlusIcon aria-hidden className="size-4" />
-              {wizard.emptyCreateTitle}
-            </button>
-          </div>
+          {!isExistingUpload && onCreateEmpty ? (
+            <div className="border-border/70 border-t pt-4">
+              <button
+                type="button"
+                className="flex items-center gap-1.5 rounded-lg text-[13px] text-blue-600 hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500/20 focus-visible:outline-none"
+                onClick={onCreateEmpty}
+              >
+                <FolderPlusIcon aria-hidden className="size-4" />
+                {wizard.emptyCreateTitle}
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -844,143 +923,218 @@ export function KnowledgeCreateWizard({
                   ))}
                 </fieldset>
               </div>
-              <div className="border-border/60 space-y-3 border-t pt-5">
-                <div className="space-y-1">
-                  <h2 className="text-[13px] font-semibold">
-                    {labels.bases.modelLabel}
-                  </h2>
+              {modelsLocked ? (
+                <section className="border-border/60 space-y-3 border-t pt-5">
                   <p className="text-muted-foreground text-xs leading-5">
-                    {labels.bases.modelHint}
+                    {wizard.existingConfigurationHint}
                   </p>
-                </div>
-                {options.isLoading ? (
-                  <Skeleton className="h-9 rounded-lg" />
-                ) : options.error ? (
-                  <p role="alert" className="text-destructive text-[13px]">
-                    {labels.bases.modelsLoadFailed}
-                  </p>
-                ) : (options.data?.embedding_models.length ?? 0) === 0 ? (
-                  <p className="text-muted-foreground text-[13px]">
-                    {labels.bases.noModels}
-                  </p>
-                ) : (
-                  <Select
-                    value={embeddingModelId}
-                    disabled={isSubmitting}
-                    onValueChange={setEmbeddingModelId}
-                  >
-                    <SelectTrigger
-                      className="bg-muted/60 w-full rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15"
-                      aria-label={labels.bases.modelLabel}
-                    >
-                      <SelectValue
-                        placeholder={labels.bases.modelPlaceholder}
-                      />
-                    </SelectTrigger>
-                    <SelectContent className="border-border/70 rounded-lg">
-                      {options.data?.embedding_models.map((option) => (
-                        <SelectItem
-                          className="rounded-md text-[13px]"
-                          key={option.id}
-                          value={option.id}
+                  <dl className="grid gap-3 text-[13px]">
+                    <div className="grid min-w-0 gap-1.5">
+                      <dt className="font-medium">{labels.bases.modelLabel}</dt>
+                      <dd
+                        className="bg-muted/60 truncate rounded-lg px-3 py-2"
+                        title={modelDisplayName}
+                      >
+                        {modelDisplayName}
+                      </dd>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="grid min-w-0 gap-1.5">
+                        <dt className="font-medium">
+                          {labels.bases.retrievalModeLabel}
+                        </dt>
+                        <dd className="bg-muted/60 rounded-lg px-3 py-2">
+                          {
+                            labels.bases.retrievalModes[
+                              submissionSnapshot?.retrievalMode ??
+                                effectiveRetrievalMode
+                            ]
+                          }
+                        </dd>
+                      </div>
+                      <div className="grid min-w-0 gap-1.5">
+                        <dt className="font-medium">
+                          {labels.bases.rerankerLabel}
+                        </dt>
+                        <dd
+                          className="bg-muted/60 truncate rounded-lg px-3 py-2"
+                          title={rerankerDisplayName}
                         >
-                          {option.provider_name} · {option.model_name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-              </div>
-
-              <KnowledgeRetrievalModeField
-                variant="cards"
-                value={retrievalMode}
-                onChange={setRetrievalMode}
-                disabled={isSubmitting}
-                selectedContent={
-                  <div className="space-y-2">
-                    <h3 className="text-[13px] font-medium">
-                      {labels.bases.rerankerLabel}
-                    </h3>
+                          {rerankerDisplayName}
+                        </dd>
+                      </div>
+                    </div>
+                  </dl>
+                  {options.error ? (
+                    <p role="alert" className="text-destructive text-xs">
+                      {labels.bases.modelsLoadFailed}
+                    </p>
+                  ) : null}
+                </section>
+              ) : (
+                <>
+                  <div className="border-border/60 space-y-3 border-t pt-5">
+                    <div className="space-y-1">
+                      <h2 className="text-[13px] font-semibold">
+                        {labels.bases.modelLabel}
+                      </h2>
+                      <p className="text-muted-foreground text-xs leading-5">
+                        {labels.bases.modelHint}
+                      </p>
+                    </div>
                     {options.isLoading ? (
                       <Skeleton className="h-9 rounded-lg" />
                     ) : options.error ? (
                       <p role="alert" className="text-destructive text-[13px]">
                         {labels.bases.modelsLoadFailed}
                       </p>
+                    ) : (options.data?.embedding_models.length ?? 0) === 0 ? (
+                      <p className="text-muted-foreground text-[13px]">
+                        {labels.bases.noModels}
+                      </p>
                     ) : (
-                      <>
-                        {options.data?.reranker_models.length === 0 ? (
-                          <p className="text-muted-foreground text-xs leading-5">
-                            {labels.bases.rerankerUnavailable}
-                          </p>
-                        ) : null}
-                        <Select
-                          value={rerankerModelId || "none"}
-                          disabled={isSubmitting}
-                          onValueChange={(value) =>
-                            setRerankerModelId(value === "none" ? "" : value)
-                          }
+                      <Select
+                        value={embeddingModelId}
+                        disabled={isSubmitting}
+                        onValueChange={setEmbeddingModelId}
+                      >
+                        <SelectTrigger
+                          className="bg-muted/60 w-full rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15"
+                          aria-label={labels.bases.modelLabel}
                         >
-                          <SelectTrigger
-                            className="bg-muted/60 w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-blue-500/15"
-                            aria-label={labels.bases.rerankerLabel}
-                          >
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent className="rounded-lg">
-                            <SelectItem value="none">
-                              {labels.bases.rerankerNone}
+                          <SelectValue
+                            placeholder={labels.bases.modelPlaceholder}
+                          />
+                        </SelectTrigger>
+                        <SelectContent className="border-border/70 rounded-lg">
+                          {options.data?.embedding_models.map((option) => (
+                            <SelectItem
+                              className="rounded-md text-[13px]"
+                              key={option.id}
+                              value={option.id}
+                            >
+                              {option.provider_name} · {option.model_name}
                             </SelectItem>
-                            {options.data?.reranker_models.map((option) => (
-                              <SelectItem key={option.id} value={option.id}>
-                                {option.provider_name} · {option.model_name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     )}
                   </div>
-                }
-              />
-              <div className="border-border/60 space-y-3 border-t pt-5">
-                <h2 className="text-[13px] font-semibold">
-                  {wizard.infoSectionTitle}
-                </h2>
-                <label className="grid gap-1.5 text-[13px]">
-                  <span className="font-medium">{labels.bases.nameLabel}</span>
+
+                  <KnowledgeRetrievalModeField
+                    variant="cards"
+                    value={retrievalMode}
+                    onChange={setRetrievalMode}
+                    disabled={isSubmitting}
+                    selectedContent={
+                      <div className="space-y-2">
+                        <h3 className="text-[13px] font-medium">
+                          {labels.bases.rerankerLabel}
+                        </h3>
+                        {options.isLoading ? (
+                          <Skeleton className="h-9 rounded-lg" />
+                        ) : options.error ? (
+                          <p
+                            role="alert"
+                            className="text-destructive text-[13px]"
+                          >
+                            {labels.bases.modelsLoadFailed}
+                          </p>
+                        ) : (
+                          <>
+                            {options.data?.reranker_models.length === 0 ? (
+                              <p className="text-muted-foreground text-xs leading-5">
+                                {labels.bases.rerankerUnavailable}
+                              </p>
+                            ) : null}
+                            <Select
+                              value={rerankerModelId || "none"}
+                              disabled={isSubmitting}
+                              onValueChange={(value) =>
+                                setRerankerModelId(
+                                  value === "none" ? "" : value,
+                                )
+                              }
+                            >
+                              <SelectTrigger
+                                className="bg-muted/60 w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-blue-500/15"
+                                aria-label={labels.bases.rerankerLabel}
+                              >
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent className="rounded-lg">
+                                <SelectItem value="none">
+                                  {labels.bases.rerankerNone}
+                                </SelectItem>
+                                {options.data?.reranker_models.map((option) => (
+                                  <SelectItem key={option.id} value={option.id}>
+                                    {option.provider_name} · {option.model_name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </>
+                        )}
+                      </div>
+                    }
+                  />
+                </>
+              )}
+              {!isExistingUpload ? (
+                <div className="border-border/60 space-y-3 border-t pt-5">
+                  <h2 className="text-[13px] font-semibold">
+                    {wizard.infoSectionTitle}
+                  </h2>
+                  <label className="grid gap-1.5 text-[13px]">
+                    <span className="font-medium">
+                      {labels.bases.nameLabel}
+                    </span>
+                    <Input
+                      className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                      value={name}
+                      required
+                      maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
+                      disabled={isSubmitting}
+                      placeholder={labels.bases.namePlaceholder}
+                      onChange={(event) => {
+                        setNameTouched(true);
+                        setName(event.target.value);
+                      }}
+                    />
+                  </label>
+                  <label className="grid gap-1.5 text-[13px]">
+                    <span className="font-medium">
+                      {labels.bases.descriptionLabel}
+                    </span>
+                    <Textarea
+                      className="bg-muted/60 w-full rounded-lg border-transparent text-[13px] leading-5 shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                      value={description}
+                      rows={2}
+                      disabled={isSubmitting}
+                      placeholder={labels.bases.descriptionPlaceholder}
+                      onChange={(event) => setDescription(event.target.value)}
+                    />
+                  </label>
+                </div>
+              ) : files.length === 1 ? (
+                <label className="border-border/60 grid gap-1.5 border-t pt-5 text-[13px]">
+                  <span className="font-medium">
+                    {labels.documents.displayNameLabel}
+                  </span>
                   <Input
                     className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
-                    value={name}
-                    required
-                    maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
+                    value={displayName}
+                    maxLength={200}
                     disabled={isSubmitting}
-                    placeholder={labels.bases.namePlaceholder}
-                    onChange={(event) => {
-                      setNameTouched(true);
-                      setName(event.target.value);
-                    }}
+                    placeholder={labels.documents.displayNamePlaceholder}
+                    onChange={(event) => setDisplayName(event.target.value)}
                   />
                 </label>
-                <label className="grid gap-1.5 text-[13px]">
-                  <span className="font-medium">
-                    {labels.bases.descriptionLabel}
-                  </span>
-                  <Textarea
-                    className="bg-muted/60 w-full rounded-lg border-transparent text-[13px] leading-5 shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
-                    value={description}
-                    rows={2}
-                    disabled={isSubmitting}
-                    placeholder={labels.bases.descriptionPlaceholder}
-                    onChange={(event) => setDescription(event.target.value)}
-                  />
-                </label>
-              </div>
+              ) : null}
 
-              {createBase.error ? (
+              {initializationError ? (
                 <p role="alert" className="text-destructive text-[13px]">
-                  {knowledgeErrorMessage(createBase.error, labels.errors)}
+                  {knowledgeErrorMessage(initializationError, labels.errors)}
                 </p>
               ) : null}
             </div>
@@ -1001,7 +1155,11 @@ export function KnowledgeCreateWizard({
               >
                 {createBase.isPending
                   ? labels.common.creating
-                  : wizard.saveAndProcess}
+                  : updateBase.isPending
+                    ? labels.common.saving
+                    : isExistingUpload
+                      ? wizard.uploadAction
+                      : wizard.saveAndProcess}
               </Button>
             </div>
           </form>
@@ -1180,8 +1338,17 @@ export function KnowledgeCreateWizard({
           <div className="space-y-5">
             <div className="space-y-1">
               <h2 className="flex items-center gap-2 text-base font-semibold tracking-tight">
-                <CheckIcon aria-hidden className="size-5 text-emerald-600" />
-                {wizard.createdTitle}
+                {isExistingUpload ? (
+                  <UploadCloudIcon
+                    aria-hidden
+                    className="size-5 text-blue-600"
+                  />
+                ) : (
+                  <CheckIcon aria-hidden className="size-5 text-emerald-600" />
+                )}
+                {isExistingUpload
+                  ? wizard.uploadProcessingTitle
+                  : wizard.createdTitle}
               </h2>
               <p className="text-muted-foreground text-[13px]">
                 {wizard.createdHint}
@@ -1213,7 +1380,7 @@ export function KnowledgeCreateWizard({
                 >
                   {labels.documents.uploadingProgress(
                     uploadingIndex + 1,
-                    submissionSnapshot.files.length,
+                    uploadingTotal,
                   )}
                 </p>
               ) : null}
@@ -1221,23 +1388,29 @@ export function KnowledgeCreateWizard({
                 className="divide-border/60 bg-background border-border/70 divide-y overflow-hidden rounded-lg border"
                 data-testid="wizard-document-status"
               >
-                {(documents.data?.items ?? []).map((document) => (
-                  <li
-                    key={document.id}
-                    className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-[13px]"
-                  >
-                    <KnowledgeFileTypeIcon fileName={document.original_name} />
-                    <span className="min-w-0 flex-1 truncate">
-                      {document.name}
-                    </span>
-                    <Badge
-                      variant={documentStatusVariant(document.status)}
-                      className={documentStatusClassName(document.status)}
+                {(documents.data?.items ?? [])
+                  .filter((document) =>
+                    uploadedDocumentIds.includes(document.id),
+                  )
+                  .map((document) => (
+                    <li
+                      key={document.id}
+                      className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-[13px]"
                     >
-                      {labels.documentStatus[document.status]}
-                    </Badge>
-                  </li>
-                ))}
+                      <KnowledgeFileTypeIcon
+                        fileName={document.original_name}
+                      />
+                      <span className="min-w-0 flex-1 truncate">
+                        {document.name}
+                      </span>
+                      <Badge
+                        variant={documentStatusVariant(document.status)}
+                        className={documentStatusClassName(document.status)}
+                      >
+                        {labels.documentStatus[document.status]}
+                      </Badge>
+                    </li>
+                  ))}
               </ul>
               {uploadFailures.length > 0 ? (
                 <div className="space-y-1">
@@ -1254,6 +1427,15 @@ export function KnowledgeCreateWizard({
                       </li>
                     ))}
                   </ul>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mt-2 h-8 rounded-lg text-[13px] shadow-none"
+                    disabled={isSubmitting}
+                    onClick={() => void startProcessing(true)}
+                  >
+                    {wizard.retryFailedUploads}
+                  </Button>
                 </div>
               ) : null}
             </div>

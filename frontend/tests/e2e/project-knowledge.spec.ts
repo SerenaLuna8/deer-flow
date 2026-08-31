@@ -319,6 +319,11 @@ async function mockKnowledgeRoutes(
     previewRequests: [] as Array<Record<string, string>>,
     baseCreates: [] as Array<Record<string, unknown>>,
     baseUpdates: [] as Array<Record<string, unknown>>,
+    uploadRequests: [] as Array<{
+      baseId: string;
+      fileName: string;
+      displayName: string | null;
+    }>,
     baseUpdateFailure: null as null | {
       status: number;
       code: string;
@@ -859,6 +864,13 @@ async function mockKnowledgeRoutes(
       const form = request.postData() ?? "";
       const uploadFileName =
         /name="file"; filename="([^"]+)"/u.exec(form)?.[1] ?? "";
+      // Count every attempt, including rejected files, so retry coverage can
+      // distinguish a failed-only retry from silently re-uploading successes.
+      state.uploadRequests.push({
+        baseId: documentsMatch[1]!,
+        fileName: uploadFileName,
+        displayName: multipartField(form, "name"),
+      });
       if (uploadFileName.includes("reject") && !state.acceptRejectedUploads) {
         return knowledgeError(
           route,
@@ -1835,7 +1847,7 @@ test("creates an unconfigured empty base using only name and description", async
   expect(state.uploadCounter).toBe(0);
 });
 
-test("configures an empty base before opening its first upload dialog", async ({
+test("an existing empty base configures in wizard step two before uploading", async ({
   page,
 }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
@@ -1863,26 +1875,31 @@ test("configures an empty base before opening its first upload dialog", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: "View documents" }).click();
   await page.getByRole("button", { name: "Upload document" }).click();
-  const configuration = page.getByRole("dialog", {
-    name: "Configure knowledge base",
+  const wizard = page.getByTestId("knowledge-create-wizard");
+  await expect(wizard).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Configure knowledge base" }),
+  ).toHaveCount(0);
+  await wizard.getByLabel("File", { exact: true }).setInputFiles({
+    name: "configured-first-upload.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("Upload only after the initial configuration succeeds"),
   });
-  await expect(configuration).toBeVisible();
-  await expect(configuration.getByLabel("File", { exact: true })).toHaveCount(
-    0,
+  await wizard.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(wizard.getByTestId("chunk-preview-panel")).toContainText(
+    "Previewing: configured-first-upload.txt",
   );
-  await configuration.getByLabel("Embedding model").click();
+  await wizard.getByLabel("Embedding model").click();
   await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
-  await configuration
-    .getByRole("radio", { name: "Hybrid", exact: true })
-    .check();
-  await configuration.getByLabel("Reranker model").click();
+  await wizard.getByRole("radio", { name: "Hybrid", exact: true }).check();
+  await wizard.getByLabel("Reranker model").click();
   await page
     .getByRole("option", { name: "SiliconFlow · BAAI/bge-reranker-v2-m3" })
     .click();
 
   try {
-    await configuration
-      .getByRole("button", { name: "Save configuration" })
+    await wizard
+      .getByRole("button", { name: "Upload & process", exact: true })
       .click();
     await expect.poll(() => state.baseUpdates.length).toBe(1);
     expect(state.baseUpdates[0]).toEqual({
@@ -1890,45 +1907,39 @@ test("configures an empty base before opening its first upload dialog", async ({
       retrieval_mode: "hybrid",
       reranker_model_id: RERANK_MODEL_ID,
     });
-    // An accepted PATCH is not a successful response yet: file admission must
-    // wait, even though the mock server has already persisted the binding.
-    await expect(configuration).toBeVisible();
-    await expect(
-      page.getByRole("dialog", { name: "Upload document", exact: true }),
-    ).toHaveCount(0);
-    expect(state.uploadCounter).toBe(0);
+    // Persisting the mock row is not a successful PATCH response. The wizard
+    // must remain in step two without admitting any file until it settles.
+    await expect(wizard.getByTestId("chunk-preview-panel")).toBeVisible();
+    await expect(wizard.getByTestId("wizard-document-status")).toHaveCount(0);
+    expect(state.uploadRequests).toHaveLength(0);
     expect(state.documents).toHaveLength(0);
+    expect(state.baseCreates).toHaveLength(0);
   } finally {
     releaseConfiguration();
   }
 
-  const uploadDialog = page.getByRole("dialog", {
-    name: "Upload document",
-    exact: true,
-  });
-  await expect(uploadDialog).toBeVisible();
-  await expect(configuration).toHaveCount(0);
+  await expect(
+    wizard.getByTestId("wizard-document-status").getByText("handbook-1.txt"),
+  ).toBeVisible();
   expect(state.bases[0]).toMatchObject({
     embedding_model_id: MODEL_ID,
     retrieval_mode: "hybrid",
     reranker_model_id: RERANK_MODEL_ID,
   });
-  await uploadDialog.getByLabel("File").setInputFiles({
-    name: "configured-first-upload.txt",
-    mimeType: "text/plain",
-    buffer: Buffer.from("Upload only after the initial configuration succeeds"),
+  expect(state.uploadRequests).toHaveLength(1);
+  expect(state.uploadRequests[0]).toMatchObject({
+    baseId: BASE_ID,
+    fileName: "configured-first-upload.txt",
   });
-  await uploadDialog
-    .getByRole("button", { name: "Upload", exact: true })
-    .click();
+  expect(state.baseCreates).toHaveLength(0);
+  expect(state.baseUpdates).toHaveLength(1);
+  await wizard.getByRole("button", { name: "Go to documents" }).click();
   await expect(
     page.getByTestId("knowledge-document-rows").getByText("handbook-1.txt"),
   ).toBeVisible();
-  expect(state.uploadCounter).toBe(1);
-  expect(state.documents).toHaveLength(1);
 });
 
-test("failed initial configuration preserves choices without uploading documents", async ({
+test("failed initial configuration stays in wizard step two and preserves upload choices", async ({
   page,
 }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
@@ -1955,49 +1966,88 @@ test("failed initial configuration preserves choices without uploading documents
   await page.goto("/projects/alpha/knowledge");
   await page.getByRole("button", { name: "View documents" }).click();
   await page.getByRole("button", { name: "Upload document" }).click();
-  const configuration = page.getByRole("dialog", {
-    name: "Configure knowledge base",
+  const wizard = page.getByTestId("knowledge-create-wizard");
+  await wizard.getByLabel("File", { exact: true }).setInputFiles({
+    name: "preserved.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from(
+      "Preserve this selected file across a failed configuration",
+    ),
   });
-  await configuration.getByLabel("Embedding model").click();
+  await wizard.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(wizard.getByTestId("chunk-preview-panel")).toContainText(
+    "Previewing: preserved.txt",
+  );
+  await wizard
+    .getByLabel("Chunk size (characters)", { exact: true })
+    .fill("1200");
+  await wizard
+    .getByLabel("Display name (optional)", { exact: true })
+    .fill("Preserved display name");
+  await wizard.getByLabel("Embedding model").click();
   await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
-  await configuration
-    .getByRole("radio", { name: "Hybrid", exact: true })
-    .check();
-  await configuration.getByLabel("Reranker model").click();
+  await wizard.getByRole("radio", { name: "Hybrid", exact: true }).check();
+  await wizard.getByLabel("Reranker model").click();
   await page
     .getByRole("option", { name: "SiliconFlow · BAAI/bge-reranker-v2-m3" })
     .click();
-  await configuration
-    .getByRole("button", { name: "Save configuration" })
+  await wizard
+    .getByRole("button", { name: "Upload & process", exact: true })
     .click();
 
-  await expect(configuration.getByRole("alert")).toHaveText(
+  await expect(wizard.getByRole("alert")).toHaveText(
     "Model binding temporarily unavailable.",
   );
-  await expect(configuration.getByLabel("Embedding model")).toHaveText(
+  await expect(wizard.getByLabel("Embedding model")).toHaveText(
     "SiliconFlow · BAAI/bge-m3",
   );
   await expect(
-    configuration.getByRole("radio", { name: "Hybrid", exact: true }),
+    wizard.getByRole("radio", { name: "Hybrid", exact: true }),
   ).toBeChecked();
-  await expect(configuration.getByLabel("Reranker model")).toHaveText(
+  await expect(wizard.getByLabel("Reranker model")).toHaveText(
     "SiliconFlow · BAAI/bge-reranker-v2-m3",
   );
   await expect(
-    configuration.getByRole("button", { name: "Save configuration" }),
-  ).toBeEnabled();
+    wizard.getByLabel("Chunk size (characters)", { exact: true }),
+  ).toHaveValue("1200");
   await expect(
-    page.getByRole("dialog", { name: "Upload document", exact: true }),
-  ).toHaveCount(0);
+    wizard.getByLabel("Display name (optional)", { exact: true }),
+  ).toHaveValue("Preserved display name");
+  await expect(wizard.getByTestId("chunk-preview-panel")).toContainText(
+    "Previewing: preserved.txt",
+  );
+  await expect(
+    wizard.getByRole("button", { name: "Upload & process", exact: true }),
+  ).toBeEnabled();
+  await expect(wizard.getByTestId("wizard-document-status")).toHaveCount(0);
   expect(state.baseUpdates).toHaveLength(1);
+  expect(state.baseCreates).toHaveLength(0);
   expect(state.bases[0]).toMatchObject({
     embedding_model_id: null,
     retrieval_mode: "semantic",
     reranker_model_id: null,
     document_count: 0,
   });
-  expect(state.uploadCounter).toBe(0);
+  expect(state.uploadRequests).toHaveLength(0);
   expect(state.documents).toHaveLength(0);
+
+  // A configuration failure may retry PATCH; the same retained file follows
+  // only its successful response, without creating a replacement base.
+  await wizard
+    .getByRole("button", { name: "Upload & process", exact: true })
+    .click();
+  await expect(
+    wizard.getByTestId("wizard-document-status").getByText("handbook-1.txt"),
+  ).toBeVisible();
+  expect(state.baseUpdates).toHaveLength(2);
+  expect(state.baseCreates).toHaveLength(0);
+  expect(state.uploadRequests).toEqual([
+    {
+      baseId: BASE_ID,
+      fileName: "preserved.txt",
+      displayName: "Preserved display name",
+    },
+  ]);
 });
 
 test("read-only members cannot configure an unconfigured base", async ({
@@ -2041,12 +2091,15 @@ test("read-only members cannot configure an unconfigured base", async ({
   await expect(
     page.getByRole("dialog", { name: "Configure knowledge base" }),
   ).toHaveCount(0);
+  await expect(page.getByTestId("knowledge-create-wizard")).toHaveCount(0);
+  expect(state.baseCreates).toHaveLength(0);
   expect(state.baseUpdates).toHaveLength(0);
+  expect(state.uploadRequests).toHaveLength(0);
   expect(state.modelOptionsRequests).toBe(0);
   expect(state.uploadCounter).toBe(0);
 });
 
-test("settings configure an empty base without opening an upload dialog", async ({
+test("settings configure an empty base without opening an upload wizard", async ({
   page,
 }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
@@ -2096,10 +2149,9 @@ test("settings configure an empty base without opening an upload dialog", async 
   await expect(
     page.getByRole("button", { name: "Re-embed documents" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("dialog", { name: "Upload document", exact: true }),
-  ).toHaveCount(0);
+  await expect(page.getByTestId("knowledge-create-wizard")).toHaveCount(0);
   expect(state.rebuildRequests).toHaveLength(0);
+  expect(state.uploadRequests).toHaveLength(0);
   expect(state.uploadCounter).toBe(0);
   expect(state.documents).toHaveLength(0);
 });
@@ -2855,7 +2907,7 @@ test("deletes a base, polls the deleting status away, and parks delete failures 
 
 test("read-only members see lists but no write controls", async ({ page }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
-  await mockKnowledgeRoutes(page, {
+  const state = await mockKnowledgeRoutes(page, {
     capabilities: READ_CAPABILITIES,
     bases: [
       {
@@ -2920,6 +2972,10 @@ test("read-only members see lists but no write controls", async ({ page }) => {
   await expect(browser.getByRole("switch")).toHaveCount(0);
   await expect(browser.getByRole("button", { name: "Edit" })).toHaveCount(0);
   await expect(browser.getByRole("button", { name: "Delete" })).toHaveCount(0);
+  await expect(page.getByTestId("knowledge-create-wizard")).toHaveCount(0);
+  expect(state.baseCreates).toHaveLength(0);
+  expect(state.baseUpdates).toHaveLength(0);
+  expect(state.uploadRequests).toHaveLength(0);
 });
 
 test("toggles a document's retrieval switch and renames it from the list", async ({
@@ -3120,7 +3176,7 @@ test("wizard parent-child mode nests preview children and freezes child params o
   expect(state.documents.at(-1)?.child_chunk_separator).toBe("\\n");
 });
 
-test("upload dialog sends parent-child chunking parameters", async ({
+test("an existing configured base uploads through the wizard without changing its configuration", async ({
   page,
 }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
@@ -3129,9 +3185,24 @@ test("upload dialog sends parent-child chunking parameters", async ({
       {
         id: BASE_ID,
         name: "产品手册",
-        description: "",
+        description: "Existing base description",
         status: "active",
-        document_count: 0,
+        document_count: 1,
+        delete_error: null,
+        embedding_model_id: MODEL_ID,
+        reranker_model_id: RERANK_MODEL_ID,
+        retrieval_mode: "hybrid",
+      },
+    ],
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-000000000099",
+        knowledge_base_id: BASE_ID,
+        name: "guide.txt",
+        original_name: "guide.txt",
+        status: "ready",
+        segment_count: 2,
+        error_message: null,
         delete_error: null,
       },
     ],
@@ -3139,25 +3210,89 @@ test("upload dialog sends parent-child chunking parameters", async ({
   await page.goto("/projects/alpha/knowledge");
   await page.getByRole("button", { name: "View documents" }).click();
   await page.getByRole("button", { name: "Upload document" }).click();
-
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("File").setInputFiles({
+  const wizard = page.getByTestId("knowledge-create-wizard");
+  await expect(wizard).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Upload document", exact: true }),
+  ).toHaveCount(0);
+  await wizard.getByLabel("File", { exact: true }).setInputFiles({
     name: "guide.txt",
     mimeType: "text/plain",
-    buffer: Buffer.from("上传对话框父子分块内容"),
+    buffer: Buffer.from("已有知识库通过完整向导上传父子分块内容"),
   });
-  await dialog.getByRole("radio", { name: "Parent-child" }).check();
-  await dialog.getByLabel("Child chunk size (characters)").fill("200");
-  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
+  await wizard.getByRole("button", { name: "Next", exact: true }).click();
+  const preview = wizard.getByTestId("chunk-preview-panel");
+  await expect(preview).toContainText("Previewing: guide.txt");
 
+  // Existing library settings are informational, while the single document's
+  // optional display name remains editable and is a multipart file property.
+  await expect(wizard.getByLabel("Name", { exact: true })).toHaveCount(0);
+  await expect(wizard.getByLabel("Description", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(
+    wizard.getByRole("combobox", { name: "Embedding model", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    wizard.getByRole("combobox", { name: "Reranker model", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    wizard.getByRole("radiogroup", { name: "Default retrieval route" }),
+  ).toHaveCount(0);
+  await wizard
+    .getByLabel("Display name (optional)", { exact: true })
+    .fill("Uploaded guide");
+  await wizard
+    .getByRole("radio", { name: /Parent-child/u })
+    .check();
+  await wizard
+    .getByLabel("Child chunk size (characters)", { exact: true })
+    .fill("200");
+  await preview.getByRole("button", { name: "Refresh preview" }).click();
+  await expect(
+    preview.getByText("父块1子块一 child=200 csep=\\n"),
+  ).toBeVisible();
+  await wizard
+    .getByRole("button", { name: "Upload & process", exact: true })
+    .click();
+
+  await expect(
+    wizard.getByRole("heading", { name: "Processing documents", exact: true }),
+  ).toBeVisible();
+  const statusList = wizard.getByTestId("wizard-document-status");
+  await expect(statusList.getByText("handbook-1.txt")).toBeVisible();
+  // The old document shares the selected filename. Only returned upload IDs,
+  // not all base documents or filename matches, belong to this batch.
+  await expect(statusList.getByRole("listitem")).toHaveCount(1);
+  await expect(statusList.getByText("guide.txt", { exact: true })).toHaveCount(
+    0,
+  );
+  expect(state.baseCreates).toHaveLength(0);
+  expect(state.baseUpdates).toHaveLength(0);
+  expect(state.uploadRequests).toEqual([
+    { baseId: BASE_ID, fileName: "guide.txt", displayName: "Uploaded guide" },
+  ]);
+  expect(state.documents.at(-1)).toMatchObject({
+    knowledge_base_id: BASE_ID,
+    chunking_mode: "parent_child",
+    child_chunk_size: 200,
+    child_chunk_separator: "\\n",
+  });
+  expect(state.bases[0]).toMatchObject({
+    name: "产品手册",
+    description: "Existing base description",
+    embedding_model_id: MODEL_ID,
+    reranker_model_id: RERANK_MODEL_ID,
+    retrieval_mode: "hybrid",
+  });
+  await wizard.getByRole("button", { name: "Go to documents" }).click();
   const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("guide.txt", { exact: true })).toBeVisible();
   await expect(rows.getByText("handbook-1.txt")).toBeVisible();
-  expect(state.documents.at(-1)?.chunking_mode).toBe("parent_child");
-  expect(state.documents.at(-1)?.child_chunk_size).toBe(200);
-  expect(state.documents.at(-1)?.child_chunk_separator).toBe("\\n");
+  await expect(page).toHaveURL(new RegExp(`kb=${BASE_ID}`));
 });
 
-test("multi-file upload reports per-file verdicts and retries only the failures", async ({
+test("cancelling an existing-base upload returns to the original documents view without mutations", async ({
   page,
 }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
@@ -3165,7 +3300,7 @@ test("multi-file upload reports per-file verdicts and retries only the failures"
     bases: [
       {
         id: BASE_ID,
-        name: "产品手册",
+        name: "Keep this base",
         description: "",
         status: "active",
         document_count: 0,
@@ -3173,53 +3308,215 @@ test("multi-file upload reports per-file verdicts and retries only the failures"
       },
     ],
   });
+  await page.goto(`/projects/alpha/knowledge?kb=${BASE_ID}`);
+  await expect(
+    page.getByRole("button", { name: "Upload document" }),
+  ).toBeVisible();
+  const originalUrl = page.url();
+  const wizard = page.getByTestId("knowledge-create-wizard");
+
+  // Both file selection and parameter editing can exit without creating or
+  // changing a library. Back returns to the same base, never the base catalog.
+  await page.getByRole("button", { name: "Upload document" }).click();
+  await wizard.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(wizard).toHaveCount(0);
+  await expect(page).toHaveURL(originalUrl);
+  await expect(
+    page.getByRole("button", { name: "Upload document" }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Upload document" }).click();
+  await wizard.getByLabel("File", { exact: true }).setInputFiles({
+    name: "cancelled.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("This file must not be admitted after cancelling"),
+  });
+  await wizard.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(wizard.getByTestId("chunk-preview-panel")).toContainText(
+    "Previewing: cancelled.txt",
+  );
+  await wizard
+    .getByLabel("Chunk size (characters)", { exact: true })
+    .fill("1200");
+  await wizard.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(wizard).toHaveCount(0);
+  await expect(page).toHaveURL(originalUrl);
+  await expect(
+    page.getByRole("button", { name: "Upload document" }),
+  ).toBeVisible();
+  expect(state.baseCreates).toHaveLength(0);
+  expect(state.baseUpdates).toHaveLength(0);
+  expect(state.uploadRequests).toHaveLength(0);
+  expect(state.documents).toHaveLength(0);
+});
+
+test("browser back clears an existing-base upload before reopening the same base", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "Return to base A",
+        description: "",
+        status: "active",
+        document_count: 1,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-000000000099",
+        knowledge_base_id: BASE_ID,
+        name: "existing-guide.txt",
+        original_name: "existing-guide.txt",
+        status: "ready",
+        segment_count: 2,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+  });
   await page.goto("/projects/alpha/knowledge");
   await page.getByRole("button", { name: "View documents" }).click();
+  await expect(page).toHaveURL(new RegExp(`kb=${BASE_ID}`));
   await page.getByRole("button", { name: "Upload document" }).click();
+  await expect(page.getByTestId("knowledge-create-wizard")).toBeVisible();
 
-  // One good file plus two the backend rejects (quota) in a single batch.
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("File").setInputFiles([
-    { name: "ok.txt", mimeType: "text/plain", buffer: Buffer.from("正常内容") },
-    {
-      name: "reject-a.txt",
-      mimeType: "text/plain",
-      buffer: Buffer.from("超配额 A"),
-    },
-    {
-      name: "reject-b.txt",
-      mimeType: "text/plain",
-      buffer: Buffer.from("超配额 B"),
-    },
-  ]);
-  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
+  await page.goBack();
+  await expect(page).not.toHaveURL(/kb=/u);
+  await expect(page.getByTestId("knowledge-base-list")).toBeVisible();
+  await expect(page.getByTestId("knowledge-create-wizard")).toHaveCount(0);
 
-  // Partial failure: per-file verdicts stay visible, the dialog stays open,
-  // and the server's own error message is surfaced verbatim.
-  const outcomes = dialog.getByTestId("upload-outcomes");
-  await expect(outcomes.getByText("ok.txt: uploaded")).toBeVisible();
-  await expect(outcomes.getByText("reject-a.txt: 文件超出配额")).toBeVisible();
-  await expect(outcomes.getByText("reject-b.txt: 文件超出配额")).toBeVisible();
-
-  // Retrying re-sends only the two failures — never the succeeded file.
-  const uploadsBeforeRetry = state.uploadCounter;
-  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
-  await expect(outcomes.getByText("reject-a.txt: 文件超出配额")).toBeVisible();
-  expect(state.uploadCounter).toBe(uploadsBeforeRetry);
-  await expect(outcomes.getByText(/ok\.txt/u)).toHaveCount(0);
-
-  // Once the backend accepts them, the retry drains the queue and closes.
-  state.acceptRejectedUploads = true;
-  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
-  await expect(dialog).toBeHidden();
-  expect(state.uploadCounter).toBe(uploadsBeforeRetry + 2);
-
-  // All three documents land in the table (mock renames to handbook-N.txt).
-  const rows = page.getByTestId("knowledge-document-rows");
-  await expect(rows.getByText("handbook-1.txt")).toBeVisible();
-  await expect(rows.getByText("handbook-2.txt")).toBeVisible();
-  await expect(rows.getByText("handbook-3.txt")).toBeVisible();
+  await page.getByRole("button", { name: "View documents" }).click();
+  await expect(page).toHaveURL(new RegExp(`kb=${BASE_ID}`));
+  await expect(
+    page.getByTestId("knowledge-document-rows").getByText("existing-guide.txt"),
+  ).toBeVisible();
+  await expect(page.getByTestId("knowledge-create-wizard")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Upload document" }),
+  ).toBeVisible();
+  expect(state.baseCreates).toHaveLength(0);
+  expect(state.baseUpdates).toHaveLength(0);
+  expect(state.uploadRequests).toHaveLength(0);
 });
+
+for (const needsInitialConfiguration of [false, true]) {
+  test(`existing-base wizard retries only failed files without repeating ${needsInitialConfiguration ? "initial configuration" : "base mutations"}`, async ({
+    page,
+  }) => {
+    const BASE_ID = "40000000-0000-4000-8000-000000000001";
+    const state = await mockKnowledgeRoutes(page, {
+      bases: [
+        {
+          id: BASE_ID,
+          name: "产品手册",
+          description: "",
+          status: "active",
+          document_count: 0,
+          delete_error: null,
+          embedding_model_id: needsInitialConfiguration ? null : MODEL_ID,
+        },
+      ],
+    });
+    await page.goto("/projects/alpha/knowledge");
+    await page.getByRole("button", { name: "View documents" }).click();
+    await page.getByRole("button", { name: "Upload document" }).click();
+    const wizard = page.getByTestId("knowledge-create-wizard");
+    await wizard.getByLabel("File", { exact: true }).setInputFiles([
+      {
+        name: "ok.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("正常内容"),
+      },
+      {
+        name: "reject-a.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("超配额 A"),
+      },
+      {
+        name: "reject-b.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("超配额 B"),
+      },
+    ]);
+    await wizard.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(wizard.getByTestId("chunk-preview-panel")).toBeVisible();
+    await expect(
+      wizard.getByLabel("Display name (optional)", { exact: true }),
+    ).toHaveCount(0);
+    if (needsInitialConfiguration) {
+      await wizard.getByLabel("Embedding model").click();
+      await page
+        .getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" })
+        .click();
+    }
+    await wizard
+      .getByRole("button", { name: "Upload & process", exact: true })
+      .click();
+
+    const statusList = wizard.getByTestId("wizard-document-status");
+    await expect(statusList.getByText("handbook-1.txt")).toBeVisible();
+    await expect(wizard.getByText("reject-a.txt: 文件超出配额")).toBeVisible();
+    await expect(wizard.getByText("reject-b.txt: 文件超出配额")).toBeVisible();
+    await expect(
+      wizard.getByRole("button", { name: "Retry failed uploads", exact: true }),
+    ).toBeEnabled();
+    expect(state.uploadRequests.map((request) => request.fileName)).toEqual([
+      "ok.txt",
+      "reject-a.txt",
+      "reject-b.txt",
+    ]);
+    expect(state.baseCreates).toHaveLength(0);
+    expect(state.baseUpdates).toHaveLength(needsInitialConfiguration ? 1 : 0);
+
+    // An unsuccessful retry resends exactly the failures and retains the
+    // successful document in the processing list.
+    await wizard
+      .getByRole("button", { name: "Retry failed uploads", exact: true })
+      .click();
+    await expect.poll(() => state.uploadRequests.length).toBe(5);
+    await expect(
+      wizard.getByRole("button", { name: "Retry failed uploads", exact: true }),
+    ).toBeEnabled();
+    expect(
+      state.uploadRequests.slice(3).map((request) => request.fileName),
+    ).toEqual(["reject-a.txt", "reject-b.txt"]);
+    expect(state.uploadCounter).toBe(1);
+    await expect(statusList.getByText("handbook-1.txt")).toBeVisible();
+
+    state.acceptRejectedUploads = true;
+    await wizard
+      .getByRole("button", { name: "Retry failed uploads", exact: true })
+      .click();
+    await expect(statusList.getByRole("listitem")).toHaveCount(3);
+    await expect(statusList.getByText("handbook-3.txt")).toBeVisible();
+    await expect(wizard.getByText("reject-a.txt: 文件超出配额")).toHaveCount(0);
+    await expect(wizard.getByText("reject-b.txt: 文件超出配额")).toHaveCount(0);
+    expect(
+      state.uploadRequests.slice(5).map((request) => request.fileName),
+    ).toEqual(["reject-a.txt", "reject-b.txt"]);
+    expect(state.uploadCounter).toBe(3);
+    expect(
+      state.uploadRequests.every((request) => request.baseId === BASE_ID),
+    ).toBe(true);
+    expect(state.baseCreates).toHaveLength(0);
+    expect(state.baseUpdates).toHaveLength(needsInitialConfiguration ? 1 : 0);
+    if (needsInitialConfiguration) {
+      expect(state.baseUpdates[0]).toEqual({
+        embedding_model_id: MODEL_ID,
+        retrieval_mode: "semantic",
+      });
+    }
+    await wizard.getByRole("button", { name: "Go to documents" }).click();
+    const rows = page.getByTestId("knowledge-document-rows");
+    await expect(rows.getByText("handbook-1.txt")).toBeVisible();
+    await expect(rows.getByText("handbook-2.txt")).toBeVisible();
+    await expect(rows.getByText("handbook-3.txt")).toBeVisible();
+  });
+}
 
 test("retrieval test lists recent queries, refreshes after a search, and backfills on click", async ({
   page,
@@ -3813,7 +4110,9 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
   ).toContainText("Failed");
 });
 
-test("upload dialog accepts the K4 document formats", async ({ page }) => {
+test("the existing-base upload wizard accepts the K4 document formats", async ({
+  page,
+}) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
   await mockKnowledgeRoutes(page, {
     bases: [
@@ -3831,9 +4130,10 @@ test("upload dialog accepts the K4 document formats", async ({ page }) => {
   await page.getByRole("button", { name: "View documents" }).click();
   await page.getByRole("button", { name: "Upload document" }).click();
 
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText(/HTML, PPTX, and EPUB/u)).toBeVisible();
-  await expect(dialog.getByLabel("File")).toHaveAttribute(
+  const wizard = page.getByTestId("knowledge-create-wizard");
+  await expect(wizard).toBeVisible();
+  await expect(wizard.getByText(/HTML, PPTX, and EPUB/u)).toBeVisible();
+  await expect(wizard.getByLabel("File")).toHaveAttribute(
     "accept",
     ".pdf,.docx,.txt,.md,.csv,.xlsx,.html,.htm,.pptx,.epub",
   );

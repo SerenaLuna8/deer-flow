@@ -78,6 +78,7 @@ export function KnowledgeBaseDetail({
   canEdit,
   navState,
   onNavigate,
+  onUploadDocuments,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
@@ -87,6 +88,7 @@ export function KnowledgeBaseDetail({
     next: KnowledgeNavigationState,
     mode: "push" | "replace",
   ) => void;
+  onUploadDocuments: () => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
@@ -210,6 +212,7 @@ export function KnowledgeBaseDetail({
             canEdit={canEdit}
             navState={navState}
             onNavigate={onNavigate}
+            onUploadDocuments={onUploadDocuments}
           />
         ) : null}
         {section === "search" && base.embedding_model_id === null ? (
@@ -221,7 +224,7 @@ export function KnowledgeBaseDetail({
               {labels.bases.unconfiguredHint}
             </p>
             {canEdit ? (
-              <Button type="button" onClick={() => setSection("documents")}>
+              <Button type="button" onClick={onUploadDocuments}>
                 {labels.documents.uploadButton}
               </Button>
             ) : null}

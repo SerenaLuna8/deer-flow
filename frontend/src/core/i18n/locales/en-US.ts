@@ -260,6 +260,13 @@ export const enUS: Translations = {
       rebuildConfirm: "Re-embed",
     },
     wizard: {
+      uploadExistingTitle: "Upload documents",
+      uploadProcessingTitle: "Processing documents",
+      uploadAction: "Upload & process",
+      existingConfigurationHint:
+        "Uses the base’s saved models and retrieval settings. Change them in Settings.",
+      configuredModelUnavailable: "Configured; model name unavailable",
+      retryFailedUploads: "Retry failed uploads",
       heroTitle: "Create your first knowledge base",
       uploadCreateTitle: "Create from documents",
       uploadCreateHint:
@@ -295,8 +302,7 @@ export const enUS: Translations = {
       processingTitle: "Embedding progress",
       summaryTitle: "Settings",
       goToDocuments: "Go to documents",
-      uploadFailedNote:
-        "These files failed to upload; you can upload them again from the documents page:",
+      uploadFailedNote: "These files failed to upload. Retry them below:",
       previewTitle: "Chunk preview",
       previewHint: (fileName) => `Previewing: ${fileName}`,
       previewPickFile: "Preview file",

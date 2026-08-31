@@ -309,9 +309,10 @@ generator; a necessary local patch needs focused coverage and an explanation.
   those cached rows.
 - All chunk parameters (size, overlap, separator, pre-processing rules,
   chunking mode with child size/separator) are
-  immutable after upload and retry reuses them; the wizard's step 2 and the
-  upload dialog expose the same controls. The wizard expands parameters inside
-  the selected mode card and scrolls configuration and preview independently on
+  immutable after upload and retry reuses them. New-base creation and uploads
+  into existing bases share `knowledge-create-wizard.tsx`: file selection,
+  chunk configuration with preview, and processing results. The wizard expands
+  parameters inside the selected mode card and scrolls configuration and preview independently on
   desktop. Its preview panel carries a
   file picker over the selected files: each newly shown `File` object
   auto-previews exactly once via the stateless `chunk-preview` endpoint, and
@@ -326,11 +327,11 @@ generator; a necessary local patch needs focused coverage and an explanation.
   render only in parent_child mode and are omitted from general-mode
   requests; child preview chips retain access to the complete parent text.
   The separator inputs hold the escaped form the backend decodes
-  (`\n\n` and `\n` by default). The upload dialog submits multiple files
-  sequentially, reports one verdict per file, and keeps only the failed files
-  queued for a retry that never re-uploads the succeeded ones. Search labels
-  scores with the
-  neutral "Retrieval score" wording plus a `score_kind` provenance badge
+  (`\n\n` and `\n` by default). The shared wizard submits multiple files
+  sequentially, reports one verdict per file, and retries only failed files with the frozen submission settings.
+  Processing results show only documents returned by this upload session;
+  existing documents in the base are not folded into its progress. Search labels
+  scores with the neutral "Retrieval score" wording plus a `score_kind` provenance badge
   (Cosine, Rerank, or Rank fusion — never a "confidence" percentage); result
   rows show the final rank, and a collapsed diagnostics disclosure exposes
   strategy/budget/count/timing/model details without any segment text. Hit
@@ -347,11 +348,13 @@ generator; a necessary local patch needs focused coverage and an explanation.
   omit the field so the backend resolves the base defaults (placeholders show
   them), which are edited in the base settings panel. Empty-base creation only
   submits name/description and accepts `embedding_model_id: null`; it neither
-  fetches model options nor silently chooses a model. The first Upload action
-  opens `knowledge-base-setup-dialog.tsx`: an atomic initial PATCH binds the
-  embedding model plus retrieval/reranker choices before the original upload
-  dialog opens. Failure preserves choices without uploading. Settings can open
-  the same setup without starting an upload. Unconfigured bases show a neutral
+  fetches model options nor silently chooses a model. Upload opens the shared
+  full-page wizard. For an unconfigured base, step 2
+  atomically PATCHes its first embedding/retrieval/reranker configuration
+  before uploading; failure preserves choices without uploading. Configured
+  bases keep their saved models and retrieval settings without a PATCH. Upload
+  never creates another base. Settings retains `knowledge-base-setup-dialog.tsx`
+  for initial configuration without an upload. Unconfigured bases show a neutral
   state; read-only members never receive setup controls. Already configured
   bases retain rebuild as their only embedding replacement path.
   The document-first wizard, first configuration, and base settings persist the

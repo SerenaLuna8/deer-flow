@@ -82,7 +82,6 @@ import {
   useSetKnowledgeDocumentMetadata,
   useSetKnowledgeDocumentsEnabled,
   useSetKnowledgeDocumentsMetadata,
-  useUploadKnowledgeDocument,
 } from "@/core/knowledge/hooks";
 import type {
   KnowledgeDocumentSort,
@@ -104,7 +103,6 @@ import {
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
-import { KnowledgeBaseSetupDialog } from "./knowledge-base-setup-dialog";
 import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeFileTypeIcon } from "./knowledge-file-type-icon";
 import { KnowledgeSegmentsBrowser } from "./knowledge-segments-browser";
@@ -225,6 +223,7 @@ export function KnowledgeDocumentsView({
   canEdit,
   navState,
   onNavigate,
+  onUploadDocuments,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
@@ -234,6 +233,7 @@ export function KnowledgeDocumentsView({
     next: KnowledgeNavigationState,
     mode: "push" | "replace",
   ) => void;
+  onUploadDocuments: () => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
@@ -302,6 +302,7 @@ export function KnowledgeDocumentsView({
       documents={documents}
       navState={navState}
       onNavigate={onNavigate}
+      onUploadDocuments={onUploadDocuments}
       onBrowse={(document) =>
         onNavigate({ ...navState, doc: document.id }, "push")
       }
@@ -317,6 +318,7 @@ function DocumentsTable({
   navState,
   onNavigate,
   onBrowse,
+  onUploadDocuments,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
@@ -328,6 +330,7 @@ function DocumentsTable({
     mode: "push" | "replace",
   ) => void;
   onBrowse: (document: KnowledgeDocumentItem) => void;
+  onUploadDocuments: () => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
@@ -335,8 +338,6 @@ function DocumentsTable({
   const deleteDocument = useDeleteKnowledgeDocument(scope);
   const toggleDocuments = useSetKnowledgeDocumentsEnabled(scope);
   const batchDelete = useDeleteKnowledgeDocuments(scope);
-  const [uploadOpen, setUploadOpen] = useState(false);
-  const [setupOpen, setSetupOpen] = useState(false);
   const [deleting, setDeleting] = useState<KnowledgeDocumentItem | null>(null);
   const [renaming, setRenaming] = useState<KnowledgeDocumentItem | null>(null);
   // Metadata and reparse dialogs track ids, not row objects: conflicts
@@ -463,10 +464,7 @@ function DocumentsTable({
           <Button
             type="button"
             className="h-9 rounded-lg text-[13px] shadow-none"
-            onClick={() => {
-              if (base.embedding_model_id === null) setSetupOpen(true);
-              else setUploadOpen(true);
-            }}
+            onClick={onUploadDocuments}
           >
             <UploadIcon aria-hidden className="size-4" />
             {labels.documents.uploadButton}
@@ -1008,26 +1006,6 @@ function DocumentsTable({
             </Button>
           </div>
         </div>
-      ) : null}
-
-      {canEdit ? (
-        <KnowledgeBaseSetupDialog
-          key={base.id}
-          scope={scope}
-          base={base}
-          open={setupOpen}
-          onOpenChange={setSetupOpen}
-          onConfigured={() => setUploadOpen(true)}
-        />
-      ) : null}
-
-      {canEdit ? (
-        <UploadDocumentDialog
-          scope={scope}
-          baseId={base.id}
-          open={uploadOpen}
-          onOpenChange={setUploadOpen}
-        />
       ) : null}
 
       {renaming ? (
@@ -2097,368 +2075,6 @@ function ReparseDocumentDialog({
               {reparse.isPending
                 ? labels.documents.reparsePending
                 : labels.documents.reparseSubmit}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-type UploadFileOutcome = {
-  fileName: string;
-  ok: boolean;
-  message: string;
-};
-
-function UploadDocumentDialog({
-  scope,
-  baseId,
-  open,
-  onOpenChange,
-}: {
-  scope: ProjectClientScope;
-  baseId: string;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const { t } = useI18n();
-  const labels = t.knowledge;
-  const upload = useUploadKnowledgeDocument(scope);
-  const [files, setFiles] = useState<File[]>([]);
-  const [displayName, setDisplayName] = useState("");
-  const [chunkSize, setChunkSize] = useState("1000");
-  const [chunkOverlap, setChunkOverlap] = useState("100");
-  const [chunkSeparator, setChunkSeparator] = useState(DEFAULT_CHUNK_SEPARATOR);
-  const [chunkingMode, setChunkingMode] =
-    useState<KnowledgeChunkingMode>("general");
-  const [childChunkSize, setChildChunkSize] = useState("500");
-  const [childChunkSeparator, setChildChunkSeparator] = useState(
-    DEFAULT_CHILD_CHUNK_SEPARATOR,
-  );
-  const [removeExtraSpaces, setRemoveExtraSpaces] = useState(false);
-  const [removeUrlsEmails, setRemoveUrlsEmails] = useState(false);
-  const [outcomes, setOutcomes] = useState<UploadFileOutcome[]>([]);
-  const [uploadingIndex, setUploadingIndex] = useState<number | null>(null);
-  const [fileInputKey, setFileInputKey] = useState(0);
-
-  const close = (nextOpen: boolean) => {
-    if (uploadingIndex !== null) return;
-    onOpenChange(nextOpen);
-    if (!nextOpen) {
-      setFiles([]);
-      setDisplayName("");
-      setChunkSize("1000");
-      setChunkOverlap("100");
-      setChunkSeparator(DEFAULT_CHUNK_SEPARATOR);
-      setChunkingMode("general");
-      setChildChunkSize("500");
-      setChildChunkSeparator(DEFAULT_CHILD_CHUNK_SEPARATOR);
-      setRemoveExtraSpaces(false);
-      setRemoveUrlsEmails(false);
-      setOutcomes([]);
-      setFileInputKey((key) => key + 1);
-      upload.reset();
-    }
-  };
-
-  const parsedChunkSize = Number.parseInt(chunkSize, 10);
-  const parsedChunkOverlap = Number.parseInt(chunkOverlap, 10);
-  const parsedChildChunkSize = Number.parseInt(childChunkSize, 10);
-  const childParamsValid =
-    chunkingMode === "general" ||
-    (isChildChunkSizeValid(parsedChildChunkSize, parsedChunkSize) &&
-      isChunkSeparatorValid(childChunkSeparator));
-  // Bounds mirror the backend exactly so an out-of-range value cannot reach
-  // a doomed upload request.
-  const chunkParamsValid =
-    isChunkSizeValid(parsedChunkSize) &&
-    isChunkOverlapValid(parsedChunkOverlap, parsedChunkSize) &&
-    isChunkSeparatorValid(chunkSeparator) &&
-    childParamsValid;
-
-  const startUpload = async () => {
-    if (files.length === 0 || !chunkParamsValid) return;
-    setOutcomes([]);
-    const collected: UploadFileOutcome[] = [];
-    const failedFiles: File[] = [];
-    for (const [index, file] of files.entries()) {
-      setUploadingIndex(index);
-      try {
-        // Files upload one by one so each gets its own verdict; the custom
-        // display name only makes sense for a single file.
-        await upload.mutateAsync({
-          baseId,
-          input: {
-            file,
-            name: files.length === 1 ? displayName : "",
-            chunk_size: parsedChunkSize,
-            chunk_overlap: parsedChunkOverlap,
-            chunk_separator: chunkSeparator,
-            remove_extra_spaces: removeExtraSpaces,
-            remove_urls_emails: removeUrlsEmails,
-            chunking_mode: chunkingMode,
-            ...(chunkingMode === "parent_child"
-              ? {
-                  child_chunk_size: parsedChildChunkSize,
-                  child_chunk_separator: childChunkSeparator,
-                }
-              : {}),
-          },
-        });
-        collected.push({
-          fileName: file.name,
-          ok: true,
-          message: labels.documents.uploadResultSuccess(file.name),
-        });
-      } catch (error) {
-        failedFiles.push(file);
-        collected.push({
-          fileName: file.name,
-          ok: false,
-          message: labels.documents.uploadResultFailed(
-            file.name,
-            knowledgeErrorMessage(error, labels.errors),
-          ),
-        });
-      }
-      setOutcomes([...collected]);
-    }
-    setUploadingIndex(null);
-    if (failedFiles.length === 0) {
-      onOpenChange(false);
-      setFiles([]);
-      setDisplayName("");
-      setOutcomes([]);
-      setFileInputKey((key) => key + 1);
-      upload.reset();
-    } else {
-      // Retrying must not re-upload the files that already succeeded.
-      setFiles(failedFiles);
-      setFileInputKey((key) => key + 1);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={close}>
-      {/* Parent-child mode adds enough fields to outgrow small viewports. */}
-      <DialogContent className="border-border/80 max-h-[85vh] overflow-y-auto rounded-xl text-[13px]">
-        <DialogHeader>
-          <DialogTitle className="text-base font-semibold">
-            {labels.documents.uploadTitle}
-          </DialogTitle>
-          <DialogDescription className="text-[13px] leading-5">
-            {labels.documents.uploadDescription}
-          </DialogDescription>
-        </DialogHeader>
-        <form
-          className="grid gap-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void startUpload();
-          }}
-        >
-          <label className="grid gap-1.5 text-[13px]">
-            <span className="font-medium">{labels.documents.fileLabel}</span>
-            <Input
-              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-              key={fileInputKey}
-              type="file"
-              // After a partial failure the input is cleared while the failed
-              // files stay queued in state, so it must not block resubmission.
-              required={files.length === 0}
-              multiple
-              accept={KNOWLEDGE_UPLOAD_ACCEPT}
-              onChange={(event) =>
-                setFiles(Array.from(event.target.files ?? []))
-              }
-            />
-          </label>
-          {files.length <= 1 ? (
-            <label className="grid gap-1.5 text-[13px]">
-              <span className="font-medium">
-                {labels.documents.displayNameLabel}
-              </span>
-              <Input
-                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                value={displayName}
-                maxLength={200}
-                placeholder={labels.documents.displayNamePlaceholder}
-                onChange={(event) => setDisplayName(event.target.value)}
-              />
-            </label>
-          ) : null}
-          <fieldset className="grid gap-2 text-[13px]">
-            <legend className="font-medium">
-              {labels.documents.chunkingModeLabel}
-            </legend>
-            <div className="flex flex-wrap gap-4">
-              {(
-                [
-                  ["general", labels.documents.chunkingModeGeneral],
-                  ["parent_child", labels.documents.chunkingModeParentChild],
-                ] as const
-              ).map(([mode, label]) => (
-                <label key={mode} className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name="upload-chunking-mode"
-                    value={mode}
-                    className="accent-selection size-4"
-                    checked={chunkingMode === mode}
-                    onChange={() => setChunkingMode(mode)}
-                  />
-                  {label}
-                </label>
-              ))}
-            </div>
-            {chunkingMode === "parent_child" ? (
-              <p className="text-muted-foreground text-xs">
-                {labels.documents.chunkingModeParentChildHint}
-              </p>
-            ) : null}
-          </fieldset>
-          <div className="grid grid-cols-2 items-start gap-3">
-            <label className="grid gap-1.5 text-[13px]">
-              <span className="font-medium">
-                {labels.documents.chunkSizeLabel}
-              </span>
-              <Input
-                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                type="number"
-                min={KNOWLEDGE_CHUNK_SIZE_MIN}
-                max={KNOWLEDGE_CHUNK_SIZE_MAX}
-                required
-                value={chunkSize}
-                onChange={(event) => setChunkSize(event.target.value)}
-              />
-            </label>
-            <label className="grid gap-1.5 text-[13px]">
-              <span className="font-medium">
-                {labels.documents.chunkOverlapLabel}
-              </span>
-              <Input
-                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                type="number"
-                min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
-                max={KNOWLEDGE_CHUNK_OVERLAP_MAX}
-                required
-                value={chunkOverlap}
-                onChange={(event) => setChunkOverlap(event.target.value)}
-              />
-            </label>
-          </div>
-          <label className="grid gap-1.5 text-[13px]">
-            <span className="font-medium">
-              {labels.documents.chunkSeparatorLabel}
-            </span>
-            <Input
-              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-              required
-              maxLength={64}
-              value={chunkSeparator}
-              onChange={(event) => setChunkSeparator(event.target.value)}
-            />
-          </label>
-          {chunkingMode === "parent_child" ? (
-            <div className="grid grid-cols-2 items-start gap-3">
-              <label className="grid gap-1.5 text-[13px]">
-                <span className="font-medium">
-                  {labels.documents.childChunkSizeLabel}
-                </span>
-                <Input
-                  className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                  type="number"
-                  min={KNOWLEDGE_CHILD_CHUNK_SIZE_MIN}
-                  max={KNOWLEDGE_CHILD_CHUNK_SIZE_MAX}
-                  required
-                  value={childChunkSize}
-                  onChange={(event) => setChildChunkSize(event.target.value)}
-                />
-              </label>
-              <label className="grid gap-1.5 text-[13px]">
-                <span className="font-medium">
-                  {labels.documents.childChunkSeparatorLabel}
-                </span>
-                <Input
-                  className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                  required
-                  maxLength={64}
-                  value={childChunkSeparator}
-                  onChange={(event) =>
-                    setChildChunkSeparator(event.target.value)
-                  }
-                />
-              </label>
-            </div>
-          ) : null}
-          <fieldset className="grid gap-2 text-[13px]">
-            <legend className="font-medium">
-              {labels.documents.preprocessingLabel}
-            </legend>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                className="accent-selection size-4"
-                checked={removeExtraSpaces}
-                onChange={(event) => setRemoveExtraSpaces(event.target.checked)}
-              />
-              {labels.documents.removeExtraSpacesLabel}
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                className="accent-selection size-4"
-                checked={removeUrlsEmails}
-                onChange={(event) => setRemoveUrlsEmails(event.target.checked)}
-              />
-              {labels.documents.removeUrlsEmailsLabel}
-            </label>
-          </fieldset>
-          <p className="text-muted-foreground text-xs">
-            {labels.documents.chunkImmutableNote}
-          </p>
-          {outcomes.length > 0 ? (
-            <ul className="grid gap-1 text-xs" data-testid="upload-outcomes">
-              {outcomes.map((outcome) => (
-                <li
-                  key={outcome.fileName}
-                  className={
-                    outcome.ok ? "text-muted-foreground" : "text-destructive"
-                  }
-                >
-                  {outcome.message}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <DialogFooter>
-            <Button
-              className="h-9 rounded-lg text-[13px] shadow-none"
-              type="button"
-              variant="outline"
-              disabled={uploadingIndex !== null}
-              onClick={() => close(false)}
-            >
-              {labels.common.cancel}
-            </Button>
-            <Button
-              className="h-9 rounded-lg text-[13px] shadow-none"
-              type="submit"
-              disabled={
-                uploadingIndex !== null ||
-                files.length === 0 ||
-                !chunkParamsValid
-              }
-            >
-              {uploadingIndex !== null
-                ? files.length > 1
-                  ? labels.documents.uploadingProgress(
-                      uploadingIndex + 1,
-                      files.length,
-                    )
-                  : labels.documents.uploading
-                : labels.documents.upload}
             </Button>
           </DialogFooter>
         </form>

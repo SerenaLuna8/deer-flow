@@ -1,6 +1,6 @@
 # Knowledge reference redesign — 2026-08-31
 
-final result: pending database application
+final result: passed
 
 ## Scope and source authority
 
@@ -137,3 +137,18 @@ The user requested that empty-base creation not require a model or retrieval cho
 ## Limits
 
 This verifies the frontend unit suite and the complete Knowledge Chromium spec, not the entire repository, all Playwright specs, other browser engines, external model providers, or deployment targets. Dark mode and physical touch hardware were not visually verified. The earlier visual passes changed no backend behavior; the unconfigured empty-base follow-up above now includes an explicit schema contract change. The unrelated untracked model-provider plan was preserved. This new redesign remains uncommitted; the user's earlier push request had already been fulfilled for the preceding version.
+
+
+## Existing-base upload wizard — accepted 2026-08-31
+
+The current request replaces the upload dialog with the same three-step workspace used to create a base. Earlier entries above are historical validation snapshots; the database was subsequently reset with explicit authorization and the normal local service is running.
+
+- **Acceptance:** the user confirmed “我已经验证了，改好了”. No additional functionality or browser reruns were pursued after that confirmation.
+- **Behavior:** both upload entry points open the shared full-page wizard. Configured bases preserve their models and retrieval mode; unconfigured bases perform their first atomic configuration in step 2. Uploading never creates another base. Results contain only this batch’s returned document IDs, and retries retain the frozen parameters and only retry failed files. Cancel returns to the prior base view; browser history changes clear the transient upload session.
+- **Visual sources:** `upload-dialog-user-before.png` and `upload-wizard-source-reference.png` in the artifact directory above. The source reference is 1336×766 pixels. `upload-wizard-step1-live.png` is a same-size 1336×766 content crop from a 1640×800 CSS viewport, inspected together with the reference. `upload-wizard-mobile-live.png` records the 390px viewport; DOM scroll width was also 390px.
+- **Fidelity:** the comparison checked typography, spacing, colors, assets, and copy. Compact type, blue step state, a 640px file area, a light dashed drop target, and the right-aligned Next action follow the reference. Existing navigation and design tokens remain. Icons come from the existing library; there are no new raster assets. Supported formats and the actual 50 MB limit are preserved; the reference product’s upgrade advertisement and 15 MB restriction are intentionally omitted. The first-step controls were legible at full comparison scale, so an additional focused crop was unnecessary. No actionable visual P0/P1/P2 remained in that capture.
+- **Checks completed on this change:** frontend `pnpm check`; 203 unit-test files / 1,124 tests passed with zero skips; isolated production build generated 69 pages; whitespace checks passed.
+- **Automated browser limitation:** the 61-case system-Chrome run did not return a final result and was stopped. A bundled-Chromium visual run reached the configured-upload UI, then exposed an overly exact test selector for the Parent-child radio’s accessible name. That selector was corrected to match the existing label-plus-description control, but the browser suite was not rerun after the user confirmed acceptance. Do not report the 61 browser cases as passed. The complete flow is user-verified; only the first-step desktop/mobile views were screenshot-verified by the agent in this iteration.
+- **Cleanup:** only the isolated port-3126 server and temporary visual-test copy were removed. The normal port-2026 service remains running. No business data was created or changed by this UI verification.
+
+final result: passed

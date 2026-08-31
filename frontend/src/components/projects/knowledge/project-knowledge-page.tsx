@@ -2,7 +2,7 @@
 
 import { PlusIcon } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useCurrentProject } from "@/components/projects/project-context";
 import { ProjectPageHeader } from "@/components/projects/project-page-header";
@@ -46,8 +46,16 @@ export function ProjectKnowledgePage() {
     [searchParams],
   );
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [uploadBaseId, setUploadBaseId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const bases = useKnowledgeBases(scope);
+  const navigationKey = `${scope.accountId}:${scope.projectId}:${pathname}?${searchParams.toString()}`;
+
+  // Upload files are transient. Browser history or a scope change exits the
+  // session, so reopening the same base returns to its document list.
+  useEffect(() => {
+    setUploadBaseId(null);
+  }, [navigationKey]);
 
   const navigate = useCallback(
     (next: KnowledgeNavigationState, mode: "push" | "replace") => {
@@ -128,6 +136,23 @@ export function ProjectKnowledgePage() {
       );
     }
 
+    if (canEdit && uploadBaseId === currentBase.id) {
+      return (
+        <main className={KNOWLEDGE_PAGE_CLASS_NAME}>
+          <KnowledgeCreateWizard
+            key={`${scope.accountId}:${scope.projectId}:${currentBase.id}:upload`}
+            scope={scope}
+            existingBase={currentBase}
+            onExit={() => setUploadBaseId(null)}
+            onFinished={(base) => {
+              setUploadBaseId(null);
+              openBase(base.id);
+            }}
+          />
+        </main>
+      );
+    }
+
     // Readers may hold a metadata/settings URL without the edit capability;
     // the URL is not an authorization, so the view degrades to documents.
     const view =
@@ -144,6 +169,7 @@ export function ProjectKnowledgePage() {
           canEdit={canEdit}
           navState={{ ...navState, view }}
           onNavigate={navigate}
+          onUploadDocuments={() => setUploadBaseId(currentBase.id)}
         />
       </main>
     );

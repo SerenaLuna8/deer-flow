@@ -208,6 +208,12 @@ export interface Translations {
       rebuildConfirm: string;
     };
     wizard: {
+      uploadExistingTitle: string;
+      uploadProcessingTitle: string;
+      uploadAction: string;
+      existingConfigurationHint: string;
+      configuredModelUnavailable: string;
+      retryFailedUploads: string;
       heroTitle: string;
       uploadCreateTitle: string;
       uploadCreateHint: string;
