@@ -23,7 +23,7 @@ export const adminModelProviderAdapterSchema = z
   .regex(/^[a-z][a-z0-9_]*$/u);
 const readableAdminModelProviderAdapterSchema = adminModelProviderAdapterSchema;
 
-const providerFieldSchema = z
+export const adminModelProviderModelNameSchema = z
   .string()
   .trim()
   .min(1)
@@ -37,7 +37,8 @@ const providerFieldSchema = z
       });
     }
   });
-const apiKeyInputSchema = z.string().min(1).max(16_384);
+const providerFieldSchema = adminModelProviderModelNameSchema;
+export const adminModelApiKeyInputSchema = z.string().min(1).max(16_384);
 
 export type AdminModelSettingValue =
   | string
@@ -96,7 +97,7 @@ function secretSafeTextSchema(max: number, required: boolean) {
     });
 }
 
-const baseUrlSchema = z
+export const adminModelBaseUrlSchema = z
   .string()
   .trim()
   .min(1)
@@ -402,7 +403,7 @@ function validateDescriptorSettingValue(
 ): void {
   if (field.input_type === "json") return;
   if (field.input_type === "url") {
-    const parsed = baseUrlSchema.safeParse(value);
+    const parsed = adminModelBaseUrlSchema.safeParse(value);
     if (!parsed.success) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -510,6 +511,8 @@ export const adminModelItemSchema = z
   .object({
     id: adminModelIdSchema,
     ...modelVersionFields,
+    provider_id: z.string().uuid(),
+    provider_name: secretSafeTextSchema(120, true),
     status: adminModelStatusSchema,
     is_default: z.boolean(),
     revision: z.number().int().positive(),
@@ -559,30 +562,27 @@ export const createAdminModelInputSchema = z
   .object({
     ...writableModelVersionFields,
     status: adminModelStatusSchema,
-    api_key: apiKeyInputSchema.nullable(),
+    provider_id: z.string().uuid(),
   })
   .strict();
 
 export const replaceAdminModelInputSchema = z
   .object({
     ...writableModelVersionFields,
-    api_key: apiKeyInputSchema.nullable(),
+    provider_id: z.string().uuid(),
   })
   .strict();
 
+/** Stored-Key test: the server materializes the bound Provider's Key. */
 export const testAdminModelConnectionInputSchema = z
   .object({
+    provider_id: z.string().uuid(),
     provider_adapter: adminModelProviderAdapterSchema,
     provider_model: providerFieldSchema,
     max_input_tokens: adminModelMaxInputTokensSchema,
     settings: safeAdminModelSettingsSchema,
     supports_vision: z.boolean(),
-    api_key: apiKeyInputSchema,
   })
-  .strict();
-
-export const adminModelSecretClearInputSchema = z
-  .object({ confirmed: z.literal(true) })
   .strict();
 
 export const adminModelStatusInputSchema = z
@@ -626,9 +626,6 @@ export type TestAdminModelConnectionInput = z.infer<
 export type AdminModelStatusInput = z.infer<typeof adminModelStatusInputSchema>;
 export type AdminModelDefaultInput = z.infer<
   typeof adminModelDefaultInputSchema
->;
-export type AdminModelSecretClearInput = z.infer<
-  typeof adminModelSecretClearInputSchema
 >;
 export type AdminModelMutationResponse = z.infer<
   typeof adminModelMutationResponseSchema

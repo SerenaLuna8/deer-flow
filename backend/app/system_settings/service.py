@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from types import MappingProxyType
 from typing import TypeVar
 
@@ -23,6 +24,10 @@ from app.audit.models import (
     is_issued_system_audit_context,
 )
 from app.audit.service import AuditService
+from app.model_registry.secrets import (
+    ModelProviderSecretInvalid,
+    materialize_provider_api_key,
+)
 from app.system_settings.errors import (
     SystemModelAdministrationRequired,
     SystemModelConflict,
@@ -42,16 +47,16 @@ from app.system_settings.models import (
     SystemModelCatalogView,
     SystemModelConnectionCheck,
     SystemModelView,
+    TestProviderCandidateConnection,
+    TestSystemModelConnection,
     UpdateSystemModel,
 )
+from app.system_settings.provider_key_fanout import regenerate_model_secret
 from app.system_settings.repository import (
     SystemModelRepository,
     SystemModelRepositoryInvariant,
 )
-from app.system_settings.secrets import (
-    model_secret_envelope_digest,
-    model_secret_recipient,
-)
+from app.system_settings.secrets import model_secret_recipient
 from app.system_settings.validation import (
     ModelSettingsInvalid,
     canonical_model_payload_checksum,
@@ -61,17 +66,16 @@ from app.system_settings.validation import (
     validate_system_model_connection_test,
     validate_update_system_model,
 )
+from deerflow.persistence.model_registry import ModelProviderRow
 from deerflow.persistence.system_settings import (
     RunModelConfigSnapshotRow,
     SystemModelConfigRow,
-    SystemModelSecretGenerationRow,
-    SystemModelSecretTombstoneRow,
 )
 from deerflow.persistence.user.model import UserRow
 from deerflow.secrets import (
-    SecretEnvelope,
     SecretKey,
     SecretKeyInvalid,
+    SecretMaterializationFailed,
     SecretProtectionFailed,
 )
 
@@ -116,17 +120,24 @@ def _freeze_json(value: object) -> object:
     return value
 
 
-def _model_view(row: SystemModelConfigRow) -> SystemModelView:
+def _secret_readiness(row: SystemModelConfigRow) -> str:
+    configured = row.current_secret_generation_id is not None
+    eligible = is_provider_adapter_eligible_for_new_binding(row.provider_adapter)
+    ready = eligible and (not provider_api_key_required(row.provider_adapter) or configured)
+    return "ready" if ready else "unready"
+
+
+def _model_view(row: SystemModelConfigRow, provider_name: str) -> SystemModelView:
     frozen_settings = _freeze_json(dict(row.settings))
     if not isinstance(frozen_settings, Mapping) or type(row.max_input_tokens) is not int or not 1 <= row.max_input_tokens <= 2_000_000:
         raise SystemModelRepositoryInvariant
     configured = row.current_secret_generation_id is not None
-    eligible = is_provider_adapter_eligible_for_new_binding(row.provider_adapter)
-    ready = eligible and (not provider_api_key_required(row.provider_adapter) or configured)
     return SystemModelView(
         id=uuid.UUID(str(row.id)),
         display_name=row.display_name,
         status=row.status,
+        provider_id=uuid.UUID(str(row.provider_id)),
+        provider_name=provider_name,
         provider_adapter=row.provider_adapter,
         provider_model=row.provider_model,
         max_input_tokens=row.max_input_tokens,
@@ -136,7 +147,7 @@ def _model_view(row: SystemModelConfigRow) -> SystemModelView:
         supports_vision=row.supports_vision,
         payload_checksum=row.payload_checksum,
         api_key_configured=configured,
-        secret_readiness="ready" if ready else "unready",
+        secret_readiness=_secret_readiness(row),
         secret_revision=int(row.secret_revision),
         revision=int(row.revision),
         created_by_user_id=row.created_by_user_id,
@@ -182,6 +193,18 @@ def _snapshot_payload(
         )
     except (KeyError, TypeError, ValueError):
         raise SystemModelRepositoryInvariant from None
+
+
+async def _named_model_view(
+    repository: SystemModelRepository,
+    row: SystemModelConfigRow,
+) -> SystemModelView:
+    provider_name = (await repository.provider_names()).get(
+        uuid.UUID(str(row.provider_id)),
+    )
+    if provider_name is None:
+        raise SystemModelRepositoryInvariant
+    return _model_view(row, provider_name)
 
 
 def _snapshot_view(row: RunModelConfigSnapshotRow) -> RunModelConfigSnapshotView:
@@ -232,7 +255,6 @@ class SystemModelCatalogService:
     ) -> None:
         if self._audit_service is None:
             return
-        view = _model_view(model)
         await self._audit_service.append(
             session,
             AuditActor.system_admin(actor),
@@ -248,9 +270,9 @@ class SystemModelCatalogService:
                 "operation": action,
                 "generation_id": generation_id,
                 "revision": int(model.secret_revision),
-                "result": "cleared" if action.endswith(".clear") else "configured",
+                "result": "configured",
                 "reason": reason,
-                "readiness": view.secret_readiness,
+                "readiness": _secret_readiness(model),
             },
             request_id=actor.request_id,
         )
@@ -301,99 +323,32 @@ class SystemModelCatalogService:
         ):
             raise SystemModelStorageUnavailable(issued.request_id) from None
 
-    def _protect_api_key(
-        self,
-        *,
-        model_config_id: uuid.UUID,
-        provider_adapter: str,
-        settings: Mapping[str, object],
-        api_key: str,
-        revision: int,
-        actor_user_id: str,
-    ) -> SystemModelSecretGenerationRow:
-        recipient = model_secret_recipient(
-            model_config_id,
-            provider_adapter,
-            settings,
-        )
-        envelope = SecretEnvelope.protect(
-            api_key.encode("utf-8"),
-            recipient=recipient,
-            key=self._secret_key or SecretKey.from_environment(),
-        )
-        return SystemModelSecretGenerationRow(
-            id=uuid.uuid4(),
-            model_config_id=model_config_id,
-            revision=revision,
-            nonce=envelope.nonce,
-            ciphertext=envelope.ciphertext,
-            envelope_digest=model_secret_envelope_digest(recipient, envelope),
-            created_by_user_id=actor_user_id,
-        )
+    def _resolved_secret_key(self) -> SecretKey:
+        return self._secret_key or SecretKey.from_environment()
 
-    async def _replace_secret(
+    def _materialize_provider_key(
         self,
-        repository: SystemModelRepository,
-        model: SystemModelConfigRow,
-        *,
-        api_key: str,
-        actor_user_id: str,
-        reason: str,
-    ) -> None:
-        previous = await repository.current_secret(model, for_update=True)
-        next_revision = int(model.secret_revision) + 1
-        generation = self._protect_api_key(
-            model_config_id=uuid.UUID(str(model.id)),
-            provider_adapter=model.provider_adapter,
-            settings=model.settings,
-            api_key=api_key,
-            revision=next_revision,
-            actor_user_id=actor_user_id,
-        )
-        await repository.add_secret_generation(generation)
-        model.current_secret_generation_id = generation.id
-        model.secret_revision = next_revision
-        await repository.session.flush()
-        if previous is not None:
-            await repository.add_secret_tombstone(
-                SystemModelSecretTombstoneRow(
-                    generation_id=previous.id,
-                    model_config_id=previous.model_config_id,
-                    revision=previous.revision,
-                    envelope_digest=previous.envelope_digest,
-                    reason=reason,
-                    destroyed_by_user_id=actor_user_id,
-                    created_at=previous.created_at,
-                )
-            )
-            await repository.delete_secret_generation(previous)
+        provider: ModelProviderRow,
+        request_id: str,
+    ) -> str:
+        """Decrypt the bound Provider's Key once, inside the caller's locks."""
 
-    async def _clear_secret(
-        self,
-        repository: SystemModelRepository,
-        model: SystemModelConfigRow,
-        *,
-        actor_user_id: str,
-    ) -> bool:
-        previous = await repository.current_secret(model, for_update=True)
-        if previous is None:
-            return False
-        model.current_secret_generation_id = None
-        model.secret_revision = int(model.secret_revision) + 1
-        await repository.session.flush()
-        await repository.add_secret_tombstone(
-            SystemModelSecretTombstoneRow(
-                generation_id=previous.id,
-                model_config_id=previous.model_config_id,
-                revision=previous.revision,
-                envelope_digest=previous.envelope_digest,
-                reason="cleared",
-                destroyed_by_user_id=actor_user_id,
-                created_at=previous.created_at,
+        try:
+            return materialize_provider_api_key(
+                provider_id=uuid.UUID(str(provider.id)),
+                base_url=provider.base_url,
+                nonce=bytes(provider.api_key_nonce),
+                ciphertext=bytes(provider.api_key_ciphertext),
+                key=self._resolved_secret_key(),
             )
-        )
-        await repository.delete_secret_generation(previous)
-        return True
+        except (
+            ModelProviderSecretInvalid,
+            SecretKeyInvalid,
+            SecretMaterializationFailed,
+            UnicodeError,
+            ValueError,
+        ):
+            raise SystemModelStorageUnavailable(request_id) from None
 
     async def list_models(
         self,
@@ -404,10 +359,17 @@ class SystemModelCatalogService:
             _issued: SystemAuditContext,
         ) -> SystemModelCatalogView:
             state = await repository.catalog_state()
+            provider_names = await repository.provider_names()
+            items: list[SystemModelView] = []
+            for row in await repository.list_models():
+                provider_name = provider_names.get(uuid.UUID(str(row.provider_id)))
+                if provider_name is None:
+                    raise SystemModelRepositoryInvariant
+                items.append(_model_view(row, provider_name))
             return SystemModelCatalogView(
                 catalog_revision=int(state.revision),
                 default_model_config_id=(uuid.UUID(str(state.default_model_config_id)) if state.default_model_config_id is not None else None),
-                items=tuple(_model_view(row) for row in await repository.list_models()),
+                items=tuple(items),
             )
 
         return await self._admin_operation(context, operation)
@@ -426,7 +388,7 @@ class SystemModelCatalogService:
             model = await repository.lock_model(model_config_id)
             if model is None:
                 raise SystemModelNotFound(issued.request_id)
-            return _model_view(model)
+            return await _named_model_view(repository, model)
 
         return await self._admin_operation(context, operation)
 
@@ -481,20 +443,32 @@ class SystemModelCatalogService:
             actor: SystemAuditContext,
         ) -> SystemModelView:
             state = await repository.catalog_state(for_update=True)
+            provider = await repository.lock_provider_for_share(
+                command.provider_id,
+            )
+            if provider is None:
+                raise SystemModelInvalid(actor.request_id)
+            settings = dict(command.settings)
+            settings["base_url"] = provider.base_url
+            derived = validate_create_system_model(
+                replace(command, settings=settings),
+                allow_derived_base_url=True,
+            )
             model = SystemModelConfigRow(
                 id=model_id,
-                display_name=command.display_name,
-                status=command.status,
-                provider_adapter=command.provider_adapter,
-                provider_model=command.provider_model,
-                max_input_tokens=command.max_input_tokens,
-                settings=dict(command.settings),
-                supports_thinking=command.supports_thinking,
-                supports_reasoning_effort=command.supports_reasoning_effort,
-                supports_vision=command.supports_vision,
+                display_name=derived.display_name,
+                status=derived.status,
+                provider_id=provider.id,
+                provider_adapter=derived.provider_adapter,
+                provider_model=derived.provider_model,
+                max_input_tokens=derived.max_input_tokens,
+                settings=dict(derived.settings),
+                supports_thinking=derived.supports_thinking,
+                supports_reasoning_effort=derived.supports_reasoning_effort,
+                supports_vision=derived.supports_vision,
                 payload_checksum=canonical_model_payload_checksum(
                     model_id,
-                    command,
+                    derived,
                 ),
                 revision=1,
                 secret_revision=0,
@@ -502,39 +476,105 @@ class SystemModelCatalogService:
                 updated_by_user_id=str(actor.user_id),
             )
             await repository.add_model(model)
-            if command.api_key is not None:
-                await self._replace_secret(
-                    repository,
-                    model,
-                    api_key=command.api_key,
-                    actor_user_id=str(actor.user_id),
-                    reason="replaced",
-                )
-                await self._append_secret_event(
-                    repository.session,
-                    actor,
-                    model,
-                    action="model.secret.configure",
-                    generation_id=model.current_secret_generation_id,
-                    reason="created",
-                )
-            if state.default_model_config_id is None and model.status == "active" and _model_view(model).secret_readiness == "ready":
+            api_key = self._materialize_provider_key(provider, actor.request_id)
+            generation = await regenerate_model_secret(
+                repository.session,
+                model,
+                None,
+                api_key=api_key,
+                actor_user_id=str(actor.user_id),
+                secret_key=self._resolved_secret_key(),
+                reason="replaced",
+            )
+            await self._append_secret_event(
+                repository.session,
+                actor,
+                model,
+                action="model.secret.configure",
+                generation_id=generation.id,
+                reason="created",
+            )
+            if state.default_model_config_id is None and model.status == "active" and _secret_readiness(model) == "ready":
                 state.default_model_config_id = model.id
             state.revision += 1
             state.updated_by_user_id = str(actor.user_id)
             await repository.session.flush()
-            return _model_view(model)
+            return _model_view(model, provider.name)
 
         return await self._admin_operation(issued, operation)
 
     async def prepare_connection_test(
         self,
         context: SystemAuditContext,
-        command: SystemModelConnectionCheck,
+        command: TestSystemModelConnection,
     ) -> ConnectionTestSystemModelMaterial:
+        """Stored-Key test: derive URL and Key from the selected Provider."""
+
+        issued = self._require_admin(context)
+        if not isinstance(command, TestSystemModelConnection) or type(command.provider_id) is not uuid.UUID or (isinstance(command.settings, Mapping) and "base_url" in command.settings):
+            raise SystemModelInvalid(issued.request_id)
+
+        async def operation(
+            repository: SystemModelRepository,
+            actor: SystemAuditContext,
+        ) -> ConnectionTestSystemModelMaterial:
+            provider = await repository.lock_provider_for_share(
+                command.provider_id,
+            )
+            if provider is None:
+                raise SystemModelInvalid(actor.request_id)
+            settings: object = command.settings
+            if isinstance(settings, Mapping):
+                settings = dict(settings)
+                settings["base_url"] = provider.base_url
+            checked = validate_system_model_connection_test(
+                SystemModelConnectionCheck(
+                    provider_adapter=command.provider_adapter,
+                    provider_model=command.provider_model,
+                    max_input_tokens=command.max_input_tokens,
+                    settings=settings,  # type: ignore[arg-type]  # validated above
+                    supports_vision=command.supports_vision,
+                    api_key=self._materialize_provider_key(
+                        provider,
+                        actor.request_id,
+                    ),
+                )
+            )
+            return ConnectionTestSystemModelMaterial(command=checked)
+
+        return await self._admin_operation(issued, operation)
+
+    async def prepare_candidate_connection_test(
+        self,
+        context: SystemAuditContext,
+        command: TestProviderCandidateConnection,
+    ) -> ConnectionTestSystemModelMaterial:
+        """Candidate test: explicit URL and transient Key, no rows touched.
+
+        Never falls back to a stored Provider Key and never persists anything;
+        the material only lives for this authorized request.
+        """
+
         issued = self._require_admin(context)
         try:
-            command = validate_system_model_connection_test(command)
+            if not isinstance(command, TestProviderCandidateConnection):
+                raise ModelSettingsInvalid
+            if isinstance(command.settings, Mapping) and "base_url" in command.settings:
+                raise ModelSettingsInvalid
+            settings: object = command.settings
+            if isinstance(settings, Mapping):
+                settings = dict(settings)
+                settings["base_url"] = command.base_url
+            checked = validate_system_model_connection_test(
+                SystemModelConnectionCheck(
+                    provider_adapter=command.provider_adapter,
+                    provider_model=command.provider_model,
+                    max_input_tokens=command.max_input_tokens,
+                    settings=settings,  # type: ignore[arg-type]  # validated above
+                    supports_vision=command.supports_vision,
+                    api_key=command.api_key,
+                )
+            )
         except ModelSettingsInvalid:
             raise SystemModelInvalid(issued.request_id) from None
 
@@ -542,7 +582,7 @@ class SystemModelCatalogService:
             _repository: SystemModelRepository,
             _actor: SystemAuditContext,
         ) -> ConnectionTestSystemModelMaterial:
-            return ConnectionTestSystemModelMaterial(command=command)
+            return ConnectionTestSystemModelMaterial(command=checked)
 
         return await self._admin_operation(issued, operation)
 
@@ -565,104 +605,95 @@ class SystemModelCatalogService:
             actor: SystemAuditContext,
         ) -> SystemModelView:
             state = await repository.catalog_state(for_update=True)
+            # Rebinding protocol: read the current binding under the catalog
+            # lock, lock old and new Providers in UUID order (FOR SHARE), then
+            # lock the model and re-verify the binding did not move.
+            current_provider_id = await repository.current_model_provider_id(
+                model_config_id,
+            )
+            if current_provider_id is None:
+                raise SystemModelNotFound(actor.request_id)
+            providers = await repository.lock_providers_for_share(
+                (current_provider_id, command.provider_id),
+            )
+            target_provider = providers.get(command.provider_id)
+            if target_provider is None:
+                raise SystemModelInvalid(actor.request_id)
             model = await repository.lock_model(model_config_id)
             if model is None:
                 raise SystemModelNotFound(actor.request_id)
+            if uuid.UUID(str(model.provider_id)) != current_provider_id:
+                raise SystemModelConflict(actor.request_id)
+            rebind = command.provider_id != current_provider_id
+            adapter_changed = command.provider_adapter != model.provider_adapter
             had_secret = model.current_secret_generation_id is not None
             old_recipient = model_secret_recipient(
                 uuid.UUID(str(model.id)),
                 model.provider_adapter,
                 model.settings,
             )
-            new_recipient = model_secret_recipient(
-                uuid.UUID(str(model.id)),
-                command.provider_adapter,
-                command.settings,
+            settings = dict(command.settings)
+            settings["base_url"] = target_provider.base_url
+            derived = validate_update_system_model(
+                replace(command, settings=settings),
+                allow_derived_base_url=True,
             )
-            if model.current_secret_generation_id is not None and old_recipient != new_recipient and command.api_key is None:
-                raise SystemModelInvalid(actor.request_id)
-            model.display_name = command.display_name
-            model.provider_adapter = command.provider_adapter
-            model.provider_model = command.provider_model
-            model.max_input_tokens = command.max_input_tokens
-            model.settings = dict(command.settings)
+            model.display_name = derived.display_name
+            model.provider_id = target_provider.id
+            model.provider_adapter = derived.provider_adapter
+            model.provider_model = derived.provider_model
+            model.max_input_tokens = derived.max_input_tokens
+            model.settings = dict(derived.settings)
             # JSON numbers such as 600 and 600.0 compare equal in Python even
             # though their canonical JSON bytes (and therefore checksum) differ.
             # Force the exact validated representation to be persisted whenever
             # the checksum is replaced in this transaction.
             flag_modified(model, "settings")
-            model.supports_thinking = command.supports_thinking
-            model.supports_reasoning_effort = command.supports_reasoning_effort
-            model.supports_vision = command.supports_vision
+            model.supports_thinking = derived.supports_thinking
+            model.supports_reasoning_effort = derived.supports_reasoning_effort
+            model.supports_vision = derived.supports_vision
             model.payload_checksum = canonical_model_payload_checksum(
                 uuid.UUID(str(model.id)),
-                command,
+                derived,
             )
-            if command.api_key is not None:
-                await self._replace_secret(
-                    repository,
+            # A rebind always regenerates — the Provider identity selects the
+            # Key even when URL and recipient stay identical. Display or
+            # timeout edits never read or re-encrypt the Provider Key.
+            if rebind or adapter_changed:
+                previous = await repository.current_secret(model, for_update=True)
+                new_recipient = model_secret_recipient(
+                    uuid.UUID(str(model.id)),
+                    model.provider_adapter,
+                    model.settings,
+                )
+                reason = "recipient_changed" if new_recipient != old_recipient else "replaced"
+                api_key = self._materialize_provider_key(
+                    target_provider,
+                    actor.request_id,
+                )
+                generation = await regenerate_model_secret(
+                    repository.session,
                     model,
-                    api_key=command.api_key,
+                    previous,
+                    api_key=api_key,
                     actor_user_id=str(actor.user_id),
-                    reason=("recipient_changed" if old_recipient != new_recipient else "replaced"),
+                    secret_key=self._resolved_secret_key(),
+                    reason=reason,
                 )
                 await self._append_secret_event(
                     repository.session,
                     actor,
                     model,
                     action=("model.secret.replace" if had_secret else "model.secret.configure"),
-                    generation_id=model.current_secret_generation_id,
-                    reason=("recipient_changed" if had_secret and old_recipient != new_recipient else "replaced" if had_secret else "created"),
+                    generation_id=generation.id,
+                    reason=(reason if had_secret else "created"),
                 )
             model.revision += 1
             model.updated_by_user_id = str(actor.user_id)
             state.revision += 1
             state.updated_by_user_id = str(actor.user_id)
             await repository.session.flush()
-            return _model_view(model)
-
-        return await self._admin_operation(issued, operation)
-
-    async def clear_api_key(
-        self,
-        context: SystemAuditContext,
-        model_config_id: uuid.UUID,
-        *,
-        confirmed: bool,
-    ) -> SystemModelView:
-        issued = self._require_admin(context)
-        if type(model_config_id) is not uuid.UUID or confirmed is not True:
-            raise SystemModelInvalid(issued.request_id)
-
-        async def operation(
-            repository: SystemModelRepository,
-            actor: SystemAuditContext,
-        ) -> SystemModelView:
-            state = await repository.catalog_state(for_update=True)
-            model = await repository.lock_model(model_config_id)
-            if model is None:
-                raise SystemModelNotFound(actor.request_id)
-            previous_generation_id = model.current_secret_generation_id
-            changed = await self._clear_secret(
-                repository,
-                model,
-                actor_user_id=str(actor.user_id),
-            )
-            if changed:
-                model.revision += 1
-                model.updated_by_user_id = str(actor.user_id)
-                state.revision += 1
-                state.updated_by_user_id = str(actor.user_id)
-                await self._append_secret_event(
-                    repository.session,
-                    actor,
-                    model,
-                    action="model.secret.clear",
-                    generation_id=previous_generation_id,
-                    reason="cleared",
-                )
-                await repository.session.flush()
-            return _model_view(model)
+            return _model_view(model, target_provider.name)
 
         return await self._admin_operation(issued, operation)
 
@@ -685,7 +716,7 @@ class SystemModelCatalogService:
             if model is None:
                 raise SystemModelNotFound(actor.request_id)
             if model.status == status:
-                return _model_view(model)
+                return await _named_model_view(repository, model)
             if status == "active" and not is_provider_adapter_eligible_for_new_binding(
                 model.provider_adapter,
             ):
@@ -695,12 +726,12 @@ class SystemModelCatalogService:
             model.updated_by_user_id = str(actor.user_id)
             if status == "suspended" and state.default_model_config_id == model.id:
                 state.default_model_config_id = None
-            elif status == "active" and state.default_model_config_id is None and _model_view(model).secret_readiness == "ready":
+            elif status == "active" and state.default_model_config_id is None and _secret_readiness(model) == "ready":
                 state.default_model_config_id = model.id
             state.revision += 1
             state.updated_by_user_id = str(actor.user_id)
             await repository.session.flush()
-            return _model_view(model)
+            return await _named_model_view(repository, model)
 
         return await self._admin_operation(issued, operation)
 
@@ -725,7 +756,7 @@ class SystemModelCatalogService:
                 model.provider_adapter,
             ):
                 raise SystemModelInvalid(actor.request_id)
-            if _model_view(model).secret_readiness != "ready":
+            if _secret_readiness(model) != "ready":
                 raise SystemModelInvalid(actor.request_id)
             if state.default_model_config_id != model.id:
                 state.default_model_config_id = model.id

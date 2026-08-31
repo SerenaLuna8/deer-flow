@@ -12,6 +12,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.private_thread_seed import seed_private_thread_database
+from support.system_model_seed import seed_model_provider
 from support.run_closure import (
     add_legacy_test_run_asset,
     add_sealed_test_run,
@@ -5540,6 +5541,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 id=model_config_id,
                 display_name="Test model",
                 status="active",
+                provider_id=await seed_model_provider(session),
                 provider_adapter="openai",
                 provider_model="test-model",
                 max_input_tokens=64_000,

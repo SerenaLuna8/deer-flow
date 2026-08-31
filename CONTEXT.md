@@ -139,12 +139,12 @@ A logged retrieval request against a Project's Knowledge Bases, recording its so
 _Avoid_: chat message, Run
 
 **Model Provider**:
-A platform-administered retrieval-model vendor in the host model registry: a display name, an OpenAI-compatible endpoint, and one write-only API key held as its Configuration Secret. It owns Provider Models. It is not a System Model Configuration and carries no `provider_adapter`; those concepts belong to Agent model execution.
+A platform-administered model vendor in the host model registry: a display name, an OpenAI-compatible endpoint, and the one write-only API key of the model domain, held as its Configuration Secret. It owns Provider Models, and every System Model Configuration binds exactly one Model Provider for its endpoint and key. It is not a System Model Configuration and carries no `provider_adapter`; those concepts belong to Agent model execution.
 _Avoid_: Knowledge Model Configuration, provider adapter, System Model Configuration
 
 **Provider Model**:
-One typed model under a Model Provider: embedding (with a fixed vector dimension) or reranker. A Knowledge Base binds exactly one embedding Provider Model — changed only through rebuild — and at most one reranker Provider Model, effective on save. A Provider Model referenced by any Knowledge Base is in use, and neither it nor its Model Provider can be disabled or deleted.
-_Avoid_: Knowledge Model Configuration, model configuration row
+One typed retrieval model under a Model Provider: embedding (with a fixed vector dimension) or reranker. It never denotes a text model, even though the admin page groups both under the same Model Provider. A Knowledge Base binds exactly one embedding Provider Model — changed only through rebuild — and at most one reranker Provider Model, effective on save. A Provider Model referenced by any Knowledge Base is in use, and neither it nor its Model Provider can be disabled or deleted.
+_Avoid_: Knowledge Model Configuration, model configuration row, text model
 
 ## Configuration secrets
 
@@ -173,8 +173,8 @@ The non-secret identity and integrity metadata retained after a Configuration Se
 _Avoid_: Deleted Credential, archived secret
 
 **System Model Configuration**:
-A platform-administered model endpoint and capability definition with a stable identity and no version history. It owns an independently replaceable API Key as its Configuration Secret.
-_Avoid_: System Model Version, model Credential
+A platform-administered text-model capability definition with a stable identity and no version history. It binds exactly one Model Provider, derives its endpoint from that provider, and holds no independently authored API Key: its per-model Configuration Secret Generation is re-encrypted from the provider's key on create, rebind, and provider key or endpoint change.
+_Avoid_: System Model Version, model Credential, model-level API Key
 
 ## Skill versions
 

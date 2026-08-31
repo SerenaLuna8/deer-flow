@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,10 +39,10 @@ from app.system_settings import (
     CreateSystemModel,
     SystemModelCatalogService,
     SystemModelCatalogView,
-    SystemModelConnectionCheck,
     SystemModelMaterializationUnavailable,
     SystemModelMaterializer,
     SystemModelView,
+    TestSystemModelConnection,
     UpdateSystemModel,
 )
 from app.system_settings.errors import SystemModelError
@@ -77,6 +77,7 @@ class _StrictModel(BaseModel):
 class AdminModelCreateRequest(_StrictModel):
     display_name: str
     status: Literal["active", "suspended"] = "suspended"
+    provider_id: _JsonUuid
     provider_adapter: str
     provider_model: str
     max_input_tokens: int = Field(ge=1, le=2_000_000)
@@ -84,11 +85,11 @@ class AdminModelCreateRequest(_StrictModel):
     supports_thinking: bool = False
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
-    api_key: SecretStr | None = None
 
 
 class AdminModelUpdateRequest(_StrictModel):
     display_name: str
+    provider_id: _JsonUuid
     provider_adapter: str
     provider_model: str
     max_input_tokens: int = Field(ge=1, le=2_000_000)
@@ -96,7 +97,6 @@ class AdminModelUpdateRequest(_StrictModel):
     supports_thinking: bool = False
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
-    api_key: SecretStr | None = None
 
 
 class AdminModelStatusRequest(_StrictModel):
@@ -107,29 +107,22 @@ class AdminModelDefaultRequest(_StrictModel):
     pass
 
 
-class AdminModelSecretClearRequest(_StrictModel):
-    confirmed: Literal[True]
-
-
 class AdminModelConnectionTestRequest(_StrictModel):
+    """Stored-Key test: the server derives URL and Key from the Provider."""
+
+    provider_id: _JsonUuid
     provider_adapter: str
     provider_model: str
     max_input_tokens: int = Field(ge=1, le=2_000_000)
     settings: dict[str, object]
     supports_vision: bool
-    api_key: SecretStr
-
-    @field_validator("api_key")
-    @classmethod
-    def require_non_empty_api_key(cls, value: SecretStr) -> SecretStr:
-        if not value.get_secret_value():
-            raise ValueError("api_key must not be empty")
-        return value
 
 
 class AdminModelItemResponse(_StrictModel):
     id: uuid.UUID
     display_name: str
+    provider_id: uuid.UUID
+    provider_name: str
     provider_adapter: str
     provider_model: str
     max_input_tokens: int = Field(ge=1, le=2_000_000)
@@ -211,6 +204,8 @@ def _item_response(
     return AdminModelItemResponse(
         id=item.id,
         display_name=item.display_name,
+        provider_id=item.provider_id,
+        provider_name=item.provider_name,
         provider_adapter=item.provider_adapter,
         provider_model=item.provider_model,
         max_input_tokens=item.max_input_tokens,
@@ -262,6 +257,9 @@ def _catalog_response(
                         descriptor.fields,
                         key=lambda item: item.name,
                     )
+                    # ``base_url`` is derived from the bound Model Provider;
+                    # it is not an authoring field on the admin surface.
+                    if field.name != "base_url"
                 ],
             )
             for adapter_id, descriptor in BUILTIN_PROVIDER_ADAPTERS.items()
@@ -302,7 +300,7 @@ async def current_model_admin_context(
         ) from None
 
 
-def _system_model_http_exception(error: SystemModelError) -> HTTPException:
+def system_model_http_exception(error: SystemModelError) -> HTTPException:
     return HTTPException(
         status_code=error.status_code,
         detail={
@@ -337,7 +335,7 @@ async def list_admin_models(
             context.request_id,
         )
     except SystemModelError as error:
-        raise _system_model_http_exception(error) from None
+        raise system_model_http_exception(error) from None
 
 
 @router.post("", response_model=AdminModelMutationResponse)
@@ -358,6 +356,7 @@ async def create_admin_model(
             CreateSystemModel(
                 display_name=body.display_name,
                 status=body.status,
+                provider_id=body.provider_id,
                 provider_adapter=body.provider_adapter,
                 provider_model=body.provider_model,
                 max_input_tokens=body.max_input_tokens,
@@ -365,7 +364,6 @@ async def create_admin_model(
                 supports_thinking=body.supports_thinking,
                 supports_reasoning_effort=(body.supports_reasoning_effort),
                 supports_vision=body.supports_vision,
-                api_key=(body.api_key.get_secret_value() if body.api_key is not None else None),
             ),
         )
         catalog = await _catalog_after_mutation(service, context)
@@ -378,7 +376,7 @@ async def create_admin_model(
             request_id=context.request_id,
         )
     except SystemModelError as error:
-        raise _system_model_http_exception(error) from None
+        raise system_model_http_exception(error) from None
 
 
 @router.post(
@@ -404,18 +402,18 @@ async def test_admin_model_connection(
     try:
         material = await service.prepare_connection_test(
             context,
-            SystemModelConnectionCheck(
+            TestSystemModelConnection(
+                provider_id=body.provider_id,
                 provider_adapter=body.provider_adapter,
                 provider_model=body.provider_model,
                 max_input_tokens=body.max_input_tokens,
                 settings=body.settings,
                 supports_vision=body.supports_vision,
-                api_key=body.api_key.get_secret_value(),
             ),
         )
         model = await materializer.materialize_connection_test(material)
     except SystemModelError as error:
-        raise _system_model_http_exception(error) from None
+        raise system_model_http_exception(error) from None
     except SystemModelMaterializationUnavailable:
         return AdminModelConnectionTestResponse(
             status="failed",
@@ -446,6 +444,7 @@ async def update_admin_model(
             model_config_id,
             UpdateSystemModel(
                 display_name=body.display_name,
+                provider_id=body.provider_id,
                 provider_adapter=body.provider_adapter,
                 provider_model=body.provider_model,
                 max_input_tokens=body.max_input_tokens,
@@ -453,7 +452,6 @@ async def update_admin_model(
                 supports_thinking=body.supports_thinking,
                 supports_reasoning_effort=(body.supports_reasoning_effort),
                 supports_vision=body.supports_vision,
-                api_key=(body.api_key.get_secret_value() if body.api_key is not None else None),
             ),
         )
         catalog = await _catalog_after_mutation(service, context)
@@ -466,42 +464,7 @@ async def update_admin_model(
             request_id=context.request_id,
         )
     except SystemModelError as error:
-        raise _system_model_http_exception(error) from None
-
-
-@router.post(
-    "/{model_config_id}/api-key/clear",
-    response_model=AdminModelMutationResponse,
-)
-async def clear_admin_model_api_key(
-    model_config_id: uuid.UUID,
-    body: AdminModelSecretClearRequest,
-    context: Annotated[
-        SystemAuditContext,
-        Depends(current_model_admin_context),
-    ],
-    service: Annotated[
-        SystemModelCatalogService,
-        Depends(get_system_model_catalog),
-    ],
-) -> AdminModelMutationResponse:
-    try:
-        updated = await service.clear_api_key(
-            context,
-            model_config_id,
-            confirmed=body.confirmed,
-        )
-        catalog = await _catalog_after_mutation(service, context)
-        return AdminModelMutationResponse(
-            item=_item_response(
-                updated,
-                default_model_config_id=catalog.default_model_config_id,
-            ),
-            catalog_revision=catalog.catalog_revision,
-            request_id=context.request_id,
-        )
-    except SystemModelError as error:
-        raise _system_model_http_exception(error) from None
+        raise system_model_http_exception(error) from None
 
 
 @router.post(
@@ -536,7 +499,7 @@ async def set_admin_model_status(
             request_id=context.request_id,
         )
     except SystemModelError as error:
-        raise _system_model_http_exception(error) from None
+        raise system_model_http_exception(error) from None
 
 
 @router.post(
@@ -576,7 +539,7 @@ async def set_admin_model_default(
             request_id=context.request_id,
         )
     except SystemModelError as error:
-        raise _system_model_http_exception(error) from None
+        raise system_model_http_exception(error) from None
 
 
 __all__ = [
@@ -591,4 +554,5 @@ __all__ = [
     "AdminModelUpdateRequest",
     "current_model_admin_context",
     "router",
+    "system_model_http_exception",
 ]

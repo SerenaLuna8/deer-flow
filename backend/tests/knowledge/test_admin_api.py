@@ -343,12 +343,26 @@ async def test_admin_routes_map_knowledge_errors_to_stable_codes(code: str, stat
 
 
 @pytest.mark.asyncio
-async def test_disabled_feature_answers_knowledge_disabled_on_the_admin_surface() -> None:
+async def test_registry_stays_administrable_while_knowledge_is_disabled() -> None:
+    """The registry no longer depends on the KnowledgeModule lifecycle."""
+
+    service = _FakeRegistryService()
+    app = _registry_app(service)
+    app.state.knowledge_module = None
+    async with _client(app) as client:
+        response = await client.get("/api/admin/settings/model-providers")
+
+    assert response.status_code == 200
+    assert service.calls == [("list_providers", None)]
+
+
+@pytest.mark.asyncio
+async def test_registry_fails_closed_without_the_lifespan_probe_client() -> None:
     async with _client(_registry_app(None)) as client:
         response = await client.get("/api/admin/settings/model-providers")
 
-    assert response.status_code == 404
-    assert response.json()["detail"]["code"] == KNOWLEDGE_DISABLED
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Model registry probe client not available"
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +498,7 @@ async def test_registry_routes_fail_closed_without_the_audit_service() -> None:
     app = FastAPI()
     app.include_router(registry_gateway.router)
     app.dependency_overrides[registry_gateway.require_model_registry_admin_context] = lambda: SimpleNamespace(request_id=_REQUEST_ID)
-    app.state.knowledge_module = SimpleNamespace(model_client=object(), model_in_use=object())
+    app.state.model_registry_probe_client = object()
     # ``project_audit_service`` is deliberately absent from app.state.
 
     async with _client(app) as client:

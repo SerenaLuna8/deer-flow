@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select, update
 from support.private_thread_seed import seed_private_thread_database
+from support.system_model_seed import seed_model_provider
 
 from app.audit.models import resolve_system_audit_context
 from app.audit.service import (
@@ -14,6 +16,8 @@ from app.audit.service import (
     _bind_gateway_audit_process,
 )
 from app.audit.sinks import OperationalAuditSink
+from app.model_registry.secrets import protect_provider_api_key
+from app.model_registry.service import ModelRegistryService
 from app.project_channels.errors import (
     ChannelInstanceForbidden,
     ChannelInstanceValidationFailed,
@@ -24,7 +28,6 @@ from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.reliability.owner_refs import AuditHmacKeyring
-from app.system_settings.errors import SystemModelInvalid
 from app.system_settings.materializer import SystemModelMaterializer
 from app.system_settings.models import CreateSystemModel, UpdateSystemModel
 from app.system_settings.repository import SystemModelRepository
@@ -43,6 +46,7 @@ from deerflow.persistence.system_settings import (
     SystemModelSecretTombstoneRow,
 )
 from deerflow.persistence.user import UserRow
+from deerflow.secrets import SecretKey
 
 
 def _project_context(seed, *, role: ProjectRole = ProjectRole.ADMIN):
@@ -60,21 +64,24 @@ def _project_context(seed, *, role: ProjectRole = ProjectRole.ADMIN):
 
 def _model_update(
     *,
+    provider_id: uuid.UUID,
     display_name: str = "DeepSeek lifecycle",
-    base_url: str = "https://api.deepseek.com",
-    api_key: str | None = None,
 ) -> UpdateSystemModel:
     return UpdateSystemModel(
         display_name=display_name,
+        provider_id=provider_id,
         provider_adapter="deepseek",
         provider_model="deepseek-v4-flash",
         max_input_tokens=64_000,
-        settings={"base_url": base_url},
+        settings={},
         supports_thinking=True,
         supports_reasoning_effort=True,
         supports_vision=False,
-        api_key=api_key,
     )
+
+
+def _never_in_use(_session: object, _model_id: uuid.UUID) -> bool:
+    raise AssertionError("retrieval model_in_use must not be consulted here")
 
 
 @pytest.mark.asyncio
@@ -105,22 +112,35 @@ async def test_system_model_update_keeps_json_settings_and_checksum_atomic(
                 AuditHmacKeyring("test", {"test": b"a" * 32}),
             ),
         )
+        provider_id = uuid.uuid4()
+        envelope = protect_provider_api_key(
+            provider_id=provider_id,
+            base_url="https://api.deepseek.com",
+            api_key="numeric-settings-secret",
+            key=SecretKey(b"n" * 32),
+        )
+        async with seed.factory() as session, session.begin():
+            await seed_model_provider(
+                session,
+                provider_id=provider_id,
+                name="DeepSeek JSON provider",
+                base_url="https://api.deepseek.com",
+                api_key_nonce=envelope.nonce,
+                api_key_ciphertext=envelope.ciphertext,
+            )
         created = await service.create_model(
             context,
             CreateSystemModel(
                 display_name="DeepSeek numeric settings",
                 status="active",
+                provider_id=provider_id,
                 provider_adapter="deepseek",
                 provider_model="deepseek-v4-flash",
                 max_input_tokens=64_000,
-                settings={
-                    "base_url": "https://api.deepseek.com",
-                    "request_timeout": 600.0,
-                },
+                settings={"request_timeout": 600.0},
                 supports_thinking=True,
                 supports_reasoning_effort=True,
                 supports_vision=False,
-                api_key="numeric-settings-secret",
             ),
         )
 
@@ -129,18 +149,17 @@ async def test_system_model_update_keeps_json_settings_and_checksum_atomic(
             created.id,
             UpdateSystemModel(
                 display_name="DeepSeek numeric settings",
+                provider_id=provider_id,
                 provider_adapter="deepseek",
                 provider_model="deepseek-v4-flash",
                 max_input_tokens=64_000,
                 settings={
-                    "base_url": "https://api.deepseek.com",
                     # Browser JSON round-tripping serializes 600.0 as 600.
                     "request_timeout": 600,
                 },
                 supports_thinking=True,
                 supports_reasoning_effort=True,
                 supports_vision=False,
-                api_key=None,
             ),
         )
 
@@ -184,56 +203,43 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
             seed.factory,
             audit_service=audit,
         )
-        unready = await service.create_model(
-            context,
-            CreateSystemModel(
-                display_name="DeepSeek unready",
-                status="active",
-                provider_adapter="deepseek",
-                provider_model="deepseek-v4-pro",
-                max_input_tokens=64_000,
-                settings={"base_url": "https://api.deepseek.com"},
-                supports_thinking=True,
-                supports_reasoning_effort=True,
-                supports_vision=False,
-                api_key=None,
-            ),
+        registry = ModelRegistryService(
+            seed.factory,
+            secret_key=SecretKey(b"m" * 32),
+            client=object(),  # type: ignore[arg-type]  # no retrieval models exist here
+            model_in_use=_never_in_use,  # type: ignore[arg-type]
+            audit_service=audit,
         )
-        assert unready.status == "active"
-        assert unready.api_key_configured is False
-        assert unready.secret_readiness == "unready"
-        async with seed.factory() as session:
-            unready_row = await session.get(SystemModelConfigRow, unready.id)
-            state = await session.get(SystemModelCatalogStateRow, 1)
-            assert unready_row is not None
-            assert state is not None
-            assert unready_row.current_secret_generation_id is None
-            assert state.default_model_config_id is None
-            assert (
-                await SystemModelRepository(
-                    session,
-                ).resolve_admissible_active_model(str(unready.id))
-                is None
-            )
 
+        # The Provider owns the Key: a model bound at create is immediately
+        # ready without ever receiving a model-level Key.
         first_secret = "model-test-value-one"
+        provider = await registry.create_provider(
+            context,
+            name="DeepSeek",
+            base_url="https://api.deepseek.com",
+            request_timeout_seconds=30,
+            api_key=first_secret,
+        )
         created = await service.create_model(
             context,
             CreateSystemModel(
                 display_name="DeepSeek lifecycle",
                 status="active",
+                provider_id=provider.id,
                 provider_adapter="deepseek",
                 provider_model="deepseek-v4-flash",
                 max_input_tokens=64_000,
-                settings={"base_url": "https://api.deepseek.com"},
+                settings={},
                 supports_thinking=True,
                 supports_reasoning_effort=True,
                 supports_vision=False,
-                api_key=first_secret,
             ),
         )
         assert created.api_key_configured is True
         assert created.secret_readiness == "ready"
+        assert created.provider_id == provider.id
+        assert created.provider_name == "DeepSeek"
         assert first_secret not in repr(created)
 
         async with seed.factory() as session:
@@ -242,9 +248,15 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
             ).resolve_admissible_active_model(str(created.id))
             assert admissible is not None
             assert admissible.secret_generation is None
+            state = await session.get(SystemModelCatalogStateRow, 1)
+            assert state is not None
+            assert state.default_model_config_id == created.id
             model = await session.get(SystemModelConfigRow, created.id)
             assert model is not None
+            # ``base_url`` is derived from the bound Provider, never authored.
+            assert model.settings["base_url"] == "https://api.deepseek.com"
             first_generation_id = model.current_secret_generation_id
+            assert first_generation_id is not None
             first_generation = await session.get(
                 SystemModelSecretGenerationRow,
                 first_generation_id,
@@ -262,10 +274,14 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
                     is None
                 )
 
+        # A display-only edit never reads or re-encrypts the Provider Key.
         preserved = await service.update_model(
             context,
             created.id,
-            _model_update(display_name="Renamed without replacement"),
+            _model_update(
+                provider_id=provider.id,
+                display_name="Renamed without replacement",
+            ),
         )
         assert preserved.secret_revision == created.secret_revision
         async with seed.factory() as session:
@@ -273,27 +289,17 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
             assert model is not None
             assert model.current_secret_generation_id == first_generation_id
 
-        equivalent_origin = await service.update_model(
-            context,
-            created.id,
-            _model_update(base_url="https://api.deepseek.com:443"),
-        )
-        assert equivalent_origin.secret_revision == created.secret_revision
-        async with seed.factory() as session:
-            model = await session.get(SystemModelConfigRow, created.id)
-            assert model is not None
-            assert model.current_secret_generation_id == first_generation_id
-
+        # Rotating the Provider Key fans out to every bound text model.
         second_secret = "model-test-value-two"
-        replaced = await service.update_model(
+        await registry.update_provider(
             context,
-            created.id,
-            _model_update(api_key=second_secret),
+            provider.id,
+            api_key=second_secret,
         )
-        assert replaced.secret_revision == created.secret_revision + 1
         async with seed.factory() as session:
             model = await session.get(SystemModelConfigRow, created.id)
             assert model is not None
+            assert model.secret_revision == created.secret_revision + 1
             second_generation_id = model.current_secret_generation_id
             assert second_generation_id not in {None, first_generation_id}
             assert (
@@ -309,70 +315,52 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
             )
             assert first_tombstone is not None
             assert first_tombstone.reason == "replaced"
-
-        with pytest.raises(SystemModelInvalid):
-            await service.update_model(
-                context,
-                created.id,
-                _model_update(base_url="https://alternate.deepseek.invalid"),
+            second_generation = await session.get(
+                SystemModelSecretGenerationRow,
+                second_generation_id,
             )
+            assert second_generation is not None
+            assert second_secret.encode() not in bytes(second_generation.ciphertext)
 
+        # Rebinding to a Provider with another origin changes the recipient
+        # and re-protects that Provider's Key for this model.
         third_secret = "model-test-value-three"
-        recipient_changed = await service.update_model(
+        alternate = await registry.create_provider(
+            context,
+            name="DeepSeek Alternate",
+            base_url="https://alternate.deepseek.invalid",
+            request_timeout_seconds=30,
+            api_key=third_secret,
+        )
+        rebound = await service.update_model(
             context,
             created.id,
             _model_update(
-                base_url="https://alternate.deepseek.invalid",
-                api_key=third_secret,
+                provider_id=alternate.id,
+                display_name="Renamed without replacement",
             ),
         )
-        assert recipient_changed.api_key_configured is True
+        assert rebound.provider_id == alternate.id
+        assert rebound.api_key_configured is True
+        assert rebound.secret_revision == created.secret_revision + 2
         async with seed.factory() as session:
             model = await session.get(SystemModelConfigRow, created.id)
             assert model is not None
+            assert model.settings["base_url"] == "https://alternate.deepseek.invalid"
             third_generation_id = model.current_secret_generation_id
+            assert third_generation_id not in {None, second_generation_id}
             second_tombstone = await session.get(
                 SystemModelSecretTombstoneRow,
                 second_generation_id,
             )
             assert second_tombstone is not None
             assert second_tombstone.reason == "recipient_changed"
-
-        with pytest.raises(SystemModelInvalid):
-            await service.clear_api_key(
-                context,
-                created.id,
-                confirmed=False,
+            third_generation = await session.get(
+                SystemModelSecretGenerationRow,
+                third_generation_id,
             )
-        cleared = await service.clear_api_key(
-            context,
-            created.id,
-            confirmed=True,
-        )
-        assert cleared.status == "active"
-        assert cleared.api_key_configured is False
-        assert cleared.secret_readiness == "unready"
-
-        async with seed.factory() as session:
-            state = await session.get(SystemModelCatalogStateRow, 1)
-            model = await session.get(SystemModelConfigRow, created.id)
-            assert state is not None
-            assert model is not None
-            assert state.default_model_config_id == created.id
-            assert model.current_secret_generation_id is None
-            assert (
-                await SystemModelRepository(
-                    session,
-                ).resolve_admissible_active_model(str(created.id))
-                is None
-            )
-            assert (
-                await session.get(
-                    SystemModelSecretGenerationRow,
-                    third_generation_id,
-                )
-                is None
-            )
+            assert third_generation is not None
+            assert third_secret.encode() not in bytes(third_generation.ciphertext)
             tombstones = tuple((await session.execute(select(SystemModelSecretTombstoneRow).where(SystemModelSecretTombstoneRow.model_config_id == created.id))).scalars().all())
             audits = tuple(
                 (
@@ -389,13 +377,13 @@ async def test_system_model_secret_lifecycle_is_write_only_and_recipient_bound(
         assert {row.reason for row in tombstones} == {
             "replaced",
             "recipient_changed",
-            "cleared",
         }
+        model_secret_audits = [row for row in audits if isinstance(row.metadata_json, dict) and row.metadata_json.get("asset_kind") == "model"]
+        assert len(model_secret_audits) == 3
         serialized_audits = json.dumps(
             [row.metadata_json for row in audits],
             sort_keys=True,
         )
-        assert len(audits) == 4
         for secret in (first_secret, second_secret, third_secret):
             assert secret not in serialized_audits
     finally:

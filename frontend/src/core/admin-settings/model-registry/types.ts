@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+import {
+  adminModelApiKeyInputSchema,
+  adminModelBaseUrlSchema,
+  adminModelMaxInputTokensSchema,
+  adminModelProviderAdapterSchema,
+  adminModelProviderModelNameSchema,
+  safeAdminModelSettingsSchema,
+} from "../models/types";
+
 export const adminModelRegistryAccountIdSchema = z.union([
   z.string().uuid(),
   z.literal("default"),
@@ -120,3 +129,34 @@ export type CreateAdminProviderModelInput = {
   embedding_dimension?: number;
   max_batch?: number;
 };
+
+/**
+ * Candidate Provider connection test: a transient URL/Key pair probed against
+ * one explicit text-model target. It requires no stored Provider, writes no
+ * configuration, and the Key is imperative request material that must never
+ * enter TanStack state.
+ */
+export const testAdminModelProviderConnectionInputSchema = z
+  .object({
+    base_url: adminModelBaseUrlSchema,
+    api_key: adminModelApiKeyInputSchema,
+    provider_adapter: adminModelProviderAdapterSchema,
+    provider_model: adminModelProviderModelNameSchema,
+    max_input_tokens: adminModelMaxInputTokensSchema,
+    settings: safeAdminModelSettingsSchema,
+    supports_vision: z.boolean(),
+  })
+  .strict();
+export type TestAdminModelProviderConnectionInput = z.input<
+  typeof testAdminModelProviderConnectionInputSchema
+>;
+
+export const adminModelProviderConnectionTestSchema = z
+  .object({
+    status: z.enum(["succeeded", "failed"]),
+    request_id: z.string(),
+  })
+  .strict();
+export type AdminModelProviderConnectionTestResult = z.infer<
+  typeof adminModelProviderConnectionTestSchema
+>;

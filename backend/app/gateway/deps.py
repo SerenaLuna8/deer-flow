@@ -343,6 +343,16 @@ async def gateway_platform_runtime(
         app.state.system_model_catalog = model_catalog
         app.state.system_model_materializer = model_materializer
 
+        # The retrieval model registry stays administrable while Knowledge is
+        # disabled, so the Gateway owns a dedicated probe client independent of
+        # the optional module below. Registering aclose immediately releases it
+        # on normal shutdown and when a later startup step fails.
+        from actweave_knowledge import create_knowledge_model_client
+
+        model_registry_probe_client = create_knowledge_model_client()
+        app.state.model_registry_probe_client = model_registry_probe_client
+        stack.push_async_callback(model_registry_probe_client.aclose)
+
         # Knowledge is startup-only: a missing/disabled `knowledge` block keeps
         # the module absent and every knowledge route answers KNOWLEDGE_DISABLED.
         from app.knowledge.composition import (
@@ -353,6 +363,8 @@ async def gateway_platform_runtime(
         knowledge_module = create_knowledge_module_from_app_config(config)
         app.state.knowledge_module = knowledge_module
         if knowledge_module is not None:
+            # The module keeps creating and closing its own client; the two
+            # instances never share ownership or shutdown responsibility.
             stack.push_async_callback(knowledge_module.aclose)
             await require_knowledge_storage_ready(knowledge_module)
         runtime_policy_service = SystemRuntimePolicyService(
@@ -553,6 +565,10 @@ get_system_runtime_policy_materializer = _require(
 get_system_model_materializer = _require(
     "system_model_materializer",
     "System model materializer",
+)
+get_model_registry_probe_client = _require(
+    "model_registry_probe_client",
+    "Model registry probe client",
 )
 get_memory_dream_prepare_service = _require(
     "memory_dream_prepare_service",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -14,6 +14,10 @@ from app.bootstrap_identities import (
     BUILTIN_MODEL_EMAIL,
     BUILTIN_MODEL_USER_ID,
     BUILTIN_MODEL_USERNAME,
+)
+from app.model_registry.secrets import (
+    ModelProviderSecretInvalid,
+    protect_provider_api_key,
 )
 from app.system_settings.models import CreateSystemModel
 from app.system_settings.secrets import (
@@ -25,6 +29,7 @@ from app.system_settings.validation import (
     canonical_model_payload_checksum,
     validate_create_system_model,
 )
+from deerflow.persistence.model_registry import ModelProviderRow
 from deerflow.persistence.projects import ProjectMembershipRow
 from deerflow.persistence.system_settings import (
     SystemModelCatalogStateRow,
@@ -43,6 +48,13 @@ _BOOTSTRAP_LOCK_KEY = 0x0DEE_12F1_4D4F_444C
 _ID_NAMESPACE = uuid.UUID("e9ef2794-807b-5d89-967c-c67be15b42e7")
 _BOOTSTRAP_API_KEY_ENV = "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY"
 DEEPSEEK_V4_MAX_INPUT_TOKENS = 1_000_000
+
+DEEPSEEK_PROVIDER_ID = uuid.uuid5(_ID_NAMESPACE, "deepseek:provider")
+DEEPSEEK_PROVIDER_NAME = "DeepSeek"
+DEEPSEEK_PROVIDER_BASE_URL = "https://api.deepseek.com"
+# The Provider timeout only governs Embedding/Rerank requests; the seeded
+# text models keep their own adapter request timeouts in ``settings``.
+_DEEPSEEK_PROVIDER_REQUEST_TIMEOUT_SECONDS = 30
 
 DEEPSEEK_V4_PRO_MODEL_ID = uuid.uuid5(_ID_NAMESPACE, "deepseek-v4:model")
 DEEPSEEK_V4_FLASH_MODEL_ID = uuid.uuid5(
@@ -87,8 +99,12 @@ class DefaultSystemModelBootstrapEntry:
 class DefaultSystemModelBootstrapMaterial:
     """Pre-encrypted input passed across the create-schema boundary."""
 
+    provider_id: uuid.UUID
+    provider_name: str
+    provider_base_url: str
     models: tuple[DefaultSystemModelBootstrapEntry, ...]
     default_model_id: uuid.UUID
+    provider_envelope: SecretEnvelope = field(repr=False, kw_only=True)
 
 
 def _deepseek_model_command(
@@ -96,17 +112,20 @@ def _deepseek_model_command(
     display_name: str,
     provider_model: str,
     supports_vision: bool,
-    api_key: str | None,
 ) -> CreateSystemModel:
+    # The seed derives ``settings.base_url`` from the DeepSeek Provider row,
+    # exactly like the admin service; validation therefore runs with the
+    # internal derived-URL allowance.
     return validate_create_system_model(
         CreateSystemModel(
             display_name=display_name,
             status="active",
+            provider_id=DEEPSEEK_PROVIDER_ID,
             provider_adapter="deepseek",
             provider_model=provider_model,
             max_input_tokens=DEEPSEEK_V4_MAX_INPUT_TOKENS,
             settings={
-                "base_url": "https://api.deepseek.com",
+                "base_url": DEEPSEEK_PROVIDER_BASE_URL,
                 "request_timeout": 600.0,
                 "max_tokens": 51_200,
                 "temperature": 0.7,
@@ -121,8 +140,8 @@ def _deepseek_model_command(
             supports_thinking=True,
             supports_reasoning_effort=True,
             supports_vision=supports_vision,
-            api_key=api_key,
-        )
+        ),
+        allow_derived_base_url=True,
     )
 
 
@@ -160,7 +179,6 @@ def prepare_default_system_model_bootstrap() -> DefaultSystemModelBootstrapMater
                 display_name=display_name,
                 provider_model=provider_model,
                 supports_vision=supports_vision,
-                api_key=api_key,
             )
             recipient = model_secret_recipient(
                 model_id,
@@ -174,7 +192,7 @@ def prepare_default_system_model_bootstrap() -> DefaultSystemModelBootstrapMater
             )
             entries.append(
                 DefaultSystemModelBootstrapEntry(
-                    command=replace(command, api_key=None),
+                    command=command,
                     model_id=model_id,
                     envelope=envelope,
                     envelope_digest=model_secret_envelope_digest(
@@ -183,11 +201,25 @@ def prepare_default_system_model_bootstrap() -> DefaultSystemModelBootstrapMater
                     ),
                 )
             )
+        # One DeepSeek Key protects one Provider envelope plus three
+        # independent model envelopes; distinct nonces do not rotate the
+        # actual upstream Key.
+        provider_envelope = protect_provider_api_key(
+            provider_id=DEEPSEEK_PROVIDER_ID,
+            base_url=DEEPSEEK_PROVIDER_BASE_URL,
+            api_key=api_key,
+            key=key,
+        )
         return DefaultSystemModelBootstrapMaterial(
+            provider_id=DEEPSEEK_PROVIDER_ID,
+            provider_name=DEEPSEEK_PROVIDER_NAME,
+            provider_base_url=DEEPSEEK_PROVIDER_BASE_URL,
             models=tuple(entries),
             default_model_id=DEFAULT_MODEL_ID,
+            provider_envelope=provider_envelope,
         )
     except (
+        ModelProviderSecretInvalid,
         ModelSettingsInvalid,
         SecretKeyInvalid,
         SecretProtectionFailed,
@@ -244,6 +276,7 @@ async def _validate_existing_catalog(session: AsyncSession) -> None:
             CreateSystemModel(
                 display_name=model.display_name,
                 status=model.status,
+                provider_id=uuid.UUID(str(model.provider_id)),
                 provider_adapter=model.provider_adapter,
                 provider_model=model.provider_model,
                 max_input_tokens=model.max_input_tokens,
@@ -251,8 +284,8 @@ async def _validate_existing_catalog(session: AsyncSession) -> None:
                 supports_thinking=model.supports_thinking,
                 supports_reasoning_effort=model.supports_reasoning_effort,
                 supports_vision=model.supports_vision,
-                api_key=None,
-            )
+            ),
+            allow_derived_base_url=True,
         )
         if canonical_model_payload_checksum(model.id, command) != model.payload_checksum:
             raise DefaultSystemModelBootstrapConflict
@@ -288,14 +321,40 @@ async def _bootstrap_fresh_catalog(
         raise DefaultSystemModelBootstrapConflict
     if await session.scalar(select(func.count()).select_from(SystemModelConfigRow)):
         raise DefaultSystemModelBootstrapConflict
+    # Fixed Provider identity: never adopt or repair a same-name row that
+    # belongs to a different identity, and never reuse a pre-existing fixed
+    # ID while the text catalog is empty (that state is not ours).
+    if await session.get(ModelProviderRow, material.provider_id) is not None:
+        raise DefaultSystemModelBootstrapConflict
+    if (
+        await session.scalar(
+            select(ModelProviderRow.id).where(
+                ModelProviderRow.name == material.provider_name,
+            )
+        )
+        is not None
+    ):
+        raise DefaultSystemModelBootstrapConflict
     await _ensure_bootstrap_principal(session)
     actor_id = str(BUILTIN_MODEL_USER_ID)
+    provider = ModelProviderRow(
+        id=material.provider_id,
+        name=material.provider_name,
+        base_url=material.provider_base_url,
+        request_timeout_seconds=_DEEPSEEK_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+        api_key_nonce=material.provider_envelope.nonce,
+        api_key_ciphertext=material.provider_envelope.ciphertext,
+    )
+    session.add(provider)
+    # The provider row must land before the models that reference it.
+    await session.flush()
     for entry in material.models:
         command = entry.command
         model = SystemModelConfigRow(
             id=entry.model_id,
             display_name=command.display_name,
             status=command.status,
+            provider_id=material.provider_id,
             provider_adapter=command.provider_adapter,
             provider_model=command.provider_model,
             max_input_tokens=command.max_input_tokens,
@@ -371,6 +430,9 @@ async def bootstrap_default_system_model(
 
 __all__ = [
     "DEFAULT_MODEL_ID",
+    "DEEPSEEK_PROVIDER_BASE_URL",
+    "DEEPSEEK_PROVIDER_ID",
+    "DEEPSEEK_PROVIDER_NAME",
     "DEEPSEEK_V4_MAX_INPUT_TOKENS",
     "DEEPSEEK_V4_FLASH_MODEL_ID",
     "DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID",

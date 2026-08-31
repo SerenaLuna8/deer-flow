@@ -7,8 +7,9 @@ operators actually get from ``make setup-db``.
 
 from __future__ import annotations
 
+import json
 import uuid
-from base64 import b64encode
+from base64 import b64decode, b64encode
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -30,6 +31,7 @@ from app.model_registry.bootstrap import (
     DEFAULT_MODEL_PROVIDER_ID,
     DEFAULT_RERANK_MODEL_ID,
     ModelRegistryBootstrapConfigurationInvalid,
+    ModelRegistryBootstrapConflict,
     ModelRegistryBootstrapSkipped,
     ModelRegistrySeed,
     bootstrap_default_model_registry,
@@ -299,8 +301,13 @@ async def test_default_registry_bootstrap_roundtrip_and_conflict(
             assert rerank.max_batch == 32
             assert rerank.status == "active"
 
-        # A lost bootstrap race finds the winner's rows and must not write.
-        assert await bootstrap_default_model_registry(factory, _seed()) is False
+        # A lost bootstrap race finds the winner's fixed identity and must not
+        # write; installed-ness is the fixed provider UUID, not a row count.
+        assert await bootstrap_default_model_registry(factory, prepare_model_registry_bootstrap()) is False
+        # The default name held by a different identity is a loud conflict:
+        # the seed never adopts or repairs another Provider's row.
+        with pytest.raises(ModelRegistryBootstrapConflict):
+            await bootstrap_default_model_registry(factory, _seed())
         async with factory() as session:
             provider_count = await session.scalar(sa.select(sa.func.count()).select_from(ModelProviderRow))
             model_count = await session.scalar(sa.select(sa.func.count()).select_from(ModelProviderModelRow))
@@ -794,8 +801,12 @@ async def test_missing_registry_seed_fails_bootstrap_without_marker(
         async with engine.connect() as connection:
             marker_count = await connection.scalar(text("SELECT count(*) FROM alembic_version"))
             provider_count = await connection.scalar(text("SELECT count(*) FROM model_providers"))
+            retrieval_count = await connection.scalar(text("SELECT count(*) FROM model_provider_models"))
+        # The Schema V1 marker is never published; the earlier DeepSeek stage
+        # committed its Provider, but the SiliconFlow seed wrote nothing.
         assert marker_count == 0
-        assert provider_count == 0
+        assert provider_count == 1
+        assert retrieval_count == 0
     finally:
         await engine.dispose()
 
@@ -805,12 +816,15 @@ async def test_bootstrap_with_explicit_skip_installs_schema_without_seed(
     postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The explicit skip installs full Schema V1 with zero seeded providers."""
+    """The explicit skip omits only the SiliconFlow seed; DeepSeek still lands."""
 
     monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", _SECRET_KEY)
     monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY", "unit-model-key")
 
-    from app.system_settings.bootstrap import prepare_default_system_model_bootstrap
+    from app.system_settings.bootstrap import (
+        DEEPSEEK_PROVIDER_ID,
+        prepare_default_system_model_bootstrap,
+    )
     from scripts import setup_postgres
 
     revision = await setup_postgres._bootstrap_empty_schema_under_lock(
@@ -824,8 +838,145 @@ async def test_bootstrap_with_explicit_skip_installs_schema_without_seed(
     try:
         async with engine.connect() as connection:
             marker_count = await connection.scalar(text("SELECT count(*) FROM alembic_version"))
-            provider_count = await connection.scalar(text("SELECT count(*) FROM model_providers"))
+            provider_ids = [row[0] for row in await connection.execute(text("SELECT id FROM model_providers"))]
+            retrieval_count = await connection.scalar(text("SELECT count(*) FROM model_provider_models"))
+            text_model_count = await connection.scalar(text("SELECT count(*) FROM system_model_configs WHERE provider_id = :provider_id"), {"provider_id": DEEPSEEK_PROVIDER_ID})
         assert marker_count == 1
-        assert provider_count == 0
+        assert provider_ids == [DEEPSEEK_PROVIDER_ID]
+        assert retrieval_count == 0
+        assert text_model_count == 3
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_default_full_install_seeds_both_providers_with_their_own_keys(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """联合验收：默认全新安装得到 2 供应商 / 3 文本模型 / 2 检索模型 / 3 代际。
+
+    DeepSeek 先初始化不会让 SiliconFlow 漏建；两把不同的虚构 Key 分别保护各自
+    供应商，DeepSeek 三个模型代际解密结果与其供应商 Key 一致。直接重复
+    bootstrap 只读返回，不覆盖、不新增代际。
+    """
+
+    monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", _SECRET_KEY)
+    monkeypatch.setenv("ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY", "unit-deepseek-key")
+    monkeypatch.setenv(
+        "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY",
+        "unit-siliconflow-key",
+    )
+    monkeypatch.delenv("ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP", raising=False)
+
+    from app.model_registry.secrets import materialize_provider_api_key
+    from app.system_settings.bootstrap import (
+        DEEPSEEK_PROVIDER_ID,
+        DEEPSEEK_V4_FLASH_MODEL_ID,
+        DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID,
+        bootstrap_default_system_model,
+        prepare_default_system_model_bootstrap,
+    )
+    from app.system_settings.secrets import model_secret_recipient
+    from deerflow.secrets import SecretEnvelope, SecretKey
+    from scripts import setup_postgres
+
+    revision = await setup_postgres._bootstrap_empty_schema_under_lock(
+        postgres_database_url,
+        default_model_bootstrap=prepare_default_system_model_bootstrap(),
+        model_registry_bootstrap=prepare_model_registry_bootstrap(),
+    )
+    assert revision == setup_postgres.CURRENT_SCHEMA_REVISION
+
+    secret_key = SecretKey(b64decode(_SECRET_KEY))
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.connect() as connection:
+            providers = {row.id: row for row in await connection.execute(text("SELECT id, name, base_url, api_key_nonce, api_key_ciphertext FROM model_providers"))}
+            text_models = list(
+                await connection.execute(
+                    text("SELECT id, provider_id, provider_adapter, settings, status FROM system_model_configs ORDER BY id"),
+                )
+            )
+            retrieval_models = list(
+                await connection.execute(
+                    text("SELECT id, provider_id, model_type FROM model_provider_models ORDER BY id"),
+                )
+            )
+            generations = list(
+                await connection.execute(
+                    text("SELECT model_config_id, nonce, ciphertext FROM system_model_secret_generations"),
+                )
+            )
+            default_model_id = await connection.scalar(text("SELECT default_model_config_id FROM system_model_catalog_state WHERE id = 1"))
+            vision_flags = {row.id: row.supports_vision for row in await connection.execute(text("SELECT id, supports_vision FROM system_model_configs"))}
+
+        assert set(providers) == {DEEPSEEK_PROVIDER_ID, DEFAULT_MODEL_PROVIDER_ID}
+        assert providers[DEEPSEEK_PROVIDER_ID].name == "DeepSeek"
+        assert providers[DEFAULT_MODEL_PROVIDER_ID].name == "SiliconFlow"
+
+        # Three individually selectable text models, all bound to DeepSeek.
+        assert len(text_models) == 3
+        assert len({row.id for row in text_models}) == 3
+        assert all(row.provider_id == DEEPSEEK_PROVIDER_ID for row in text_models)
+        assert all(row.status == "active" for row in text_models)
+        assert default_model_id == DEEPSEEK_V4_FLASH_MODEL_ID
+        assert vision_flags[DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID] is True
+
+        # Both retrieval models bound to SiliconFlow; they never enter the
+        # text-model catalog.
+        assert {row.model_type for row in retrieval_models} == {"embedding", "rerank"}
+        assert all(row.provider_id == DEFAULT_MODEL_PROVIDER_ID for row in retrieval_models)
+
+        # Each Provider keeps its own Key: DeepSeek's envelope and all three
+        # model generations open to the DeepSeek Key, SiliconFlow to its own.
+        deepseek_row = providers[DEEPSEEK_PROVIDER_ID]
+        assert (
+            materialize_provider_api_key(
+                provider_id=DEEPSEEK_PROVIDER_ID,
+                base_url=deepseek_row.base_url,
+                nonce=bytes(deepseek_row.api_key_nonce),
+                ciphertext=bytes(deepseek_row.api_key_ciphertext),
+                key=secret_key,
+            )
+            == "unit-deepseek-key"
+        )
+        siliconflow_row = providers[DEFAULT_MODEL_PROVIDER_ID]
+        assert (
+            materialize_provider_api_key(
+                provider_id=DEFAULT_MODEL_PROVIDER_ID,
+                base_url=siliconflow_row.base_url,
+                nonce=bytes(siliconflow_row.api_key_nonce),
+                ciphertext=bytes(siliconflow_row.api_key_ciphertext),
+                key=secret_key,
+            )
+            == "unit-siliconflow-key"
+        )
+        assert len(generations) == 3
+        models_by_id = {row.id: row for row in text_models}
+        for generation in generations:
+            model = models_by_id[generation.model_config_id]
+            settings = model.settings if isinstance(model.settings, dict) else json.loads(model.settings)
+            recipient = model_secret_recipient(
+                generation.model_config_id,
+                model.provider_adapter,
+                settings,
+            )
+            envelope = SecretEnvelope(
+                nonce=bytes(generation.nonce),
+                ciphertext=bytes(generation.ciphertext),
+            )
+            assert envelope.materialize(recipient=recipient, key=secret_key) == b"unit-deepseek-key"
+
+        # Direct bootstrap replays are read-only: no overwrites, no new
+        # generations, and the SiliconFlow seed never adopts foreign rows.
+        assert await bootstrap_default_system_model(factory, prepare_default_system_model_bootstrap()) is False
+        assert await bootstrap_default_model_registry(factory, prepare_model_registry_bootstrap()) is False
+        async with engine.connect() as connection:
+            generation_count = await connection.scalar(text("SELECT count(*) FROM system_model_secret_generations"))
+            provider_count = await connection.scalar(text("SELECT count(*) FROM model_providers"))
+        assert generation_count == 3
+        assert provider_count == 2
     finally:
         await engine.dispose()

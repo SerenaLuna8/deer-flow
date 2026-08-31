@@ -110,6 +110,11 @@ Provider 客户端不导出。完整清单见 `actweave_knowledge/__init__.py`,�
   `create_knowledge_project_purger(settings=..., session_factory=...)`、
   不拥有事务的 `purge_knowledge_query_history(session, project_id,
   owner_user_id)`;
+- 宿主模型注册表支撑:`create_knowledge_model_client()`(包内 Provider 探活
+  客户端的受控构造,类本身不导出,宿主负责 `aclose`)、不拥有事务的
+  `retrieval_model_in_use(session, model_id)`(与
+  `KnowledgeModule.model_in_use` 同一引用查询,Knowledge 关闭时仍保护
+  已被知识库引用的检索模型);
 - 模块与端口:`KnowledgeModule`、`KnowledgeSettings`、`KnowledgeModelPort`、
   `KnowledgeEmbeddingMaterial`、`KnowledgeRerankMaterial`、
   `KnowledgeProjectAuthority`、`KnowledgeError`;
@@ -715,6 +720,16 @@ API、库级 only_me 权限与标签、文档暂停恢复、归档、Pipeline �
   删除 `patched_openai`/`patched_deepseek`;计量 revision v6→v7。
 - M9 不提供旧数据迁移路径,按空库重新初始化交付(操作者确认后
   `make reset-db`)。
+
+> 补记(2026-08-31 模型供应商统一):M9 交付时注册表仅服务检索模型,上述
+> 记录保留当时事实。此后 `model_providers` 升级为整个模型域的唯一凭据与端点
+> 所有者:每个 System Model(文本模型)绑定必填 `provider_id`,`base_url`
+> 由供应商派生,模型级 API Key 与清除入口删除;供应商 Key/端点变更在同一
+> 事务内对全部绑定文本模型做 fan-out 重加密(锁竞争回滚整个 settle 并返回
+> 409)。注册表管理与 Knowledge 模块启用状态解耦(Gateway lifespan 提供
+> 探活客户端);DeepSeek 引导 Key 落为 DeepSeek 供应商,与 SiliconFlow seed
+> 各用各的 Key。Provider Model 词义不变,仍专指 Embedding/Reranker,不因
+> 管理页按供应商分组而混同文本模型。
 
 ### M10 — 检索质量与知识维护工作区(2026-08-31)
 

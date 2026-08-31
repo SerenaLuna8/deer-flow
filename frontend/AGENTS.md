@@ -244,8 +244,14 @@ generator; a necessary local patch needs focused coverage and an explanation.
   authorization. Credential fields are dynamic rows targeting Header or Query;
   one slot may contain both targets and is submitted as one write-only
   replacement. Replacing or clearing a value marks discovery stale.
-- Model API keys belong to the Model configuration. Connection tests always
-  require a temporary Key from the current form and never read the stored copy.
+- Model API keys belong to the Model Provider, never to an individual model
+  form. Text-model connection tests address the bound provider (`provider_id`)
+  and the server materializes the stored Key; the provider dialog offers a
+  separate candidate test that carries a transient URL/Key pair and saves
+  nothing. As a narrow exception to the general "clear on submit" secret rule,
+  the candidate Key may stay in the dialog's transient state for an explicit
+  test followed by save in the same dialog; it is cleared on close or on save
+  success and must never enter caches, storage, or query state.
 - System Model create, update, and connection-test forms require the bounded
   `max_input_tokens` capability (`1..2,000,000`), presented as the Provider
   Model's maximum input context and context-percentage denominator, never as
@@ -386,11 +392,16 @@ generator; a necessary local patch needs focused coverage and an explanation.
   enable toggles, edit and add dialogs (4000-character ceiling mirroring the
   backend), and delete. Read-only members get the browser without any
   mutation controls.
-- The admin retrieval model registry shares `/admin/settings/models` with
-  language model settings (`core/admin-settings/model-registry/` and
-  `admin-model-registry-page.tsx`): providers own write-only API keys sent as
-  imperative requests that never enter query caches, and a provider or model
-  referenced by knowledge bases (`in_use`) cannot be disabled or deleted.
+- `/admin/settings/models` is one unified "Model providers" surface:
+  `admin-model-settings-page.tsx` owns provider cards that group the bound
+  text models with the provider's Embedding/Rerank models, while
+  `admin-model-registry-page.tsx` exports the provider/retrieval dialogs and
+  `core/admin-settings/model-registry/` keeps their contracts. Providers own
+  write-only API keys sent as imperative requests that never enter query
+  caches; a key or endpoint change re-encrypts every bound text model, and a
+  retrieval model referenced by knowledge bases (`in_use`) cannot be disabled
+  or deleted. Registry administration works even while the Knowledge module
+  is disabled. Chat and sidecar selection stays per model, never per provider.
 - Chat citations render only from the thread projection's validated
   `knowledge_citations` payload on the Run's final AI text message; the
   renderer re-validates and degrades to "no citations" rather than trusting an

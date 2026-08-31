@@ -1,10 +1,8 @@
 "use client";
 
-import { PlusIcon, RefreshCwIcon } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { AdminSection } from "@/components/admin/ui/admin-page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,18 +22,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AdminModelRegistryApiError } from "@/core/admin-settings/model-registry/api";
 import {
-  AdminModelRegistryApiError,
-  isKnowledgeDisabledError,
-} from "@/core/admin-settings/model-registry/api";
-import {
-  useAdminModelProviders,
   useAdminProviderModels,
   useCreateAdminModelProvider,
   useCreateAdminProviderModel,
-  useDeleteAdminModelProvider,
-  useDeleteAdminProviderModel,
   useSetAdminProviderModelStatus,
+  useTestAdminModelProviderConnection,
   useTestAdminProviderModel,
   useUpdateAdminModelProvider,
 } from "@/core/admin-settings/model-registry/hooks";
@@ -45,31 +38,36 @@ import type {
   AdminProviderModelTestResult,
   AdminProviderModelType,
 } from "@/core/admin-settings/model-registry/types";
-import { useAuth } from "@/core/auth/AuthProvider";
+import {
+  ADMIN_MODEL_MAX_INPUT_TOKENS,
+  type AdminModelItem,
+  type AdminModelProviderAdapterDescriptor,
+} from "@/core/admin-settings/models";
 import type { Locale } from "@/core/i18n";
-import { useI18n } from "@/core/i18n/hooks";
 
 const MODEL_REGISTRY_COPY = {
   "en-US": {
-    sectionTitle: "Retrieval model providers",
+    sectionTitle: "Model providers",
     sectionDescription:
-      "Providers and typed embedding/rerank models used by project knowledge bases. Credentials are configured once per provider.",
+      "Providers own the endpoint and the API Key. Text models bind a provider for chat; embedding/rerank models serve project knowledge bases.",
     refresh: "Refresh",
     addProvider: "Add provider",
     empty: "No model providers yet.",
     loadFailed: "Model providers could not be loaded.",
-    knowledgeDisabled:
-      "The Knowledge module is not enabled for this deployment, so retrieval model providers are unavailable.",
     keyConfigured: "Key configured",
-    keyConfiguredUnverified: "Key configured, unverified",
-    timeout: (seconds: number) => `Timeout ${seconds}s`,
+    timeout: (seconds: number) => `Retrieval timeout ${seconds}s`,
     modelCount: (count: number) => `${count} model${count === 1 ? "" : "s"}`,
+    activeModelCount: (count: number) => `${count} active`,
     endpointFrozen:
       "The endpoint is referenced by knowledge bases. To move to a new endpoint, create a new provider and model, then rebuild each base explicitly.",
     editProvider: "Edit",
     deleteProvider: "Delete",
-    addModel: "Add model",
-    modelsEmpty: "No models under this provider yet.",
+    textModelsTitle: "Text models",
+    textModelsEmpty: "No text models bound to this provider yet.",
+    addTextModel: "Add text model",
+    retrievalModelsTitle: "Retrieval models",
+    addModel: "Add retrieval model",
+    modelsEmpty: "No retrieval models under this provider yet.",
     modelsLoadFailed: "Models could not be loaded.",
     typeEmbedding: "Embedding",
     typeRerank: "Rerank",
@@ -86,18 +84,35 @@ const MODEL_REGISTRY_COPY = {
     createProviderTitle: "Add model provider",
     editProviderTitle: "Edit model provider",
     providerDialogDescription:
-      "The API Key is encrypted at rest. When editing, leave the Key blank to preserve the saved value; changing the endpoint requires a new Key.",
+      "The provider owns the only API Key. When editing, leave the Key blank to preserve the saved value; changing the endpoint requires a new Key. A Key or endpoint change re-encrypts the Key for every bound text model.",
     providerName: "Provider name",
     baseUrl: "Base URL",
     baseUrlFrozenHint:
       "Referenced by knowledge bases; the endpoint cannot be changed in place. Create a new provider for a new endpoint.",
-    timeoutSeconds: "Request timeout (seconds)",
+    timeoutSeconds: "Retrieval request timeout (seconds)",
+    timeoutSecondsHint:
+      "Applies to embedding/rerank requests only; text-model requests keep their own timeout settings.",
     apiKey: "API Key",
     apiKeyCreatePlaceholder: "Enter API Key",
     apiKeyEditPlaceholder: "Leave blank to preserve the saved Key",
     baseUrlChangedNeedsKey:
       "Changing the endpoint requires entering a new API Key.",
-    createModelTitle: "Add model",
+    fanoutWarning: (count: number) =>
+      `Saving a Key or endpoint change re-encrypts credentials for ${count} bound model(s); Runs frozen on the old material become stale.`,
+    candidateTestTitle: "Connection test (optional, may incur provider charges)",
+    candidateTestDescription:
+      "Tests the URL and Key above against one explicit text-model target without saving anything. One passing model does not verify every model of this provider; saving without testing is allowed.",
+    candidateAdapter: "Adapter",
+    candidateModel: "Model name for the test",
+    candidateMaxInputTokens: "Maximum input tokens",
+    candidateTest: "Test connection",
+    candidateTesting: "Testing…",
+    candidateNeedsMaterial:
+      "Enter the URL, the Key, and a test model target before testing.",
+    candidateSucceeded:
+      "Connection test succeeded for this URL/Key/model combination.",
+    candidateFailed: "Connection test failed.",
+    createModelTitle: "Add retrieval model",
     modelDialogDescription:
       "Models are typed: embedding models carry a vector dimension; rerank scores are normalized to [0,1].",
     modelType: "Model type",
@@ -111,7 +126,7 @@ const MODEL_REGISTRY_COPY = {
     save: "Save",
     deleteProviderTitle: "Delete provider",
     deleteProviderDescription: (name: string) =>
-      `Delete provider "${name}"? Providers with models cannot be deleted.`,
+      `Delete provider "${name}"? A provider with bound text models requires rebinding them first; retrieval models must be deleted first.`,
     deleteModelTitle: "Delete model",
     deleteModelDescription: (name: string) =>
       `Delete model "${name}"? Models referenced by knowledge bases cannot be deleted.`,
@@ -121,24 +136,27 @@ const MODEL_REGISTRY_COPY = {
     requestFailed: "The request failed.",
   },
   "zh-CN": {
-    sectionTitle: "检索模型供应商",
+    sectionTitle: "模型供应商",
     sectionDescription:
-      "供项目知识库使用的供应商与类型化 Embedding/Rerank 模型。凭据按供应商配置一次。",
+      "供应商统一持有服务地址与 API Key。文本模型绑定供应商用于会话；Embedding/Rerank 模型供项目知识库使用。",
     refresh: "刷新",
     addProvider: "添加供应商",
     empty: "还没有模型供应商。",
     loadFailed: "无法加载模型供应商。",
-    knowledgeDisabled: "当前部署未启用 Knowledge 模块，检索模型供应商不可用。",
     keyConfigured: "Key 已配置",
-    keyConfiguredUnverified: "Key 已配置，未验证",
-    timeout: (seconds: number) => `超时 ${seconds} 秒`,
+    timeout: (seconds: number) => `检索超时 ${seconds} 秒`,
     modelCount: (count: number) => `${count} 个模型`,
+    activeModelCount: (count: number) => `${count} 个启用`,
     endpointFrozen:
       "端点正被知识库引用。如需更换端点，请新建供应商和模型，再逐库显式重建。",
     editProvider: "编辑",
     deleteProvider: "删除",
-    addModel: "添加模型",
-    modelsEmpty: "该供应商下还没有模型。",
+    textModelsTitle: "文本模型",
+    textModelsEmpty: "该供应商下还没有绑定的文本模型。",
+    addTextModel: "添加文本模型",
+    retrievalModelsTitle: "检索模型",
+    addModel: "添加检索模型",
+    modelsEmpty: "该供应商下还没有检索模型。",
     modelsLoadFailed: "无法加载模型列表。",
     typeEmbedding: "Embedding",
     typeRerank: "Rerank",
@@ -155,16 +173,31 @@ const MODEL_REGISTRY_COPY = {
     createProviderTitle: "添加模型供应商",
     editProviderTitle: "编辑模型供应商",
     providerDialogDescription:
-      "API Key 加密存储。编辑时留空表示保留已保存的 Key；修改端点必须输入新 Key。",
+      "供应商持有唯一的 API Key。编辑时留空表示保留已保存的 Key；修改端点必须输入新 Key。更换 Key 或端点会同时为所有绑定的文本模型重新加密凭据。",
     providerName: "供应商名称",
     baseUrl: "Base URL",
     baseUrlFrozenHint: "正被知识库引用，端点不可原地修改。更换端点请新建供应商。",
-    timeoutSeconds: "请求超时（秒）",
+    timeoutSeconds: "检索请求超时（秒）",
+    timeoutSecondsHint:
+      "仅作用于 Embedding/Rerank 请求；文本模型请求使用各自的超时设置。",
     apiKey: "API Key",
     apiKeyCreatePlaceholder: "输入 API Key",
     apiKeyEditPlaceholder: "留空则保留已保存的 Key",
     baseUrlChangedNeedsKey: "修改端点必须输入新的 API Key。",
-    createModelTitle: "添加模型",
+    fanoutWarning: (count: number) =>
+      `保存新的 Key 或端点会同时为 ${count} 个绑定模型重新加密凭据；冻结旧材料的 Run 会失效。`,
+    candidateTestTitle: "连接测试（可选，可能产生供应商计费）",
+    candidateTestDescription:
+      "使用上方的 URL 和 Key 对一个明确选定的文本模型目标发起测试，不保存任何配置。测试一个模型成功不代表该供应商全部模型可用；未测试也可以保存。",
+    candidateAdapter: "适配器",
+    candidateModel: "测试用模型名称",
+    candidateMaxInputTokens: "最大输入 Token",
+    candidateTest: "测试连接",
+    candidateTesting: "测试中…",
+    candidateNeedsMaterial: "测试前请先填写 URL、Key 和测试模型目标。",
+    candidateSucceeded: "本次 URL/Key/模型组合连接测试成功。",
+    candidateFailed: "连接测试失败。",
+    createModelTitle: "添加检索模型",
     modelDialogDescription:
       "模型按类型区分：Embedding 模型带向量维度；Rerank 分数归一化到 [0,1]。",
     modelType: "模型类型",
@@ -178,7 +211,7 @@ const MODEL_REGISTRY_COPY = {
     save: "保存",
     deleteProviderTitle: "删除供应商",
     deleteProviderDescription: (name: string) =>
-      `确定删除供应商「${name}」？有模型的供应商无法删除。`,
+      `确定删除供应商「${name}」？有绑定文本模型的供应商需要先将模型改绑到其他供应商；检索模型需要先删除。`,
     deleteModelTitle: "删除模型",
     deleteModelDescription: (name: string) =>
       `确定删除模型「${name}」？被知识库引用的模型无法删除。`,
@@ -192,13 +225,16 @@ const MODEL_REGISTRY_COPY = {
 const DEFAULT_EMBEDDING_MAX_BATCH = 64;
 const DEFAULT_RERANK_MAX_BATCH = 32;
 
-function registryCopy(locale: Locale) {
+export function registryCopy(locale: Locale) {
   return MODEL_REGISTRY_COPY[locale] ?? MODEL_REGISTRY_COPY["zh-CN"];
 }
 
-type Copy = ReturnType<typeof registryCopy>;
+export type ModelRegistryCopy = ReturnType<typeof registryCopy>;
 
-function registryErrorText(error: unknown, copy: Copy): string {
+export function registryErrorText(
+  error: unknown,
+  copy: ModelRegistryCopy,
+): string {
   if (error instanceof AdminModelRegistryApiError && error.serverMessage) {
     return error.serverMessage;
   }
@@ -217,48 +253,149 @@ type ProviderDraft = {
   apiKey: string;
 };
 
+type CandidateTargetDraft = {
+  adapter: string;
+  model: string;
+  maxInputTokens: string;
+};
+
 function providerDraftFrom(target: AdminModelProviderItem | null): ProviderDraft {
   return {
     name: target?.name ?? "",
-    baseUrl: target?.base_url ?? "https://api.siliconflow.cn/v1",
+    baseUrl: target?.base_url ?? "",
     timeoutSeconds: String(target?.request_timeout_seconds ?? 30),
     apiKey: "",
   };
 }
 
-function ProviderEditorDialog({
+function candidateTargetFrom(
+  boundTextModels: readonly AdminModelItem[],
+  descriptors: readonly AdminModelProviderAdapterDescriptor[],
+): CandidateTargetDraft {
+  // An existing provider prefills the target from a bound model; a new
+  // provider starts from the first authorable adapter.
+  const bound = boundTextModels[0];
+  if (bound) {
+    return {
+      adapter: bound.provider_adapter,
+      model: bound.provider_model,
+      maxInputTokens: String(bound.max_input_tokens),
+    };
+  }
+  return {
+    adapter: descriptors[0]?.id ?? "",
+    model: "",
+    maxInputTokens: "64000",
+  };
+}
+
+export function ProviderEditorDialog({
   accountId,
   target,
   open,
   onClose,
   copy,
+  descriptors,
+  boundTextModels,
 }: {
   accountId: string;
   target: AdminModelProviderItem | null;
   open: boolean;
   onClose: () => void;
-  copy: Copy;
+  copy: ModelRegistryCopy;
+  descriptors: readonly AdminModelProviderAdapterDescriptor[];
+  boundTextModels: readonly AdminModelItem[];
 }) {
   const create = useCreateAdminModelProvider(accountId);
   const update = useUpdateAdminModelProvider(accountId);
+  const candidateTest = useTestAdminModelProviderConnection(accountId);
   const [draft, setDraft] = useState<ProviderDraft>(() =>
     providerDraftFrom(target),
   );
+  const [candidateTarget, setCandidateTarget] = useState<CandidateTargetDraft>(
+    () => candidateTargetFrom(boundTextModels, descriptors),
+  );
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [testState, setTestState] = useState<
+    "idle" | "pending" | "succeeded" | "failed"
+  >("idle");
+  const [testError, setTestError] = useState<string | null>(null);
+  // Discard late test responses after a newer test, an edit, or a close.
+  const testSequence = useRef(0);
   const pending = create.isPending || update.isPending;
+  const testPending = testState === "pending";
   const submitError = create.error ?? update.error;
   const endpointFrozen = target?.endpoint_frozen ?? false;
+  const boundModelCount = target?.model_count ?? 0;
+  const baseUrlChanged =
+    target !== null && draft.baseUrl.trim() !== target.base_url;
+  const keyEntered = draft.apiKey.trim().length > 0;
 
-  const set = (patch: Partial<ProviderDraft>) =>
+  // Any change to the tested material revokes the local success marker.
+  const revokeTestResult = () => {
+    testSequence.current += 1;
+    setTestState("idle");
+    setTestError(null);
+  };
+
+  const set = (patch: Partial<ProviderDraft>) => {
+    revokeTestResult();
     setDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const setTarget = (patch: Partial<CandidateTargetDraft>) => {
+    revokeTestResult();
+    setCandidateTarget((current) => ({ ...current, ...patch }));
+  };
 
   const close = () => {
-    // Write-only secret: never keep the key in state after the dialog closes.
+    // Write-only secret: never keep the key in state after the dialog closes,
+    // and orphan any in-flight test response.
+    testSequence.current += 1;
     setDraft(providerDraftFrom(null));
     setValidationError(null);
+    setTestState("idle");
+    setTestError(null);
     create.reset();
     update.reset();
     onClose();
+  };
+
+  const runCandidateTest = async () => {
+    const baseUrl = draft.baseUrl.trim();
+    const apiKey = draft.apiKey;
+    const maxInputTokens = parsePositiveInt(candidateTarget.maxInputTokens);
+    if (
+      baseUrl.length === 0 ||
+      apiKey.trim().length === 0 ||
+      candidateTarget.adapter.length === 0 ||
+      candidateTarget.model.trim().length === 0 ||
+      maxInputTokens === null ||
+      maxInputTokens > ADMIN_MODEL_MAX_INPUT_TOKENS
+    ) {
+      setTestError(copy.candidateNeedsMaterial);
+      return;
+    }
+    const sequence = ++testSequence.current;
+    setTestState("pending");
+    setTestError(null);
+    try {
+      const result = await candidateTest.execute({
+        base_url: baseUrl,
+        api_key: apiKey,
+        provider_adapter: candidateTarget.adapter,
+        provider_model: candidateTarget.model.trim(),
+        max_input_tokens: maxInputTokens,
+        settings: {},
+        supports_vision: false,
+      });
+      if (sequence !== testSequence.current) return;
+      setTestState(result.status);
+    } catch (error) {
+      if (sequence !== testSequence.current) return;
+      setTestState("failed");
+      setTestError(registryErrorText(error, copy));
+    }
   };
 
   const submit = async () => {
@@ -268,7 +405,6 @@ function ProviderEditorDialog({
       return;
     }
     const baseUrl = draft.baseUrl.trim();
-    const baseUrlChanged = target !== null && baseUrl !== target.base_url;
     if (baseUrlChanged && draft.apiKey.trim().length === 0) {
       // The server re-verifies anyway; this only explains the rule up front.
       setValidationError(copy.baseUrlChangedNeedsKey);
@@ -308,7 +444,7 @@ function ProviderEditorDialog({
     <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
-        if (!nextOpen) close();
+        if (!nextOpen && !testPending) close();
       }}
     >
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
@@ -339,7 +475,7 @@ function ProviderEditorDialog({
             <span className="font-medium">{copy.baseUrl}</span>
             <Input
               required
-              disabled={endpointFrozen}
+              disabled={endpointFrozen || testPending}
               value={draft.baseUrl}
               onChange={(event) => set({ baseUrl: event.target.value })}
             />
@@ -358,6 +494,9 @@ function ProviderEditorDialog({
               value={draft.timeoutSeconds}
               onChange={(event) => set({ timeoutSeconds: event.target.value })}
             />
+            <span className="text-muted-foreground text-xs">
+              {copy.timeoutSecondsHint}
+            </span>
           </label>
           <label className="grid gap-1.5 text-sm">
             <span className="font-medium">{copy.apiKey}</span>
@@ -365,6 +504,7 @@ function ProviderEditorDialog({
               type="password"
               autoComplete="off"
               required={target === null}
+              disabled={testPending}
               value={draft.apiKey}
               placeholder={
                 target === null
@@ -374,6 +514,89 @@ function ProviderEditorDialog({
               onChange={(event) => set({ apiKey: event.target.value })}
             />
           </label>
+          {target !== null && (keyEntered || baseUrlChanged) && boundModelCount > 0 ? (
+            <p
+              data-testid="admin-provider-fanout-warning"
+              className="text-muted-foreground text-xs leading-5"
+            >
+              {copy.fanoutWarning(boundModelCount)}
+            </p>
+          ) : null}
+          <section className="grid gap-3 rounded-lg border p-3">
+            <div>
+              <h3 className="text-sm font-medium">{copy.candidateTestTitle}</h3>
+              <p className="text-muted-foreground mt-1 text-xs leading-5">
+                {copy.candidateTestDescription}
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <label className="grid gap-1.5 text-sm">
+                <span className="font-medium">{copy.candidateAdapter}</span>
+                <select
+                  className="border-input bg-background h-9 rounded-md border px-3 text-sm"
+                  aria-label={copy.candidateAdapter}
+                  value={candidateTarget.adapter}
+                  disabled={testPending}
+                  onChange={(event) => setTarget({ adapter: event.target.value })}
+                >
+                  {descriptors.map((descriptor) => (
+                    <option key={descriptor.id} value={descriptor.id}>
+                      {descriptor.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1.5 text-sm">
+                <span className="font-medium">{copy.candidateModel}</span>
+                <Input
+                  value={candidateTarget.model}
+                  disabled={testPending}
+                  onChange={(event) => setTarget({ model: event.target.value })}
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm">
+                <span className="font-medium">
+                  {copy.candidateMaxInputTokens}
+                </span>
+                <Input
+                  type="number"
+                  min={1}
+                  max={ADMIN_MODEL_MAX_INPUT_TOKENS}
+                  value={candidateTarget.maxInputTokens}
+                  disabled={testPending}
+                  onChange={(event) =>
+                    setTarget({ maxInputTokens: event.target.value })
+                  }
+                />
+              </label>
+            </div>
+            <div className="flex items-center gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={testPending || pending}
+                onClick={() => void runCandidateTest()}
+              >
+                {testPending ? copy.candidateTesting : copy.candidateTest}
+              </Button>
+              {testState === "succeeded" ? (
+                <p role="status" className="text-success text-xs">
+                  {copy.candidateSucceeded}
+                </p>
+              ) : null}
+              {testState === "failed" ? (
+                <p role="status" className="text-destructive text-xs">
+                  {testError ?? copy.candidateFailed}
+                </p>
+              ) : null}
+              {testState === "idle" && testError ? (
+                <p role="alert" className="text-destructive text-xs">
+                  {testError}
+                </p>
+              ) : null}
+            </div>
+          </section>
           {validationError ? (
             <p role="alert" className="text-destructive text-sm">
               {validationError}
@@ -385,10 +608,15 @@ function ProviderEditorDialog({
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={close}>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={testPending}
+              onClick={close}
+            >
               {copy.cancel}
             </Button>
-            <Button type="submit" disabled={pending}>
+            <Button type="submit" disabled={pending || testPending}>
               {pending ? copy.saving : copy.save}
             </Button>
           </DialogFooter>
@@ -405,7 +633,7 @@ type ModelDraft = {
   maxBatch: string;
 };
 
-function ModelCreateDialog({
+export function ModelCreateDialog({
   accountId,
   provider,
   open,
@@ -416,7 +644,7 @@ function ModelCreateDialog({
   provider: AdminModelProviderItem;
   open: boolean;
   onClose: () => void;
-  copy: Copy;
+  copy: ModelRegistryCopy;
 }) {
   const create = useCreateAdminProviderModel(accountId);
   const [draft, setDraft] = useState<ModelDraft>({
@@ -570,7 +798,7 @@ function ModelCreateDialog({
   );
 }
 
-function ProviderModelList({
+export function ProviderModelList({
   accountId,
   provider,
   copy,
@@ -578,7 +806,7 @@ function ProviderModelList({
 }: {
   accountId: string;
   provider: AdminModelProviderItem;
-  copy: Copy;
+  copy: ModelRegistryCopy;
   onDeleteModel: (model: AdminProviderModelItem) => void;
 }) {
   const models = useAdminProviderModels(accountId, provider.id);
@@ -736,273 +964,5 @@ function ProviderModelList({
         );
       })}
     </ul>
-  );
-}
-
-export function AdminModelRegistrySection() {
-  const { user } = useAuth();
-  const { locale } = useI18n();
-  const copy = registryCopy(locale);
-  const accountId = user?.id ?? "default";
-  const providers = useAdminModelProviders(accountId, user !== null);
-  const deleteProvider = useDeleteAdminModelProvider(accountId);
-  const deleteModel = useDeleteAdminProviderModel(accountId);
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editorTarget, setEditorTarget] =
-    useState<AdminModelProviderItem | null>(null);
-  const [modelDialogProvider, setModelDialogProvider] =
-    useState<AdminModelProviderItem | null>(null);
-  const [deletingProvider, setDeletingProvider] =
-    useState<AdminModelProviderItem | null>(null);
-  const [deletingModel, setDeletingModel] =
-    useState<AdminProviderModelItem | null>(null);
-
-  const closeProviderDelete = () => {
-    setDeletingProvider(null);
-    // A stale error from a previous failed delete must not greet the next one.
-    deleteProvider.reset();
-  };
-  const closeModelDelete = () => {
-    setDeletingModel(null);
-    deleteModel.reset();
-  };
-
-  if (!user) return null;
-
-  return (
-    <>
-      <AdminSection
-        title={copy.sectionTitle}
-        description={copy.sectionDescription}
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void providers.refetch()}
-            >
-              <RefreshCwIcon aria-hidden className="size-4" />
-              {copy.refresh}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => {
-                setEditorTarget(null);
-                setEditorOpen(true);
-              }}
-            >
-              <PlusIcon aria-hidden className="size-4" />
-              {copy.addProvider}
-            </Button>
-          </div>
-        }
-      >
-        {providers.isLoading ? (
-          <Skeleton className="h-40 rounded-xl" />
-        ) : isKnowledgeDisabledError(providers.error) ? (
-          <p
-            data-testid="admin-model-registry-disabled"
-            className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm"
-          >
-            {copy.knowledgeDisabled}
-          </p>
-        ) : providers.error ? (
-          <p role="alert" className="text-destructive text-sm">
-            {copy.loadFailed}
-          </p>
-        ) : (providers.data?.length ?? 0) === 0 ? (
-          <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm">
-            {copy.empty}
-          </p>
-        ) : (
-          <ol className="grid gap-3" data-testid="admin-model-provider-list">
-            {providers.data?.map((provider) => (
-              <li
-                key={provider.id}
-                className="border-border rounded-xl border p-4"
-              >
-                <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="text-foreground truncate font-medium">
-                        {provider.name}
-                      </span>
-                      {provider.api_key_configured ? (
-                        <Badge variant="outline">
-                          {provider.active_model_count > 0
-                            ? copy.keyConfigured
-                            : copy.keyConfiguredUnverified}
-                        </Badge>
-                      ) : null}
-                    </div>
-                    <p className="text-muted-foreground mt-1 truncate text-xs">
-                      {provider.base_url} ·{" "}
-                      {copy.timeout(provider.request_timeout_seconds)} ·{" "}
-                      {copy.modelCount(provider.model_count)}
-                    </p>
-                    {provider.endpoint_frozen ? (
-                      <p className="text-muted-foreground mt-1 text-xs">
-                        {copy.endpointFrozen}
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setModelDialogProvider(provider)}
-                    >
-                      <PlusIcon aria-hidden className="size-4" />
-                      {copy.addModel}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setEditorTarget(provider);
-                        setEditorOpen(true);
-                      }}
-                    >
-                      {copy.editProvider}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="text-destructive"
-                      disabled={provider.model_count > 0}
-                      onClick={() => setDeletingProvider(provider)}
-                    >
-                      {copy.deleteProvider}
-                    </Button>
-                  </div>
-                </div>
-                <ProviderModelList
-                  accountId={accountId}
-                  provider={provider}
-                  copy={copy}
-                  onDeleteModel={setDeletingModel}
-                />
-              </li>
-            ))}
-          </ol>
-        )}
-      </AdminSection>
-
-      {editorOpen ? (
-        <ProviderEditorDialog
-          key={editorTarget?.id ?? "create"}
-          accountId={accountId}
-          target={editorTarget}
-          open={editorOpen}
-          onClose={() => {
-            setEditorOpen(false);
-            setEditorTarget(null);
-          }}
-          copy={copy}
-        />
-      ) : null}
-
-      {modelDialogProvider ? (
-        <ModelCreateDialog
-          key={modelDialogProvider.id}
-          accountId={accountId}
-          provider={modelDialogProvider}
-          open={modelDialogProvider !== null}
-          onClose={() => setModelDialogProvider(null)}
-          copy={copy}
-        />
-      ) : null}
-
-      <Dialog
-        open={deletingProvider !== null}
-        onOpenChange={(open) => {
-          if (!open) closeProviderDelete();
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{copy.deleteProviderTitle}</DialogTitle>
-            <DialogDescription>
-              {deletingProvider
-                ? copy.deleteProviderDescription(deletingProvider.name)
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
-          {deleteProvider.error ? (
-            <p role="alert" className="text-destructive text-sm">
-              {registryErrorText(deleteProvider.error, copy)}
-            </p>
-          ) : null}
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={closeProviderDelete}
-            >
-              {copy.cancel}
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={deleteProvider.isPending}
-              onClick={() => {
-                if (!deletingProvider) return;
-                deleteProvider.mutate(deletingProvider.id, {
-                  onSuccess: () => closeProviderDelete(),
-                });
-              }}
-            >
-              {deleteProvider.isPending ? copy.deleting : copy.delete}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={deletingModel !== null}
-        onOpenChange={(open) => {
-          if (!open) closeModelDelete();
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{copy.deleteModelTitle}</DialogTitle>
-            <DialogDescription>
-              {deletingModel
-                ? copy.deleteModelDescription(deletingModel.model_name)
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
-          {deleteModel.error ? (
-            <p role="alert" className="text-destructive text-sm">
-              {registryErrorText(deleteModel.error, copy)}
-            </p>
-          ) : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={closeModelDelete}>
-              {copy.cancel}
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={deleteModel.isPending}
-              onClick={() => {
-                if (!deletingModel) return;
-                deleteModel.mutate(deletingModel.id, {
-                  onSuccess: () => closeModelDelete(),
-                });
-              }}
-            >
-              {deleteModel.isPending ? copy.deleting : copy.delete}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
   );
 }

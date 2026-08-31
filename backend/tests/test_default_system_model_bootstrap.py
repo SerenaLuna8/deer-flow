@@ -6,18 +6,25 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.model_registry.secrets import materialize_provider_api_key
 from app.system_settings.bootstrap import (
+    DEEPSEEK_PROVIDER_BASE_URL,
+    DEEPSEEK_PROVIDER_ID,
+    DEEPSEEK_PROVIDER_NAME,
     DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID,
     DEFAULT_MODEL_ID,
     DefaultSystemModelBootstrapConfigurationInvalid,
+    DefaultSystemModelBootstrapConflict,
     bootstrap_default_system_model,
     prepare_default_system_model_bootstrap,
 )
+from deerflow.persistence.model_registry import ModelProviderRow
 from deerflow.persistence.system_settings import (
     SystemModelCatalogStateRow,
     SystemModelConfigRow,
     SystemModelSecretGenerationRow,
 )
+from deerflow.secrets import SecretKey
 
 
 @pytest.fixture()
@@ -72,6 +79,24 @@ def test_default_model_bootstrap_prepares_three_independent_deepseek_models(
     assert len({entry.envelope.nonce for entry in material.models}) == 3
     assert len({entry.envelope.ciphertext for entry in material.models}) == 3
     assert "unit-bootstrap-secret" not in repr(material)
+
+    # One DeepSeek Key protects one Provider envelope plus three independent
+    # model envelopes; the seeded models derive their URL from the Provider.
+    assert material.provider_id == DEEPSEEK_PROVIDER_ID
+    assert material.provider_name == DEEPSEEK_PROVIDER_NAME
+    assert material.provider_base_url == DEEPSEEK_PROVIDER_BASE_URL
+    assert all(entry.command.provider_id == DEEPSEEK_PROVIDER_ID for entry in material.models)
+    assert all(entry.command.settings["base_url"] == DEEPSEEK_PROVIDER_BASE_URL for entry in material.models)
+    assert (
+        materialize_provider_api_key(
+            provider_id=material.provider_id,
+            base_url=material.provider_base_url,
+            nonce=material.provider_envelope.nonce,
+            ciphertext=material.provider_envelope.ciphertext,
+            key=SecretKey(b"s" * 32),
+        )
+        == "unit-bootstrap-secret"
+    )
 
 
 def test_default_model_bootstrap_requires_the_deepseek_bootstrap_key(
@@ -140,5 +165,66 @@ async def test_default_model_bootstrap_persists_flash_as_default(
         assert len(secret_generations) == 3
         assert len({generation.id for generation in secret_generations}) == 3
         assert len({generation.ciphertext for generation in secret_generations}) == 3
+
+        # The seed installs the DeepSeek Provider row first and binds all
+        # three text models to that fixed identity.
+        async with factory() as session:
+            provider = await session.get(ModelProviderRow, DEEPSEEK_PROVIDER_ID)
+        assert provider is not None
+        assert provider.name == DEEPSEEK_PROVIDER_NAME
+        assert provider.base_url == DEEPSEEK_PROVIDER_BASE_URL
+        assert all(model.provider_id == DEEPSEEK_PROVIDER_ID for model in models)
+        assert all(model.settings["base_url"] == DEEPSEEK_PROVIDER_BASE_URL for model in models)
+        assert (
+            materialize_provider_api_key(
+                provider_id=DEEPSEEK_PROVIDER_ID,
+                base_url=provider.base_url,
+                nonce=bytes(provider.api_key_nonce),
+                ciphertext=bytes(provider.api_key_ciphertext),
+                key=SecretKey(b"s" * 32),
+            )
+            == "unit-bootstrap-secret"
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_default_model_bootstrap_rejects_a_same_name_foreign_provider(
+    migrated_postgres_database_url: str,
+    default_model_bootstrap_environment: None,
+) -> None:
+    """The default name held by another identity fails loudly with zero writes."""
+
+    import uuid as _uuid
+
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    material = prepare_default_system_model_bootstrap()
+    foreign_id = _uuid.uuid4()
+    try:
+        async with factory() as session, session.begin():
+            session.add(
+                ModelProviderRow(
+                    id=foreign_id,
+                    name=DEEPSEEK_PROVIDER_NAME,
+                    base_url="https://foreign.deepseek.invalid",
+                    request_timeout_seconds=30,
+                    api_key_nonce=b"\x00" * 12,
+                    api_key_ciphertext=b"\x00" * 16,
+                )
+            )
+
+        with pytest.raises(DefaultSystemModelBootstrapConflict):
+            await bootstrap_default_system_model(factory, material)
+
+        async with factory() as session:
+            assert await session.get(ModelProviderRow, DEEPSEEK_PROVIDER_ID) is None
+            models = (await session.execute(select(SystemModelConfigRow))).scalars().all()
+            state = await session.get(SystemModelCatalogStateRow, 1)
+        assert models == []
+        assert state is not None
+        assert state.default_model_config_id is None
     finally:
         await engine.dispose()

@@ -5,6 +5,7 @@ import {
   jobFiltersSchema,
   operationsOverviewSchema,
 } from "@/core/admin-operations/types";
+import { testAdminModelProviderConnectionInputSchema } from "@/core/admin-settings/model-registry/types";
 import {
   adminModelCatalogSchema,
   adminModelItemSchema,
@@ -29,6 +30,8 @@ const JOB_TYPES = [
 ] as const;
 const PUBLIC_MODEL_ID = "00000000-0000-4000-8000-000000000201";
 const VISION_MODEL_ID = "00000000-0000-4000-8000-000000000202";
+const MODEL_PROVIDER_ID = "00000000-0000-4000-8000-00000000c001";
+const MODEL_PROVIDER_NAME = "Contract Provider";
 
 function agentRuntimeSettings() {
   return {
@@ -471,6 +474,8 @@ describe("admin contracts", () => {
     const item = {
       id: "00000000-0000-4000-8000-000000000208",
       display_name: "Visible admin model",
+      provider_id: MODEL_PROVIDER_ID,
+      provider_name: MODEL_PROVIDER_NAME,
       provider_adapter: "historical_adapter_v1" as const,
       provider_model: "historical-model-v1",
       max_input_tokens: 128_000,
@@ -492,6 +497,7 @@ describe("admin contracts", () => {
       { logical_name: "legacy-logical-name" },
       { description: "Removed" },
       { sort_order: 0 },
+      { api_key: "temporary-key" },
     ]) {
       expect(
         adminModelItemSchema.safeParse({
@@ -500,6 +506,17 @@ describe("admin contracts", () => {
         }).success,
       ).toBe(false);
     }
+    // The provider binding is part of the read contract, not optional data.
+    const { provider_id: _providerId, ...withoutProviderId } = item;
+    expect(_providerId).toBe(MODEL_PROVIDER_ID);
+    expect(adminModelItemSchema.safeParse(withoutProviderId).success).toBe(
+      false,
+    );
+    const { provider_name: _providerName, ...withoutProviderName } = item;
+    expect(_providerName).toBe(MODEL_PROVIDER_NAME);
+    expect(adminModelItemSchema.safeParse(withoutProviderName).success).toBe(
+      false,
+    );
   });
 
   test("requires one bounded maximum input context across model read and write contracts", () => {
@@ -515,6 +532,8 @@ describe("admin contracts", () => {
     const itemWithoutCapacity = {
       ...versionWithoutCapacity,
       id: "00000000-0000-4000-8000-000000000209",
+      provider_id: MODEL_PROVIDER_ID,
+      provider_name: MODEL_PROVIDER_NAME,
       status: "active" as const,
       is_default: false,
       revision: 1,
@@ -542,23 +561,23 @@ describe("admin contracts", () => {
         createAdminModelInputSchema.safeParse({
           ...version,
           status: "active",
-          api_key: "temporary-key",
+          provider_id: MODEL_PROVIDER_ID,
         }).success,
       ).toBe(true);
       expect(
         replaceAdminModelInputSchema.safeParse({
           ...version,
-          api_key: null,
+          provider_id: MODEL_PROVIDER_ID,
         }).success,
       ).toBe(true);
       expect(
         testAdminModelConnectionInputSchema.safeParse({
+          provider_id: MODEL_PROVIDER_ID,
           provider_adapter: version.provider_adapter,
           provider_model: version.provider_model,
           settings: version.settings,
           max_input_tokens: version.max_input_tokens,
           supports_vision: version.supports_vision,
-          api_key: "temporary-key",
         }).success,
       ).toBe(true);
     }
@@ -588,6 +607,8 @@ describe("admin contracts", () => {
       adminModelItemSchema.safeParse({
         ...version,
         id: "00000000-0000-4000-8000-000000000103",
+        provider_id: MODEL_PROVIDER_ID,
+        provider_name: MODEL_PROVIDER_NAME,
         status: "suspended",
         is_default: false,
         revision: 1,
@@ -601,24 +622,113 @@ describe("admin contracts", () => {
       createAdminModelInputSchema.safeParse({
         ...version,
         status: "suspended",
-        api_key: "temporary-key",
+        provider_id: MODEL_PROVIDER_ID,
       }).success,
     ).toBe(false);
     expect(
       replaceAdminModelInputSchema.safeParse({
         ...version,
-        api_key: null,
+        provider_id: MODEL_PROVIDER_ID,
         expected_revision: 1,
       }).success,
     ).toBe(false);
     expect(
       testAdminModelConnectionInputSchema.safeParse({
+        provider_id: MODEL_PROVIDER_ID,
+        provider_adapter: version.provider_adapter,
+        provider_model: version.provider_model,
+        max_input_tokens: version.max_input_tokens,
+        settings: version.settings,
+        supports_vision: version.supports_vision,
+      }).success,
+    ).toBe(false);
+  });
+
+  test("model write contracts bind a provider and carry no model-level key", () => {
+    const version = {
+      display_name: "Provider-bound model",
+      provider_adapter: "openai" as const,
+      provider_model: "gpt-provider-bound",
+      max_input_tokens: 128_000,
+      settings: {},
+      supports_thinking: false,
+      supports_reasoning_effort: false,
+      supports_vision: false,
+    };
+
+    // A model never carries its own key; the strict contracts reject one.
+    for (const keyed of [
+      createAdminModelInputSchema.safeParse({
+        ...version,
+        status: "active",
+        provider_id: MODEL_PROVIDER_ID,
+        api_key: "temporary-key",
+      }),
+      replaceAdminModelInputSchema.safeParse({
+        ...version,
+        provider_id: MODEL_PROVIDER_ID,
+        api_key: null,
+      }),
+      testAdminModelConnectionInputSchema.safeParse({
+        provider_id: MODEL_PROVIDER_ID,
         provider_adapter: version.provider_adapter,
         provider_model: version.provider_model,
         max_input_tokens: version.max_input_tokens,
         settings: version.settings,
         supports_vision: version.supports_vision,
         api_key: "temporary-key",
+      }),
+    ]) {
+      expect(keyed.success).toBe(false);
+    }
+    // The provider binding itself is required.
+    expect(
+      createAdminModelInputSchema.safeParse({
+        ...version,
+        status: "active",
+      }).success,
+    ).toBe(false);
+    expect(
+      replaceAdminModelInputSchema.safeParse(version).success,
+    ).toBe(false);
+  });
+
+  test("candidate provider connection test carries a transient URL and key", () => {
+    const candidate = {
+      base_url: "https://candidate.example.test/v1",
+      api_key: "candidate-key",
+      provider_adapter: "openai" as const,
+      provider_model: "gpt-candidate",
+      max_input_tokens: 128_000,
+      settings: {},
+      supports_vision: false,
+    };
+
+    expect(
+      testAdminModelProviderConnectionInputSchema.safeParse(candidate).success,
+    ).toBe(true);
+    const { api_key: _candidateKey, ...withoutKey } = candidate;
+    expect(_candidateKey).toBe("candidate-key");
+    expect(
+      testAdminModelProviderConnectionInputSchema.safeParse(withoutKey)
+        .success,
+    ).toBe(false);
+    expect(
+      testAdminModelProviderConnectionInputSchema.safeParse({
+        ...candidate,
+        api_key: "",
+      }).success,
+    ).toBe(false);
+    expect(
+      testAdminModelProviderConnectionInputSchema.safeParse({
+        ...candidate,
+        base_url: "https://candidate.example.test/v1?token=leak",
+      }).success,
+    ).toBe(false);
+    expect(
+      testAdminModelProviderConnectionInputSchema.safeParse({
+        ...candidate,
+        provider_id: MODEL_PROVIDER_ID,
       }).success,
     ).toBe(false);
   });
@@ -627,6 +737,8 @@ describe("admin contracts", () => {
     const item = {
       id: "00000000-0000-4000-8000-000000000105",
       display_name: "Historical model",
+      provider_id: MODEL_PROVIDER_ID,
+      provider_name: MODEL_PROVIDER_NAME,
       provider_adapter: "legacy_adapter_v1",
       provider_model: "legacy-model",
       max_input_tokens: 128_000,

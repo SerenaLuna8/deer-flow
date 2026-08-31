@@ -50,6 +50,18 @@ async function expectSafeModelResponse(
   };
 }
 
+async function expectSafeProviderResponse(
+  response: SafeResponse,
+  forbiddenValues: readonly string[],
+): Promise<{ providerId: string }> {
+  const body = await expectSafeJson(response, forbiddenValues);
+  const item = body.item as Record<string, unknown>;
+  expect(item.api_key_configured).toBe(true);
+  expect(typeof item.id).toBe("string");
+  expect(Object.keys(item)).not.toContain("api_key");
+  return { providerId: item.id as string };
+}
+
 async function expectSafeMcpResponse(
   response: SafeResponse,
   configured: boolean,
@@ -113,7 +125,7 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     project = await registerReplayProject(context, APP);
   });
 
-  test("keeps System Model API keys write-only across preserve, replace, and confirmed clear", async ({
+  test("keeps Model Provider API keys write-only across create, blank preserve, and rotation", async ({
     page,
     context,
   }) => {
@@ -126,120 +138,166 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
       },
     ]);
     const suffix = project.id.slice(0, 8);
+    const providerName = `Browser secret provider ${suffix}`;
     const displayName = `Browser secret model ${suffix}`;
     const providerModel = `browser-secret-${suffix}`;
 
+    // The provider owns the only API Key; text models carry no key of their own.
     await page.goto("/admin/settings/models");
-    await page.getByRole("button", { name: "新增模型" }).click();
-    const createDialog = page.getByRole("dialog", { name: "新增模型" });
-    await createDialog.getByLabel("显示名称").fill(displayName);
-    await createDialog.getByRole("combobox").selectOption("deepseek");
-    await createDialog.getByLabel("Provider 模型 ID").fill(providerModel);
-    await createDialog
+    await page.getByRole("button", { name: "添加供应商" }).click();
+    const providerDialog = page.getByRole("dialog", {
+      name: "添加模型供应商",
+    });
+    await providerDialog.getByLabel("供应商名称").fill(providerName);
+    await providerDialog
+      .getByLabel("Base URL")
+      .fill(`https://provider-${suffix}.invalid/v1`);
+    const providerKeyInput = providerDialog.getByLabel("API Key");
+    await providerKeyInput.fill(MODEL_FIRST);
+    const providerCreatedPromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith("/api/admin/settings/model-providers"),
+    );
+    await providerDialog.getByRole("button", { name: "保存" }).click();
+    const provider = await expectSafeProviderResponse(
+      await providerCreatedPromise,
+      [MODEL_FIRST],
+    );
+    await expect(providerDialog).toBeHidden();
+
+    const providerCard = page
+      .getByTestId("admin-model-provider-card")
+      .filter({ hasText: providerName })
+      .first();
+    await expect(
+      providerCard.getByText("Key 已配置", { exact: true }),
+    ).toBeVisible();
+
+    // A text model binds the provider and derives credential and endpoint.
+    await providerCard.getByRole("button", { name: "添加文本模型" }).click();
+    const modelDialog = page.getByRole("dialog", { name: "添加文本模型" });
+    await expect(modelDialog.getByLabel("API Key")).toHaveCount(0);
+    await expect(
+      modelDialog.getByLabel("所属供应商", { exact: true }),
+    ).toHaveValue(provider.providerId);
+    await modelDialog.getByLabel("显示名称").fill(displayName);
+    await modelDialog
+      .getByRole("combobox", { name: "适配器", exact: true })
+      .selectOption("deepseek");
+    await modelDialog.getByLabel("供应商侧模型 ID").fill(providerModel);
+    await modelDialog
       .getByRole("spinbutton", { name: /最大输入 Token/u })
       .fill("64000");
-    const createKeyInput = createDialog.getByLabel("API Key");
-    await createKeyInput.fill(MODEL_FIRST);
-    const createdResponsePromise = page.waitForResponse(
+    const modelCreatedPromise = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
         response.url().endsWith("/api/admin/settings/models"),
     );
-    await createDialog.getByRole("button", { name: "保存" }).click();
-    await expect(createKeyInput).toHaveValue("");
+    await modelDialog.getByRole("button", { name: "保存" }).click();
     const created = await expectSafeModelResponse(
-      await createdResponsePromise,
+      await modelCreatedPromise,
       true,
       [MODEL_FIRST],
     );
-    await expect(createDialog).toBeHidden();
+    await expect(modelDialog).toBeHidden();
 
     const card = modelCard(page, displayName);
     await expect(card.getByText("已配置", { exact: true })).toBeVisible();
-    await card.getByRole("button", { name: "编辑" }).click();
-    const preserveDialog = page.getByRole("dialog", { name: "编辑模型" });
+    await expect(card.getByText("就绪", { exact: true })).toBeVisible();
+
+    // A blank key on provider edit preserves the stored secret unchanged.
+    await providerCard
+      .getByRole("button", { name: "编辑", exact: true })
+      .first()
+      .click();
+    const preserveDialog = page.getByRole("dialog", {
+      name: "编辑模型供应商",
+    });
     const preserveInput = preserveDialog.getByLabel("API Key");
     await expect(preserveInput).toHaveValue("");
-    await expect(
-      preserveDialog.getByRole("button", { name: "测试连接" }),
-    ).toBeDisabled();
     const preserveRequestPromise = page.waitForRequest(
       (request) =>
-        request.method() === "PUT" &&
-        request.url().endsWith(`/api/admin/settings/models/${created.modelId}`),
-    );
-    const preserveResponsePromise = page.waitForResponse(
-      (response) =>
-        response.request().method() === "PUT" &&
-        response
-          .url()
-          .endsWith(`/api/admin/settings/models/${created.modelId}`),
-    );
-    await preserveDialog.getByRole("button", { name: "保存" }).click();
-    expect((await preserveRequestPromise).postDataJSON()).toMatchObject({
-      api_key: null,
-    });
-    const preserved = await expectSafeModelResponse(
-      await preserveResponsePromise,
-      true,
-      [MODEL_FIRST],
-    );
-    expect(preserved.secretRevision).toBe(created.secretRevision);
-
-    await card.getByRole("button", { name: "编辑" }).click();
-    const replaceDialog = page.getByRole("dialog", { name: "编辑模型" });
-    const replaceInput = replaceDialog.getByLabel("API Key");
-    await replaceInput.fill(MODEL_SECOND);
-    const replacementResponsePromise = page.waitForResponse(
-      (response) =>
-        response.request().method() === "PUT" &&
-        response
-          .url()
-          .endsWith(`/api/admin/settings/models/${created.modelId}`),
-    );
-    await replaceDialog.getByRole("button", { name: "保存" }).click();
-    await expect(replaceInput).toHaveValue("");
-    const replaced = await expectSafeModelResponse(
-      await replacementResponsePromise,
-      true,
-      [MODEL_FIRST, MODEL_SECOND],
-    );
-    expect(replaced.secretRevision).toBe(created.secretRevision + 1);
-
-    await card.getByRole("button", { name: "清除 API Key" }).click();
-    const clearDialog = page.getByRole("dialog", { name: "清除 API Key？" });
-    const clearRequestPromise = page.waitForRequest(
-      (request) =>
-        request.method() === "POST" &&
+        request.method() === "PATCH" &&
         request
           .url()
           .endsWith(
-            `/api/admin/settings/models/${created.modelId}/api-key/clear`,
+            `/api/admin/settings/model-providers/${provider.providerId}`,
           ),
     );
-    const clearResponsePromise = page.waitForResponse(
+    const preserveResponsePromise = page.waitForResponse(
       (response) =>
-        response.request().method() === "POST" &&
+        response.request().method() === "PATCH" &&
         response
           .url()
           .endsWith(
-            `/api/admin/settings/models/${created.modelId}/api-key/clear`,
+            `/api/admin/settings/model-providers/${provider.providerId}`,
           ),
     );
-    await clearDialog.getByRole("button", { name: "确认清除" }).click();
-    expect((await clearRequestPromise).postDataJSON()).toEqual({
-      confirmed: true,
-    });
-    const cleared = await expectSafeModelResponse(
-      await clearResponsePromise,
-      false,
-      [MODEL_FIRST, MODEL_SECOND],
-    );
-    expect(cleared.secretRevision).toBe(created.secretRevision + 2);
+    await preserveDialog.getByRole("button", { name: "保存" }).click();
+    const preserveBody = (
+      await preserveRequestPromise
+    ).postDataJSON() as Record<string, unknown>;
+    expect(preserveBody).not.toHaveProperty("api_key");
+    await expectSafeProviderResponse(await preserveResponsePromise, [
+      MODEL_FIRST,
+    ]);
+    await expect(preserveDialog).toBeHidden();
+
+    // Rotating the provider key fans out to every bound text model.
+    await providerCard
+      .getByRole("button", { name: "编辑", exact: true })
+      .first()
+      .click();
+    const rotateDialog = page.getByRole("dialog", { name: "编辑模型供应商" });
+    const rotateInput = rotateDialog.getByLabel("API Key");
+    await rotateInput.fill(MODEL_SECOND);
     await expect(
-      card.getByText("未配置", { exact: true }).first(),
+      page.getByTestId("admin-provider-fanout-warning"),
     ).toBeVisible();
-    await expect(card.getByText("未就绪", { exact: true })).toBeVisible();
+    const rotateRequestPromise = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        request
+          .url()
+          .endsWith(
+            `/api/admin/settings/model-providers/${provider.providerId}`,
+          ),
+    );
+    const rotateResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        response
+          .url()
+          .endsWith(
+            `/api/admin/settings/model-providers/${provider.providerId}`,
+          ),
+    );
+    const catalogRefreshPromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        response.url().endsWith("/api/admin/settings/models"),
+    );
+    await rotateDialog.getByRole("button", { name: "保存" }).click();
+    expect((await rotateRequestPromise).postDataJSON()).toMatchObject({
+      api_key: MODEL_SECOND,
+    });
+    await expectSafeProviderResponse(await rotateResponsePromise, [
+      MODEL_FIRST,
+      MODEL_SECOND,
+    ]);
+    await expect(rotateDialog).toBeHidden();
+
+    const catalogText = await (await catalogRefreshPromise).text();
+    expect(catalogText).not.toContain(MODEL_FIRST);
+    expect(catalogText).not.toContain(MODEL_SECOND);
+    const catalogBody = JSON.parse(catalogText) as {
+      items: Array<{ id: string; secret_revision: number }>;
+    };
+    const rotatedModel = catalogBody.items.find(
+      (item) => item.id === created.modelId,
+    );
+    expect(rotatedModel?.secret_revision).toBe(created.secretRevision + 1);
 
     expect(
       await browserPersistenceSecretLocations(page, [

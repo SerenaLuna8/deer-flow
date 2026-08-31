@@ -59,7 +59,7 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         re.MULTILINE,
     )
     assert len(table_comments) == 108
-    assert len(column_comments) == 1352
+    assert len(column_comments) == 1353
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
@@ -82,6 +82,7 @@ def test_langgraph_readiness_comments_match_the_frozen_signature() -> None:
 def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> None:
     expected = {
         ("system_model_configs", "max_input_tokens"),
+        ("system_model_configs", "provider_id"),
         ("runs", "first_human_message"),
         ("runs", "last_ai_message"),
         ("run_events", "content"),

@@ -18,6 +18,7 @@ from deerflow.persistence.system_settings import (
 class CreateSystemModel:
     display_name: str
     status: str
+    provider_id: uuid.UUID
     provider_adapter: str
     provider_model: str
     max_input_tokens: int
@@ -25,12 +26,12 @@ class CreateSystemModel:
     supports_thinking: bool
     supports_reasoning_effort: bool
     supports_vision: bool
-    api_key: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class UpdateSystemModel:
     display_name: str
+    provider_id: uuid.UUID
     provider_adapter: str
     provider_model: str
     max_input_tokens: int
@@ -38,12 +39,45 @@ class UpdateSystemModel:
     supports_thinking: bool
     supports_reasoning_effort: bool
     supports_vision: bool
-    api_key: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class TestSystemModelConnection:
+    """External stored-Key connection test: no Key, no derived base URL."""
+
+    provider_id: uuid.UUID
+    provider_adapter: str
+    provider_model: str
+    max_input_tokens: int
+    settings: Mapping[str, object]
+    supports_vision: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TestProviderCandidateConnection:
+    """Candidate Provider material test: explicit URL plus a transient Key.
+
+    Used before a Provider row exists (or before replacing its Key); nothing
+    is created, modified, or read back from stored Provider material.
+    """
+
+    base_url: str
+    provider_adapter: str
+    provider_model: str
+    max_input_tokens: int
+    settings: Mapping[str, object]
+    supports_vision: bool
+    api_key: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class SystemModelConnectionCheck:
-    """Validated transient inputs for one administrator connection check."""
+    """Validated transient inputs for one administrator connection check.
+
+    Internal material only: the transient ``api_key`` and the derived
+    ``settings.base_url`` are injected by the service, never accepted from
+    external authoring DTOs.
+    """
 
     provider_adapter: str
     provider_model: str
@@ -58,6 +92,8 @@ class SystemModelView:
     id: uuid.UUID
     display_name: str
     status: str
+    provider_id: uuid.UUID
+    provider_name: str
     provider_adapter: str
     provider_model: str
     max_input_tokens: int
@@ -153,5 +189,7 @@ __all__ = [
     "SystemModelCatalogView",
     "SystemModelView",
     "SystemModelConnectionCheck",
+    "TestProviderCandidateConnection",
+    "TestSystemModelConnection",
     "UpdateSystemModel",
 ]

@@ -68,6 +68,51 @@ def system_model_payload_checksum(
     ).hexdigest()
 
 
+# Fixed identity for the shared test Provider row that satisfies the
+# required ``system_model_configs.provider_id`` binding. The envelope bytes
+# are shape-valid placeholders only; tests that must decrypt a Provider Key
+# seed their own Provider with a real SecretEnvelope instead.
+SEED_PROVIDER_ID = uuid.UUID("6f7d17e5-a2a6-5a0b-9c62-6c6f64656c00")
+SEED_PROVIDER_NAME = "Seed Test Provider"
+SEED_PROVIDER_BASE_URL = "https://provider.seed.invalid/v1"
+
+
+async def seed_model_provider(
+    executor: object,
+    *,
+    provider_id: uuid.UUID | None = None,
+    name: str | None = None,
+    base_url: str = SEED_PROVIDER_BASE_URL,
+    request_timeout_seconds: int = 30,
+    api_key_nonce: bytes = b"\x00" * 12,
+    api_key_ciphertext: bytes = b"\x00" * 16,
+) -> uuid.UUID:
+    """Insert one Model Provider row (idempotent for the fixed seed identity)."""
+
+    execute = getattr(executor, "execute", None)
+    if execute is None:
+        raise TypeError("executor must provide execute()")
+    resolved_id = provider_id if provider_id is not None else SEED_PROVIDER_ID
+    resolved_name = name if name is not None else (SEED_PROVIDER_NAME if provider_id is None else f"provider-{resolved_id.hex[:12]}")
+    await execute(
+        text(
+            """INSERT INTO model_providers
+            (id,name,base_url,request_timeout_seconds,api_key_nonce,api_key_ciphertext)
+            VALUES (:id,:name,:base_url,:timeout,:nonce,:ciphertext)
+            ON CONFLICT (id) DO NOTHING"""
+        ),
+        {
+            "id": resolved_id,
+            "name": resolved_name,
+            "base_url": base_url,
+            "timeout": request_timeout_seconds,
+            "nonce": api_key_nonce,
+            "ciphertext": api_key_ciphertext,
+        },
+    )
+    return resolved_id
+
+
 async def seed_system_model_config(
     executor: object,
     *,
@@ -75,6 +120,7 @@ async def seed_system_model_config(
     owner_user_id: str,
     display_name: str,
     provider_model: str,
+    provider_id: uuid.UUID | None = None,
     provider_adapter: str = "vision_bridge_fake",
     max_input_tokens: int = 64_000,
     supports_thinking: bool = False,
@@ -87,6 +133,8 @@ async def seed_system_model_config(
     execute = getattr(executor, "execute", None)
     if execute is None:
         raise TypeError("executor must provide execute()")
+    if provider_id is None:
+        provider_id = await seed_model_provider(executor)
     canonical_checksum = system_model_payload_checksum(
         model_id=model_id,
         provider_adapter=provider_adapter,
@@ -100,17 +148,18 @@ async def seed_system_model_config(
     await execute(
         text(
             """INSERT INTO system_model_configs
-            (id,display_name,status,provider_adapter,provider_model,max_input_tokens,settings,
+            (id,display_name,status,provider_id,provider_adapter,provider_model,max_input_tokens,settings,
              supports_thinking,supports_reasoning_effort,supports_vision,
              payload_checksum,current_secret_generation_id,secret_revision,
              revision,created_by_user_id,updated_by_user_id)
-            VALUES (:id,:display_name,'active',:provider_adapter,:provider_model,
+            VALUES (:id,:display_name,'active',:provider_id,:provider_adapter,:provider_model,
                     :max_input_tokens,CAST(:settings AS jsonb),:supports_thinking,:supports_reasoning_effort,
                     :supports_vision,:payload_checksum,NULL,0,1,:owner,:owner)"""
         ),
         {
             "id": model_id,
             "display_name": display_name,
+            "provider_id": provider_id,
             "provider_adapter": provider_adapter,
             "provider_model": provider_model,
             "max_input_tokens": max_input_tokens,
@@ -167,7 +216,11 @@ def frozen_system_model_execution(
 
 
 __all__ = [
+    "SEED_PROVIDER_BASE_URL",
+    "SEED_PROVIDER_ID",
+    "SEED_PROVIDER_NAME",
     "frozen_system_model_execution",
+    "seed_model_provider",
     "seed_system_model_config",
     "system_model_payload",
     "system_model_payload_checksum",

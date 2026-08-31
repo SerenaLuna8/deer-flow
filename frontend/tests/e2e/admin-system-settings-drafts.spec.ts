@@ -1,11 +1,25 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const TIMESTAMP = "2026-08-22T00:00:00Z";
+const PROVIDER = {
+  id: "20000000-0000-4000-8000-000000000009",
+  name: "DeepSeek Cloud",
+  base_url: "https://api.deepseek.com/v1",
+  request_timeout_seconds: 30,
+  api_key_configured: true,
+  model_count: 1,
+  active_model_count: 1,
+  endpoint_frozen: false,
+  created_at: TIMESTAMP,
+  updated_at: TIMESTAMP,
+};
 const CONFIGURED_MODEL = {
   id: "90000000-0000-4000-8000-000000000002",
   display_name: "Existing DeepSeek",
   provider_adapter: "deepseek",
   provider_model: "deepseek-existing",
+  provider_id: PROVIDER.id,
+  provider_name: PROVIDER.name,
   max_input_tokens: 128_000,
   settings: {
     max_tokens: 64_000,
@@ -25,20 +39,8 @@ const CONFIGURED_MODEL = {
   updated_at: TIMESTAMP,
 };
 
+// base_url is provider-owned and no longer appears as an adapter field.
 const DEEPSEEK_SETTING_FIELDS = [
-  {
-    name: "base_url",
-    label: "Base URL",
-    input_type: "url",
-    advanced: false,
-    form_control: "input",
-    default_mode: "platform",
-    default_value: "https://api.deepseek.com/v1",
-    minimum: null,
-    maximum: null,
-    step: null,
-    options: [],
-  },
   {
     name: "max_tokens",
     label: "Max tokens",
@@ -94,19 +96,6 @@ const DEEPSEEK_SETTING_FIELDS = [
 ] as const;
 
 const OPENAI_SETTING_FIELDS = [
-  {
-    name: "base_url",
-    label: "Base URL",
-    input_type: "url",
-    advanced: false,
-    form_control: "input",
-    default_mode: "platform",
-    default_value: "https://api.openai.com/v1",
-    minimum: null,
-    maximum: null,
-    step: null,
-    options: [],
-  },
   {
     name: "max_tokens",
     label: "Max tokens",
@@ -338,6 +327,12 @@ async function mockSystemSettings(page: Page) {
         request_id: "browser-draft-test",
       });
     }
+    if (
+      path === "/api/admin/settings/model-providers" &&
+      request.method() === "GET"
+    ) {
+      return json(route, { items: [], request_id: "browser-draft-providers" });
+    }
     return json(
       route,
       { detail: `unexpected ${request.method()} ${path}` },
@@ -407,6 +402,15 @@ async function mockModelSettings(
         ],
         catalog_revision: 1,
         request_id: "browser-model-test",
+      });
+    }
+    if (
+      path === "/api/admin/settings/model-providers" &&
+      request.method() === "GET"
+    ) {
+      return json(route, {
+        items: [PROVIDER],
+        request_id: "browser-model-providers",
       });
     }
     if (
@@ -620,7 +624,7 @@ test("edits and retains independent Lead and per-Task internal tool-call limit d
   await expect(subagentToolCallLimit).toHaveValue("60");
 });
 
-test("explains tested-Key clearing and requires re-entry before create", async ({
+test("authors text models without any model-level key surface", async ({
   page,
   baseURL,
 }) => {
@@ -631,46 +635,46 @@ test("explains tested-Key clearing and requires re-entry before create", async (
       url: baseURL ?? "http://localhost:3000",
     },
   ]);
-  await mockModelSettings(page);
+  const mutationBodies = await mockModelSettings(page);
   await page.goto("/admin/settings/models");
   const modelPage = page.locator('main[data-slot="admin-page"]');
   await expect(modelPage).not.toContainText(/[\u3400-\u9fff]/u);
-  await page.getByRole("button", { name: "Clear API Key" }).click();
-  const clearDialog = page.getByRole("dialog", { name: "Clear API Key?" });
-  await expect(clearDialog).not.toContainText(/[\u3400-\u9fff]/u);
-  await clearDialog.getByRole("button", { name: "Cancel" }).click();
+  // The clear-key affordance is gone: credentials live on the provider only.
+  await expect(
+    page.getByRole("button", { name: "Clear API Key" }),
+  ).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Add model" }).click();
+  await page.getByRole("button", { name: "Add text model" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Add model" });
+  const dialog = page.getByRole("dialog", { name: "Add text model" });
+  await expect(dialog.getByLabel("API Key")).toHaveCount(0);
+  await expect(dialog.getByLabel("Provider", { exact: true })).toHaveValue(
+    PROVIDER.id,
+  );
   await dialog.getByLabel("Display name").fill("Temporary DeepSeek");
-  await dialog.getByLabel("Provider model ID").fill("deepseek-test");
+  await dialog.getByLabel("Model ID at the provider").fill("deepseek-test");
   await dialog.getByLabel("Maximum input tokens").fill("128000");
   await expect(
     dialog.getByText(/denominator for context-usage percentages/u),
   ).toBeVisible();
-  const keyInput = dialog.getByLabel("API Key");
-  const save = dialog.getByRole("button", { name: "Save" });
-  await expect(save).toBeDisabled();
-  await keyInput.fill("temporary-test-key");
-  await expect(save).toBeEnabled();
-  await dialog.getByRole("button", { name: "Test connection" }).click();
-
-  await expect(keyInput).toHaveValue("");
-  await expect(save).toBeDisabled();
-  await expect(dialog.getByRole("status")).toHaveText(
-    "Connection test succeeded. The test Key was cleared from the form; re-enter the API Key before saving.",
-  );
+  // Saving needs no key: the provider binding is the only credential source.
   await expect(
-    dialog.getByText(/A connection test immediately clears/u),
-  ).toBeVisible();
-  await expect(dialog).not.toContainText(/[\u3400-\u9fff]/u);
+    dialog.getByRole("button", { name: "Save", exact: true }),
+  ).toBeEnabled();
 
-  await keyInput.fill("fresh-save-key");
-  await expect(save).toBeEnabled();
+  await dialog.getByRole("button", { name: "Test connection" }).click();
+  await expect(dialog.getByRole("status")).toHaveText(
+    "Connection test succeeded using the provider's saved Key.",
+  );
+  await expect(dialog).not.toContainText(/[\u3400-\u9fff]/u);
+  const connectionTest = mutationBodies.find((item) =>
+    item.path.endsWith("/test-connection"),
+  );
+  expect(connectionTest?.body).toMatchObject({ provider_id: PROVIDER.id });
+  expect(connectionTest?.body).not.toHaveProperty("api_key");
 });
 
-test("explains Key re-entry after a connection-test request error", async ({
+test("keeps the form intact after a connection-test request error", async ({
   page,
   baseURL,
 }) => {
@@ -683,21 +687,24 @@ test("explains Key re-entry after a connection-test request error", async ({
   ]);
   await mockModelSettings(page, "request-error");
   await page.goto("/admin/settings/models");
-  await page.getByRole("button", { name: "Add model" }).click();
+  await page.getByRole("button", { name: "Add text model" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Add model" });
+  const dialog = page.getByRole("dialog", { name: "Add text model" });
   await dialog.getByLabel("Display name").fill("Unavailable DeepSeek");
-  await dialog.getByLabel("Provider model ID").fill("deepseek-unavailable");
+  await dialog
+    .getByLabel("Model ID at the provider")
+    .fill("deepseek-unavailable");
   await dialog.getByLabel("Maximum input tokens").fill("128000");
-  const keyInput = dialog.getByLabel("API Key");
-  await keyInput.fill("temporary-test-key");
   await dialog.getByRole("button", { name: "Test connection" }).click();
 
-  await expect(keyInput).toHaveValue("");
   await expect(dialog.getByRole("alert")).toBeVisible();
   await expect(dialog.getByRole("status")).toHaveText(
-    "Connection test failed. The test Key was cleared from the form; re-enter the API Key to retry or save.",
+    "Connection test failed using the provider's saved Key. Check the provider's endpoint and Key, or this model's target.",
   );
+  // The failure clears nothing; saving stays possible after a failed probe.
+  await expect(
+    dialog.getByRole("button", { name: "Save", exact: true }),
+  ).toBeEnabled();
 });
 
 test("uses typed Provider fields, preserves structured settings, and resets defaults on Provider change", async ({
@@ -713,15 +720,18 @@ test("uses typed Provider fields, preserves structured settings, and resets defa
   ]);
   const mutationBodies = await mockModelSettings(page);
   await page.goto("/admin/settings/models");
-  await page.getByRole("button", { name: "Edit" }).click();
+  // The model card's Edit sits after the provider card's own Edit button.
+  await page.getByRole("button", { name: "Edit", exact: true }).last().click();
 
   let dialog = page.getByRole("dialog", { name: "Edit model" });
   await expect(dialog).toHaveCSS("max-width", "768px");
   await expect(dialog.getByText("Provider settings JSON")).toHaveCount(0);
   await expect(dialog.locator('textarea[name="settings"]')).toHaveCount(0);
-  await expect(dialog.getByLabel("Base URL")).toHaveValue(
-    "https://api.deepseek.com/v1",
-  );
+  // The endpoint is displayed from the bound provider, never authored here.
+  await expect(dialog.getByLabel("Base URL")).toHaveCount(0);
+  await expect(
+    dialog.getByText("Endpoint: https://api.deepseek.com/v1"),
+  ).toBeVisible();
   await expect(dialog.getByLabel("Maximum output tokens")).toHaveValue("64000");
   await expect(dialog.getByLabel("Temperature")).not.toBeVisible();
 
@@ -756,9 +766,11 @@ test("uses typed Provider fields, preserves structured settings, and resets defa
     reasoning_effort: "high",
     extra_body: { reasoning_format: "deepseek-style" },
   });
+  expect(update?.body).toMatchObject({ provider_id: PROVIDER.id });
+  expect(update?.body).not.toHaveProperty("api_key");
 
-  await page.getByRole("button", { name: "Add model" }).click();
-  dialog = page.getByRole("dialog", { name: "Add model" });
+  await page.getByRole("button", { name: "Add text model" }).click();
+  dialog = page.getByRole("dialog", { name: "Add text model" });
   await expect(dialog.getByLabel("Maximum output tokens")).toHaveValue("51200");
   await expect(dialog.getByLabel("Temperature")).not.toBeVisible();
   await dialog.locator("details summary").click();
@@ -768,19 +780,14 @@ test("uses typed Provider fields, preserves structured settings, and resets defa
       "No override is stored; the Provider decides the effective value.",
     ),
   ).toHaveCount(0);
-  await dialog.getByLabel("API Key").fill("temporary-provider-key");
-  const providerSelect = dialog.getByRole("combobox", {
-    name: "Provider",
+  const adapterSelect = dialog.getByRole("combobox", {
+    name: "Adapter",
     exact: true,
   });
-  await providerSelect.selectOption("openai");
-  await expect(dialog.getByLabel("API Key")).toHaveValue("");
-  await expect(dialog.getByLabel("Base URL")).toHaveValue(
-    "https://api.openai.com/v1",
-  );
+  await adapterSelect.selectOption("openai");
   await expect(dialog.getByLabel("Maximum output tokens")).toHaveValue("16384");
   await expect(dialog.locator("details")).not.toHaveAttribute("open", "");
-  await providerSelect.selectOption("deepseek");
+  await adapterSelect.selectOption("deepseek");
   await expect(dialog.getByLabel("Maximum output tokens")).toHaveValue("51200");
   await expect(dialog.getByLabel("Temperature")).not.toBeVisible();
 });
@@ -798,10 +805,10 @@ test("offers a single DeepSeek entry plus two OpenAI protocol entrypoints withou
   ]);
   await mockModelSettings(page);
   await page.goto("/admin/settings/models");
-  await page.getByRole("button", { name: "Add model" }).click();
-  const dialog = page.getByRole("dialog", { name: "Add model" });
+  await page.getByRole("button", { name: "Add text model" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add text model" });
   const providerSelect = dialog.getByRole("combobox", {
-    name: "Provider",
+    name: "Adapter",
     exact: true,
   });
 

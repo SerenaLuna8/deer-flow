@@ -19,6 +19,7 @@ from support.skill_version_fixture import (
     assemble_and_seal_skill_version,
     sealed_skill_version_fixture,
 )
+from support.system_model_seed import seed_model_provider
 
 from app.audit.service import AuditService, _bind_worker_audit_process
 from app.audit.sinks import TrustedOperationAuditSink
@@ -270,6 +271,7 @@ async def _add_all_domain_secrets(session, context: ProjectContext) -> _ProjectS
         id=uuid.uuid4(),
         display_name="Retention model",
         status="active",
+        provider_id=await seed_model_provider(session),
         provider_adapter="deepseek",
         provider_model="deepseek-v4-flash",
         max_input_tokens=64_000,

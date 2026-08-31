@@ -16,6 +16,7 @@ from app.system_settings.validation import (
     is_provider_adapter_eligible_for_new_binding,
     provider_api_key_required,
 )
+from deerflow.persistence.model_registry import ModelProviderRow
 from deerflow.persistence.system_settings import (
     RunModelConfigSnapshotRow,
     SystemModelCatalogStateRow,
@@ -63,6 +64,44 @@ class SystemModelRepository:
             SystemModelConfigRow.id.desc(),
         )
         return tuple((await self.session.execute(statement)).scalars().all())
+
+    async def provider_names(self) -> dict[uuid.UUID, str]:
+        rows = (await self.session.execute(select(ModelProviderRow.id, ModelProviderRow.name))).all()
+        return {uuid.UUID(str(row.id)): row.name for row in rows}
+
+    async def lock_provider_for_share(
+        self,
+        provider_id: uuid.UUID,
+    ) -> ModelProviderRow | None:
+        """Hold the Provider row FOR SHARE so its material cannot change."""
+
+        if not isinstance(provider_id, uuid.UUID):
+            return None
+        return (await self.session.execute(select(ModelProviderRow).where(ModelProviderRow.id == provider_id).with_for_update(of=ModelProviderRow, read=True))).scalar_one_or_none()
+
+    async def lock_providers_for_share(
+        self,
+        provider_ids: tuple[uuid.UUID, ...],
+    ) -> dict[uuid.UUID, ModelProviderRow | None]:
+        """Lock several Providers FOR SHARE in UUID order (rebinding path)."""
+
+        locked: dict[uuid.UUID, ModelProviderRow | None] = {}
+        for provider_id in sorted(set(provider_ids)):
+            locked[provider_id] = await self.lock_provider_for_share(provider_id)
+        return locked
+
+    async def current_model_provider_id(
+        self,
+        model_config_id: uuid.UUID,
+    ) -> uuid.UUID | None:
+        """Read this model's current Provider binding without locking the row."""
+
+        value = await self.session.scalar(
+            select(SystemModelConfigRow.provider_id).where(
+                SystemModelConfigRow.id == model_config_id,
+            )
+        )
+        return uuid.UUID(str(value)) if value is not None else None
 
     async def lock_model(
         self,

@@ -68,32 +68,28 @@ def test_legacy_vision_adapter_has_no_production_descriptor() -> None:
             CreateSystemModel(
                 display_name="Legacy vision",
                 status="suspended",
+                provider_id=uuid.UUID("00000000-0000-4000-8000-000000000910"),
                 provider_adapter=VISION_RETIRED_PROVIDER_ADAPTER,
                 provider_model="legacy-vision",
                 max_input_tokens=64_000,
-                settings={
-                    "base_url": "https://legacy-vision.example.test/v1",
-                },
+                settings={},
                 supports_thinking=False,
                 supports_reasoning_effort=False,
                 supports_vision=True,
-                api_key="transient-test-key",
             ),
         ),
         (
             validate_update_system_model,
             UpdateSystemModel(
                 display_name="Legacy vision",
+                provider_id=uuid.UUID("00000000-0000-4000-8000-000000000910"),
                 provider_adapter=VISION_RETIRED_PROVIDER_ADAPTER,
                 provider_model="legacy-vision",
                 max_input_tokens=64_000,
-                settings={
-                    "base_url": "https://legacy-vision.example.test/v1",
-                },
+                settings={},
                 supports_thinking=False,
                 supports_reasoning_effort=False,
                 supports_vision=True,
-                api_key="transient-test-key",
             ),
         ),
         (
@@ -150,10 +146,12 @@ def _admin_context():
 async def test_retired_vision_adapter_remains_admin_readable() -> None:
     model_id = uuid.UUID("00000000-0000-4000-8000-000000000911")
     now = datetime.now(UTC)
+    provider_id = uuid.UUID("00000000-0000-4000-8000-000000000912")
     model = SimpleNamespace(
         id=model_id,
         display_name="Legacy vision",
         status="suspended",
+        provider_id=provider_id,
         provider_adapter=VISION_RETIRED_PROVIDER_ADAPTER,
         provider_model="legacy-vision",
         max_input_tokens=64_000,
@@ -177,6 +175,9 @@ async def test_retired_vision_adapter_remains_admin_readable() -> None:
                 revision=4,
                 default_model_config_id=None,
             )
+
+        async def provider_names(self):
+            return {provider_id: "Legacy Provider"}
 
         async def list_models(self):
             return (model,)

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -51,8 +51,8 @@ from .ingestion import (
 )
 from .metadata import KnowledgeMetadataService
 from .models import KnowledgeModelClient
-from .persistence.models import KnowledgeBaseRow
 from .project_retention import create_knowledge_project_purger
+from .registry import retrieval_model_in_use
 from .retrieval import KnowledgeSearchService
 from .segments import KnowledgeSegmentService
 from .storage import MinioObjectStore
@@ -161,23 +161,12 @@ class KnowledgeModule:
     async def model_in_use(self, session: AsyncSession, model_id: UUID) -> bool:
         """Whether any Knowledge Base binds ``model_id`` (either column).
 
-        Runs inside the caller's transaction — the registry calls this while
-        holding FOR UPDATE on the model row — and includes bases that are
-        pending deletion, whose ingest/search paths may still resolve the
-        model until the Worker finishes.
+        Delegates to the module-level :func:`retrieval_model_in_use` so the
+        registry sees one binding-reference query whether or not a module is
+        constructed.
         """
 
-        found = await session.scalar(
-            select(KnowledgeBaseRow.id)
-            .where(
-                or_(
-                    KnowledgeBaseRow.embedding_model_id == model_id,
-                    KnowledgeBaseRow.reranker_model_id == model_id,
-                )
-            )
-            .limit(1)
-        )
-        return found is not None
+        return await retrieval_model_in_use(session, model_id)
 
     # -- knowledge bases -------------------------------------------------------
 

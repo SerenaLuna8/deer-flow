@@ -172,8 +172,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   确认后替换全部分段、覆盖人工编辑与启停），并可按库选配或解绑 Reranker
   模型（保存即生效，无需重建）；Agent `knowledge_search` 引用返回 64KiB
   预算内的完整原文正文（超出以 `omitted_count` 记数），会话中的
-  最终回答下方展示知识库引用；管理员在 `/admin/settings/models` 的检索模型注册表
-  维护模型提供商及其 Embedding 与 Reranker 模型并做连接测试。
+  最终回答下方展示知识库引用；管理员在 `/admin/settings/models` 的统一
+  “模型供应商”页面维护供应商及其文本模型与 Embedding/Reranker 模型并做连接测试。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
   System Runtime Policy v6 在系统设置中分别配置主 Agent 每 Run 与每个 Sub-Agent Task 的
@@ -248,8 +248,8 @@ make setup
 
 为一个新的空 PostgreSQL 目标配置 `DATABASE_URL`、`POSTGRES_ADMIN_URL`、
 `ACT_WEAVE_SECRET_KEY` 和 `ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY`，并为
-检索模型注册表 seed 提供 `ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY`
-（SiliconFlow；不使用 Knowledge 的部署可改设
+SiliconFlow 供应商 seed 提供 `ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY`
+（不使用 Knowledge 的部署可改设
 `ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_SKIP=1` 显式跳过），然后运行：
 
 ```bash
@@ -333,9 +333,18 @@ DeepSeek 与 DeepSeek 兼容增强适配器的思考强度只提供 `low`、`hig
 `thinking`、`pro`、`ultra` 分别映射到这三档，`flash` 使用思考关闭参数且不发送强度值。
 MiMo、MiniMax、StepFun、MindIE、Claude Code CLI
 和 Codex CLI 模型适配器已停止支持，不再允许新建、启用、设为默认或准入新 Run；已有
-历史目录记录仍可由管理员查看并改配到受支持适配器。全新数据库只初始化
-三个 `deepseek` 模型配置：`deepseek-v4-flash`、`deepseek-v4-pro` 和
-`deepseek-v4-flash-vision-exp`。Flash 是默认 System Model；Vision Exp 是默认
+历史目录记录仍可由管理员查看并改配到受支持适配器。
+
+API Key 与服务地址统一由“模型供应商”持有：每个文本模型必须绑定一个供应商，
+模型自身不再单独填写 Key 或 Base URL。更换供应商的 Key 或端点会在同一事务中为其
+全部绑定文本模型重新加密凭据，已冻结旧凭据的 Run 会失效；供应商弹窗提供不落库的
+候选连接测试，文本模型的连接测试直接使用供应商已保存的 Key。管理页按供应商分组
+展示文本模型与 Embedding/Reranker 模型，但会话与 sidecar 仍按具体模型选择。
+
+全新数据库默认初始化两个供应商并分别沿用各自的引导 Key：DeepSeek 供应商挂
+三个 `deepseek` 文本模型配置（`deepseek-v4-flash`、`deepseek-v4-pro` 和
+`deepseek-v4-flash-vision-exp`），SiliconFlow 供应商挂默认检索模型（可显式跳过）；
+其他供应商从管理页添加。Flash 是默认 System Model；Vision Exp 是默认
 Vision Bridge；三者的必填最大输入上限均初始化为 `1,000,000` tokens，独立于
 `settings.max_tokens=51,200` 的输出上限。管理员新建、更新或测试 System Model 时必须
 填写 `max_input_tokens`（`1..2,000,000`）；它表示该 Provider Model 可接收的最大输入，

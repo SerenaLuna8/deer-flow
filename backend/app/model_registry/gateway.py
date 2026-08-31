@@ -2,9 +2,10 @@
 
 Routes live under ``/api/admin/settings`` beside the system model settings and
 reuse the same platform system-admin gate (non-admins receive 404). The
-registry exists for the Knowledge module, so every route is also gated by the
-module switch: with Knowledge disabled the surface answers 404
-``KNOWLEDGE_DISABLED`` and errors reuse the ``KNOWLEDGE_*`` body shape.
+registry stays administrable while the Knowledge feature is disabled: the
+service borrows the Gateway-owned lifespan probe client and the package-level
+``retrieval_model_in_use`` reference query, so no ``KnowledgeModule`` is
+required. Errors keep the ``KNOWLEDGE_*`` body shape.
 """
 
 from __future__ import annotations
@@ -16,10 +17,11 @@ from typing import Annotated, Literal
 from actweave_knowledge import (
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeError,
-    KnowledgeModule,
+    retrieval_model_in_use,
 )
+from actweave_knowledge.models import KnowledgeModelClient
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,12 +32,21 @@ from app.final_schema import (
     FinalSchemaRequired,
     FinalSchemaUnavailable,
 )
-from app.gateway.deps import get_project_audit_service, project_session
+from app.gateway.deps import (
+    get_config,
+    get_model_registry_probe_client,
+    get_project_audit_service,
+    get_system_model_catalog,
+    get_system_model_materializer,
+    project_session,
+)
+from app.gateway.routers.admin_model_settings import system_model_http_exception
 from app.gateway.routers.admin_operations import (
     AdminOperationsRoute,
     authenticated_system_identity,
 )
-from app.knowledge.gateway import get_knowledge_module, knowledge_http_exception
+from app.gateway.system_model_callers import ModelConnectionTester
+from app.knowledge.gateway import knowledge_http_exception
 from app.model_registry.service import (
     ModelProviderView,
     ModelRegistryService,
@@ -47,6 +58,14 @@ from app.reliability.errors import (
     ReliabilityNotFound,
 )
 from app.reliability.operations import resolve_current_system_audit_context
+from app.system_settings import (
+    SystemModelCatalogService,
+    SystemModelMaterializationUnavailable,
+    SystemModelMaterializer,
+    TestProviderCandidateConnection,
+)
+from app.system_settings.errors import SystemModelError
+from deerflow.config.app_config import AppConfig
 from deerflow.secrets import SecretKey, SecretKeyInvalid
 from deerflow.trace_context import generate_trace_id, get_current_trace_id, normalize_trace_id
 
@@ -90,13 +109,19 @@ async def require_model_registry_admin_context(
 
 def get_model_registry_service(
     request: Request,
-    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+    # The Gateway lifespan owns this probe client; requests only borrow it.
+    # No KnowledgeModule is involved, so the admin surface stays available
+    # while the Knowledge feature is disabled.
+    probe_client: Annotated[
+        KnowledgeModelClient,
+        Depends(get_model_registry_probe_client),
+    ],
     # Registry writes are governed asset changes: resolve the audit service
     # through the shared fail-closed dependency (503 when unset) instead of
     # assembling a service that would silently drop the trail.
     audit_service: Annotated[AuditService, Depends(get_project_audit_service)],
 ) -> ModelRegistryService:
-    """Assemble the registry service on host resources, gated by the module."""
+    """Assemble the registry service on Gateway-owned host resources."""
 
     from deerflow.persistence.engine import get_session_factory
 
@@ -111,8 +136,8 @@ def get_model_registry_service(
     return ModelRegistryService(
         session_factory,
         secret_key=secret_key,
-        client=module.model_client,
-        model_in_use=module.model_in_use,
+        client=probe_client,
+        model_in_use=retrieval_model_in_use,
         audit_service=audit_service,
     )
 
@@ -148,6 +173,34 @@ class ModelProviderUpdateRequest(_StrictModel):
         if value is not None and not value.get_secret_value():
             raise ValueError("api_key must not be empty")
         return value
+
+
+class ModelProviderConnectionTestRequest(_StrictModel):
+    """Candidate URL/Key test against one explicit text-model target.
+
+    Requires no existing Provider row and creates or modifies nothing; the
+    Key is transient request material and never enters stored configuration.
+    """
+
+    base_url: str
+    api_key: SecretStr
+    provider_adapter: str
+    provider_model: str
+    max_input_tokens: int = Field(ge=1, le=2_000_000)
+    settings: dict[str, object]
+    supports_vision: bool = False
+
+    @field_validator("api_key")
+    @classmethod
+    def require_non_empty_api_key(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value():
+            raise ValueError("api_key must not be empty")
+        return value
+
+
+class ModelProviderConnectionTestResponse(_StrictModel):
+    status: Literal["succeeded", "failed"]
+    request_id: str
 
 
 class ProviderModelCreateRequest(_StrictModel):
@@ -306,6 +359,49 @@ async def update_model_provider(
     return ModelProviderMutationResponse(item=_provider_response(view), request_id=context.request_id)
 
 
+@router.post(
+    "/model-providers/test-connection",
+    response_model=ModelProviderConnectionTestResponse,
+)
+async def test_model_provider_candidate(
+    body: ModelProviderConnectionTestRequest,
+    context: Annotated[SystemAuditContext, Depends(require_model_registry_admin_context)],
+    catalog: Annotated[SystemModelCatalogService, Depends(get_system_model_catalog)],
+    materializer: Annotated[
+        SystemModelMaterializer,
+        Depends(get_system_model_materializer),
+    ],
+    config: Annotated[AppConfig, Depends(get_config)],
+) -> ModelProviderConnectionTestResponse:
+    """Probe candidate Provider material without saving or replacing anything."""
+
+    try:
+        material = await catalog.prepare_candidate_connection_test(
+            context,
+            TestProviderCandidateConnection(
+                base_url=body.base_url,
+                provider_adapter=body.provider_adapter,
+                provider_model=body.provider_model,
+                max_input_tokens=body.max_input_tokens,
+                settings=body.settings,
+                supports_vision=body.supports_vision,
+                api_key=body.api_key.get_secret_value(),
+            ),
+        )
+        model = await materializer.materialize_connection_test(material)
+    except SystemModelError as error:
+        raise system_model_http_exception(error) from None
+    except SystemModelMaterializationUnavailable:
+        return ModelProviderConnectionTestResponse(
+            status="failed",
+            request_id=context.request_id,
+        )
+    return ModelProviderConnectionTestResponse(
+        status=("succeeded" if await ModelConnectionTester(config).test(model) else "failed"),
+        request_id=context.request_id,
+    )
+
+
 @router.delete("/model-providers/{provider_id}", response_model=ModelProviderDeleteResponse)
 async def delete_model_provider(
     provider_id: uuid.UUID,
@@ -400,6 +496,8 @@ async def test_provider_model(
 
 
 __all__ = [
+    "ModelProviderConnectionTestRequest",
+    "ModelProviderConnectionTestResponse",
     "ModelProviderCreateRequest",
     "ModelProviderDeleteResponse",
     "ModelProviderItemResponse",

@@ -104,6 +104,7 @@ class SystemModelConfigRow(Base):
         default="suspended",
         server_default=text("'suspended'"),
     )
+    provider_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     provider_adapter: Mapped[str] = mapped_column(String(64), nullable=False)
     provider_model: Mapped[str] = mapped_column(String(255), nullable=False)
     max_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -207,11 +208,25 @@ class SystemModelConfigRow(Base):
             ondelete="RESTRICT",
             use_alter=True,
         ),
+        # ``model_providers`` is registered by the model-registry module and
+        # created later in the Schema V1 snapshot, so the binding is a named
+        # ALTER TABLE constraint rather than an inline column reference.
+        ForeignKeyConstraint(
+            ["provider_id"],
+            ["model_providers.id"],
+            name="fk_system_model_configs_provider",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
         Index(
             "ix_system_model_configs_status_created",
             status,
             created_at.desc(),
             id.desc(),
+        ),
+        Index(
+            "ix_system_model_configs_provider",
+            provider_id,
         ),
     )
 

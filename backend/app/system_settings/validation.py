@@ -646,6 +646,11 @@ def _validate_model_settings(
         if provider_adapter is not None:
             descriptor = provider_adapter_descriptor(provider_adapter)
             field_specs = {field.name: field for field in descriptor.fields}
+            # ``base_url`` is derived from the bound Model Provider for every
+            # adapter, so validation accepts it even when the adapter declares
+            # no authoring field for it. External authoring cannot reach here
+            # with a submitted ``base_url``; the derived-field gate rejects it.
+            field_specs.setdefault("base_url", _BASE_URL_FIELD)
         else:
             field_specs = _ALL_SETTING_FIELD_SPECS
         allowed_fields = frozenset(field_specs)
@@ -798,7 +803,7 @@ def _validate_configuration_fields(
     supports_thinking: object,
     supports_reasoning_effort: object,
     supports_vision: object,
-    api_key: object,
+    allow_derived_base_url: bool,
 ) -> dict[str, object]:
     try:
         if (
@@ -812,8 +817,10 @@ def _validate_configuration_fields(
             or type(supports_vision) is not bool
         ):
             raise ValueError
-        normalized_api_key = _validate_api_key(api_key)
-        if normalized_api_key is not None and not provider_api_key_required(provider_adapter):
+        # ``base_url`` is derived server-side from the bound Model Provider;
+        # external authoring must not submit it. Internal validation of the
+        # injected configuration re-runs with ``allow_derived_base_url=True``.
+        if not allow_derived_base_url and isinstance(settings, Mapping) and "base_url" in settings:
             raise ValueError
         display_name = _validate_public_text(
             display_name,
@@ -839,7 +846,6 @@ def _validate_configuration_fields(
             "supports_thinking": supports_thinking,
             "supports_reasoning_effort": supports_reasoning_effort,
             "supports_vision": supports_vision,
-            "api_key": normalized_api_key,
         }
     except (AttributeError, TypeError, ValueError):
         raise ModelSettingsInvalid() from None
@@ -847,11 +853,15 @@ def _validate_configuration_fields(
 
 def validate_create_system_model(
     command: CreateSystemModel,
+    *,
+    allow_derived_base_url: bool = False,
 ) -> CreateSystemModel:
     try:
         if not isinstance(command, CreateSystemModel):
             raise ValueError
         if command.status not in {"active", "suspended"}:
+            raise ValueError
+        if type(command.provider_id) is not uuid.UUID:
             raise ValueError
         values = _validate_configuration_fields(
             display_name=command.display_name,
@@ -862,7 +872,7 @@ def validate_create_system_model(
             supports_thinking=command.supports_thinking,
             supports_reasoning_effort=command.supports_reasoning_effort,
             supports_vision=command.supports_vision,
-            api_key=command.api_key,
+            allow_derived_base_url=allow_derived_base_url,
         )
         return replace(
             command,
@@ -874,9 +884,13 @@ def validate_create_system_model(
 
 def validate_update_system_model(
     command: UpdateSystemModel,
+    *,
+    allow_derived_base_url: bool = False,
 ) -> UpdateSystemModel:
     try:
         if not isinstance(command, UpdateSystemModel):
+            raise ValueError
+        if type(command.provider_id) is not uuid.UUID:
             raise ValueError
         return replace(
             command,
@@ -889,7 +903,7 @@ def validate_update_system_model(
                 supports_thinking=command.supports_thinking,
                 supports_reasoning_effort=command.supports_reasoning_effort,
                 supports_vision=command.supports_vision,
-                api_key=command.api_key,
+                allow_derived_base_url=allow_derived_base_url,
             ),
         )
     except (AttributeError, TypeError, ValueError):
@@ -899,7 +913,12 @@ def validate_update_system_model(
 def validate_system_model_connection_test(
     command: SystemModelConnectionCheck,
 ) -> SystemModelConnectionCheck:
-    """Apply provider validation and require this request's transient Key."""
+    """Fully validate internal test material, requiring the transient Key.
+
+    This is the internal boundary: ``settings`` already carries the derived
+    ``base_url`` and ``api_key`` was materialized (stored Provider Key) or
+    submitted as an explicit candidate. External DTO checks happen earlier.
+    """
 
     try:
         if not isinstance(command, SystemModelConnectionCheck):
@@ -913,7 +932,7 @@ def validate_system_model_connection_test(
             supports_thinking=False,
             supports_reasoning_effort=False,
             supports_vision=command.supports_vision,
-            api_key=None,
+            allow_derived_base_url=True,
         )
         transient_api_key = _validate_api_key(command.api_key)
         if provider_api_key_required(command.provider_adapter) and transient_api_key is None:

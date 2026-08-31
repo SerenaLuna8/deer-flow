@@ -4,6 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useImperativeRequest } from "@/core/api/use-imperative-request";
 
+import { invalidateModelCatalogs } from "../invalidate-model-catalogs";
+
 import {
   createAdminModelProvider,
   createAdminProviderModel,
@@ -12,18 +14,17 @@ import {
   listAdminModelProviders,
   listAdminProviderModels,
   setAdminProviderModelStatus,
+  testAdminModelProviderConnection,
   testAdminProviderModel,
   updateAdminModelProvider,
 } from "./api";
-import {
-  adminModelRegistryQueryKey,
-  adminModelRegistryRoot,
-} from "./query-keys";
+import { adminModelRegistryQueryKey } from "./query-keys";
 import {
   adminModelRegistryAccountIdSchema,
   type AdminProviderModelStatus,
   type CreateAdminModelProviderInput,
   type CreateAdminProviderModelInput,
+  type TestAdminModelProviderConnectionInput,
   type UpdateAdminModelProviderInput,
 } from "./types";
 
@@ -60,16 +61,14 @@ export function useAdminProviderModels(
 }
 
 /**
- * Invalidate the whole registry root: model mutations also move provider
- * aggregates (`model_count`, `endpoint_frozen`), so partial invalidation
- * would leave stale cards.
+ * Registry writes move provider aggregates (`model_count`, text-model
+ * `provider_name` projections, `endpoint_frozen`) that surface on the admin
+ * text-model catalog and public model list too, so every configuration write
+ * invalidates the shared catalogs, never a partial subtree.
  */
 function useInvalidateAdminModelRegistry(accountId: string) {
   const queryClient = useQueryClient();
-  return () =>
-    queryClient.invalidateQueries({
-      queryKey: adminModelRegistryRoot(accountId),
-    });
+  return () => invalidateModelCatalogs(queryClient, accountId);
 }
 
 /** Secret-bearing create: imperative so the API key never enters query state. */
@@ -156,4 +155,17 @@ export function useTestAdminProviderModel(accountId: string) {
   return useMutation({
     mutationFn: (modelId: string) => testAdminProviderModel(parsed, modelId),
   });
+}
+
+/**
+ * Candidate URL/Key connection test: imperative so the transient Key never
+ * enters TanStack state, and without catalog invalidation because a test
+ * writes no configuration.
+ */
+export function useTestAdminModelProviderConnection(accountId: string) {
+  const parsed = adminModelRegistryAccountIdSchema.parse(accountId);
+  return useImperativeRequest(
+    (input: TestAdminModelProviderConnectionInput) =>
+      testAdminModelProviderConnection(parsed, input),
+  );
 }

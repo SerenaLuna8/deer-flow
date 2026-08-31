@@ -12,7 +12,7 @@ import os
 import uuid
 from dataclasses import dataclass, field
 
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -153,11 +153,12 @@ async def bootstrap_default_model_registry(
     session_factory: async_sessionmaker[AsyncSession],
     seed: ModelRegistrySeed,
 ) -> bool:
-    """Seed an empty registry once; accept an already-seeded one read-only.
+    """Seed the fixed SiliconFlow identity once; accept it read-only after.
 
-    A concurrent installer that lost the bootstrap race finds the winner's
-    rows and must succeed without writing, exactly like the default System
-    Model bootstrap.
+    Installed-ness is decided by the seed's fixed Provider UUID, so other
+    Providers (for example the seeded DeepSeek text-model Provider) never
+    make this seed skip. A concurrent installer that lost the bootstrap race
+    finds the winner's row and must succeed without writing.
     """
 
     try:
@@ -166,10 +167,23 @@ async def bootstrap_default_model_registry(
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {"key": _BOOTSTRAP_LOCK_KEY},
             )
-            existing_providers = await session.scalar(select(func.count()).select_from(ModelProviderRow))
-            existing_models = await session.scalar(select(func.count()).select_from(ModelProviderModelRow))
-            if existing_providers or existing_models:
+            # Installed-ness is the seed's fixed identity, not a row count:
+            # the DeepSeek text-model Provider (or any admin-created Provider)
+            # existing first must not skip this seed. An existing fixed ID
+            # returns read-only, preserving manual renames, URL/timeout/Key
+            # changes, model status changes, and deletions.
+            existing = await session.get(ModelProviderRow, seed.provider_id)
+            if existing is not None:
                 return False
+            name_taken = await session.scalar(
+                select(ModelProviderRow.id).where(
+                    ModelProviderRow.name == seed.provider_name,
+                )
+            )
+            if name_taken is not None:
+                # The default name belongs to a different identity; never
+                # reuse or repair that row.
+                raise ModelRegistryBootstrapConflict
             session.add(
                 ModelProviderRow(
                     id=seed.provider_id,

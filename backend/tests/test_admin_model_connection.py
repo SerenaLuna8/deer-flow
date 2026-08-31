@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from app.gateway.deps import (
 )
 from app.gateway.routers import admin_model_settings
 from app.gateway.system_model_callers import ModelConnectionTester
+from app.model_registry import gateway as model_registry_gateway
+from app.model_registry.secrets import protect_provider_api_key
 from app.system_settings import SystemModelMaterializer
 from app.system_settings.models import (
     ConnectionTestSystemModelMaterial,
@@ -30,6 +33,29 @@ from app.system_settings.validation import (
     validate_system_model_connection_test,
 )
 from deerflow.models import ModelRuntimeProfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "knowledge"))
+from registry_helpers import registry_secret_key  # noqa: E402
+
+_PROVIDER_ID = uuid.UUID("00000000-0000-4000-8000-00000000f101")
+_PROVIDER_BASE_URL = "https://provider.connection.invalid/v1"
+_PROVIDER_STORED_KEY = "sk-stored-provider-key"
+
+
+def _fake_provider() -> SimpleNamespace:
+    envelope = protect_provider_api_key(
+        provider_id=_PROVIDER_ID,
+        base_url=_PROVIDER_BASE_URL,
+        api_key=_PROVIDER_STORED_KEY,
+        key=registry_secret_key(),
+    )
+    return SimpleNamespace(
+        id=_PROVIDER_ID,
+        name="Connection Test Provider",
+        base_url=_PROVIDER_BASE_URL,
+        api_key_nonce=envelope.nonce,
+        api_key_ciphertext=envelope.ciphertext,
+    )
 
 
 class _RuntimeConfig:
@@ -49,12 +75,18 @@ def test_gateway_model_callers_do_not_import_vision_protocol_implementations() -
     assert not any(module.startswith("deerflow.vision") for module in imported_modules)
 
 
+class _FakeRepository:
+    async def lock_provider_for_share(self, provider_id: uuid.UUID):
+        assert provider_id == _PROVIDER_ID
+        return _fake_provider()
+
+
 class _ConnectionTestService(SystemModelCatalogService):
     def __init__(self) -> None:
-        super().__init__(lambda: None)  # type: ignore[arg-type]
+        super().__init__(lambda: None, secret_key=registry_secret_key())  # type: ignore[arg-type]
 
     async def _admin_operation(self, context: object, operation):  # type: ignore[no-untyped-def]
-        return await operation(object(), self._require_admin(context))
+        return await operation(_FakeRepository(), self._require_admin(context))
 
 
 @pytest.mark.anyio
@@ -249,12 +281,12 @@ async def test_admin_model_connection_route_uses_requested_probe_profile(
         response = await client.post(
             "/api/admin/settings/models/test-connection",
             json={
+                "provider_id": str(_PROVIDER_ID),
                 "provider_adapter": "vision_bridge_fake",
                 "provider_model": "vision-test",
                 "max_input_tokens": 64_000,
                 "settings": {},
                 "supports_vision": supports_vision,
-                "api_key": "request-only-test-key",
             },
         )
 
@@ -267,10 +299,11 @@ async def test_admin_model_connection_route_uses_requested_probe_profile(
 
 
 @pytest.mark.anyio
-async def test_admin_visual_connection_route_uses_transient_key_without_leak(
+async def test_admin_stored_key_connection_route_materializes_the_provider_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret = "connection-test-secret"
+    """Stored-Key test derives URL and Key from the Provider without leaks."""
+
     service = _ConnectionTestService()
     observed: dict[str, object] = {}
 
@@ -278,18 +311,16 @@ async def test_admin_visual_connection_route_uses_transient_key_without_leak(
         def __init__(self, *, app_config: object) -> None:
             model = app_config.models[0]  # type: ignore[attr-defined]
             observed["secret"] = model.api_key.get_secret_value()
+            observed["base_url"] = model.base_url
 
         async def ainvoke(self, messages: object, **_kwargs: object) -> AIMessage:
-            assert isinstance(messages, list)
-            assert isinstance(messages[-1], HumanMessage)
-            assert isinstance(messages[-1].content, list)
-            observed["probe"] = "vision"
+            del messages
             return AIMessage(content="OK")
 
     monkeypatch.setattr("app.gateway.system_model_callers.ModelRuntime", Runtime)
     context = resolve_system_audit_context(
         SimpleNamespace(id=uuid.uuid4(), system_role="system_admin"),
-        request_id="transient-key-vision-probe",
+        request_id="stored-key-probe",
     )
     materializer = SystemModelMaterializer(lambda: None)  # type: ignore[arg-type]
     app = FastAPI()
@@ -306,12 +337,75 @@ async def test_admin_visual_connection_route_uses_transient_key_without_leak(
         response = await client.post(
             "/api/admin/settings/models/test-connection",
             json={
+                "provider_id": str(_PROVIDER_ID),
+                "provider_adapter": "openai",
+                "provider_model": "gpt-5.2",
+                "max_input_tokens": 64_000,
+                "settings": {},
+                "supports_vision": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "succeeded",
+        "request_id": "stored-key-probe",
+    }
+    assert observed["secret"] == _PROVIDER_STORED_KEY
+    assert observed["base_url"] == _PROVIDER_BASE_URL
+    assert _PROVIDER_STORED_KEY not in response.text
+
+
+@pytest.mark.anyio
+async def test_provider_candidate_connection_route_uses_transient_key_without_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate test: explicit URL and transient Key, nothing persisted."""
+
+    secret = "connection-test-secret"
+    service = _ConnectionTestService()
+    observed: dict[str, object] = {}
+
+    class Runtime:
+        def __init__(self, *, app_config: object) -> None:
+            model = app_config.models[0]  # type: ignore[attr-defined]
+            observed["secret"] = model.api_key.get_secret_value()
+            observed["base_url"] = model.base_url
+
+        async def ainvoke(self, messages: object, **_kwargs: object) -> AIMessage:
+            assert isinstance(messages, list)
+            assert isinstance(messages[-1], HumanMessage)
+            assert isinstance(messages[-1].content, list)
+            observed["probe"] = "vision"
+            return AIMessage(content="OK")
+
+    monkeypatch.setattr("app.gateway.system_model_callers.ModelRuntime", Runtime)
+    context = resolve_system_audit_context(
+        SimpleNamespace(id=uuid.uuid4(), system_role="system_admin"),
+        request_id="transient-key-vision-probe",
+    )
+    materializer = SystemModelMaterializer(lambda: None)  # type: ignore[arg-type]
+    app = FastAPI()
+    app.include_router(model_registry_gateway.router)
+    app.dependency_overrides[model_registry_gateway.require_model_registry_admin_context] = lambda: context
+    app.dependency_overrides[get_system_model_catalog] = lambda: service
+    app.dependency_overrides[get_system_model_materializer] = lambda: materializer
+    app.dependency_overrides[get_config] = _RuntimeConfig
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/api/admin/settings/model-providers/test-connection",
+            json={
+                "base_url": "https://vision.example.test/v1",
+                "api_key": secret,
                 "provider_adapter": "openai",
                 "provider_model": "vision-test",
                 "max_input_tokens": 64_000,
-                "settings": {"base_url": "https://vision.example.test/v1"},
+                "settings": {},
                 "supports_vision": True,
-                "api_key": secret,
             },
         )
 
@@ -320,7 +414,11 @@ async def test_admin_visual_connection_route_uses_transient_key_without_leak(
         "status": "succeeded",
         "request_id": "transient-key-vision-probe",
     }
-    assert observed == {"secret": secret, "probe": "vision"}
+    assert observed == {
+        "secret": secret,
+        "base_url": "https://vision.example.test/v1",
+        "probe": "vision",
+    }
     assert secret not in response.text
 
 

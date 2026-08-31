@@ -21,6 +21,22 @@ export class AdminModelProviderSettingsDraftError extends Error {
   }
 }
 
+/**
+ * Server-derived settings: the backend injects them from the bound Provider
+ * and the authoring boundary rejects them, so drafts drop them up front —
+ * they are neither incompatible nor preserved, and never serialize back.
+ */
+export const DERIVED_ADMIN_MODEL_SETTING_KEYS = ["base_url"] as const;
+
+function withoutDerivedSettings(
+  storedSettings: Readonly<Record<string, AdminModelSettingValue>>,
+): Record<string, AdminModelSettingValue> {
+  const derived: readonly string[] = DERIVED_ADMIN_MODEL_SETTING_KEYS;
+  return Object.fromEntries(
+    Object.entries(storedSettings).filter(([key]) => !derived.includes(key)),
+  );
+}
+
 function hasOwn(
   settings: Readonly<Record<string, AdminModelSettingValue>>,
   key: string,
@@ -59,9 +75,10 @@ function isPreservedField(field: AdminModelProviderSettingField): boolean {
 
 export function createAdminModelProviderSettingsDraft(
   descriptor: AdminModelProviderAdapterDescriptor | null | undefined,
-  storedSettings: Readonly<Record<string, AdminModelSettingValue>>,
+  rawStoredSettings: Readonly<Record<string, AdminModelSettingValue>>,
   providerAdapter = descriptor?.id ?? "",
 ): AdminModelProviderSettingsDraft {
+  const storedSettings = withoutDerivedSettings(rawStoredSettings);
   if (!descriptor) {
     return {
       provider_adapter: providerAdapter,

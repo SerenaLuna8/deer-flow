@@ -8,23 +8,12 @@ import {
   type AdminModelProviderAdapterDescriptor,
 } from "@/core/admin-settings/models";
 
+// ``base_url`` is provider-derived and no longer part of the admin
+// descriptor projection, so the typed form never declares it.
 const descriptor: AdminModelProviderAdapterDescriptor = {
   id: "typed_provider",
   api_key_required: true,
   setting_fields: [
-    {
-      name: "base_url",
-      label: "Base URL",
-      input_type: "url",
-      advanced: false,
-      form_control: "input",
-      default_mode: "platform",
-      default_value: "https://provider.example.test/v1",
-      minimum: null,
-      maximum: null,
-      step: null,
-      options: [],
-    },
     {
       name: "max_tokens",
       label: "Max tokens",
@@ -117,7 +106,6 @@ describe("descriptor-driven admin model provider settings", () => {
     });
 
     expect(draft.values).toMatchObject({
-      base_url: "https://provider.example.test/v1",
       max_tokens: "64000",
       temperature: "0",
       streaming_enabled: "false",
@@ -212,7 +200,6 @@ describe("descriptor-driven admin model provider settings", () => {
       ["temperature", "0.005"],
       ["temperature", "2.01"],
       ["reasoning_effort", "extreme"],
-      ["base_url", "https://user:password@provider.example.test/v1"],
     ] as const) {
       const invalid = updateAdminModelProviderSettingDraftValue(
         createAdminModelProviderSettingsDraft(descriptor, {}),
@@ -245,6 +232,30 @@ describe("descriptor-driven admin model provider settings", () => {
     expect(() =>
       serializeAdminModelProviderSettingsDraft(descriptor, draft),
     ).toThrow("retired_vendor_flag");
+  });
+
+  test("strips the derived base_url from stored settings without marking it incompatible", () => {
+    const draft = createAdminModelProviderSettingsDraft(descriptor, {
+      base_url: "https://provider.example.test/v1",
+      max_tokens: 64_000,
+    });
+
+    // The server injected value is a known derived field: not editable, not
+    // incompatible, not preserved, and never serialized back.
+    expect(draft.incompatible_keys).toEqual([]);
+    expect(draft.original_keys).toEqual(["max_tokens"]);
+    expect(draft.values).not.toHaveProperty("base_url");
+    expect(draft.preserved_settings).toEqual({});
+    expect(serializeAdminModelProviderSettingsDraft(descriptor, draft)).toEqual(
+      { max_tokens: 64_000 },
+    );
+
+    // Even without a descriptor the derived key is not reported incompatible.
+    const unknownAdapter = createAdminModelProviderSettingsDraft(null, {
+      base_url: "https://provider.example.test/v1",
+      retired_vendor_flag: true,
+    });
+    expect(unknownAdapter.incompatible_keys).toEqual(["retired_vendor_flag"]);
   });
 
   test("fails closed when a known preserved value violates its descriptor", () => {

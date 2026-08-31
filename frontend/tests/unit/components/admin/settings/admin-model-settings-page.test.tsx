@@ -1,7 +1,6 @@
 import { describe, expect, test } from "@rstest/core";
 
 import {
-  adminModelConnectionTestErrorState,
   adminModelConnectionTestResultMessage,
   adminModelProviderSettingLabel,
   adminModelSettingsCopy,
@@ -19,6 +18,8 @@ import {
   type AdminModelCatalog,
 } from "@/core/admin-settings/models";
 
+const PROVIDER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
 const catalog: AdminModelCatalog = {
   items: [
     {
@@ -26,6 +27,8 @@ const catalog: AdminModelCatalog = {
       display_name: "DeepSeek Flash",
       provider_adapter: "deepseek",
       provider_model: "deepseek-v4-flash",
+      provider_id: PROVIDER_ID,
+      provider_name: "DeepSeek",
       max_input_tokens: 128_000,
       settings: {},
       supports_thinking: false,
@@ -78,17 +81,19 @@ const catalog: AdminModelCatalog = {
   request_id: "request-1",
 };
 
-describe("admin model settings domain-owned API Key", () => {
+describe("admin model settings with provider-owned credentials", () => {
   test("provides a complete English governance surface without Chinese fallbacks", () => {
     const copy = adminModelSettingsCopy("en-US");
 
     expect(copy.pageTitle).toBe("Model management");
-    expect(copy.addModel).toBe("Add model");
-    expect(copy.clearDialogTitle).toBe("Clear API Key?");
+    expect(copy.addModel).toBe("Add text model");
     expect(copy.testConnection).toBe("Test connection");
+    expect(copy.providerBinding).toBe("Provider");
     expect(JSON.stringify(copy)).toContain("Maximum input tokens");
     expect(JSON.stringify(copy)).toContain("not the maximum output token");
     expect(JSON.stringify(copy)).not.toMatch(/[\u3400-\u9fff]/u);
+    // The model editor carries no credential vocabulary of its own anymore.
+    expect(JSON.stringify(copy)).not.toContain("Clear API Key");
     expect(
       adminModelProviderSettingLabel("max_tokens", "Max tokens", "en-US"),
     ).toBe("Maximum output tokens");
@@ -110,8 +115,10 @@ describe("admin model settings domain-owned API Key", () => {
     ).toEqual(catalog.items);
   });
 
-  test("catalog responses expose status only and reject plaintext", () => {
+  test("catalog items carry the provider binding and reject plaintext keys", () => {
     expect(adminModelCatalogSchema.safeParse(catalog).success).toBe(true);
+    expect(catalog.items[0]?.provider_id).toBe(PROVIDER_ID);
+    expect(catalog.items[0]?.provider_name).toBe("DeepSeek");
     expect(
       adminModelCatalogSchema.safeParse({
         ...catalog,
@@ -149,7 +156,7 @@ describe("admin model settings domain-owned API Key", () => {
     }
   });
 
-  test("save accepts write-only key while connection test requires a fresh key", () => {
+  test("model writes bind a provider and never carry a model-level key", () => {
     const common = {
       display_name: "DeepSeek Pro",
       provider_adapter: "deepseek",
@@ -164,24 +171,43 @@ describe("admin model settings domain-owned API Key", () => {
       createAdminModelInputSchema.safeParse({
         ...common,
         status: "active",
-        api_key: "temporary-key",
+        provider_id: PROVIDER_ID,
       }).success,
     ).toBe(true);
     expect(
       createAdminModelInputSchema.safeParse({
         ...common,
         status: "active",
-        api_key: null,
+        provider_id: PROVIDER_ID,
+        api_key: "must-not-exist",
       }).success,
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      createAdminModelInputSchema.safeParse({
+        ...common,
+        status: "active",
+      }).success,
+    ).toBe(false);
+    // The stored-key connection test addresses the provider, never a raw key.
     expect(
       testAdminModelConnectionInputSchema.safeParse({
+        provider_id: PROVIDER_ID,
         provider_adapter: common.provider_adapter,
         provider_model: common.provider_model,
         max_input_tokens: common.max_input_tokens,
         settings: common.settings,
         supports_vision: false,
-        api_key: "",
+      }).success,
+    ).toBe(true);
+    expect(
+      testAdminModelConnectionInputSchema.safeParse({
+        provider_id: PROVIDER_ID,
+        provider_adapter: common.provider_adapter,
+        provider_model: common.provider_model,
+        max_input_tokens: common.max_input_tokens,
+        settings: common.settings,
+        supports_vision: false,
+        api_key: "must-not-exist",
       }).success,
     ).toBe(false);
   });
@@ -201,7 +227,7 @@ describe("admin model settings domain-owned API Key", () => {
       createAdminModelInputSchema.safeParse({
         ...commonWithoutCapacity,
         status: "active",
-        api_key: "temporary-key",
+        provider_id: PROVIDER_ID,
       }).success,
     ).toBe(false);
     for (const maxInputTokens of [1, 128_000, 2_000_000]) {
@@ -210,17 +236,17 @@ describe("admin model settings domain-owned API Key", () => {
           ...commonWithoutCapacity,
           max_input_tokens: maxInputTokens,
           status: "active",
-          api_key: "temporary-key",
+          provider_id: PROVIDER_ID,
         }).success,
       ).toBe(true);
       expect(
         testAdminModelConnectionInputSchema.safeParse({
+          provider_id: PROVIDER_ID,
           provider_adapter: commonWithoutCapacity.provider_adapter,
           provider_model: commonWithoutCapacity.provider_model,
           settings: commonWithoutCapacity.settings,
           max_input_tokens: maxInputTokens,
           supports_vision: false,
-          api_key: "temporary-key",
         }).success,
       ).toBe(true);
     }
@@ -230,7 +256,7 @@ describe("admin model settings domain-owned API Key", () => {
           ...commonWithoutCapacity,
           max_input_tokens: invalidCapacity,
           status: "active",
-          api_key: "temporary-key",
+          provider_id: PROVIDER_ID,
         }).success,
       ).toBe(false);
     }
@@ -245,15 +271,11 @@ describe("admin model settings domain-owned API Key", () => {
       form,
       descriptor,
       settingsDraft,
-      "temporary-key",
-      () => undefined,
       "en-US",
     );
-    expect(
-      "max_input_tokens" in submission.common
-        ? submission.common.max_input_tokens
-        : null,
-    ).toBe(128_000);
+    expect(submission.max_input_tokens).toBe(128_000);
+    expect("api_key" in submission).toBe(false);
+    expect("provider_id" in submission).toBe(false);
 
     for (const invalidCapacity of ["", "0", "1.5", "2000001", "128k"]) {
       form.set("max_input_tokens", invalidCapacity);
@@ -262,8 +284,6 @@ describe("admin model settings domain-owned API Key", () => {
           form,
           descriptor,
           settingsDraft,
-          "temporary-key",
-          () => undefined,
           "en-US",
         ),
       ).toThrow(
@@ -272,7 +292,7 @@ describe("admin model settings domain-owned API Key", () => {
     }
   });
 
-  test("typed settings validation clears the write-only API Key first", () => {
+  test("typed settings validation reports locale-specific errors", () => {
     const form = new FormData();
     form.set("max_input_tokens", "128000");
     const descriptor = catalog.provider_adapters[0];
@@ -281,106 +301,62 @@ describe("admin model settings domain-owned API Key", () => {
       "max_tokens",
       "0",
     );
-    let cleared = false;
 
     expect(() =>
-      consumeAdminModelEditorSubmission(
-        form,
-        descriptor,
-        invalidDraft,
-        "temporary-key",
-        () => {
-          cleared = true;
-        },
-      ),
+      consumeAdminModelEditorSubmission(form, descriptor, invalidDraft),
     ).toThrow("Provider 设置无效。");
-    expect(cleared).toBe(true);
-
     expect(() =>
-      consumeAdminModelEditorSubmission(
-        form,
-        descriptor,
-        invalidDraft,
-        "temporary-key",
-        () => undefined,
-        "en-US",
-      ),
+      consumeAdminModelEditorSubmission(form, descriptor, invalidDraft, "en-US"),
     ).toThrow("Provider settings are invalid.");
   });
 
-  test("requires a fresh Key to save a newly tested model", () => {
+  test("saving requires a resolvable provider binding, not a fresh key", () => {
     expect(
       isAdminModelEditorSaveDisabled({
-        apiKey: "",
-        creating: true,
         pending: false,
-        providerRequiresApiKey: true,
+        providerMissing: true,
         providerSettingsIncompatible: false,
         testPending: false,
       }),
     ).toBe(true);
     expect(
       isAdminModelEditorSaveDisabled({
-        apiKey: "replacement-key",
-        creating: true,
         pending: false,
-        providerRequiresApiKey: true,
+        providerMissing: false,
         providerSettingsIncompatible: false,
         testPending: false,
       }),
     ).toBe(false);
     expect(
       isAdminModelEditorSaveDisabled({
-        apiKey: "",
-        creating: false,
         pending: false,
-        providerRequiresApiKey: true,
-        providerSettingsIncompatible: false,
-        testPending: false,
-      }),
-    ).toBe(false);
-    expect(
-      isAdminModelEditorSaveDisabled({
-        apiKey: "temporary-key",
-        creating: true,
-        pending: false,
-        providerRequiresApiKey: true,
+        providerMissing: false,
         providerSettingsIncompatible: true,
         testPending: false,
       }),
     ).toBe(true);
     expect(
-      adminModelConnectionTestResultMessage("succeeded", "zh-CN"),
-    ).toContain("保存前必须重新输入 API Key");
-    expect(adminModelConnectionTestResultMessage("failed", "zh-CN")).toContain(
-      "测试用 Key 已从表单清除",
-    );
-    expect(adminModelConnectionTestResultMessage("succeeded", "en-US")).toBe(
-      "Connection test succeeded. The test Key was cleared from the form; re-enter the API Key before saving.",
-    );
-    expect(
-      adminModelConnectionTestResultMessage("succeeded", "en-US", "edit"),
-    ).toBe(
-      "Connection test succeeded. The test Key was cleared and not saved. Leave the field blank to preserve the saved Key, or re-enter a Key to replace it.",
-    );
+      isAdminModelEditorSaveDisabled({
+        pending: false,
+        providerMissing: false,
+        providerSettingsIncompatible: false,
+        testPending: true,
+      }),
+    ).toBe(true);
   });
 
-  test("keeps the re-entry guidance when the connection request throws", () => {
-    expect(
-      adminModelConnectionTestErrorState(
-        new Error("provider unavailable"),
-        "en-US",
-        "create",
-      ),
-    ).toEqual({
-      error: "provider unavailable",
-      result:
-        "Connection test failed. The test Key was cleared from the form; re-enter the API Key to retry or save.",
-    });
-    expect(adminModelConnectionTestErrorState(null, "zh-CN", "edit")).toEqual({
-      error: "连接测试失败。",
-      result:
-        "连接测试失败。测试用 Key 已清空且不会保存；留空可保留原 Key，重新输入可再次测试或替换。",
-    });
+  test("connection test messages describe the provider's stored key", () => {
+    expect(adminModelConnectionTestResultMessage("succeeded", "zh-CN")).toBe(
+      "连接测试成功（使用供应商已保存的 Key）。",
+    );
+    expect(adminModelConnectionTestResultMessage("failed", "zh-CN")).toContain(
+      "请检查供应商的服务地址与 Key",
+    );
+    expect(adminModelConnectionTestResultMessage("succeeded", "en-US")).toBe(
+      "Connection test succeeded using the provider's saved Key.",
+    );
+    expect(adminModelConnectionTestResultMessage("failed", "en-US")).toContain(
+      "Check the provider's endpoint and Key",
+    );
   });
 });

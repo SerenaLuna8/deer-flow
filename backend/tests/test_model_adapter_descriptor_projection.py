@@ -65,9 +65,9 @@ def test_admin_catalog_projects_only_authorable_builtin_adapters() -> None:
     assert openai_fields["max_tokens"].form_control == "input"
     assert openai_fields["max_tokens"].default_mode == "provider"
     assert openai_fields["max_tokens"].default_value is None
-    assert openai_fields["base_url"].form_control == "input"
-    assert openai_fields["base_url"].default_mode == "platform"
-    assert openai_fields["base_url"].default_value == "https://api.openai.com/v1"
+    # ``base_url`` is owned by the bound Model Provider and derived
+    # server-side, so no adapter projects it as an authoring field.
+    assert "base_url" not in openai_fields
     assert openai_fields["request_timeout"].advanced is True
     assert openai_fields["request_timeout"].form_control == "input"
     assert openai_fields["stream_chunk_timeout"].default_mode == "platform"
@@ -83,8 +83,8 @@ def test_admin_catalog_projects_only_authorable_builtin_adapters() -> None:
     assert anthropic_fields["request_timeout"].form_control == "preserve"
     assert anthropic_fields["timeout"].form_control == "preserve"
     for descriptor in descriptors.values():
+        assert "base_url" not in {field.name for field in descriptor.setting_fields}
         assert {field.name for field in descriptor.setting_fields if not field.advanced} == {
-            "base_url",
             "max_tokens",
         }
         assert next(field for field in descriptor.setting_fields if field.name == "temperature").advanced is True

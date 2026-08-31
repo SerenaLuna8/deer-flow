@@ -42,9 +42,11 @@ def _material() -> tuple[
 ]:
     model_id = uuid.UUID("10000000-0000-4000-8000-000000000001")
     generation_id = uuid.UUID("20000000-0000-4000-8000-000000000001")
+    provider_id = uuid.UUID("40000000-0000-4000-8000-000000000001")
     command = CreateSystemModel(
         display_name="DeepSeek Flash",
         status="active",
+        provider_id=provider_id,
         provider_adapter="deepseek",
         provider_model="deepseek-v4-flash",
         max_input_tokens=64_000,
@@ -52,7 +54,6 @@ def _material() -> tuple[
         supports_thinking=True,
         supports_reasoning_effort=True,
         supports_vision=False,
-        api_key=None,
     )
     payload = canonical_model_payload(model_id, command)
     key = SecretKey(b"k" * 32)
@@ -80,6 +81,7 @@ def _material() -> tuple[
         id=model_id,
         display_name=command.display_name,
         status="active",
+        provider_id=provider_id,
         provider_adapter=command.provider_adapter,
         provider_model=command.provider_model,
         max_input_tokens=command.max_input_tokens,

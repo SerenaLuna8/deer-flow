@@ -53,6 +53,17 @@ from app.model_registry.secrets import (
     materialize_provider_api_key,
     protect_provider_api_key,
 )
+from app.system_settings.provider_key_fanout import (
+    ProviderKeyFanout,
+    ProviderKeyFanoutInvariant,
+    ProviderKeyFanoutLockBusy,
+    count_bound_text_models,
+)
+from app.system_settings.repository import (
+    SystemModelRepository,
+    SystemModelRepositoryInvariant,
+)
+from app.system_settings.validation import ModelSettingsInvalid
 from deerflow.persistence.model_registry import (
     ModelProviderModelRow,
     ModelProviderRow,
@@ -193,6 +204,10 @@ def _invalid(message: str) -> KnowledgeError:
 
 def _conflict() -> KnowledgeError:
     return KnowledgeError(KNOWLEDGE_CONFLICT, "供应商配置刚被其他管理员修改，请刷新后重试")
+
+
+def _models_busy() -> KnowledgeError:
+    return KnowledgeError(KNOWLEDGE_CONFLICT, "模型正在使用，请稍后重试")
 
 
 def _storage_unavailable() -> KnowledgeError:
@@ -336,6 +351,13 @@ class ModelRegistryService:
         self._client = client
         self._model_in_use = model_in_use
         self._audit_service = audit_service
+        # Provider Keys fan out to bound text models inside this service's
+        # settle transaction; the collaborator owns only the locked-scope
+        # re-encryption and per-model audit, never the transaction itself.
+        self._key_fanout = ProviderKeyFanout(
+            secret_key=secret_key,
+            audit_service=audit_service,
+        )
 
     # -- admin authority -------------------------------------------------
 
@@ -399,6 +421,10 @@ class ModelRegistryService:
                 views: list[ModelProviderView] = []
                 for provider in providers:
                     models = (await session.scalars(select(ModelProviderModelRow).where(ModelProviderModelRow.provider_id == provider.id))).all()
+                    text_total, text_active = await count_bound_text_models(
+                        session,
+                        provider.id,
+                    )
                     views.append(
                         ModelProviderView(
                             id=provider.id,
@@ -406,8 +432,11 @@ class ModelRegistryService:
                             base_url=provider.base_url,
                             request_timeout_seconds=provider.request_timeout_seconds,
                             api_key_configured=True,
-                            model_count=len(models),
-                            active_model_count=sum(1 for model in models if model.status == "active"),
+                            # Counts aggregate bound text models with typed
+                            # retrieval models; endpoint freezing stays a pure
+                            # Embedding-reference decision.
+                            model_count=len(models) + text_total,
+                            active_model_count=sum(1 for model in models if model.status == "active") + text_active,
                             endpoint_frozen=await self._any_embedding_in_use(session, models),
                             created_at=provider.created_at,
                             updated_at=provider.updated_at,
@@ -534,10 +563,18 @@ class ModelRegistryService:
 
         envelope = self._protect(provider_id, new_base_url, plaintext) if plaintext is not None else None
 
+        # Name, URL, and Key changes surface on bound text models (display
+        # name in the admin catalog; URL/Key through fan-out), so those
+        # settles follow the unified admin → catalog → provider → models →
+        # generation order. A timeout-only change is retrieval-scoped and
+        # never takes the catalog lock.
+        touches_text_models = cleaned_name is not None or cleaned_base_url is not None or plaintext is not None
+
         # Settle: re-lock, compare with the frozen snapshot, then commit.
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
+                catalog_state = await SystemModelRepository(session).catalog_state(for_update=True) if touches_text_models else None
                 provider = await session.get(ModelProviderRow, provider_id, with_for_update=True)
                 if provider is None:
                     raise _not_found()
@@ -549,6 +586,7 @@ class ModelRegistryService:
                         raise _conflict()
                 if base_url_changed and await self._any_embedding_in_use(session, current_models):
                     raise _invalid("该供应商存在被知识库引用的 Embedding 模型，不能修改服务地址")
+                name_changed = cleaned_name is not None and provider.name != cleaned_name
                 if cleaned_name is not None:
                     provider.name = cleaned_name
                 # Assign only caller-provided fields: a rename-only settle
@@ -565,6 +603,25 @@ class ModelRegistryService:
                     provider.api_key_ciphertext = envelope.ciphertext
                 provider.updated_at = datetime.now(UTC)
                 await session.flush()
+                # Fan-out re-encrypts the validated plaintext for the current
+                # bound set — including suspended models and any model created
+                # or rebound here since freeze — never a frozen member list.
+                if plaintext is not None:
+                    await self._key_fanout.rotate_bound_text_models(
+                        session,
+                        issued,
+                        provider_id=uuid.UUID(str(provider.id)),
+                        base_url=provider.base_url,
+                        api_key=plaintext,
+                    )
+                text_total, text_active = await count_bound_text_models(
+                    session,
+                    provider.id,
+                )
+                if catalog_state is not None and text_total > 0 and (plaintext is not None or name_changed):
+                    catalog_state.revision += 1
+                    catalog_state.updated_by_user_id = str(issued.user_id)
+                    await session.flush()
                 key_only_rotation = plaintext is not None and not base_url_changed and new_timeout == frozen.request_timeout_seconds and cleaned_name is None
                 await self._append_audit(
                     session,
@@ -583,14 +640,24 @@ class ModelRegistryService:
                     base_url=provider.base_url,
                     request_timeout_seconds=provider.request_timeout_seconds,
                     api_key_configured=True,
-                    model_count=len(current_models),
-                    active_model_count=sum(1 for model in current_models if model.status == "active"),
+                    model_count=len(current_models) + text_total,
+                    active_model_count=sum(1 for model in current_models if model.status == "active") + text_active,
                     endpoint_frozen=await self._any_embedding_in_use(session, current_models),
                     created_at=provider.created_at,
                     updated_at=provider.updated_at,
                 )
         except KnowledgeError:
             raise
+        except ProviderKeyFanoutLockBusy:
+            # Only an explicit NOWAIT lock-busy signal becomes a retryable
+            # 409; other database failures keep the 503 storage semantics.
+            raise _models_busy() from None
+        except (
+            ModelSettingsInvalid,
+            ProviderKeyFanoutInvariant,
+            SystemModelRepositoryInvariant,
+        ):
+            raise _storage_unavailable() from None
         except IntegrityError:
             raise _PROVIDER_NAME_CONFLICT from None
         except SQLAlchemyError:
@@ -604,6 +671,14 @@ class ModelRegistryService:
                 provider = await session.get(ModelProviderRow, provider_id, with_for_update=True)
                 if provider is None:
                     raise _not_found()
+                # Any bound text model — suspended included — blocks deletion;
+                # rebind text models first, then remove retrieval models.
+                text_total, _text_active = await count_bound_text_models(
+                    session,
+                    provider_id,
+                )
+                if text_total:
+                    raise _invalid("该供应商下仍有绑定的文本模型，请先将它们改绑到其他供应商")
                 models = await self._provider_models(session, provider_id, for_update=True)
                 if models:
                     raise _invalid("该供应商下仍有模型，请先删除全部模型")

@@ -10,7 +10,6 @@ import {
   adminModelDefaultInputSchema,
   adminModelIdSchema,
   adminModelMutationResponseSchema,
-  adminModelSecretClearInputSchema,
   adminModelStatusInputSchema,
   createAdminModelInputSchema,
   replaceAdminModelInputSchema,
@@ -19,7 +18,6 @@ import {
   type AdminModelConnectionTestResponse,
   type AdminModelDefaultInput,
   type AdminModelMutationResponse,
-  type AdminModelSecretClearInput,
   type AdminModelStatusInput,
   type CreateAdminModelInput,
   type ReplaceAdminModelInput,
@@ -170,22 +168,6 @@ export async function replaceAdminModel(
   const response = await requestModelSettings(
     `${modelSettingsBaseURL()}/${parsedId}`,
     jsonRequestInit("PUT", body, signal),
-  );
-  return readModelSettingsResponse(response, adminModelMutationResponseSchema);
-}
-
-export async function clearAdminModelApiKey(
-  accountId: string,
-  modelId: string,
-  input: AdminModelSecretClearInput,
-  signal?: AbortSignal,
-): Promise<AdminModelMutationResponse> {
-  adminModelAccountIdSchema.parse(accountId);
-  const parsedId = adminModelIdSchema.parse(modelId);
-  const body = adminModelSecretClearInputSchema.parse(input);
-  const response = await requestModelSettings(
-    `${modelSettingsBaseURL()}/${parsedId}/api-key/clear`,
-    jsonRequestInit("POST", body, signal),
   );
   return readModelSettingsResponse(response, adminModelMutationResponseSchema);
 }

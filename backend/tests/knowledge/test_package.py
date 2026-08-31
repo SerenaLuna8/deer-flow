@@ -16,8 +16,10 @@ APP_SRC = BACKEND_ROOT / "app"
 
 PUBLIC_EXPORTS = [
     "create_knowledge_module",
+    "create_knowledge_model_client",
     "create_knowledge_project_purger",
     "purge_knowledge_query_history",
+    "retrieval_model_in_use",
     "KnowledgeModule",
     "KnowledgeProjectPurger",
     "KnowledgeProjectAuthority",
@@ -87,6 +89,26 @@ def test_root_package_does_not_export_internals() -> None:
 
     for internal in ("PostgreSQLStore", "MinioObjectStore", "KnowledgeModelClient"):
         assert internal not in actweave_knowledge.__all__
+
+
+def test_model_client_factory_builds_the_internal_provider_client() -> None:
+    """The factory is the only public construction path for a probe client.
+
+    Hosts that need a registry-owned client (e.g. the Gateway lifespan for the
+    retrieval model registry when Knowledge is disabled) obtain it here without
+    the class itself joining the public surface.
+    """
+
+    import asyncio
+
+    from actweave_knowledge import create_knowledge_model_client
+    from actweave_knowledge.models.client import KnowledgeModelClient
+
+    client = create_knowledge_model_client()
+    assert isinstance(client, KnowledgeModelClient)
+    asyncio.run(client.aclose())
+    # Closing twice stays safe: the lifespan may release it on failed startup.
+    asyncio.run(client.aclose())
 
 
 def _module_imports(path: Path) -> set[str]:

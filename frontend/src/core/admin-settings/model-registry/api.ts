@@ -4,6 +4,7 @@ import { AuthRequiredError, fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import {
+  adminModelProviderConnectionTestSchema,
   adminModelProviderDeleteSchema,
   adminModelProviderListSchema,
   adminModelProviderMutationSchema,
@@ -12,12 +13,15 @@ import {
   adminProviderModelListSchema,
   adminProviderModelMutationSchema,
   adminProviderModelTestSchema,
+  testAdminModelProviderConnectionInputSchema,
+  type AdminModelProviderConnectionTestResult,
   type AdminModelProviderItem,
   type AdminProviderModelItem,
   type AdminProviderModelStatus,
   type AdminProviderModelTestResult,
   type CreateAdminModelProviderInput,
   type CreateAdminProviderModelInput,
+  type TestAdminModelProviderConnectionInput,
   type UpdateAdminModelProviderInput,
 } from "./types";
 
@@ -48,14 +52,6 @@ export class AdminModelRegistryApiError extends Error {
     this.knowledgeCode = options.knowledgeCode ?? null;
     this.serverMessage = options.serverMessage ?? null;
   }
-}
-
-/** The registry is Knowledge-gated: a 404 KNOWLEDGE_DISABLED is a module state. */
-export function isKnowledgeDisabledError(error: unknown): boolean {
-  return (
-    error instanceof AdminModelRegistryApiError &&
-    error.knowledgeCode === "KNOWLEDGE_DISABLED"
-  );
 }
 
 function isAbortError(error: unknown): boolean {
@@ -299,6 +295,27 @@ export async function deleteAdminProviderModel(
   await readAdminModelRegistryResponse(
     response,
     adminProviderModelDeleteSchema,
+  );
+}
+
+/**
+ * Candidate URL/Key test: imperative-only. The request body carries the
+ * transient Key and must never be cached, retried, or logged by callers.
+ */
+export async function testAdminModelProviderConnection(
+  accountId: string,
+  input: TestAdminModelProviderConnectionInput,
+  signal?: AbortSignal,
+): Promise<AdminModelProviderConnectionTestResult> {
+  adminModelRegistryAccountIdSchema.parse(accountId);
+  const body = testAdminModelProviderConnectionInputSchema.parse(input);
+  const response = await requestAdminModelRegistry(
+    `${adminSettingsBaseURL()}/model-providers/test-connection`,
+    jsonRequestInit("POST", body, signal),
+  );
+  return readAdminModelRegistryResponse(
+    response,
+    adminModelProviderConnectionTestSchema,
   );
 }
 

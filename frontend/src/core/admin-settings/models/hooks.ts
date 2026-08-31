@@ -3,10 +3,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useImperativeRequest } from "@/core/api/use-imperative-request";
-import { modelsQueryKey } from "@/core/models/hooks";
+
+import { invalidateModelCatalogs } from "../invalidate-model-catalogs";
 
 import {
-  clearAdminModelApiKey,
   createAdminModel,
   fetchAdminModelCatalog,
   replaceAdminModel,
@@ -18,7 +18,6 @@ import {
 import {
   adminModelMutationKey,
   adminModelSettingsQueryKey,
-  adminModelSettingsRoot,
 } from "./query-keys";
 import {
   adminModelAccountIdSchema,
@@ -42,18 +41,6 @@ export function adminModelCatalogQueryOptions(accountId: string) {
 
 export function useAdminModelCatalog(accountId: string) {
   return useQuery(adminModelCatalogQueryOptions(accountId));
-}
-
-async function invalidateModelCatalogs(
-  queryClient: ReturnType<typeof useQueryClient>,
-  accountId: string,
-): Promise<void> {
-  await Promise.all([
-    queryClient.invalidateQueries({
-      queryKey: adminModelSettingsRoot(accountId),
-    }),
-    queryClient.invalidateQueries({ queryKey: modelsQueryKey }),
-  ]);
 }
 
 export function useCreateAdminModel(accountId: string) {
@@ -86,19 +73,6 @@ export function useReplaceAdminModel(accountId: string) {
       return result;
     },
   );
-}
-
-export function useClearAdminModelApiKey(accountId: string) {
-  const parsed = adminModelAccountIdSchema.parse(accountId);
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationKey: adminModelMutationKey(parsed, "clear_api_key"),
-    mutationFn: (modelId: string) =>
-      runAbortableAdminModelMutation(parsed, (signal) =>
-        clearAdminModelApiKey(parsed, modelId, { confirmed: true }, signal),
-      ),
-    onSuccess: () => invalidateModelCatalogs(queryClient, parsed),
-  });
 }
 
 export function useTestAdminModelConnection(accountId: string) {

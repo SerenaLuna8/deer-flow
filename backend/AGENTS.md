@@ -50,9 +50,13 @@ Run full-stack commands from the repository root and backend targets from
 - `packages/knowledge/actweave_knowledge/` owns the self-contained RAG
   Knowledge module; `app/knowledge/` owns its host adapters (config mapping,
   Gateway routers, Worker handlers, Agent tool, authority seam, model port).
-  `app/model_registry/` owns the host-level retrieval Model Registry
-  (admin routes, provider/model service, provider-secret envelopes, and the
-  optional install-time default-provider bootstrap).
+  `app/model_registry/` owns the host-level Model Provider registry
+  (admin routes, provider/retrieval-model service, provider-secret envelopes,
+  and the optional install-time default-provider bootstrap). It administers
+  the only API Keys in the model domain and stays administrable while the
+  Knowledge module is disabled; a provider key or endpoint change fans out
+  re-encryption to every bound text model inside one transaction
+  (`app/system_settings/provider_key_fanout.py`).
 - `scripts/` owns explicit Schema V1 setup and operator workflows.
 - `tests/` owns unit, PostgreSQL, process, and contract gates.
 
@@ -492,11 +496,13 @@ recreated explicitly, never repaired in place.
   together, and `public.vector` (pgvector) must exist before install.
   PostgreSQL owns all metadata, task, and segment authority; MinIO owns only
   document bytes, keyed by database-issued storage keys.
-- Embedding/Reranker model configurations are PostgreSQL-administered with
-  independently encrypted API keys (shared secret-envelope infrastructure).
-  Keys are write-only through the admin API and never appear in responses,
-  logs, or the browser; a configuration referenced by knowledge bases cannot
-  be disabled or deleted. Admin routes require `system_admin`; project routes
+- Embedding/Reranker model configurations are PostgreSQL-administered and use
+  their Model Provider's encrypted API key (shared secret-envelope
+  infrastructure); the same provider row also carries the key for its bound
+  text models. Keys are write-only through the admin API and never appear in
+  responses, logs, or the browser; a configuration referenced by knowledge
+  bases cannot be disabled or deleted, and a provider with bound text models
+  or retrieval models cannot be deleted. Admin routes require `system_admin`; project routes
   require membership plus `shared_assets.read` for reads and
   `shared_assets.edit` for writes; the search API and Agent tool return only
   segments of the caller's project.
@@ -783,9 +789,21 @@ recreated explicitly, never repaired in place.
 
 Configuration is read only from explicit `ACT_WEAVE_CONFIG_PATH` or the
 repository-root `config.yaml`. Infrastructure settings are restart-required.
-Model definitions, runtime/auth/Memory/quota/Automation policy, and model-owned
-API Keys are PostgreSQL authority and must not be reintroduced as YAML or
-ambient-key fallbacks.
+Model definitions, runtime/auth/Memory/quota/Automation policy, and
+provider-owned API Keys are PostgreSQL authority and must not be reintroduced
+as YAML or ambient-key fallbacks.
+
+Model API Keys belong to the Model Provider, never to an individual System
+Model. Every System Model binds a required `provider_id`; its `base_url` is
+derived from the provider and rejected as external authoring input, and its
+per-model secret Generation is re-encrypted from the provider key on create,
+rebind, or provider key/endpoint change. Provider fan-out locks
+`catalog_state`, providers `FOR SHARE`, then bound models and their current
+Generations `FOR UPDATE NOWAIT` in UUID order; lock contention rolls back the
+whole settle and surfaces 409 `KNOWLEDGE_CONFLICT` with zero partial commits.
+Runs keep freezing the exact model secret Generation, so a rotation
+invalidates Runs frozen on the old material; tombstoned Generations are never
+restored.
 
 Every System Model stores a required `max_input_tokens` capability in the
 bounded range `1..2,000,000`. It is frozen with the exact model execution

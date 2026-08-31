@@ -95,6 +95,7 @@ from .project_retention import (
     KnowledgeProjectPurger,
     create_knowledge_project_purger,
 )
+from .registry import create_knowledge_model_client, retrieval_model_in_use
 from .retention import purge_knowledge_query_history
 
 __all__ = [
@@ -184,7 +185,9 @@ __all__ = [
     "KnowledgeSettings",
     "KnowledgeTaskProgress",
     "KnowledgeTaskStage",
+    "create_knowledge_model_client",
     "create_knowledge_module",
     "create_knowledge_project_purger",
     "purge_knowledge_query_history",
+    "retrieval_model_in_use",
 ]

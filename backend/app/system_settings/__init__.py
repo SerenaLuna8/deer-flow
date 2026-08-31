@@ -15,6 +15,8 @@ from app.system_settings.models import (
     SystemModelCatalogView,
     SystemModelConnectionCheck,
     SystemModelView,
+    TestProviderCandidateConnection,
+    TestSystemModelConnection,
     UpdateSystemModel,
 )
 from app.system_settings.service import SystemModelCatalogService
@@ -33,5 +35,7 @@ __all__ = [
     "SystemModelMaterializationUnavailable",
     "SystemModelMaterializer",
     "SystemModelView",
+    "TestProviderCandidateConnection",
+    "TestSystemModelConnection",
     "UpdateSystemModel",
 ]

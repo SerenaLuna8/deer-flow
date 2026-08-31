@@ -29,7 +29,7 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
 _EXPECTED_TABLE_COUNT = 108
-_EXPECTED_COLUMN_COUNT = 1352
+_EXPECTED_COLUMN_COUNT = 1353
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -543,6 +543,10 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
         "system_model_configs",
         "max_input_tokens",
     ): "模型可接收的最大输入令牌数量",
+    (
+        "system_model_configs",
+        "provider_id",
+    ): "所属模型供应商标识；API Key 由供应商行统一配置",
     ("system_asset_upgrade_audit", "before_checksum"): "升级前载荷校验和",
     ("system_asset_upgrade_audit", "after_checksum"): "升级后载荷校验和",
     ("system_asset_upgrade_audit", "package_digest"): "升级软件包目录摘要",
