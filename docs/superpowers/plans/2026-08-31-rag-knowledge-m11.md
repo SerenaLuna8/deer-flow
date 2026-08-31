@@ -114,16 +114,34 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 
 ### T0：固定基线与交付前提
 
-- [ ] 记录基线 commit（`b94d8b34`）与工作树非知识域脏文件清单；确认 M10 交付状态与
+- [x] 记录基线 commit（`b94d8b34`）与工作树非知识域脏文件清单；确认 M10 交付状态与
   `tests/knowledge` 全量绿作为起点证据。
-- [ ] 确认真实质量门前提：SiliconFlow（或等价）文本 chat 模型可用性与预算（摘要生成 =
+- [x] 确认真实质量门前提：SiliconFlow（或等价）文本 chat 模型可用性与预算（摘要生成 =
   语料段数次调用）、评测语料扩充的标注人力。没有不阻塞 T1–T10，但阻塞 T11 放行。
-- [ ] 确认操作者数据库处置意向仅作记录：M11 验证走临时隔离库 + 全新空库安装；目标库是否
+- [x] 确认操作者数据库处置意向仅作记录：M11 验证走临时隔离库 + 全新空库安装；目标库是否
   重建在 T11 前另行确认。
-- [ ] 复核 `.env` 是否有 `ACT_WEAVE_SECRET_KEY`（F03 加密依赖）与 `DATABASE_URL`；缺失记录为
+- [x] 复核 `.env` 是否有 `ACT_WEAVE_SECRET_KEY`（F03 加密依赖）与 `DATABASE_URL`；缺失记录为
   部署前提。
 
 验收：以上四项有书面记录（追加到本文件 T0 落地记录），无未经授权的破坏性动作。
+
+#### T0 落地记录（2026-08-31）
+
+- 基线：规格基线 `b94d8b34`；实施起点 `3676c3b5`（操作者授权将工作树中与知识域无关的
+  未提交改动整体提交为 `feat(runs): surface graph recursion and vision budget exhaustion
+  failures…`，此后工作树干净）。操作者明确授权在 `main` 分支直接实施（不建功能分支）。
+- 起点测试证据（实施起点 `3676c3b5` 重跑）：`tests/knowledge` core gate 723 collected /
+  718 passed / 0 failed / 5 skipped——5 个 skip 全是 `test_storage.py` MinIO 集成例，导出
+  `.env` 的 `ACT_WEAVE_KNOWLEDGE_MINIO_*` 后 17/17 通过、零跳过（本机 MinIO 可用）。
+  **后续所有任务的门禁命令须先 `set -a && source ../.env && set +a` 以满足零跳过门。**
+- 真实质量门前提：根 `.env` 具备 `ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY`（SiliconFlow）
+  与 `ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY`；文本 chat 模型与摘要生成预算在 T11 运行前
+  由操作者最终确认。语料扩充由实施方（含标注）完成、操作者验收。
+- 部署前提：`.env` 具备 `ACT_WEAVE_SECRET_KEY`、`DATABASE_URL`、`POSTGRES_ADMIN_URL`、
+  `ACT_WEAVE_KNOWLEDGE_MINIO_*`。**本机 `config.yaml` 当前含非空 `knowledge` 块**——T3 墓碑
+  落地后，本机部署重启前必须先跑 `scripts/migrate_knowledge_config.py` 再删块（T11 演练项）。
+- 数据库处置：M11 全部验证走临时隔离库与全新空库；操作者目标库（`deerflow_knowledge`）
+  是否随 M11 重建，T11 前另行确认，本计划不含 reset 授权。
 
 ### T1：Schema 与包契约一次定义
 
