@@ -1115,13 +1115,22 @@ test("never flashes a failed Sub-Agent card after switching conversations", asyn
     Reflect.set(window, "__subtaskFailureObserver", observer);
   });
 
-  await page.getByText(fixture.otherThreadName, { exact: true }).click();
+  const rail = page.getByTestId("project-conversation-rail");
+  // The row's blank center must navigate just like its title.
+  await rail
+    .locator("li")
+    .filter({ has: page.getByText(fixture.otherThreadName, { exact: true }) })
+    .click();
   await expect(page).toHaveURL(
     new RegExp(`/projects/alpha/chats/${OTHER_THREAD_ID}$`, "u"),
   );
 
   fixture.gateReturnCatalog();
-  await page.getByText(thread.display_name, { exact: true }).click();
+  // Row padding must also remain part of the conversation link.
+  await rail
+    .locator("li")
+    .filter({ has: page.getByText(thread.display_name, { exact: true }) })
+    .click({ position: { x: 2, y: 2 } });
   await expect(page).toHaveURL(
     new RegExp(`/projects/alpha/chats/${THREAD_ID}$`, "u"),
   );

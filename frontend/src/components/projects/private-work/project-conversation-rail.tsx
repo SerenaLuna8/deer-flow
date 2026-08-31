@@ -189,16 +189,20 @@ function ConversationRailContent({
                 <li
                   key={thread.thread_id}
                   className={cn(
-                    "group rounded-xl px-2 py-2 transition-colors",
+                    "group relative rounded-xl transition-colors",
                     active
                       ? "bg-accent text-accent-foreground"
                       : "hover:bg-accent/60",
                   )}
                 >
-                  <div className="relative min-w-0">
-                    <Link
-                      href={`/projects/${encodeURIComponent(project.slug)}/chats/${encodeURIComponent(thread.thread_id)}`}
-                      aria-current={active ? "page" : undefined}
+                  <Link
+                    href={`/projects/${encodeURIComponent(project.slug)}/chats/${encodeURIComponent(thread.thread_id)}`}
+                    aria-label={title}
+                    aria-current={active ? "page" : undefined}
+                    className="focus-visible:ring-ring/50 block min-w-0 rounded-xl p-2 outline-none focus-visible:ring-2"
+                    onClick={onNavigate}
+                  >
+                    <span
                       className={cn(
                         "block truncate text-sm font-medium",
                         canRename && canDelete
@@ -207,50 +211,44 @@ function ConversationRailContent({
                             ? "group-focus-within:pr-7 group-hover:pr-7"
                             : null,
                       )}
-                      onClick={onNavigate}
                     >
                       {title}
-                    </Link>
-                    {(canRename || canDelete) && (
-                      <div className="pointer-events-none absolute top-1/2 right-0 flex -translate-y-1/2 items-center opacity-0 transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
-                        {canRename && (
-                          <Button
-                            type="button"
-                            size="icon-sm"
-                            variant="ghost"
-                            className="text-muted-foreground size-7"
-                            aria-label={`重命名 ${title}`}
-                            title="重命名"
-                            onClick={() => onRename(thread)}
-                          >
-                            <PencilLineIcon aria-hidden className="size-3.5" />
-                          </Button>
-                        )}
-                        {canDelete && (
-                          <Button
-                            type="button"
-                            size="icon-sm"
-                            variant="ghost"
-                            className="text-muted-foreground size-7"
-                            aria-label={`删除 ${title}`}
-                            onClick={() => onDelete(thread)}
-                          >
-                            <Trash2Icon aria-hidden className="size-3.5" />
-                          </Button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  {thread.updated_at ? (
-                    <Link
-                      href={`/projects/${encodeURIComponent(project.slug)}/chats/${encodeURIComponent(thread.thread_id)}`}
-                      tabIndex={-1}
-                      className="text-muted-foreground mt-1 block text-xs"
-                      onClick={onNavigate}
-                    >
-                      {formatTimeAgo(thread.updated_at)}
-                    </Link>
-                  ) : null}
+                    </span>
+                    {thread.updated_at ? (
+                      <span className="text-muted-foreground mt-1 block text-xs">
+                        {formatTimeAgo(thread.updated_at)}
+                      </span>
+                    ) : null}
+                  </Link>
+                  {(canRename || canDelete) && (
+                    <div className="pointer-events-none absolute top-1 right-2 z-10 flex items-center opacity-0 transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
+                      {canRename && (
+                        <Button
+                          type="button"
+                          size="icon-sm"
+                          variant="ghost"
+                          className="text-muted-foreground size-7"
+                          aria-label={`重命名 ${title}`}
+                          title="重命名"
+                          onClick={() => onRename(thread)}
+                        >
+                          <PencilLineIcon aria-hidden className="size-3.5" />
+                        </Button>
+                      )}
+                      {canDelete && (
+                        <Button
+                          type="button"
+                          size="icon-sm"
+                          variant="ghost"
+                          className="text-muted-foreground size-7"
+                          aria-label={`删除 ${title}`}
+                          onClick={() => onDelete(thread)}
+                        >
+                          <Trash2Icon aria-hidden className="size-3.5" />
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 </li>
               );
             })}

@@ -50,6 +50,8 @@ Keep routes and layouts thin. `core/<domain>/` owns contracts and data flow;
 feature components own presentation of already-scoped, validated state. Prefer
 updating generated or shared primitives through their owning registry or
 generator; a necessary local patch needs focused coverage and an explanation.
+Conversation-rail rows use one full-row link for title, timestamp, and padding;
+rename/delete controls remain sibling buttons outside the navigation link.
 
 ## Non-negotiable client boundaries
 

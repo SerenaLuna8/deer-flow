@@ -146,16 +146,11 @@ export function SubtaskCard({
       open={!collapsed}
       data-subtask-stop-reason={task.stopReason}
     >
-      <div
-        className={cn("ambilight z-[-1]", visuallyRunning ? "enabled" : "")}
-      ></div>
       {visuallyRunning && (
-        <>
-          <ShineBorder
-            borderWidth={1.5}
-            shineColor={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
-          />
-        </>
+        <ShineBorder
+          borderWidth={1.5}
+          shineColor={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
+        />
       )}
       <div className="bg-background/95 flex w-full min-w-0 flex-col rounded-lg">
         <div className="flex w-full min-w-0 items-center justify-between p-0.5">

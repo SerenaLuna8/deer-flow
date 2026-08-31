@@ -202,6 +202,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 本人已有且未完成的 Agent Builder 会话；创建、继续设计、编辑、取消、提交和生命周期操作仍
 按编辑或治理 capability 拒绝。Skill/MCP 作者工作台也不向只读角色开放。
 
+会话列表的标题、时间和行内留白均可点击切换会话；重命名与删除按钮独立操作。
+
 ## 运行架构
 
 | 组件        |   默认端口 | 职责                                        |

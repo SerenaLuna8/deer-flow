@@ -53,7 +53,7 @@ describe("SubtaskCard delegated execution approval", () => {
     expect(html).toContain("等待审批");
     expect(html).not.toContain("子任务运行中");
     expect(html).not.toContain("animate-spin");
-    expect(html).not.toContain('class="ambilight z-[-1] enabled"');
+    expect(html).not.toContain("animate-shine");
   });
 
   test("renders a denied approval as a settled failure", () => {
