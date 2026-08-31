@@ -22,6 +22,9 @@ import { KnowledgeBaseDetail } from "./knowledge-base-detail";
 import { KnowledgeBasesView } from "./knowledge-bases-view";
 import { KnowledgeCreateWizard } from "./knowledge-create-wizard";
 
+const KNOWLEDGE_PAGE_CLASS_NAME =
+  "w-full min-w-0 px-4 py-6 text-[13px] leading-5 [--muted:#f0f2f5] [--primary:#155dfc] [--primary-foreground:#fff] [--ring:#60a5fa] [--selection:#155dfc] [--selection-subtle:#eff6ff] sm:px-6 lg:px-8 dark:[--muted:#24272e] dark:[--selection:#60a5fa] dark:[--selection-subtle:#172554]";
+
 /**
  * URL-driven knowledge workspace: `kb/view/doc/segment/status/sort/page`
  * live in the query string (validated by the navigation module), so reloads
@@ -83,7 +86,7 @@ export function ProjectKnowledgePage() {
 
   if (canEdit && wizardOpen) {
     return (
-      <main className="w-full min-w-0 px-4 py-6 text-[13px] leading-5 sm:px-6 lg:px-8">
+      <main className={KNOWLEDGE_PAGE_CLASS_NAME}>
         <KnowledgeCreateWizard
           scope={scope}
           onExit={() => setWizardOpen(false)}
@@ -103,7 +106,7 @@ export function ProjectKnowledgePage() {
   if (navState.kb !== null) {
     if (currentBase === null) {
       return (
-        <main className="w-full min-w-0 px-4 py-6 text-[13px] leading-5 sm:px-6 lg:px-8">
+        <main className={KNOWLEDGE_PAGE_CLASS_NAME}>
           {bases.data === undefined ? (
             <Skeleton className="h-40 rounded-xl" />
           ) : (
@@ -133,7 +136,7 @@ export function ProjectKnowledgePage() {
         : navState.view;
 
     return (
-      <main className="w-full min-w-0 px-4 py-6 text-[13px] leading-5 sm:px-6 lg:px-8">
+      <main className={KNOWLEDGE_PAGE_CLASS_NAME}>
         <KnowledgeBaseDetail
           key={currentBase.id}
           scope={scope}
@@ -147,7 +150,7 @@ export function ProjectKnowledgePage() {
   }
 
   return (
-    <main className="w-full min-w-0 px-4 py-6 text-[13px] leading-5 sm:px-6 lg:px-8">
+    <main className={KNOWLEDGE_PAGE_CLASS_NAME}>
       <ProjectPageHeader
         className="mb-5 [&_h1]:text-xl [&_p]:text-[13px]"
         title={labels.page.title}

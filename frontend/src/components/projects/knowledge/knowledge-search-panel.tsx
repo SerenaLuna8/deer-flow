@@ -1,6 +1,14 @@
 "use client";
 
-import { PlusIcon, SearchIcon, XIcon } from "lucide-react";
+import {
+  FileTextIcon,
+  HistoryIcon,
+  InfoIcon,
+  PlusIcon,
+  SearchIcon,
+  SlidersHorizontalIcon,
+  XIcon,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -177,18 +185,18 @@ export function KnowledgeSearchPanel({
   };
 
   return (
-    <section aria-label={labels.search.title} className="space-y-4 text-[13px]">
+    <section aria-label={labels.search.title} className="space-y-5 text-[13px]">
       <div>
         <h2 className="text-base font-semibold tracking-tight">
           {labels.search.title}
         </h2>
         <p className="text-muted-foreground mt-1 text-xs leading-5">
-          {labels.search.description}
+          {labels.search.workspaceHint}
         </p>
       </div>
-      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      <div className="border-border/80 bg-background grid overflow-hidden rounded-xl border xl:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[360px_minmax(0,1fr)]">
         <form
-          className="border-border/70 bg-muted/20 grid gap-4 rounded-lg border p-4"
+          className="border-border/70 flex min-w-0 flex-col gap-5 border-b p-5 xl:border-r xl:border-b-0"
           onSubmit={(event) => {
             event.preventDefault();
             if (!query.trim() || !topKValid || !thresholdValid || !filtersValid)
@@ -217,10 +225,16 @@ export function KnowledgeSearchPanel({
             search.mutate(input);
           }}
         >
-          <label className="grid gap-1.5 text-[13px]">
-            <span className="font-medium">{labels.search.queryLabel}</span>
+          <label className="grid gap-2 text-[13px]">
+            <span className="flex items-center gap-2 font-semibold">
+              <SearchIcon
+                aria-hidden
+                className="text-muted-foreground size-4"
+              />
+              {labels.search.queryLabel}
+            </span>
             <Input
-              className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
+              className="border-input/80 bg-background h-10 rounded-lg text-[13px] shadow-none md:text-[13px]"
               value={query}
               required
               maxLength={2000}
@@ -228,70 +242,79 @@ export function KnowledgeSearchPanel({
               onChange={(event) => setQuery(event.target.value)}
             />
           </label>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1.5 text-[13px]">
-              <span className="font-medium">{labels.search.topKLabel}</span>
-              <Input
-                className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                type="number"
-                min={1}
-                max={20}
-                value={topK}
-                placeholder={String(base.default_top_k)}
-                onChange={(event) => setTopK(event.target.value)}
+          <div className="border-border/60 space-y-4 border-t pt-4">
+            <h3 className="flex items-center gap-2 text-[13px] font-semibold">
+              <SlidersHorizontalIcon
+                aria-hidden
+                className="text-muted-foreground size-4"
               />
-              <span className="text-muted-foreground text-xs">
-                {labels.search.topKHint}
-              </span>
-            </label>
+              {labels.search.parametersTitle}
+            </h3>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="grid gap-1.5 text-[13px]">
+                <span className="font-medium">{labels.search.topKLabel}</span>
+                <Input
+                  className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={topK}
+                  placeholder={String(base.default_top_k)}
+                  onChange={(event) => setTopK(event.target.value)}
+                />
+                <span className="text-muted-foreground text-xs">
+                  {labels.search.topKHint}
+                </span>
+              </label>
+              <label className="grid gap-1.5 text-[13px]">
+                <span className="font-medium">
+                  {labels.search.thresholdLabel}
+                </span>
+                <Input
+                  className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={threshold}
+                  placeholder={String(base.default_score_threshold)}
+                  onChange={(event) => setThreshold(event.target.value)}
+                />
+                <span className="text-muted-foreground text-xs">
+                  {labels.search.thresholdHint}
+                </span>
+              </label>
+            </div>
             <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
-                {labels.search.thresholdLabel}
+                {labels.search.retrievalModeLabel}
               </span>
-              <Input
-                className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                type="number"
-                min={0}
-                max={1}
-                step={0.05}
-                value={threshold}
-                placeholder={String(base.default_score_threshold)}
-                onChange={(event) => setThreshold(event.target.value)}
-              />
-              <span className="text-muted-foreground text-xs">
-                {labels.search.thresholdHint}
-              </span>
+              <Select
+                value={retrievalMode}
+                onValueChange={(value) =>
+                  setRetrievalMode(value as "default" | KnowledgeRetrievalMode)
+                }
+              >
+                <SelectTrigger
+                  className="border-input/80 bg-background w-full rounded-lg text-[13px] shadow-none"
+                  aria-label={labels.search.retrievalModeLabel}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
+                  <SelectItem value="default">
+                    {labels.search.retrievalModes.default}
+                  </SelectItem>
+                  <SelectItem value="semantic">
+                    {labels.search.retrievalModes.semantic}
+                  </SelectItem>
+                  <SelectItem value="hybrid">
+                    {labels.search.retrievalModes.hybrid}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
             </label>
           </div>
-          <label className="grid gap-1.5 text-[13px]">
-            <span className="font-medium">
-              {labels.search.retrievalModeLabel}
-            </span>
-            <Select
-              value={retrievalMode}
-              onValueChange={(value) =>
-                setRetrievalMode(value as "default" | KnowledgeRetrievalMode)
-              }
-            >
-              <SelectTrigger
-                className="border-border/70 bg-background rounded-lg text-[13px] shadow-none"
-                aria-label={labels.search.retrievalModeLabel}
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
-                <SelectItem value="default">
-                  {labels.search.retrievalModes.default}
-                </SelectItem>
-                <SelectItem value="semantic">
-                  {labels.search.retrievalModes.semantic}
-                </SelectItem>
-                <SelectItem value="hybrid">
-                  {labels.search.retrievalModes.hybrid}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </label>
           <fieldset className="border-border/60 grid gap-2 border-t pt-3 text-[13px]">
             <legend className="pr-2 font-medium">
               {labels.search.filtersLabel}
@@ -415,10 +438,10 @@ export function KnowledgeSearchPanel({
               </div>
             )}
           </fieldset>
-          <div>
+          <div className="pt-1">
             <Button
               type="submit"
-              className="h-9 rounded-lg text-[13px]"
+              className="h-9 w-full rounded-lg text-[13px] shadow-none"
               disabled={
                 search.isPending ||
                 !query.trim() ||
@@ -436,9 +459,32 @@ export function KnowledgeSearchPanel({
         </form>
 
         <div
-          className="min-w-0 space-y-3"
+          className="bg-muted/15 flex min-w-0 flex-col p-5"
           data-testid="knowledge-search-outcome"
         >
+          <div className="border-border/60 mb-4 flex min-h-6 items-center justify-between gap-3 border-b pb-4">
+            <h3 className="flex items-center gap-2 text-[13px] font-semibold">
+              <FileTextIcon
+                aria-hidden
+                className="text-muted-foreground size-4"
+              />
+              {labels.search.outcomeTitle}
+            </h3>
+            <details
+              className="relative shrink-0"
+              data-testid="knowledge-score-help"
+            >
+              <summary
+                aria-label={labels.search.scoreHelp}
+                className="text-muted-foreground hover:bg-muted focus-visible:ring-selection/40 flex size-6 cursor-pointer list-none items-center justify-center rounded-md focus-visible:ring-2 focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+              >
+                <InfoIcon aria-hidden className="size-3.5" />
+              </summary>
+              <div className="border-border/80 bg-popover text-popover-foreground absolute top-8 right-0 z-10 w-72 max-w-[calc(100vw-4rem)] rounded-lg border p-3 text-xs leading-5 shadow-md">
+                {labels.search.description}
+              </div>
+            </details>
+          </div>
           {search.error ? (
             <div
               role="alert"
@@ -464,16 +510,27 @@ export function KnowledgeSearchPanel({
           ) : null}
 
           {search.isPending ? (
-            <Skeleton aria-hidden className="h-40 rounded-lg" />
+            <div className="grid gap-3" aria-hidden>
+              <Skeleton className="h-32 rounded-lg" />
+              <Skeleton className="h-32 rounded-lg" />
+            </div>
           ) : null}
 
           {!search.isPending && search.error === null && !search.data ? (
-            <p
-              className="text-muted-foreground border-border/70 bg-muted/10 rounded-lg border border-dashed px-4 py-10 text-center text-[13px] leading-5"
+            <div
+              className="flex min-h-72 flex-1 flex-col items-center justify-center px-5 py-10 text-center"
               data-testid="knowledge-search-never"
             >
-              {labels.search.neverSearched}
-            </p>
+              <span className="border-border/70 bg-background text-muted-foreground mb-4 inline-flex size-11 items-center justify-center rounded-xl border">
+                <SearchIcon aria-hidden className="size-5" strokeWidth={1.5} />
+              </span>
+              <p className="text-[13px] font-medium">
+                {labels.search.waitingTitle}
+              </p>
+              <p className="text-muted-foreground mt-2 max-w-64 text-xs leading-5">
+                {labels.search.neverSearched}
+              </p>
+            </div>
           ) : null}
 
           {search.data && !search.isPending ? (
@@ -526,7 +583,7 @@ function SearchOutcome({
     const reason = diagnostics?.empty_reason ?? null;
     return (
       <p
-        className="text-muted-foreground border-border/70 bg-muted/10 rounded-lg border border-dashed px-4 py-10 text-center text-[13px] leading-5"
+        className="text-muted-foreground flex min-h-72 items-center justify-center px-5 py-10 text-center text-[13px] leading-5"
         data-testid="knowledge-search-empty"
       >
         {reason ? labels.search.emptyReasons[reason] : labels.search.empty}
@@ -583,7 +640,7 @@ function SearchOutcome({
                 </span>
                 {position ? <span>· {position}</span> : null}
               </div>
-              <p className="text-foreground/85 mt-2 text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-pre-wrap">
+              <p className="text-foreground/85 mt-2 line-clamp-4 text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-normal">
                 {citation.snippet}
               </p>
               <div className="mt-2">
@@ -961,22 +1018,25 @@ function RecentQueriesSection({
   return (
     <section
       aria-label={labels.search.recentTitle}
-      className="border-border/70 space-y-3 border-t pt-4"
+      className="border-border/80 bg-background overflow-hidden rounded-xl border"
     >
-      <h3 className="text-[13px] font-semibold">{labels.search.recentTitle}</h3>
+      <h3 className="border-border/60 flex items-center gap-2 border-b px-5 py-4 text-[13px] font-semibold">
+        <HistoryIcon aria-hidden className="text-muted-foreground size-4" />
+        {labels.search.recentTitle}
+      </h3>
       {recent.isLoading ? (
-        <Skeleton className="h-24 rounded-lg" />
+        <Skeleton className="m-5 h-24 rounded-lg" />
       ) : recent.error ? (
-        <p role="alert" className="text-destructive text-[13px]">
+        <p role="alert" className="text-destructive p-5 text-[13px]">
           {knowledgeErrorMessage(recent.error, labels.errors)}
         </p>
       ) : (recent.data?.items.length ?? 0) === 0 ? (
-        <p className="text-muted-foreground border-border/70 bg-muted/10 rounded-lg border border-dashed px-4 py-6 text-center text-[13px]">
+        <p className="text-muted-foreground px-5 py-6 text-center text-xs">
           {labels.search.recentEmpty}
         </p>
       ) : (
         <>
-          <div className="border-border/70 bg-background overflow-x-auto rounded-lg border">
+          <div className="overflow-x-auto">
             <table className="w-full text-left text-[13px]">
               <thead className="bg-muted/30 text-muted-foreground text-xs [&_th]:font-medium">
                 <tr>
@@ -1038,7 +1098,7 @@ function RecentQueriesSection({
             </table>
           </div>
           {pageCount > 1 ? (
-            <div className="flex items-center justify-between gap-2 text-xs">
+            <div className="border-border/60 flex items-center justify-between gap-2 border-t px-5 py-3 text-xs">
               <span className="text-muted-foreground tabular-nums">
                 {labels.segments.pageInfo(page, pageCount, total)}
               </span>

@@ -4266,7 +4266,7 @@ CREATE TABLE knowledge_bases (
     project_id UUID NOT NULL,
     name VARCHAR(120) NOT NULL,
     description VARCHAR(500) DEFAULT '' NOT NULL,
-    embedding_model_id UUID NOT NULL,
+    embedding_model_id UUID,
     reranker_model_id UUID,
     status VARCHAR(16) DEFAULT 'active' NOT NULL,
     retrieval_mode VARCHAR(16) DEFAULT 'semantic' NOT NULL,
@@ -6090,12 +6090,12 @@ COMMENT ON COLUMN model_provider_models.status IS '供应商模型：模型状�
 COMMENT ON COLUMN model_provider_models.created_at IS '供应商模型：记录创建时间。';
 COMMENT ON COLUMN model_provider_models.updated_at IS '供应商模型：记录最近更新时间。';
 
-COMMENT ON TABLE knowledge_bases IS '保存项目内绑定同一 Embedding 模型（可选 Reranker 模型）的知识文档集合。';
+COMMENT ON TABLE knowledge_bases IS '保存项目内的知识文档集合；空库可暂不配置模型，首次上传前绑定 Embedding 模型及可选 Reranker 模型。';
 COMMENT ON COLUMN knowledge_bases.id IS '知识库：主键标识。';
 COMMENT ON COLUMN knowledge_bases.project_id IS '知识库：所属项目标识。';
 COMMENT ON COLUMN knowledge_bases.name IS '知识库：项目内唯一的知识库名称。';
 COMMENT ON COLUMN knowledge_bases.description IS '知识库：知识库描述。';
-COMMENT ON COLUMN knowledge_bases.embedding_model_id IS '知识库：固定使用的 Embedding 模型标识（指向供应商模型行）。';
+COMMENT ON COLUMN knowledge_bases.embedding_model_id IS '知识库：使用的 Embedding 模型标识（指向供应商模型行）；空库尚未配置时为空，首次上传前完成绑定。';
 COMMENT ON COLUMN knowledge_bases.reranker_model_id IS '知识库：可选的 Reranker 模型标识；为空表示检索不重排序。';
 COMMENT ON COLUMN knowledge_bases.status IS '知识库：知识库状态（active、disabled 或 deleting）。';
 COMMENT ON COLUMN knowledge_bases.retrieval_mode IS '知识库：检索模式（semantic 仅向量或 hybrid 增加词法召回路）；检索测试可单次覆盖不落库。';

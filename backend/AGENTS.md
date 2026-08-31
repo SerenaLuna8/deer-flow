@@ -506,6 +506,13 @@ recreated explicitly, never repaired in place.
   require membership plus `shared_assets.read` for reads and
   `shared_assets.edit` for writes; the search API and Agent tool return only
   segments of the caller's project.
+- An empty Knowledge Base may leave `embedding_model_id` NULL and retains the
+  normal status values. Its first configuration uses PATCH to bind Embedding
+  and save retrieval settings together, under the Base lock, only while no
+  documents exist. Reranker binding requires Embedding. Upload admission rejects
+  unconfigured bases before reserving a document or writing an object; search
+  excludes them before model loading and candidate budgeting. Once configured,
+  Embedding changes use rebuild; PATCH cannot replace or clear that binding.
 - Ingestion, document deletion, base deletion, and exact-key orphan cleanup run
   as `knowledge_tasks` claimed by the Worker under lease semantics. Project
   purge is a separate retention hook that stays composed when Knowledge is

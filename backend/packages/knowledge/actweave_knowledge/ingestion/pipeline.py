@@ -225,7 +225,7 @@ class KnowledgeIngestionHandler:
                 if document is None or document.version != claim.target_version or document.status not in ("queued", "processing"):
                     return None
                 embedding_model_id = await session.scalar(select(KnowledgeBaseRow.embedding_model_id).where(KnowledgeBaseRow.id == document.knowledge_base_id))
-                if embedding_model_id is None:  # pragma: no cover - FK keeps the base alive
+                if embedding_model_id is None:  # pragma: no cover - upload admission requires a configured base
                     raise _storage_unavailable()
                 # The port validates type and active status inside this locked
                 # transaction; a disabled model halts provider usage, not just

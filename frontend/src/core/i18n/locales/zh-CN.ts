@@ -186,7 +186,15 @@ export const zhCN: Translations = {
       empty: "还没有知识库。创建一个后即可上传文档。",
       createButton: "新建知识库",
       createTitle: "新建知识库",
-      createDescription: "选择模型配置后创建知识库；创建后模型配置不可更换。",
+      createDescription:
+        "先创建空白知识库，首次上传文档时再配置模型和检索方式。",
+      unconfigured: "待配置",
+      unconfiguredHint:
+        "知识库尚未配置模型，首次上传文档时完成配置即可开始使用。",
+      setupTitle: "配置知识库",
+      setupDescription: "开始导入文档前，选择 Embedding 模型和检索方式。",
+      setupButton: "配置模型",
+      setupSave: "保存配置",
       nameLabel: "名称",
       namePlaceholder: "例如：产品手册",
       descriptionLabel: "描述（可选）",
@@ -207,11 +215,16 @@ export const zhCN: Translations = {
       updatedAt: (time) => `更新于 ${time}`,
       openDocuments: "查看文档",
       noDescription: "暂无描述。",
+      basicSectionTitle: "基本信息",
       retrievalSectionTitle: "检索默认参数",
       retrievalModeLabel: "默认检索路线",
       retrievalModeHint:
         "供 Agent 和使用库默认值的检索使用。保存后生效，无需重建。",
-      retrievalModes: { semantic: "仅语义检索", hybrid: "混合检索" },
+      retrievalModes: { semantic: "向量检索", hybrid: "混合检索" },
+      retrievalModeDescriptions: {
+        semantic: "将问题转为向量，查找语义相近的文档分段。",
+        hybrid: "同时进行语义与关键词检索，合并候选结果。",
+      },
       defaultTopKLabel: "默认返回条数 (top_k)",
       defaultTopKHint: "检索未指定 top_k 时使用，范围 1-20。",
       defaultThresholdLabel: "默认分数阈值",
@@ -219,10 +232,12 @@ export const zhCN: Translations = {
       rerankerLabel: "重排序模型",
       rerankerNone: "不使用重排序",
       rerankerHint: "可选。保存后立即生效，不需要重建。",
+      rerankerUnavailable:
+        "暂无可用的重排序模型，可先不启用；模型需在模型管理中配置。",
       rebuildSectionTitle: "嵌入模型",
       rebuildModelLabel: "Embedding 模型",
       rebuildHint:
-        "重嵌入保留全部分段的文本、身份与启停状态（含人工编辑），仅重新生成向量；处理期间文档暂不参与检索。可更换模型改绑，也可保持当前模型原样重嵌入。",
+        "仅重新生成向量，保留全部分段的文本、身份、启停状态及人工编辑；文档完成前暂停检索。可沿用或更换模型。",
       rebuildButton: "重新嵌入文档",
       rebuildPending: "提交中…",
       rebuildOutcome: (accepted, skipped) =>
@@ -255,10 +270,15 @@ export const zhCN: Translations = {
       previous: "上一步",
       saveAndProcess: "保存并处理",
       chunkSectionTitle: "分段设置",
+      parentContextTitle: "父块用于上下文",
+      childRetrievalTitle: "子块用于检索",
+      previewParentText: "查看完整父块",
+      nextStepsTitle: "接下来做什么",
+      nextStepsHint:
+        "前往文档查看处理状态、检查分段或重试失败文件。文档就绪后，可运行检索测试，并在 Agent 对话中使用。",
       infoSectionTitle: "知识库信息",
       createdTitle: "知识库已创建",
-      createdHint:
-        "文档正在嵌入处理，就绪后即可在检索测试与 Agent 对话中使用。",
+      createdHint: "文档就绪后，可进行检索测试，并在 Agent 对话中使用。",
       processingTitle: "嵌入处理进度",
       summaryTitle: "创建设置",
       goToDocuments: "前往文档",
@@ -283,6 +303,7 @@ export const zhCN: Translations = {
       documents: "文档",
       settings: "设置",
       settingsSaved: "已保存。",
+      settingsDescription: "管理知识库信息与默认检索方式。",
       metadata: "元数据",
       baseNotFound: "该知识库不存在或不可访问。",
       backToBases: "返回知识库列表",
@@ -463,6 +484,7 @@ export const zhCN: Translations = {
         "分段将使用本知识库绑定的 Embedding 模型生成向量，保存后立即可被检索。",
       contentLabel: "内容",
       contentPlaceholder: "输入分段内容",
+      viewContent: "查看全文",
       edit: "编辑",
       editTitle: (position) => `编辑分段 #${position}`,
       delete: "删除",
@@ -488,6 +510,11 @@ export const zhCN: Translations = {
     },
     search: {
       title: "检索测试",
+      workspaceHint: "输入问题，验证知识库的召回效果。",
+      parametersTitle: "检索参数",
+      outcomeTitle: "检索结果",
+      waitingTitle: "等待检索",
+      scoreHelp: "分数说明",
       description:
         "对当前知识库执行检索，验证召回效果。绑定重排序模型时结果按重排分排序（0-1），未绑定时按向量余弦相似度排序（-1 到 1）。",
       queryLabel: "查询内容",
@@ -534,7 +561,7 @@ export const zhCN: Translations = {
       retrievalModeLabel: "检索路线",
       retrievalModes: {
         default: "跟随库配置",
-        semantic: "仅语义（本次）",
+        semantic: "向量检索（本次）",
         hybrid: "混合（本次）",
       },
       neverSearched: "输入问题开始检索测试，结果与诊断将显示在这里。",

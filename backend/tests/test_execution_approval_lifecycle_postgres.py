@@ -12,13 +12,13 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.private_thread_seed import seed_private_thread_database
-from support.system_model_seed import seed_model_provider
 from support.run_closure import (
     add_legacy_test_run_asset,
     add_sealed_test_run,
     begin_test_run_closure,
     seal_test_run_closure,
 )
+from support.system_model_seed import seed_model_provider
 
 from app.audit.models import AuditAction
 from app.audit.service import (

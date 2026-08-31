@@ -1154,8 +1154,8 @@ class KnowledgeSearchService:
     ) -> tuple[list[_SearchGroup], dict[UUID, _BaseDefaults]]:
         """Group the project's searchable bases by (embedding, reranker) pair.
 
-        Explicit base ids narrow to their active subset; an explicitly empty
-        selection searches nothing. An unresolvable bound model — missing,
+        Explicit base ids narrow to their active, configured subset; an
+        explicitly empty selection searches nothing. An unresolvable bound model — missing,
         disabled, or with undecryptable material — fails the whole request
         (``KNOWLEDGE_MODEL_UNAVAILABLE`` from the port): its bases cannot
         silently vanish from results. The second return value carries each
@@ -1178,6 +1178,7 @@ class KnowledgeSearchService:
         ).where(
             KnowledgeBaseRow.project_id == project_id,
             KnowledgeBaseRow.status == "active",
+            KnowledgeBaseRow.embedding_model_id.is_not(None),
         )
         if base_ids is not None:
             statement = statement.where(KnowledgeBaseRow.id.in_(base_ids))

@@ -312,7 +312,7 @@ class KnowledgeModelOptionsResponse(_StrictModel):
 class KnowledgeBaseCreateRequest(_StrictModel):
     name: str
     # UUIDs arrive as JSON strings; strict mode would reject the coercion.
-    embedding_model_id: Annotated[uuid.UUID, Field(strict=False)]
+    embedding_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
     reranker_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
     description: str = ""
     # hybrid adds the lexical recall route; semantic is the default.
@@ -326,6 +326,8 @@ class KnowledgeBaseUpdateRequest(_StrictModel):
     default_top_k: int | None = None
     # Integers (e.g. 0) are valid thresholds; strict float would reject them.
     default_score_threshold: Annotated[float, Field(strict=False)] | None = None
+    # Only an empty, unconfigured base can receive its first embedding binding.
+    embedding_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
     # Optional reranker rebinding: set an ID, or clear the binding entirely.
     reranker_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
     clear_reranker_model: bool = False
@@ -344,7 +346,7 @@ class KnowledgeBaseItemResponse(_StrictModel):
     project_id: uuid.UUID
     name: str
     description: str
-    embedding_model_id: uuid.UUID
+    embedding_model_id: uuid.UUID | None
     reranker_model_id: uuid.UUID | None
     retrieval_mode: Literal["semantic", "hybrid"]
     status: Literal["active", "disabled", "deleting"]
@@ -1000,6 +1002,7 @@ async def update_knowledge_base(
                 status=body.status,
                 default_top_k=body.default_top_k,
                 default_score_threshold=body.default_score_threshold,
+                embedding_model_id=body.embedding_model_id,
                 reranker_model_id=body.reranker_model_id,
                 clear_reranker_model=body.clear_reranker_model,
                 retrieval_mode=body.retrieval_mode,

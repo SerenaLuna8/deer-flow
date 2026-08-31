@@ -104,6 +104,7 @@ import {
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
+import { KnowledgeBaseSetupDialog } from "./knowledge-base-setup-dialog";
 import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeFileTypeIcon } from "./knowledge-file-type-icon";
 import { KnowledgeSegmentsBrowser } from "./knowledge-segments-browser";
@@ -335,6 +336,7 @@ function DocumentsTable({
   const toggleDocuments = useSetKnowledgeDocumentsEnabled(scope);
   const batchDelete = useDeleteKnowledgeDocuments(scope);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
   const [deleting, setDeleting] = useState<KnowledgeDocumentItem | null>(null);
   const [renaming, setRenaming] = useState<KnowledgeDocumentItem | null>(null);
   // Metadata and reparse dialogs track ids, not row objects: conflicts
@@ -461,13 +463,22 @@ function DocumentsTable({
           <Button
             type="button"
             className="h-9 rounded-lg text-[13px] shadow-none"
-            onClick={() => setUploadOpen(true)}
+            onClick={() => {
+              if (base.embedding_model_id === null) setSetupOpen(true);
+              else setUploadOpen(true);
+            }}
           >
             <UploadIcon aria-hidden className="size-4" />
             {labels.documents.uploadButton}
           </Button>
         ) : null}
       </div>
+
+      {base.embedding_model_id === null ? (
+        <p className="text-muted-foreground rounded-lg border border-dashed px-4 py-3 text-[13px]">
+          {labels.bases.unconfiguredHint}
+        </p>
+      ) : null}
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="relative min-w-0 flex-1 sm:max-w-72">
@@ -997,6 +1008,17 @@ function DocumentsTable({
             </Button>
           </div>
         </div>
+      ) : null}
+
+      {canEdit ? (
+        <KnowledgeBaseSetupDialog
+          key={base.id}
+          scope={scope}
+          base={base}
+          open={setupOpen}
+          onOpenChange={setSetupOpen}
+          onConfigured={() => setUploadOpen(true)}
+        />
       ) : null}
 
       {canEdit ? (
@@ -2296,7 +2318,7 @@ function UploadDocumentDialog({
               </p>
             ) : null}
           </fieldset>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 items-start gap-3">
             <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
                 {labels.documents.chunkSizeLabel}
@@ -2310,9 +2332,6 @@ function UploadDocumentDialog({
                 value={chunkSize}
                 onChange={(event) => setChunkSize(event.target.value)}
               />
-              <span className="text-muted-foreground text-xs">
-                {labels.documents.chunkSizeHint}
-              </span>
             </label>
             <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
@@ -2327,9 +2346,6 @@ function UploadDocumentDialog({
                 value={chunkOverlap}
                 onChange={(event) => setChunkOverlap(event.target.value)}
               />
-              <span className="text-muted-foreground text-xs">
-                {labels.documents.chunkOverlapHint}
-              </span>
             </label>
           </div>
           <label className="grid gap-1.5 text-[13px]">
@@ -2343,12 +2359,9 @@ function UploadDocumentDialog({
               value={chunkSeparator}
               onChange={(event) => setChunkSeparator(event.target.value)}
             />
-            <span className="text-muted-foreground text-xs">
-              {labels.documents.chunkSeparatorHint}
-            </span>
           </label>
           {chunkingMode === "parent_child" ? (
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 items-start gap-3">
               <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
                   {labels.documents.childChunkSizeLabel}
@@ -2376,9 +2389,6 @@ function UploadDocumentDialog({
                     setChildChunkSeparator(event.target.value)
                   }
                 />
-                <span className="text-muted-foreground text-xs">
-                  {labels.documents.childChunkSeparatorHint}
-                </span>
               </label>
             </div>
           ) : null}

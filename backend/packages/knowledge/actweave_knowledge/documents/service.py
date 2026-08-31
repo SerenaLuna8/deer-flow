@@ -442,6 +442,8 @@ class KnowledgeDocumentService:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
                 if base.status != "active":
                     raise _invalid("仅 active 状态的 Knowledge Base 接受上传")
+                if base.embedding_model_id is None:
+                    raise _invalid("请先配置 Knowledge Base 的 Embedding 模型再上传文档")
                 document_count = await session.scalar(select(func.count()).select_from(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == base_id))
                 if int(document_count or 0) >= self._settings.max_documents_per_knowledge_base:
                     raise KnowledgeError(

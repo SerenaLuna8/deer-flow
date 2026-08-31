@@ -310,7 +310,9 @@ generator; a necessary local patch needs focused coverage and an explanation.
 - All chunk parameters (size, overlap, separator, pre-processing rules,
   chunking mode with child size/separator) are
   immutable after upload and retry reuses them; the wizard's step 2 and the
-  upload dialog expose the same controls. The wizard preview panel carries a
+  upload dialog expose the same controls. The wizard expands parameters inside
+  the selected mode card and scrolls configuration and preview independently on
+  desktop. Its preview panel carries a
   file picker over the selected files: each newly shown `File` object
   auto-previews exactly once via the stateless `chunk-preview` endpoint, and
   later parameter edits keep the last preview visible as stale requiring an
@@ -322,7 +324,8 @@ generator; a necessary local patch needs focused coverage and an explanation.
   winner (fast A→B switches, re-submitted parameters, removed or same-name
   replaced files, scope changes). Child fields
   render only in parent_child mode and are omitted from general-mode
-  requests. The separator inputs hold the escaped form the backend decodes
+  requests; child preview chips retain access to the complete parent text.
+  The separator inputs hold the escaped form the backend decodes
   (`\n\n` and `\n` by default). The upload dialog submits multiple files
   sequentially, reports one verdict per file, and keeps only the failed files
   queued for a retry that never re-uploads the succeeded ones. Search labels
@@ -342,9 +345,23 @@ generator; a necessary local patch needs focused coverage and an explanation.
   response cannot resurrect them.
 - The retrieval test's top_k and threshold inputs are optional: empty inputs
   omit the field so the backend resolves the base defaults (placeholders show
-  them), which are edited in the base settings panel. The wizard, empty-base
-  creation, and base settings persist the semantic/hybrid retrieval mode;
-  changing the retrieval test's mode overrides only that request and does not
+  them), which are edited in the base settings panel. Empty-base creation only
+  submits name/description and accepts `embedding_model_id: null`; it neither
+  fetches model options nor silently chooses a model. The first Upload action
+  opens `knowledge-base-setup-dialog.tsx`: an atomic initial PATCH binds the
+  embedding model plus retrieval/reranker choices before the original upload
+  dialog opens. Failure preserves choices without uploading. Settings can open
+  the same setup without starting an upload. Unconfigured bases show a neutral
+  state; read-only members never receive setup controls. Already configured
+  bases retain rebuild as their only embedding replacement path.
+  The document-first wizard, first configuration, and base settings persist the
+  semantic/hybrid retrieval mode;
+  the UI calls `semantic` "Vector search" (向量检索); the API value remains
+  `semantic`. The creation wizard can bind an optional reranker inside either
+  selected mode card. It snapshots the binding at submit, omits an unselected
+  `reranker_model_id`, and freezes the control during creation. Model selection
+  is a base setting, not a per-query override.
+  Changing the retrieval test's mode overrides only that request and does not
   change what an Agent inherits from the base. Metadata filter rows
   (field/operator/typed value; operators follow the field type) are built
   client-side and sent as `metadata_filters` only when present; with no
@@ -362,12 +379,15 @@ generator; a necessary local patch needs focused coverage and an explanation.
   blank, submits only explicitly edited fields in one all-or-nothing patch,
   and on a 409 conflict keeps the unsaved form while refreshing the
   authoritative rows for re-confirmation. The settings
-  panel binds or clears the optional reranker model (effective on save, no
+  panel uses semantic/hybrid choice cards and binds or clears the optional
+  reranker model (effective on save, no
   rebuild; the search panel drops stale results on the change), and its
   re-embed block confirms what is preserved (text, manual edits, enabled
   states) before POSTing the selected embedding model, then reports the real
   admission outcome (accepted count plus skipped never-published documents);
-  documents then repoll back to ready. Each document row's "Reparse from
+  documents then repoll back to ready. Settings controls placed outside the
+  PATCH form retain explicit `form` association for native validation and Enter
+  submission; the re-embed operation remains separate. Each document row's "Reparse from
   original" action opens a dialog prefilled with the document's frozen chunk
   parameters: edits invalidate the server-side preview, submission carries
   `expected_version`, and a conflict keeps the form, retires the preview, and
@@ -389,9 +409,12 @@ generator; a necessary local patch needs focused coverage and an explanation.
   documents without folding failures into success. "View
   segments" replaces the table in place with the segment browser
   (`knowledge-segments-browser.tsx`): list with word counts and manual badges,
-  enable toggles, edit and add dialogs (4000-character ceiling mirroring the
-  backend), and delete. Read-only members get the browser without any
-  mutation controls.
+  enable toggles, right-side edit/add sheets (4000-character ceiling mirroring
+  the backend), and confirmed deletion. Condensed list previews open complete
+  text in a read-only sheet, also available to read-only members; those members
+  still receive no mutation controls. These sheets use `SheetContent`'s optional
+  `overlayClassName` for a light backdrop while keeping the shared modal,
+  focus, and dismissal behavior; other sheets retain their default overlay.
 - `/admin/settings/models` is one unified "Model providers" surface:
   `admin-model-settings-page.tsx` owns provider cards that group the bound
   text models with the provider's Embedding/Rerank models, while

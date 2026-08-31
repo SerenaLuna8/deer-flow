@@ -125,7 +125,7 @@ class KnowledgeReembedHandler:
                     # like this is corrupt state, not a late result.
                     raise KnowledgeError(KNOWLEDGE_TASK_FAILED, "文档从未成功发布，无法重嵌入")
                 embedding_model_id = await session.scalar(select(KnowledgeBaseRow.embedding_model_id).where(KnowledgeBaseRow.id == document.knowledge_base_id))
-                if embedding_model_id is None:  # pragma: no cover - FK keeps the base alive
+                if embedding_model_id is None:  # pragma: no cover - rebuild binds the model before queuing
                     raise _storage_unavailable()
                 # The port validates type and active status inside this locked
                 # transaction; a disabled model halts provider usage.

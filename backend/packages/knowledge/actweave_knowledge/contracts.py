@@ -186,7 +186,7 @@ KNOWLEDGE_MAX_TOP_K = 20
 @dataclass(frozen=True, slots=True)
 class KnowledgeBaseCreate:
     name: str
-    embedding_model_id: UUID
+    embedding_model_id: UUID | None = None
     description: str = ""
     reranker_model_id: UUID | None = None
     retrieval_mode: KnowledgeRetrievalMode = "semantic"
@@ -196,6 +196,8 @@ class KnowledgeBaseCreate:
 class KnowledgeBaseUpdate:
     """Partial update; ``None`` keeps the stored value.
 
+    Embedding can only be set on an unconfigured base with no documents;
+    changing an existing binding remains an explicit rebuild operation.
     Rerank rebinding is tri-state: ``reranker_model_id`` set rebinds without a
     rebuild, ``clear_reranker_model=True`` switches reranking off, and neither
     keeps the stored binding. Setting both is invalid.
@@ -206,6 +208,7 @@ class KnowledgeBaseUpdate:
     status: Literal["active", "disabled"] | None = None
     default_top_k: int | None = None
     default_score_threshold: float | None = None
+    embedding_model_id: UUID | None = None
     reranker_model_id: UUID | None = None
     clear_reranker_model: bool = False
     retrieval_mode: KnowledgeRetrievalMode | None = None
@@ -217,7 +220,7 @@ class KnowledgeBaseView:
     project_id: UUID
     name: str
     description: str
-    embedding_model_id: UUID
+    embedding_model_id: UUID | None
     reranker_model_id: UUID | None
     retrieval_mode: KnowledgeRetrievalMode
     status: KnowledgeBaseStatus

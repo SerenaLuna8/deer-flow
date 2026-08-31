@@ -19,13 +19,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
@@ -34,18 +27,15 @@ import {
   useCreateKnowledgeBase,
   useDeleteKnowledgeBase,
   useKnowledgeBases,
-  useKnowledgeModelOptions,
 } from "@/core/knowledge/hooks";
 import type {
   KnowledgeBaseItem,
   KnowledgeBaseStatus,
-  KnowledgeRetrievalMode,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
-import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
 
 function baseStatusVariant(
   status: KnowledgeBaseStatus,
@@ -172,12 +162,17 @@ export function KnowledgeBasesView({
                     className={cn(
                       "rounded-md px-1.5 py-0.5 text-[11px] font-medium",
                       base.status === "active" &&
+                        base.embedding_model_id !== null &&
                         "border-success/15 bg-success/10 text-emerald-700 dark:text-emerald-300",
-                      base.status === "disabled" &&
+                      (base.status === "disabled" ||
+                        base.embedding_model_id === null) &&
                         "border-border/60 bg-muted text-muted-foreground",
                     )}
                   >
-                    {labels.status[base.status]}
+                    {base.status === "active" &&
+                    base.embedding_model_id === null
+                      ? labels.bases.unconfigured
+                      : labels.status[base.status]}
                   </Badge>
                 </span>
                 <span className="text-muted-foreground mt-2 line-clamp-2 block text-[13px] leading-5">
@@ -296,21 +291,15 @@ function CreateBaseDialog({
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
-  const options = useKnowledgeModelOptions(scope, open);
   const createBase = useCreateKnowledgeBase(scope);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [embeddingModelId, setEmbeddingModelId] = useState("");
-  const [retrievalMode, setRetrievalMode] =
-    useState<KnowledgeRetrievalMode>("semantic");
 
   const close = (nextOpen: boolean) => {
     onOpenChange(nextOpen);
     if (!nextOpen) {
       setName("");
       setDescription("");
-      setEmbeddingModelId("");
-      setRetrievalMode("semantic");
       createBase.reset();
     }
   };
@@ -330,13 +319,10 @@ function CreateBaseDialog({
           className="grid gap-4"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!name.trim() || !embeddingModelId) return;
-            // The optional reranker starts unbound; it lives in base settings.
+            if (!name.trim()) return;
             createBase.mutate(
               {
                 name: name.trim(),
-                retrieval_mode: retrievalMode,
-                embedding_model_id: embeddingModelId,
                 description: description.trim(),
               },
               { onSuccess: () => close(false) },
@@ -364,51 +350,6 @@ function CreateBaseDialog({
               onChange={(event) => setDescription(event.target.value)}
             />
           </label>
-          <div className="grid gap-1.5 text-[13px]">
-            <span className="font-medium">{labels.bases.modelLabel}</span>
-            {options.isLoading ? (
-              <Skeleton className="h-9 rounded-md" />
-            ) : options.error ? (
-              <p role="alert" className="text-destructive text-[13px]">
-                {labels.bases.modelsLoadFailed}
-              </p>
-            ) : (options.data?.embedding_models.length ?? 0) === 0 ? (
-              <p className="text-muted-foreground text-[13px]">
-                {labels.bases.noModels}
-              </p>
-            ) : (
-              <Select
-                value={embeddingModelId}
-                onValueChange={setEmbeddingModelId}
-              >
-                <SelectTrigger
-                  className="border-input/80 bg-background rounded-lg text-[13px] shadow-none"
-                  aria-label={labels.bases.modelLabel}
-                >
-                  <SelectValue placeholder={labels.bases.modelPlaceholder} />
-                </SelectTrigger>
-                <SelectContent className="rounded-lg">
-                  {options.data?.embedding_models.map((option) => (
-                    <SelectItem
-                      className="text-[13px]"
-                      key={option.id}
-                      value={option.id}
-                    >
-                      {option.provider_name} · {option.model_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-            <p className="text-muted-foreground text-xs">
-              {labels.bases.modelHint}
-            </p>
-          </div>
-          <KnowledgeRetrievalModeField
-            value={retrievalMode}
-            onChange={setRetrievalMode}
-            disabled={createBase.isPending}
-          />
           {createBase.error ? (
             <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(createBase.error, labels.errors)}
@@ -426,9 +367,7 @@ function CreateBaseDialog({
             <Button
               className="h-9 rounded-lg text-[13px] shadow-none"
               type="submit"
-              disabled={
-                createBase.isPending || !name.trim() || !embeddingModelId
-              }
+              disabled={createBase.isPending || !name.trim()}
             >
               {createBase.isPending
                 ? labels.common.creating

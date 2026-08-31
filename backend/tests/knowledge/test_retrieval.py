@@ -539,6 +539,34 @@ async def test_search_returns_empty_without_bases_and_skips_rerank_without_candi
 
 
 @pytest.mark.asyncio
+async def test_search_excludes_unconfigured_bases_before_model_loading_and_budgeting(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, configured_id, embedding_id, _ = await _seed_single_base(harness, segments=[("安装说明", [1.0, 0.0, 0.0])])
+        unconfigured_id = uuid.uuid4()
+        async with harness.factory() as session, session.begin():
+            session.add(KnowledgeBaseRow(id=unconfigured_id, project_id=project_id, name="待配置", default_top_k=20, retrieval_mode="hybrid"))
+
+        empty = await harness.service.search(_request(project_id, knowledge_base_ids=(unconfigured_id,), debug=True))
+        assert empty.citations == ()
+        assert empty.diagnostics is not None
+        assert empty.diagnostics.target_base_count == 0
+        assert empty.diagnostics.empty_reason == "not_ready"
+        assert harness.client.embed_calls == []
+        assert harness.client.rerank_calls == []
+
+        result = await harness.service.search(_request(project_id, debug=True))
+        assert [citation.knowledge_base_id for citation in result.citations] == [configured_id]
+        assert result.diagnostics is not None
+        assert result.diagnostics.target_base_count == 1
+        assert result.diagnostics.effective_top_k == 4
+        assert result.diagnostics.retrieval_mode == "semantic"
+        assert harness.client.embed_calls == [(embedding_id, ["如何安装产品"])]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_search_only_sees_active_bases_ready_documents_and_current_versions(postgres_database_url: str) -> None:
     harness = await _harness(postgres_database_url)
     try:
