@@ -206,9 +206,9 @@ CHECK：`enabled=true` 时 MinIO 四要素与密文列必须非空。全新安�
 
 挂在既有 `system_admin` 管理路由族（与 admin model settings 同级）：
 
-- `GET /api/admin/knowledge-settings`：全部非密字段 + `secret_key_configured` 布尔 + revision；
+- `GET /api/admin/settings/knowledge`：全部非密字段 + `secret_key_configured` 布尔 + revision；
   密钥永不回显。
-- `PUT /api/admin/knowledge-settings`：strict 模型 + 乐观 revision（冲突 409）；secret 字段
+- `PUT /api/admin/settings/knowledge`：strict 模型 + 乐观 revision（冲突 409）；secret 字段
   可省略（保留旧值）；`enabled=true` 时**保存前强制**用提交的完整配置做存储探测
   （bucket 可达 + versioning 为 Off，短超时），探测失败 422、整体不落库；
   `summary_model_name` 非空时校验活跃文本 System Model，失败 422。
@@ -258,7 +258,7 @@ CHECK：`enabled=true` 时 MinIO 四要素与密文列必须非空。全新安�
 | GET /model-options | 增 summary_model（已配置返回名称，未配置 null；前端据此禁用开关并提示） |
 | GET .../segments/{segment} | 增只读 summary 字段 |
 | POST /search | debug 增缓存计数、summary_candidates；hit_diagnostics 增 matched_via |
-| GET/PUT /api/admin/knowledge-settings | 新增，见 6.2 |
+| GET/PUT /api/admin/settings/knowledge | 新增，见 6.2 |
 
 前端：管理页新增知识库配置；库设置页新增摘要索引开关卡片（未配置系统摘要模型时禁用并提示）；
 段详情/浏览器展示系统摘要；文档列表 task_progress 显示 summarize 任务与新 stage 文案；
