@@ -19,6 +19,7 @@ from actweave_knowledge.persistence.models import (
     KnowledgeDocumentRow,
     KnowledgeOrmBase,
     KnowledgeSegmentRow,
+    KnowledgeSegmentSummaryRow,
     KnowledgeTaskRow,
 )
 from actweave_knowledge.persistence.tasks import claim_next_task
@@ -39,6 +40,7 @@ from app.model_registry.bootstrap import (
 )
 from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.final_schema_contract import FINAL_APP_TABLES
+from deerflow.persistence.knowledge_settings import KnowledgeSystemSettingsRow
 from deerflow.persistence.model_registry import ModelProviderModelRow, ModelProviderRow
 
 KNOWLEDGE_TABLES = (
@@ -47,6 +49,7 @@ KNOWLEDGE_TABLES = (
     "knowledge_metadata_fields",
     "knowledge_segments",
     "knowledge_segment_children",
+    "knowledge_segment_summaries",
     "knowledge_queries",
     "knowledge_tasks",
 )
@@ -56,6 +59,9 @@ MODEL_REGISTRY_TABLES = (
     "model_providers",
     "model_provider_models",
 )
+
+# 宿主级知识系统设置单行表（M11）：注册在宿主 Base.metadata，不属于包 ORM。
+HOST_KNOWLEDGE_SETTINGS_TABLES = ("knowledge_system_settings",)
 
 _SECRET_KEY = b64encode(b"k" * 32).decode("ascii")
 
@@ -181,6 +187,26 @@ def _segment(
     )
 
 
+def _summary(
+    segment: KnowledgeSegmentRow,
+    *,
+    content: str = "系统生成的段摘要",
+    document_version: int = 1,
+    embedding: list[float] | None = None,
+) -> KnowledgeSegmentSummaryRow:
+    return KnowledgeSegmentSummaryRow(
+        id=uuid.uuid4(),
+        project_id=segment.project_id,
+        knowledge_base_id=segment.knowledge_base_id,
+        knowledge_document_id=segment.knowledge_document_id,
+        knowledge_segment_id=segment.id,
+        document_version=document_version,
+        content=content,
+        source_content_digest="a" * 64,
+        embedding=embedding or [0.1, 0.2, 0.3],
+    )
+
+
 def _task(
     *,
     project_id: uuid.UUID,
@@ -220,21 +246,23 @@ async def test_orm_metadata_matches_installed_catalog(postgres_database_url: str
 
     assert set(KNOWLEDGE_TABLES) <= FINAL_APP_TABLES
     assert set(MODEL_REGISTRY_TABLES) <= FINAL_APP_TABLES
+    assert set(HOST_KNOWLEDGE_SETTINGS_TABLES) <= FINAL_APP_TABLES
     assert set(KnowledgeOrmBase.metadata.tables) == set(KNOWLEDGE_TABLES)
 
     from scripts.check_postgres import REQUIRED_TABLES
 
     assert set(KNOWLEDGE_TABLES) <= set(REQUIRED_TABLES)
     assert set(MODEL_REGISTRY_TABLES) <= set(REQUIRED_TABLES)
+    assert set(HOST_KNOWLEDGE_SETTINGS_TABLES) <= set(REQUIRED_TABLES)
 
     engine = create_async_engine(postgres_database_url)
     try:
         await _install_full_schema(engine)
-        # The registry rows live on the host harness metadata, not the
-        # package-isolated KnowledgeOrmBase.
+        # The registry and settings rows live on the host harness metadata,
+        # not the package-isolated KnowledgeOrmBase.
         host_metadata = ModelProviderRow.metadata
         async with engine.connect() as connection:
-            for table_name in (*KNOWLEDGE_TABLES, *MODEL_REGISTRY_TABLES):
+            for table_name in (*KNOWLEDGE_TABLES, *MODEL_REGISTRY_TABLES, *HOST_KNOWLEDGE_SETTINGS_TABLES):
                 rows = (
                     await connection.execute(
                         text(
@@ -555,6 +583,228 @@ async def test_segment_vector_roundtrip_and_cascade_delete(
         async with factory() as session:
             remaining = await session.scalar(sa.select(sa.func.count()).select_from(KnowledgeSegmentRow).where(KnowledgeSegmentRow.knowledge_document_id == document.id))
             assert remaining == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_segment_summary_unique_per_segment_and_cascades_with_segment(
+    postgres_database_url: str,
+) -> None:
+    """M11 T1：摘要行每段唯一、约束探针、删段级联删摘要。"""
+
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        await _install_full_schema(engine)
+        embedding_model_id, _ = await seed_registry_models(factory)
+        async with factory() as session, session.begin():
+            project_id = await _seed_project(session, "summary")
+            base = await _seed_base(session, project_id=project_id, embedding_model_id=embedding_model_id)
+            document = _document(base, status="ready")
+            session.add(document)
+            await session.flush()
+            segment = _segment(document, position=1, embedding=[0.5, -1.25, 3.0])
+            sibling = _segment(document, position=2, embedding=[1.0, 2.0, 4.5])
+            session.add_all([segment, sibling])
+            await session.flush()
+
+            session.add(_summary(segment))
+            await session.flush()
+
+            # 每段至多一条摘要（uq_knowledge_segment_summaries_segment）。
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    session.add(_summary(segment, content="重复摘要"))
+                    await session.flush()
+
+            # document_version 必须 >= 1。
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    session.add(_summary(sibling, document_version=0))
+                    await session.flush()
+
+            # content 必须非空（length(content) > 0）。
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    session.add(_summary(sibling, content=""))
+                    await session.flush()
+
+            session.add(_summary(sibling))
+            await session.flush()
+
+        async with factory() as session:
+            stored = (await session.execute(sa.select(KnowledgeSegmentSummaryRow).where(KnowledgeSegmentSummaryRow.knowledge_document_id == document.id).order_by(KnowledgeSegmentSummaryRow.created_at))).scalars().all()
+            assert len(stored) == 2
+            assert stored[0].source_content_digest == "a" * 64
+            assert [round(float(value), 3) for value in stored[0].embedding] == [0.1, 0.2, 0.3]
+
+        # 删除父段：摘要随 FK 级联删除，另一段的摘要保留。
+        async with factory() as session, session.begin():
+            await session.execute(sa.delete(KnowledgeSegmentRow).where(KnowledgeSegmentRow.id == segment.id))
+        async with factory() as session:
+            remaining = (await session.execute(sa.select(KnowledgeSegmentSummaryRow.knowledge_segment_id).where(KnowledgeSegmentSummaryRow.knowledge_document_id == document.id))).scalars().all()
+            assert remaining == [sibling.id]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_system_settings_singleton_and_minio_guards(
+    postgres_database_url: str,
+) -> None:
+    """M11 T1：单行 CHECK、密文对约束、enabled-requires-minio、repr 不带密文。"""
+
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        await _install_full_schema(engine)
+        async with factory() as session, session.begin():
+            session.add(KnowledgeSystemSettingsRow(id=1))
+            await session.flush()
+
+            # 单行表：id 只能是 1。
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    session.add(KnowledgeSystemSettingsRow(id=2))
+                    await session.flush()
+
+        async with factory() as session:
+            stored = await session.get(KnowledgeSystemSettingsRow, 1)
+            assert stored is not None
+            assert stored.revision == 1
+            assert stored.enabled is False
+            assert stored.worker_concurrency == 2
+            assert stored.task_timeout_seconds == 900
+            assert stored.upload_max_bytes == 52428800
+            assert stored.max_knowledge_bases_per_project == 20
+            assert stored.max_documents_per_knowledge_base == 500
+            assert stored.max_segments_per_document == 5000
+            assert stored.minio_endpoint is None
+            assert stored.minio_secure is False
+            assert stored.summary_model_name is None
+            assert stored.query_cache_enabled is True
+            assert stored.query_cache_max_entries == 512
+            assert stored.query_cache_ttl_seconds == 300
+
+        async with factory() as session, session.begin():
+            row = await session.get(KnowledgeSystemSettingsRow, 1)
+            assert row is not None
+
+            # 未配齐 MinIO 五要素时不得启用。
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    row.enabled = True
+                    await session.flush()
+            session.expire(row)
+            row = await session.get(KnowledgeSystemSettingsRow, 1)
+            assert row is not None
+
+            # 密文对必须同空同非空。
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    row.minio_secret_nonce = b"n" * 12
+                    await session.flush()
+            session.expire(row)
+            row = await session.get(KnowledgeSystemSettingsRow, 1)
+            assert row is not None
+
+            # 非空时 nonce 必须 12 字节、密文至少 16 字节。
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    row.minio_secret_nonce = b"n" * 11
+                    row.minio_secret_ciphertext = b"c" * 24
+                    await session.flush()
+            session.expire(row)
+            row = await session.get(KnowledgeSystemSettingsRow, 1)
+            assert row is not None
+
+            row.enabled = True
+            row.minio_endpoint = "127.0.0.1:9000"
+            row.minio_bucket = "actweave-knowledge"
+            row.minio_access_key = "minio-access-value"
+            row.minio_secret_nonce = b"n" * 12
+            row.minio_secret_ciphertext = b"c" * 24
+            await session.flush()
+
+        async with factory() as session:
+            enabled_row = await session.get(KnowledgeSystemSettingsRow, 1)
+            assert enabled_row is not None
+            assert enabled_row.enabled is True
+            rendered = repr(enabled_row)
+            assert "minio_secret_nonce" not in rendered
+            assert "minio_secret_ciphertext" not in rendered
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_summarize_task_shares_the_open_indexing_slot(
+    postgres_database_url: str,
+) -> None:
+    """M11 T1：summarize 与 ingest/reembed 同文档同版本互斥；约束按字面执行。"""
+
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        await _install_full_schema(engine)
+        async with factory() as session, session.begin():
+            project_id = await _seed_project(session, "summarize")
+            resource_id = uuid.uuid4()
+
+            session.add(_task(project_id=project_id, resource_id=resource_id, kind="summarize_document"))
+            await session.flush()
+
+            # 开放的 summarize 任务占用同一开放索引槽：ingest 与 reembed 均被拒。
+            for other_kind in ("ingest_document", "reembed_document", "summarize_document"):
+                with pytest.raises(sa.exc.IntegrityError):
+                    async with session.begin_nested():
+                        session.add(_task(project_id=project_id, resource_id=resource_id, kind=other_kind))
+                        await session.flush()
+
+            # summarize 属于"必须携带 target_version"的种类。
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    session.add(
+                        _task(
+                            project_id=project_id,
+                            resource_id=uuid.uuid4(),
+                            kind="summarize_document",
+                            target_version=None,
+                        )
+                    )
+                    await session.flush()
+
+            # 冻结的 reparse 参数仍仅允许 ingest 携带。
+            with pytest.raises(sa.exc.IntegrityError):
+                async with session.begin_nested():
+                    reparse_carrier = _task(
+                        project_id=project_id,
+                        resource_id=uuid.uuid4(),
+                        kind="summarize_document",
+                    )
+                    reparse_carrier.reparse_settings = {"chunk_size": 1000}
+                    session.add(reparse_carrier)
+                    await session.flush()
+
+            # 新 stage 字面量 summarizing 被 CHECK 接受。
+            running = _task(
+                project_id=project_id,
+                resource_id=uuid.uuid4(),
+                kind="summarize_document",
+                status="running",
+                attempt_count=1,
+                claim_token=uuid.uuid4(),
+                lease_until=datetime.now(UTC) + timedelta(minutes=5),
+            )
+            running.stage = "summarizing"
+            session.add(running)
+            await session.flush()
+
+            # 结清后释放开放槽。
+            await session.execute(sa.update(KnowledgeTaskRow).where(KnowledgeTaskRow.resource_id == resource_id).values(status="succeeded", finished_at=datetime.now(UTC)))
+            session.add(_task(project_id=project_id, resource_id=resource_id, kind="ingest_document"))
+            await session.flush()
     finally:
         await engine.dispose()
 

@@ -1,4 +1,4 @@
-"""Package-owned ORM rows for the seven ``knowledge_*`` tables.
+"""Package-owned ORM rows for the eight package ``knowledge_*`` tables.
 
 The DDL authority is the host Schema V1 snapshot (``full_schema.sql``); these
 mappings mirror it exactly. The runtime never emits DDL from this metadata.
@@ -74,6 +74,10 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
     # (retrieval test prefill and the Agent tool without explicit arguments).
     default_top_k: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("4"))
     default_score_threshold: Mapped[float] = mapped_column(Double, nullable=False, server_default=text("0.2"))
+    # Segment-summary index switch: turning it on queues a summary backfill
+    # for published documents; turning it off only excludes summaries from
+    # recall — generated rows are kept, never deleted by the switch.
+    summary_index_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
@@ -368,6 +372,57 @@ class KnowledgeSegmentChildRow(KnowledgeOrmBase):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class KnowledgeSegmentSummaryRow(KnowledgeOrmBase):
+    """System-generated recall summary: at most one complete row per segment.
+
+    A row exists only in complete form — text and vector written in the same
+    transaction — and carries no enabled switch of its own: recall visibility
+    follows the owning segment/document, and the base's summary-index switch
+    only gates whether summaries join recall. Segment deletion cascades;
+    ``document_version`` pins the content generation the summary describes so
+    republishing can drop stale summaries wholesale.
+    """
+
+    __tablename__ = "knowledge_segment_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_segment_id",
+            name="uq_knowledge_segment_summaries_segment",
+        ),
+        CheckConstraint("document_version >= 1", name="ck_knowledge_segment_summaries_version"),
+        CheckConstraint("length(content) > 0", name="ck_knowledge_segment_summaries_content"),
+        CheckConstraint(
+            "public.vector_dims(embedding) BETWEEN 1 AND 16000",
+            name="ck_knowledge_segment_summaries_embedding",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_segment_id"],
+            ["knowledge_segments.id"],
+            name="fk_knowledge_segment_summaries_segment",
+            ondelete="CASCADE",
+        ),
+        Index("ix_knowledge_segment_summaries_scope", "project_id", "knowledge_base_id"),
+        Index("ix_knowledge_segment_summaries_document", "knowledge_document_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_segment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # Content generation of the source segment at generation time; compared
+    # against the document's published_version to invalidate stale summaries.
+    document_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # SHA-256 hex of the exact segment content the summary was generated
+    # from; a digest mismatch marks the summary stale even within a version.
+    source_content_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Embedded with the base's bound embedding model into the same vector
+    # space as segments/children; dimension checked, never fixed per column.
+    embedding: Mapped[Any] = mapped_column(Vector(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class KnowledgeQueryRow(KnowledgeOrmBase):
     """Append-only retrieval log: one row per search on either path.
 
@@ -429,12 +484,13 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
     __tablename__ = "knowledge_tasks"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('ingest_document', 'reembed_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')",
+            "kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')",
             name="ck_knowledge_tasks_kind",
         ),
-        # Both indexing kinds bind an execution generation; other kinds never.
+        # Every indexing kind binds an execution generation; other kinds never.
         CheckConstraint(
-            "(kind IN ('ingest_document', 'reembed_document') AND target_version IS NOT NULL AND target_version >= 1) OR (kind NOT IN ('ingest_document', 'reembed_document') AND target_version IS NULL)",
+            "(kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND target_version IS NOT NULL AND target_version >= 1)"
+            " OR (kind NOT IN ('ingest_document', 'reembed_document', 'summarize_document') AND target_version IS NULL)",
             name="ck_knowledge_tasks_target_version",
         ),
         CheckConstraint(
@@ -452,7 +508,7 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
             name="ck_knowledge_tasks_status",
         ),
         CheckConstraint(
-            "stage IN ('queued', 'reading_source', 'extracting_splitting', 'loading_segments', 'embedding', 'publishing', 'done')",
+            "stage IN ('queued', 'reading_source', 'extracting_splitting', 'loading_segments', 'summarizing', 'embedding', 'publishing', 'done')",
             name="ck_knowledge_tasks_stage",
         ),
         CheckConstraint(
@@ -485,14 +541,14 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
             postgresql_where=text("status = 'running'"),
         ),
         # One open indexing operation per document/version regardless of
-        # kind: a reembed cannot bypass the guard an ingest holds and vice
-        # versa (M10 design §5).
+        # kind: ingest, reembed and summarize share the guard, so none can
+        # bypass the slot another holds (M10 design §5; M11 adds summarize).
         Index(
             "uq_knowledge_tasks_open_indexing",
             "resource_id",
             "target_version",
             unique=True,
-            postgresql_where=text("kind IN ('ingest_document', 'reembed_document') AND status IN ('queued', 'running', 'retry_wait')"),
+            postgresql_where=text("kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND status IN ('queued', 'running', 'retry_wait')"),
         ),
         Index(
             "uq_knowledge_tasks_open_document_delete",

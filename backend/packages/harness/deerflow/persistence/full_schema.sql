@@ -4272,6 +4272,7 @@ CREATE TABLE knowledge_bases (
     retrieval_mode VARCHAR(16) DEFAULT 'semantic' NOT NULL,
     default_top_k INTEGER DEFAULT 4 NOT NULL,
     default_score_threshold DOUBLE PRECISION DEFAULT 0.2 NOT NULL,
+    summary_index_enabled BOOLEAN DEFAULT false NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     CONSTRAINT pk_knowledge_bases PRIMARY KEY (id),
@@ -4501,6 +4502,38 @@ CREATE INDEX ix_knowledge_segment_children_document
 CREATE INDEX ix_knowledge_segment_children_lexical
     ON knowledge_segment_children USING gin (lexical_tsv);
 
+-- Segment summaries (M11 design §5): at most one complete, system-generated
+-- summary per segment, embedded into the base's vector space as a recall
+-- aid. Rows have no enabled switch of their own — visibility follows the
+-- owning segment/document — and segment deletion cascades.
+CREATE TABLE knowledge_segment_summaries (
+    id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    knowledge_document_id UUID NOT NULL,
+    knowledge_segment_id UUID NOT NULL,
+    document_version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    source_content_digest VARCHAR(64) NOT NULL,
+    embedding public.vector NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_knowledge_segment_summaries PRIMARY KEY (id),
+    CONSTRAINT uq_knowledge_segment_summaries_segment UNIQUE (knowledge_segment_id),
+    CONSTRAINT ck_knowledge_segment_summaries_version CHECK (document_version >= 1),
+    CONSTRAINT ck_knowledge_segment_summaries_content CHECK (length(content) > 0),
+    CONSTRAINT ck_knowledge_segment_summaries_embedding CHECK (
+        public.vector_dims(embedding) BETWEEN 1 AND 16000
+    ),
+    CONSTRAINT fk_knowledge_segment_summaries_segment FOREIGN KEY (knowledge_segment_id)
+        REFERENCES knowledge_segments (id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_knowledge_segment_summaries_scope
+    ON knowledge_segment_summaries (project_id, knowledge_base_id);
+
+CREATE INDEX ix_knowledge_segment_summaries_document
+    ON knowledge_segment_summaries (knowledge_document_id);
+
 CREATE TABLE knowledge_queries (
     id UUID NOT NULL,
     project_id UUID NOT NULL,
@@ -4558,11 +4591,11 @@ CREATE TABLE knowledge_tasks (
     finished_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT pk_knowledge_tasks PRIMARY KEY (id),
     CONSTRAINT ck_knowledge_tasks_kind CHECK (
-        kind IN ('ingest_document', 'reembed_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')
+        kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')
     ),
     CONSTRAINT ck_knowledge_tasks_target_version CHECK (
-        (kind IN ('ingest_document', 'reembed_document') AND target_version IS NOT NULL AND target_version >= 1)
-        OR (kind NOT IN ('ingest_document', 'reembed_document') AND target_version IS NULL)
+        (kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND target_version IS NOT NULL AND target_version >= 1)
+        OR (kind NOT IN ('ingest_document', 'reembed_document', 'summarize_document') AND target_version IS NULL)
     ),
     CONSTRAINT ck_knowledge_tasks_storage_key CHECK (
         (kind = 'delete_document_object' AND storage_key IS NOT NULL AND btrim(storage_key) <> '')
@@ -4576,7 +4609,7 @@ CREATE TABLE knowledge_tasks (
         status IN ('queued', 'running', 'retry_wait', 'succeeded', 'failed')
     ),
     CONSTRAINT ck_knowledge_tasks_stage CHECK (
-        stage IN ('queued', 'reading_source', 'extracting_splitting', 'loading_segments', 'embedding', 'publishing', 'done')
+        stage IN ('queued', 'reading_source', 'extracting_splitting', 'loading_segments', 'summarizing', 'embedding', 'publishing', 'done')
     ),
     CONSTRAINT ck_knowledge_tasks_progress_units CHECK (
         completed_units >= 0
@@ -4605,11 +4638,12 @@ CREATE INDEX ix_knowledge_tasks_expired
     ON knowledge_tasks (lease_until, id)
     WHERE status = 'running';
 
--- One open indexing operation per document/version regardless of kind: a
--- reembed cannot slip past the guard an ingest holds and vice versa.
+-- One open indexing operation per document/version regardless of kind:
+-- ingest, reembed and summarize share the guard, so none can slip past the
+-- slot another holds.
 CREATE UNIQUE INDEX uq_knowledge_tasks_open_indexing
     ON knowledge_tasks (resource_id, target_version)
-    WHERE kind IN ('ingest_document', 'reembed_document') AND status IN ('queued', 'running', 'retry_wait');
+    WHERE kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND status IN ('queued', 'running', 'retry_wait');
 
 CREATE UNIQUE INDEX uq_knowledge_tasks_open_document_delete
     ON knowledge_tasks (resource_id)
@@ -4622,6 +4656,76 @@ CREATE UNIQUE INDEX uq_knowledge_tasks_open_document_object_delete
 CREATE UNIQUE INDEX uq_knowledge_tasks_open_base_delete
     ON knowledge_tasks (resource_id)
     WHERE kind = 'delete_knowledge_base' AND status IN ('queued', 'running', 'retry_wait');
+
+-- Host-owned singleton (id = 1) with the PostgreSQL-administered Knowledge
+-- configuration: module switch, worker limits, quotas, MinIO storage target
+-- and the System Model reference for segment-summary generation. The MinIO
+-- secret key is stored as an AES-GCM envelope (nonce + ciphertext).
+CREATE TABLE knowledge_system_settings (
+    id SMALLINT DEFAULT 1 NOT NULL,
+    revision INTEGER DEFAULT 1 NOT NULL,
+    enabled BOOLEAN DEFAULT false NOT NULL,
+    worker_concurrency SMALLINT DEFAULT 2 NOT NULL,
+    task_timeout_seconds INTEGER DEFAULT 900 NOT NULL,
+    upload_max_bytes BIGINT DEFAULT 52428800 NOT NULL,
+    max_knowledge_bases_per_project INTEGER DEFAULT 20 NOT NULL,
+    max_documents_per_knowledge_base INTEGER DEFAULT 500 NOT NULL,
+    max_segments_per_document INTEGER DEFAULT 5000 NOT NULL,
+    minio_endpoint VARCHAR(512),
+    minio_bucket VARCHAR(255),
+    minio_access_key VARCHAR(512),
+    minio_secure BOOLEAN DEFAULT false NOT NULL,
+    minio_secret_nonce BYTEA,
+    minio_secret_ciphertext BYTEA,
+    summary_model_name VARCHAR(36),
+    query_cache_enabled BOOLEAN DEFAULT true NOT NULL,
+    query_cache_max_entries INTEGER DEFAULT 512 NOT NULL,
+    query_cache_ttl_seconds INTEGER DEFAULT 300 NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_knowledge_system_settings PRIMARY KEY (id),
+    CONSTRAINT ck_knowledge_system_settings_singleton CHECK (id = 1),
+    CONSTRAINT ck_knowledge_system_settings_worker_concurrency CHECK (
+        worker_concurrency BETWEEN 1 AND 16
+    ),
+    CONSTRAINT ck_knowledge_system_settings_task_timeout CHECK (
+        task_timeout_seconds BETWEEN 30 AND 7200
+    ),
+    CONSTRAINT ck_knowledge_system_settings_upload_max_bytes CHECK (
+        upload_max_bytes BETWEEN 1 AND 52428800
+    ),
+    CONSTRAINT ck_knowledge_system_settings_max_bases CHECK (
+        max_knowledge_bases_per_project >= 1
+    ),
+    CONSTRAINT ck_knowledge_system_settings_max_documents CHECK (
+        max_documents_per_knowledge_base >= 1
+    ),
+    CONSTRAINT ck_knowledge_system_settings_max_segments CHECK (
+        max_segments_per_document BETWEEN 1 AND 5000
+    ),
+    CONSTRAINT ck_knowledge_system_settings_cache_entries CHECK (
+        query_cache_max_entries BETWEEN 16 AND 65536
+    ),
+    CONSTRAINT ck_knowledge_system_settings_cache_ttl CHECK (
+        query_cache_ttl_seconds BETWEEN 5 AND 86400
+    ),
+    CONSTRAINT ck_knowledge_system_settings_secret_pair CHECK (
+        ((minio_secret_nonce IS NULL) = (minio_secret_ciphertext IS NULL))
+        AND (
+            minio_secret_nonce IS NULL
+            OR (octet_length(minio_secret_nonce) = 12 AND octet_length(minio_secret_ciphertext) >= 16)
+        )
+    ),
+    CONSTRAINT ck_knowledge_system_settings_enabled_requires_minio CHECK (
+        NOT enabled
+        OR (
+            minio_endpoint IS NOT NULL
+            AND minio_bucket IS NOT NULL
+            AND minio_access_key IS NOT NULL
+            AND minio_secret_nonce IS NOT NULL
+            AND minio_secret_ciphertext IS NOT NULL
+        )
+    )
+);
 
 
 
@@ -4638,7 +4742,7 @@ INSERT INTO alembic_version (version_num) VALUES ('schema_v1');
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 108 static tables and 1353 columns.
+-- Coverage: 110 static tables and 1384 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE project_invitation_rate_limits IS '记录项目邀请码失败尝试的限流窗口。';
@@ -6101,6 +6205,7 @@ COMMENT ON COLUMN knowledge_bases.status IS '知识库：知识库状态（activ
 COMMENT ON COLUMN knowledge_bases.retrieval_mode IS '知识库：检索模式（semantic 仅向量或 hybrid 增加词法召回路）；检索测试可单次覆盖不落库。';
 COMMENT ON COLUMN knowledge_bases.default_top_k IS '知识库：检索未显式传参时使用的默认返回条数。';
 COMMENT ON COLUMN knowledge_bases.default_score_threshold IS '知识库：检索未显式传参时使用的默认相关性分数阈值（0 表示不过滤）。';
+COMMENT ON COLUMN knowledge_bases.summary_index_enabled IS '知识库：是否启用片段摘要索引；开启为已发布文档排队摘要回填，关闭仅将摘要移出召回而不删除已生成行。';
 COMMENT ON COLUMN knowledge_bases.created_at IS '知识库：记录创建时间。';
 COMMENT ON COLUMN knowledge_bases.updated_at IS '知识库：记录最近更新时间。';
 
@@ -6174,6 +6279,18 @@ COMMENT ON COLUMN knowledge_segment_children.lexical_tsv IS '知识子块：按�
 COMMENT ON COLUMN knowledge_segment_children.lexical_version IS '知识子块：词法派生规则版本；与当前版本不一致的行词法路明确失败，不运行时补数据。';
 COMMENT ON COLUMN knowledge_segment_children.created_at IS '知识子块：记录创建时间。';
 
+COMMENT ON TABLE knowledge_segment_summaries IS '保存系统生成的片段召回摘要及其向量；每片段至多一条完整行，仅作召回辅助，从不作为引用内容，删段级联删除。';
+COMMENT ON COLUMN knowledge_segment_summaries.id IS '知识片段摘要：主键标识。';
+COMMENT ON COLUMN knowledge_segment_summaries.project_id IS '知识片段摘要：所属项目标识。';
+COMMENT ON COLUMN knowledge_segment_summaries.knowledge_base_id IS '知识片段摘要：所属知识库标识。';
+COMMENT ON COLUMN knowledge_segment_summaries.knowledge_document_id IS '知识片段摘要：所属知识文档标识。';
+COMMENT ON COLUMN knowledge_segment_summaries.knowledge_segment_id IS '知识片段摘要：所属知识片段标识；每片段至多一条摘要，删段级联删除。';
+COMMENT ON COLUMN knowledge_segment_summaries.document_version IS '知识片段摘要：生成本摘要时源片段所属的文档处理版本号。';
+COMMENT ON COLUMN knowledge_segment_summaries.content IS '知识片段摘要：系统生成的召回摘要文本（属于私有内容）；仅作召回辅助，从不作为引用内容。';
+COMMENT ON COLUMN knowledge_segment_summaries.source_content_digest IS '知识片段摘要：生成摘要时源片段内容的 SHA-256 摘要；不一致即视为过期。';
+COMMENT ON COLUMN knowledge_segment_summaries.embedding IS '知识片段摘要：与知识库 Embedding 模型维度一致的 pgvector 向量；与摘要文本同事务写入。';
+COMMENT ON COLUMN knowledge_segment_summaries.created_at IS '知识片段摘要：记录创建时间。';
+
 COMMENT ON TABLE knowledge_queries IS '按项目和查询发起者追加记录每次知识检索（检索测试与 Agent 工具）的查询、目标库与结果概要。';
 COMMENT ON COLUMN knowledge_queries.id IS '知识检索查询日志：主键标识。';
 COMMENT ON COLUMN knowledge_queries.project_id IS '知识检索查询日志：所属项目标识。';
@@ -6187,12 +6304,12 @@ COMMENT ON COLUMN knowledge_queries.top_score_kind IS '知识检索查询日志�
 COMMENT ON COLUMN knowledge_queries.strategy_version IS '知识检索查询日志：产生本行的检索策略版本标签；历史行为空。';
 COMMENT ON COLUMN knowledge_queries.created_at IS '知识检索查询日志：记录创建时间。';
 
-COMMENT ON TABLE knowledge_tasks IS '保存知识摄取、资源删除和晚到对象清理任务；领取、租约、精确存储标识与尝试次数直接保存在任务行。';
+COMMENT ON TABLE knowledge_tasks IS '保存知识摄取、摘要生成、资源删除和晚到对象清理任务；领取、租约、精确存储标识与尝试次数直接保存在任务行。';
 COMMENT ON COLUMN knowledge_tasks.id IS '知识后台任务：主键标识。';
 COMMENT ON COLUMN knowledge_tasks.project_id IS '知识后台任务：所属项目标识。';
 COMMENT ON COLUMN knowledge_tasks.resource_id IS '知识后台任务：按任务类型指向知识文档或知识库的业务标识。';
-COMMENT ON COLUMN knowledge_tasks.kind IS '知识后台任务：任务类型（摄取文档、重嵌入文档、删除文档、清理晚到文档对象或删除知识库）。';
-COMMENT ON COLUMN knowledge_tasks.target_version IS '知识后台任务：ingest_document 与 reembed_document 任务允许发布的文档版本号。';
+COMMENT ON COLUMN knowledge_tasks.kind IS '知识后台任务：任务类型（摄取文档、重嵌入文档、生成片段摘要、删除文档、清理晚到文档对象或删除知识库）。';
+COMMENT ON COLUMN knowledge_tasks.target_version IS '知识后台任务：ingest_document、reembed_document 与 summarize_document 任务允许发布的文档版本号。';
 COMMENT ON COLUMN knowledge_tasks.storage_key IS '知识后台任务：仅 delete_document_object 使用的精确 MinIO object key；属于受保护存储定位符。';
 COMMENT ON COLUMN knowledge_tasks.reparse_settings IS '知识后台任务：显式重新解析时固化的完整切分/清洗参数 JSON；重试继承，其余任务为空。';
 COMMENT ON COLUMN knowledge_tasks.status IS '知识后台任务：任务状态（queued、running、retry_wait、succeeded 或 failed）。';
@@ -6209,6 +6326,28 @@ COMMENT ON COLUMN knowledge_tasks.error_message IS '知识后台任务：最近�
 COMMENT ON COLUMN knowledge_tasks.created_at IS '知识后台任务：记录创建时间。';
 COMMENT ON COLUMN knowledge_tasks.updated_at IS '知识后台任务：记录最近更新时间。';
 COMMENT ON COLUMN knowledge_tasks.finished_at IS '知识后台任务：任务最终成功或失败的时间。';
+
+COMMENT ON TABLE knowledge_system_settings IS '保存平台级知识模块配置的单例行（id 固定为 1）：模块开关、Worker 限额、配额、MinIO 存储目标、摘要 System Model 引用与查询向量缓存参数。';
+COMMENT ON COLUMN knowledge_system_settings.id IS '知识系统设置：主键标识。';
+COMMENT ON COLUMN knowledge_system_settings.revision IS '知识系统设置：设置修订号；每次管理更新递增。';
+COMMENT ON COLUMN knowledge_system_settings.enabled IS '知识系统设置：知识模块总开关；开启前必须配齐 MinIO 存储目标。';
+COMMENT ON COLUMN knowledge_system_settings.worker_concurrency IS '知识系统设置：Worker 知识任务并发上限。';
+COMMENT ON COLUMN knowledge_system_settings.task_timeout_seconds IS '知识系统设置：单个知识任务的执行超时秒数。';
+COMMENT ON COLUMN knowledge_system_settings.upload_max_bytes IS '知识系统设置：单个上传文件的最大字节数。';
+COMMENT ON COLUMN knowledge_system_settings.max_knowledge_bases_per_project IS '知识系统设置：每个项目允许的知识库数量上限。';
+COMMENT ON COLUMN knowledge_system_settings.max_documents_per_knowledge_base IS '知识系统设置：每个知识库允许的文档数量上限。';
+COMMENT ON COLUMN knowledge_system_settings.max_segments_per_document IS '知识系统设置：每个文档允许的片段数量上限。';
+COMMENT ON COLUMN knowledge_system_settings.minio_endpoint IS '知识系统设置：MinIO 服务端点地址（不含凭据）；未配置时为空。';
+COMMENT ON COLUMN knowledge_system_settings.minio_bucket IS '知识系统设置：存放知识文档对象的 MinIO bucket 名称。';
+COMMENT ON COLUMN knowledge_system_settings.minio_access_key IS '知识系统设置：MinIO 访问键标识；对应 secret 以密文列保存。';
+COMMENT ON COLUMN knowledge_system_settings.minio_secure IS '知识系统设置：访问 MinIO 是否使用 TLS。';
+COMMENT ON COLUMN knowledge_system_settings.minio_secret_nonce IS '知识系统设置：当前 MinIO Secret Envelope 的 12 字节 nonce。';
+COMMENT ON COLUMN knowledge_system_settings.minio_secret_ciphertext IS '知识系统设置：当前 MinIO Secret Envelope 的密文。';
+COMMENT ON COLUMN knowledge_system_settings.summary_model_name IS '知识系统设置：片段摘要使用的 System Model 标识（UUID 字符串）；为空表示未配置摘要模型。';
+COMMENT ON COLUMN knowledge_system_settings.query_cache_enabled IS '知识系统设置：是否启用进程内查询向量缓存。';
+COMMENT ON COLUMN knowledge_system_settings.query_cache_max_entries IS '知识系统设置：查询向量缓存的最大条目数（LRU 淘汰）。';
+COMMENT ON COLUMN knowledge_system_settings.query_cache_ttl_seconds IS '知识系统设置：查询向量缓存条目的存活秒数。';
+COMMENT ON COLUMN knowledge_system_settings.updated_at IS '知识系统设置：记录最近更新时间。';
 -- END GENERATED SCHEMA COMMENTS
 
 

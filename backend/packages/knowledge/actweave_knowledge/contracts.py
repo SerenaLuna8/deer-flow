@@ -92,6 +92,11 @@ class KnowledgeSettings(BaseModel):
     max_knowledge_bases_per_project: int = Field(default=20, ge=1)
     max_documents_per_knowledge_base: int = Field(default=500, ge=1)
     max_segments_per_document: int = Field(default=5000, ge=1, le=5000)
+    # In-process query-vector cache (per Gateway/Worker process, LRU + TTL).
+    # ``enabled=false`` keeps the cache object constructed but never hitting.
+    query_cache_enabled: bool = True
+    query_cache_max_entries: int = Field(default=512, ge=16, le=65536)
+    query_cache_ttl_seconds: int = Field(default=300, ge=5, le=86400)
     minio: KnowledgeMinioSettings | None = None
 
     @model_validator(mode="after")
@@ -140,13 +145,23 @@ class KnowledgeRerankMaterial:
 class KnowledgeModelPort(Protocol):
     """Host-provided access to the registry rows Knowledge Bases bind.
 
-    Every method runs inside the caller's transaction (``session``): binding
-    paths lock Provider then Model ``FOR SHARE`` so they serialize with the
-    registry's ``FOR UPDATE`` write paths, and material resolution validates
-    type and ``active`` status before decrypting. Any unresolvable model —
-    missing, wrong type, disabled, or undecryptable material — raises
+    Every session-taking method runs inside the caller's transaction
+    (``session``): binding paths lock Provider then Model ``FOR SHARE`` so
+    they serialize with the registry's ``FOR UPDATE`` write paths, and
+    material resolution validates type and ``active`` status before
+    decrypting. Any unresolvable model — missing, wrong type, disabled, or
+    undecryptable material — raises
     ``KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE)``. The package never joins
     or imports host ORM tables.
+
+    Summary generation is the exception to the session rule:
+    ``resolve_summary_model`` reads the host's system settings inside the
+    caller's transaction and returns ``None`` when no summary model is
+    configured, while ``generate_summary`` performs the model call itself and
+    must never hold a database session across it. A configured-but-invalid
+    model raises ``KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE)``; a failed
+    generation call raises ``KnowledgeError(KNOWLEDGE_TASK_FAILED)`` with a
+    provider-safe message.
     """
 
     async def lock_model_for_binding(
@@ -167,6 +182,18 @@ class KnowledgeModelPort(Protocol):
         session: AsyncSession,
         model_id: UUID,
     ) -> KnowledgeRerankMaterial: ...
+
+    async def resolve_summary_model(
+        self,
+        session: AsyncSession,
+    ) -> str | None: ...
+
+    async def generate_summary(
+        self,
+        *,
+        model_ref: str,
+        prompt: str,
+    ) -> str: ...
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +239,7 @@ class KnowledgeBaseUpdate:
     reranker_model_id: UUID | None = None
     clear_reranker_model: bool = False
     retrieval_mode: KnowledgeRetrievalMode | None = None
+    summary_index_enabled: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +251,7 @@ class KnowledgeBaseView:
     embedding_model_id: UUID | None
     reranker_model_id: UUID | None
     retrieval_mode: KnowledgeRetrievalMode
+    summary_index_enabled: bool
     status: KnowledgeBaseStatus
     document_count: int
     default_top_k: int
@@ -246,6 +275,29 @@ class KnowledgeRebuildResult:
     skipped_document_ids: tuple[UUID, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class KnowledgeSummaryBackfill:
+    """Admission outcome of the summary backfill queued by turning the
+    base's summary-index switch on.
+
+    ``skipped_document_ids`` lists ready documents whose backfill task could
+    not be queued right now (typically an already-open task on the same
+    document); they are reported, never silently dropped.
+    """
+
+    accepted_document_count: int
+    skipped_document_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeBaseUpdateResult:
+    """Base update outcome; ``summary_backfill`` is populated only when this
+    update turned the summary-index switch on."""
+
+    base: KnowledgeBaseView
+    summary_backfill: KnowledgeSummaryBackfill | None = None
+
+
 # ---------------------------------------------------------------------------
 # Knowledge Document DTOs
 # ---------------------------------------------------------------------------
@@ -259,6 +311,7 @@ KnowledgeTaskStage = Literal[
     "reading_source",
     "extracting_splitting",
     "loading_segments",
+    "summarizing",
     "embedding",
     "publishing",
     "done",
@@ -266,7 +319,7 @@ KnowledgeTaskStage = Literal[
 
 KnowledgeTaskProgressStatus = Literal["queued", "running", "retry_wait", "failed"]
 
-KnowledgeIndexingTaskKind = Literal["ingest_document", "reembed_document"]
+KnowledgeIndexingTaskKind = Literal["ingest_document", "reembed_document", "summarize_document"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +446,16 @@ KnowledgeContentState = Literal["current", "stale"]
 
 KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE = 50
 
+# Segment-summary generation contract. The prompt is package-fixed; bumping
+# ``KNOWLEDGE_SUMMARY_PROMPT_VERSION`` is an explicit regeneration decision,
+# never a silent rewrite. Segments shorter than the minimum keep only their
+# content vector; generated text is hard-truncated at the char ceiling and
+# the model call itself is capped at the token ceiling.
+KNOWLEDGE_SUMMARY_PROMPT_VERSION = 1
+KNOWLEDGE_SUMMARY_MIN_SOURCE_CHARS = 200
+KNOWLEDGE_SUMMARY_MAX_CHARS = 1000
+KNOWLEDGE_SUMMARY_MAX_TOKENS = 1024
+
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeSegmentChildView:
@@ -402,6 +465,18 @@ class KnowledgeSegmentChildView:
     position: int
     content: str
     word_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSegmentSummaryView:
+    """System-generated recall summary of one segment.
+
+    A recall aid only: it may route a query to its segment but is never the
+    citation content — hit passages always come from the segment itself.
+    """
+
+    content: str
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,6 +500,7 @@ class KnowledgeSegmentDetail:
     children_total: int
     child_page: int
     children: tuple[KnowledgeSegmentChildView, ...] = ()
+    summary: KnowledgeSegmentSummaryView | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +774,11 @@ KNOWLEDGE_GLOBAL_PARENT_CANDIDATE_BUDGET = 400
 # At most this many really-recalled children are projected per hit.
 KNOWLEDGE_MAX_MATCHED_CHILDREN = 3
 
+# What actually produced the hit's native semantic score: the segment's own
+# vector, a child chunk's vector, or the segment-summary vector. Lexical-only
+# hits keep the ``segment`` attribution.
+KnowledgeMatchedVia = Literal["segment", "child", "summary"]
+
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeMatchedChild:
@@ -764,6 +845,9 @@ class KnowledgeHitDiagnostics:
     score_domain: str
     ranking_method: KnowledgeScoreKind
     ranking_score: float
+    # Defaults to ``segment`` until the recall transaction records real
+    # attribution; only ever the actual score source, never a guess.
+    matched_via: KnowledgeMatchedVia = "segment"
     matched_children: tuple[KnowledgeMatchedChild, ...] = ()
 
 
@@ -773,10 +857,13 @@ class KnowledgeRouteCounts:
 
     semantic_candidates: int = 0
     lexical_candidates: int = 0
+    summary_candidates: int = 0
     parents_deduplicated: int = 0
     threshold_filtered: int = 0
     stale_filtered: int = 0
     returned: int = 0
+    query_embedding_cache_hits: int = 0
+    query_embedding_cache_misses: int = 0
 
 
 @dataclass(frozen=True, slots=True)

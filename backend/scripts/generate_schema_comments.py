@@ -28,8 +28,8 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
-_EXPECTED_TABLE_COUNT = 108
-_EXPECTED_COLUMN_COUNT = 1353
+_EXPECTED_TABLE_COUNT = 110
+_EXPECTED_COLUMN_COUNT = 1384
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -75,13 +75,21 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
         "知识子块",
         "保存父子分块模式下父级片段内的二级子块及其向量；检索命中回卷到父级片段。",
     ),
+    "knowledge_segment_summaries": (
+        "知识片段摘要",
+        "保存系统生成的片段召回摘要及其向量；每片段至多一条完整行，仅作召回辅助，从不作为引用内容，删段级联删除。",
+    ),
     "knowledge_queries": (
         "知识检索查询日志",
         "按项目和查询发起者追加记录每次知识检索（检索测试与 Agent 工具）的查询、目标库与结果概要。",
     ),
     "knowledge_tasks": (
         "知识后台任务",
-        "保存知识摄取、资源删除和晚到对象清理任务；领取、租约、精确存储标识与尝试次数直接保存在任务行。",
+        "保存知识摄取、摘要生成、资源删除和晚到对象清理任务；领取、租约、精确存储标识与尝试次数直接保存在任务行。",
+    ),
+    "knowledge_system_settings": (
+        "知识系统设置",
+        "保存平台级知识模块配置的单例行（id 固定为 1）：模块开关、Worker 限额、配额、MinIO 存储目标、摘要 System Model 引用与查询向量缓存参数。",
     ),
     "asset_catalog_state": ("资产目录状态", "记录系统资产目录的单例代次与更新时间。"),
     "system_asset_upgrade_audit": (
@@ -466,6 +474,7 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_bases", "retrieval_mode"): "检索模式（semantic 仅向量或 hybrid 增加词法召回路）；检索测试可单次覆盖不落库",
     ("knowledge_bases", "default_top_k"): "检索未显式传参时使用的默认返回条数",
     ("knowledge_bases", "default_score_threshold"): "检索未显式传参时使用的默认相关性分数阈值（0 表示不过滤）",
+    ("knowledge_bases", "summary_index_enabled"): "是否启用片段摘要索引；开启为已发布文档排队摘要回填，关闭仅将摘要移出召回而不删除已生成行",
     ("knowledge_documents", "knowledge_base_id"): "所属知识库标识",
     ("knowledge_documents", "name"): "用户看到的文档名称",
     ("knowledge_documents", "original_name"): "上传文件的原始文件名",
@@ -514,6 +523,13 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_segment_children", "embedding"): "与知识库 Embedding 模型维度一致的 pgvector 向量",
     ("knowledge_segment_children", "lexical_tsv"): "按包内 lexical_v1 规则派生的词法 tsvector（simple 配置）；parent_child 词法召回经子块回卷父段",
     ("knowledge_segment_children", "lexical_version"): "词法派生规则版本；与当前版本不一致的行词法路明确失败，不运行时补数据",
+    ("knowledge_segment_summaries", "knowledge_base_id"): "所属知识库标识",
+    ("knowledge_segment_summaries", "knowledge_document_id"): "所属知识文档标识",
+    ("knowledge_segment_summaries", "knowledge_segment_id"): "所属知识片段标识；每片段至多一条摘要，删段级联删除",
+    ("knowledge_segment_summaries", "document_version"): "生成本摘要时源片段所属的文档处理版本号",
+    ("knowledge_segment_summaries", "content"): "系统生成的召回摘要文本（属于私有内容）；仅作召回辅助，从不作为引用内容",
+    ("knowledge_segment_summaries", "source_content_digest"): "生成摘要时源片段内容的 SHA-256 摘要；不一致即视为过期",
+    ("knowledge_segment_summaries", "embedding"): "与知识库 Embedding 模型维度一致的 pgvector 向量；与摘要文本同事务写入",
     ("knowledge_queries", "owner_user_id"): "发起本次检索并唯一有权读取原始查询文本的用户标识",
     ("knowledge_queries", "knowledge_base_ids"): "本次检索实际命中的目标知识库标识 JSON 数组",
     ("knowledge_queries", "query"): "检索查询文本（属于私有内容）",
@@ -523,8 +539,8 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_queries", "top_score_kind"): "top_score 的分数来源（cosine、rerank 或 rank_fusion）；M10 前历史行为空表示未知",
     ("knowledge_queries", "strategy_version"): "产生本行的检索策略版本标签；历史行为空",
     ("knowledge_tasks", "resource_id"): "按任务类型指向知识文档或知识库的业务标识",
-    ("knowledge_tasks", "kind"): "任务类型（摄取文档、重嵌入文档、删除文档、清理晚到文档对象或删除知识库）",
-    ("knowledge_tasks", "target_version"): "ingest_document 与 reembed_document 任务允许发布的文档版本号",
+    ("knowledge_tasks", "kind"): "任务类型（摄取文档、重嵌入文档、生成片段摘要、删除文档、清理晚到文档对象或删除知识库）",
+    ("knowledge_tasks", "target_version"): "ingest_document、reembed_document 与 summarize_document 任务允许发布的文档版本号",
     ("knowledge_tasks", "storage_key"): "仅 delete_document_object 使用的精确 MinIO object key；属于受保护存储定位符",
     ("knowledge_tasks", "reparse_settings"): "显式重新解析时固化的完整切分/清洗参数 JSON；重试继承，其余任务为空",
     ("knowledge_tasks", "status"): "任务状态（queued、running、retry_wait、succeeded 或 failed）",
@@ -539,6 +555,24 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_tasks", "lease_until"): "当前领取租约到期时间；过期后任务可重新领取",
     ("knowledge_tasks", "error_message"): "最近一次执行失败的可展示错误",
     ("knowledge_tasks", "finished_at"): "任务最终成功或失败的时间",
+    ("knowledge_system_settings", "revision"): "设置修订号；每次管理更新递增",
+    ("knowledge_system_settings", "enabled"): "知识模块总开关；开启前必须配齐 MinIO 存储目标",
+    ("knowledge_system_settings", "worker_concurrency"): "Worker 知识任务并发上限",
+    ("knowledge_system_settings", "task_timeout_seconds"): "单个知识任务的执行超时秒数",
+    ("knowledge_system_settings", "upload_max_bytes"): "单个上传文件的最大字节数",
+    ("knowledge_system_settings", "max_knowledge_bases_per_project"): "每个项目允许的知识库数量上限",
+    ("knowledge_system_settings", "max_documents_per_knowledge_base"): "每个知识库允许的文档数量上限",
+    ("knowledge_system_settings", "max_segments_per_document"): "每个文档允许的片段数量上限",
+    ("knowledge_system_settings", "minio_endpoint"): "MinIO 服务端点地址（不含凭据）；未配置时为空",
+    ("knowledge_system_settings", "minio_bucket"): "存放知识文档对象的 MinIO bucket 名称",
+    ("knowledge_system_settings", "minio_access_key"): "MinIO 访问键标识；对应 secret 以密文列保存",
+    ("knowledge_system_settings", "minio_secure"): "访问 MinIO 是否使用 TLS",
+    ("knowledge_system_settings", "minio_secret_nonce"): "当前 MinIO Secret Envelope 的 12 字节 nonce",
+    ("knowledge_system_settings", "minio_secret_ciphertext"): "当前 MinIO Secret Envelope 的密文",
+    ("knowledge_system_settings", "summary_model_name"): "片段摘要使用的 System Model 标识（UUID 字符串）；为空表示未配置摘要模型",
+    ("knowledge_system_settings", "query_cache_enabled"): "是否启用进程内查询向量缓存",
+    ("knowledge_system_settings", "query_cache_max_entries"): "查询向量缓存的最大条目数（LRU 淘汰）",
+    ("knowledge_system_settings", "query_cache_ttl_seconds"): "查询向量缓存条目的存活秒数",
     (
         "system_model_configs",
         "max_input_tokens",

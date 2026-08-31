@@ -58,8 +58,8 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         comments,
         re.MULTILINE,
     )
-    assert len(table_comments) == 108
-    assert len(column_comments) == 1353
+    assert len(table_comments) == 110
+    assert len(column_comments) == 1384
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
@@ -140,6 +140,7 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_bases", "default_top_k"),
         ("knowledge_bases", "default_score_threshold"),
         ("knowledge_bases", "retrieval_mode"),
+        ("knowledge_bases", "summary_index_enabled"),
         ("knowledge_documents", "knowledge_base_id"),
         ("knowledge_documents", "name"),
         ("knowledge_documents", "original_name"),
@@ -188,6 +189,13 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_segment_children", "embedding"),
         ("knowledge_segment_children", "lexical_tsv"),
         ("knowledge_segment_children", "lexical_version"),
+        ("knowledge_segment_summaries", "knowledge_base_id"),
+        ("knowledge_segment_summaries", "knowledge_document_id"),
+        ("knowledge_segment_summaries", "knowledge_segment_id"),
+        ("knowledge_segment_summaries", "document_version"),
+        ("knowledge_segment_summaries", "content"),
+        ("knowledge_segment_summaries", "source_content_digest"),
+        ("knowledge_segment_summaries", "embedding"),
         ("knowledge_queries", "owner_user_id"),
         ("knowledge_queries", "knowledge_base_ids"),
         ("knowledge_queries", "query"),
@@ -213,6 +221,24 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_tasks", "completed_units"),
         ("knowledge_tasks", "total_units"),
         ("knowledge_tasks", "progress_updated_at"),
+        ("knowledge_system_settings", "revision"),
+        ("knowledge_system_settings", "enabled"),
+        ("knowledge_system_settings", "worker_concurrency"),
+        ("knowledge_system_settings", "task_timeout_seconds"),
+        ("knowledge_system_settings", "upload_max_bytes"),
+        ("knowledge_system_settings", "max_knowledge_bases_per_project"),
+        ("knowledge_system_settings", "max_documents_per_knowledge_base"),
+        ("knowledge_system_settings", "max_segments_per_document"),
+        ("knowledge_system_settings", "minio_endpoint"),
+        ("knowledge_system_settings", "minio_bucket"),
+        ("knowledge_system_settings", "minio_access_key"),
+        ("knowledge_system_settings", "minio_secure"),
+        ("knowledge_system_settings", "minio_secret_nonce"),
+        ("knowledge_system_settings", "minio_secret_ciphertext"),
+        ("knowledge_system_settings", "summary_model_name"),
+        ("knowledge_system_settings", "query_cache_enabled"),
+        ("knowledge_system_settings", "query_cache_max_entries"),
+        ("knowledge_system_settings", "query_cache_ttl_seconds"),
     }
 
     assert set(generate_schema_comments._TABLE_COLUMN_PHRASES) == expected

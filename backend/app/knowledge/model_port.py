@@ -27,7 +27,10 @@ from app.model_registry.secrets import (
     ModelProviderSecretInvalid,
     materialize_provider_api_key,
 )
+from deerflow.models.runtime import ModelRuntime
+from deerflow.persistence.knowledge_settings import KnowledgeSystemSettingsRow
 from deerflow.persistence.model_registry import ModelProviderModelRow, ModelProviderRow
+from deerflow.persistence.system_settings import SystemModelConfigRow
 from deerflow.secrets import SecretKey, SecretKeyInvalid, SecretMaterializationFailed
 
 
@@ -35,11 +38,27 @@ def _model_unavailable() -> KnowledgeError:
     return KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "检索模型不存在或已停用")
 
 
-class RegistryKnowledgeModelPort:
-    """Bind-time locking and call-time materialization for registry models."""
+def _summary_model_unavailable() -> KnowledgeError:
+    return KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "摘要模型不存在或已停用")
 
-    def __init__(self, *, secret_key: SecretKey) -> None:
+
+class RegistryKnowledgeModelPort:
+    """Bind-time locking and call-time materialization for registry models.
+
+    ``model_runtime`` is the optional System-Model dispatch dependency for
+    summary generation; composition wires it where summaries actually run
+    (the Worker), and an unconfigured port rejects ``generate_summary`` with
+    a typed ``KNOWLEDGE_MODEL_UNAVAILABLE`` error.
+    """
+
+    def __init__(
+        self,
+        *,
+        secret_key: SecretKey,
+        model_runtime: ModelRuntime | None = None,
+    ) -> None:
         self._secret_key = secret_key
+        self._model_runtime = model_runtime
 
     @classmethod
     def from_environment(cls) -> RegistryKnowledgeModelPort:
@@ -102,6 +121,49 @@ class RegistryKnowledgeModelPort:
             request_timeout_seconds=provider.request_timeout_seconds,
             api_key=self._decrypted_api_key(provider),
         )
+
+    async def resolve_summary_model(
+        self,
+        session: AsyncSession,
+    ) -> str | None:
+        """Return the configured, active summary System Model reference.
+
+        Reads the ``knowledge_system_settings`` singleton with the caller's
+        session. A missing row or NULL ``summary_model_name`` means summaries
+        are simply not configured (``None``); a configured reference that is
+        malformed, missing, or not ``active`` raises the typed
+        ``KNOWLEDGE_MODEL_UNAVAILABLE`` error instead of degrading silently.
+        """
+
+        model_name = await session.scalar(select(KnowledgeSystemSettingsRow.summary_model_name).where(KnowledgeSystemSettingsRow.id == 1))
+        if model_name is None:
+            return None
+        try:
+            model_id = uuid.UUID(model_name)
+        except ValueError:
+            raise _summary_model_unavailable() from None
+        status = await session.scalar(select(SystemModelConfigRow.status).where(SystemModelConfigRow.id == model_id))
+        if status != "active":
+            raise _summary_model_unavailable()
+        return model_name
+
+    async def generate_summary(
+        self,
+        *,
+        model_ref: str,
+        prompt: str,
+    ) -> str:
+        """Generate one segment summary without holding a database session.
+
+        T1 freezes the port signature only: an unconfigured runtime is the
+        only reachable branch and raises the typed error. The actual
+        ModelRuntime dispatch (with ``KNOWLEDGE_TASK_FAILED`` on call
+        failure) lands with the M11 summary pipeline task.
+        """
+
+        if self._model_runtime is None:
+            raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "摘要模型运行时未配置")
+        raise NotImplementedError("summary generation dispatch lands with the M11 pipeline task")
 
     async def _resolved_active_model(
         self,

@@ -25,6 +25,7 @@ KNOWLEDGE_APP_TABLES = frozenset(
         "knowledge_metadata_fields",
         "knowledge_segments",
         "knowledge_segment_children",
+        "knowledge_segment_summaries",
         "knowledge_queries",
         "knowledge_tasks",
     }
@@ -127,32 +128,32 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=107,
-        digest="454c40a567936dfdb6184fd7a5216180645476c9d067349a424a234992c9164b",
+        count=109,
+        digest="f9d4e3bc84d89d0dc6ad137aebddb702c0cab90bdba296d653f7b3d8063e9c1d",
     ),
     "columns": CatalogInvariant(
-        count=1352,
-        digest="d07452d3d8e1e12ec35cc5454d23217a8209f493153bf72c0a4a1556d01417ac",
+        count=1383,
+        digest="8fc08b8ddcdb3d8bd9ab033e50555e849da2bcbb2c1d763dec660b3775ab1236",
     ),
     "table_comments": CatalogInvariant(
-        count=108,
-        digest="49865a7bb80e5786c3df74c77595a26db114dcc680d663dd876d8860faf9e3a2",
+        count=110,
+        digest="8c6746bacc9821b4abbf9a8f55d8af299e60f2ea236367da5b27577c4829e977",
     ),
     "column_comments": CatalogInvariant(
-        count=1353,
-        digest="7ec22a70bb865cd668c547cd9ddcc6c1ad95e2719727a10d79f15a2d2ab0f58c",
+        count=1384,
+        digest="9417786a898b6461d836f902facbef9563963db97e311621970de05ab9088c48",
     ),
     "sequences": CatalogInvariant(
         count=4,
         digest="73cb0d46bc3afc9585d0959b1d57d093621113408f2629dad9a6b027550af894",
     ),
     "constraints": CatalogInvariant(
-        count=1001,
-        digest="08374d12a32c4a2064593aa30d6697bcccea57189eb4cdee584e69398c904b1d",
+        count=1019,
+        digest="024d8a0ab1f4cd29c537cca999de773034f0566fb1d97a2fc192d9952907c916",
     ),
     "indexes": CatalogInvariant(
-        count=364,
-        digest="9c4bdd5d8572f5b5abc64f231574972a20159fda89f4100af6aabec23f90ce6a",
+        count=369,
+        digest="98e5f8a04abf30b3f69adf5a7099f2719ccd395c193638a5a470ffc13dafa296",
     ),
     "functions": CatalogInvariant(
         count=28,

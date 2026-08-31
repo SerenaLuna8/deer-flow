@@ -48,6 +48,7 @@ from deerflow.persistence.execution_approvals import (
 )
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.jobs import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
+from deerflow.persistence.knowledge_settings import KnowledgeSystemSettingsRow
 from deerflow.persistence.model_registry import (
     ModelProviderModelRow,
     ModelProviderRow,
@@ -167,6 +168,7 @@ __all__ = [
     "DeadJobRow",
     "JobAttemptRow",
     "JobRow",
+    "KnowledgeSystemSettingsRow",
     "McpSecretSlotRow",
     "McpServerRow",
     "McpServerVersionRow",

@@ -97,6 +97,7 @@ def _view(row: KnowledgeBaseRow, *, document_count: int, delete_error: str | Non
         embedding_model_id=row.embedding_model_id,
         reranker_model_id=row.reranker_model_id,
         retrieval_mode=row.retrieval_mode,  # type: ignore[arg-type]
+        summary_index_enabled=row.summary_index_enabled,
         status=row.status,  # type: ignore[arg-type]
         document_count=document_count,
         default_top_k=row.default_top_k,

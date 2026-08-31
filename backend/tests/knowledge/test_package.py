@@ -71,6 +71,15 @@ PUBLIC_EXPORTS = [
     "KNOWLEDGE_BUILTIN_FILTER_FIELDS",
     "KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS",
     "KNOWLEDGE_MAX_BATCH_METADATA_FIELDS",
+    # M11 T1: segment-summary index, settings cache knobs, matched-via.
+    "KnowledgeSegmentSummaryView",
+    "KnowledgeSummaryBackfill",
+    "KnowledgeBaseUpdateResult",
+    "KnowledgeMatchedVia",
+    "KNOWLEDGE_SUMMARY_PROMPT_VERSION",
+    "KNOWLEDGE_SUMMARY_MIN_SOURCE_CHARS",
+    "KNOWLEDGE_SUMMARY_MAX_CHARS",
+    "KNOWLEDGE_SUMMARY_MAX_TOKENS",
 ]
 
 
@@ -424,6 +433,132 @@ class TestM10ContractShapes:
         assert tuple(baseline["metadata_contract"]["builtin_fields"]) == pkg.KNOWLEDGE_BUILTIN_FILTER_FIELDS
         assert pkg.KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS == baseline["metadata_contract"]["batch_limits"]["max_documents"]
         assert pkg.KNOWLEDGE_MAX_BATCH_METADATA_FIELDS == baseline["metadata_contract"]["batch_limits"]["max_fields"]
+
+
+class TestM11ContractShapes:
+    """M11 T1 gates: summary/settings/cache contracts hold their frozen shape."""
+
+    def test_summary_constants_match_the_design_freeze(self) -> None:
+        import actweave_knowledge as pkg
+
+        assert pkg.KNOWLEDGE_SUMMARY_PROMPT_VERSION == 1
+        assert pkg.KNOWLEDGE_SUMMARY_MIN_SOURCE_CHARS == 200
+        assert pkg.KNOWLEDGE_SUMMARY_MAX_CHARS == 1000
+        assert pkg.KNOWLEDGE_SUMMARY_MAX_TOKENS == 1024
+
+    def test_matched_via_and_task_literals_cover_the_summary_route(self) -> None:
+        from typing import get_args
+
+        from actweave_knowledge import KnowledgeMatchedVia
+        from actweave_knowledge.contracts import (
+            KnowledgeIndexingTaskKind,
+            KnowledgeTaskStage,
+        )
+
+        assert get_args(KnowledgeMatchedVia) == ("segment", "child", "summary")
+        assert "summarize_document" in get_args(KnowledgeIndexingTaskKind)
+        assert "summarizing" in get_args(KnowledgeTaskStage)
+
+    def test_settings_carry_bounded_query_cache_knobs(self) -> None:
+        from actweave_knowledge import KnowledgeSettings
+
+        settings = KnowledgeSettings()
+        assert settings.query_cache_enabled is True
+        assert settings.query_cache_max_entries == 512
+        assert settings.query_cache_ttl_seconds == 300
+
+        assert KnowledgeSettings(query_cache_max_entries=16).query_cache_max_entries == 16
+        assert KnowledgeSettings(query_cache_max_entries=65536).query_cache_max_entries == 65536
+        assert KnowledgeSettings(query_cache_ttl_seconds=5).query_cache_ttl_seconds == 5
+        assert KnowledgeSettings(query_cache_ttl_seconds=86400).query_cache_ttl_seconds == 86400
+        for invalid in ({"query_cache_max_entries": 15}, {"query_cache_max_entries": 65537}, {"query_cache_ttl_seconds": 4}, {"query_cache_ttl_seconds": 86401}):
+            with pytest.raises(ValidationError):
+                KnowledgeSettings.model_validate(invalid)
+
+    def test_base_view_and_update_carry_the_summary_index_switch(self) -> None:
+        import dataclasses
+
+        from actweave_knowledge import KnowledgeBaseUpdate, KnowledgeBaseView
+
+        view_fields = {f.name for f in dataclasses.fields(KnowledgeBaseView)}
+        assert "summary_index_enabled" in view_fields
+        update = KnowledgeBaseUpdate()
+        assert update.summary_index_enabled is None
+
+    def test_update_result_wraps_base_view_with_optional_backfill(self) -> None:
+        from datetime import UTC, datetime
+
+        from actweave_knowledge import (
+            KnowledgeBaseUpdateResult,
+            KnowledgeBaseView,
+            KnowledgeSummaryBackfill,
+        )
+
+        now = datetime.now(UTC)
+        base = KnowledgeBaseView(
+            id=uuid4(),
+            project_id=uuid4(),
+            name="库",
+            description="",
+            embedding_model_id=None,
+            reranker_model_id=None,
+            retrieval_mode="semantic",
+            summary_index_enabled=False,
+            status="active",
+            document_count=0,
+            default_top_k=4,
+            default_score_threshold=0.2,
+            delete_error=None,
+            created_at=now,
+            updated_at=now,
+        )
+        plain = KnowledgeBaseUpdateResult(base=base)
+        assert plain.summary_backfill is None
+        skipped = (uuid4(),)
+        backfill = KnowledgeSummaryBackfill(accepted_document_count=3, skipped_document_ids=skipped)
+        result = KnowledgeBaseUpdateResult(base=base, summary_backfill=backfill)
+        assert result.summary_backfill is not None
+        assert result.summary_backfill.accepted_document_count == 3
+        assert result.summary_backfill.skipped_document_ids == skipped
+
+    def test_hit_diagnostics_default_matched_via_is_segment(self) -> None:
+        from actweave_knowledge import KnowledgeHitDiagnostics
+
+        diagnostics = KnowledgeHitDiagnostics(
+            segment_id=uuid4(),
+            local_score=0.5,
+            local_score_kind="cosine",
+            score_domain="cosine:embed",
+            ranking_method="cosine",
+            ranking_score=0.5,
+        )
+        assert diagnostics.matched_via == "segment"
+
+    def test_route_counts_add_summary_and_cache_counters_defaulting_zero(self) -> None:
+        from actweave_knowledge import KnowledgeRouteCounts
+
+        counts = KnowledgeRouteCounts()
+        assert counts.summary_candidates == 0
+        assert counts.query_embedding_cache_hits == 0
+        assert counts.query_embedding_cache_misses == 0
+
+    def test_segment_detail_carries_optional_system_summary(self) -> None:
+        import dataclasses
+        from datetime import UTC, datetime
+
+        from actweave_knowledge import KnowledgeSegmentDetail, KnowledgeSegmentSummaryView
+
+        detail_fields = {f.name: f for f in dataclasses.fields(KnowledgeSegmentDetail)}
+        assert "summary" in detail_fields
+        assert detail_fields["summary"].default is None
+        summary = KnowledgeSegmentSummaryView(content="系统生成摘要", created_at=datetime.now(UTC))
+        assert summary.content == "系统生成摘要"
+
+    def test_model_port_protocol_declares_the_summary_methods(self) -> None:
+        from actweave_knowledge import KnowledgeModelPort
+
+        assert callable(getattr(KnowledgeModelPort, "resolve_summary_model", None))
+        assert callable(getattr(KnowledgeModelPort, "generate_summary", None))
 
 
 def _stub_module_with_health(*, storage_ok: bool):
