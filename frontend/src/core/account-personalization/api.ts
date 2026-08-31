@@ -114,10 +114,11 @@ export async function runAbortableAccountPersonalizationMutation<T>(
 }
 
 export function abortAccountPersonalizationAccount(accountId: string): void {
-  const parsedAccountId =
-    accountPersonalizationAccountIdSchema.parse(accountId);
-  for (const controller of mutationControllers.get(parsedAccountId) ?? []) {
+  const parsed = accountPersonalizationAccountIdSchema.safeParse(accountId);
+  // Development identity has no personalization requests to cancel.
+  if (!parsed.success) return;
+  for (const controller of mutationControllers.get(parsed.data) ?? []) {
     controller.abort();
   }
-  mutationControllers.delete(parsedAccountId);
+  mutationControllers.delete(parsed.data);
 }

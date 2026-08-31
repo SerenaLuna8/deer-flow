@@ -33,6 +33,7 @@ REQUIRED_CATEGORIES = {
     "cross_base",
     "metadata",
     "no_answer",
+    "question_style",
 }
 
 
@@ -73,6 +74,74 @@ class TestMetricWorkedExamples:
 
 
 class TestFrozenCorpusContract:
+    def test_existing_m10_queries_and_documents_remain_frozen(self, corpus: dict) -> None:
+        legacy = {
+            "queries": [item for item in corpus["queries"] if item["category"] != "question_style"],
+            "documents": [item for item in corpus["documents"] if not item["source_id"].startswith("m11-question-")],
+        }
+        expected = {
+            "queries": (65, "fb20703fa950571050300e172ec0457f2250b04340e3f1356401652fda4394e5"),
+            "documents": (20, "f27ca1a442f7d4a2bd8726915ebff54f7e1f560840e133ad57ad8301711ea52b"),
+        }
+        for kind, (count, digest) in expected.items():
+            assert len(legacy[kind]) == count
+            canonical = json.dumps(legacy[kind], ensure_ascii=False, sort_keys=True).encode("utf-8")
+            assert hashlib.sha256(canonical).hexdigest() == digest
+
+    def test_generated_cases_match_the_frozen_fixture(self, corpus: dict) -> None:
+        from _generate_m10_eval_corpus import documents, queries, question_documents, question_queries
+
+        assert corpus["documents"] == documents() + question_documents()
+        assert corpus["queries"] == queries() + question_queries()
+
+    def test_question_style_has_ten_independent_cases_in_each_split(self, corpus: dict) -> None:
+        cases = [item for item in corpus["queries"] if item["category"] == "question_style"]
+        split_sources: dict[str, set[str]] = {"dev": set(), "holdout": set()}
+        for split in split_sources:
+            selected = [item for item in cases if item["split"] == split]
+            assert len(selected) >= 10
+            for item in selected:
+                split_sources[split].update(judgment["source_id"] for judgment in item["judgments"])
+        assert split_sources["dev"].isdisjoint(split_sources["holdout"])
+        documents = {document["source_id"]: document for document in corpus["documents"]}
+        for case in cases:
+            other_split = "holdout" if case["split"] == "dev" else "dev"
+            for source in split_sources[other_split]:
+                assert all(case["answer_marker"] not in segment["content"] for segment in documents[source]["segments"])
+
+    def test_question_style_uses_long_factual_passages_and_three_grades(self, corpus: dict) -> None:
+        documents = {document["source_id"]: document for document in corpus["documents"]}
+        cases = [item for item in corpus["queries"] if item["category"] == "question_style"]
+        assert cases
+        for query in cases:
+            assert {item["grade"] for item in query["judgments"]} == {0, 1, 2}
+            assert query["query"].endswith("？")
+            marker = query["answer_marker"]
+            assert marker not in query["query"]
+            for judgment in query["judgments"]:
+                document = documents[judgment["source_id"]]
+                segment = next(item for item in document["segments"] if item["position"] == judgment["position"])
+                if judgment["grade"] == 2:
+                    assert len(segment["content"]) >= 200
+                    assert marker in segment["content"]
+                    assert query["query"].rstrip("？") not in segment["content"]
+                else:
+                    assert marker not in segment["content"]
+
+    def test_m11_gates_are_additive_and_preserve_m10_thresholds(self, corpus: dict) -> None:
+        gates = corpus["gates"]
+        assert gates["identifier_recall_candidate_min"] == 0.95
+        assert gates["identifier_recall_at_10_min"] == 0.95
+        assert gates["natural_language_recall_regression_max"] == 0.02
+        assert gates["natural_language_ndcg_regression_max"] == 0.02
+        assert gates["p95_regression_review_ratio"] == 1.5
+        assert gates["question_recall_candidate_uplift_pp"] == 5
+        assert gates["question_recall_at_10_uplift_pp"] == 5
+        assert gates["overall_ndcg_regression"] == 0.02
+        assert gates["no_answer_false_recall_not_worse"] is True
+        assert gates["existing_category_recall_not_worse"] is True
+        assert gates["p95_regression_review_ratio_m11"] == 1.2
+
     def test_source_is_synthetic_and_desensitized(self, corpus: dict) -> None:
         source = corpus["source"]
         assert source["kind"] == "synthetic_desensitized"

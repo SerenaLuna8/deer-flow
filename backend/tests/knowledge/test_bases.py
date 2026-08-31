@@ -209,7 +209,7 @@ async def test_retrieval_mode_round_trips_and_validates(postgres_database_url: s
             created.id,
             KnowledgeBaseUpdate(retrieval_mode="semantic"),
         )
-        assert updated.retrieval_mode == "semantic"
+        assert updated.base.retrieval_mode == "semantic"
 
         with pytest.raises(KnowledgeError) as bad_create:
             await harness.service.create_knowledge_base(
@@ -503,11 +503,11 @@ async def test_initial_configuration_commits_models_and_retrieval_settings_toget
             created.id,
             KnowledgeBaseUpdate(embedding_model_id=embedding_model_id, reranker_model_id=reranker_id, retrieval_mode="hybrid"),
         )
-        assert configured.embedding_model_id == embedding_model_id
-        assert configured.reranker_model_id == reranker_id
-        assert configured.retrieval_mode == "hybrid"
-        assert configured.document_count == 0
-        assert await harness.service.get_knowledge_base(project_id, created.id) == configured
+        assert configured.base.embedding_model_id == embedding_model_id
+        assert configured.base.reranker_model_id == reranker_id
+        assert configured.base.retrieval_mode == "hybrid"
+        assert configured.base.document_count == 0
+        assert await harness.service.get_knowledge_base(project_id, created.id) == configured.base
 
         with pytest.raises(KnowledgeError) as rebound:
             await harness.service.update_knowledge_base(project_id, created.id, KnowledgeBaseUpdate(embedding_model_id=uuid.uuid4()))
@@ -530,15 +530,15 @@ async def test_update_changes_allowed_fields_and_bumps_updated_at(postgres_datab
             KnowledgeBaseUpdate(name="after", description="新的描述", status="disabled"),
         )
 
-        assert updated.name == "after"
-        assert updated.description == "新的描述"
-        assert updated.status == "disabled"
-        assert updated.embedding_model_id == embedding_model_id
-        assert updated.updated_at > created.updated_at
+        assert updated.base.name == "after"
+        assert updated.base.description == "新的描述"
+        assert updated.base.status == "disabled"
+        assert updated.base.embedding_model_id == embedding_model_id
+        assert updated.base.updated_at > created.updated_at
 
         # A no-op update keeps updated_at untouched.
         unchanged = await harness.service.update_knowledge_base(project_id, created.id, KnowledgeBaseUpdate(name="after"))
-        assert unchanged.updated_at == updated.updated_at
+        assert unchanged.base.updated_at == updated.base.updated_at
     finally:
         await harness.engine.dispose()
 
@@ -564,21 +564,21 @@ async def test_update_rebinding_and_clearing_the_reranker(postgres_database_url:
             created.id,
             KnowledgeBaseUpdate(reranker_model_id=first_rerank),
         )
-        assert bound.reranker_model_id == first_rerank
+        assert bound.base.reranker_model_id == first_rerank
 
         rebound = await harness.service.update_knowledge_base(
             project_id,
             created.id,
             KnowledgeBaseUpdate(reranker_model_id=second_rerank),
         )
-        assert rebound.reranker_model_id == second_rerank
+        assert rebound.base.reranker_model_id == second_rerank
 
         cleared = await harness.service.update_knowledge_base(
             project_id,
             created.id,
             KnowledgeBaseUpdate(clear_reranker_model=True),
         )
-        assert cleared.reranker_model_id is None
+        assert cleared.base.reranker_model_id is None
 
         # Neither binding nor clearing queued any re-ingestion.
         async with harness.factory() as session:
@@ -648,8 +648,8 @@ async def test_update_retrieval_defaults_round_trip_and_validate(postgres_databa
             created.id,
             KnowledgeBaseUpdate(default_top_k=9, default_score_threshold=0.65),
         )
-        assert updated.default_top_k == 9
-        assert updated.default_score_threshold == 0.65
+        assert updated.base.default_top_k == 9
+        assert updated.base.default_score_threshold == 0.65
 
         # Boundary values are allowed: 1..20 and 0..1 (0 disables the filter).
         edges = await harness.service.update_knowledge_base(
@@ -657,8 +657,8 @@ async def test_update_retrieval_defaults_round_trip_and_validate(postgres_databa
             created.id,
             KnowledgeBaseUpdate(default_top_k=20, default_score_threshold=0.0),
         )
-        assert edges.default_top_k == 20
-        assert edges.default_score_threshold == 0.0
+        assert edges.base.default_top_k == 20
+        assert edges.base.default_score_threshold == 0.0
 
         for update in (
             KnowledgeBaseUpdate(default_top_k=0),
@@ -1040,7 +1040,7 @@ async def test_concurrent_initial_configurations_commit_one_complete_configurati
         assert isinstance(second_result, KnowledgeError)
         assert second_result.code == KNOWLEDGE_INVALID_REQUEST
         stored = await harness.service.get_knowledge_base(project_id, created.id)
-        assert stored == first_result
+        assert stored == first_result.base
         assert stored.name == first_update.name
         assert stored.description == first_update.description
         assert stored.embedding_model_id == first_embedding_id

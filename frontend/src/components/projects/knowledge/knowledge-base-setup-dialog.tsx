@@ -93,7 +93,7 @@ export function KnowledgeBaseSetupDialog({
               {
                 onSuccess: (configured) => {
                   onOpenChange(false);
-                  onConfigured?.(configured);
+                  onConfigured?.(configured.item);
                 },
               },
             );

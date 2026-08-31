@@ -94,9 +94,25 @@ async function setRerankFailures(
   expect(response.status(), await response.text()).toBe(200);
 }
 
+async function setSummaryFailures(
+  context: BrowserContext,
+  project: ReplayProjectScope,
+  failures: number,
+): Promise<void> {
+  const response = await context.request.post(
+    `${APP}/api/test-only/replay-knowledge/provider/faults`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { chat_failures: failures },
+    },
+  );
+  expect(response.status(), await response.text()).toBe(200);
+}
+
 async function providerCounters(context: BrowserContext): Promise<{
   embedding_calls: number;
   rerank_calls: number;
+  chat_calls: number;
   embedding_failures_remaining: number;
 }> {
   const response = await context.request.get(
@@ -106,6 +122,7 @@ async function providerCounters(context: BrowserContext): Promise<{
   return (await response.json()) as {
     embedding_calls: number;
     rerank_calls: number;
+    chat_calls: number;
     embedding_failures_remaining: number;
   };
 }
@@ -116,13 +133,27 @@ async function createBaseThroughUI(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: "New base" }).click();
   await page.getByRole("button", { name: "Create an empty base" }).click();
   await page.getByLabel("Name").fill(name);
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(
+    page.getByTestId("knowledge-base-list").getByText(name),
+  ).toBeVisible();
+  // Empty bases no longer bind a model in their create dialog. Configure
+  // explicitly through Settings, then return to the list for callers.
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Configure models" }).click();
   await page.getByLabel("Embedding model").click();
   await page
     .getByRole("option", { name: "Replay Knowledge Model · replay/embedding" })
     .click();
-  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await page.getByRole("button", { name: "Save configuration" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(page).toHaveURL(/\/knowledge$/u);
   await expect(
-    page.getByTestId("knowledge-base-list").getByText(name),
+    page
+      .getByRole("region", { name: "Knowledge bases", exact: true })
+      .getByText(name),
   ).toBeVisible();
 }
 
@@ -153,7 +184,11 @@ async function uploadDocumentThroughUI(
     mimeType: "text/plain",
     buffer: Buffer.from(contents, "utf-8"),
   });
-  await page.getByRole("button", { name: "Upload", exact: true }).click();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Upload & process", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Go to documents" }).click();
 }
 
 async function openDocumentActions(page: Page, documentName: string) {
@@ -563,16 +598,19 @@ test("parent-child upload rolls child hits up to one parent citation and base de
 
   // Upload in parent-child mode with an explicit child size and no overlap.
   await page.getByRole("button", { name: "Upload document" }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("File").setInputFiles({
+  await page.getByLabel("File").setInputFiles({
     name: "parent-child.txt",
     mimeType: "text/plain",
     buffer: Buffer.from(documentText, "utf-8"),
   });
-  await dialog.getByRole("radio", { name: "Parent-child" }).check();
-  await dialog.getByLabel("Chunk overlap (characters)").fill("0");
-  await dialog.getByLabel("Child chunk size (characters)").fill("200");
-  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await page.getByRole("radio", { name: "Parent-child" }).check();
+  await page.getByLabel("Chunk overlap (characters)").fill("0");
+  await page.getByLabel("Child chunk size (characters)").fill("200");
+  await page
+    .getByRole("button", { name: "Upload & process", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Go to documents" }).click();
 
   const rows = page.getByTestId("knowledge-document-rows");
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
@@ -1054,9 +1092,9 @@ test("re-embedding keeps segment identity, edits, and disables; reparse replaces
     expect(item.enabled).toBe(true);
     expect(item.content).not.toContain("EMG-3088");
   }
-  expect(
-    reparsed.some((item) => item.content.includes(MARKER_PHONE)),
-  ).toBe(true);
+  expect(reparsed.some((item) => item.content.includes(MARKER_PHONE))).toBe(
+    true,
+  );
 
   // Retrieval serves only the reparsed generation: the marker paragraph hits
   // again (proving the reparse also reset the manual disable) while the
@@ -1087,4 +1125,366 @@ test("re-embedding keeps segment identity, edits, and disables; reparse replaces
     MARKER_PHONE,
     { timeout: 15_000 },
   );
+});
+
+test("summary indexing retries without hiding ready content, caches queries, and survives re-embed before reparse replaces it", async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(300_000);
+  const project = await registerReplayProject(context, APP);
+  // The deterministic provider embeds every source chunk away from the query,
+  // and generated summaries toward it. Repeating the marker keeps this true
+  // across both the initial split and the later, smaller reparse split.
+  const source =
+    `${RERANK_MARKER}设备维护手册记录了跨班组应急联络方式、夜间故障升级路径与复核程序，值班人员必须核对原始运行记录后处理。`.repeat(
+      30,
+    );
+  await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
+  await createBaseThroughUI(page, "摘要索引验收");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await expect(page).toHaveURL(/[?&]kb=/u);
+  const baseId = new URL(page.url()).searchParams.get("kb");
+  expect(baseId).toBeTruthy();
+  const apiRoot = `${APP}/api/projects/${project.id}/knowledge`;
+  const nav = page.getByRole("navigation", { name: "Knowledge base sections" });
+  await nav.getByRole("button", { name: "Settings", exact: true }).click();
+  const summarySwitch = page.getByRole("switch", {
+    name: "Summary index",
+    exact: true,
+  });
+  await expect(summarySwitch).toBeEnabled();
+  await summarySwitch.click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(
+    page.getByTestId("knowledge-summary-backfill-outcome"),
+  ).toHaveText("Summary backfill: 0 queued, 0 skipped.");
+  await nav.getByRole("button", { name: "Documents", exact: true }).click();
+
+  const row = page
+    .getByTestId("knowledge-document-rows")
+    .getByRole("row")
+    .filter({ hasText: "summary.txt" });
+  // A permanent first-attempt failure gives the browser a stable task-progress
+  // state to inspect without adding timing delays to the provider or Worker.
+  await setSummaryFailures(context, project, 100);
+  try {
+    await uploadDocumentThroughUI(page, "summary.txt", source);
+    await expect(row.getByText("Ready", { exact: true })).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(row.getByTestId("knowledge-task-progress")).toContainText(
+      "Generate summaries · Failed during Generating summaries",
+      { timeout: 60_000 },
+    );
+  } finally {
+    await setSummaryFailures(context, project, 0);
+  }
+  await (await openDocumentActions(page, "summary.txt"))
+    .getByRole("menuitem", { name: "Retry", exact: true })
+    .click();
+
+  type DocumentState = {
+    id: string;
+    name: string;
+    status: string;
+    version: number;
+    task_progress: { kind: string; status: string } | null;
+  };
+  type SegmentState = { id: string; content: string; document_version: number };
+  type DetailState = {
+    segment: SegmentState;
+    summary: { content: string; created_at: string } | null;
+    current_document_version: number;
+  };
+  const readDocument = async (): Promise<DocumentState> => {
+    const response = await context.request.get(
+      `${apiRoot}/bases/${baseId}/documents?page=1&page_size=50`,
+    );
+    expect(response.status(), await response.text()).toBe(200);
+    const body = (await response.json()) as { items: DocumentState[] };
+    const document = body.items.find((item) => item.name === "summary.txt");
+    expect(document).toBeDefined();
+    return document!;
+  };
+  await expect
+    .poll(async () => (await readDocument()).task_progress, { timeout: 60_000 })
+    .toBeNull();
+  const document = await readDocument();
+  expect(document.status).toBe("ready");
+  const listSegments = async (): Promise<SegmentState[]> => {
+    const response = await context.request.get(
+      `${apiRoot}/documents/${document.id}/segments?page=1&page_size=50`,
+    );
+    expect(response.status(), await response.text()).toBe(200);
+    return ((await response.json()) as { items: SegmentState[] }).items;
+  };
+  const detailUrl = (segmentId: string) =>
+    `${apiRoot}/bases/${baseId}/documents/${document.id}/segments/${segmentId}`;
+  const readDetail = async (segmentId: string): Promise<DetailState> => {
+    const response = await context.request.get(detailUrl(segmentId));
+    expect(response.status(), await response.text()).toBe(200);
+    return (await response.json()) as DetailState;
+  };
+  const originalSegments = await listSegments();
+  expect(originalSegments.length).toBeGreaterThan(1);
+  const originalDetails = await Promise.all(
+    originalSegments.map((segment) => readDetail(segment.id)),
+  );
+  for (const detail of originalDetails) {
+    expect(detail.summary?.content).toMatch(/^摘要索引回放 [a-f0-9]{16}$/u);
+    expect(detail.segment.content).toContain(RERANK_MARKER);
+    expect(detail.segment.content).not.toContain("摘要索引回放");
+  }
+
+  await nav.getByRole("button", { name: "Retrieval test" }).click();
+  // Unique across scenarios so the first request is demonstrably cold.
+  await page.getByLabel("Query").fill(`夜间维修故障复核 ${project.id}`);
+  const search = async () => {
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (result) =>
+          result.url().endsWith(`/projects/${project.id}/knowledge/search`) &&
+          result.request().method() === "POST",
+      ),
+      page.getByRole("button", { name: "Search", exact: true }).click(),
+    ]);
+    expect(response.status(), await response.text()).toBe(200);
+    return (await response.json()) as {
+      citations: Array<{ segment_id: string; snippet: string; score: number }>;
+      diagnostics: {
+        counts: {
+          summary_candidates: number;
+          query_embedding_cache_hits: number;
+          query_embedding_cache_misses: number;
+        };
+        hit_diagnostics: Array<{ segment_id: string; matched_via: string }>;
+      };
+    };
+  };
+  const beforeSearch = await providerCounters(context);
+  const cold = await search();
+  expect(cold.citations.length).toBeGreaterThan(0);
+  expect(cold.diagnostics.counts).toMatchObject({
+    query_embedding_cache_hits: 0,
+    query_embedding_cache_misses: 1,
+  });
+  expect(cold.diagnostics.counts.summary_candidates).toBeGreaterThan(0);
+  for (const hit of cold.diagnostics.hit_diagnostics) {
+    expect(hit.matched_via).toBe("summary");
+  }
+  for (const citation of cold.citations) {
+    expect(citation.snippet).toContain(RERANK_MARKER);
+    expect(citation.snippet).not.toContain("摘要索引回放");
+    expect(citation.score).toBeCloseTo(1);
+  }
+  const afterCold = await providerCounters(context);
+  expect(afterCold.embedding_calls).toBe(beforeSearch.embedding_calls + 1);
+  const warm = await search();
+  expect(warm.diagnostics.counts).toMatchObject({
+    query_embedding_cache_hits: 1,
+    query_embedding_cache_misses: 0,
+  });
+  expect((await providerCounters(context)).embedding_calls).toBe(
+    afterCold.embedding_calls,
+  );
+
+  const firstHit = page
+    .getByTestId("knowledge-search-results")
+    .getByRole("listitem")
+    .first();
+  await expect(firstHit.getByTestId("knowledge-hit-source")).toHaveText(
+    "Summary",
+  );
+  await firstHit
+    .getByRole("button", { name: /View segment #\d+ in full/u })
+    .click();
+  const detailDialog = page.getByRole("dialog");
+  const firstDetail = originalDetails.find(
+    (item) => item.segment.id === warm.citations[0]!.segment_id,
+  )!;
+  await expect(detailDialog.getByTestId("knowledge-detail-content")).toHaveText(
+    firstDetail.segment.content,
+  );
+  await expect(
+    detailDialog.getByTestId("knowledge-segment-summary"),
+  ).toContainText(firstDetail.summary!.content);
+  await expect(
+    detailDialog.getByTestId("knowledge-segment-summary"),
+  ).toContainText("System-generated summary");
+  await page.keyboard.press("Escape");
+
+  // Re-embedding changes vector generations only; every summary remains
+  // byte-identical, with its timestamp intact and without another chat call.
+  const beforeReembed = await providerCounters(context);
+  await nav.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("region", { name: "Embedding model" })
+    .getByRole("button", { name: "Re-embed documents" })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Re-embed", exact: true })
+    .click();
+  await expect(page.getByTestId("knowledge-rebuild-outcome")).toHaveText(
+    "Re-embedding accepted for 1 documents.",
+  );
+  await expect
+    .poll(
+      async () => {
+        const current = await readDocument();
+        return (
+          current.version > document.version &&
+          current.status === "ready" &&
+          current.task_progress === null
+        );
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(true);
+  const reembedded = await Promise.all(
+    originalSegments.map((segment) => readDetail(segment.id)),
+  );
+  expect(reembedded.map((item) => item.summary)).toEqual(
+    originalDetails.map((item) => item.summary),
+  );
+  expect(reembedded.map((item) => item.segment.content)).toEqual(
+    originalSegments.map((item) => item.content),
+  );
+  const afterReembed = await providerCounters(context);
+  expect(afterReembed.chat_calls).toBe(beforeReembed.chat_calls);
+  expect(afterReembed.embedding_calls).toBeGreaterThan(
+    beforeReembed.embedding_calls,
+  );
+  await nav.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill(`夜间维修故障复核 ${project.id}`);
+  const afterReembedSearch = await search();
+  expect(
+    afterReembedSearch.diagnostics.hit_diagnostics.every(
+      (hit) => hit.matched_via === "summary",
+    ),
+  ).toBe(true);
+  expect(afterReembedSearch.citations.length).toBeGreaterThan(0);
+
+  // Reparse is a new split of the original source. Its old segment details
+  // disappear, while replacement segments receive freshly generated summaries.
+  const reembeddedDocument = await readDocument();
+  await nav.getByRole("button", { name: "Documents", exact: true }).click();
+  await (await openDocumentActions(page, "summary.txt"))
+    .getByRole("menuitem", { name: "Reparse from original" })
+    .click();
+  const reparseDialog = page.getByRole("dialog");
+  await reparseDialog.getByLabel("Chunk size (characters)").fill("500");
+  await reparseDialog
+    .getByRole("button", { name: "Preview split", exact: true })
+    .click();
+  await expect(
+    reparseDialog.getByText(/Showing \d+ of \d+ chunks/u),
+  ).toBeVisible({ timeout: 30_000 });
+  await reparseDialog
+    .getByRole("button", { name: "Reparse", exact: true })
+    .click();
+  await expect(reparseDialog).toBeHidden();
+  await expect
+    .poll(
+      async () => {
+        const current = await readDocument();
+        return (
+          current.version > reembeddedDocument.version &&
+          current.status === "ready" &&
+          current.task_progress === null
+        );
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(true);
+  const reparsedSegments = await listSegments();
+  expect(reparsedSegments.length).toBeGreaterThan(originalSegments.length);
+  const oldIds = new Set(originalSegments.map((item) => item.id));
+  expect(reparsedSegments.every((item) => !oldIds.has(item.id))).toBe(true);
+  const reparsedDetails = await Promise.all(
+    reparsedSegments.map((item) => readDetail(item.id)),
+  );
+  expect(reparsedDetails.some((item) => item.summary !== null)).toBe(true);
+  expect((await providerCounters(context)).chat_calls).toBeGreaterThan(
+    afterReembed.chat_calls,
+  );
+  for (const previous of originalSegments) {
+    expect((await context.request.get(detailUrl(previous.id))).status()).toBe(
+      404,
+    );
+  }
+});
+
+test("real knowledge settings render safely and a failed storage probe preserves the saved revision", async ({
+  page,
+  context,
+}) => {
+  // With no session cookie, the replay Gateway supplies its persisted System
+  // Administrator. The UI and route still use the real authorization path.
+  const readSettings = async () => {
+    const response = await context.request.get(
+      `${APP}/api/admin/settings/knowledge`,
+    );
+    expect(response.status()).toBe(200);
+    const body = (await response.json()) as {
+      revision: number;
+      secret_key_configured: boolean;
+      summary_model: { display_name: string } | null;
+    };
+    expect(body).not.toHaveProperty("minio_secret_key");
+    return {
+      revision: body.revision,
+      secret_key_configured: body.secret_key_configured,
+      summary_model: body.summary_model,
+    };
+  };
+  const original = await readSettings();
+  expect(original.secret_key_configured).toBe(true);
+  expect(original.summary_model?.display_name).toBe("Replay Knowledge Summary");
+  await page.goto("/admin/settings/knowledge");
+  await expect(
+    page.getByRole("heading", { name: "Knowledge settings", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("knowledge-settings-revision")).toHaveText(
+    `Revision ${original.revision}`,
+  );
+  await expect(
+    page.getByRole("combobox", { name: "Summary model", exact: true }),
+  ).toContainText("Replay Knowledge Summary");
+  await expect(
+    page.getByLabel("Storage secret key", { exact: true }),
+  ).toHaveValue("");
+  await page
+    .getByLabel("Storage endpoint", { exact: true })
+    .fill("127.0.0.1:1");
+  // The real form requires a fresh secret whenever the endpoint changes. A
+  // fictional value reaches the failed probe without exposing the live key.
+  const replacementSecret = "fictional-unreachable-storage-key";
+  await page
+    .getByLabel("Storage secret key", { exact: true })
+    .fill(replacementSecret);
+  await expect(
+    page.getByRole("button", { name: "Save settings", exact: true }),
+  ).toBeEnabled();
+  const [failed] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/admin/settings/knowledge") &&
+        response.request().method() === "PUT",
+    ),
+    page.getByRole("button", { name: "Save settings", exact: true }).click(),
+  ]);
+  expect(failed.status()).toBe(422);
+  const failure = (await failed.json()) as {
+    detail: { code: string; message: string };
+  };
+  expect(failure.detail.code).toBe("KNOWLEDGE_SETTINGS_INVALID");
+  expect(JSON.stringify(failure)).not.toContain("127.0.0.1:1");
+  expect(JSON.stringify(failure)).not.toContain("minio_secret_key");
+  expect(JSON.stringify(failure)).not.toContain(replacementSecret);
+  await expect(
+    page.getByRole("alert").filter({ hasText: failure.detail.message }),
+  ).toBeVisible();
+  expect(await readSettings()).toEqual(original);
 });

@@ -38,14 +38,18 @@ async def test_replay_gateway_maps_only_auth_disabled_identity_to_admin() -> Non
     assert user.system_role == "system_admin"
 
 
-def test_replay_model_uses_a_supported_provider_engineering_profile() -> None:
+def test_replay_model_uses_a_supported_provider_engineering_profile(monkeypatch) -> None:
+    import os
+    from dataclasses import replace
+
     from app.system_settings import validation
 
-    original = validation.PROVIDER_ADAPTERS["openai"]
-    try:
-        install_replay_model_adapter()
-        replay = validation.PROVIDER_ADAPTERS["openai"]
-        assert replay.class_path == "replay_provider:ReplayChatModel"
-        assert replay.api_key_required is False
-    finally:
-        validation.PROVIDER_ADAPTERS["openai"] = original
+    monkeypatch.setattr(validation, "PROVIDER_ADAPTERS", dict(validation.PROVIDER_ADAPTERS))
+    for key in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(key, os.environ.get(key, ""))
+    native = validation.BUILTIN_PROVIDER_ADAPTERS["openai"]
+    install_replay_model_adapter()
+    replay = validation.PROVIDER_ADAPTERS["openai"]
+    assert replay == replace(native, class_path="replay_provider:ReplayChatModel")
+    assert replay.api_key_required is True
+    assert validation.PROVIDER_ADAPTERS["knowledge_replay"] == native

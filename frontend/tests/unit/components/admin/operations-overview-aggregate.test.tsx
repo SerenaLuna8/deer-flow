@@ -29,6 +29,7 @@ const overview = operationsOverviewSchema.parse({
     run_skill_legacy_policy_digest:
       "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
     run_skill_writer_ready: true,
+    knowledge: "disabled",
   },
   data_status: "available",
   counts: {
@@ -53,6 +54,29 @@ const overview = operationsOverviewSchema.parse({
 });
 
 describe("OperationsOverviewStateView aggregate projection", () => {
+  for (const knowledge of ["ready", "disabled", "unavailable"] as const) {
+    test(`renders the explicit knowledge ${knowledge} readiness without storage details`, () => {
+      const data = {
+        ...overview,
+        readiness: { ...overview.readiness, knowledge },
+      };
+      expect(operationsOverviewSchema.safeParse(data).success).toBe(true);
+      const html = renderToStaticMarkup(
+        <I18nProvider initialLocale="en-US">
+          <OperationsOverviewStateView state={{ status: "ready", data }} />
+        </I18nProvider>,
+      );
+      expect(html).toContain("Knowledge");
+      expect(html).not.toContain("minio_endpoint");
+      expect(
+        operationsOverviewSchema.safeParse({
+          ...data,
+          readiness: { ...data.readiness, knowledge: "storage_failed" },
+        }).success,
+      ).toBe(false);
+    });
+  }
+
   test("renders private-run capacity and queue convergence signals", () => {
     const html = renderToStaticMarkup(
       <I18nProvider initialLocale="en-US">

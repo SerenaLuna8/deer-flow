@@ -136,6 +136,7 @@ describe("admin contracts", () => {
         run_skill_legacy_policy_digest:
           "e01a816a3f20a4ecf088e2f0d37b92ba16634e5969860b900a14924312edb6e8",
         run_skill_writer_ready: true,
+        knowledge: "disabled",
       },
       data_status: "available",
       counts: {
@@ -688,9 +689,7 @@ describe("admin contracts", () => {
         status: "active",
       }).success,
     ).toBe(false);
-    expect(
-      replaceAdminModelInputSchema.safeParse(version).success,
-    ).toBe(false);
+    expect(replaceAdminModelInputSchema.safeParse(version).success).toBe(false);
   });
 
   test("candidate provider connection test carries a transient URL and key", () => {
@@ -710,8 +709,7 @@ describe("admin contracts", () => {
     const { api_key: _candidateKey, ...withoutKey } = candidate;
     expect(_candidateKey).toBe("candidate-key");
     expect(
-      testAdminModelProviderConnectionInputSchema.safeParse(withoutKey)
-        .success,
+      testAdminModelProviderConnectionInputSchema.safeParse(withoutKey).success,
     ).toBe(false);
     expect(
       testAdminModelProviderConnectionInputSchema.safeParse({

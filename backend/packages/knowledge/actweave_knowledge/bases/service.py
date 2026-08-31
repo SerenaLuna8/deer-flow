@@ -27,11 +27,13 @@ from ..contracts import (
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeBaseCreate,
     KnowledgeBaseUpdate,
+    KnowledgeBaseUpdateResult,
     KnowledgeBaseView,
     KnowledgeError,
     KnowledgeModelPort,
     KnowledgeRebuildResult,
     KnowledgeSettings,
+    KnowledgeSummaryBackfill,
 )
 from ..persistence.derivations import delete_error_expression, document_count_expression
 from ..persistence.models import (
@@ -39,7 +41,7 @@ from ..persistence.models import (
     KnowledgeDocumentRow,
     KnowledgeTaskRow,
 )
-from ..persistence.tasks import TASK_OPEN_STATUSES
+from ..persistence.tasks import TASK_OPEN_STATUSES, VERSIONED_TASK_KINDS
 
 logger = logging.getLogger(__name__)
 
@@ -253,10 +255,14 @@ class KnowledgeBaseService:
         update: KnowledgeBaseUpdate,
         *,
         authority: KnowledgeProjectAuthority | None = None,
-    ) -> KnowledgeBaseView:
+    ) -> KnowledgeBaseUpdateResult:
         changes: dict[str, str | int | float | UUID | None] = {}
         if update.name is not None:
             changes["name"] = _validated_name(update.name)
+        if update.summary_index_enabled is not None:
+            if type(update.summary_index_enabled) is not bool:
+                raise _invalid("summary_index_enabled 必须是布尔值")
+            changes["summary_index_enabled"] = update.summary_index_enabled
         if update.description is not None:
             changes["description"] = _validated_description(update.description)
         if update.status is not None:
@@ -295,6 +301,17 @@ class KnowledgeBaseService:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
                 if row.status == "deleting":
                     raise _invalid("Knowledge Base 正在删除，不能修改")
+                summary_backfill = None
+                enabling_summary = update.summary_index_enabled is True and not row.summary_index_enabled
+                if enabling_summary:
+                    try:
+                        summary_model = await self._model_port.resolve_summary_model(session)
+                    except KnowledgeError as exc:
+                        if exc.code != KNOWLEDGE_MODEL_UNAVAILABLE:
+                            raise
+                        summary_model = None
+                    if summary_model is None:
+                        raise _invalid("请先在系统设置 → 知识库配置中选择可用的摘要模型")
                 effective_embedding_model_id = update.embedding_model_id or row.embedding_model_id
                 if effective_embedding_model_id is None and update.reranker_model_id is not None:
                     raise _invalid("请先配置 Embedding 模型，再绑定 Reranker 模型")
@@ -322,6 +339,24 @@ class KnowledgeBaseService:
                     row.updated_at = func.now()  # type: ignore[assignment]
                     await session.flush()
                     await session.refresh(row)
+                if enabling_summary:
+                    documents = (await session.scalars(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == base_id).order_by(KnowledgeDocumentRow.id).with_for_update())).all()
+                    open_ids = set(
+                        await session.scalars(
+                            select(KnowledgeTaskRow.resource_id).where(
+                                KnowledgeTaskRow.resource_id.in_([document.id for document in documents]), KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS), KnowledgeTaskRow.status.in_(TASK_OPEN_STATUSES)
+                            )
+                        )
+                    )
+                    accepted = 0
+                    skipped = []
+                    for document in documents:
+                        if document.status != "ready" or document.published_version != document.version or document.id in open_ids:
+                            skipped.append(document.id)
+                            continue
+                        session.add(KnowledgeTaskRow(id=uuid4(), project_id=project_id, resource_id=document.id, kind="summarize_document", target_version=document.version))
+                        accepted += 1
+                    summary_backfill = KnowledgeSummaryBackfill(accepted_document_count=accepted, skipped_document_ids=tuple(skipped))
                 document_count, delete_error = (
                     await session.execute(
                         select(
@@ -330,7 +365,7 @@ class KnowledgeBaseService:
                         ).where(KnowledgeBaseRow.id == base_id)
                     )
                 ).one()
-                return _view(row, document_count=int(document_count), delete_error=delete_error)
+                return KnowledgeBaseUpdateResult(base=_view(row, document_count=int(document_count), delete_error=delete_error), summary_backfill=summary_backfill)
         except IntegrityError:
             raise KnowledgeError(KNOWLEDGE_NAME_CONFLICT, "同一 Project 内已存在同名 Knowledge Base") from None
         except KnowledgeError:
@@ -383,7 +418,7 @@ class KnowledgeBaseService:
                         .select_from(KnowledgeTaskRow)
                         .where(
                             KnowledgeTaskRow.resource_id.in_([document.id for document in documents]),
-                            KnowledgeTaskRow.kind.in_(("ingest_document", "reembed_document")),
+                            KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS),
                             KnowledgeTaskRow.status.in_(TASK_OPEN_STATUSES),
                         )
                     )

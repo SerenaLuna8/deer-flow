@@ -10,16 +10,22 @@ ModelRuntime dispatch.
 
 from __future__ import annotations
 
+import time
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import sqlalchemy as sa
 from actweave_knowledge import KNOWLEDGE_MODEL_UNAVAILABLE, KnowledgeError
-from registry_helpers import registry_model_port
+from langchain_core.messages import AIMessage, HumanMessage
+from registry_helpers import registry_model_port, registry_secret_key
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.system_model_seed import seed_system_model_config
 
+from app.knowledge.model_port import RegistryKnowledgeModelPort
+from deerflow.models.runtime import ModelRuntimeProfile
 from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.knowledge_settings import KnowledgeSystemSettingsRow
 from deerflow.persistence.system_settings import SystemModelConfigRow
@@ -124,3 +130,68 @@ async def test_generate_summary_requires_configured_runtime() -> None:
     with pytest.raises(KnowledgeError) as rejected:
         await port.generate_summary(model_ref=str(uuid.uuid4()), prompt="总结这段内容")
     assert rejected.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_generate_summary_uses_private_runtime_and_untrusted_human_message() -> None:
+    runtime = AsyncMock()
+    runtime.ainvoke.return_value = AIMessage(content="生成的摘要")
+    port = RegistryKnowledgeModelPort(secret_key=registry_secret_key(), model_runtime=runtime)
+    before = time.monotonic()
+    result = await port.generate_summary(model_ref="model-reference", prompt="不可信的源内容")
+    assert result == "生成的摘要"
+    args, kwargs = runtime.ainvoke.call_args
+    assert len(args[0]) == 1 and isinstance(args[0][0], HumanMessage)
+    assert args[0][0].content == "不可信的源内容"
+    assert kwargs["profile"] is ModelRuntimeProfile.PRIVATE_ONESHOT
+    assert kwargs["model_name"] == "model-reference"
+    assert kwargs["model_overrides"] == {"max_tokens": 1024}
+    assert kwargs["provider_max_retries"] == 0
+    assert before + 120 <= kwargs["deadline_monotonic"] <= time.monotonic() + 120
+
+
+@pytest.mark.asyncio
+async def test_generate_summary_sanitizes_provider_failure() -> None:
+    runtime = AsyncMock()
+    runtime.ainvoke.side_effect = RuntimeError("secret provider payload")
+    port = RegistryKnowledgeModelPort(secret_key=registry_secret_key(), model_runtime=runtime)
+    with pytest.raises(KnowledgeError) as caught:
+        await port.generate_summary(model_ref="model-reference", prompt="source")
+    assert caught.value.code == "KNOWLEDGE_TASK_FAILED"
+    assert caught.value.message == "摘要生成失败"
+    assert caught.value.__suppress_context__
+
+
+@pytest.mark.asyncio
+async def test_database_runtime_materializes_current_model_each_call(monkeypatch):
+    import app.knowledge.summary_runtime as summary_runtime
+
+    models = [SimpleNamespace(name="active-model-one"), SimpleNamespace(name="active-model-two")]
+    materializer = SimpleNamespace(materialize_active=AsyncMock(side_effect=models))
+    monkeypatch.setattr(summary_runtime, "SystemModelMaterializer", lambda factory: materializer)
+    runtime = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content="summary")))
+    runtime_configs = []
+    monkeypatch.setattr(summary_runtime, "ModelRuntime", lambda *, app_config: runtime_configs.append(app_config) or runtime)
+    config = SimpleNamespace(with_runtime_models=lambda values: values)
+    adapter = summary_runtime.DatabaseKnowledgeSummaryRuntime(app_config=config, session_factory=object())
+    port = RegistryKnowledgeModelPort(secret_key=registry_secret_key(), model_runtime=adapter)
+    await port.generate_summary(model_ref="configured-id", prompt="source")
+    await port.generate_summary(model_ref="configured-id", prompt="source")
+    assert materializer.materialize_active.await_count == 2
+    assert runtime_configs == [(models[0],), (models[1],)]
+    assert [call.kwargs["model_name"] for call in runtime.ainvoke.await_args_list] == [model.name for model in models]
+    assert all(call.kwargs["provider_max_retries"] == 0 for call in runtime.ainvoke.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_database_runtime_unavailable_model_stays_safe_typed_error(monkeypatch):
+    import app.knowledge.summary_runtime as summary_runtime
+    from app.system_settings.execution_adapter import SystemModelMaterializationUnavailable
+
+    materializer = SimpleNamespace(materialize_active=AsyncMock(side_effect=SystemModelMaterializationUnavailable()))
+    monkeypatch.setattr(summary_runtime, "SystemModelMaterializer", lambda factory: materializer)
+    adapter = summary_runtime.DatabaseKnowledgeSummaryRuntime(app_config=object(), session_factory=object())
+    port = RegistryKnowledgeModelPort(secret_key=registry_secret_key(), model_runtime=adapter)
+    with pytest.raises(KnowledgeError) as caught:
+        await port.generate_summary(model_ref="suspended-id", prompt="source")
+    assert caught.value.code == KNOWLEDGE_MODEL_UNAVAILABLE

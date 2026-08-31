@@ -49,6 +49,7 @@ from ..tasks.worker import KnowledgeTaskClaim, ProjectActiveCheck
 from .preview import extract_clean_split
 from .progress import KnowledgeTaskProgressReporter, ensure_locked_task_lease, lock_indexing_claim
 from .splitter import SegmentDraft
+from .summary_admission import enqueue_summary_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -370,5 +371,7 @@ class KnowledgeIngestionHandler:
                 document.error_message = None
                 document.updated_at = moment
                 settle_task_row_success(task, now=moment)
+                await session.flush()
+                await enqueue_summary_refresh(session, document, self._model_port)
         except SQLAlchemyError:
             raise _storage_unavailable() from None

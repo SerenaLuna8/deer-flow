@@ -122,7 +122,7 @@ def main() -> int:
             with tempfile.TemporaryDirectory(prefix="replay-gw-") as raw_home, contextlib.ExitStack() as knowledge_resources:
                 home = Path(raw_home)
                 cfg = home / "config.yaml"
-                knowledge_block = ""
+                os.environ.setdefault("ACT_WEAVE_SECRET_KEY", base64.b64encode(os.urandom(32)).decode("ascii"))
                 knowledge_state = None
                 knowledge_provider = None
                 knowledge_objects = None
@@ -130,7 +130,6 @@ def main() -> int:
                     from replay_knowledge import (
                         KnowledgeReplayState,
                         ReplayKnowledgeProviderServer,
-                        build_knowledge_config_block,
                         create_replay_knowledge_bucket,
                         drop_replay_knowledge_bucket,
                         list_replay_knowledge_objects,
@@ -157,7 +156,6 @@ def main() -> int:
                     knowledge_provider = ReplayKnowledgeProviderServer(knowledge_state)
                     knowledge_provider.start()
                     knowledge_resources.callback(knowledge_provider.stop)
-                    knowledge_block = build_knowledge_config_block(bucket=knowledge_bucket)
                     knowledge_objects = partial(
                         list_replay_knowledge_objects,
                         minio_settings,
@@ -168,7 +166,7 @@ def main() -> int:
                         "provider_port": knowledge_provider.port,
                     }
                 cfg.write_text(
-                    build_config_yaml(home=home, knowledge_block=knowledge_block),
+                    build_config_yaml(home=home),
                     encoding="utf-8",
                 )
 
@@ -201,6 +199,11 @@ def main() -> int:
                         )
                     )
                 asyncio.run(prepare_replay_runtime_catalog(database.database_url))
+                if knowledge_provider is not None:
+                    from replay_knowledge import seed_replay_knowledge_settings, seed_replay_summary_model
+
+                    summary_model_id = asyncio.run(seed_replay_summary_model(database.database_url))
+                    asyncio.run(seed_replay_knowledge_settings(database.database_url, settings=minio_settings, bucket=knowledge_bucket, summary_model_name=str(summary_model_id)))
 
                 import uvicorn
                 from replay_agent_router import (

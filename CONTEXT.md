@@ -122,12 +122,16 @@ _Avoid_: random chunk
 A finer-grained chunk derived from one Knowledge Segment in parent-child mode. Children carry the vectors used for recall; a hit rolls up to its parent Segment for reranking and citation.
 _Avoid_: child segment, sub-document
 
+**Knowledge Segment Summary**:
+A system-generated retrieval aid for one Knowledge Segment, produced by the configured text System Model. It can retrieve its source Segment but is never citation or tool-response body content.
+_Avoid_: document summary, editable summary, source passage
+
 **Knowledge Metadata Field**:
 A Knowledge Base–scoped custom field definition typed as string, number, or time. Knowledge Documents hold typed values for these fields, and retrieval filters on them.
 _Avoid_: tag, label, free-form attribute
 
 **Knowledge Task**:
-A durable background work item for document ingestion or deletion.
+A durable background work item for document ingestion, re-embedding, Segment Summary generation, or deletion.
 _Avoid_: Run, Job, fire-and-forget background task
 
 **Knowledge Citation**:

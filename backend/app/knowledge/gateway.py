@@ -65,6 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.deps import get_current_user_from_request, project_session
 from app.knowledge.authority import ProjectKnowledgeAuthority
+from app.knowledge_settings.service import read_active_summary_model
 from app.model_registry.service import (
     RetrievalModelOption,
     list_active_retrieval_model_options,
@@ -303,9 +304,15 @@ class KnowledgeModelOptionResponse(_StrictModel):
     embedding_dimension: int | None
 
 
+class KnowledgeSummaryModelResponse(_StrictModel):
+    model_name: str
+    display_name: str
+
+
 class KnowledgeModelOptionsResponse(_StrictModel):
     embedding_models: list[KnowledgeModelOptionResponse]
     reranker_models: list[KnowledgeModelOptionResponse]
+    summary_model: KnowledgeSummaryModelResponse | None
     request_id: str
 
 
@@ -332,6 +339,7 @@ class KnowledgeBaseUpdateRequest(_StrictModel):
     reranker_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
     clear_reranker_model: bool = False
     retrieval_mode: Literal["semantic", "hybrid"] | None = None
+    summary_index_enabled: bool | None = None
 
 
 class KnowledgeBaseRebuildRequest(_StrictModel):
@@ -349,6 +357,7 @@ class KnowledgeBaseItemResponse(_StrictModel):
     embedding_model_id: uuid.UUID | None
     reranker_model_id: uuid.UUID | None
     retrieval_mode: Literal["semantic", "hybrid"]
+    summary_index_enabled: bool
     status: Literal["active", "disabled", "deleting"]
     document_count: int
     default_top_k: int
@@ -371,6 +380,15 @@ class KnowledgeBaseMutationResponse(_StrictModel):
     request_id: str
 
 
+class KnowledgeSummaryBackfillResponse(_StrictModel):
+    accepted_document_count: int
+    skipped_document_ids: list[uuid.UUID]
+
+
+class KnowledgeBaseUpdateResponse(KnowledgeBaseMutationResponse):
+    summary_backfill: KnowledgeSummaryBackfillResponse | None
+
+
 class KnowledgeBaseRebuildResponse(_StrictModel):
     """Re-embed admission outcome: the rebound base plus per-document counts."""
 
@@ -386,13 +404,14 @@ class KnowledgeTaskProgressResponse(_StrictModel):
     """Progress of the open indexing task bound to the document's current
     generation; ``total_units`` stays null while no verifiable total exists."""
 
-    kind: Literal["ingest_document", "reembed_document"]
+    kind: Literal["ingest_document", "reembed_document", "summarize_document"]
     status: Literal["queued", "running", "retry_wait", "failed"]
     stage: Literal[
         "queued",
         "reading_source",
         "extracting_splitting",
         "loading_segments",
+        "summarizing",
         "embedding",
         "publishing",
         "done",
@@ -697,11 +716,15 @@ class KnowledgeHitDiagnosticsResponse(_StrictModel):
     ranking_method: Literal["cosine", "rerank", "rank_fusion"]
     ranking_score: float
     matched_children: list[KnowledgeMatchedChildResponse]
+    matched_via: Literal["segment", "child", "summary"]
 
 
 class KnowledgeRouteCountsResponse(_StrictModel):
     semantic_candidates: int
     lexical_candidates: int
+    summary_candidates: int
+    query_embedding_cache_hits: int
+    query_embedding_cache_misses: int
     parents_deduplicated: int
     threshold_filtered: int
     stale_filtered: int
@@ -745,6 +768,11 @@ class KnowledgeSegmentChildResponse(_StrictModel):
     word_count: int
 
 
+class KnowledgeSegmentSummaryResponse(_StrictModel):
+    content: str
+    created_at: datetime
+
+
 class KnowledgeSegmentDetailResponse(_StrictModel):
     segment: KnowledgeSegmentItemResponse
     knowledge_base_id: uuid.UUID
@@ -756,6 +784,7 @@ class KnowledgeSegmentDetailResponse(_StrictModel):
     children_total: int
     child_page: int
     children: list[KnowledgeSegmentChildResponse]
+    summary: KnowledgeSegmentSummaryResponse | None
     request_id: str
 
 
@@ -803,6 +832,7 @@ def _base_response(view: KnowledgeBaseView) -> KnowledgeBaseItemResponse:
         embedding_model_id=view.embedding_model_id,
         reranker_model_id=view.reranker_model_id,
         retrieval_mode=view.retrieval_mode,
+        summary_index_enabled=view.summary_index_enabled,
         status=view.status,
         document_count=view.document_count,
         default_top_k=view.default_top_k,
@@ -888,6 +918,14 @@ async def list_knowledge_model_options(
             # context issuance and use must not keep reading this surface.
             await authority.revalidate(session)
             embedding, rerank = await list_active_retrieval_model_options(session)
+            try:
+                summary_model = await read_active_summary_model(session)
+            except KnowledgeError as error:
+                if error.code != KNOWLEDGE_MODEL_UNAVAILABLE:
+                    raise
+                # An invalid optional summary model must not hide working
+                # embedding/reranker choices from project members.
+                summary_model = None
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     except SQLAlchemyError:
@@ -898,6 +936,7 @@ async def list_knowledge_model_options(
     return KnowledgeModelOptionsResponse(
         embedding_models=[_option_response(option) for option in embedding],
         reranker_models=[_option_response(option) for option in rerank],
+        summary_model=KnowledgeSummaryModelResponse(model_name=summary_model.model_name, display_name=summary_model.display_name) if summary_model is not None else None,
         request_id=context.request_id,
     )
 
@@ -985,15 +1024,15 @@ async def get_knowledge_base(
     return KnowledgeBaseMutationResponse(item=_base_response(view), request_id=context.request_id)
 
 
-@project_router.patch("/bases/{base_id}", response_model=KnowledgeBaseMutationResponse)
+@project_router.patch("/bases/{base_id}", response_model=KnowledgeBaseUpdateResponse)
 async def update_knowledge_base(
     base_id: uuid.UUID,
     body: KnowledgeBaseUpdateRequest,
     context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
-) -> KnowledgeBaseMutationResponse:
+) -> KnowledgeBaseUpdateResponse:
     try:
-        view = await module.update_knowledge_base(
+        result = await module.update_knowledge_base(
             context.project_id,
             base_id,
             KnowledgeBaseUpdate(
@@ -1006,12 +1045,22 @@ async def update_knowledge_base(
                 reranker_model_id=body.reranker_model_id,
                 clear_reranker_model=body.clear_reranker_model,
                 retrieval_mode=body.retrieval_mode,
+                summary_index_enabled=body.summary_index_enabled,
             ),
             authority=_knowledge_edit_authority(context),
         )
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
-    return KnowledgeBaseMutationResponse(item=_base_response(view), request_id=context.request_id)
+    return KnowledgeBaseUpdateResponse(
+        item=_base_response(result.base),
+        summary_backfill=KnowledgeSummaryBackfillResponse(
+            accepted_document_count=result.summary_backfill.accepted_document_count,
+            skipped_document_ids=list(result.summary_backfill.skipped_document_ids),
+        )
+        if result.summary_backfill is not None
+        else None,
+        request_id=context.request_id,
+    )
 
 
 @project_router.post("/bases/{base_id}/rebuild", response_model=KnowledgeBaseRebuildResponse)
@@ -1814,6 +1863,9 @@ def _search_diagnostics_response(diagnostics: KnowledgeSearchDiagnostics) -> Kno
         counts=KnowledgeRouteCountsResponse(
             semantic_candidates=diagnostics.counts.semantic_candidates,
             lexical_candidates=diagnostics.counts.lexical_candidates,
+            summary_candidates=diagnostics.counts.summary_candidates,
+            query_embedding_cache_hits=diagnostics.counts.query_embedding_cache_hits,
+            query_embedding_cache_misses=diagnostics.counts.query_embedding_cache_misses,
             parents_deduplicated=diagnostics.counts.parents_deduplicated,
             threshold_filtered=diagnostics.counts.threshold_filtered,
             stale_filtered=diagnostics.counts.stale_filtered,
@@ -1837,6 +1889,7 @@ def _search_diagnostics_response(diagnostics: KnowledgeSearchDiagnostics) -> Kno
                 score_domain=entry.score_domain,
                 ranking_method=entry.ranking_method,
                 ranking_score=entry.ranking_score,
+                matched_via=entry.matched_via,
                 matched_children=[
                     KnowledgeMatchedChildResponse(
                         child_id=child.child_id,
@@ -1863,6 +1916,7 @@ def _segment_detail_response(detail: KnowledgeSegmentDetail, request_id: str) ->
         current_document_version=detail.current_document_version,
         children_total=detail.children_total,
         child_page=detail.child_page,
+        summary=KnowledgeSegmentSummaryResponse(content=detail.summary.content, created_at=detail.summary.created_at) if detail.summary is not None else None,
         children=[
             KnowledgeSegmentChildResponse(
                 id=child.id,

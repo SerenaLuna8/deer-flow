@@ -147,7 +147,7 @@ async def replay_gateway_user(request: Request):
     return await get_current_user_from_request(request)
 
 
-def build_config_yaml(*, home: Path, knowledge_block: str = "") -> str:
+def build_config_yaml(*, home: Path) -> str:
     """Build the current, non-database process config for record/replay.
 
     Everything that shapes the system prompt is pinned so record, replay, and CI
@@ -159,8 +159,7 @@ def build_config_yaml(*, home: Path, knowledge_block: str = "") -> str:
     - model catalog / memory / summarization — PostgreSQL-owned and prepared by
       ``prepare_replay_runtime_catalog`` for replay.
 
-    ``knowledge_block`` optionally appends the Knowledge feature block built by
-    ``replay_knowledge.build_knowledge_config_block`` for the knowledge gate.
+    Knowledge feature settings are separately seeded in PostgreSQL, never YAML.
     """
     return f"""\
 log_level: warning
@@ -193,7 +192,7 @@ worker:
   shutdown_grace_seconds: 5
   retry_initial_seconds: 1
   retry_max_seconds: 5
-{knowledge_block}"""
+"""
 
 
 def _validated_replay_database_url(
@@ -297,12 +296,21 @@ def install_replay_model_adapter() -> None:
     retains a provider engineering profile supported by the production request
     guard, while the process-local descriptor prevents any network/API-key use.
     """
+    from dataclasses import replace
+
     from app.system_settings import validation
 
-    validation.PROVIDER_ADAPTERS["openai"] = validation.ProviderAdapterSpec(
-        "replay_provider:ReplayChatModel",
-        False,
-    )
+    # httpx may inherit macOS system proxies even when HTTP_PROXY is absent.
+    # Replay's native HTTP summaries must reach the loopback mock directly.
+    for key in ("NO_PROXY", "no_proxy"):
+        entries = [entry for entry in os.environ.get(key, "").split(",") if entry]
+        os.environ[key] = ",".join(dict.fromkeys([*entries, "127.0.0.1", "localhost"]))
+
+    native = validation.BUILTIN_PROVIDER_ADAPTERS["openai"]
+    validation.PROVIDER_ADAPTERS["openai"] = replace(native, class_path="replay_provider:ReplayChatModel")
+    # Summary calls use the real OpenAI HTTP transport against the loopback
+    # deterministic provider; scenario Agents continue recorded offline replay.
+    validation.PROVIDER_ADAPTERS["knowledge_replay"] = native
 
 
 async def prepare_replay_runtime_catalog(
@@ -318,6 +326,7 @@ async def prepare_replay_runtime_catalog(
 
     from app.audit.models import resolve_system_audit_context
     from app.audit.service import AuditService
+    from app.model_registry.secrets import protect_provider_api_key
     from app.reliability.owner_refs import AuditHmacKeyring
     from app.system_runtime_settings.bootstrap import (
         bootstrap_system_runtime_policies,
@@ -329,7 +338,9 @@ async def prepare_replay_runtime_catalog(
     from app.system_runtime_settings.service import SystemRuntimePolicyService
     from app.system_settings.models import CreateSystemModel
     from app.system_settings.service import SystemModelCatalogService
+    from deerflow.persistence.model_registry import ModelProviderRow
     from deerflow.persistence.user.model import UserRow
+    from deerflow.secrets import SecretKey
 
     resolved_url = _validated_replay_database_url(database_url)
 
@@ -359,6 +370,11 @@ async def prepare_replay_runtime_catalog(
                 await session.flush()
             elif admin.system_role != "system_admin":
                 raise RuntimeError("replay runtime principal is not a system admin")
+            provider_id = uuid.uuid5(_REPLAY_ADMIN_ID, "scenario-provider")
+            if await session.get(ModelProviderRow, provider_id) is None:
+                provider_url = "https://replay.invalid/v1"
+                envelope = protect_provider_api_key(provider_id=provider_id, base_url=provider_url, api_key="replay-scenario-key", key=SecretKey.from_environment())
+                session.add(ModelProviderRow(id=provider_id, name="Replay Scenario Provider", base_url=provider_url, request_timeout_seconds=10, api_key_nonce=envelope.nonce, api_key_ciphertext=envelope.ciphertext))
 
         audit_context = resolve_system_audit_context(
             SimpleNamespace(
@@ -374,7 +390,7 @@ async def prepare_replay_runtime_catalog(
             raise RuntimeError("replay scenario model catalog is ambiguous")
         if matches:
             model = matches[0]
-            if model.status != "active" or model.provider_adapter != "openai" or model.provider_model != "replay" or model.settings or not model.supports_thinking or model.api_key_configured:
+            if model.status != "active" or model.provider_adapter != "openai" or model.provider_model != "replay" or model.provider_id != provider_id or not model.supports_thinking or not model.api_key_configured:
                 raise RuntimeError("existing scenario-model is not replay-compatible")
         else:
             model = await model_catalog.create_model(
@@ -382,6 +398,7 @@ async def prepare_replay_runtime_catalog(
                 CreateSystemModel(
                     display_name="Scenario Model",
                     status="active",
+                    provider_id=provider_id,
                     provider_adapter="openai",
                     provider_model="replay",
                     max_input_tokens=64_000,
@@ -389,7 +406,6 @@ async def prepare_replay_runtime_catalog(
                     supports_thinking=True,
                     supports_reasoning_effort=False,
                     supports_vision=False,
-                    api_key=None,
                 ),
             )
             catalog = await model_catalog.list_models(audit_context)

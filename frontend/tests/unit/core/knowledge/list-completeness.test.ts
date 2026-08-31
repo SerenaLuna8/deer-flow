@@ -24,6 +24,7 @@ function baseItem(index: number) {
     embedding_model_id: "30000000-0000-4000-8000-000000000001",
     reranker_model_id: null,
     retrieval_mode: "semantic",
+    summary_index_enabled: false,
     status: "active",
     document_count: 0,
     default_top_k: 4,

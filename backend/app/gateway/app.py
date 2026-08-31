@@ -385,6 +385,9 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(admin_jobs.router)
     app.include_router(admin_audit.router)
     app.include_router(admin_model_settings.router)
+    from app.gateway.routers import admin_knowledge_settings
+
+    app.include_router(admin_knowledge_settings.router)
     app.include_router(admin_system_settings.router)
 
     # Knowledge API: project routes plus the admin model registry it binds.

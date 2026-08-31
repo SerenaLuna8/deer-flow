@@ -88,6 +88,7 @@ class OperationsReadinessResponse(BaseModel):
     stream: str
     quota: str
     audit: str
+    knowledge: Literal["ready", "disabled", "unavailable"]
     role: str
     worker_count: int
     worker_capacity: int
@@ -326,6 +327,8 @@ def overview_response(
     value: OperationsOverview | None,
     readiness: ReliabilityReadiness,
     channel_providers: tuple[ChannelProviderHealth, ...] = (),
+    *,
+    knowledge: Literal["ready", "disabled", "unavailable"] = "disabled",
 ) -> OperationsOverviewResponse:
     if readiness.status == "closed":
         return OperationsOverviewResponse(
@@ -338,6 +341,7 @@ def overview_response(
                 stream=readiness.stream,
                 quota=readiness.quota,
                 audit=readiness.audit,
+                knowledge=knowledge,
                 role=readiness.role,
                 worker_count=readiness.worker_count,
                 worker_capacity=readiness.worker_capacity,
@@ -369,6 +373,7 @@ def overview_response(
             stream=readiness.stream,
             quota=readiness.quota,
             audit=readiness.audit,
+            knowledge=knowledge,
             role=readiness.role,
             worker_count=readiness.worker_count,
             worker_capacity=readiness.worker_capacity,
@@ -443,14 +448,17 @@ async def get_operations_overview(
             worker_fresh_for_seconds=worker_fresh_for_seconds,
         )
         channel_providers = await current_channel_provider_health()
+        knowledge_state = getattr(request.app.state, "knowledge_startup_state", "disabled")
+        knowledge = knowledge_state if knowledge_state in {"ready", "disabled"} else "unavailable"
         if readiness.status == "closed":
-            return overview_response(None, readiness, channel_providers)
+            return overview_response(None, readiness, channel_providers, knowledge=knowledge)
         return overview_response(
             await SystemOperationsRepository(session).overview(
                 worker_fresh_for_seconds=worker_fresh_for_seconds,
             ),
             readiness,
             channel_providers,
+            knowledge=knowledge,
         )
 
 

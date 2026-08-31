@@ -23,6 +23,9 @@ TASK_OPEN_STATUSES = ("queued", "running", "retry_wait")
 # document was taken out of ``ready`` for this work, so an exhausted task
 # marks it ``failed`` (rows and published_version stay untouched).
 INDEXING_TASK_KINDS = ("ingest_document", "reembed_document")
+# Summaries share generation admission/lease fencing, but never take a
+# published Document out of ready or mark it failed when attempts expire.
+VERSIONED_TASK_KINDS = (*INDEXING_TASK_KINDS, "summarize_document")
 
 _CLAIMABLE_STATUSES = ("queued", "retry_wait")
 _EXPIRED_LEASE_MESSAGE = "任务租约到期，Worker 可能已中断"

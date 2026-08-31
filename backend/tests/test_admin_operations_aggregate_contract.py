@@ -80,6 +80,7 @@ def test_admin_overview_exposes_private_run_fleet_and_queue_aggregates() -> None
         "stream": "ready",
         "quota": "ready",
         "audit": "ready",
+        "knowledge": "disabled",
         "role": "gateway",
         "worker_count": 4,
         "worker_capacity": 12,

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: 用 superpowers:subagent-driven-development（推荐）
 > 或 superpowers:executing-plans 按任务推进本计划，步骤用 `- [ ]` 勾选跟踪。
-> 状态：立项（2026-08-31），未实施。
+> 状态：T1–T10 实现与确定性验证完成（2026-09-01）；T11 首次真实尝试在摘要阶段未完成，检索对照与目标部署未放行。
 > 规范来源：[M11 设计方案](../specs/2026-08-31-rag-knowledge-m11-design.md)。
 > 前置：[M10 计划](2026-08-30-rag-knowledge-m10-quality-workbench.md)完整验收；基线 commit `b94d8b34`。
 
@@ -150,7 +150,7 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 **新表 1：`knowledge_segment_summaries`**（包表，`actweave_knowledge/persistence/models.py`，
 归入 `KnowledgeOrmBase.metadata`）：
 
-- [ ] `KnowledgeSegmentSummaryRow`：`id UUID PK`；`project_id/knowledge_base_id/
+- [x] `KnowledgeSegmentSummaryRow`：`id UUID PK`；`project_id/knowledge_base_id/
   knowledge_document_id UUID NOT NULL`；`knowledge_segment_id UUID NOT NULL`
   FK→`knowledge_segments.id` `ON DELETE CASCADE` + 唯一约束
   `uq_knowledge_segment_summaries_segment`；`document_version Integer NOT NULL`（CHECK ≥1）；
@@ -160,14 +160,14 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
   timestamptz NOT NULL DEFAULT now()`。索引：`ix_knowledge_segment_summaries_scope
   (project_id, knowledge_base_id)`、`ix_knowledge_segment_summaries_document
   (knowledge_document_id)`。
-- [ ] 注册进 `final_schema_contract.KNOWLEDGE_APP_TABLES`（现 L21-31 八表 → 九表）、
+- [x] 注册进 `final_schema_contract.KNOWLEDGE_APP_TABLES`（七张包表 → 八张，另新增宿主设置表）、
   `check_postgres.REQUIRED_TABLES`、`tests/knowledge/test_schema_repository.py::KNOWLEDGE_TABLES`。
 
 **新表 2：`knowledge_system_settings`**（宿主表，新文件
 `deerflow/persistence/knowledge_settings/model.py`，归入宿主 `Base.metadata`，自动进
 `FINAL_APP_TABLES`）：
 
-- [ ] `KnowledgeSystemSettingsRow`：`id SmallInteger PK` + CHECK `id = 1`（单行）；
+- [x] `KnowledgeSystemSettingsRow`：`id SmallInteger PK` + CHECK `id = 1`（单行）；
   `revision Integer NOT NULL DEFAULT 1`；`enabled Boolean NOT NULL DEFAULT false`；
   `worker_concurrency SmallInteger NOT NULL DEFAULT 2`（CHECK 1..16）；
   `task_timeout_seconds Integer NOT NULL DEFAULT 900`（CHECK 30..7200）；
@@ -183,7 +183,7 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
   `query_cache_max_entries Integer NOT NULL DEFAULT 512`（CHECK 16..65536）、
   `query_cache_ttl_seconds Integer NOT NULL DEFAULT 300`（CHECK 5..86400）；
   `updated_at timestamptz NOT NULL DEFAULT now()`。
-- [ ] CHECK `ck_knowledge_system_settings_secret_pair`：nonce 与 ciphertext 同空同非空，
+- [x] CHECK `ck_knowledge_system_settings_secret_pair`：nonce 与 ciphertext 同空同非空，
   非空时 `octet_length(nonce)=12 AND octet_length(ciphertext)>=16`（沿
   `model_providers` L77-80 风格）；CHECK `ck_knowledge_system_settings_enabled_requires_minio`：
   `NOT enabled OR (endpoint/bucket/access_key/nonce/ciphertext 全非空)`。
@@ -191,9 +191,9 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 
 **既有表增量**：
 
-- [ ] `knowledge_bases.summary_index_enabled Boolean NOT NULL server_default false`
+- [x] `knowledge_bases.summary_index_enabled Boolean NOT NULL server_default false`
   （models.py L38-78 区）。
-- [ ] `knowledge_tasks`：`ck_knowledge_tasks_kind` 加 `summarize_document`（六种）；
+- [x] `knowledge_tasks`：`ck_knowledge_tasks_kind` 加 `summarize_document`（六种）；
   `ck_knowledge_tasks_target_version` 的"必须非空"集合扩为三种索引/摘要 kind；
   `uq_knowledge_tasks_open_indexing`（L490-496）的 partial WHERE 扩为
   `kind IN ('ingest_document','reembed_document','summarize_document')`；
@@ -201,15 +201,15 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 
 **包契约（`contracts.py`）**：
 
-- [ ] 字面量与常量：`KnowledgeIndexingTaskKind` 加 `"summarize_document"`；
+- [x] 字面量与常量：`KnowledgeIndexingTaskKind` 加 `"summarize_document"`；
   `KnowledgeTaskStage` 加 `"summarizing"`；新增
   `KNOWLEDGE_SUMMARY_PROMPT_VERSION = 1`、`KNOWLEDGE_SUMMARY_MIN_SOURCE_CHARS = 200`、
   `KNOWLEDGE_SUMMARY_MAX_CHARS = 1000`、`KNOWLEDGE_SUMMARY_MAX_TOKENS = 1024`、
   `KnowledgeMatchedVia = Literal["segment", "child", "summary"]`。
-- [ ] `KnowledgeSettings` 加 `query_cache_enabled: bool = True`、
+- [x] `KnowledgeSettings` 加 `query_cache_enabled: bool = True`、
   `query_cache_max_entries: int = Field(default=512, ge=16, le=65536)`、
   `query_cache_ttl_seconds: int = Field(default=300, ge=5, le=86400)`。
-- [ ] DTO：`KnowledgeSegmentSummaryView{content: str, created_at: datetime}`；
+- [x] DTO：`KnowledgeSegmentSummaryView{content: str, created_at: datetime}`；
   `KnowledgeSegmentDetail` 加 `summary: KnowledgeSegmentSummaryView | None = None`；
   `KnowledgeBaseView` 加 `summary_index_enabled: bool`；`KnowledgeBaseUpdate` 加
   `summary_index_enabled: bool | None = None`；新增
@@ -219,7 +219,7 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
   `KnowledgeRouteCounts` 加 `summary_candidates: int = 0`、
   `query_embedding_cache_hits: int = 0`、`query_embedding_cache_misses: int = 0`；
   `KnowledgeHitDiagnostics` 加 `matched_via: KnowledgeMatchedVia`。
-- [ ] `KnowledgeModelPort`（L140-169）加两个方法：
+- [x] `KnowledgeModelPort`（L140-169）加两个方法：
   `async def resolve_summary_model(self, session: AsyncSession) -> str | None`（返回当前
   已配置且活跃的摘要模型引用，未配置返回 None，配置了但失效抛
   `KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE)`）与
@@ -229,11 +229,11 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 
 **五件套与测试**：
 
-- [ ] `full_schema.sql` 两张建表 + bases/tasks 增量；重生成 `schema_comments.sql`（新列全部
+- [x] `full_schema.sql` 两张建表 + bases/tasks 增量；重生成 `schema_comments.sql`（新列全部
   中文注释）并同步 `generate_schema_comments.py` 期望计数；更新
   `FINAL_SCHEMA_V1_CATALOG_SIGNATURE` 九项 count/digest 与 `SCHEMA_V1_CANONICAL_DIGEST`
   （临时空库安装后复读取值）。
-- [ ] 测试：`test_schema_repository.py`（新表列奇偶自动覆盖 + IntegrityError 行为探针：
+- [x] 测试：`test_schema_repository.py`（新表列奇偶自动覆盖 + IntegrityError 行为探针：
   单行 CHECK、每段唯一摘要、CASCADE 删段删摘要、enabled-requires-minio、summarize 开放任务
   与 ingest 互斥）；`test_package.py`（新 DTO/常量导出与 strict 拒绝）；
   `tests/test_schema_comments_contract.py` 回归。
@@ -246,7 +246,7 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 
 依赖 T1。
 
-- [ ] 新域 `backend/app/knowledge_settings/`：
+- [x] 新域 `backend/app/knowledge_settings/`：
   - `service.py`：`knowledge_minio_secret_recipient(endpoint: str) -> str`（
     `f"knowledge-system-settings:minio-secret-key:{endpoint}"`——换 endpoint 即换 recipient，
     旧密文不可移用，PUT 时改 endpoint 必须同时重交 secret，否则 422）；
@@ -269,13 +269,13 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
   - `bootstrap.py`：`bootstrap_knowledge_system_settings(session_factory) -> None`，仿
     `system_runtime_settings/bootstrap.py` L116-188（`pg_advisory_xact_lock` + 幂等：有行校验、
     无行插 id=1 全默认禁用行）。
-- [ ] `scripts/setup_postgres.py`：调用序（L524-533）加 `_bootstrap_knowledge_settings_schema
+- [x] `scripts/setup_postgres.py`：调用序（L524-533）加 `_bootstrap_knowledge_settings_schema
   (engine)`；`reset_postgres.py` 经共享路径自动获得。
-- [ ] 审计：`app/audit/models.py` 加 `AuditAction.KNOWLEDGE_SETTINGS_UPDATED =
+- [x] 审计：`app/audit/models.py` 加 `AuditAction.KNOWLEDGE_SETTINGS_UPDATED =
   "knowledge_settings.update"`，contract 沿 `SYSTEM_SETTING_UPDATED`（L542）模式
   （target `SYSTEM_SETTING`、actor system_admin、成功/拒绝/失败三 outcome），metadata 白名单
   模型为空对象（不带字段值）。
-- [ ] 新路由 `backend/app/gateway/routers/admin_knowledge_settings.py`：
+- [x] 新路由 `backend/app/gateway/routers/admin_knowledge_settings.py`：
   `prefix="/api/admin/settings/knowledge"`、`route_class=AdminOperationsRoute`、管理员依赖仿
   `admin_model_settings.current_model_admin_context`（L272-288，非管理员 404 +
   `FinalSchemaProbe().require_ready`）。
@@ -287,7 +287,7 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
     `repr`/`model_dump` 不泄密（SecretStr 或显式排除）。响应同 GET 形状。409/422/404 映射与
     既有 admin 路由一致。
   - 在 `backend/app/gateway/app.py` L387-391 路由注册块挂载。
-- [ ] 测试：新 `backend/tests/test_knowledge_settings_postgres.py`——bootstrap 幂等（两次调用
+- [x] 测试：新 `backend/tests/test_knowledge_settings_postgres.py`——bootstrap 幂等（两次调用
   一行不变）、setup 播种默认行、CAS 冲突、探测失败不落库（注入失败 `storage_probe`）、
   探测成功落库且 revision 递增、endpoint 变更未重交密钥 422、summary_model 校验（活跃通过/
   停用 422/非 UUID 422）、审计行存在且 metadata 无字段值、`enabled=true` 缺 MinIO 的 DB CHECK
@@ -300,38 +300,38 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 
 依赖 T2。
 
-- [ ] `app/knowledge/config.py`：删除 `load_knowledge_settings(app_config)` YAML 路径；模块改为
+- [x] `app/knowledge/config.py`：删除 `load_knowledge_settings(app_config)` YAML 路径；模块改为
   重导出 `load_knowledge_settings_from_db`。`app_config.py` 的 `YAML_CONFIG_TOMBSTONES`
   （L95）加 `"knowledge"`，并在 `reject_removed_legacy_config`（L338-369）为该键定制拒绝文案：
   指向 `scripts/migrate_knowledge_config.py` 与管理页"系统设置 → 知识库配置"。
   `config.example.yaml` 删除 knowledge 块、原位留迁移注释。
-- [ ] `app/knowledge/composition.py`：`create_knowledge_module_from_app_config` 改为
+- [x] `app/knowledge/composition.py`：`create_knowledge_module_from_app_config` 改为
   `async def create_knowledge_module_from_database(*, app_config) -> tuple[KnowledgeModule |
   None, KnowledgeStartupState]`，`KnowledgeStartupState = Literal["ready", "disabled",
   "storage_failed"]`：engine 就绪后读设置行 → 禁用返回 `(None, "disabled")` → 组合模块（
   `RegistryKnowledgeModelPort` 构造加 `model_runtime`/`summary_model_reader`，见 T5）→
   `module.health()` 存储校验失败：记日志（不含端点/凭据）、`await module.aclose()`、返回
   `(None, "storage_failed")`。`KnowledgeStorageNotReady` 异常类保留给留存 fail-closed 语义。
-- [ ] Gateway：`gateway/deps.py` L358-369 改调新工厂，`app.state.knowledge_module` +
+- [x] Gateway：`gateway/deps.py` L358-369 改调新工厂，`app.state.knowledge_module` +
   `app.state.knowledge_startup_state` 两个状态；`storage_failed` 不再中止 lifespan。
   Worker：`worker/app.py` L182-191 同改；模块为 None（含 storage_failed）时只跑主循环。
   `create_knowledge_worker_resources_from_app_config`（composition.py L66-81）同步改为
   DB 来源：留存 purger 与功能模块继续独立组装——设置行禁用或缺 MinIO 时 purger 保持现有
   "元数据可清、存储证据不全则 fail-closed" 语义不变。
-- [ ] readiness：`admin_operations.py` 的 `OperationsReadinessResponse`（L77-103）加
+- [x] readiness：`admin_operations.py` 的 `OperationsReadinessResponse`（L77-103）加
   `knowledge: Literal["ready", "disabled", "unavailable"]`（Gateway 进程自身状态：
   ready/disabled/storage_failed→unavailable），`overview_response` 映射同步；该字段不携带
   端点/凭据/错误详情。前端 `core/admin-operations/types.ts` strict schema 同步。
-- [ ] 迁移脚本 `backend/scripts/migrate_knowledge_config.py`：**不经 `get_app_config()`**
+- [x] 迁移脚本 `backend/scripts/migrate_knowledge_config.py`：**不经 `get_app_config()`**
   （墓碑会拒绝）——直接 `yaml.safe_load(ACT_WEAVE_CONFIG_PATH 或仓库根 config.yaml)` +
   `resolve_env_variables`（从 `app_config.py` 导入）取 knowledge 块，经 `KnowledgeSettings`
   校验，`SecretKey.from_environment()` 加密，engine 由根 `.env` 的 `DATABASE_URL` 直连，
   upsert id=1（幂等，重跑覆盖同值、revision 递增），stdout 报告字段清单（密钥打码）。
   文档化操作顺序：停服 → 跑迁移（YAML 块仍在）→ 删块 → 启动新版本。
-- [ ] replay/真实后端启动器改为播种设置行：`scripts/run_replay_gateway.py`、
+- [x] replay/真实后端启动器改为播种设置行：`scripts/run_replay_gateway.py`、
   `tests/_replay_fixture.py`、`tests/replay_worker_process.py` 在建库后写入 enabled 设置行
   （MinIO 临时容器参数 + 加密密钥），不再依赖 YAML knowledge 块。
-- [ ] 测试：`tests/knowledge/test_host_config.py` 重写为 DB 装载（行缺失=禁用、解密往返、
+- [x] 测试：`tests/knowledge/test_host_config.py` 重写为 DB 装载（行缺失=禁用、解密往返、
   损坏密文明确失败）；app_config 墓碑测试（knowledge 块 → `LEGACY_CONFIG_REMOVED` 且文案
   含迁移指引）；composition 三态（disabled/ready/storage_failed，后者断言模块缺席 + 知识路由
   404 `KNOWLEDGE_DISABLED` + readiness `unavailable`）；迁移脚本幂等与密钥打码（
@@ -346,7 +346,7 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 
 依赖 T1（settings 三字段）；与 T2/T3 可并行（包侧只消费 `KnowledgeSettings`）。
 
-- [ ] 新 `retrieval/query_cache.py`：
+- [x] 新 `retrieval/query_cache.py`：
 
   ```python
   class KnowledgeQueryEmbeddingCache:
@@ -359,16 +359,16 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
   键 `(model_id, sha256(query.encode("utf-8")).digest())`；`OrderedDict` LRU（get 触达移尾、
   put 超容量弹头）；TTL 读时惰性过期；`enabled=False` 时 `get` 恒 None、`put` 恒 no-op；
   纯同步无锁（asyncio 单线程内原子）；值转只读 tuple。不做 single-flight。
-- [ ] `module.py`：`KnowledgeModule.__init__` 按 settings 构造缓存实例，传入
+- [x] `module.py`：`KnowledgeModule.__init__` 按 settings 构造缓存实例，传入
   `KnowledgeSearchService`（L137-140 构造点加 `query_cache=`）。
-- [ ] `retrieval/service.py` `search()` L694-716：分组嵌入前先 `cache.get(model_id,
+- [x] `retrieval/service.py` `search()` L694-716：分组嵌入前先 `cache.get(model_id,
   validated.query)`——命中计 hit、跳过 `_dispatch_guard` 与 `self._client.embed`；未命中照旧
   （guard 在前）后 `cache.put`；本次搜索的 hit/miss 计数进 `KnowledgeRouteCounts`
   两个新字段；`timings.query_embedding_ms` 语义不变（命中≈0）。搜索内既有 `query_vectors`
   字典保留（单请求内复用）。
-- [ ] `backend/AGENTS.md` 知识节授权措辞更新为"每次**面向 Provider 的**查询嵌入（缓存未命中）
+- [x] `backend/AGENTS.md` 知识节授权措辞更新为"每次**面向 Provider 的**查询嵌入（缓存未命中）
   前回验授权；缓存命中不产生 Provider 调用，召回事务与终审回验不变"。
-- [ ] 测试：新 `tests/knowledge/test_query_cache.py`（纯缓存：命中/TTL 过期/LRU 淘汰/模型隔离/
+- [x] 测试：新 `tests/knowledge/test_query_cache.py`（纯缓存：命中/TTL 过期/LRU 淘汰/模型隔离/
   禁用恒未命中/超长值容量边界）；`test_retrieval.py` 增：同查询第二次搜索 Provider embed
   调用数为零（MockTransport 计数）且两次 hits 逐字节一致、缓存全热下撤权成员仍在召回事务
   边界被拒（既有撤权用例扩一次预热）、rebuild 换模型后旧条目天然失效（新 model_id 未命中）、
@@ -382,7 +382,7 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 
 依赖 T1、T2（`resolve_summary_model` 读设置行）。
 
-- [ ] 宿主端口实现（`app/knowledge/model_port.py`）：`RegistryKnowledgeModelPort.__init__` 加
+- [x] 宿主端口实现（`app/knowledge/model_port.py`）：`RegistryKnowledgeModelPort.__init__` 加
   `model_runtime: ModelRuntime | None = None`；`from_environment()` 改由 composition 传入
   `ModelRuntime(app_config=get_app_config())`。
   - `resolve_summary_model(session)`：读 `knowledge_system_settings.summary_model_name`
@@ -394,7 +394,7 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
     deadline_monotonic=time.monotonic() + 120)`（参照 `inspect_image_tool.py` L530-536）；
     返回 `message.content` 文本；Provider 异常折叠为
     `KnowledgeError(KNOWLEDGE_TASK_FAILED, "摘要生成失败")`（不透传 Provider 载荷）。
-- [ ] 新 `ingestion/summarize.py`：
+- [x] 新 `ingestion/summarize.py`：
   - 模块级 `KNOWLEDGE_SUMMARY_PROMPT_V1`（固定中文指令模板：以源段落语言输出 ≤200 字摘要、
     保留关键实体/数值/结论、不添加评论；`{content}` 单占位）。
   - `class KnowledgeSummarizeHandler`（构造签名仿 `KnowledgeReembedHandler`：
@@ -420,12 +420,12 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
        `settle_task_row_success`。
   - stage 流转 `queued → summarizing → embedding → publishing → done`，经
     `KnowledgeTaskProgressReporter`（`ingestion/progress.py`）短事务写入。
-- [ ] `persistence/tasks.py`：新增 `VERSIONED_TASK_KINDS = ("ingest_document",
+- [x] `persistence/tasks.py`：新增 `VERSIONED_TASK_KINDS = ("ingest_document",
   "reembed_document", "summarize_document")`；`INDEXING_TASK_KINDS` 保持二元——
   `settle_task_failure` 耗尽只对 INDEXING 两种 `_mark_indexed_document_failed`，
   summarize 耗尽只任务 failed、文档保持 ready；`recover_expired_tasks` 对新 kind 走同一恢复。
-- [ ] `module.py` `run_worker` handlers（L686-715）注册 `"summarize_document"`。
-- [ ] 测试：新 `tests/knowledge/test_summaries.py`（鸭子型 port 记录 prompt/model_ref +
+- [x] `module.py` `run_worker` handlers（L686-715）注册 `"summarize_document"`。
+- [x] 测试：新 `tests/knowledge/test_summaries.py`（鸭子型 port 记录 prompt/model_ref +
   真实 `KnowledgeModelClient` + MockTransport 嵌入）：完整生成发布（行字段全断言含 digest/
   version/embedding）；短段跳过与零目标成功；digest 一致跳过、不一致重生成；模型未配置
   `KNOWLEDGE_MODEL_UNAVAILABLE` 失败且文档 ready 摘要缺席；停用模型同前；LLM 中途失败保留
@@ -438,32 +438,32 @@ frontend/tests/unit/core/admin-settings/knowledge-hooks.test.tsx
 
 依赖 T5。
 
-- [ ] `ingestion/pipeline.py` `_publish`（L273-374）：`settle_task_row_success` 之后、同事务内——
+- [x] `ingestion/pipeline.py` `_publish`（L273-374）：`settle_task_row_success` 之后、同事务内——
   base `summary_index_enabled` 且 `await model_port.resolve_summary_model(session)` 非 None
   且存在 ≥200 字符段 → `session.add(KnowledgeTaskRow(kind="summarize_document",
   project_id=…, resource_id=document.id, target_version=document.version))`（含 reparse 路径；
   handler 构造需新增 model_port 依赖）。
-- [ ] `segments/service.py`：`update_segment` 写事务（L180-219）内删除该段摘要行；
+- [x] `segments/service.py`：`update_segment` 写事务（L180-219）内删除该段摘要行；
   `update_segment`/`create_segment` 事务内若库开关开 + 模型可解析 + 无开放 VERSIONED 任务 →
   入队刷新 summarize（有开放任务则跳过——T5 发布端 digest 复核 + 补任务闭环兜底）。
   `delete_segment` 靠 FK CASCADE，无需改动（用测试锁行为）。
-- [ ] `bases/service.py`：`update_knowledge_base`（L248-338）接受 `summary_index_enabled`；
+- [x] `bases/service.py`：`update_knowledge_base`（L248-338）接受 `summary_index_enabled`；
   返回类型改 `KnowledgeBaseUpdateResult`。拨 ON：同事务 Base 锁 + 全文档 UUID 序锁（沿
   rebuild L370-393 模式但**跳过不拒绝**）——`published_version` 非空且 ready 且无开放
   VERSIONED 任务的入队（accepted），其余计 skipped；拨 ON 前
   `resolve_summary_model` 为 None → `KNOWLEDGE_INVALID_REQUEST`（422，文案指向管理页）。
   拨 OFF：仅写列。`_view` 投影补 `summary_index_enabled`。
-- [ ] `ingestion/reembed.py`：`_PreparedReembed` 加 `summary_entries: tuple[tuple[UUID, str],
+- [x] `ingestion/reembed.py`：`_PreparedReembed` 加 `summary_entries: tuple[tuple[UUID, str],
   ...]`（`_begin_processing` 按 published_version 段集合装载摘要 id+content）；handler 对
   摘要文本走同一新模型嵌入（合并进现有批量，`total_units` 相应累加）；`_publish`（L170-237）
   同事务 `update(knowledge_segment_summaries)` 写新向量并翻 `document_version`——摘要文本、
   digest、created_at 不动，零 LLM 调用。
-- [ ] `documents/service.py`：reparse/上传/删除准入的开放任务检查（L379-393 等）与
+- [x] `documents/service.py`：reparse/上传/删除准入的开放任务检查（L379-393 等）与
   `retry_document` 继承查询（L755-766）从 `INDEXING_TASK_KINDS` 切到 `VERSIONED_TASK_KINDS`；
   `retry_document` 增加分支：文档 ready 且最近 VERSIONED 任务为 failed `summarize_document`
   → 仅重新入队 summarize（不动文档 status/version/计数）；`indexing_task_progress` 投影
   （kind 字面量已扩）确认覆盖新 kind 并保留"绑定当前代次"语义。
-- [ ] 测试：`test_ingestion.py`（发布入队矩阵：开关开+模型配 → 入队；关/未配/全短段 → 不入队；
+- [x] 测试：`test_ingestion.py`（发布入队矩阵：开关开+模型配 → 入队；关/未配/全短段 → 不入队；
   reparse 路径同断言）；`test_governance.py`（编辑同事务删摘要 + 入队；开放任务时跳过入队；
   CASCADE 删除）；`test_bases.py`（拨 ON 回填 accepted/skipped 矩阵：ready 入队、开放任务/
   未发布/非 ready 跳过；模型未配 422；拨 OFF 行保留；HTTP round-trip 新响应形状）；
@@ -478,28 +478,28 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
 
 依赖 T5/T6；与 T4 在 `service.py` 有共同修改面，按 T4 → T7 顺序合入。
 
-- [ ] `retrieval/service.py` 新 `_summary_candidates(...)`（构造仿 `_general_candidates`
+- [x] `retrieval/service.py` 新 `_summary_candidates(...)`（构造仿 `_general_candidates`
   L1790-1858）：`KnowledgeSegmentSummaryRow` join segments/documents/bases；过滤 =
   `_current_scope_filters` 全套 + `KnowledgeBaseRow.summary_index_enabled.is_(True)`；
   `vector_score = 1 - summary.embedding.cosine_distance(qv)`；每库 `row_number() ≤ C` 封顶
   （稳定序同两路：分数→文档→段位置→段 UUID）。
-- [ ] 语义池合并点：general/parent_child/summary 三来源按段 id 取 max 成段语义原生分，
+- [x] 语义池合并点：general/parent_child/summary 三来源按段 id 取 max 成段语义原生分，
   记录 argmax 来源为 `matched_via`（`segment|child|summary`；lexical 新增项回填 cosine 时
   parent_child 取子块 max → `child`，general → `segment`，summary 贡献最高 → `summary`）；
   合并后再截每库 C（既有合并语义扩一个来源，RRF/三分支/阈值语义零改动——阈值作用于
   该 max 原生分）。`_Candidate`/`_Ranked` 携带 matched_via 直至 `KnowledgeHitDiagnostics`。
-- [ ] 诊断：`counts.summary_candidates`（各组封顶后摘要候选和）；`search()` L900-932 组装
+- [x] 诊断：`counts.summary_candidates`（各组封顶后摘要候选和）；`search()` L900-932 组装
   同步。终审 `_reviewed_hits` 不需复核摘要行（hit 本体是段，内容 digest 复核已覆盖）。
-- [ ] `segments/service.py` `get_segment_detail`：装载该段摘要行 → `summary` 字段。
-- [ ] `gateway.py`：`KnowledgeModelOptionsResponse`（L297-309）加 `summary_model:
+- [x] `segments/service.py` `get_segment_detail`：装载该段摘要行 → `summary` 字段。
+- [x] `gateway.py`：`KnowledgeModelOptionsResponse`（L297-309）加 `summary_model:
   KnowledgeSummaryModelResponse | None`（`{model_name: str, display_name: str}`，数据来自
   `read_active_summary_model`）；`KnowledgeBaseUpdateRequest`（L321-334）加
   `summary_index_enabled: bool | None`，PATCH 响应加 `summary_backfill`（strict 子模型）；
   base item 投影加 `summary_index_enabled`；`KnowledgeSegmentDetailResponse`（L748-759）加
   `summary`；`_search_diagnostics_response`（L1806-1852）投影三个新计数与 `matched_via`。
-- [ ] `app/knowledge/run_tool.py`：ToolMessage 载荷与 citations **零变化**（摘要不进正文）——
+- [x] `app/knowledge/run_tool.py`：ToolMessage 载荷与 citations **零变化**（摘要不进正文）——
   用既有断言锁形状。
-- [ ] 测试：`test_search_ranking.py`/`test_retrieval.py` 增——摘要向量翻盘（原文无 marker、
+- [x] 测试：`test_search_ranking.py`/`test_retrieval.py` 增——摘要向量翻盘（原文无 marker、
   摘要含 marker 的段经 summary 路召回且 `matched_via="summary"`）；三来源 max 归因矩阵；
   开关关库/段禁用/文档非 ready/stale version 的摘要一律不出现在候选；阈值作用于回卷后
   max 分；每库 C 在合并后生效（摘要多的库不挤占预算外名额）；RRF 与三分支基线用例全量
@@ -516,12 +516,12 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
 
 依赖 T2/T3（API 契约冻结）。
 
-- [ ] `core/admin-settings/knowledge/`：`types.ts`（GET/PUT strict Zod：全部字段 +
+- [x] `core/admin-settings/knowledge/`：`types.ts`（GET/PUT strict Zod：全部字段 +
   `secret_key_configured` + `summary_model` nullable + `expected_revision`；秘密字段仅在
   PUT 输入且可选）、`api.ts`（`fetchAdminKnowledgeSettings` / `replaceAdminKnowledgeSettings`
-  仿 `admin-settings/system/api.ts` L134-233）、`hooks.ts`（query + mutation，onSuccess 失效
-  自身 root）、`query-keys.ts`。
-- [ ] 页面：`app/admin/settings/knowledge/page.tsx`（thin route）+
+  仿 `admin-settings/system/api.ts` L134-233）、`hooks.ts`（query + 命令式保存，成功后失效
+  自身 root；秘密不进 TanStack mutation cache）、`query-keys.ts`。
+- [x] 页面：`app/admin/settings/knowledge/page.tsx`（thin route）+
   `components/admin/settings/admin-knowledge-settings-page.tsx`——组成仿
   `admin-system-settings-page.tsx` 的 `FieldShell/BooleanField/NumberField/ModelField` 行式
   模板与 `EditableSection` 壳（单 section）：功能开关、存储表单（endpoint/bucket/access_key/
@@ -531,13 +531,13 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
   409/422（探测失败展示服务端安全文案）；`system_admin` 双门（layout 已有 + 组件 `useAuth`
   防御，仿 L2997-3001）。字段文案用组件内 `FIELD_COPY` 双语字典（house 风格），页头/反馈
   进 locales `adminKnowledgeSettings.*`。
-- [ ] 导航：`admin-operations-shell.tsx` governance 组（L184-204）加
+- [x] 导航：`admin-operations-shell.tsx` governance 组（L184-204）加
   `/admin/settings/knowledge` 项 + 面包屑匹配（L391-408）+ 导航 label i18n
   （`adminOperations.navigation.knowledgeSettings`）。运维页 readiness 展示加 knowledge
   组件状态行（`core/admin-operations/types.ts` 已在 T3 同步 schema）。
-- [ ] i18n：`en-US.ts`/`zh-CN.ts`/`types.ts` 三处同步新增 `adminKnowledgeSettings` 节与导航
+- [x] i18n：`en-US.ts`/`zh-CN.ts`/`types.ts` 三处同步新增 `adminKnowledgeSettings` 节与导航
   key（注意与用户未提交改动共存，只追加）。
-- [ ] 测试：`tests/unit/core/admin-settings/knowledge-hooks.test.tsx`（mock api 的失效行为）；
+- [x] 测试：`tests/unit/core/admin-settings/knowledge-hooks.test.tsx`（mock api 的失效行为）；
   新 `tests/e2e/admin-knowledge-settings.spec.ts`（mock：`/api/v1/auth/me` system_admin、
   GET/PUT 设置、`/api/models`）——渲染与草稿脏检查、保存成功回写 revision、409 冲突文案、
   422 探测失败文案持续可见、secret 写后占位且响应无泄漏、非管理员不可见入口、重启 Banner。
@@ -548,31 +548,31 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
 
 依赖 T6/T7（HTTP 契约冻结）；与 T8 可并行。
 
-- [ ] `core/knowledge/types.ts`：`knowledgeBaseItemSchema` + `UpdateKnowledgeBaseInput` 加
+- [x] `core/knowledge/types.ts`：`knowledgeBaseItemSchema` + `UpdateKnowledgeBaseInput` 加
   `summary_index_enabled`；base update 响应加 `summary_backfill` nullable strict 子对象；
   `knowledgeModelOptionsResponseSchema`（L202-212）加 `summary_model` nullable（`api.ts`
   L627-630 的手工重组同步透传）；`knowledgeSegmentDetailResponseSchema` 加 `summary`
   nullable `{content, created_at}`；task kind/stage 枚举加 `summarize_document`/`summarizing`；
   诊断 schema 加 `summary_candidates`、两个缓存计数、`hit_diagnostics[].matched_via`。
-- [ ] `knowledge-base-detail.tsx` 设置面板：retrieval 区（L449-473 后）加"摘要索引"开关卡片
+- [x] `knowledge-base-detail.tsx` 设置面板：retrieval 区（L449-473 后）加"摘要索引"开关卡片
   ——`modelOptions.summary_model` 为 null 时禁用 + 提示文案（指向管理员配置）；提交把
   `summary_index_enabled` 并入 PATCH（L320-343 的 input）；mutation 成功后若响应带
   `summary_backfill` 以 status 条展示 accepted/skipped（testid
   `knowledge-summary-backfill-outcome`）。
-- [ ] 段详情：`SearchHitDetailDialog`（`knowledge-search-panel.tsx` L855-869 区）与
+- [x] 段详情：`SearchHitDetailDialog`（`knowledge-search-panel.tsx` L855-869 区）与
   `knowledge-segments-browser.tsx` 详情视图渲染摘要块（标注"系统生成摘要" + created_at，
   与正文视觉区分，无摘要不渲染）。
-- [ ] 进度：`knowledge-documents-view.tsx` `TaskProgressLine`（L180-218）依赖的 i18n
+- [x] 进度：`knowledge-documents-view.tsx` `TaskProgressLine`（L180-218）依赖的 i18n
   `knowledge.documents.progress.kinds.summarize_document` 与 `stages.summarizing`
   三文件补齐。
-- [ ] 诊断面板（`knowledge-search-panel.tsx` 折叠区）：新计数三项 + 逐 hit `matched_via`
+- [x] 诊断面板（`knowledge-search-panel.tsx` 折叠区）：新计数三项 + 逐 hit `matched_via`
   徽标（Segment/Child/Summary）。
-- [ ] mock e2e `project-knowledge.spec.ts`：`mockKnowledgeRoutes` 的 model-options 分支
+- [x] mock e2e `project-knowledge.spec.ts`：`mockKnowledgeRoutes` 的 model-options 分支
   （L401-422）加 `summary_model` 可配开关；baseView 补 `summary_index_enabled`；PATCH 分支
   返回 `summary_backfill`；segment detail mock 带摘要；进度 mock 带 summarize 任务。用例：
   未配置时开关禁用+提示；配置后拨 ON 显示回填计数；详情摘要展示；进度行文案；诊断新字段
   与 matched_via 徽标。
-- [ ] 单测：`tests/unit/core/knowledge/` 相应 schema/纯函数用例（strict 拒绝旧形状、缺省
+- [x] 单测：`tests/unit/core/knowledge/` 相应 schema/纯函数用例（strict 拒绝旧形状、缺省
   nullable 兼容）。
 
 验收：`pnpm check` 干净；mock e2e 全绿；所有 strict schema 与后端 DTO 逐字段对齐。
@@ -583,26 +583,27 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
 
 依赖 T1–T9。
 
-- [ ] `tests/replay_knowledge.py`：`_build_provider_app` 加 `POST /v1/chat/completions`
+- [x] `tests/replay_knowledge.py`：`_build_provider_app` 加 `POST /v1/chat/completions`
   （OpenAI 形状；锁内 `chat_calls` 计数 + `chat_failures` 故障注入，`ProviderFaults` 同步）；
-  确定性输出规则：`f"{DOC_RERANK_MARKER}摘要{sha256(prompt)[:8]}"`——摘要必含 marker，
-  使"原文无 marker、摘要可召回"在 replay 向量合同下可证明。System Model 种子：仿
+  确定性输出规则原拟摘要含 marker；核对既有 replay 向量合同后，保留其原有分数行为，
+  改为原文含 marker、摘要不含 marker，以证明摘要单独召回。差异与证据见
+  [验证记录](../../knowledge/m11-validation.md)。System Model 种子：仿
   `tests/support/system_model_seed.py` 在 `seed_replay_model_registry` 旁新增文本模型行
   （openai 适配器指向 replay base_url），并在 replay 启动器把
   `knowledge_system_settings.summary_model_name` 指向它。
-- [ ] `knowledge-real-backend.spec.ts` 扩展（临时 PG + MinIO + replay Worker）：库拨 ON →
+- [x] `knowledge-real-backend.spec.ts` 扩展（临时 PG + MinIO + replay Worker）：库拨 ON →
   上传发布 → summarize 任务进度可见 → 摘要在段详情展示 → marker 查询经 summary 命中
   （debug `matched_via="summary"`）→ Re-embed 后摘要文本不变仍可召回（chat_calls 零增长）
   → Reparse 后摘要重建（新任务、旧摘要消失）。管理设置页 real-backend 至少覆盖 GET 渲染
   与 PUT 探测失败一例（错误 MinIO endpoint）。
-- [ ] 后端全量门：`make test`（core gate 零跳过）+ `make lint` +
+- [x] 后端全量门：`make test`（core gate 零跳过）+ `make lint` +
   `generate_schema_comments.py --check`；`tests/knowledge` 单独跑一遍记录数量。前端：
   `pnpm check`、`pnpm test`、`project-knowledge.spec.ts`、`admin-knowledge-settings.spec.ts`、
   real-backend 套件、`pnpm build:production`。
-- [ ] 安全门专项汇总（跨任务断言已存在，此处逐项确认并记录）：secret 五路径零泄漏（响应/
+- [x] 安全门专项汇总（跨任务断言已存在，此处逐项确认并记录）：secret 五路径零泄漏（响应/
   日志/审计/repr/诊断）；摘要文本不进 citation/ToolMessage/普通日志；readiness 不含端点；
   撤权在缓存全热与摘要在场时行为不变。
-- [ ] 失败先归属再处置：与既有测试冲突时先在基线 worktree 复现定位，不得顺手改无关域。
+- [x] 失败先归属再处置：与既有测试冲突时先在基线 worktree 复现定位，不得顺手改无关域。
 
 验收：全部确定性门绿并留存执行记录（数量/失败/跳过逐项）；mock 与 replay 证据不冒充真实质量。
 
@@ -610,28 +611,34 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
 
 依赖 T10。
 
-- [ ] 语料扩充：`_generate_m10_eval_corpus.py` 新增 `question_style` 类目（答案在长段落、
+- [x] 语料扩充：`_generate_m10_eval_corpus.py` 新增 `question_style` 类目（答案在长段落、
   问句与正文表述有明显鸿沟；dev ≥10、holdout ≥10，判定单位与三级相关性沿 M10）；
   `test_m10_eval_corpus.py::REQUIRED_CATEGORIES` 与分层断言同步；fixture `gates` 加 M11 键：
   `question_recall_candidate_uplift_pp ≥ 5`、`question_recall_at_10_uplift_pp ≥ 5`、
   `overall_ndcg_regression ≤ 0.02`、`no_answer_false_recall_not_worse`、既有类目不低于
   M10 放行水位。
-- [ ] `eval_quality.py`：变体轴从 `("semantic", "hybrid")` 扩为 (mode × summary on/off)——
+- [x] `eval_quality.py`：变体轴从 `("semantic", "hybrid")` 扩为 (mode × summary on/off)——
   语料摄取后为 opt-in 库真实生成摘要（真实 chat 模型，记录调用数与费用），off 趟拨
   OFF（行保留、召回排除，零重生成）；`summarize`/`evaluate_gates`/`write_report` 按新轴
   聚合；报告写 `docs/knowledge/m11-quality-eval-report.{json,md}`。运行入口仿
-  `test_m10_quality_eval.py`（`ACT_WEAVE_KNOWLEDGE_QUALITY_EVAL=1` + provider_integration）。
+  `test_m10_quality_eval.py` 的 provider_integration 机制；M11 使用独立显式开关
+  `ACT_WEAVE_KNOWLEDGE_M11_QUALITY_EVAL=1`，并预检摘要模型、调用预算与 M10 基线。
+  当前已有第一次真实尝试报告；摘要生成未完整，检索指标尚未测得。
+- [x] 真实评测前提：操作者确认执行后，使用当前默认 DeepSeek V4 Flash，按24次上限完成
+  第一次摘要尝试，并补跑冻结原65题的新 M10 等价基线。没有将85题结果或 replay 分数冒充基线。
+- [ ] 完整检索对照：第一次摘要生成未完整，680次检索尚未运行；下一轮调用预算待确认。
 - [ ] 性能与运行证据：非 Provider P95 对比 M10 基线（>20% 恶化须优化或记录产品复审）；
   缓存命中率（Agent 复用场景两连搜的诊断计数）；单文档摘要 LLM 调用数与 skipped 计数
   入报告。预算/语料不可用 → 按 M10 协议记录 `blocked_pending_operator_input`，F02 不得
   标记完成。
-- [ ] 文档同批更新：README（知识配置改为管理页 + 迁移指引）、Install（迁移顺序：停服 →
+- [x] 文档同批更新：README（知识配置改为管理页 + 迁移指引）、Install（迁移顺序：停服 →
   迁移脚本 → 删 YAML 块 → 启动）、`config.example.yaml`（已在 T3）、`backend/AGENTS.md`
   （F03 装配、新表、授权措辞已在 T4）、`frontend/AGENTS.md`（新管理页与知识 UI 增量）、
   `CONTEXT.md`（Knowledge Segment Summary 词条 + 摘要模型是 System Model 的措辞）、
   `docs/knowledge/RAG知识库设计文档.md`（三功能行为）。
-- [ ] 交付确认：全新空库安装 + `make check-db` 只读证据；操作者目标库处置单独确认（本计划
-  不是 reset 授权）；存量部署迁移路径演练记录（迁移脚本在含 knowledge 块的 YAML 上跑通）。
+- [x] 隔离部署演练：全新随机空库显式安装、`make check-db`、旧 knowledge YAML 迁移两次、
+  再次 `make check-db` 全部通过；加密和单行设置一致，临时库及 YAML 已清理。
+- [ ] 目标交付确认：操作者目标库处置和前后端切换单独确认（本计划不是 reset 授权）。
 - [ ] M11 总状态最后才从"计划中"更新为"已完成"。
 
 验收：问题式查询类目双召回指标 +5pp、全量 nDCG 回退 ≤0.02、无答案不恶化、既有类目不回退；
@@ -649,8 +656,76 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
 ## 完成清单
 
 - [ ] F01–F03 逐项有实现与验收证据；M10 既有能力无重复建设或退化（基线契约测试全量不回归）。
-- [ ] 没有摘要文本进入引用/工具正文、密钥泄漏、跨项目披露、迟到任务写入旧代次。
-- [ ] 缓存开/关/冷/热结果与授权行为不可区分，仅 Provider 调用次数不同。
-- [ ] 设置行是知识配置唯一来源；YAML 墓碑生效；迁移脚本幂等；降级启动可观测。
-- [ ] 所有确定性门通过，真实质量/性能门有有效结果或明确受阻记录。
+- [x] 没有摘要文本进入引用/工具正文、密钥泄漏、跨项目披露、迟到任务写入旧代次（已列回归覆盖）。
+- [x] 缓存开/关/冷/热结果与授权行为不可区分，仅 Provider 调用次数不同。
+- [x] 设置行是知识配置唯一来源；YAML 墓碑生效；迁移脚本幂等；降级启动可观测。
+- [x] 所有确定性门通过，真实质量/性能门有有效结果或明确受阻记录。
 - [ ] Schema 五件套、DTO、装配、retention、文档一致；部署确认单独完成。
+
+## 续作记录（2026-08-31）
+
+- 接续基线 `b9658197`：T1 Schema 与包契约已提交，T2 设置服务和管理 API 尚未存在。
+  T1 定向检查 63 passed、0 skipped，目录和中文注释一致。包表计数纠正为七到八，另有一张宿主设置表。
+- 原 `main` 仍有会话列表点击区、子任务光效等未提交 UI 修改，当前运行配置含旧 YAML
+  `knowledge`。实现隔离于 detached worktree `deer-flow-m11`，没有覆盖这些修改，也没有提交或推送。
+- T0 留存的目标库 `deerflow_knowledge` 与当前环境不一致；本次只读核对实际为 `deerflow`。
+  本次未操作该目标库，数据库测试仅使用随机 `deerflow_test_*`；此前 reset 授权不沿用。
+- T2/T3 设置、CAS、存储探测、密钥保护、迁移、启动降级、留存与安装定向回归：
+  92 passed、0 skipped。T4 缓存及检索回归：130 passed、0 skipped。
+- T5/T6 摘要、重处理、任务与 ModelRuntime 回归：299 passed、0 skipped。
+  T7 检索、HTTP、工具及 M10 基线：325 passed、0 skipped。另补热缓存搜索中途关闭摘要
+  索引的策略冲突回归，相关 40 项通过。
+- T8 管理页 33 项定向单测和 6 项 mock Chromium 用例通过；T9 核心知识域 83 项单测和
+  5 项新浏览器用例通过。过程中的前端全量为 1159 passed / 206 files；最终新增回归后的
+  数量见下方 2026-09-01 交付验证记录。
+- 过程中的 `make lint` 通过，1314 个 Python 文件格式检查。
+  首次完整后端 core gate：5377 passed、1 failed、6 provider-integration deselected、0 skipped，
+  失败是 replay 原生 Provider profile 的旧测试预期，已修复为验证原生 descriptor 除
+  class_path 外全部保留，未放宽生产验证；首次结果不计为全门通过。
+- 独立 replay Gateway、Worker 和 MinIO 已跑通上传、摘要生成及检索（`matched_via=summary`、
+  热缓存命中）。停止后确认随机数据库、临时 bucket、Worker 和 Gateway 全部清理。
+  该证据不证明真实外部模型的质量提升。
+- 必要实施调整：摘要调用关闭 SDK 重试，改由持久任务在 lease 检查后重试；ModelRuntime
+  只新增可向下收紧的单次重试上限，既有默认不变。每次调用物化当前 System Model，不缓存凭据。
+  发布前扫描剩余缺失或变化分段，覆盖生成期间新增分段的刷新需求。
+- Replay 的旧模型种子与当前 `CreateSystemModel(provider_id=...)` 不一致，已通过
+  `git show b9658197` 确认为原有漂移并修复；生产 Provider 验证没有放宽。
+- T11 的模型型号、摘要调用预算及目标库处置仍待操作者明确决定。F02 真实质量和 M11
+  总交付保持未放行，不标记已完成。
+
+## 交付验证记录（2026-09-01）
+
+- T2–T10 实现完成；最后一轮后端 core gate **5423 passed、7 provider_integration deselected、
+  0 failed、0 skipped**，543.69 秒。Knowledge 专项另跑 **868 passed、2 deselected、0 failed、
+  0 skipped**，221.65 秒（该专项包含于全量，数量不累加）。
+- 后端 lint/format 检查通过，1315 个 Python 文件；Schema 中文注释检查通过，110 表、1384 列。
+- 前端 `pnpm check`、`pnpm build:production` 通过；单测 **1161 passed / 206 files**。
+  Chromium mock **73 passed**（知识库 67 + 管理设置 6）；真实 PostgreSQL、MinIO、独立
+  Worker + replay HTTP 模型的 Chromium **11 passed**，均零失败、零跳过。
+- 故障回归包括 MinIO 接受连接后无响应时的有界探测、非法 endpoint 的 Worker 降级启动、
+  热缓存检索期间关闭摘要索引后的策略冲突、摘要失败保留 ready 并可重试、重嵌入不新增
+  chat 调用、重解析清理旧摘要。前端已有账户切换清理的非法 ID 异常按现有 abort 约定修复，
+  请求参数验证未放宽。
+- T11 已备妥 85 题语料（新增 question_style dev/holdout 各 10）、四组评测轴、预算预检、
+  冻结 M10 基线校验与受阻报告；当前至少需 24 次摘要调用和 680 次检索请求，另有嵌入及
+  Rerank 费用。没有执行真实付费模型调用、没有填写虚构质量或费用。
+- 全新随机库的显式安装、`make check-db`、迁移脚本两次和再次 `make check-db` 共五次
+  CLI 均 exit 0；schema_v1 / ready，设置行数保持 1、revision 为 1→2→3，凭据加密
+  与解密一致。独立复查随机库记录和连接数均 0，临时合成 YAML 已删除。
+- 本次仍无 commit/push，原 `deer-flow` 服务、配置与目标数据库未变更；验证用浏览器与
+  服务已关闭，临时数据库及 MinIO bucket 已清理。详细命令、范围、安全证据和剩余交付条件
+  见 [M11 验证记录](../../knowledge/m11-validation.md)。
+
+## 真实评测续作（2026-09-01）
+
+- 用户回复“确认执行”后，使用当前默认 DeepSeek V4 Flash 原生配置，摘要尝试上限 24。
+  已修复评测入口的 OpenAI 模板硬编码，保留正确 Provider、native adapter、设置及能力；
+  模板和 endpoint 在任何 Provider 调用前验证，独立审查通过。
+- 新 M10 等价基线完成原 65 题、130 次检索，无请求错误，召回质量通过。非 Provider
+  自然语言 P95 semantic111.59ms/hybrid566.63ms，约5.08倍，待显式性能复审。
+- 纠正旧 M10 评测器自动声称“产品接受”的缺陷。只离线重算审批 gate，全部原始测量、
+  usage、模型和 outcomes 不变；没有重复模型调用。当前质量通过不等于性能已批准。
+- M11 第一次尝试达到 24 次上限，发布18/24条摘要，3个文档任务未完成；由于单文档原子
+  发布，缺6条不等于6次API失败。重试最后因预算耗尽退出，首次错误原因未保留，不能猜测。
+- 生成不完整时未运行后续680次检索，不能证明或否定召回收益。此次临时库已独立复查清理。
+  下一轮摘要预算待确认（已询问36次上限），M10基线不需重跑。详见验证记录和第一次报告。

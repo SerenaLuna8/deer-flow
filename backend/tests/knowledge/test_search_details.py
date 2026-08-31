@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import httpx
@@ -25,6 +26,7 @@ from actweave_knowledge import (
     KnowledgeError,
     KnowledgeSegmentChildView,
     KnowledgeSegmentDetail,
+    KnowledgeSegmentSummaryView,
     KnowledgeSegmentView,
     KnowledgeSettings,
 )
@@ -33,6 +35,7 @@ from actweave_knowledge.persistence.models import (
     KnowledgeDocumentRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
+    KnowledgeSegmentSummaryRow,
 )
 from actweave_knowledge.segments import KnowledgeSegmentService
 from fastapi import FastAPI
@@ -46,6 +49,38 @@ from app.projects.models import ProjectRole
 from deerflow.persistence.bootstrap import _install_full_schema
 
 _OWNER_USER_ID = uuid.UUID("44444444-4444-4444-8444-444444444444")
+
+
+@pytest.mark.asyncio
+async def test_segment_detail_projects_an_optional_system_generated_summary(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, document_id, segment_id, content = await _seed_detail_fixture(harness)
+        missing = await harness.service.get_segment_detail(project_id, base_id, document_id, segment_id)
+        assert missing.summary is None
+        async with harness.factory() as session, session.begin():
+            session.add(
+                KnowledgeSegmentSummaryRow(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    knowledge_base_id=base_id,
+                    knowledge_document_id=document_id,
+                    knowledge_segment_id=segment_id,
+                    document_version=1,
+                    content="系统生成的故障排查摘要",
+                    source_content_digest=hashlib.sha256(content.encode()).hexdigest(),
+                    embedding=[1.0, 0.0, 0.0],
+                )
+            )
+
+        present = await harness.service.get_segment_detail(project_id, base_id, document_id, segment_id)
+
+        assert present.segment.content == content
+        assert present.summary is not None
+        assert present.summary.content == "系统生成的故障排查摘要"
+        assert present.summary.created_at.tzinfo is not None
+    finally:
+        await harness.engine.dispose()
 
 
 class _DetailHarness:
@@ -539,6 +574,7 @@ async def test_http_segment_detail_round_trips_the_module_view() -> None:
         )
 
     assert response.status_code == 200
+    assert response.json()["summary"] is None
     assert module.calls == [
         (_PROJECT_ID, base_id, document_id, segment_id, 2, digest, 1),
     ]
@@ -561,6 +597,7 @@ async def test_http_segment_detail_round_trips_the_module_view() -> None:
         "stored_content_version": 2,
         "current_document_version": 2,
         "children_total": 1,
+        "summary": None,
         "child_page": 1,
         "children": [
             {
@@ -572,6 +609,18 @@ async def test_http_segment_detail_round_trips_the_module_view() -> None:
         ],
         "request_id": _REQUEST_ID,
     }
+
+
+@pytest.mark.asyncio
+async def test_http_segment_detail_includes_only_summary_text_and_creation_time() -> None:
+    module = _FakeDetailModule()
+    module.detail = replace(module.detail, summary=KnowledgeSegmentSummaryView(content="生成的摘要", created_at=datetime(2026, 8, 31, tzinfo=UTC)))
+    detail = module.detail
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app(module)), base_url="http://test") as client:
+        response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/bases/{detail.knowledge_base_id}/documents/{detail.document_id}/segments/{detail.segment.id}")
+
+    assert response.status_code == 200
+    assert response.json()["summary"] == {"content": "生成的摘要", "created_at": "2026-08-31T00:00:00Z"}
 
 
 @pytest.mark.asyncio

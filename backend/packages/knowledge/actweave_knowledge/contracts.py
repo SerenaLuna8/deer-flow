@@ -76,8 +76,9 @@ class KnowledgeMinioSettings(BaseModel):
 class KnowledgeSettings(BaseModel):
     """Startup configuration for the Knowledge feature.
 
-    Values come from the repository-root ``config.yaml`` ``knowledge`` block.
-    A missing block is equivalent to ``enabled=false``.
+    The host projects its persisted system settings into this configuration.
+    A missing settings row is equivalent to ``enabled=false``; the package
+    neither reads host configuration files nor repairs host persistence.
     """
 
     model_config = ConfigDict(extra="forbid")

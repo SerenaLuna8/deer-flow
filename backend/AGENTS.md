@@ -477,8 +477,16 @@ recreated explicitly, never repaired in place.
 
 ### Knowledge (optional RAG module)
 
-- Knowledge is disabled by default and enabled only by the root `config.yaml`
-  `knowledge` block. The knowledge routes are always mounted but answer 404
+- Knowledge is disabled by default. The host-owned `knowledge_system_settings`
+  singleton is its only configuration source; `/api/admin/settings/knowledge`
+  requires a current `system_admin`, revision CAS, secret-envelope encryption,
+  and a transaction-free MinIO probe before an enabled setting can commit.
+  Changing the endpoint requires resubmitting the secret. Setup seeds the row;
+  runtime never repairs a missing row. Nonempty YAML `knowledge` is rejected;
+  use the explicit migration workflow in `Install.md` for legacy configuration.
+  Gateway/Worker restart together for storage, limits, and cache changes;
+  the text System Model reference for summaries is resolved per task.
+  The knowledge routes are always mounted but answer 404
   `KNOWLEDGE_DISABLED` while the module is absent; a disabled module also means
   the Worker registers no knowledge task handlers and no Run receives the
   `knowledge_search` tool. The Worker's Project-retention cleanup capability is
@@ -488,15 +496,19 @@ recreated explicitly, never repaired in place.
   closed and retries; operators must restore the original endpoint, bucket,
   and credentials until those rows and objects are purged.
   When enabled, Gateway and Worker startup verify the configured MinIO bucket
-  is reachable and unversioned; `Enabled`/`Suspended` versioning, Object Lock,
-  or missing `GetBucketVersioning` authority fail closed. The bucket is
+  is reachable and unversioned. A failed storage check closes the feature
+  module and reports `knowledge=unavailable` in Gateway readiness without
+  preventing other features or administration from starting. Retention still
+  fails closed for missing storage evidence. `Enabled`/`Suspended` versioning,
+  Object Lock, or missing `GetBucketVersioning` authority are rejected. The bucket is
   administrator-provisioned and never auto-created. Members lacking a knowledge
   capability receive 403 `KNOWLEDGE_FORBIDDEN`; outsiders and missing projects
   collapse to 404.
 - `actweave_knowledge` stays host-agnostic: the host supplies engine, secret
   cipher, and configuration through `app/knowledge/` adapters. Do not import
   `app.*` or `deerflow.*` from the package.
-- The eight `knowledge_*` tables are ordinary Schema V1 members: ORM,
+- The eight package-owned `knowledge_*` tables plus the host settings singleton
+  are ordinary Schema V1 members: ORM,
   `full_schema.sql`, catalog digest, Chinese comments, and schema tests change
   together, and `public.vector` (pgvector) must exist before install.
   PostgreSQL owns all metadata, task, and segment authority; MinIO owns only
@@ -511,6 +523,19 @@ recreated explicitly, never repaired in place.
   require membership plus `shared_assets.read` for reads and
   `shared_assets.edit` for writes; the search API and Agent tool return only
   segments of the caller's project.
+- Summary indexes are opt-in per Base. A `summarize_document` task shares the
+  single open versioned-task slot with ingest/reembed, but never changes a ready
+  Document to failed. The host materializes one active text System Model per
+  call and uses private `ModelRuntime` invocation, with SDK retries disabled;
+  durable task retries re-enter the lease guard. Each LLM/Embedding dispatch
+  and summary publication rechecks Project state and lease. Publication also
+  checks document version, Base binding/flag, and source digests; changed sources
+  are skipped and admitted for a follow-up refresh. Re-embed preserves summary
+  text and refreshes vectors atomically; reparse cascades old summaries away.
+  Summary vectors are the semantic route's third source, deduplicated by each
+  Segment's maximum cosine before the existing per-base cap. They never replace
+  real Segment text in reranking, citations, ToolMessages, or logs. Details alone
+  expose the separately labeled generated text and time.
 - An empty Knowledge Base may leave `embedding_model_id` NULL and retains the
   normal status values. Its first configuration uses PATCH to bind Embedding
   and save retrieval settings together, under the Base lock, only while no
@@ -660,8 +685,8 @@ recreated explicitly, never repaired in place.
   degrading. Lexical columns are maintained in the same transaction as every
   content write (publish, reparse, segment edit/add, child re-split);
   re-embedding leaves them byte-identical. The search snapshots each base's
-  model bindings, per-base threshold/mode, and the effective global top_k, then
-  re-verifies them before provider dispatch and at the final review — a
+  model bindings, summary-index flags, per-base threshold/mode, and the
+  effective global top_k, then re-verifies them before provider dispatch and at the final review — a
   mid-search change is a `KNOWLEDGE_CONFLICT`; changes to defaults already
   overridden by the request, or a smaller top_k default that does not change
   the effective maximum, do not invalidate its strategy. The final
@@ -682,12 +707,15 @@ recreated explicitly, never repaired in place.
   history and hit-counter database faults remain best-effort inside a
   savepoint, while authority/content validation and the outer transaction
   must succeed. Search
-  revalidates before every per-group query embedding, after each
-  embedding inside the exact recall transaction, again immediately before
+  revalidates before every Provider-bound query embedding (cache misses only),
+  inside the exact recall transaction even on a cache hit, again immediately before
   sending Segment text to the Reranker, and finally after Provider work;
   revocation thus suppresses later Provider spend, Segment disclosure, query
   logging, hit updates, and already-computed citations at the applicable
   boundary. The
+  process-local LRU/TTL query cache keys by model identity and query digest;
+  it caches no source embeddings, content, or authorization. Cache counts are
+  diagnostic only. The
   `knowledge_search` tool binds `project_id` and owner from the Run context
   (never model arguments) and persists citations in the ToolMessage's
   `additional_kwargs.knowledge_citations`, which stream, values, and journal

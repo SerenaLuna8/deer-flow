@@ -2349,6 +2349,7 @@ async def test_http_search_debug_round_trips_the_safe_hit_diagnostics() -> None:
     [entry] = diagnostics["hit_diagnostics"]
     assert entry == {
         "segment_id": str(debug_hit.citation.segment_id),
+        "matched_via": "segment",
         "local_score": 0.91,
         "local_score_kind": "cosine",
         "score_domain": "embedding:test",

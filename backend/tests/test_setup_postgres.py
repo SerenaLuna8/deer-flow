@@ -290,6 +290,9 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     async def runtime_policy(_engine):
         calls.append("runtime-policy")
 
+    async def knowledge_settings(_engine):
+        calls.append("knowledge-settings")
+
     async def model_registry(_engine, seed):
         assert seed is registry_seed
         calls.append("model-registry")
@@ -325,6 +328,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
         model_registry,
     )
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", langgraph)
+    monkeypatch.setattr(setup_postgres, "_bootstrap_knowledge_settings_schema", knowledge_settings)
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_project_schema", projects)
 
     assert (
@@ -342,6 +346,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
         "builtin",
         "default-model",
         "runtime-policy",
+        "knowledge-settings",
         "model-registry",
         "langgraph",
         "projects",
@@ -373,6 +378,7 @@ async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) ->
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_model_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_runtime_policy_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_knowledge_settings_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_model_registry_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
     monkeypatch.setattr(
@@ -473,6 +479,7 @@ async def test_bootstrap_existing_cleanup_failure_does_not_override_bootstrap_co
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_model_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_runtime_policy_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_knowledge_settings_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_model_registry_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
     monkeypatch.setattr(

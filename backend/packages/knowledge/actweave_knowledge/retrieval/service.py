@@ -41,8 +41,10 @@ evidence reports ``heterogeneous_without_lexical_evidence``.
 
 Recall runs per group: general-mode segments carry their own vectors,
 parent_child-mode documents recall through child chunks whose best score
-rolls up to the parent segment (one candidate per parent). The reranker
-always scores the text a citation would return — the parent content.
+rolls up to the parent segment. Enabled summary indexes add a third semantic
+source; a Segment's maximum source cosine wins before its base's semantic
+cap. Summaries are never citation text: the reranker always scores the real
+Segment content.
 
 The effective strategy snapshot (every targeted base's model bindings and
 resolved retrieval settings) is
@@ -94,6 +96,7 @@ from ..contracts import (
     KnowledgeHitDiagnostics,
     KnowledgeLocalScoreKind,
     KnowledgeMatchedChild,
+    KnowledgeMatchedVia,
     KnowledgeMetadataFilter,
     KnowledgeModelPort,
     KnowledgeQueryView,
@@ -114,8 +117,10 @@ from ..persistence.models import (
     KnowledgeQueryRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
+    KnowledgeSegmentSummaryRow,
 )
 from .lexical import lexical_query_input
+from .query_cache import KnowledgeQueryEmbeddingCache
 
 logger = logging.getLogger(__name__)
 
@@ -357,6 +362,7 @@ class _BaseDefaults:
     top_k: int
     score_threshold: float
     retrieval_mode: KnowledgeRetrievalMode
+    summary_index_enabled: bool
 
 
 def _effective_defaults(defaults: _BaseDefaults, overrides: _ValidatedSearch) -> _BaseDefaults:
@@ -364,6 +370,7 @@ def _effective_defaults(defaults: _BaseDefaults, overrides: _ValidatedSearch) ->
         top_k=overrides.top_k if overrides.top_k is not None else defaults.top_k,
         score_threshold=overrides.score_threshold if overrides.score_threshold is not None else defaults.score_threshold,
         retrieval_mode=overrides.retrieval_mode if overrides.retrieval_mode is not None else defaults.retrieval_mode,
+        summary_index_enabled=defaults.summary_index_enabled,
     )
 
 
@@ -391,8 +398,8 @@ class _SearchGroup:
 class _Candidate:
     """One recalled segment with its display fields and recall-stage score.
 
-    For parent_child documents this is the parent segment and
-    ``vector_score`` is the best of its child-chunk scores. ``content`` is
+    ``vector_score`` is the maximum Segment/Child/Summary source cosine;
+    ``matched_via`` identifies its source. ``content`` is
     the complete parent text frozen by the recall snapshot; hits carry it as
     the passage while citations only quote its head. ``matched_children``
     are the really-recalled child chunks, carried by the recall transaction
@@ -410,6 +417,7 @@ class _Candidate:
     knowledge_base_name: str
     vector_score: float
     matched_children: tuple[KnowledgeMatchedChild, ...] = ()
+    matched_via: KnowledgeMatchedVia = "segment"
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,6 +503,7 @@ async def _assert_snapshot_strategy(
                 KnowledgeBaseRow.default_top_k,
                 KnowledgeBaseRow.default_score_threshold,
                 KnowledgeBaseRow.retrieval_mode,
+                KnowledgeBaseRow.summary_index_enabled,
             ).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id.in_(snapshot.model_bindings))
         )
     ).all()
@@ -505,11 +514,17 @@ async def _assert_snapshot_strategy(
                 top_k=row.default_top_k,
                 score_threshold=float(row.default_score_threshold),
                 retrieval_mode=row.retrieval_mode,
+                summary_index_enabled=row.summary_index_enabled,
             ),
             snapshot.overrides,
         )
         expected = snapshot.effective_defaults[row.id]
-        if snapshot.model_bindings[row.id] != (row.embedding_model_id, row.reranker_model_id) or expected.score_threshold != actual.score_threshold or expected.retrieval_mode != actual.retrieval_mode:
+        if (
+            snapshot.model_bindings[row.id] != (row.embedding_model_id, row.reranker_model_id)
+            or expected.score_threshold != actual.score_threshold
+            or expected.retrieval_mode != actual.retrieval_mode
+            or expected.summary_index_enabled != actual.summary_index_enabled
+        ):
             raise KnowledgeError(KNOWLEDGE_CONFLICT, "检索策略已变更，请重新检索")
         current_defaults[row.id] = actual
     # top_k is one global limit: a smaller base default changing without
@@ -619,10 +634,12 @@ class KnowledgeSearchService:
         session_factory: async_sessionmaker[AsyncSession],
         client: KnowledgeModelClient,
         model_port: KnowledgeModelPort,
+        query_cache: KnowledgeQueryEmbeddingCache | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._client = client
         self._model_port = model_port
+        self._query_cache = query_cache
 
     async def search(
         self,
@@ -676,7 +693,10 @@ class KnowledgeSearchService:
         ranked: list[_Ranked] = []
         semantic_candidates = 0
         lexical_candidates = 0
+        summary_candidates = 0
         threshold_filtered = 0
+        query_embedding_cache_hits = 0
+        query_embedding_cache_misses = 0
         timings = {"query_embedding_ms": 0.0, "recall_ms": 0.0, "rerank_ms": 0.0, "final_validation_ms": 0.0}
 
         # Every provider dispatch — each batch and the client's internal
@@ -693,29 +713,39 @@ class KnowledgeSearchService:
         for group in groups:
             embedding = group.embedding
             if embedding.model_id not in query_vectors:
-                # Provider failures surface as bare KnowledgeError to callers,
-                # so log the stage and code here (never the query or provider
-                # body) — otherwise a production embedding/reranker outage is
-                # invisible.
                 started = time.monotonic()
-                try:
-                    query_vectors[embedding.model_id] = (
-                        await self._client.embed(
-                            embedding,
-                            [validated.query],
-                            batch_guard=_dispatch_guard,
+                cached = self._query_cache.get(embedding.model_id, validated.query) if self._query_cache is not None else None
+                if cached is not None:
+                    query_embedding_cache_hits += 1
+                    query_vectors[embedding.model_id] = list(cached)
+                else:
+                    query_embedding_cache_misses += 1
+                    # Provider failures surface as bare KnowledgeError to
+                    # callers. Log only the stage/code, never cached content,
+                    # query text or the Provider response body.
+                    try:
+                        vector = (
+                            await self._client.embed(
+                                embedding,
+                                [validated.query],
+                                batch_guard=_dispatch_guard,
+                            )
+                        )[0]
+                    except KnowledgeError as error:
+                        logger.warning(
+                            "knowledge search embed failed for model %s: %s",
+                            embedding.model_id,
+                            error.code,
                         )
-                    )[0]
-                except KnowledgeError as error:
-                    logger.warning(
-                        "knowledge search embed failed for model %s: %s",
-                        embedding.model_id,
-                        error.code,
-                    )
-                    raise
+                        raise
+                    query_vectors[embedding.model_id] = vector
+                    if self._query_cache is not None:
+                        self._query_cache.put(embedding.model_id, validated.query, vector)
                 timings["query_embedding_ms"] += (time.monotonic() - started) * 1000.0
+            # Cache hits skip Provider dispatch only. Recall and final review
+            # retain their transaction-bound live authorization checks.
             started = time.monotonic()
-            candidates, group_semantic, group_lexical = await self._recalled_candidates(
+            candidates, group_semantic, group_lexical, group_summary = await self._recalled_candidates(
                 project_id=request.project_id,
                 embedding_model_id=embedding.model_id,
                 base_ids=group.base_ids,
@@ -729,6 +759,7 @@ class KnowledgeSearchService:
             timings["recall_ms"] += (time.monotonic() - started) * 1000.0
             semantic_candidates += group_semantic
             lexical_candidates += group_lexical
+            summary_candidates += group_summary
             if not candidates:
                 continue
             group_ranked: list[_Ranked] = []
@@ -820,6 +851,7 @@ class KnowledgeSearchService:
         ranking_method: KnowledgeScoreKind = "rank_fusion" if fusion else next(iter(domains))[0]  # type: ignore[assignment]
 
         pending: list[KnowledgeSearchHit] = []
+        matched_via_by_segment: dict[UUID, KnowledgeMatchedVia] = {}
         seen_segments: set[UUID] = set()
         parents_deduplicated = 0
         for item, ranking_score in ordered:
@@ -828,6 +860,7 @@ class KnowledgeSearchService:
                 parents_deduplicated += 1
                 continue
             seen_segments.add(candidate.segment_id)
+            matched_via_by_segment[candidate.segment_id] = candidate.matched_via
             content_digest = hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()
             citation = KnowledgeCitation(
                 knowledge_base_id=candidate.knowledge_base_id,
@@ -900,10 +933,13 @@ class KnowledgeSearchService:
                 counts=KnowledgeRouteCounts(
                     semantic_candidates=semantic_candidates,
                     lexical_candidates=lexical_candidates,
+                    summary_candidates=summary_candidates,
                     parents_deduplicated=parents_deduplicated,
                     threshold_filtered=threshold_filtered,
                     stale_filtered=len(pending) - len(hits),
                     returned=len(hits),
+                    query_embedding_cache_hits=query_embedding_cache_hits,
+                    query_embedding_cache_misses=query_embedding_cache_misses,
                 ),
                 timings=KnowledgeSearchTimings(
                     query_embedding_ms=timings["query_embedding_ms"],
@@ -927,6 +963,7 @@ class KnowledgeSearchService:
                         ranking_method=hit.ranking_method,
                         ranking_score=hit.ranking_score,
                         matched_children=hit.matched_children,
+                        matched_via=matched_via_by_segment[hit.citation.segment_id],
                     )
                     for hit in hits
                 ),
@@ -1175,6 +1212,7 @@ class KnowledgeSearchService:
             KnowledgeBaseRow.default_top_k,
             KnowledgeBaseRow.default_score_threshold,
             KnowledgeBaseRow.retrieval_mode,
+            KnowledgeBaseRow.summary_index_enabled,
         ).where(
             KnowledgeBaseRow.project_id == project_id,
             KnowledgeBaseRow.status == "active",
@@ -1194,12 +1232,13 @@ class KnowledgeSearchService:
                     return [], {}
                 bases_by_pair: dict[tuple[UUID, UUID | None], list[UUID]] = {}
                 defaults: dict[UUID, _BaseDefaults] = {}
-                for base_id, embedding_model_id, reranker_model_id, default_top_k, default_score_threshold, retrieval_mode in rows:
+                for base_id, embedding_model_id, reranker_model_id, default_top_k, default_score_threshold, retrieval_mode, summary_index_enabled in rows:
                     bases_by_pair.setdefault((embedding_model_id, reranker_model_id), []).append(base_id)
                     defaults[base_id] = _BaseDefaults(
                         top_k=default_top_k,
                         score_threshold=float(default_score_threshold),
                         retrieval_mode=retrieval_mode,
+                        summary_index_enabled=summary_index_enabled,
                     )
                 # Materialize each distinct model once through the host port,
                 # inside this authority-checked transaction. The port owns
@@ -1242,11 +1281,11 @@ class KnowledgeSearchService:
         per_base_budget: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
         authority: KnowledgeProjectAuthority | None = None,
-    ) -> tuple[list[_Candidate], int, int]:
+    ) -> tuple[list[_Candidate], int, int, int]:
         """Per-base recall: the semantic route, the lexical route, their merge.
 
-        Each route caps at ``per_base_budget`` parents per base (general
-        segments and parent_child rollups merged first). A hybrid base with
+        Each route caps at ``per_base_budget`` parents per base (Segment,
+        Child and Summary sources deduplicated by max cosine first). A hybrid base with
         lexical tokens then merges its two routes by ``Σ 1/(60+rank)`` and
         keeps ``C`` parents; a semantic base keeps its semantic route as-is,
         so no base can consume another base's slots (§8.2). Returns the
@@ -1286,8 +1325,22 @@ class KnowledgeSearchService:
                     metadata_filters=metadata_filters,
                     session=session,
                 )
+                summaries = await self._summary_candidates(
+                    project_id=project_id,
+                    embedding_model_id=embedding_model_id,
+                    base_ids=base_ids,
+                    query_vector=query_vector,
+                    per_base_budget=per_base_budget,
+                    metadata_filters=metadata_filters,
+                    session=session,
+                )
+                semantic_by_segment: dict[UUID, _Candidate] = {}
+                for candidate in [*general, *parents, *summaries]:
+                    previous = semantic_by_segment.get(candidate.segment_id)
+                    if previous is None or candidate.vector_score > previous.vector_score:
+                        semantic_by_segment[candidate.segment_id] = candidate
                 semantic_by_base: dict[UUID, list[_Candidate]] = {}
-                for candidate in [*general, *parents]:
+                for candidate in semantic_by_segment.values():
                     semantic_by_base.setdefault(candidate.knowledge_base_id, []).append(candidate)
                 for pool in semantic_by_base.values():
                     pool.sort(key=_candidate_sort_key)
@@ -1326,6 +1379,27 @@ class KnowledgeSearchService:
                     for lexical_pool in lexical_by_base.values():
                         lexical_pool.sort(key=lambda entry: (-entry[1], *_candidate_sort_key(entry[0])))
                         del lexical_pool[per_base_budget:]
+                    lexical_ids = [candidate.segment_id for pool in lexical_by_base.values() for candidate, _ in pool]
+                    if lexical_ids:
+                        # Lexical-only parents may sit below every semantic
+                        # source's cap. Their threshold still needs the real
+                        # maximum cosine, including an enabled summary.
+                        lexical_summaries = await self._summary_candidates(
+                            project_id=project_id,
+                            embedding_model_id=embedding_model_id,
+                            base_ids=group_hybrid_ids,
+                            query_vector=query_vector,
+                            per_base_budget=per_base_budget,
+                            metadata_filters=metadata_filters,
+                            session=session,
+                            segment_ids=lexical_ids,
+                        )
+                        summaries_by_segment = {candidate.segment_id: candidate for candidate in lexical_summaries}
+                        for base_id, pool in lexical_by_base.items():
+                            lexical_by_base[base_id] = [
+                                (summaries_by_segment[candidate.segment_id], score) if candidate.segment_id in summaries_by_segment and summaries_by_segment[candidate.segment_id].vector_score > candidate.vector_score else (candidate, score)
+                                for candidate, score in pool
+                            ]
 
                 merged: list[_Candidate] = []
                 for base_id in {*semantic_by_base, *lexical_by_base}:
@@ -1363,7 +1437,7 @@ class KnowledgeSearchService:
             raise _search_failed() from None
         semantic_count = sum(len(pool) for pool in semantic_by_base.values())
         lexical_count = sum(len(pool) for pool in lexical_by_base.values())
-        return merged, semantic_count, lexical_count
+        return merged, semantic_count, lexical_count, len(summaries)
 
     async def _matched_children_by_parent(
         self,
@@ -1614,9 +1688,9 @@ class KnowledgeSearchService:
             )
         )
         rows = (await session.execute(statement)).all()
-        return [(self._candidate_from_row(row), float(row.lexical_score)) for row in rows]
+        return [(self._candidate_from_row(row, matched_via="child"), float(row.lexical_score)) for row in rows]
 
-    def _candidate_from_row(self, row: Any) -> _Candidate:
+    def _candidate_from_row(self, row: Any, *, matched_via: KnowledgeMatchedVia = "segment") -> _Candidate:
         return _Candidate(
             segment_id=row.id,
             position=row.position,
@@ -1628,6 +1702,7 @@ class KnowledgeSearchService:
             knowledge_base_id=row.knowledge_base_id,
             knowledge_base_name=row.knowledge_base_name,
             vector_score=float(row.vector_score),
+            matched_via=matched_via,
         )
 
     async def _lexical_matched_children(
@@ -1857,6 +1932,58 @@ class KnowledgeSearchService:
         )
         return await self._execute_recall(statement, session=session)
 
+    async def _summary_candidates(
+        self,
+        *,
+        project_id: UUID,
+        embedding_model_id: UUID,
+        base_ids: list[UUID],
+        query_vector: list[float],
+        per_base_budget: int,
+        metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+        session: AsyncSession,
+        segment_ids: list[UUID] | None = None,
+    ) -> list[_Candidate]:
+        """Summary vectors recall real Segments under the same scope and cap."""
+
+        vector_score = 1 - KnowledgeSegmentSummaryRow.embedding.cosine_distance(query_vector)
+        inner = (
+            select(
+                KnowledgeSegmentRow.id,
+                KnowledgeSegmentRow.position,
+                KnowledgeSegmentRow.content,
+                KnowledgeSegmentRow.source_position,
+                KnowledgeSegmentRow.document_version,
+                KnowledgeDocumentRow.id.label("document_id"),
+                KnowledgeDocumentRow.name.label("document_name"),
+                KnowledgeBaseRow.id.label("knowledge_base_id"),
+                KnowledgeBaseRow.name.label("knowledge_base_name"),
+                vector_score.label("vector_score"),
+                func.row_number()
+                .over(
+                    partition_by=KnowledgeBaseRow.id,
+                    order_by=(vector_score.desc(), KnowledgeDocumentRow.id.asc(), KnowledgeSegmentRow.position.asc(), KnowledgeSegmentRow.id.asc()),
+                )
+                .label("per_base_rank"),
+            )
+            .select_from(KnowledgeSegmentSummaryRow)
+            .join(KnowledgeSegmentRow, KnowledgeSegmentRow.id == KnowledgeSegmentSummaryRow.knowledge_segment_id)
+            .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
+            .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
+            .where(
+                *self._candidate_filters(project_id, embedding_model_id, base_ids, metadata_filters),
+                KnowledgeBaseRow.summary_index_enabled.is_(True),
+                KnowledgeSegmentSummaryRow.project_id == project_id,
+                KnowledgeSegmentSummaryRow.knowledge_base_id == KnowledgeBaseRow.id,
+                KnowledgeSegmentSummaryRow.knowledge_document_id == KnowledgeDocumentRow.id,
+                KnowledgeSegmentSummaryRow.document_version == KnowledgeSegmentRow.document_version,
+                *(() if segment_ids is None else (KnowledgeSegmentRow.id.in_(segment_ids),)),
+            )
+            .subquery()
+        )
+        statement = select(inner).where(inner.c.per_base_rank <= per_base_budget).order_by(inner.c.vector_score.desc(), inner.c.knowledge_base_id.asc(), inner.c.document_id.asc(), inner.c.position.asc(), inner.c.id.asc())
+        return await self._execute_recall(statement, session=session, matched_via="summary")
+
     async def _parent_child_candidates(
         self,
         *,
@@ -1928,13 +2055,14 @@ class KnowledgeSearchService:
                 inner.c.id.asc(),
             )
         )
-        return await self._execute_recall(statement, session=session)
+        return await self._execute_recall(statement, session=session, matched_via="child")
 
     async def _execute_recall(
         self,
         statement: Any,
         *,
         session: AsyncSession | None = None,
+        matched_via: KnowledgeMatchedVia = "segment",
     ) -> list[_Candidate]:
         try:
             if session is None:
@@ -1957,6 +2085,7 @@ class KnowledgeSearchService:
                 knowledge_base_id=row.knowledge_base_id,
                 knowledge_base_name=row.knowledge_base_name,
                 vector_score=float(row.vector_score),
+                matched_via=matched_via,
             )
             for row in rows
         ]

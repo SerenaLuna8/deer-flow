@@ -162,6 +162,31 @@ def test_private_profiles_disable_model_tracing(
 
 
 @pytest.mark.anyio
+async def test_private_runtime_can_cap_sdk_retries_for_guarded_task_attempts() -> None:
+    observed = []
+
+    class FakeChatModel:
+        async def ainvoke(self, _messages, *, config):
+            return AIMessage(content="ok")
+
+    def model_factory(**kwargs):
+        observed.append(kwargs["runtime_overrides"])
+        return FakeChatModel()
+
+    runtime = ModelRuntime(app_config=SimpleNamespace(), model_factory=model_factory)
+    await runtime.ainvoke([HumanMessage(content="source")], profile=ModelRuntimeProfile.PRIVATE_ONESHOT, provider_max_retries=0)
+    await runtime.ainvoke([HumanMessage(content="source")], profile=ModelRuntimeProfile.PRIVATE_ONESHOT)
+    assert observed == [{"max_retries": 0}, {"max_retries": 2}]
+
+
+@pytest.mark.parametrize("value", [-1, 3, True, 1.5])
+def test_runtime_retry_cap_cannot_expand_or_malformed_profile_policy(value):
+    runtime = ModelRuntime(app_config=SimpleNamespace(), model_factory=lambda **_: None)
+    with pytest.raises(ValueError, match="provider_max_retries"):
+        runtime.build_chat_model(profile=ModelRuntimeProfile.PRIVATE_ONESHOT, provider_max_retries=value)
+
+
+@pytest.mark.anyio
 async def test_sensitive_runtime_clears_inherited_callbacks() -> None:
     observed: dict[str, object] = {}
 

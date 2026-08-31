@@ -35,12 +35,14 @@ from ..contracts import (
     KnowledgeSegmentChildView,
     KnowledgeSegmentCreate,
     KnowledgeSegmentDetail,
+    KnowledgeSegmentSummaryView,
     KnowledgeSegmentUpdate,
     KnowledgeSegmentView,
     KnowledgeSettings,
 )
 from ..documents.service import document_view
 from ..ingestion.splitter import split_child_chunks
+from ..ingestion.summary_admission import enqueue_summary_refresh
 from ..models.client import KnowledgeModelClient
 from ..persistence.derivations import document_delete_error_expression
 from ..persistence.models import (
@@ -48,6 +50,7 @@ from ..persistence.models import (
     KnowledgeDocumentRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
+    KnowledgeSegmentSummaryRow,
 )
 from ..retrieval.lexical import lexical_index_input
 
@@ -214,7 +217,11 @@ class KnowledgeSegmentService:
                         await self._replace_children(session, segment, embedded)
                 if update.enabled is not None:
                     segment.enabled = update.enabled
+                if content is not None:
+                    await session.execute(delete(KnowledgeSegmentSummaryRow).where(KnowledgeSegmentSummaryRow.knowledge_segment_id == segment.id))
                 await session.flush()
+                if content is not None:
+                    await enqueue_summary_refresh(session, document, self._model_port)
                 await session.refresh(segment)
                 return _segment_view(segment)
         except KnowledgeError:
@@ -303,6 +310,7 @@ class KnowledgeSegmentService:
                 document.word_count = document.word_count + word_count
                 document.updated_at = func.now()  # type: ignore[assignment]
                 await session.flush()
+                await enqueue_summary_refresh(session, document, self._model_port)
                 await session.refresh(segment)
                 return _segment_view(segment)
         except KnowledgeError:
@@ -387,6 +395,16 @@ class KnowledgeSegmentService:
                         .limit(KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE)
                     )
                 ).all()
+                summary = await session.scalar(
+                    select(KnowledgeSegmentSummaryRow).where(
+                        KnowledgeSegmentSummaryRow.project_id == project_id,
+                        KnowledgeSegmentSummaryRow.knowledge_base_id == base_id,
+                        KnowledgeSegmentSummaryRow.knowledge_document_id == document_id,
+                        KnowledgeSegmentSummaryRow.knowledge_segment_id == segment.id,
+                        KnowledgeSegmentSummaryRow.document_version == segment.document_version,
+                        KnowledgeSegmentSummaryRow.source_content_digest == hashlib.sha256(segment.content.encode("utf-8")).hexdigest(),
+                    )
+                )
                 return KnowledgeSegmentDetail(
                     segment=_segment_view(segment),
                     knowledge_base_id=base_id,
@@ -397,6 +415,7 @@ class KnowledgeSegmentService:
                     current_document_version=document.version,
                     children_total=children_total,
                     child_page=child_page,
+                    summary=KnowledgeSegmentSummaryView(content=summary.content, created_at=summary.created_at) if summary is not None else None,
                     children=tuple(
                         KnowledgeSegmentChildView(
                             id=row.id,

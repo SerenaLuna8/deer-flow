@@ -23,6 +23,7 @@ their parameter types as unresolvable strings (FastAPI would then read the
 request body parameters as query parameters).
 """
 
+import hashlib
 import os
 import socket
 import threading
@@ -40,6 +41,8 @@ _REPLAY_KNOWLEDGE_NAMESPACE = uuid.UUID("9a1de0f4-63b7-5c58-9f2e-0d84a3c14b72")
 REPLAY_KNOWLEDGE_MODEL_DISPLAY_NAME = "Replay Knowledge Model"
 REPLAY_KNOWLEDGE_MODEL_API_KEY = "sk-replay-knowledge-mock"
 REPLAY_EMBEDDING_DIMENSION = 64
+REPLAY_SUMMARY_MODEL_DISPLAY_NAME = "Replay Knowledge Summary"
+REPLAY_SUMMARY_OUTPUT_MARKER = "摘要索引回放"
 
 # Documents containing this exact substring get the far-from-query embedding
 # (cosine ranks them last) but the top rerank score (final order ranks them
@@ -114,26 +117,76 @@ def prepare_pgvector_extension(database_url: str) -> None:
         connection.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public")
 
 
-def build_knowledge_config_block(*, bucket: str) -> str:
-    """The ``knowledge`` block appended to the replay process config.
+async def seed_replay_knowledge_settings(database_url: str, *, settings: ReplayMinioSettings, bucket: str, summary_model_name: str | None = None) -> None:
+    """Seed database-owned configuration only in an isolated test database."""
+    from _replay_fixture import _validated_replay_database_url
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    Endpoint and credentials stay env-substituted so they never land in the
-    temporary config file; the bucket name is run-local and not a secret.
-    """
+    from app.knowledge_settings.service import knowledge_minio_secret_recipient
+    from deerflow.persistence.knowledge_settings import KnowledgeSystemSettingsRow
+    from deerflow.secrets import SecretEnvelope, SecretKey
 
-    return f"""\
-knowledge:
-  enabled: true
-  worker_concurrency: 2
-  task_timeout_seconds: 120
-  upload_max_bytes: 10485760
-  minio:
-    endpoint: ${_MINIO_ENDPOINT_ENV}
-    bucket: {bucket}
-    access_key: ${_MINIO_ACCESS_KEY_ENV}
-    secret_key: ${_MINIO_SECRET_KEY_ENV}
-    secure: false
-"""
+    engine = create_async_engine(_validated_replay_database_url(database_url))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        envelope = SecretEnvelope.protect(settings.secret_key.encode("utf-8"), recipient=knowledge_minio_secret_recipient(settings.endpoint), key=SecretKey.from_environment())
+        async with factory() as session, session.begin():
+            row = await session.get(KnowledgeSystemSettingsRow, 1, with_for_update=True)
+            if row is None:
+                row = KnowledgeSystemSettingsRow(id=1)
+                session.add(row)
+            row.enabled = True
+            row.worker_concurrency = 2
+            row.task_timeout_seconds = 120
+            row.upload_max_bytes = 10485760
+            row.minio_endpoint = settings.endpoint
+            row.minio_bucket = bucket
+            row.minio_access_key = settings.access_key
+            row.minio_secure = False
+            row.minio_secret_nonce = envelope.nonce
+            row.minio_secret_ciphertext = envelope.ciphertext
+            row.summary_model_name = summary_model_name
+    finally:
+        await engine.dispose()
+
+
+async def seed_replay_summary_model(database_url: str) -> uuid.UUID:
+    """Bind a live System Model to the loopback provider already seeded above."""
+    from types import SimpleNamespace
+
+    from _replay_fixture import _REPLAY_ADMIN_ID, _validated_replay_database_url
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.audit.models import resolve_system_audit_context
+    from app.system_settings.models import CreateSystemModel
+    from app.system_settings.service import SystemModelCatalogService
+
+    engine = create_async_engine(_validated_replay_database_url(database_url))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        context = resolve_system_audit_context(SimpleNamespace(id=_REPLAY_ADMIN_ID, system_role="system_admin"), request_id="replay-summary-model")
+        catalog = SystemModelCatalogService(factory)
+        for model in (await catalog.list_models(context)).items:
+            if model.display_name == REPLAY_SUMMARY_MODEL_DISPLAY_NAME:
+                return model.id
+        model = await catalog.create_model(
+            context,
+            CreateSystemModel(
+                display_name=REPLAY_SUMMARY_MODEL_DISPLAY_NAME,
+                status="active",
+                provider_id=uuid.uuid5(_REPLAY_KNOWLEDGE_NAMESPACE, "replay-model-provider"),
+                provider_adapter="knowledge_replay",
+                provider_model="replay/summary",
+                max_input_tokens=64000,
+                settings={},
+                supports_thinking=False,
+                supports_reasoning_effort=False,
+                supports_vision=False,
+            ),
+        )
+        return model.id
+    finally:
+        await engine.dispose()
 
 
 async def seed_replay_model_registry(database_url: str, *, base_url: str) -> tuple[uuid.UUID, uuid.UUID]:
@@ -220,16 +273,20 @@ class KnowledgeReplayState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     embedding_calls: int = 0
     rerank_calls: int = 0
+    chat_calls: int = 0
     embedding_failures_remaining: int = 0
     rerank_failures_remaining: int = 0
+    chat_failures_remaining: int = 0
 
     def snapshot(self) -> dict[str, int]:
         with self.lock:
             return {
                 "embedding_calls": self.embedding_calls,
                 "rerank_calls": self.rerank_calls,
+                "chat_calls": self.chat_calls,
                 "embedding_failures_remaining": self.embedding_failures_remaining,
                 "rerank_failures_remaining": self.rerank_failures_remaining,
+                "chat_failures_remaining": self.chat_failures_remaining,
             }
 
 
@@ -271,6 +328,27 @@ def _build_provider_app(state: KnowledgeReplayState):
     from fastapi.responses import JSONResponse
 
     app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        body = await request.json()
+        with state.lock:
+            state.chat_calls += 1
+            if state.chat_failures_remaining > 0:
+                state.chat_failures_remaining -= 1
+                return JSONResponse({"error": "replay summary fault"}, status_code=500)
+        prompt = body["messages"][-1]["content"]
+        source = prompt.split("源段落：\n", 1)[-1]
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+        content = f"{REPLAY_SUMMARY_OUTPUT_MARKER} {digest}"
+        return {
+            "id": f"chatcmpl-replay-{digest}",
+            "object": "chat.completion",
+            "created": 0,
+            "model": body["model"],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
+        }
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request):
@@ -376,6 +454,7 @@ def build_replay_knowledge_router(
 
         embedding_failures: int = Field(default=0, ge=0, le=1000)
         rerank_failures: int = Field(default=0, ge=0, le=1000)
+        chat_failures: int = Field(default=0, ge=0, le=1000)
 
     router = APIRouter(
         prefix="/api/test-only/replay-knowledge",
@@ -393,6 +472,7 @@ def build_replay_knowledge_router(
         with state.lock:
             state.embedding_failures_remaining = faults.embedding_failures
             state.rerank_failures_remaining = faults.rerank_failures
+            state.chat_failures_remaining = faults.chat_failures
         return state.snapshot()
 
     @router.get("/objects")

@@ -36,6 +36,7 @@ const READINESS_COMPONENTS = [
   "stream",
   "quota",
   "audit",
+  "knowledge",
 ] as const;
 
 export function OperationsOverviewStateView({
@@ -80,6 +81,7 @@ export function OperationsOverviewStateView({
     stream: readiness.stream,
     quota: readiness.quota,
     audit: readiness.audit,
+    knowledge: readiness.knowledge,
   } as const;
   const fleetFacts = [
     {

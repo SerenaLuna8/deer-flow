@@ -55,6 +55,7 @@ import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
+import { KnowledgeSummaryBlock } from "./knowledge-summary-block";
 
 /** Matches the backend cap on metadata_filters per search. */
 const MAX_METADATA_FILTERS = 10;
@@ -126,6 +127,7 @@ export function KnowledgeSearchPanel({
     base.embedding_model_id,
     base.reranker_model_id ?? "",
     base.retrieval_mode,
+    base.summary_index_enabled,
     base.default_top_k,
     base.default_score_threshold,
     base.updated_at,
@@ -633,6 +635,15 @@ function SearchOutcome({
                 >
                   {labels.search.scoreKinds[citation.score_kind ?? "unknown"]}
                 </Badge>
+                {hit ? (
+                  <Badge
+                    variant="outline"
+                    data-testid="knowledge-hit-source"
+                    className="shrink-0 rounded-md font-normal"
+                  >
+                    {labels.search.matchedVia[hit.matched_via]}
+                  </Badge>
+                ) : null}
               </div>
               <div className="text-muted-foreground mt-2.5 flex flex-wrap items-center gap-x-2 text-xs">
                 <span>
@@ -705,6 +716,15 @@ function SearchDiagnosticsDisclosure({
     [labels.models, diagnostics.model_ids.join(", ") || "—"],
     [labels.semanticCandidates, String(diagnostics.counts.semantic_candidates)],
     [labels.lexicalCandidates, String(diagnostics.counts.lexical_candidates)],
+    [labels.summaryCandidates, String(diagnostics.counts.summary_candidates)],
+    [
+      labels.queryCacheHits,
+      String(diagnostics.counts.query_embedding_cache_hits),
+    ],
+    [
+      labels.queryCacheMisses,
+      String(diagnostics.counts.query_embedding_cache_misses),
+    ],
     [
       labels.parentsDeduplicated,
       String(diagnostics.counts.parents_deduplicated),
@@ -861,6 +881,7 @@ function SearchHitDetailDialog({
                 </span>
                 {sourcePosition ? <span>· {sourcePosition}</span> : null}
               </div>
+              <KnowledgeSummaryBlock summary={data.summary} />
               <p
                 className="border-border/60 bg-muted/15 rounded-lg border px-3 py-2.5 text-[13px] leading-6 [overflow-wrap:anywhere] break-words whitespace-pre-wrap"
                 data-testid="knowledge-detail-content"

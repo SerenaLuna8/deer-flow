@@ -129,11 +129,15 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 可选的项目 RAG 知识库（Knowledge）：独立 `actweave-knowledge` 软件包提供文档上传、
   摄取切分、向量召回加 Reranker 精排检索和 Agent `knowledge_search` 引用；文件存储在
-  外部 MinIO，功能由根 `config.yaml` 的 `knowledge` 块启用，默认关闭。关闭功能会停用
+  外部 MinIO，管理员在 `/admin/settings/knowledge` 的“知识库配置”页启用，默认关闭。
+  配置存入 PostgreSQL，MinIO 密钥加密且只写不回显；开启时保存必须通过存储探测，
+  存储、配额与缓存设置在 Gateway/Worker 重启后生效。旧 YAML `knowledge` 块已移除，
+  迁移顺序见 [Install.md](Install.md#knowledge-configuration-migration)。关闭功能会停用
   路由、Agent 工具和 Knowledge Task worker，但 Worker 仍保留 Project 最终删除所需的
   清理能力；曾经写入过文档的部署必须保留原 MinIO 配置直到相关 retention 清理完成，
   且 bucket 必须关闭 versioning/Object Lock，凭据需允许读取 versioning 状态、列举前缀
-  和删除对象；否则启动、每次上传的 PUT 前检查或 Project purge 会失败关闭而不会伪成功。
+  和删除对象；存储启动检查失败只停用 Knowledge，管理页和其他功能仍可用，运维页显示
+  Knowledge `unavailable`；每次上传的 PUT 前检查和 Project purge 仍失败关闭。
   单文件上限硬限制为 50 MiB，单 PUT 在每个对象存储实例内串行执行，以约束 MinIO SDK
   的整 part 内存峰值。摄取与重嵌入在每批模型请求和发布前复核 Project 状态及任务租约，
   失效后停止未派发工作、禁止发布。Project 进入待删除状态后，Knowledge Task 不消耗重试预算地暂停；
@@ -181,6 +185,13 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   预算内的完整原文正文（超出以 `omitted_count` 记数），会话中的
   最终回答下方展示知识库引用；管理员在 `/admin/settings/models` 的统一
   “模型供应商”页面维护供应商及其文本模型与 Embedding/Reranker 模型并做连接测试。
+  知识库还可启用“摘要索引”：系统配置的文本 System Model 为长分段生成检索摘要，
+  作为第三个语义来源按最高余弦分回卷原段；摘要失败不改变文档就绪状态，可显式重试。
+  编辑会刷新受影响摘要，重嵌入保留摘要文本、只重算向量，重新解析替换后再生成。
+  引用与工具正文始终返回真实原段，摘要仅在详情中单独标注；是否提升真实召回效果仍须通过
+  [M11 质量门](docs/superpowers/plans/2026-08-31-rag-knowledge-m11.md#t11真实质量门文档与交付确认)。
+  查询向量使用进程内 LRU+TTL 缓存，同模型同查询命中时不重复请求 Embedding；缓存
+  不跳过召回与终审的权限检查，诊断面板显示缓存命中、摘要候选和命中来源。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
   System Runtime Policy v6 在系统设置中分别配置主 Agent 每 Run 与每个 Sub-Agent Task 的

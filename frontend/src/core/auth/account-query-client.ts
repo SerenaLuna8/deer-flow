@@ -2,6 +2,7 @@ import { QueryClient } from "@tanstack/react-query";
 
 import { abortAccountPersonalizationAccount } from "@/core/account-personalization/api";
 import { abortAdminOperationsAccount } from "@/core/admin-operations/api";
+import { abortAdminKnowledgeSettingsAccount } from "@/core/admin-settings/knowledge/api";
 import { abortAdminModelSettingsAccount } from "@/core/admin-settings/models/api";
 import { abortAdminSystemSettingsAccount } from "@/core/admin-settings/system/api";
 import { abortPrivacyCenterAccount } from "@/core/privacy-center/hooks";
@@ -32,6 +33,7 @@ export async function transitionAccountQueries(
   if (previousUserId) {
     abortAccountPersonalizationAccount(previousUserId);
     abortAdminOperationsAccount(previousUserId);
+    abortAdminKnowledgeSettingsAccount(previousUserId);
     abortAdminModelSettingsAccount(previousUserId);
     abortAdminSystemSettingsAccount(previousUserId);
     abortPrivacyCenterAccount(previousUserId);

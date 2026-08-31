@@ -131,8 +131,9 @@ function documentsNeedPolling(
   if (!items) return false;
   return items.some(
     (item) =>
-      KNOWLEDGE_DOCUMENT_ACTIVE_STATUSES.includes(item.status) &&
-      !(item.status === "deleting" && item.delete_error),
+      (KNOWLEDGE_DOCUMENT_ACTIVE_STATUSES.includes(item.status) &&
+        !(item.status === "deleting" && item.delete_error)) ||
+      (item.task_progress !== null && item.task_progress.status !== "failed"),
   )
     ? KNOWLEDGE_POLL_INTERVAL_MS
     : false;
@@ -271,7 +272,14 @@ export function useUpdateKnowledgeBase(scope: ProjectClientScope) {
       baseId: string;
       input: UpdateKnowledgeBaseInput;
     }) => updateKnowledgeBase(scope.projectId, baseId, input),
-    onSuccess: () => invalidate.bases(),
+    onSuccess: async (result, variables) => {
+      await Promise.all([
+        invalidate.bases(),
+        ...(result.summary_backfill === null
+          ? []
+          : [invalidate.documents(variables.baseId)]),
+      ]);
+    },
   });
 }
 
