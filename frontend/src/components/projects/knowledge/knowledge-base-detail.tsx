@@ -138,6 +138,7 @@ export function KnowledgeBaseDetail({
           type="button"
           variant="ghost"
           size="sm"
+          className="text-muted-foreground hover:text-foreground h-8 rounded-lg text-[13px] shadow-none"
           aria-label={labels.common.back}
           onClick={() =>
             onNavigate(
@@ -158,12 +159,15 @@ export function KnowledgeBaseDetail({
           {labels.page.title}
         </Button>
 
-        <div className="border-border flex items-center gap-2.5 rounded-xl border p-3">
-          <span className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg">
+        <div className="border-border/80 bg-muted/30 flex items-center gap-2.5 rounded-xl border p-3">
+          <span className="bg-background text-selection ring-border/60 flex size-9 shrink-0 items-center justify-center rounded-lg ring-1">
             <BookOpenIcon aria-hidden className="size-4.5" />
           </span>
           <span className="min-w-0">
-            <span className="block truncate text-sm font-semibold">
+            <span
+              className="block truncate text-[13px] font-medium"
+              title={base.name}
+            >
               {base.name}
             </span>
             <span className="text-muted-foreground block text-xs">
@@ -182,9 +186,9 @@ export function KnowledgeBaseDetail({
                 type="button"
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "focus-visible:ring-ring flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm focus-visible:ring-2 focus-visible:outline-none",
+                  "focus-visible:ring-ring flex items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors focus-visible:ring-2 focus-visible:outline-none",
                   active
-                    ? "bg-selection-subtle/60 text-foreground font-medium"
+                    ? "bg-selection-subtle/80 text-selection font-medium"
                     : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
                 )}
                 onClick={() => setSection(item.id)}
@@ -281,8 +285,10 @@ function KnowledgeBaseSettingsPanel({
   const formValid = name.trim().length > 0 && topKValid && thresholdValid;
 
   return (
-    <section aria-label={labels.detail.settings} className="max-w-xl space-y-4">
-      <h2 className="text-lg font-semibold">{labels.detail.settings}</h2>
+    <section aria-label={labels.detail.settings} className="w-full space-y-4">
+      <h2 className="text-base font-semibold tracking-tight">
+        {labels.detail.settings}
+      </h2>
       <form
         className="grid gap-4"
         onSubmit={(event) => {
@@ -306,9 +312,10 @@ function KnowledgeBaseSettingsPanel({
           });
         }}
       >
-        <label className="grid gap-1.5 text-sm">
+        <label className="grid gap-1.5 text-[13px]">
           <span className="font-medium">{labels.bases.nameLabel}</span>
           <Input
+            className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
             value={name}
             required
             maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
@@ -318,9 +325,10 @@ function KnowledgeBaseSettingsPanel({
             }}
           />
         </label>
-        <label className="grid gap-1.5 text-sm">
+        <label className="grid gap-1.5 text-[13px]">
           <span className="font-medium">{labels.bases.descriptionLabel}</span>
           <Textarea
+            className="border-input/80 bg-background rounded-lg text-[13px] leading-5 shadow-none md:text-[13px]"
             value={description}
             rows={3}
             onChange={(event) => {
@@ -329,7 +337,7 @@ function KnowledgeBaseSettingsPanel({
             }}
           />
         </label>
-        <div className="grid gap-1.5 text-sm">
+        <div className="grid gap-1.5 text-[13px]">
           <span className="font-medium">{labels.bases.statusLabel}</span>
           <Select
             value={status}
@@ -338,17 +346,24 @@ function KnowledgeBaseSettingsPanel({
               setStatus(value === "disabled" ? "disabled" : "active");
             }}
           >
-            <SelectTrigger aria-label={labels.bases.statusLabel}>
+            <SelectTrigger
+              className="border-input/80 bg-background rounded-lg text-[13px] shadow-none"
+              aria-label={labels.bases.statusLabel}
+            >
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="active">{labels.status.active}</SelectItem>
-              <SelectItem value="disabled">{labels.status.disabled}</SelectItem>
+            <SelectContent className="rounded-lg">
+              <SelectItem className="text-[13px]" value="active">
+                {labels.status.active}
+              </SelectItem>
+              <SelectItem className="text-[13px]" value="disabled">
+                {labels.status.disabled}
+              </SelectItem>
             </SelectContent>
           </Select>
         </div>
-        <fieldset className="grid gap-3">
-          <legend className="text-sm font-medium">
+        <fieldset className="border-border/70 grid gap-3 rounded-lg border px-3 pt-2 pb-3">
+          <legend className="text-muted-foreground px-1 text-xs font-medium">
             {labels.bases.retrievalSectionTitle}
           </legend>
           <KnowledgeRetrievalModeField
@@ -360,11 +375,12 @@ function KnowledgeBaseSettingsPanel({
             disabled={updateBase.isPending}
           />
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1.5 text-sm">
+            <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
                 {labels.bases.defaultTopKLabel}
               </span>
               <Input
+                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                 type="number"
                 min={1}
                 max={20}
@@ -379,11 +395,12 @@ function KnowledgeBaseSettingsPanel({
                 {labels.bases.defaultTopKHint}
               </span>
             </label>
-            <label className="grid gap-1.5 text-sm">
+            <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
                 {labels.bases.defaultThresholdLabel}
               </span>
               <Input
+                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                 type="number"
                 min={0}
                 max={1}
@@ -401,12 +418,12 @@ function KnowledgeBaseSettingsPanel({
             </label>
           </div>
         </fieldset>
-        <div className="grid gap-1.5 text-sm">
+        <div className="grid gap-1.5 text-[13px]">
           <span className="font-medium">{labels.bases.rerankerLabel}</span>
           {modelOptions.isLoading ? (
             <Skeleton className="h-9 rounded-md" />
           ) : modelOptions.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {labels.bases.modelsLoadFailed}
             </p>
           ) : (
@@ -417,15 +434,22 @@ function KnowledgeBaseSettingsPanel({
                 setRerankerModelId(value);
               }}
             >
-              <SelectTrigger aria-label={labels.bases.rerankerLabel}>
+              <SelectTrigger
+                className="border-input/80 bg-background rounded-lg text-[13px] shadow-none"
+                aria-label={labels.bases.rerankerLabel}
+              >
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={RERANKER_NONE}>
+              <SelectContent className="rounded-lg">
+                <SelectItem className="text-[13px]" value={RERANKER_NONE}>
                   {labels.bases.rerankerNone}
                 </SelectItem>
                 {modelOptions.data?.reranker_models.map((option) => (
-                  <SelectItem key={option.id} value={option.id}>
+                  <SelectItem
+                    className="text-[13px]"
+                    key={option.id}
+                    value={option.id}
+                  >
                     {option.provider_name} · {option.model_name}
                   </SelectItem>
                 ))}
@@ -437,17 +461,21 @@ function KnowledgeBaseSettingsPanel({
           </span>
         </div>
         {updateBase.error ? (
-          <p role="alert" className="text-destructive text-sm">
+          <p role="alert" className="text-destructive text-[13px]">
             {knowledgeErrorMessage(updateBase.error, labels.errors)}
           </p>
         ) : null}
         {updateBase.isSuccess ? (
-          <p role="status" className="text-success text-sm">
+          <p role="status" className="text-success text-[13px]">
             {labels.detail.settingsSaved}
           </p>
         ) : null}
         <div>
-          <Button type="submit" disabled={updateBase.isPending || !formValid}>
+          <Button
+            className="h-9 rounded-lg text-[13px] shadow-none"
+            type="submit"
+            disabled={updateBase.isPending || !formValid}
+          >
             {updateBase.isPending ? labels.common.saving : labels.common.save}
           </Button>
         </div>
@@ -482,15 +510,15 @@ function KnowledgeRebuildSection({
   return (
     <section
       aria-label={labels.bases.rebuildSectionTitle}
-      className="border-border mt-2 space-y-3 rounded-xl border p-4"
+      className="border-border/80 bg-muted/30 mt-2 space-y-3 rounded-xl border p-4"
     >
-      <h3 className="text-sm font-semibold">
+      <h3 className="text-[13px] font-semibold">
         {labels.bases.rebuildSectionTitle}
       </h3>
       <p className="text-muted-foreground text-xs">
         {labels.bases.rebuildHint}
       </p>
-      <div className="grid gap-1.5 text-sm">
+      <div className="grid gap-1.5 text-[13px]">
         <span className="font-medium">{labels.bases.rebuildModelLabel}</span>
         <Select
           value={embeddingModelId}
@@ -499,12 +527,19 @@ function KnowledgeRebuildSection({
             setEmbeddingModelId(value);
           }}
         >
-          <SelectTrigger aria-label={labels.bases.rebuildModelLabel}>
+          <SelectTrigger
+            className="border-input/80 bg-background rounded-lg text-[13px] shadow-none"
+            aria-label={labels.bases.rebuildModelLabel}
+          >
             <SelectValue placeholder={labels.bases.modelPlaceholder} />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className="rounded-lg">
             {options.map((option) => (
-              <SelectItem key={option.id} value={option.id}>
+              <SelectItem
+                className="text-[13px]"
+                key={option.id}
+                value={option.id}
+              >
                 {option.provider_name} · {option.model_name}
               </SelectItem>
             ))}
@@ -512,14 +547,14 @@ function KnowledgeRebuildSection({
         </Select>
       </div>
       {rebuild.error ? (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-destructive text-[13px]">
           {knowledgeErrorMessage(rebuild.error, labels.errors)}
         </p>
       ) : null}
       {rebuild.data ? (
         <p
           role="status"
-          className="text-success text-sm"
+          className="text-success text-[13px]"
           data-testid="knowledge-rebuild-outcome"
         >
           {labels.bases.rebuildOutcome(
@@ -530,6 +565,7 @@ function KnowledgeRebuildSection({
       ) : null}
       <div>
         <Button
+          className="h-9 rounded-lg text-[13px] shadow-none"
           type="button"
           variant="outline"
           disabled={rebuild.isPending || options.length === 0}
@@ -547,15 +583,18 @@ function KnowledgeRebuildSection({
           if (!open) setConfirmOpen(false);
         }}
       >
-        <DialogContent>
+        <DialogContent className="border-border/80 rounded-xl text-[13px]">
           <DialogHeader>
-            <DialogTitle>{labels.bases.rebuildConfirmTitle}</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-base font-semibold">
+              {labels.bases.rebuildConfirmTitle}
+            </DialogTitle>
+            <DialogDescription className="text-[13px] leading-5">
               {labels.bases.rebuildConfirmDescription(base.name)}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               onClick={() => setConfirmOpen(false)}
@@ -563,6 +602,7 @@ function KnowledgeRebuildSection({
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="button"
               disabled={rebuild.isPending}
               onClick={() => {
@@ -616,15 +656,21 @@ function KnowledgeMetadataPanel({
   const items = fields.data ?? [];
 
   return (
-    <section aria-label={labels.metadata.title} className="max-w-2xl space-y-4">
+    <section aria-label={labels.metadata.title} className="w-full space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">{labels.metadata.title}</h2>
-          <p className="text-muted-foreground text-sm">
+          <h2 className="text-base font-semibold tracking-tight">
+            {labels.metadata.title}
+          </h2>
+          <p className="text-muted-foreground text-[13px]">
             {labels.metadata.description}
           </p>
         </div>
-        <Button type="button" onClick={() => setAddOpen(true)}>
+        <Button
+          className="h-9 rounded-lg text-[13px] shadow-none"
+          type="button"
+          onClick={() => setAddOpen(true)}
+        >
           <PlusIcon aria-hidden className="size-4" />
           {labels.metadata.addButton}
         </Button>
@@ -633,17 +679,17 @@ function KnowledgeMetadataPanel({
       {fields.isLoading ? (
         <Skeleton className="h-32 rounded-xl" />
       ) : fields.error ? (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-destructive text-[13px]">
           {knowledgeErrorMessage(fields.error, labels.errors)}
         </p>
       ) : items.length === 0 ? (
-        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm">
+        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-[13px]">
           {labels.metadata.empty}
         </p>
       ) : (
-        <div className="border-border overflow-x-auto rounded-xl border">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-muted/60">
+        <div className="border-border/80 bg-card overflow-x-auto rounded-xl border shadow-xs">
+          <table className="w-full text-left text-[13px]">
+            <thead className="bg-muted/70 text-muted-foreground text-xs [&_th]:font-medium">
               <tr>
                 <th className="px-4 py-3">{labels.metadata.columns.name}</th>
                 <th className="px-4 py-3">{labels.metadata.columns.type}</th>
@@ -662,6 +708,7 @@ function KnowledgeMetadataPanel({
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1.5">
                       <Button
+                        className="h-8 rounded-lg text-[13px] shadow-none"
                         type="button"
                         variant="ghost"
                         size="sm"
@@ -673,7 +720,7 @@ function KnowledgeMetadataPanel({
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="text-destructive"
+                        className="text-destructive h-8 rounded-lg text-[13px] shadow-none"
                         onClick={() => setDeleting(field)}
                       >
                         {labels.metadata.delete}
@@ -710,23 +757,31 @@ function KnowledgeMetadataPanel({
           if (!open) closeDeleteDialog();
         }}
       >
-        <DialogContent>
+        <DialogContent className="border-border/80 rounded-xl text-[13px]">
           <DialogHeader>
-            <DialogTitle>{labels.metadata.deleteTitle}</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-base font-semibold">
+              {labels.metadata.deleteTitle}
+            </DialogTitle>
+            <DialogDescription className="text-[13px] leading-5">
               {deleting ? labels.metadata.deleteDescription(deleting.name) : ""}
             </DialogDescription>
           </DialogHeader>
           {deleteField.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(deleteField.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={closeDeleteDialog}>
+            <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              type="button"
+              variant="outline"
+              onClick={closeDeleteDialog}
+            >
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="destructive"
               disabled={deleteField.isPending}
@@ -772,9 +827,11 @@ function AddMetadataFieldDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent>
+      <DialogContent className="border-border/80 rounded-xl text-[13px]">
         <DialogHeader>
-          <DialogTitle>{labels.metadata.addTitle}</DialogTitle>
+          <DialogTitle className="text-base font-semibold">
+            {labels.metadata.addTitle}
+          </DialogTitle>
         </DialogHeader>
         <form
           className="grid gap-4"
@@ -790,9 +847,10 @@ function AddMetadataFieldDialog({
             );
           }}
         >
-          <label className="grid gap-1.5 text-sm">
+          <label className="grid gap-1.5 text-[13px]">
             <span className="font-medium">{labels.metadata.nameLabel}</span>
             <Input
+              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
               value={name}
               required
               maxLength={64}
@@ -800,7 +858,7 @@ function AddMetadataFieldDialog({
               onChange={(event) => setName(event.target.value)}
             />
           </label>
-          <div className="grid gap-1.5 text-sm">
+          <div className="grid gap-1.5 text-[13px]">
             <span className="font-medium">{labels.metadata.typeLabel}</span>
             <Select
               value={fieldType}
@@ -808,30 +866,41 @@ function AddMetadataFieldDialog({
                 setFieldType(value as KnowledgeMetadataFieldType)
               }
             >
-              <SelectTrigger aria-label={labels.metadata.typeLabel}>
+              <SelectTrigger
+                className="border-input/80 bg-background rounded-lg text-[13px] shadow-none"
+                aria-label={labels.metadata.typeLabel}
+              >
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="string">
+              <SelectContent className="rounded-lg">
+                <SelectItem className="text-[13px]" value="string">
                   {labels.metadata.typeString}
                 </SelectItem>
-                <SelectItem value="number">
+                <SelectItem className="text-[13px]" value="number">
                   {labels.metadata.typeNumber}
                 </SelectItem>
-                <SelectItem value="time">{labels.metadata.typeTime}</SelectItem>
+                <SelectItem className="text-[13px]" value="time">
+                  {labels.metadata.typeTime}
+                </SelectItem>
               </SelectContent>
             </Select>
           </div>
           {createField.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(createField.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
+            <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              type="button"
+              variant="outline"
+              onClick={onClose}
+            >
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="submit"
               disabled={createField.isPending || !name.trim()}
             >
@@ -869,9 +938,11 @@ function RenameMetadataFieldDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent>
+      <DialogContent className="border-border/80 rounded-xl text-[13px]">
         <DialogHeader>
-          <DialogTitle>{labels.metadata.renameTitle(field.name)}</DialogTitle>
+          <DialogTitle className="text-base font-semibold">
+            {labels.metadata.renameTitle(field.name)}
+          </DialogTitle>
         </DialogHeader>
         <form
           className="grid gap-4"
@@ -884,9 +955,10 @@ function RenameMetadataFieldDialog({
             );
           }}
         >
-          <label className="grid gap-1.5 text-sm">
+          <label className="grid gap-1.5 text-[13px]">
             <span className="font-medium">{labels.metadata.nameLabel}</span>
             <Input
+              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
               value={name}
               required
               maxLength={64}
@@ -894,15 +966,21 @@ function RenameMetadataFieldDialog({
             />
           </label>
           {renameField.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(renameField.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
+            <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              type="button"
+              variant="outline"
+              onClick={onClose}
+            >
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="submit"
               disabled={renameField.isPending || !name.trim()}
             >

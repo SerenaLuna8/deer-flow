@@ -42,6 +42,7 @@ import type {
   KnowledgeRetrievalMode,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
+import { cn } from "@/lib/utils";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
@@ -86,7 +87,7 @@ export function KnowledgeBasesView({
       {bases.isLoading ? (
         <Skeleton className="h-40 rounded-xl" />
       ) : bases.error ? (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-destructive text-[13px]">
           {knowledgeErrorMessage(bases.error, labels.errors)}
         </p>
       ) : (bases.data?.items.length ?? 0) === 0 ? (
@@ -98,7 +99,7 @@ export function KnowledgeBasesView({
                 className="text-muted-foreground size-5"
               />
             </span>
-            <p className="text-sm font-medium">{labels.wizard.heroTitle}</p>
+            <p className="text-[13px] font-medium">{labels.wizard.heroTitle}</p>
             <div className="w-full max-w-md space-y-2">
               <button
                 type="button"
@@ -109,7 +110,7 @@ export function KnowledgeBasesView({
                   <PlusIcon aria-hidden className="size-4" />
                 </span>
                 <span className="min-w-0">
-                  <span className="block text-sm font-medium">
+                  <span className="block text-[13px] font-medium">
                     {labels.wizard.uploadCreateTitle}
                   </span>
                   <span className="text-muted-foreground mt-0.5 block text-xs leading-5">
@@ -129,7 +130,7 @@ export function KnowledgeBasesView({
                   <FolderPlusIcon aria-hidden className="size-4" />
                 </span>
                 <span className="min-w-0">
-                  <span className="block text-sm font-medium">
+                  <span className="block text-[13px] font-medium">
                     {labels.wizard.emptyCreateTitle}
                   </span>
                   <span className="text-muted-foreground mt-0.5 block text-xs leading-5">
@@ -140,7 +141,7 @@ export function KnowledgeBasesView({
             </div>
           </div>
         ) : (
-          <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm">
+          <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-[13px]">
             {labels.bases.empty}
           </p>
         )
@@ -152,7 +153,7 @@ export function KnowledgeBasesView({
           {bases.data?.items.map((base) => (
             <li
               key={base.id}
-              className="border-border hover:bg-muted/30 flex min-w-0 flex-col rounded-xl border p-4 transition-colors"
+              className="border-border/80 bg-card hover:border-selection/30 flex min-w-0 flex-col rounded-xl border p-4 shadow-xs transition-[border-color,box-shadow] hover:shadow-sm"
             >
               <button
                 type="button"
@@ -160,17 +161,26 @@ export function KnowledgeBasesView({
                 onClick={() => onOpenBase(base)}
               >
                 <span className="flex min-w-0 items-center gap-2">
-                  <span className="bg-muted flex size-8 shrink-0 items-center justify-center rounded-lg">
+                  <span className="bg-selection-subtle/70 text-selection flex size-8 shrink-0 items-center justify-center rounded-lg">
                     <BookOpenIcon aria-hidden className="size-4" />
                   </span>
-                  <span className="text-foreground min-w-0 truncate font-medium">
+                  <span className="text-foreground min-w-0 truncate text-[13px] font-medium">
                     {base.name}
                   </span>
-                  <Badge variant={baseStatusVariant(base.status)}>
+                  <Badge
+                    variant={baseStatusVariant(base.status)}
+                    className={cn(
+                      "rounded-md px-1.5 py-0.5 text-[11px] font-medium",
+                      base.status === "active" &&
+                        "border-success/15 bg-success/10 text-emerald-700 dark:text-emerald-300",
+                      base.status === "disabled" &&
+                        "border-border/60 bg-muted text-muted-foreground",
+                    )}
+                  >
                     {labels.status[base.status]}
                   </Badge>
                 </span>
-                <span className="text-muted-foreground mt-2 line-clamp-2 block text-sm leading-5">
+                <span className="text-muted-foreground mt-2 line-clamp-2 block text-[13px] leading-5">
                   {base.description || labels.bases.noDescription}
                 </span>
                 {base.delete_error ? (
@@ -193,7 +203,7 @@ export function KnowledgeBasesView({
                       type="button"
                       variant="ghost"
                       size="sm"
-                      className="text-destructive"
+                      className="text-muted-foreground hover:bg-destructive/5 hover:text-destructive h-7 rounded-md px-2 text-xs shadow-none"
                       onClick={() => setDeleting(base)}
                     >
                       {labels.common.delete}
@@ -203,6 +213,7 @@ export function KnowledgeBasesView({
                     type="button"
                     variant="ghost"
                     size="sm"
+                    className="text-muted-foreground hover:bg-selection-subtle hover:text-selection h-7 rounded-md px-2 text-[13px] shadow-none"
                     aria-label={labels.bases.openDocuments}
                     onClick={() => onOpenBase(base)}
                   >
@@ -228,23 +239,31 @@ export function KnowledgeBasesView({
           if (!open) closeDeleteDialog();
         }}
       >
-        <DialogContent>
+        <DialogContent className="border-border/80 rounded-xl text-[13px]">
           <DialogHeader>
-            <DialogTitle>{labels.bases.deleteTitle}</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-base font-semibold">
+              {labels.bases.deleteTitle}
+            </DialogTitle>
+            <DialogDescription className="text-[13px] leading-5">
               {deleting ? labels.bases.deleteDescription(deleting.name) : ""}
             </DialogDescription>
           </DialogHeader>
           {deleteBase.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(deleteBase.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={closeDeleteDialog}>
+            <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              type="button"
+              variant="outline"
+              onClick={closeDeleteDialog}
+            >
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="destructive"
               disabled={deleteBase.isPending}
@@ -298,10 +317,12 @@ function CreateBaseDialog({
 
   return (
     <Dialog open={open} onOpenChange={close}>
-      <DialogContent>
+      <DialogContent className="border-border/80 rounded-xl text-[13px]">
         <DialogHeader>
-          <DialogTitle>{labels.bases.createTitle}</DialogTitle>
-          <DialogDescription>
+          <DialogTitle className="text-base font-semibold">
+            {labels.bases.createTitle}
+          </DialogTitle>
+          <DialogDescription className="text-[13px] leading-5">
             {labels.bases.createDescription}
           </DialogDescription>
         </DialogHeader>
@@ -322,9 +343,10 @@ function CreateBaseDialog({
             );
           }}
         >
-          <label className="grid gap-1.5 text-sm">
+          <label className="grid gap-1.5 text-[13px]">
             <span className="font-medium">{labels.bases.nameLabel}</span>
             <Input
+              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
               value={name}
               required
               maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
@@ -332,25 +354,26 @@ function CreateBaseDialog({
               onChange={(event) => setName(event.target.value)}
             />
           </label>
-          <label className="grid gap-1.5 text-sm">
+          <label className="grid gap-1.5 text-[13px]">
             <span className="font-medium">{labels.bases.descriptionLabel}</span>
             <Textarea
+              className="border-input/80 bg-background rounded-lg text-[13px] leading-5 shadow-none md:text-[13px]"
               value={description}
               rows={3}
               placeholder={labels.bases.descriptionPlaceholder}
               onChange={(event) => setDescription(event.target.value)}
             />
           </label>
-          <div className="grid gap-1.5 text-sm">
+          <div className="grid gap-1.5 text-[13px]">
             <span className="font-medium">{labels.bases.modelLabel}</span>
             {options.isLoading ? (
               <Skeleton className="h-9 rounded-md" />
             ) : options.error ? (
-              <p role="alert" className="text-destructive text-sm">
+              <p role="alert" className="text-destructive text-[13px]">
                 {labels.bases.modelsLoadFailed}
               </p>
             ) : (options.data?.embedding_models.length ?? 0) === 0 ? (
-              <p className="text-muted-foreground text-sm">
+              <p className="text-muted-foreground text-[13px]">
                 {labels.bases.noModels}
               </p>
             ) : (
@@ -358,12 +381,19 @@ function CreateBaseDialog({
                 value={embeddingModelId}
                 onValueChange={setEmbeddingModelId}
               >
-                <SelectTrigger aria-label={labels.bases.modelLabel}>
+                <SelectTrigger
+                  className="border-input/80 bg-background rounded-lg text-[13px] shadow-none"
+                  aria-label={labels.bases.modelLabel}
+                >
                   <SelectValue placeholder={labels.bases.modelPlaceholder} />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="rounded-lg">
                   {options.data?.embedding_models.map((option) => (
-                    <SelectItem key={option.id} value={option.id}>
+                    <SelectItem
+                      className="text-[13px]"
+                      key={option.id}
+                      value={option.id}
+                    >
                       {option.provider_name} · {option.model_name}
                     </SelectItem>
                   ))}
@@ -380,12 +410,13 @@ function CreateBaseDialog({
             disabled={createBase.isPending}
           />
           {createBase.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(createBase.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               onClick={() => close(false)}
@@ -393,6 +424,7 @@ function CreateBaseDialog({
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="submit"
               disabled={
                 createBase.isPending || !name.trim() || !embeddingModelId

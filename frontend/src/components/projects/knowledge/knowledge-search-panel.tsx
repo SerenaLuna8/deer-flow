@@ -177,290 +177,309 @@ export function KnowledgeSearchPanel({
   };
 
   return (
-    <section aria-label={labels.search.title} className="space-y-4">
+    <section aria-label={labels.search.title} className="space-y-4 text-[13px]">
       <div>
-        <h2 className="text-lg font-semibold">{labels.search.title}</h2>
-        <p className="text-muted-foreground mt-1 text-sm">
+        <h2 className="text-base font-semibold tracking-tight">
+          {labels.search.title}
+        </h2>
+        <p className="text-muted-foreground mt-1 text-xs leading-5">
           {labels.search.description}
         </p>
       </div>
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
-      <form
-        className="grid gap-4"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!query.trim() || !topKValid || !thresholdValid || !filtersValid)
-            return;
-          // The retrieval test always asks for the bounded safe diagnostics;
-          // they exist only in this response and are never logged.
-          const input: KnowledgeSearchInput = {
-            query: query.trim(),
-            knowledge_base_ids: [base.id],
-            debug: true,
-          };
-          if (parsedTopK !== undefined) {
-            input.top_k = parsedTopK;
-          }
-          if (parsedThreshold !== undefined) {
-            input.score_threshold = parsedThreshold;
-          }
-          if (retrievalMode !== "default") {
-            input.retrieval_mode = retrievalMode;
-          }
-          if (filterInputs.length > 0) {
-            input.metadata_filters = filterInputs;
-          }
-          setLastInput(input);
-          setOpenHit(null);
-          search.mutate(input);
-        }}
-      >
-        <label className="grid gap-1.5 text-sm">
-          <span className="font-medium">{labels.search.queryLabel}</span>
-          <Input
-            value={query}
-            required
-            maxLength={2000}
-            placeholder={labels.search.queryPlaceholder}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="grid gap-1.5 text-sm">
-            <span className="font-medium">{labels.search.topKLabel}</span>
-            <Input
-              type="number"
-              min={1}
-              max={20}
-              value={topK}
-              placeholder={String(base.default_top_k)}
-              onChange={(event) => setTopK(event.target.value)}
-            />
-            <span className="text-muted-foreground text-xs">
-              {labels.search.topKHint}
-            </span>
-          </label>
-          <label className="grid gap-1.5 text-sm">
-            <span className="font-medium">{labels.search.thresholdLabel}</span>
-            <Input
-              type="number"
-              min={0}
-              max={1}
-              step={0.05}
-              value={threshold}
-              placeholder={String(base.default_score_threshold)}
-              onChange={(event) => setThreshold(event.target.value)}
-            />
-            <span className="text-muted-foreground text-xs">
-              {labels.search.thresholdHint}
-            </span>
-          </label>
-        </div>
-        <label className="grid gap-1.5 text-sm">
-          <span className="font-medium">
-            {labels.search.retrievalModeLabel}
-          </span>
-          <Select
-            value={retrievalMode}
-            onValueChange={(value) =>
-              setRetrievalMode(value as "default" | KnowledgeRetrievalMode)
+        <form
+          className="border-border/70 bg-muted/20 grid gap-4 rounded-lg border p-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!query.trim() || !topKValid || !thresholdValid || !filtersValid)
+              return;
+            // The retrieval test always asks for the bounded safe diagnostics;
+            // they exist only in this response and are never logged.
+            const input: KnowledgeSearchInput = {
+              query: query.trim(),
+              knowledge_base_ids: [base.id],
+              debug: true,
+            };
+            if (parsedTopK !== undefined) {
+              input.top_k = parsedTopK;
             }
-          >
-            <SelectTrigger aria-label={labels.search.retrievalModeLabel}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="default">
-                {labels.search.retrievalModes.default}
-              </SelectItem>
-              <SelectItem value="semantic">
-                {labels.search.retrievalModes.semantic}
-              </SelectItem>
-              <SelectItem value="hybrid">
-                {labels.search.retrievalModes.hybrid}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </label>
-        <fieldset className="grid gap-2 text-sm">
-          <legend className="font-medium">{labels.search.filtersLabel}</legend>
-          {filters.length > 0 ? (
-            <p className="text-muted-foreground text-xs">
-              {labels.search.filtersHint}
-            </p>
-          ) : null}
-          {filters.map((draft, index) => {
-            const field = fieldByName.get(draft.name);
-            const operators = operatorsForField(field);
-            const valueType =
-              field?.field_type === "number"
-                ? "number"
-                : field?.field_type === "time"
-                  ? "datetime-local"
-                  : "text";
-            return (
-              <div
-                key={draft.key}
-                className="flex flex-wrap items-center gap-2"
-                data-testid="knowledge-filter-row"
+            if (parsedThreshold !== undefined) {
+              input.score_threshold = parsedThreshold;
+            }
+            if (retrievalMode !== "default") {
+              input.retrieval_mode = retrievalMode;
+            }
+            if (filterInputs.length > 0) {
+              input.metadata_filters = filterInputs;
+            }
+            setLastInput(input);
+            setOpenHit(null);
+            search.mutate(input);
+          }}
+        >
+          <label className="grid gap-1.5 text-[13px]">
+            <span className="font-medium">{labels.search.queryLabel}</span>
+            <Input
+              className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
+              value={query}
+              required
+              maxLength={2000}
+              placeholder={labels.search.queryPlaceholder}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-1.5 text-[13px]">
+              <span className="font-medium">{labels.search.topKLabel}</span>
+              <Input
+                className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
+                type="number"
+                min={1}
+                max={20}
+                value={topK}
+                placeholder={String(base.default_top_k)}
+                onChange={(event) => setTopK(event.target.value)}
+              />
+              <span className="text-muted-foreground text-xs">
+                {labels.search.topKHint}
+              </span>
+            </label>
+            <label className="grid gap-1.5 text-[13px]">
+              <span className="font-medium">
+                {labels.search.thresholdLabel}
+              </span>
+              <Input
+                className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={threshold}
+                placeholder={String(base.default_score_threshold)}
+                onChange={(event) => setThreshold(event.target.value)}
+              />
+              <span className="text-muted-foreground text-xs">
+                {labels.search.thresholdHint}
+              </span>
+            </label>
+          </div>
+          <label className="grid gap-1.5 text-[13px]">
+            <span className="font-medium">
+              {labels.search.retrievalModeLabel}
+            </span>
+            <Select
+              value={retrievalMode}
+              onValueChange={(value) =>
+                setRetrievalMode(value as "default" | KnowledgeRetrievalMode)
+              }
+            >
+              <SelectTrigger
+                className="border-border/70 bg-background rounded-lg text-[13px] shadow-none"
+                aria-label={labels.search.retrievalModeLabel}
               >
-                <Select
-                  value={draft.name}
-                  onValueChange={(name) => {
-                    // The value input type changes with the field type, so a
-                    // stale value text would be misleading; operators reset
-                    // to the always-valid eq.
-                    updateFilter(draft.key, { name, operator: "eq", value: "" });
-                  }}
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
+                <SelectItem value="default">
+                  {labels.search.retrievalModes.default}
+                </SelectItem>
+                <SelectItem value="semantic">
+                  {labels.search.retrievalModes.semantic}
+                </SelectItem>
+                <SelectItem value="hybrid">
+                  {labels.search.retrievalModes.hybrid}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+          <fieldset className="border-border/60 grid gap-2 border-t pt-3 text-[13px]">
+            <legend className="pr-2 font-medium">
+              {labels.search.filtersLabel}
+            </legend>
+            {filters.length > 0 ? (
+              <p className="text-muted-foreground text-xs">
+                {labels.search.filtersHint}
+              </p>
+            ) : null}
+            {filters.map((draft, index) => {
+              const field = fieldByName.get(draft.name);
+              const operators = operatorsForField(field);
+              const valueType =
+                field?.field_type === "number"
+                  ? "number"
+                  : field?.field_type === "time"
+                    ? "datetime-local"
+                    : "text";
+              return (
+                <div
+                  key={draft.key}
+                  className="flex flex-wrap items-center gap-2"
+                  data-testid="knowledge-filter-row"
                 >
-                  <SelectTrigger
-                    className="w-40"
-                    aria-label={labels.search.filterFieldAria(index + 1)}
+                  <Select
+                    value={draft.name}
+                    onValueChange={(name) => {
+                      // The value input type changes with the field type, so a
+                      // stale value text would be misleading; operators reset
+                      // to the always-valid eq.
+                      updateFilter(draft.key, {
+                        name,
+                        operator: "eq",
+                        value: "",
+                      });
+                    }}
                   >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {fieldItems.map((item) => (
-                      <SelectItem key={item.id} value={item.name}>
-                        {item.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={draft.operator}
-                  onValueChange={(operator) =>
-                    updateFilter(draft.key, {
-                      operator: operator as KnowledgeMetadataFilterOperator,
-                    })
-                  }
-                >
-                  <SelectTrigger
-                    className="w-28"
-                    aria-label={labels.search.filterOperatorAria(index + 1)}
+                    <SelectTrigger
+                      className="border-border/70 bg-background w-40 rounded-lg text-[13px] shadow-none"
+                      aria-label={labels.search.filterFieldAria(index + 1)}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
+                      {fieldItems.map((item) => (
+                        <SelectItem key={item.id} value={item.name}>
+                          {item.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    value={draft.operator}
+                    onValueChange={(operator) =>
+                      updateFilter(draft.key, {
+                        operator: operator as KnowledgeMetadataFilterOperator,
+                      })
+                    }
                   >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {operators.map((operator) => (
-                      <SelectItem key={operator} value={operator}>
-                        {labels.search.operators[operator]}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Input
-                  className="w-44 flex-1"
-                  type={valueType}
-                  step={valueType === "number" ? "any" : undefined}
-                  value={draft.value}
-                  placeholder={labels.search.filterValuePlaceholder}
-                  aria-label={labels.search.filterValueAria(index + 1)}
-                  onChange={(event) =>
-                    updateFilter(draft.key, { value: event.target.value })
-                  }
-                />
+                    <SelectTrigger
+                      className="border-border/70 bg-background w-28 rounded-lg text-[13px] shadow-none"
+                      aria-label={labels.search.filterOperatorAria(index + 1)}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
+                      {operators.map((operator) => (
+                        <SelectItem key={operator} value={operator}>
+                          {labels.search.operators[operator]}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Input
+                    className="border-border/70 bg-background h-9 w-44 flex-1 rounded-lg text-[13px] shadow-none md:text-[13px]"
+                    type={valueType}
+                    step={valueType === "number" ? "any" : undefined}
+                    value={draft.value}
+                    placeholder={labels.search.filterValuePlaceholder}
+                    aria-label={labels.search.filterValueAria(index + 1)}
+                    onChange={(event) =>
+                      updateFilter(draft.key, { value: event.target.value })
+                    }
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="text-muted-foreground size-8 rounded-lg"
+                    aria-label={labels.search.removeFilterAria(index + 1)}
+                    onClick={() =>
+                      setFilters((current) =>
+                        current.filter((item) => item.key !== draft.key),
+                      )
+                    }
+                  >
+                    <XIcon aria-hidden className="size-4" />
+                  </Button>
+                </div>
+              );
+            })}
+            {fieldItems.length === 0 ? (
+              filters.length === 0 ? (
+                <p className="text-muted-foreground text-xs">
+                  {labels.search.filterNoFields}
+                </p>
+              ) : null
+            ) : (
+              <div>
                 <Button
                   type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={labels.search.removeFilterAria(index + 1)}
-                  onClick={() =>
-                    setFilters((current) =>
-                      current.filter((item) => item.key !== draft.key),
-                    )
-                  }
+                  variant="outline"
+                  size="sm"
+                  className="border-border/70 rounded-lg text-[13px] shadow-none"
+                  disabled={filters.length >= MAX_METADATA_FILTERS}
+                  onClick={addFilter}
                 >
-                  <XIcon aria-hidden className="size-4" />
+                  <PlusIcon aria-hidden className="size-4" />
+                  {labels.search.addFilter}
                 </Button>
               </div>
-            );
-          })}
-          {fieldItems.length === 0 ? (
-            filters.length === 0 ? (
-              <p className="text-muted-foreground text-xs">
-                {labels.search.filterNoFields}
-              </p>
-            ) : null
-          ) : (
-            <div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={filters.length >= MAX_METADATA_FILTERS}
-                onClick={addFilter}
-              >
-                <PlusIcon aria-hidden className="size-4" />
-                {labels.search.addFilter}
-              </Button>
-            </div>
-          )}
-        </fieldset>
-        <div>
-          <Button
-            type="submit"
-            disabled={
-              search.isPending ||
-              !query.trim() ||
-              !topKValid ||
-              !thresholdValid ||
-              !filtersValid
-            }
-          >
-            <SearchIcon aria-hidden className="size-4" />
-            {search.isPending ? labels.search.searching : labels.search.submit}
-          </Button>
-        </div>
-      </form>
-
-      <div
-        className="min-w-0 space-y-3"
-        data-testid="knowledge-search-outcome"
-      >
-        {search.error ? (
-          <div
-            role="alert"
-            data-testid="knowledge-search-error"
-            className="border-destructive/40 bg-destructive/5 space-y-3 rounded-xl border px-4 py-4"
-          >
-            <p className="text-destructive text-sm">
-              {knowledgeErrorMessage(search.error, labels.errors)}
-            </p>
-            {lastInput ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={search.isPending}
-                onClick={() => search.mutate(lastInput)}
-              >
-                {labels.search.retry}
-              </Button>
-            ) : null}
+            )}
+          </fieldset>
+          <div>
+            <Button
+              type="submit"
+              className="h-9 rounded-lg text-[13px]"
+              disabled={
+                search.isPending ||
+                !query.trim() ||
+                !topKValid ||
+                !thresholdValid ||
+                !filtersValid
+              }
+            >
+              <SearchIcon aria-hidden className="size-4" />
+              {search.isPending
+                ? labels.search.searching
+                : labels.search.submit}
+            </Button>
           </div>
-        ) : null}
+        </form>
 
-        {search.isPending ? (
-          <Skeleton aria-hidden className="h-40 rounded-xl" />
-        ) : null}
+        <div
+          className="min-w-0 space-y-3"
+          data-testid="knowledge-search-outcome"
+        >
+          {search.error ? (
+            <div
+              role="alert"
+              data-testid="knowledge-search-error"
+              className="border-destructive/40 bg-destructive/5 space-y-3 rounded-lg border px-4 py-4"
+            >
+              <p className="text-destructive text-[13px]">
+                {knowledgeErrorMessage(search.error, labels.errors)}
+              </p>
+              {lastInput ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="rounded-lg text-[13px] shadow-none"
+                  disabled={search.isPending}
+                  onClick={() => search.mutate(lastInput)}
+                >
+                  {labels.search.retry}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
 
-        {!search.isPending && search.error === null && !search.data ? (
-          <p
-            className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm"
-            data-testid="knowledge-search-never"
-          >
-            {labels.search.neverSearched}
-          </p>
-        ) : null}
+          {search.isPending ? (
+            <Skeleton aria-hidden className="h-40 rounded-lg" />
+          ) : null}
 
-        {search.data && !search.isPending ? (
-          <SearchOutcome
-            data={search.data}
-            onOpenHit={setOpenHit}
-          />
-        ) : null}
-      </div>
+          {!search.isPending && search.error === null && !search.data ? (
+            <p
+              className="text-muted-foreground border-border/70 bg-muted/10 rounded-lg border border-dashed px-4 py-10 text-center text-[13px] leading-5"
+              data-testid="knowledge-search-never"
+            >
+              {labels.search.neverSearched}
+            </p>
+          ) : null}
+
+          {search.data && !search.isPending ? (
+            <SearchOutcome data={search.data} onOpenHit={setOpenHit} />
+          ) : null}
+        </div>
       </div>
 
       {openHit ? (
@@ -507,7 +526,7 @@ function SearchOutcome({
     const reason = diagnostics?.empty_reason ?? null;
     return (
       <p
-        className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm"
+        className="text-muted-foreground border-border/70 bg-muted/10 rounded-lg border border-dashed px-4 py-10 text-center text-[13px] leading-5"
         data-testid="knowledge-search-empty"
       >
         {reason ? labels.search.emptyReasons[reason] : labels.search.empty}
@@ -520,7 +539,7 @@ function SearchOutcome({
       aria-label={labels.search.resultsTitle(data.citations.length)}
       className="space-y-3"
     >
-      <h3 className="text-sm font-semibold">
+      <h3 className="text-[13px] font-semibold">
         {labels.search.resultsTitle(data.citations.length)}
       </h3>
       <ol className="grid gap-2" data-testid="knowledge-search-results">
@@ -533,32 +552,38 @@ function SearchOutcome({
           return (
             <li
               key={citation.segment_id}
-              className="border-border rounded-xl border p-4"
+              className="border-border/70 bg-background overflow-hidden rounded-lg border p-4"
             >
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <span className="text-muted-foreground text-xs font-medium tabular-nums">
+              <div className="border-border/60 bg-muted/25 -mx-4 -mt-4 flex min-w-0 flex-wrap items-center gap-2 border-b px-4 py-2.5">
+                <span className="text-muted-foreground bg-muted inline-flex h-5 min-w-5 items-center justify-center rounded px-1 text-xs font-medium tabular-nums">
                   #{index + 1}
                 </span>
-                <span className="text-foreground truncate text-sm font-medium">
+                <span className="text-foreground truncate text-[13px] font-medium">
                   {citation.document_name}
                 </span>
                 <span className="text-muted-foreground truncate text-xs">
                   {citation.knowledge_base_name}
                 </span>
-                <Badge variant="secondary" className="ml-auto shrink-0">
+                <Badge
+                  variant="secondary"
+                  className="bg-selection-subtle text-selection ml-auto shrink-0 rounded-md font-medium tabular-nums"
+                >
                   {labels.search.score(citation.score)}
                 </Badge>
-                <Badge variant="outline" className="shrink-0">
+                <Badge
+                  variant="outline"
+                  className="border-border/70 text-muted-foreground shrink-0 rounded-md font-normal"
+                >
                   {labels.search.scoreKinds[citation.score_kind ?? "unknown"]}
                 </Badge>
               </div>
-              <div className="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-xs">
+              <div className="text-muted-foreground mt-2.5 flex flex-wrap items-center gap-x-2 text-xs">
                 <span>
                   {labels.citations.segmentPosition(citation.segment_position)}
                 </span>
                 {position ? <span>· {position}</span> : null}
               </div>
-              <p className="text-muted-foreground mt-2 text-sm leading-6 whitespace-pre-wrap">
+              <p className="text-foreground/85 mt-2 text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-pre-wrap">
                 {citation.snippet}
               </p>
               <div className="mt-2">
@@ -566,13 +591,14 @@ function SearchOutcome({
                   type="button"
                   variant="outline"
                   size="sm"
+                  className="border-border/70 rounded-lg text-[13px] shadow-none"
                   onClick={() => onOpenHit(citation)}
                 >
                   {labels.search.openDetail(citation.segment_position)}
                 </Button>
               </div>
               {hit ? (
-                <details className="mt-2 text-xs">
+                <details className="border-border/50 mt-3 border-t pt-2 text-xs">
                   <summary className="text-muted-foreground cursor-pointer">
                     {labels.search.hitDiagnosticsSummary}
                   </summary>
@@ -599,7 +625,9 @@ function SearchOutcome({
           );
         })}
       </ol>
-      {diagnostics ? <SearchDiagnosticsDisclosure diagnostics={diagnostics} /> : null}
+      {diagnostics ? (
+        <SearchDiagnosticsDisclosure diagnostics={diagnostics} />
+      ) : null}
     </section>
   );
 }
@@ -640,10 +668,10 @@ function SearchDiagnosticsDisclosure({
   ];
   return (
     <details
-      className="rounded-xl border px-4 py-3"
+      className="border-border/70 bg-muted/15 rounded-lg border px-4 py-3"
       data-testid="knowledge-search-diagnostics"
     >
-      <summary className="cursor-pointer text-sm font-medium">
+      <summary className="text-muted-foreground hover:text-foreground cursor-pointer text-[13px] font-medium transition-colors">
         {labels.title}
       </summary>
       {diagnostics.heterogeneous_without_lexical_evidence ? (
@@ -728,10 +756,12 @@ function SearchHitDetailDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="flex max-h-[85vh] flex-col gap-4 overflow-hidden sm:max-w-2xl">
+      <DialogContent className="border-border/70 flex max-h-[85vh] flex-col gap-4 overflow-hidden rounded-lg text-[13px] sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{detailLabels.title}</DialogTitle>
-          <DialogDescription className="truncate">
+          <DialogTitle className="text-base tracking-tight">
+            {detailLabels.title}
+          </DialogTitle>
+          <DialogDescription className="truncate text-xs leading-5">
             {citation.document_name} ·{" "}
             {labels.citations.segmentPosition(citation.segment_position)}
           </DialogDescription>
@@ -745,16 +775,16 @@ function SearchHitDetailDialog({
             <p
               role="alert"
               data-testid="knowledge-detail-conflict"
-              className="text-destructive text-sm"
+              className="text-destructive text-[13px]"
             >
               {detailLabels.conflict}
             </p>
           ) : detail.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(detail.error, labels.errors)}
             </p>
           ) : data === undefined ? (
-            <Skeleton className="h-40 rounded-xl" />
+            <Skeleton className="h-40 rounded-lg" />
           ) : (
             <>
               {data.content_state === "stale" ? (
@@ -769,11 +799,13 @@ function SearchHitDetailDialog({
                 {!data.segment.enabled ? (
                   <Badge variant="outline">{detailLabels.disabledBadge}</Badge>
                 ) : null}
-                <span>{labels.segments.wordCount(data.segment.word_count)}</span>
+                <span>
+                  {labels.segments.wordCount(data.segment.word_count)}
+                </span>
                 {sourcePosition ? <span>· {sourcePosition}</span> : null}
               </div>
               <p
-                className="text-sm leading-6 break-words whitespace-pre-wrap"
+                className="border-border/60 bg-muted/15 rounded-lg border px-3 py-2.5 text-[13px] leading-6 [overflow-wrap:anywhere] break-words whitespace-pre-wrap"
                 data-testid="knowledge-detail-content"
               >
                 {data.segment.content}
@@ -789,9 +821,8 @@ function SearchHitDetailDialog({
                   <ul className="text-muted-foreground grid gap-1 text-xs">
                     {hitDiagnostics.matched_children.map((child) => (
                       <li key={child.child_id} className="tabular-nums">
-                        C-{child.position} ·{" "}
-                        {detailLabels.routes[child.route]} ·{" "}
-                        {child.score.toFixed(3)}
+                        C-{child.position} · {detailLabels.routes[child.route]}{" "}
+                        · {child.score.toFixed(3)}
                       </li>
                     ))}
                   </ul>
@@ -815,22 +846,25 @@ function SearchHitDetailDialog({
                         <li
                           key={child.id}
                           className={cn(
-                            "rounded-lg border px-3 py-2",
+                            "border-border/70 bg-background rounded-lg border px-3 py-2",
                             matched &&
                               "border-selection bg-selection-subtle/40",
                           )}
                         >
-                          <p className="text-muted-foreground flex flex-wrap items-center gap-2 text-[10px] font-medium tabular-nums">
+                          <p className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs font-medium tabular-nums">
                             C-{child.position}
                             {matched ? (
-                              <Badge variant="secondary" className="text-[10px]">
+                              <Badge
+                                variant="secondary"
+                                className="bg-selection-subtle text-selection rounded-md text-xs font-medium"
+                              >
                                 {detailLabels.matchedBadge} ·{" "}
                                 {detailLabels.routes[matched.route]} ·{" "}
                                 {matched.score.toFixed(3)}
                               </Badge>
                             ) : null}
                           </p>
-                          <p className="mt-0.5 text-xs break-words whitespace-pre-wrap">
+                          <p className="mt-1.5 text-[13px] leading-6 [overflow-wrap:anywhere] break-words whitespace-pre-wrap">
                             {child.content}
                           </p>
                         </li>
@@ -851,6 +885,7 @@ function SearchHitDetailDialog({
                           type="button"
                           variant="outline"
                           size="sm"
+                          className="border-border/70 rounded-lg text-[13px] shadow-none"
                           disabled={childPage <= 1}
                           onClick={() => setChildPage((page) => page - 1)}
                         >
@@ -860,6 +895,7 @@ function SearchHitDetailDialog({
                           type="button"
                           variant="outline"
                           size="sm"
+                          className="border-border/70 rounded-lg text-[13px] shadow-none"
                           disabled={childPage >= childPageCount}
                           onClick={() => setChildPage((page) => page + 1)}
                         >
@@ -873,11 +909,12 @@ function SearchHitDetailDialog({
             </>
           )}
         </div>
-        <DialogFooter className="gap-2 sm:justify-between">
+        <DialogFooter className="border-border/60 gap-2 border-t pt-4 sm:justify-between">
           {onLocate ? (
             <Button
               type="button"
               variant="outline"
+              className="border-border/70 rounded-lg text-[13px] shadow-none"
               onClick={() =>
                 onLocate(citation.document_id, citation.segment_id)
               }
@@ -887,7 +924,12 @@ function SearchHitDetailDialog({
           ) : (
             <span aria-hidden />
           )}
-          <Button type="button" variant="ghost" onClick={onClose}>
+          <Button
+            type="button"
+            variant="ghost"
+            className="rounded-lg text-[13px]"
+            onClick={onClose}
+          >
             {labels.segments.close}
           </Button>
         </DialogFooter>
@@ -919,24 +961,24 @@ function RecentQueriesSection({
   return (
     <section
       aria-label={labels.search.recentTitle}
-      className="space-y-3 border-t pt-4"
+      className="border-border/70 space-y-3 border-t pt-4"
     >
-      <h3 className="text-sm font-semibold">{labels.search.recentTitle}</h3>
+      <h3 className="text-[13px] font-semibold">{labels.search.recentTitle}</h3>
       {recent.isLoading ? (
-        <Skeleton className="h-24 rounded-xl" />
+        <Skeleton className="h-24 rounded-lg" />
       ) : recent.error ? (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-destructive text-[13px]">
           {knowledgeErrorMessage(recent.error, labels.errors)}
         </p>
       ) : (recent.data?.items.length ?? 0) === 0 ? (
-        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-6 text-center text-sm">
+        <p className="text-muted-foreground border-border/70 bg-muted/10 rounded-lg border border-dashed px-4 py-6 text-center text-[13px]">
           {labels.search.recentEmpty}
         </p>
       ) : (
         <>
-          <div className="border-border overflow-x-auto rounded-xl border">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-muted/60">
+          <div className="border-border/70 bg-background overflow-x-auto rounded-lg border">
+            <table className="w-full text-left text-[13px]">
+              <thead className="bg-muted/30 text-muted-foreground text-xs [&_th]:font-medium">
                 <tr>
                   <th className="px-4 py-2.5">
                     {labels.search.recentColumns.query}
@@ -957,11 +999,14 @@ function RecentQueriesSection({
               </thead>
               <tbody data-testid="knowledge-recent-queries">
                 {recent.data?.items.map((item) => (
-                  <tr key={item.id} className="border-t align-top">
+                  <tr
+                    key={item.id}
+                    className="border-border/60 hover:bg-muted/20 border-t align-top transition-colors"
+                  >
                     <td className="max-w-72 px-4 py-2.5">
                       <button
                         type="button"
-                        className="hover:text-foreground focus-visible:ring-ring block w-full cursor-pointer truncate text-left underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:outline-none"
+                        className="hover:text-selection focus-visible:ring-selection/40 block w-full cursor-pointer truncate rounded-sm text-left underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:outline-none"
                         title={item.query}
                         onClick={() => onPick(item.query)}
                       >
@@ -969,7 +1014,10 @@ function RecentQueriesSection({
                       </button>
                     </td>
                     <td className="px-4 py-2.5">
-                      <Badge variant="outline">
+                      <Badge
+                        variant="outline"
+                        className="border-border/70 text-muted-foreground rounded-md font-normal"
+                      >
                         {labels.search.recentSource[item.source]}
                       </Badge>
                     </td>
@@ -977,7 +1025,9 @@ function RecentQueriesSection({
                       {item.result_count}
                     </td>
                     <td className="text-muted-foreground px-4 py-2.5 tabular-nums">
-                      {item.top_score === null ? "—" : item.top_score.toFixed(3)}
+                      {item.top_score === null
+                        ? "—"
+                        : item.top_score.toFixed(3)}
                     </td>
                     <td className="text-muted-foreground px-4 py-2.5 text-xs whitespace-nowrap">
                       {new Date(item.created_at).toLocaleString(locale)}
@@ -997,6 +1047,7 @@ function RecentQueriesSection({
                   type="button"
                   variant="outline"
                   size="sm"
+                  className="border-border/70 rounded-lg text-[13px] shadow-none"
                   disabled={page <= 1}
                   onClick={() => setPage((current) => current - 1)}
                 >
@@ -1006,6 +1057,7 @@ function RecentQueriesSection({
                   type="button"
                   variant="outline"
                   size="sm"
+                  className="border-border/70 rounded-lg text-[13px] shadow-none"
                   disabled={page >= pageCount}
                   onClick={() => setPage((current) => current + 1)}
                 >

@@ -2,7 +2,6 @@
 
 import {
   ArrowLeftIcon,
-  FilePlusIcon,
   FolderPlusIcon,
   RefreshCwIcon,
   UploadCloudIcon,
@@ -60,10 +59,12 @@ import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
 import {
+  documentStatusClassName,
   documentStatusVariant,
   KNOWLEDGE_UPLOAD_ACCEPT,
 } from "./knowledge-documents-view";
 import { knowledgeErrorMessage } from "./knowledge-error";
+import { KnowledgeFileTypeIcon } from "./knowledge-file-type-icon";
 import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
 
 const ACCEPTED_EXTENSIONS = KNOWLEDGE_UPLOAD_ACCEPT;
@@ -139,9 +140,9 @@ function StepIndicator({
             <span
               aria-current={active ? "step" : undefined}
               className={cn(
-                "flex items-center gap-1.5 rounded-full px-2.5 py-1",
+                "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5",
                 active
-                  ? "bg-selection-subtle/70 text-foreground font-medium"
+                  ? "bg-selection-subtle/50 text-selection font-medium"
                   : "text-muted-foreground",
               )}
             >
@@ -156,7 +157,7 @@ function StepIndicator({
                 {value}
               </span>
               {active ? (
-                <span className="tracking-wide uppercase">
+                <span className="font-medium">
                   {t.knowledge.wizard.stepBadge(value)}
                 </span>
               ) : null}
@@ -494,13 +495,16 @@ export function KnowledgeCreateWizard({
     : "";
 
   return (
-    <section aria-label={wizard.uploadCreateTitle} className="space-y-6">
-      <div className="flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-center lg:justify-between">
+    <section
+      aria-label={wizard.uploadCreateTitle}
+      className="space-y-6 text-[13px]"
+    >
+      <div className="border-border/70 flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-center lg:justify-between">
         <Button
           type="button"
           variant="ghost"
           size="sm"
-          className="w-fit"
+          className="h-8 w-fit rounded-lg text-[13px]"
           // Leaving mid-upload would keep the loop running invisibly with no
           // progress or failure surface; the exit waits like "go to documents".
           disabled={isSubmitting}
@@ -514,24 +518,24 @@ export function KnowledgeCreateWizard({
       </div>
 
       {step === 1 ? (
-        <div className="mx-auto w-full max-w-2xl space-y-6">
+        <div className="w-full space-y-6">
           <div className="space-y-3">
-            <h2 className="text-sm font-semibold">
+            <h2 className="text-base font-semibold tracking-tight">
               {wizard.sourceSectionTitle}
             </h2>
             <label
-              className="border-border hover:border-selection/60 hover:bg-muted/30 focus-within:ring-ring flex cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed px-6 py-10 text-center transition-colors focus-within:ring-2"
+              className="border-border/80 bg-background hover:border-selection/50 hover:bg-selection-subtle/20 focus-within:ring-selection/20 flex cursor-pointer flex-col items-center gap-2 rounded-lg border border-dashed px-6 py-10 text-center transition-colors focus-within:ring-2"
               onDragOver={(event) => event.preventDefault()}
               onDrop={handleDrop}
             >
               <UploadCloudIcon
                 aria-hidden
-                className="text-muted-foreground size-6"
+                className="text-selection/75 size-6"
               />
-              <span className="text-sm font-medium">
+              <span className="text-[13px] font-medium">
                 {wizard.dropzoneTitle}
               </span>
-              <span className="text-muted-foreground text-xs">
+              <span className="text-muted-foreground text-xs leading-5">
                 {labels.documents.uploadDescription}
               </span>
               <input
@@ -551,20 +555,17 @@ export function KnowledgeCreateWizard({
               <div className="space-y-2">
                 <p
                   role="status"
-                  className="text-muted-foreground text-xs tabular-nums"
+                  className="text-muted-foreground text-xs leading-5 tabular-nums"
                 >
                   {wizard.filesSelected(files.length)}
                 </p>
-                <ul className="divide-border/60 divide-y overflow-hidden rounded-xl border">
+                <ul className="divide-border/60 bg-background border-border/70 divide-y overflow-hidden rounded-lg border">
                   {files.map((file) => (
                     <li
                       key={file.name}
-                      className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-sm"
+                      className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-[13px]"
                     >
-                      <FilePlusIcon
-                        aria-hidden
-                        className="text-muted-foreground size-4 shrink-0"
-                      />
+                      <KnowledgeFileTypeIcon fileName={file.name} />
                       <span className="min-w-0 flex-1 truncate">
                         {file.name}
                       </span>
@@ -575,7 +576,7 @@ export function KnowledgeCreateWizard({
                         type="button"
                         variant="ghost"
                         size="icon"
-                        className="size-7 shrink-0"
+                        className="size-7 shrink-0 rounded-lg"
                         aria-label={wizard.removeFile(file.name)}
                         onClick={() => {
                           // A removed file's preview (or in-flight response)
@@ -602,6 +603,7 @@ export function KnowledgeCreateWizard({
 
           <div className="flex justify-end">
             <Button
+              className="h-8 rounded-lg text-[13px] shadow-none"
               type="button"
               disabled={files.length === 0}
               onClick={() => setStep(2)}
@@ -610,10 +612,10 @@ export function KnowledgeCreateWizard({
             </Button>
           </div>
 
-          <div className="border-t pt-4">
+          <div className="border-border/70 border-t pt-4">
             <button
               type="button"
-              className="text-selection hover:text-selection/80 focus-visible:ring-ring flex items-center gap-1.5 rounded-md text-sm focus-visible:ring-2 focus-visible:outline-none"
+              className="text-selection hover:text-selection/80 focus-visible:ring-selection/20 flex items-center gap-1.5 rounded-lg text-[13px] focus-visible:ring-2 focus-visible:outline-none"
               onClick={onCreateEmpty}
             >
               <FolderPlusIcon aria-hidden className="size-4" />
@@ -624,7 +626,7 @@ export function KnowledgeCreateWizard({
       ) : null}
 
       {step === 2 ? (
-        <div className="mx-auto grid w-full max-w-6xl gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="grid w-full gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <form
             className="w-full space-y-6"
             onSubmit={(event) => {
@@ -633,10 +635,10 @@ export function KnowledgeCreateWizard({
             }}
           >
             <div className="space-y-3">
-              <h2 className="text-sm font-semibold">
+              <h2 className="text-[13px] font-semibold">
                 {wizard.chunkSectionTitle}
               </h2>
-              <fieldset className="grid gap-2 text-sm">
+              <fieldset className="grid gap-2 text-[13px]">
                 <legend className="sr-only">
                   {labels.documents.chunkingModeLabel}
                 </legend>
@@ -657,24 +659,24 @@ export function KnowledgeCreateWizard({
                   <label
                     key={mode}
                     className={cn(
-                      "flex cursor-pointer items-start gap-2.5 rounded-xl border px-3.5 py-2.5",
+                      "flex cursor-pointer items-start gap-2.5 rounded-lg border px-3.5 py-2.5 transition-colors",
                       chunkingMode === mode
-                        ? "border-selection bg-selection-subtle/40"
-                        : "border-border hover:bg-muted/40",
+                        ? "border-selection/40 bg-selection-subtle/25"
+                        : "border-border/70 bg-background hover:bg-muted/30",
                     )}
                   >
                     <input
                       type="radio"
                       name="chunking-mode"
                       value={mode}
-                      className="accent-primary mt-0.5 size-4"
+                      className="accent-selection mt-0.5 size-4"
                       checked={chunkingMode === mode}
                       disabled={isSubmitting}
                       onChange={() => setChunkingMode(mode)}
                     />
                     <span className="grid gap-0.5">
                       <span className="font-medium">{label}</span>
-                      <span className="text-muted-foreground text-xs">
+                      <span className="text-muted-foreground text-xs leading-5">
                         {hint}
                       </span>
                     </span>
@@ -682,11 +684,12 @@ export function KnowledgeCreateWizard({
                 ))}
               </fieldset>
               <div className="grid grid-cols-2 gap-3">
-                <label className="grid gap-1.5 text-sm">
+                <label className="grid gap-1.5 text-[13px]">
                   <span className="font-medium">
                     {labels.documents.chunkSizeLabel}
                   </span>
                   <Input
+                    className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
                     type="number"
                     min={KNOWLEDGE_CHUNK_SIZE_MIN}
                     max={KNOWLEDGE_CHUNK_SIZE_MAX}
@@ -695,15 +698,16 @@ export function KnowledgeCreateWizard({
                     value={chunkSize}
                     onChange={(event) => setChunkSize(event.target.value)}
                   />
-                  <span className="text-muted-foreground text-xs">
+                  <span className="text-muted-foreground text-xs leading-5">
                     {labels.documents.chunkSizeHint}
                   </span>
                 </label>
-                <label className="grid gap-1.5 text-sm">
+                <label className="grid gap-1.5 text-[13px]">
                   <span className="font-medium">
                     {labels.documents.chunkOverlapLabel}
                   </span>
                   <Input
+                    className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
                     type="number"
                     min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
                     max={KNOWLEDGE_CHUNK_OVERLAP_MAX}
@@ -712,33 +716,35 @@ export function KnowledgeCreateWizard({
                     value={chunkOverlap}
                     onChange={(event) => setChunkOverlap(event.target.value)}
                   />
-                  <span className="text-muted-foreground text-xs">
+                  <span className="text-muted-foreground text-xs leading-5">
                     {labels.documents.chunkOverlapHint}
                   </span>
                 </label>
               </div>
-              <label className="grid gap-1.5 text-sm">
+              <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
                   {labels.documents.chunkSeparatorLabel}
                 </span>
                 <Input
+                  className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
                   required
                   maxLength={64}
                   disabled={isSubmitting}
                   value={chunkSeparator}
                   onChange={(event) => setChunkSeparator(event.target.value)}
                 />
-                <span className="text-muted-foreground text-xs">
+                <span className="text-muted-foreground text-xs leading-5">
                   {labels.documents.chunkSeparatorHint}
                 </span>
               </label>
               {chunkingMode === "parent_child" ? (
                 <div className="grid grid-cols-2 gap-3">
-                  <label className="grid gap-1.5 text-sm">
+                  <label className="grid gap-1.5 text-[13px]">
                     <span className="font-medium">
                       {labels.documents.childChunkSizeLabel}
                     </span>
                     <Input
+                      className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
                       type="number"
                       min={KNOWLEDGE_CHILD_CHUNK_SIZE_MIN}
                       max={KNOWLEDGE_CHILD_CHUNK_SIZE_MAX}
@@ -750,11 +756,12 @@ export function KnowledgeCreateWizard({
                       }
                     />
                   </label>
-                  <label className="grid gap-1.5 text-sm">
+                  <label className="grid gap-1.5 text-[13px]">
                     <span className="font-medium">
                       {labels.documents.childChunkSeparatorLabel}
                     </span>
                     <Input
+                      className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
                       required
                       maxLength={64}
                       disabled={isSubmitting}
@@ -763,20 +770,20 @@ export function KnowledgeCreateWizard({
                         setChildChunkSeparator(event.target.value)
                       }
                     />
-                    <span className="text-muted-foreground text-xs">
+                    <span className="text-muted-foreground text-xs leading-5">
                       {labels.documents.childChunkSeparatorHint}
                     </span>
                   </label>
                 </div>
               ) : null}
-              <fieldset className="grid gap-2 text-sm">
+              <fieldset className="grid gap-2 text-[13px]">
                 <legend className="font-medium">
                   {labels.documents.preprocessingLabel}
                 </legend>
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
-                    className="accent-primary size-4"
+                    className="accent-selection size-4"
                     checked={removeExtraSpaces}
                     disabled={isSubmitting}
                     onChange={(event) =>
@@ -788,7 +795,7 @@ export function KnowledgeCreateWizard({
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
-                    className="accent-primary size-4"
+                    className="accent-selection size-4"
                     checked={removeUrlsEmails}
                     disabled={isSubmitting}
                     onChange={(event) =>
@@ -798,23 +805,23 @@ export function KnowledgeCreateWizard({
                   {labels.documents.removeUrlsEmailsLabel}
                 </label>
               </fieldset>
-              <p className="text-muted-foreground text-xs">
+              <p className="text-muted-foreground text-xs leading-5">
                 {labels.documents.chunkImmutableNote}
               </p>
             </div>
 
             <div className="space-y-3">
-              <h2 className="text-sm font-semibold">
+              <h2 className="text-[13px] font-semibold">
                 {labels.bases.modelLabel}
               </h2>
               {options.isLoading ? (
-                <Skeleton className="h-9 rounded-md" />
+                <Skeleton className="h-9 rounded-lg" />
               ) : options.error ? (
-                <p role="alert" className="text-destructive text-sm">
+                <p role="alert" className="text-destructive text-[13px]">
                   {labels.bases.modelsLoadFailed}
                 </p>
               ) : (options.data?.embedding_models.length ?? 0) === 0 ? (
-                <p className="text-muted-foreground text-sm">
+                <p className="text-muted-foreground text-[13px]">
                   {labels.bases.noModels}
                 </p>
               ) : (
@@ -823,19 +830,26 @@ export function KnowledgeCreateWizard({
                   disabled={isSubmitting}
                   onValueChange={setEmbeddingModelId}
                 >
-                  <SelectTrigger aria-label={labels.bases.modelLabel}>
+                  <SelectTrigger
+                    className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 rounded-lg text-[13px] shadow-none focus-visible:ring-2"
+                    aria-label={labels.bases.modelLabel}
+                  >
                     <SelectValue placeholder={labels.bases.modelPlaceholder} />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className="border-border/70 rounded-lg">
                     {options.data?.embedding_models.map((option) => (
-                      <SelectItem key={option.id} value={option.id}>
+                      <SelectItem
+                        className="rounded-md text-[13px]"
+                        key={option.id}
+                        value={option.id}
+                      >
                         {option.provider_name} · {option.model_name}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               )}
-              <p className="text-muted-foreground text-xs">
+              <p className="text-muted-foreground text-xs leading-5">
                 {labels.bases.modelHint}
               </p>
             </div>
@@ -846,12 +860,13 @@ export function KnowledgeCreateWizard({
               disabled={isSubmitting}
             />
             <div className="space-y-3">
-              <h2 className="text-sm font-semibold">
+              <h2 className="text-[13px] font-semibold">
                 {wizard.infoSectionTitle}
               </h2>
-              <label className="grid gap-1.5 text-sm">
+              <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">{labels.bases.nameLabel}</span>
                 <Input
+                  className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 h-9 rounded-lg text-[13px] shadow-none focus-visible:ring-2 md:text-[13px]"
                   value={name}
                   required
                   maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
@@ -863,11 +878,12 @@ export function KnowledgeCreateWizard({
                   }}
                 />
               </label>
-              <label className="grid gap-1.5 text-sm">
+              <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
                   {labels.bases.descriptionLabel}
                 </span>
                 <Textarea
+                  className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 rounded-lg text-[13px] leading-5 shadow-none focus-visible:ring-2 md:text-[13px]"
                   value={description}
                   rows={3}
                   disabled={isSubmitting}
@@ -878,13 +894,14 @@ export function KnowledgeCreateWizard({
             </div>
 
             {createBase.error ? (
-              <p role="alert" className="text-destructive text-sm">
+              <p role="alert" className="text-destructive text-[13px]">
                 {knowledgeErrorMessage(createBase.error, labels.errors)}
               </p>
             ) : null}
 
             <div className="flex items-center justify-between gap-3">
               <Button
+                className="h-8 rounded-lg text-[13px] shadow-none"
                 type="button"
                 variant="outline"
                 disabled={isSubmitting}
@@ -892,7 +909,11 @@ export function KnowledgeCreateWizard({
               >
                 {wizard.previous}
               </Button>
-              <Button type="submit" disabled={isSubmitting || !configureValid}>
+              <Button
+                className="h-8 rounded-lg text-[13px] shadow-none"
+                type="submit"
+                disabled={isSubmitting || !configureValid}
+              >
                 {createBase.isPending
                   ? labels.common.creating
                   : wizard.saveAndProcess}
@@ -902,18 +923,18 @@ export function KnowledgeCreateWizard({
 
           <aside
             aria-label={wizard.previewTitle}
-            className="min-w-0 space-y-3 lg:border-l lg:pl-8"
+            className="border-border/70 min-w-0 space-y-3 lg:border-l lg:pl-8"
             data-testid="chunk-preview-panel"
             aria-busy={previewLoading}
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="space-y-1">
                 <div className="flex flex-wrap items-baseline gap-2">
-                  <h2 className="text-sm font-semibold">
+                  <h2 className="text-[13px] font-semibold">
                     {wizard.previewTitle}
                   </h2>
                   {visiblePreviewData ? (
-                    <span className="text-muted-foreground text-xs tabular-nums">
+                    <span className="text-muted-foreground text-xs leading-5 tabular-nums">
                       {wizard.previewShowing(
                         visiblePreviewData.items.length,
                         visiblePreviewData.total,
@@ -928,6 +949,7 @@ export function KnowledgeCreateWizard({
                 ) : null}
               </div>
               <Button
+                className="h-8 rounded-lg text-[13px] shadow-none"
                 type="button"
                 variant="outline"
                 size="sm"
@@ -955,13 +977,17 @@ export function KnowledgeCreateWizard({
                 <SelectTrigger
                   size="sm"
                   aria-label={wizard.previewPickFile}
-                  className="w-full max-w-sm"
+                  className="border-border/70 bg-background focus-visible:border-selection/50 focus-visible:ring-selection/15 w-full max-w-sm rounded-lg text-[13px] shadow-none focus-visible:ring-2"
                 >
                   <SelectValue placeholder={wizard.previewPickFile} />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="border-border/70 rounded-lg">
                   {files.map((file) => (
-                    <SelectItem key={file.name} value={file.name}>
+                    <SelectItem
+                      className="rounded-md text-[13px]"
+                      key={file.name}
+                      value={file.name}
+                    >
                       {file.name}
                     </SelectItem>
                   ))}
@@ -969,7 +995,10 @@ export function KnowledgeCreateWizard({
               </Select>
             ) : null}
             {previewLoading ? (
-              <p role="status" className="text-muted-foreground text-xs">
+              <p
+                role="status"
+                className="text-muted-foreground text-xs leading-5"
+              >
                 {wizard.previewLoading}
               </p>
             ) : currentPreviewParams === null ? (
@@ -977,12 +1006,15 @@ export function KnowledgeCreateWizard({
                 {wizard.previewInvalid}
               </p>
             ) : previewIsStale ? (
-              <p role="status" className="text-muted-foreground text-xs">
+              <p
+                role="status"
+                className="text-muted-foreground text-xs leading-5"
+              >
                 {wizard.previewStale}
               </p>
             ) : null}
             {visiblePreviewError ? (
-              <p role="alert" className="text-destructive text-sm">
+              <p role="alert" className="text-destructive text-[13px]">
                 {knowledgeErrorMessage(visiblePreviewError, labels.errors)}
               </p>
             ) : null}
@@ -996,7 +1028,7 @@ export function KnowledgeCreateWizard({
                 {visiblePreviewData.items.map((chunk) => (
                   <li
                     key={chunk.position}
-                    className="bg-muted/30 space-y-1.5 rounded-xl border px-4 py-3"
+                    className="border-border/70 bg-background space-y-1.5 rounded-lg border px-4 py-3"
                   >
                     <p className="text-muted-foreground flex items-center justify-between gap-2 text-xs tabular-nums">
                       <span className="font-medium">
@@ -1009,20 +1041,20 @@ export function KnowledgeCreateWizard({
                         {wizard.previewCharacters(chunk.word_count)}
                       </span>
                     </p>
-                    <p className="text-sm break-words whitespace-pre-wrap">
+                    <p className="text-[13px] leading-6 break-words whitespace-pre-wrap">
                       {chunk.content}
                     </p>
                     {chunk.child_contents.length > 0 ? (
-                      <ol className="border-border/70 mt-2 grid gap-1.5 border-l-2 pl-3">
+                      <ol className="border-selection/20 mt-2 grid gap-1.5 border-l-2 pl-3">
                         {chunk.child_contents.map((childContent, index) => (
                           <li
                             key={index}
-                            className="bg-background/60 rounded-lg border px-2.5 py-1.5"
+                            className="border-border/50 bg-muted/20 rounded-lg border px-2.5 py-1.5"
                           >
-                            <p className="text-muted-foreground text-[10px] font-medium tabular-nums">
+                            <p className="text-muted-foreground text-xs font-medium tabular-nums">
                               {wizard.previewChildLabel(index + 1)}
                             </p>
-                            <p className="text-xs break-words whitespace-pre-wrap">
+                            <p className="text-xs leading-5 break-words whitespace-pre-wrap">
                               {childContent}
                             </p>
                           </li>
@@ -1038,18 +1070,25 @@ export function KnowledgeCreateWizard({
       ) : null}
 
       {step === 3 && createdBase && submissionSnapshot ? (
-        <div className="mx-auto w-full max-w-2xl space-y-6">
+        <div className="w-full space-y-6">
           <div className="space-y-1">
-            <h2 className="text-lg font-semibold">{wizard.createdTitle}</h2>
-            <p className="text-muted-foreground text-sm">
+            <h2 className="text-base font-semibold tracking-tight">
+              {wizard.createdTitle}
+            </h2>
+            <p className="text-muted-foreground text-[13px]">
               {wizard.createdHint}
             </p>
           </div>
 
           <div className="space-y-3">
-            <h3 className="text-sm font-semibold">{wizard.processingTitle}</h3>
+            <h3 className="text-[13px] font-semibold">
+              {wizard.processingTitle}
+            </h3>
             {uploadingIndex !== null ? (
-              <p role="status" className="text-muted-foreground text-xs">
+              <p
+                role="status"
+                className="text-muted-foreground text-xs leading-5"
+              >
                 {labels.documents.uploadingProgress(
                   uploadingIndex + 1,
                   submissionSnapshot.files.length,
@@ -1057,18 +1096,22 @@ export function KnowledgeCreateWizard({
               </p>
             ) : null}
             <ul
-              className="divide-border/60 divide-y overflow-hidden rounded-xl border"
+              className="divide-border/60 bg-background border-border/70 divide-y overflow-hidden rounded-lg border"
               data-testid="wizard-document-status"
             >
               {(documents.data?.items ?? []).map((document) => (
                 <li
                   key={document.id}
-                  className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-sm"
+                  className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-[13px]"
                 >
+                  <KnowledgeFileTypeIcon fileName={document.original_name} />
                   <span className="min-w-0 flex-1 truncate">
                     {document.name}
                   </span>
-                  <Badge variant={documentStatusVariant(document.status)}>
+                  <Badge
+                    variant={documentStatusVariant(document.status)}
+                    className={documentStatusClassName(document.status)}
+                  >
                     {labels.documentStatus[document.status]}
                   </Badge>
                 </li>
@@ -1094,8 +1137,8 @@ export function KnowledgeCreateWizard({
           </div>
 
           <div className="space-y-3">
-            <h3 className="text-sm font-semibold">{wizard.summaryTitle}</h3>
-            <dl className="divide-border/60 divide-y overflow-hidden rounded-xl border text-sm">
+            <h3 className="text-[13px] font-semibold">{wizard.summaryTitle}</h3>
+            <dl className="divide-border/60 bg-background border-border/70 divide-y overflow-hidden rounded-lg border text-[13px]">
               <div className="flex items-center justify-between gap-3 px-4 py-2.5">
                 <dt className="text-muted-foreground">
                   {labels.bases.nameLabel}
@@ -1179,6 +1222,7 @@ export function KnowledgeCreateWizard({
 
           <div className="flex justify-end">
             <Button
+              className="h-8 rounded-lg text-[13px] shadow-none"
               type="button"
               disabled={isSubmitting}
               onClick={() => onFinished(createdBase)}

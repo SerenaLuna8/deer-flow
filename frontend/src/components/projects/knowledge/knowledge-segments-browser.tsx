@@ -98,23 +98,33 @@ export function KnowledgeSegmentsBrowser({
     <section
       aria-label={labels.segments.title(document.name)}
       data-testid="knowledge-segment-browser"
-      className="space-y-4"
+      className="space-y-4 text-[13px]"
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <Button type="button" variant="ghost" size="sm" onClick={onBack}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-foreground rounded-lg text-[13px]"
+            onClick={onBack}
+          >
             <ArrowLeftIcon aria-hidden className="size-4" />
             {labels.detail.documents}
           </Button>
-          <h2 className="mt-1 truncate text-lg font-semibold">
+          <h2 className="mt-1 truncate text-base font-semibold tracking-tight">
             {document.name}
           </h2>
-          <p className="text-muted-foreground text-sm">
+          <p className="text-muted-foreground mt-1 text-xs">
             {labels.segments.stats(document.segment_count, document.word_count)}
           </p>
         </div>
         {canEdit && document.status === "ready" ? (
-          <Button type="button" onClick={() => setAdding(true)}>
+          <Button
+            type="button"
+            className="h-9 rounded-lg text-[13px]"
+            onClick={() => setAdding(true)}
+          >
             <PlusIcon aria-hidden className="size-4" />
             {labels.segments.add}
           </Button>
@@ -122,7 +132,7 @@ export function KnowledgeSegmentsBrowser({
       </div>
 
       {toggleSegment.error ? (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-destructive text-[13px]">
           {knowledgeErrorMessage(toggleSegment.error, labels.errors)}
         </p>
       ) : null}
@@ -138,13 +148,13 @@ export function KnowledgeSegmentsBrowser({
       ) : null}
 
       {segments.isLoading ? (
-        <Skeleton className="h-40 rounded-xl" />
+        <Skeleton className="h-40 rounded-lg" />
       ) : segments.error ? (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-destructive text-[13px]">
           {knowledgeErrorMessage(segments.error, labels.errors)}
         </p>
       ) : (segments.data?.items.length ?? 0) === 0 ? (
-        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm">
+        <p className="text-muted-foreground border-border/70 bg-muted/10 rounded-lg border border-dashed px-4 py-10 text-center text-[13px]">
           {labels.segments.empty}
         </p>
       ) : (
@@ -158,24 +168,35 @@ export function KnowledgeSegmentsBrowser({
             return (
               <li
                 key={segment.id}
-                className="border-border rounded-lg border p-3"
+                className="border-border/70 bg-background overflow-hidden rounded-lg border p-3"
               >
-                <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
-                  <span>{labels.segments.position(segment.position)}</span>
+                <div className="text-muted-foreground border-border/60 bg-muted/25 -mx-3 -mt-3 flex flex-wrap items-center gap-2 border-b px-3 py-1 text-xs">
+                  <span className="text-foreground/80 font-medium">
+                    {labels.segments.position(segment.position)}
+                  </span>
                   {position ? <span>· {position}</span> : null}
                   <span>· {labels.segments.wordCount(segment.word_count)}</span>
                   {manual ? (
-                    <Badge variant="outline">
+                    <Badge
+                      variant="outline"
+                      className="border-border/70 rounded-md font-normal"
+                    >
                       {labels.segments.manualBadge}
                     </Badge>
                   ) : null}
                   {!segment.enabled ? (
-                    <Badge variant="secondary">{labels.status.disabled}</Badge>
+                    <Badge
+                      variant="secondary"
+                      className="rounded-md font-normal"
+                    >
+                      {labels.status.disabled}
+                    </Badge>
                   ) : null}
                   <div className="ml-auto flex items-center gap-1.5">
                     {canEdit ? (
                       <>
                         <Switch
+                          className="data-[state=checked]:bg-success/80"
                           checked={segment.enabled}
                           disabled={toggleSegment.isPending}
                           aria-label={
@@ -195,6 +216,7 @@ export function KnowledgeSegmentsBrowser({
                           type="button"
                           variant="ghost"
                           size="sm"
+                          className="text-muted-foreground hover:text-foreground rounded-lg text-[13px]"
                           onClick={() => setEditing(segment)}
                         >
                           <PencilIcon aria-hidden className="size-4" />
@@ -204,7 +226,7 @@ export function KnowledgeSegmentsBrowser({
                           type="button"
                           variant="ghost"
                           size="sm"
-                          className="text-destructive"
+                          className="text-destructive/80 hover:bg-destructive/5 hover:text-destructive rounded-lg text-[13px]"
                           onClick={() => setDeleting(segment)}
                         >
                           <Trash2Icon aria-hidden className="size-4" />
@@ -216,9 +238,9 @@ export function KnowledgeSegmentsBrowser({
                 </div>
                 <p
                   className={cn(
-                    "mt-2 text-sm leading-6 whitespace-pre-wrap",
+                    "mt-3 text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-pre-wrap",
                     segment.enabled
-                      ? "text-foreground"
+                      ? "text-foreground/85"
                       : "text-muted-foreground",
                   )}
                 >
@@ -236,6 +258,7 @@ export function KnowledgeSegmentsBrowser({
             type="button"
             variant="outline"
             size="sm"
+            className="border-border/70 rounded-lg text-[13px] shadow-none"
             disabled={page <= 1 || segments.isFetching}
             onClick={() => setPage((current) => Math.max(1, current - 1))}
           >
@@ -245,6 +268,7 @@ export function KnowledgeSegmentsBrowser({
             type="button"
             variant="outline"
             size="sm"
+            className="border-border/70 rounded-lg text-[13px] shadow-none"
             disabled={page >= pageCount || segments.isFetching}
             onClick={() => setPage((current) => current + 1)}
           >
@@ -252,7 +276,7 @@ export function KnowledgeSegmentsBrowser({
           </Button>
         </div>
         {segments.data ? (
-          <p className="text-muted-foreground text-sm">
+          <p className="text-muted-foreground text-xs tabular-nums">
             {labels.segments.pageInfo(page, pageCount, total)}
           </p>
         ) : null}
@@ -319,13 +343,16 @@ function SegmentLocateCard({
         locate.data?.segment.position ?? 0,
       )}
       data-testid="knowledge-segment-locate"
-      className="border-primary/40 bg-primary/5 rounded-xl border p-3"
+      className="border-selection/30 bg-selection-subtle/30 rounded-lg border p-3"
     >
       {locate.isLoading ? (
         <Skeleton className="h-16 rounded-lg" />
       ) : locate.error !== null || locate.data === undefined ? (
         <div className="flex items-start gap-2">
-          <p role="alert" className="text-destructive min-w-0 flex-1 text-sm">
+          <p
+            role="alert"
+            className="text-destructive min-w-0 flex-1 text-[13px]"
+          >
             {labels.segments.locateFailed}
           </p>
           {onDismiss ? (
@@ -333,7 +360,7 @@ function SegmentLocateCard({
               type="button"
               variant="ghost"
               size="icon"
-              className="size-7"
+              className="size-8 rounded-lg"
               aria-label={labels.segments.dismissLocate}
               onClick={onDismiss}
             >
@@ -344,7 +371,7 @@ function SegmentLocateCard({
       ) : (
         <div className="space-y-1.5">
           <div className="text-muted-foreground flex items-center gap-2 text-xs">
-            <LocateIcon aria-hidden className="size-3.5" />
+            <LocateIcon aria-hidden className="text-selection size-3.5" />
             <span className="text-foreground font-medium">
               {labels.segments.locatedTitle(locate.data.segment.position)}
             </span>
@@ -352,14 +379,16 @@ function SegmentLocateCard({
               · {labels.segments.wordCount(locate.data.segment.word_count)}
             </span>
             {locate.data.content_state === "stale" ? (
-              <Badge variant="secondary">{labels.segments.locateStale}</Badge>
+              <Badge variant="secondary" className="rounded-md font-normal">
+                {labels.segments.locateStale}
+              </Badge>
             ) : null}
             {onDismiss ? (
               <Button
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="ml-auto size-7"
+                className="ml-auto size-8 rounded-lg"
                 aria-label={labels.segments.dismissLocate}
                 onClick={onDismiss}
               >
@@ -367,7 +396,7 @@ function SegmentLocateCard({
               </Button>
             ) : null}
           </div>
-          <p className="text-sm leading-6 whitespace-pre-wrap">
+          <p className="text-foreground/85 text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-pre-wrap">
             {locate.data.segment.content}
           </p>
         </div>
@@ -386,9 +415,10 @@ function SegmentContentField({
   const { t } = useI18n();
   const labels = t.knowledge;
   return (
-    <label className="grid gap-1.5 text-sm">
+    <label className="grid gap-1.5 text-[13px]">
       <span className="font-medium">{labels.segments.contentLabel}</span>
       <Textarea
+        className="border-border/70 bg-background rounded-lg text-[13px] leading-6 shadow-none md:text-[13px]"
         value={content}
         rows={8}
         required
@@ -426,10 +456,12 @@ function AddSegmentDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="border-border/70 rounded-lg text-[13px] sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>{labels.segments.addTitle}</DialogTitle>
-          <DialogDescription>
+          <DialogTitle className="text-base tracking-tight">
+            {labels.segments.addTitle}
+          </DialogTitle>
+          <DialogDescription className="text-xs leading-5">
             {labels.segments.addDescription}
           </DialogDescription>
         </DialogHeader>
@@ -450,16 +482,22 @@ function AddSegmentDialog({
         >
           <SegmentContentField content={content} onChange={setContent} />
           {createSegment.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(createSegment.error, labels.errors)}
             </p>
           ) : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
+          <DialogFooter className="border-border/60 border-t pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-border/70 rounded-lg text-[13px] shadow-none"
+              onClick={onClose}
+            >
               {labels.common.cancel}
             </Button>
             <Button
               type="submit"
+              className="rounded-lg text-[13px]"
               disabled={createSegment.isPending || !content.trim()}
             >
               {createSegment.isPending
@@ -498,9 +536,9 @@ function EditSegmentDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="border-border/70 rounded-lg text-[13px] sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="text-base tracking-tight">
             {labels.segments.editTitle(segment.position)}
           </DialogTitle>
         </DialogHeader>
@@ -522,16 +560,22 @@ function EditSegmentDialog({
         >
           <SegmentContentField content={content} onChange={setContent} />
           {updateSegment.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(updateSegment.error, labels.errors)}
             </p>
           ) : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
+          <DialogFooter className="border-border/60 border-t pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-border/70 rounded-lg text-[13px] shadow-none"
+              onClick={onClose}
+            >
               {labels.common.cancel}
             </Button>
             <Button
               type="submit"
+              className="rounded-lg text-[13px]"
               disabled={updateSegment.isPending || !content.trim()}
             >
               {updateSegment.isPending
@@ -569,25 +613,33 @@ function DeleteSegmentDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent>
+      <DialogContent className="border-border/70 rounded-lg text-[13px]">
         <DialogHeader>
-          <DialogTitle>{labels.segments.deleteTitle}</DialogTitle>
-          <DialogDescription>
+          <DialogTitle className="text-base tracking-tight">
+            {labels.segments.deleteTitle}
+          </DialogTitle>
+          <DialogDescription className="text-xs leading-5">
             {labels.segments.deleteDescription(segment.position)}
           </DialogDescription>
         </DialogHeader>
         {deleteSegment.error ? (
-          <p role="alert" className="text-destructive text-sm">
+          <p role="alert" className="text-destructive text-[13px]">
             {knowledgeErrorMessage(deleteSegment.error, labels.errors)}
           </p>
         ) : null}
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={onClose}>
+        <DialogFooter className="border-border/60 border-t pt-4">
+          <Button
+            type="button"
+            variant="outline"
+            className="border-border/70 rounded-lg text-[13px] shadow-none"
+            onClick={onClose}
+          >
             {labels.common.cancel}
           </Button>
           <Button
             type="button"
             variant="destructive"
+            className="rounded-lg text-[13px]"
             disabled={deleteSegment.isPending}
             onClick={() =>
               deleteSegment.mutate(

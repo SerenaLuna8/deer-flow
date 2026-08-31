@@ -83,7 +83,7 @@ export function ProjectKnowledgePage() {
 
   if (canEdit && wizardOpen) {
     return (
-      <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+      <main className="w-full min-w-0 px-4 py-6 text-[13px] leading-5 sm:px-6 lg:px-8">
         <KnowledgeCreateWizard
           scope={scope}
           onExit={() => setWizardOpen(false)}
@@ -103,18 +103,18 @@ export function ProjectKnowledgePage() {
   if (navState.kb !== null) {
     if (currentBase === null) {
       return (
-        <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+        <main className="w-full min-w-0 px-4 py-6 text-[13px] leading-5 sm:px-6 lg:px-8">
           {bases.data === undefined ? (
             <Skeleton className="h-40 rounded-xl" />
           ) : (
             <div className="rounded-xl border border-dashed px-4 py-12 text-center">
-              <p className="text-muted-foreground text-sm">
+              <p className="text-muted-foreground text-[13px]">
                 {labels.detail.baseNotFound}
               </p>
               <Button
                 type="button"
                 variant="outline"
-                className="mt-4"
+                className="mt-4 h-9 rounded-lg text-[13px] shadow-none"
                 onClick={() => openBase(null)}
               >
                 {labels.detail.backToBases}
@@ -133,7 +133,7 @@ export function ProjectKnowledgePage() {
         : navState.view;
 
     return (
-      <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+      <main className="w-full min-w-0 px-4 py-6 text-[13px] leading-5 sm:px-6 lg:px-8">
         <KnowledgeBaseDetail
           key={currentBase.id}
           scope={scope}
@@ -147,14 +147,18 @@ export function ProjectKnowledgePage() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+    <main className="w-full min-w-0 px-4 py-6 text-[13px] leading-5 sm:px-6 lg:px-8">
       <ProjectPageHeader
-        className="mb-5"
+        className="mb-5 [&_h1]:text-xl [&_p]:text-[13px]"
         title={labels.page.title}
         description={labels.page.description}
         actions={
           canEdit ? (
-            <Button type="button" onClick={() => setWizardOpen(true)}>
+            <Button
+              type="button"
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              onClick={() => setWizardOpen(true)}
+            >
               <PlusIcon aria-hidden className="size-4" />
               {labels.bases.createButton}
             </Button>

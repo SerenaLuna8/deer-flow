@@ -102,8 +102,10 @@ import {
   type KnowledgeTaskProgress,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
+import { cn } from "@/lib/utils";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
+import { KnowledgeFileTypeIcon } from "./knowledge-file-type-icon";
 import { KnowledgeSegmentsBrowser } from "./knowledge-segments-browser";
 
 /** Mirrors the backend's frozen ALLOWED_DOCUMENT_EXTENSIONS. */
@@ -117,6 +119,23 @@ export function documentStatusVariant(
   if (status === "failed") return "destructive";
   if (status === "deleting") return "outline";
   return "secondary";
+}
+
+export function documentStatusClassName(
+  status: KnowledgeDocumentStatus,
+): string {
+  return cn(
+    "rounded-md px-1.5 py-0.5 text-[11px] font-medium",
+    status === "ready" &&
+      "border-success/15 bg-success/10 text-emerald-700 dark:text-emerald-300",
+    status === "failed" &&
+      "border-destructive/15 bg-destructive/10 text-destructive dark:bg-destructive/10",
+    (status === "uploading" ||
+      status === "queued" ||
+      status === "processing") &&
+      "border-amber-500/15 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+    status === "deleting" && "border-border/70 bg-muted text-muted-foreground",
+  );
 }
 
 function formatSizeBytes(sizeBytes: number): string {
@@ -242,13 +261,13 @@ export function KnowledgeDocumentsView({
     if (browsing === null) {
       return (
         <div className="rounded-xl border border-dashed px-4 py-12 text-center">
-          <p className="text-muted-foreground text-sm">
+          <p className="text-muted-foreground text-[13px]">
             {labels.documents.notFound}
           </p>
           <Button
             type="button"
             variant="outline"
-            className="mt-4"
+            className="mt-4 h-9 rounded-lg text-[13px] shadow-none"
             onClick={closeBrowser}
           >
             {labels.documents.backToList}
@@ -412,7 +431,8 @@ function DocumentsTable({
     onNavigate({ ...navState, status, page: 1 }, "replace");
   const setSort = (sort: KnowledgeDocumentSort) =>
     onNavigate({ ...navState, sort, page: 1 }, "replace");
-  const setPage = (page: number) => onNavigate({ ...navState, page }, "replace");
+  const setPage = (page: number) =>
+    onNavigate({ ...navState, page }, "replace");
   const setKeywordFilter = (next: string) => {
     setKeyword(next);
     if (navState.page !== 1) onNavigate({ ...navState, page: 1 }, "replace");
@@ -434,11 +454,15 @@ function DocumentsTable({
       className="space-y-4"
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h2 className="truncate text-lg font-semibold">
+        <h2 className="truncate text-base font-semibold tracking-tight">
           {labels.detail.documents}
         </h2>
         {canEdit ? (
-          <Button type="button" onClick={() => setUploadOpen(true)}>
+          <Button
+            type="button"
+            className="h-9 rounded-lg text-[13px] shadow-none"
+            onClick={() => setUploadOpen(true)}
+          >
             <UploadIcon aria-hidden className="size-4" />
             {labels.documents.uploadButton}
           </Button>
@@ -453,7 +477,7 @@ function DocumentsTable({
           />
           <Input
             type="search"
-            className="pl-8"
+            className="border-input/80 bg-background h-9 rounded-lg pl-8 text-[13px] shadow-none md:text-[13px]"
             value={keyword}
             placeholder={labels.documents.searchPlaceholder}
             aria-label={labels.documents.searchAria}
@@ -470,13 +494,13 @@ function DocumentsTable({
             }
           >
             <SelectTrigger
-              className="w-36"
+              className="border-input/80 bg-background h-9 w-36 rounded-lg text-[13px] shadow-none"
               aria-label={labels.documents.statusFilterLabel}
             >
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">
+            <SelectContent className="rounded-lg">
+              <SelectItem className="text-[13px]" value="all">
                 {labels.documents.statusFilterAll}
               </SelectItem>
               {(
@@ -489,7 +513,7 @@ function DocumentsTable({
                   "deleting",
                 ] as const
               ).map((status) => (
-                <SelectItem key={status} value={status}>
+                <SelectItem className="text-[13px]" key={status} value={status}>
                   {labels.documentStatus[status]}
                 </SelectItem>
               ))}
@@ -500,12 +524,12 @@ function DocumentsTable({
             onValueChange={(value) => setSort(value as KnowledgeDocumentSort)}
           >
             <SelectTrigger
-              className="w-36"
+              className="border-input/80 bg-background h-9 w-36 rounded-lg text-[13px] shadow-none"
               aria-label={labels.documents.sortLabel}
             >
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className="rounded-lg">
               {(
                 [
                   "created_desc",
@@ -514,7 +538,7 @@ function DocumentsTable({
                   "name_desc",
                 ] as const
               ).map((sort) => (
-                <SelectItem key={sort} value={sort}>
+                <SelectItem className="text-[13px]" key={sort} value={sort}>
                   {labels.documents.sortOptions[sort]}
                 </SelectItem>
               ))}
@@ -524,24 +548,25 @@ function DocumentsTable({
       </div>
 
       {retryDocument.error ? (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-destructive text-[13px]">
           {knowledgeErrorMessage(retryDocument.error, labels.errors)}
         </p>
       ) : null}
       {toggleDocuments.error ? (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-destructive text-[13px]">
           {knowledgeErrorMessage(toggleDocuments.error, labels.errors)}
         </p>
       ) : null}
       {recoverableRefreshError ? (
         <div
           role="alert"
-          className="border-destructive/30 bg-destructive/5 flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 text-sm"
+          className="border-destructive/30 bg-destructive/5 flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 text-[13px]"
         >
           <span className="text-destructive min-w-0 flex-1">
             {knowledgeErrorMessage(documents.error, labels.errors)}
           </span>
           <Button
+            className="h-8 rounded-lg text-[13px] shadow-none"
             type="button"
             variant="outline"
             size="sm"
@@ -556,7 +581,7 @@ function DocumentsTable({
       {summaryActive ? (
         <p
           data-testid="knowledge-processing-summary"
-          className="flex flex-wrap gap-x-3 gap-y-1 text-xs"
+          className="border-border/60 bg-muted/40 flex flex-wrap gap-x-3 gap-y-1 rounded-lg border px-3 py-2 text-xs"
         >
           {summaryCounts.processing > 0 ? (
             <span className="text-muted-foreground">
@@ -586,13 +611,14 @@ function DocumentsTable({
       {canEdit && selectedIds.length > 0 ? (
         <div
           data-testid="knowledge-batch-bar"
-          className="border-border bg-muted/50 flex flex-wrap items-center gap-2 rounded-xl border px-4 py-2 text-sm"
+          className="border-selection/20 bg-selection-subtle/50 flex flex-wrap items-center gap-2 rounded-lg border px-4 py-2 text-[13px]"
         >
           <span className="font-medium">
             {labels.documents.selectedCount(selectedIds.length)}
           </span>
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
             <Button
+              className="h-8 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               size="sm"
@@ -608,6 +634,7 @@ function DocumentsTable({
               {labels.documents.batchEnable}
             </Button>
             <Button
+              className="h-8 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               size="sm"
@@ -623,6 +650,7 @@ function DocumentsTable({
               {labels.documents.batchDisable}
             </Button>
             <Button
+              className="h-8 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               size="sm"
@@ -635,13 +663,14 @@ function DocumentsTable({
               type="button"
               variant="outline"
               size="sm"
-              className="text-destructive"
+              className="text-destructive h-8 rounded-lg text-[13px] shadow-none"
               disabled={batchPending}
               onClick={() => setBatchDeleteOpen(true)}
             >
               {labels.documents.batchDelete}
             </Button>
             <Button
+              className="h-8 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="ghost"
               size="sm"
@@ -656,30 +685,30 @@ function DocumentsTable({
       {documents.isLoading ? (
         <Skeleton className="h-40 rounded-xl" />
       ) : blockingDocumentsError ? (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-destructive text-[13px]">
           {knowledgeErrorMessage(documents.error, labels.errors)}
         </p>
       ) : items.length === 0 ? (
-        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm">
+        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-[13px]">
           {labels.documents.empty}
         </p>
       ) : derived.filteredTotal === 0 ? (
-        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-sm">
+        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-[13px]">
           {labels.documents.filteredEmpty}
         </p>
       ) : (
         <div
-          className="border-border overflow-x-auto rounded-xl border"
+          className="border-border/80 bg-card overflow-x-auto rounded-xl border shadow-xs"
           data-testid="knowledge-documents-table"
         >
-          <table className="w-full min-w-[680px] table-fixed text-left text-sm">
-            <thead className="bg-muted/60">
+          <table className="w-full min-w-[680px] table-fixed text-left text-[13px]">
+            <thead className="bg-muted/70 text-muted-foreground text-xs [&_th]:font-medium">
               <tr>
                 {canEdit ? (
                   <th className="w-10 px-3 py-3">
                     <input
                       type="checkbox"
-                      className="accent-primary size-4 align-middle"
+                      className="accent-selection size-4 align-middle"
                       aria-label={labels.documents.selectAllAria}
                       checked={allSelected}
                       onChange={(event) =>
@@ -692,9 +721,7 @@ function DocumentsTable({
                     />
                   </th>
                 ) : null}
-                <th className="w-36 px-3 py-3">
-                  {labels.documents.columns.name}
-                </th>
+                <th className="px-3 py-3">{labels.documents.columns.name}</th>
                 <th className="w-36 px-3 py-3">
                   {labels.documents.columns.status}
                 </th>
@@ -719,12 +746,18 @@ function DocumentsTable({
             </thead>
             <tbody data-testid="knowledge-document-rows">
               {derived.rows.map((document) => (
-                <tr key={document.id} className="group border-t align-top">
+                <tr
+                  key={document.id}
+                  className={cn(
+                    "group border-border/60 hover:bg-muted/40 border-t align-top transition-colors",
+                    selected.has(document.id) && "bg-selection-subtle/40",
+                  )}
+                >
                   {canEdit ? (
                     <td className="px-3 py-3">
                       <input
                         type="checkbox"
-                        className="accent-primary size-4 align-middle"
+                        className="accent-selection size-4 align-middle"
                         aria-label={labels.documents.selectRowAria(
                           document.name,
                         )}
@@ -737,23 +770,33 @@ function DocumentsTable({
                     </td>
                   ) : null}
                   <td className="px-3 py-3">
-                    <span
-                      title={document.name}
-                      className="text-foreground block truncate font-medium"
-                    >
-                      {document.name}
-                    </span>
-                    {document.original_name !== document.name ? (
-                      <span
-                        title={document.original_name}
-                        className="text-muted-foreground block truncate text-xs"
-                      >
-                        {document.original_name}
-                      </span>
-                    ) : null}
+                    <div className="flex min-w-0 items-center gap-3">
+                      <KnowledgeFileTypeIcon
+                        fileName={document.original_name}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <span
+                          title={document.name}
+                          className="text-foreground block truncate font-medium"
+                        >
+                          {document.name}
+                        </span>
+                        {document.original_name !== document.name ? (
+                          <span
+                            title={document.original_name}
+                            className="text-muted-foreground block truncate text-xs"
+                          >
+                            {document.original_name}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
                   </td>
                   <td className="px-3 py-3">
-                    <Badge variant={documentStatusVariant(document.status)}>
+                    <Badge
+                      variant={documentStatusVariant(document.status)}
+                      className={documentStatusClassName(document.status)}
+                    >
                       {labels.documentStatus[document.status]}
                     </Badge>
                     {document.task_progress ? (
@@ -768,6 +811,7 @@ function DocumentsTable({
                   </td>
                   <td className="px-3 py-3">
                     <Switch
+                      className="data-[state=checked]:bg-success/80"
                       checked={document.enabled}
                       disabled={
                         !canEdit ||
@@ -797,7 +841,7 @@ function DocumentsTable({
                   <td className="text-muted-foreground px-3 py-3 tabular-nums">
                     {document.word_count.toLocaleString()}
                   </td>
-                  <td className="bg-background group-hover:bg-muted/20 sticky right-0 z-10 px-2 py-2.5 shadow-[-8px_0_12px_-12px_rgba(0,0,0,0.45)]">
+                  <td className="bg-background group-hover:bg-muted sticky right-0 z-10 px-2 py-2.5 shadow-[-8px_0_12px_-12px_rgba(0,0,0,0.45)]">
                     {document.status === "ready" ||
                     (document.status !== "uploading" &&
                       document.status !== "deleting") ||
@@ -809,7 +853,7 @@ function DocumentsTable({
                               type="button"
                               variant="ghost"
                               size="icon"
-                              className="size-8"
+                              className="text-muted-foreground hover:text-foreground size-8 rounded-md text-[13px] shadow-none"
                               aria-label={labels.documents.actionsAria(
                                 document.name,
                               )}
@@ -820,9 +864,13 @@ function DocumentsTable({
                               />
                             </Button>
                           </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="w-48">
+                          <DropdownMenuContent
+                            align="end"
+                            className="w-48 rounded-lg"
+                          >
                             {document.status === "ready" ? (
                               <DropdownMenuItem
+                                className="text-[13px]"
                                 onSelect={() => onBrowse(document)}
                               >
                                 <ListTreeIcon aria-hidden className="size-4" />
@@ -831,7 +879,7 @@ function DocumentsTable({
                             ) : null}
                             {document.status !== "uploading" &&
                             document.status !== "deleting" ? (
-                              <DropdownMenuItem asChild>
+                              <DropdownMenuItem className="text-[13px]" asChild>
                                 <a
                                   href={knowledgeDocumentDownloadURL(
                                     scope.projectId,
@@ -849,6 +897,7 @@ function DocumentsTable({
                             ) : null}
                             {canEdit && document.status === "failed" ? (
                               <DropdownMenuItem
+                                className="text-[13px]"
                                 disabled={retryDocument.isPending}
                                 onSelect={() =>
                                   retryDocument.mutate({
@@ -863,6 +912,7 @@ function DocumentsTable({
                             ) : null}
                             {canEdit && document.status !== "deleting" ? (
                               <DropdownMenuItem
+                                className="text-[13px]"
                                 onSelect={() => setRenaming(document)}
                               >
                                 <PencilIcon aria-hidden className="size-4" />
@@ -871,6 +921,7 @@ function DocumentsTable({
                             ) : null}
                             {canEdit && document.status !== "deleting" ? (
                               <DropdownMenuItem
+                                className="text-[13px]"
                                 onSelect={() =>
                                   setEditingMetadataId(document.id)
                                 }
@@ -883,6 +934,7 @@ function DocumentsTable({
                             (document.status === "ready" ||
                               document.status === "failed") ? (
                               <DropdownMenuItem
+                                className="text-[13px]"
                                 onSelect={() => setReparsingId(document.id)}
                               >
                                 <FileCog2Icon aria-hidden className="size-4" />
@@ -891,6 +943,7 @@ function DocumentsTable({
                             ) : null}
                             {canEdit ? (
                               <DropdownMenuItem
+                                className="text-[13px]"
                                 variant="destructive"
                                 onSelect={() => setDeleting(document)}
                               >
@@ -911,7 +964,7 @@ function DocumentsTable({
       )}
 
       {derived.filteredTotal > 0 ? (
-        <div className="text-muted-foreground flex items-center justify-between gap-2 text-sm">
+        <div className="text-muted-foreground flex items-center justify-between gap-2 text-xs">
           <span data-testid="knowledge-documents-page-info">
             {labels.documents.pageInfo(
               derived.page,
@@ -921,6 +974,7 @@ function DocumentsTable({
           </span>
           <div className="flex items-center gap-1.5">
             <Button
+              className="h-8 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               size="sm"
@@ -931,6 +985,7 @@ function DocumentsTable({
               {labels.documents.previousPage}
             </Button>
             <Button
+              className="h-8 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               size="sm"
@@ -995,25 +1050,33 @@ function DocumentsTable({
           if (!open) closeDeleteDialog();
         }}
       >
-        <DialogContent>
+        <DialogContent className="border-border/80 rounded-xl text-[13px]">
           <DialogHeader>
-            <DialogTitle>{labels.documents.deleteTitle}</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-base font-semibold">
+              {labels.documents.deleteTitle}
+            </DialogTitle>
+            <DialogDescription className="text-[13px] leading-5">
               {deleting
                 ? labels.documents.deleteDescription(deleting.name)
                 : ""}
             </DialogDescription>
           </DialogHeader>
           {deleteDocument.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(deleteDocument.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={closeDeleteDialog}>
+            <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              type="button"
+              variant="outline"
+              onClick={closeDeleteDialog}
+            >
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="destructive"
               disabled={deleteDocument.isPending}
@@ -1039,20 +1102,23 @@ function DocumentsTable({
           if (!open) closeBatchDeleteDialog();
         }}
       >
-        <DialogContent>
+        <DialogContent className="border-border/80 rounded-xl text-[13px]">
           <DialogHeader>
-            <DialogTitle>{labels.documents.batchDeleteTitle}</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-base font-semibold">
+              {labels.documents.batchDeleteTitle}
+            </DialogTitle>
+            <DialogDescription className="text-[13px] leading-5">
               {labels.documents.batchDeleteDescription(selectedIds.length)}
             </DialogDescription>
           </DialogHeader>
           {batchDelete.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(batchDelete.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               onClick={closeBatchDeleteDialog}
@@ -1060,6 +1126,7 @@ function DocumentsTable({
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="destructive"
               disabled={batchDelete.isPending || selectedIds.length === 0}
@@ -1109,9 +1176,11 @@ function RenameDocumentDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent>
+      <DialogContent className="border-border/80 rounded-xl text-[13px]">
         <DialogHeader>
-          <DialogTitle>{labels.documents.renameTitle}</DialogTitle>
+          <DialogTitle className="text-base font-semibold">
+            {labels.documents.renameTitle}
+          </DialogTitle>
         </DialogHeader>
         <form
           className="grid gap-4"
@@ -1128,9 +1197,10 @@ function RenameDocumentDialog({
             );
           }}
         >
-          <label className="grid gap-1.5 text-sm">
+          <label className="grid gap-1.5 text-[13px]">
             <span className="font-medium">{labels.documents.renameLabel}</span>
             <Input
+              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
               value={name}
               required
               maxLength={255}
@@ -1138,15 +1208,21 @@ function RenameDocumentDialog({
             />
           </label>
           {renameDocument.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(renameDocument.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
+            <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              type="button"
+              variant="outline"
+              onClick={onClose}
+            >
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="submit"
               disabled={renameDocument.isPending || !name.trim()}
             >
@@ -1265,12 +1341,12 @@ function DocumentMetadataDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent>
+      <DialogContent className="border-border/80 rounded-xl text-[13px]">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="text-base font-semibold">
             {labels.documents.metadataTitle(document.name)}
           </DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-[13px] leading-5">
             {labels.documents.metadataClearHint}
           </DialogDescription>
         </DialogHeader>
@@ -1284,16 +1360,16 @@ function DocumentMetadataDialog({
           {fields.isLoading ? (
             <Skeleton className="h-20 rounded-lg" />
           ) : fields.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(fields.error, labels.errors)}
             </p>
           ) : fieldItems.length === 0 ? (
-            <p className="text-muted-foreground text-sm">
+            <p className="text-muted-foreground text-[13px]">
               {labels.documents.metadataEmpty}
             </p>
           ) : (
             fieldItems.map((field) => (
-              <label key={field.id} className="grid gap-1.5 text-sm">
+              <label key={field.id} className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
                   {field.name}
                   <span className="text-muted-foreground ml-2 text-xs font-normal">
@@ -1309,6 +1385,7 @@ function DocumentMetadataDialog({
                   </span>
                 </span>
                 <Input
+                  className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                   type={
                     field.field_type === "number"
                       ? "number"
@@ -1331,15 +1408,21 @@ function DocumentMetadataDialog({
             ))
           )}
           {setMetadata.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(setMetadata.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
+            <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              type="button"
+              variant="outline"
+              onClick={onClose}
+            >
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="submit"
               disabled={
                 setMetadata.isPending ||
@@ -1456,12 +1539,12 @@ function BatchMetadataDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="max-h-[85vh] overflow-y-auto">
+      <DialogContent className="border-border/80 max-h-[85vh] overflow-y-auto rounded-xl text-[13px]">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="text-base font-semibold">
             {labels.documents.batchMetadataTitle(documents.length)}
           </DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-[13px] leading-5">
             {labels.documents.batchMetadataDescription}
           </DialogDescription>
         </DialogHeader>
@@ -1475,11 +1558,11 @@ function BatchMetadataDialog({
           {fields.isLoading ? (
             <Skeleton className="h-20 rounded-lg" />
           ) : fields.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(fields.error, labels.errors)}
             </p>
           ) : fieldItems.length === 0 ? (
-            <p className="text-muted-foreground text-sm">
+            <p className="text-muted-foreground text-[13px]">
               {labels.documents.metadataEmpty}
             </p>
           ) : (
@@ -1489,7 +1572,7 @@ function BatchMetadataDialog({
               return (
                 <div
                   key={field.id}
-                  className="grid gap-1.5 text-sm"
+                  className="grid gap-1.5 text-[13px]"
                   data-testid="knowledge-batch-field"
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -1526,25 +1609,26 @@ function BatchMetadataDialog({
                       }
                     >
                       <SelectTrigger
-                        className="w-28 shrink-0"
+                        className="border-input/80 bg-background w-28 shrink-0 rounded-lg text-[13px] shadow-none"
                         aria-label={`${field.name} mode`}
                       >
                         <SelectValue />
                       </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="keep">
+                      <SelectContent className="rounded-lg">
+                        <SelectItem className="text-[13px]" value="keep">
                           {labels.documents.batchMetadataModeKeep}
                         </SelectItem>
-                        <SelectItem value="set">
+                        <SelectItem className="text-[13px]" value="set">
                           {labels.documents.batchMetadataModeSet}
                         </SelectItem>
-                        <SelectItem value="clear">
+                        <SelectItem className="text-[13px]" value="clear">
                           {labels.documents.batchMetadataModeClear}
                         </SelectItem>
                       </SelectContent>
                     </Select>
                     {mode === "set" ? (
                       <Input
+                        className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                         type={
                           field.field_type === "number"
                             ? "number"
@@ -1582,15 +1666,21 @@ function BatchMetadataDialog({
             })
           )}
           {setMetadata.error ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(setMetadata.error, labels.errors)}
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
+            <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              type="button"
+              variant="outline"
+              onClick={onClose}
+            >
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="submit"
               disabled={
                 setMetadata.isPending ||
@@ -1761,12 +1851,12 @@ function ReparseDocumentDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
+      <DialogContent className="border-border/80 max-h-[85vh] overflow-y-auto rounded-xl text-[13px] sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="text-base font-semibold">
             {labels.documents.reparseTitle(document.name)}
           </DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-[13px] leading-5">
             {labels.documents.reparseWarning}
           </DialogDescription>
         </DialogHeader>
@@ -1778,11 +1868,12 @@ function ReparseDocumentDialog({
           }}
         >
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1.5 text-sm">
+            <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
                 {labels.documents.chunkSizeLabel}
               </span>
               <Input
+                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                 type="number"
                 min={KNOWLEDGE_CHUNK_SIZE_MIN}
                 max={KNOWLEDGE_CHUNK_SIZE_MAX}
@@ -1791,11 +1882,12 @@ function ReparseDocumentDialog({
                 onChange={(event) => setChunkSize(event.target.value)}
               />
             </label>
-            <label className="grid gap-1.5 text-sm">
+            <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
                 {labels.documents.chunkOverlapLabel}
               </span>
               <Input
+                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                 type="number"
                 min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
                 max={KNOWLEDGE_CHUNK_OVERLAP_MAX}
@@ -1808,17 +1900,18 @@ function ReparseDocumentDialog({
               />
             </label>
           </div>
-          <label className="grid gap-1.5 text-sm">
+          <label className="grid gap-1.5 text-[13px]">
             <span className="font-medium">
               {labels.documents.chunkSeparatorLabel}
             </span>
             <Input
+              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
               value={chunkSeparator}
               aria-invalid={!isChunkSeparatorValid(chunkSeparator) || undefined}
               onChange={(event) => setChunkSeparator(event.target.value)}
             />
           </label>
-          <fieldset className="grid gap-2 text-sm">
+          <fieldset className="grid gap-2 text-[13px]">
             <legend className="font-medium">
               {labels.documents.chunkingModeLabel}
             </legend>
@@ -1826,7 +1919,7 @@ function ReparseDocumentDialog({
               <input
                 type="radio"
                 name="reparse-chunking-mode"
-                className="accent-primary size-4"
+                className="accent-selection size-4"
                 checked={chunkingMode === "general"}
                 onChange={() => setChunkingMode("general")}
               />
@@ -1836,7 +1929,7 @@ function ReparseDocumentDialog({
               <input
                 type="radio"
                 name="reparse-chunking-mode"
-                className="accent-primary size-4"
+                className="accent-selection size-4"
                 checked={chunkingMode === "parent_child"}
                 onChange={() => setChunkingMode("parent_child")}
               />
@@ -1845,11 +1938,12 @@ function ReparseDocumentDialog({
           </fieldset>
           {chunkingMode === "parent_child" ? (
             <div className="grid gap-3 sm:grid-cols-2">
-              <label className="grid gap-1.5 text-sm">
+              <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
                   {labels.documents.childChunkSizeLabel}
                 </span>
                 <Input
+                  className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                   type="number"
                   min={KNOWLEDGE_CHILD_CHUNK_SIZE_MIN}
                   max={KNOWLEDGE_CHILD_CHUNK_SIZE_MAX}
@@ -1863,11 +1957,12 @@ function ReparseDocumentDialog({
                   onChange={(event) => setChildChunkSize(event.target.value)}
                 />
               </label>
-              <label className="grid gap-1.5 text-sm">
+              <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
                   {labels.documents.childChunkSeparatorLabel}
                 </span>
                 <Input
+                  className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                   value={childChunkSeparator}
                   aria-invalid={
                     !isChunkSeparatorValid(childChunkSeparator) || undefined
@@ -1879,11 +1974,11 @@ function ReparseDocumentDialog({
               </label>
             </div>
           ) : null}
-          <div className="grid gap-2 text-sm">
+          <div className="grid gap-2 text-[13px]">
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
-                className="accent-primary size-4"
+                className="accent-selection size-4"
                 checked={removeExtraSpaces}
                 onChange={(event) => setRemoveExtraSpaces(event.target.checked)}
               />
@@ -1892,7 +1987,7 @@ function ReparseDocumentDialog({
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
-                className="accent-primary size-4"
+                className="accent-selection size-4"
                 checked={removeUrlsEmails}
                 onChange={(event) => setRemoveUrlsEmails(event.target.checked)}
               />
@@ -1902,6 +1997,7 @@ function ReparseDocumentDialog({
 
           <div className="space-y-2">
             <Button
+              className="h-8 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               size="sm"
@@ -1913,7 +2009,7 @@ function ReparseDocumentDialog({
                 : labels.documents.reparsePreviewButton}
             </Button>
             {preview.error && !conflict ? (
-              <p role="alert" className="text-destructive text-sm">
+              <p role="alert" className="text-destructive text-[13px]">
                 {knowledgeErrorMessage(preview.error, labels.errors)}
               </p>
             ) : null}
@@ -1949,23 +2045,29 @@ function ReparseDocumentDialog({
           {conflict ? (
             <p
               role="alert"
-              className="text-destructive text-sm"
+              className="text-destructive text-[13px]"
               data-testid="knowledge-reparse-conflict"
             >
               {labels.documents.reparseConflict}
             </p>
           ) : null}
           {reparse.error && !conflict ? (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-destructive text-[13px]">
               {knowledgeErrorMessage(reparse.error, labels.errors)}
             </p>
           ) : null}
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
+            <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
+              type="button"
+              variant="outline"
+              onClick={onClose}
+            >
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="submit"
               variant="destructive"
               disabled={reparse.isPending || !paramsValid}
@@ -2118,10 +2220,12 @@ function UploadDocumentDialog({
   return (
     <Dialog open={open} onOpenChange={close}>
       {/* Parent-child mode adds enough fields to outgrow small viewports. */}
-      <DialogContent className="max-h-[85vh] overflow-y-auto">
+      <DialogContent className="border-border/80 max-h-[85vh] overflow-y-auto rounded-xl text-[13px]">
         <DialogHeader>
-          <DialogTitle>{labels.documents.uploadTitle}</DialogTitle>
-          <DialogDescription>
+          <DialogTitle className="text-base font-semibold">
+            {labels.documents.uploadTitle}
+          </DialogTitle>
+          <DialogDescription className="text-[13px] leading-5">
             {labels.documents.uploadDescription}
           </DialogDescription>
         </DialogHeader>
@@ -2132,9 +2236,10 @@ function UploadDocumentDialog({
             void startUpload();
           }}
         >
-          <label className="grid gap-1.5 text-sm">
+          <label className="grid gap-1.5 text-[13px]">
             <span className="font-medium">{labels.documents.fileLabel}</span>
             <Input
+              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
               key={fileInputKey}
               type="file"
               // After a partial failure the input is cleared while the failed
@@ -2148,11 +2253,12 @@ function UploadDocumentDialog({
             />
           </label>
           {files.length <= 1 ? (
-            <label className="grid gap-1.5 text-sm">
+            <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
                 {labels.documents.displayNameLabel}
               </span>
               <Input
+                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                 value={displayName}
                 maxLength={200}
                 placeholder={labels.documents.displayNamePlaceholder}
@@ -2160,7 +2266,7 @@ function UploadDocumentDialog({
               />
             </label>
           ) : null}
-          <fieldset className="grid gap-2 text-sm">
+          <fieldset className="grid gap-2 text-[13px]">
             <legend className="font-medium">
               {labels.documents.chunkingModeLabel}
             </legend>
@@ -2176,7 +2282,7 @@ function UploadDocumentDialog({
                     type="radio"
                     name="upload-chunking-mode"
                     value={mode}
-                    className="accent-primary size-4"
+                    className="accent-selection size-4"
                     checked={chunkingMode === mode}
                     onChange={() => setChunkingMode(mode)}
                   />
@@ -2191,11 +2297,12 @@ function UploadDocumentDialog({
             ) : null}
           </fieldset>
           <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-1.5 text-sm">
+            <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
                 {labels.documents.chunkSizeLabel}
               </span>
               <Input
+                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                 type="number"
                 min={KNOWLEDGE_CHUNK_SIZE_MIN}
                 max={KNOWLEDGE_CHUNK_SIZE_MAX}
@@ -2207,11 +2314,12 @@ function UploadDocumentDialog({
                 {labels.documents.chunkSizeHint}
               </span>
             </label>
-            <label className="grid gap-1.5 text-sm">
+            <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
                 {labels.documents.chunkOverlapLabel}
               </span>
               <Input
+                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                 type="number"
                 min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
                 max={KNOWLEDGE_CHUNK_OVERLAP_MAX}
@@ -2224,11 +2332,12 @@ function UploadDocumentDialog({
               </span>
             </label>
           </div>
-          <label className="grid gap-1.5 text-sm">
+          <label className="grid gap-1.5 text-[13px]">
             <span className="font-medium">
               {labels.documents.chunkSeparatorLabel}
             </span>
             <Input
+              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
               required
               maxLength={64}
               value={chunkSeparator}
@@ -2240,11 +2349,12 @@ function UploadDocumentDialog({
           </label>
           {chunkingMode === "parent_child" ? (
             <div className="grid grid-cols-2 gap-3">
-              <label className="grid gap-1.5 text-sm">
+              <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
                   {labels.documents.childChunkSizeLabel}
                 </span>
                 <Input
+                  className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                   type="number"
                   min={KNOWLEDGE_CHILD_CHUNK_SIZE_MIN}
                   max={KNOWLEDGE_CHILD_CHUNK_SIZE_MAX}
@@ -2253,11 +2363,12 @@ function UploadDocumentDialog({
                   onChange={(event) => setChildChunkSize(event.target.value)}
                 />
               </label>
-              <label className="grid gap-1.5 text-sm">
+              <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
                   {labels.documents.childChunkSeparatorLabel}
                 </span>
                 <Input
+                  className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
                   required
                   maxLength={64}
                   value={childChunkSeparator}
@@ -2271,14 +2382,14 @@ function UploadDocumentDialog({
               </label>
             </div>
           ) : null}
-          <fieldset className="grid gap-2 text-sm">
+          <fieldset className="grid gap-2 text-[13px]">
             <legend className="font-medium">
               {labels.documents.preprocessingLabel}
             </legend>
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
-                className="accent-primary size-4"
+                className="accent-selection size-4"
                 checked={removeExtraSpaces}
                 onChange={(event) => setRemoveExtraSpaces(event.target.checked)}
               />
@@ -2287,7 +2398,7 @@ function UploadDocumentDialog({
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
-                className="accent-primary size-4"
+                className="accent-selection size-4"
                 checked={removeUrlsEmails}
                 onChange={(event) => setRemoveUrlsEmails(event.target.checked)}
               />
@@ -2313,6 +2424,7 @@ function UploadDocumentDialog({
           ) : null}
           <DialogFooter>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="button"
               variant="outline"
               disabled={uploadingIndex !== null}
@@ -2321,6 +2433,7 @@ function UploadDocumentDialog({
               {labels.common.cancel}
             </Button>
             <Button
+              className="h-9 rounded-lg text-[13px] shadow-none"
               type="submit"
               disabled={
                 uploadingIndex !== null ||
