@@ -173,6 +173,38 @@ def test_skill_design_contracts_are_exact_reexports() -> None:
         assert getattr(legacy, name) is getattr(owning, name)
 
 
+def test_agent_design_contracts_are_exact_reexports() -> None:
+    from app.shared_assets import agent_design_contracts as owning
+    from app.shared_assets import agent_design_service as legacy
+
+    names = (
+        "AgentDesignStatus",
+        "AgentDesignProgressStatus",
+        "AgentDesignServiceErrorCode",
+        "CreateAgentDesignSession",
+        "AgentDesignBlueprint",
+        "AgentDesignMessage",
+        "AgentDesignProgressItem",
+        "AgentDesignClarificationOption",
+        "AgentDesignClarificationRequest",
+        "AgentDesignClarificationResponse",
+        "AgentDesignMessageTurn",
+        "AgentDesignClarificationTurn",
+        "AgentDesignBlueprintTurn",
+        "AgentDesignTurn",
+        "SubmitAgentDesignTurn",
+        "SetAgentDesignGenerationPreference",
+        "CommitAgentDesignSession",
+        "CancelAgentDesignSession",
+        "AgentDesignSessionView",
+        "AgentDesignSessionSummary",
+        "AgentDesignSessionPage",
+        "AgentDesignCommitResult",
+    )
+    for name in names:
+        assert getattr(legacy, name) is getattr(owning, name)
+
+
 def test_skill_design_codec_is_the_owning_module() -> None:
     from app.shared_assets import skill_design_codec as owning
     from app.shared_assets.skill_design_service import SkillDesignService
