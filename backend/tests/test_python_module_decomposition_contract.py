@@ -397,6 +397,15 @@ def test_provider_request_guard_is_the_owner_and_usage_is_a_facade() -> None:
         "ProviderDispatchOutcomeAmbiguous",
         "ProviderRequestEvidenceObserver",
         "FinalProviderRequestGuard",
+        "_join_durable_observer_transition",
+        "_record_ambiguity_despite_cancellation",
+        "_record_proven_no_response_failure",
+        "_record_provider_failed_response",
+        "_model_response",
+        "_provider_input_tokens",
+        "_runtime_run_id",
+        "_runtime_token_usage_tracking_enabled",
+        "_attach_measurement",
     )
     for name in names:
         assert getattr(legacy, name) is getattr(owning, name)
