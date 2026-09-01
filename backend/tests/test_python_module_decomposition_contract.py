@@ -345,3 +345,37 @@ def test_production_consumers_use_skill_package_integrity_owner() -> None:
         source = path.read_text(encoding="utf-8")
         assert "SkillService._verified_archive_files" not in source
         assert "_analyze_skill_files" not in source
+
+
+def test_provider_request_profile_is_the_owning_module() -> None:
+    from deerflow.agents.middlewares import provider_request_profile as owning
+    from deerflow.agents.middlewares import provider_request_usage as legacy
+
+    names = (
+        "ProviderRequestUsageUnsupported",
+        "ProviderRequestProfileDrift",
+        "ContextCapacityExceeded",
+        "ProviderRequestComponentSnapshot",
+        "ProviderToolSchemaFact",
+        "ProviderRequestProfileSnapshot",
+        "ProviderRequestMeasurementSnapshot",
+        "ProviderRequestComponent",
+        "ProviderRequestContextMeasurement",
+        "ProviderRequestMaterialMeasurement",
+        "ProviderRequestProfile",
+        "provider_tool_schema_fact",
+        "canonicalize_full_tools",
+        "collect_middleware_tools",
+        "collect_middleware_system_prompts",
+        "collect_custom_middleware_request_contract",
+        "contains_visual_material",
+        "resolve_provider_adapter",
+        "declared_visual_max_tokens_per_image",
+        "provider_request_closure_identity",
+        "provider_request_runtime_policy_identity",
+        "provider_request_runtime_policy_compatibility_identity",
+        "build_provider_request_profile",
+        "build_provider_request_profile_snapshot_from_facts",
+    )
+    for name in names:
+        assert getattr(legacy, name) is getattr(owning, name)

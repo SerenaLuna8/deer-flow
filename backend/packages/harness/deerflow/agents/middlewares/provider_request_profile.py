@@ -1,0 +1,905 @@
+"""Provider request profiles, canonicalization, and stable fingerprints."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, NotRequired, TypedDict
+
+from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelRequest
+from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.tools import BaseTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
+
+from deerflow.agents.middlewares.manifest import MiddlewareHook, middleware_hooks
+from deerflow.agents.middlewares.provider_request_cost_adapter import (
+    PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE,
+    provider_visible_message_payload,
+    provider_visible_messages_payload,
+)
+from deerflow.error_codes import PublicRunError, PublicRunErrorCode
+
+PROVIDER_REQUEST_ESTIMATOR_REVISION = "provider-wire-engineering-v7"
+PROVIDER_REQUEST_ERROR_CONTRACT = "versioned_engineering_allowance_for_app_owned_serialized_material_plus_declared_provider_overhead"
+_SERIALIZATION_FRAMING_UTF8_BYTES = 1_024
+_ESTIMATE_UTF8_BYTES_PER_TOKEN = 4
+
+# These are platform declarations, not estimates learned from observed usage.
+# UTF-8 bytes cover all app-owned material; these allowances cover provider
+# framing that is not present in the app serialization. Unknown adapters fail
+# closed instead of inheriting a zero-overhead assumption.
+_PROVIDER_OVERHEAD: dict[str, tuple[int, int, int]] = {
+    "anthropic": (256, 32, 96),
+    "deepseek": (256, 32, 96),
+    "openai": (256, 32, 96),
+    "openai_responses": (256, 32, 96),
+    "vllm": (256, 32, 96),
+}
+_PROVIDER_ERROR_ALLOWANCE_RATIO: dict[str, float] = {
+    "anthropic": 0.25,
+    "deepseek": 0.20,
+    "openai": 0.20,
+    "openai_responses": 0.20,
+    "vllm": 0.25,
+}
+# Declared per-image Token upper bounds for adapters whose providers cap or
+# downscale oversized images server-side (Anthropic ~1,590 Tokens at its
+# 1568px cap; OpenAI high-detail tiling stays under 2,048 after its 2048/768
+# resize). These are platform declarations in the same spirit as the byte
+# allowances above. Adapters without a documented per-image cap (for example
+# ``vllm``, whose cost depends on the served model) stay undeclared, and Lead
+# vision material for them remains fail-closed.
+_PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE: dict[str, int] = {
+    "anthropic": 1_600,
+    "openai": 2_048,
+    "openai_responses": 2_048,
+}
+# Mirrors ViewImageMiddleware._MAX_CURRENT_UPLOAD_IMAGES; a focused test keeps
+# the two values synchronized without importing the middleware (and its PIL
+# dependency chain) here.
+_MAX_CURRENT_UPLOAD_IMAGE_ALLOWANCE = 4
+# Declared byte allowances for the ephemeral image-context message text that
+# ViewImageMiddleware injects around visual blocks (one header plus one label
+# line per image). Visual bytes themselves are excluded from byte accounting
+# and carried as declared per-image Tokens instead.
+_VISION_CONTEXT_HEADER_UTF8_BYTES = 1_024
+_VISION_CONTEXT_PER_IMAGE_UTF8_BYTES = 512
+_VISUAL_BLOCK_TYPES = frozenset({"image", "image_url", "input_image"})
+_PROVIDER_CLASS_TO_ADAPTER = {
+    "langchain_anthropic:ChatAnthropic": "anthropic",
+    "deerflow.models.patched_deepseek:PatchedChatDeepSeek": "deepseek",
+    "langchain_openai:ChatOpenAI": "openai",
+    "deerflow.models.vllm_provider:VllmChatModel": "vllm",
+}
+
+
+class ProviderRequestUsageUnsupported(PublicRunError):
+    """Raised when the declared safety contract cannot cover a request."""
+
+    def __init__(self, detail: str | None = None) -> None:
+        self.internal_detail = detail
+        super().__init__(PublicRunErrorCode.PROVIDER_REQUEST_USAGE_UNSUPPORTED)
+
+
+class ProviderRequestProfileDrift(PublicRunError):
+    """Raised when final app-owned material exceeds the frozen profile."""
+
+    def __init__(self, detail: str | None = None) -> None:
+        self.internal_detail = detail
+        super().__init__(PublicRunErrorCode.PROVIDER_REQUEST_PROFILE_DRIFT)
+
+
+class ContextCapacityExceeded(PublicRunError):
+    """Raised before Provider invocation when final Context exceeds capacity."""
+
+    def __init__(self, detail: str | None = None) -> None:
+        self.internal_detail = detail
+        super().__init__(PublicRunErrorCode.CONTEXT_CAPACITY_EXCEEDED)
+
+
+class ProviderRequestComponentSnapshot(TypedDict):
+    estimated_tokens: int
+    error_allowance_tokens: int
+    safety_bound_tokens: int
+
+
+class ProviderToolSchemaFact(TypedDict):
+    """Secret-free identity and size of one provider-facing tool schema."""
+
+    name: str
+    schema_utf8_bytes: int
+    schema_sha256: str
+
+
+class ProviderRequestProfileSnapshot(TypedDict):
+    version: int
+    estimator_revision: str
+    error_contract: str
+    model_name: str
+    provider_adapter: str | None
+    profile_fingerprint: str
+    authority_identity: str | None
+    capture_provider_input_tokens: bool
+    closure_identity: str | None
+    mcp_closure_present: bool
+    runtime_policy_identity: str | None
+    workload_profile: str | None
+    supported: bool
+    unsupported_reason: str | None
+    supports_vision: bool
+    visual_max_tokens_per_image: NotRequired[int | None]
+    max_input_tokens: int | None
+    static_system_utf8_bytes: int
+    full_tool_schema_utf8_bytes: int
+    full_tool_count: int
+    full_tool_schema_facts: tuple[ProviderToolSchemaFact, ...]
+    bounded_overlay_utf8_bytes: int
+    bounded_overlay_message_count: int
+    provider_fixed_overhead_tokens: int
+    provider_per_message_overhead_tokens: int
+    provider_per_tool_overhead_tokens: int
+    error_allowance_ratio: float
+
+
+class ProviderRequestMeasurementSnapshot(TypedDict):
+    version: int
+    estimator_revision: str
+    error_contract: str
+    model_name: str
+    profile_fingerprint: str
+    request_fingerprint: str
+    estimated_tokens: int
+    error_allowance_tokens: int
+    safety_bound_tokens: int
+    allowed_safety_bound_tokens: int
+    message_count: int
+    full_tool_count: int
+    components: dict[str, ProviderRequestComponentSnapshot]
+    provider_input_tokens: int | None
+    provider_input_tokens_exceeded_bound: NotRequired[bool]
+    authority_identity: str | None
+    run_id: NotRequired[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestComponent:
+    estimated_tokens: int
+    error_allowance_tokens: int
+    safety_bound_tokens: int
+
+    def snapshot(self) -> ProviderRequestComponentSnapshot:
+        return {
+            "estimated_tokens": self.estimated_tokens,
+            "error_allowance_tokens": self.error_allowance_tokens,
+            "safety_bound_tokens": self.safety_bound_tokens,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestContextMeasurement:
+    estimated_tokens: int
+    error_allowance_tokens: int
+    safety_bound_tokens: int
+    material_utf8_bytes: int
+    message_count: int
+    full_tool_count: int
+    components: dict[str, ProviderRequestComponent]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestMaterialMeasurement:
+    estimated_tokens: int
+    error_allowance_tokens: int
+    safety_bound_tokens: int
+    material_utf8_bytes: int
+    message_count: int
+    tool_count: int
+    request_fingerprint: str
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _message_payload(
+    message: BaseMessage,
+    *,
+    provider_adapter: str,
+) -> dict[str, object]:
+    return provider_visible_message_payload(
+        message,
+        provider_adapter=provider_adapter,
+    )
+
+
+def _material_bytes(
+    value: object,
+    *,
+    provider_adapter: str,
+) -> bytes:
+    if isinstance(value, BaseMessage):
+        return _canonical_json(
+            _message_payload(
+                value,
+                provider_adapter=provider_adapter,
+            )
+        )
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    return _canonical_json(value)
+
+
+def _tool_payload(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
+    converted = convert_to_openai_tool(tool)
+    if not isinstance(converted, dict):
+        raise TypeError("provider tool conversion returned a non-mapping")
+    return converted
+
+
+def _tool_name(tool: BaseTool | dict[str, Any]) -> str:
+    if isinstance(tool, BaseTool):
+        return tool.name
+    function = tool.get("function")
+    if isinstance(function, Mapping) and isinstance(function.get("name"), str):
+        return function["name"]
+    name = tool.get("name")
+    if isinstance(name, str):
+        return name
+    raise ValueError("provider tool has no stable name")
+
+
+def provider_tool_schema_fact(
+    tool: BaseTool | dict[str, Any],
+) -> ProviderToolSchemaFact:
+    """Project one exact provider schema without retaining its plaintext."""
+
+    payload = _canonical_json(_tool_payload(tool))
+    return {
+        "name": _tool_name(tool),
+        "schema_utf8_bytes": len(payload),
+        "schema_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _canonicalize_tool_schema_facts(
+    facts: Sequence[Mapping[str, object]],
+) -> tuple[ProviderToolSchemaFact, ...]:
+    by_name: dict[str, ProviderToolSchemaFact] = {}
+    for raw in facts:
+        name = raw.get("name")
+        schema_utf8_bytes = raw.get("schema_utf8_bytes")
+        schema_sha256 = raw.get("schema_sha256")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(schema_utf8_bytes, int)
+            or isinstance(schema_utf8_bytes, bool)
+            or schema_utf8_bytes <= 0
+            or not isinstance(schema_sha256, str)
+            or len(schema_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in schema_sha256)
+        ):
+            raise ValueError("provider tool schema fact is invalid")
+        by_name[name] = {
+            "name": name,
+            "schema_utf8_bytes": schema_utf8_bytes,
+            "schema_sha256": schema_sha256,
+        }
+    return tuple(by_name.values())
+
+
+def _tool_schema_list_utf8_bytes(
+    facts: Sequence[ProviderToolSchemaFact],
+) -> int:
+    # Canonical JSON list framing is two brackets plus one comma between each
+    # already-canonical object payload.
+    return 2 + sum(item["schema_utf8_bytes"] for item in facts) + max(0, len(facts) - 1)
+
+
+def canonicalize_full_tools(
+    tools: Sequence[BaseTool | dict[str, Any]],
+) -> tuple[BaseTool | dict[str, Any], ...]:
+    """Apply LangChain's name-deduped effective tool-set semantics."""
+
+    by_name: dict[str, BaseTool | dict[str, Any]] = {}
+    for tool in tools:
+        by_name[_tool_name(tool)] = tool
+    return tuple(by_name.values())
+
+
+def collect_middleware_tools(
+    middlewares: Sequence[AgentMiddleware],
+) -> tuple[BaseTool | dict[str, Any], ...]:
+    """Collect tools LangChain prepends from middleware state schemas."""
+
+    collected: list[BaseTool | dict[str, Any]] = []
+    for middleware in middlewares:
+        tools = getattr(middleware, "tools", None)
+        if isinstance(tools, (list, tuple)):
+            collected.extend(tool for tool in tools if isinstance(tool, (BaseTool, dict)))
+    return tuple(collected)
+
+
+def collect_middleware_system_prompts(
+    middlewares: Sequence[AgentMiddleware],
+) -> tuple[str, ...]:
+    """Collect static system material appended by LangChain middleware."""
+
+    prompts: list[str] = []
+    for middleware in middlewares:
+        prompt = getattr(middleware, "system_prompt", None)
+        if isinstance(prompt, str) and prompt:
+            prompts.append(prompt)
+    return tuple(prompts)
+
+
+def collect_custom_middleware_request_contract(
+    middlewares: Sequence[AgentMiddleware],
+) -> tuple[tuple[object, ...], int, str | None]:
+    """Collect explicit bounds for custom hooks that can shape a model request."""
+
+    material: list[object] = []
+    message_count = 0
+    request_shaping_hooks = {
+        MiddlewareHook.BEFORE_MODEL,
+        MiddlewareHook.WRAP_MODEL_CALL,
+    }
+    for middleware in middlewares:
+        if request_shaping_hooks.isdisjoint(middleware_hooks(middleware)):
+            continue
+        bounded_material = getattr(
+            middleware,
+            "provider_request_bounded_overlay_material",
+            None,
+        )
+        bounded_message_count = getattr(
+            middleware,
+            "provider_request_bounded_overlay_message_count",
+            None,
+        )
+        if type(bounded_material) is not tuple or type(bounded_message_count) is not int or bounded_message_count < 0:
+            return (
+                (),
+                0,
+                "provider_request_usage_unsupported: custom request shaper has no bounded contract",
+            )
+        material.extend(bounded_material)
+        message_count += bounded_message_count
+    return tuple(material), message_count, None
+
+
+def contains_visual_material(messages: Sequence[BaseMessage]) -> bool:
+    """Return whether Provider-visible messages contain a visual block."""
+
+    for message in messages:
+        content = message.content
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, Mapping):
+                continue
+            block_type = str(block.get("type", "")).lower()
+            if block_type in _VISUAL_BLOCK_TYPES:
+                return True
+    return False
+
+
+def _is_visual_payload_block(block: object) -> bool:
+    return isinstance(block, Mapping) and str(block.get("type", "")).lower() in _VISUAL_BLOCK_TYPES
+
+
+def _project_visual_blocks(
+    payloads: Sequence[Mapping[str, object]],
+) -> tuple[list[Mapping[str, object]], int]:
+    """Split visual blocks out of provider payloads for byte accounting.
+
+    Visual bytes (base64 data URLs) must never be estimated as text; callers
+    account the returned count against the declared per-image Token bound.
+    """
+
+    projected: list[Mapping[str, object]] = []
+    visual_count = 0
+    for payload in payloads:
+        content = payload.get("content")
+        if not isinstance(content, list):
+            projected.append(payload)
+            continue
+        retained = [block for block in content if not _is_visual_payload_block(block)]
+        removed = len(content) - len(retained)
+        if removed == 0:
+            projected.append(payload)
+            continue
+        visual_count += removed
+        replacement = dict(payload)
+        replacement["content"] = retained
+        projected.append(replacement)
+    return projected, visual_count
+
+
+def _model_max_input_tokens(model: object) -> int | None:
+    profile = getattr(model, "profile", None)
+    value = profile.get("max_input_tokens") if isinstance(profile, Mapping) else getattr(profile, "max_input_tokens", None)
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _estimate_from_bytes(value: int) -> int:
+    return math.ceil(value / _ESTIMATE_UTF8_BYTES_PER_TOKEN)
+
+
+def _non_ascii_utf8_bytes(material: bytes) -> int:
+    return sum(1 for byte in material if byte >= 0x80)
+
+
+def _component(
+    *,
+    material_bytes: int,
+    error_allowance_ratio: float,
+    overhead_tokens: int = 0,
+    non_ascii_bytes: int = 0,
+    non_ascii_supplement_per_byte: float = 0.0,
+) -> ProviderRequestComponent:
+    estimate = _estimate_from_bytes(material_bytes)
+    # This is a deliberately versioned engineering allowance, not a proof
+    # about every provider tokenizer. Raw bytes remain separately auditable and
+    # are used for profile-drift checks; they are not treated as token usage.
+    # Non-ASCII material carries a declared per-byte supplement because bytes/4
+    # is not an upper bound for CJK-inefficient tokenizers.
+    allowance = math.ceil(estimate * error_allowance_ratio) + math.ceil(non_ascii_bytes * non_ascii_supplement_per_byte) + overhead_tokens
+    return ProviderRequestComponent(
+        estimated_tokens=estimate,
+        error_allowance_tokens=allowance,
+        safety_bound_tokens=estimate + allowance,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestProfile:
+    model_name: str
+    provider_adapter: str | None
+    system_prompt: str
+    middleware_system_prompts: tuple[str, ...]
+    tools: tuple[BaseTool | dict[str, Any], ...]
+    bounded_overlay_material: tuple[object, ...]
+    bounded_overlay_message_count: int
+    supports_vision: bool
+    max_input_tokens: int | None
+    supported: bool
+    unsupported_reason: str | None
+    provider_fixed_overhead_tokens: int
+    provider_per_message_overhead_tokens: int
+    provider_per_tool_overhead_tokens: int
+    static_system_utf8_bytes: int
+    full_tool_schema_utf8_bytes: int
+    full_tool_schema_facts: tuple[ProviderToolSchemaFact, ...]
+    bounded_overlay_utf8_bytes: int
+    profile_fingerprint: str
+    authority_identity: str | None
+    capture_provider_input_tokens: bool
+    closure_identity: str | None
+    mcp_closure_present: bool
+    runtime_policy_identity: str | None
+    workload_profile: str | None
+    error_allowance_ratio: float
+    visual_max_tokens_per_image: int | None = None
+
+    @property
+    def full_tool_count(self) -> int:
+        return len(self.tools)
+
+    def _require_supported(self) -> None:
+        if not self.supported:
+            raise ProviderRequestUsageUnsupported(self.unsupported_reason or "provider request profile is unsupported")
+
+    def snapshot(self) -> ProviderRequestProfileSnapshot:
+        return {
+            "version": 1,
+            "estimator_revision": PROVIDER_REQUEST_ESTIMATOR_REVISION,
+            "error_contract": PROVIDER_REQUEST_ERROR_CONTRACT,
+            "model_name": self.model_name,
+            "provider_adapter": self.provider_adapter,
+            "profile_fingerprint": self.profile_fingerprint,
+            "authority_identity": self.authority_identity,
+            "capture_provider_input_tokens": self.capture_provider_input_tokens,
+            "closure_identity": self.closure_identity,
+            "mcp_closure_present": self.mcp_closure_present,
+            "runtime_policy_identity": self.runtime_policy_identity,
+            "workload_profile": self.workload_profile,
+            "supported": self.supported,
+            "unsupported_reason": self.unsupported_reason,
+            "supports_vision": self.supports_vision,
+            "visual_max_tokens_per_image": self.visual_max_tokens_per_image,
+            "max_input_tokens": self.max_input_tokens,
+            "static_system_utf8_bytes": self.static_system_utf8_bytes,
+            "full_tool_schema_utf8_bytes": self.full_tool_schema_utf8_bytes,
+            "full_tool_count": self.full_tool_count,
+            "full_tool_schema_facts": self.full_tool_schema_facts,
+            "bounded_overlay_utf8_bytes": self.bounded_overlay_utf8_bytes,
+            "bounded_overlay_message_count": self.bounded_overlay_message_count,
+            "provider_fixed_overhead_tokens": self.provider_fixed_overhead_tokens,
+            "provider_per_message_overhead_tokens": self.provider_per_message_overhead_tokens,
+            "provider_per_tool_overhead_tokens": self.provider_per_tool_overhead_tokens,
+            "error_allowance_ratio": self.error_allowance_ratio,
+        }
+
+    def measure_request(self, request: ModelRequest) -> ProviderRequestMaterialMeasurement:
+        self._require_supported()
+        messages = list(request.messages)
+        if request.system_message is not None:
+            messages = [request.system_message, *messages]
+        if self.visual_max_tokens_per_image is None and contains_visual_material(messages):
+            raise ProviderRequestUsageUnsupported("provider_request_usage_unsupported: vision overhead is undeclared")
+        tools = canonicalize_full_tools(tuple(request.tools or ()))
+        actual_facts = tuple(provider_tool_schema_fact(tool) for tool in tools)
+        frozen_facts = {fact["name"]: fact for fact in self.full_tool_schema_facts}
+        if any(frozen_facts.get(fact["name"]) != fact for fact in actual_facts):
+            raise ProviderRequestProfileDrift("provider_request_profile_drift: final tool schema is outside frozen profile")
+        if self.provider_adapter is None:
+            raise ProviderRequestUsageUnsupported(
+                "provider_request_usage_unsupported: provider adapter is unavailable",
+            )
+        message_payloads = list(
+            provider_visible_messages_payload(
+                messages,
+                provider_adapter=self.provider_adapter,
+            )
+        )
+        visual_count = 0
+        if self.visual_max_tokens_per_image is not None:
+            message_payloads, visual_count = _project_visual_blocks(message_payloads)
+        tool_payloads = [_tool_payload(tool) for tool in tools]
+        material = _canonical_json({"messages": message_payloads, "tools": tool_payloads})
+        # The non-ASCII supplement covers conversation material only: the
+        # frozen profile cannot reconstruct system/tool text composition from
+        # its snapshot, so both sides of the drift comparison exclude it.
+        conversation_payloads = message_payloads[1:] if request.system_message is not None else message_payloads
+        conversation_non_ascii = _non_ascii_utf8_bytes(_canonical_json(conversation_payloads))
+        non_ascii_supplement = math.ceil(conversation_non_ascii * PROVIDER_NON_ASCII_SAFETY_SUPPLEMENT_TOKENS_PER_BYTE.get(self.provider_adapter, 0.0))
+        overhead = self.provider_fixed_overhead_tokens + len(messages) * self.provider_per_message_overhead_tokens + len(tools) * self.provider_per_tool_overhead_tokens + visual_count * (self.visual_max_tokens_per_image or 0)
+        estimate = _estimate_from_bytes(len(material))
+        allowance = math.ceil(estimate * self.error_allowance_ratio) + non_ascii_supplement + overhead
+        return ProviderRequestMaterialMeasurement(
+            estimated_tokens=estimate,
+            error_allowance_tokens=allowance,
+            safety_bound_tokens=estimate + allowance,
+            material_utf8_bytes=len(material),
+            message_count=len(message_payloads),
+            tool_count=len(tools),
+            request_fingerprint=hashlib.sha256(material).hexdigest(),
+        )
+
+
+def resolve_provider_adapter(
+    provider_adapter: str | None,
+    provider_class_path: str | None = None,
+    *,
+    model: object | None = None,
+) -> str | None:
+    resolved = provider_adapter if provider_adapter in _PROVIDER_OVERHEAD else _PROVIDER_CLASS_TO_ADAPTER.get(provider_class_path or "")
+    # ``openai_responses`` shares the native ChatOpenAI class, so a class-path
+    # fallback lands on "openai"; the pinned protocol switch on the instance
+    # is the proof that the request speaks the Responses wire.
+    if getattr(model, "use_responses_api", None) is True and resolved == "openai":
+        return "openai_responses"
+    return resolved
+
+
+def declared_visual_max_tokens_per_image(
+    provider_adapter: str | None,
+    provider_class_path: str | None = None,
+    *,
+    model: object | None = None,
+) -> int | None:
+    """Return the declared per-image Token upper bound for one adapter.
+
+    ``None`` means the adapter has no declared visual cost; Lead vision
+    injection and the ``view_image`` tool must stay disarmed for it because
+    the final provider guard fails closed on unmeasured visual material.
+    """
+
+    resolved = resolve_provider_adapter(
+        provider_adapter,
+        provider_class_path,
+        model=model,
+    )
+    return _PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE.get(resolved or "")
+
+
+def provider_request_closure_identity(
+    *,
+    agent_facts: Sequence[tuple[str, str]],
+    catalog_generation: int,
+) -> str:
+    """Hash the Lead identity under one resolver-visible catalog generation."""
+
+    material = _canonical_json(
+        {
+            "agents": tuple(agent_facts),
+            "catalog_generation": catalog_generation,
+        }
+    )
+    return hashlib.sha256(material).hexdigest()
+
+
+def _provider_request_runtime_policy_material(
+    app_config: object,
+) -> dict[str, object]:
+    if not hasattr(app_config, "model_dump"):
+        raise ProviderRequestUsageUnsupported("provider_request_usage_unsupported: runtime policy identity is unavailable")
+    value = app_config.model_dump(mode="json")
+    if not isinstance(value, Mapping):
+        raise ProviderRequestUsageUnsupported("provider_request_usage_unsupported: runtime policy identity is unavailable")
+    sections = (
+        "input_polish",
+        "loop_detection",
+        "max_recursion_limit",
+        "memory",
+        "read_before_write",
+        "safety_finish_reason",
+        "subagents",
+        "suggestions",
+        "summarization",
+        "title",
+        "token_budget",
+        "token_usage",
+        "tool_output",
+        "tool_search",
+        "vision_bridge",
+    )
+    return {name: value.get(name) for name in sections}
+
+
+def provider_request_runtime_policy_identity(app_config: object) -> str:
+    """Fingerprint the secret-free config sections that can shape a request."""
+
+    return hashlib.sha256(_canonical_json(_provider_request_runtime_policy_material(app_config))).hexdigest()
+
+
+def provider_request_runtime_policy_compatibility_identity(
+    app_config: object,
+) -> str:
+    """Fingerprint request policy while allowing Gauge-safe changes."""
+
+    material = _provider_request_runtime_policy_material(app_config)
+    # This limits Graph execution depth; it does not reshape the retained
+    # provider request measured by an idle Context Gauge.
+    material.pop("max_recursion_limit", None)
+    summarization = material.get("summarization")
+    if isinstance(summarization, Mapping):
+        compatible_summarization = dict(summarization)
+        compatible_summarization.pop("trigger", None)
+        material["summarization"] = compatible_summarization
+    return hashlib.sha256(_canonical_json(material)).hexdigest()
+
+
+def build_provider_request_profile(
+    *,
+    model: object,
+    model_name: str,
+    provider_adapter: str | None,
+    system_prompt: str,
+    tools: Sequence[BaseTool | dict[str, Any]],
+    middleware_system_prompts: Sequence[str] = (),
+    bounded_overlay_material: Sequence[object] = (),
+    bounded_overlay_utf8_bytes: int = 0,
+    bounded_overlay_message_count: int = 1,
+    supports_vision: bool = False,
+    provider_class_path: str | None = None,
+    unsupported_reason: str | None = None,
+    authority_identity: str | None = None,
+    capture_provider_input_tokens: bool = True,
+    closure_identity: str | None = None,
+    mcp_closure_present: bool = False,
+    runtime_policy_identity: str | None = None,
+    workload_profile: str | None = None,
+) -> ProviderRequestProfile:
+    """Build one immutable profile after canonical Lead tools are assembled."""
+
+    reason = unsupported_reason
+    try:
+        effective_tools = canonicalize_full_tools(tuple(tools))
+        tool_facts = tuple(provider_tool_schema_fact(tool) for tool in effective_tools)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        effective_tools = ()
+        tool_facts = ()
+        reason = "provider_request_usage_unsupported: tool schema is not serializable"
+    snapshot = build_provider_request_profile_snapshot_from_facts(
+        model=model,
+        model_name=model_name,
+        provider_adapter=provider_adapter,
+        provider_class_path=provider_class_path,
+        system_prompt=system_prompt,
+        tool_schema_facts=tool_facts,
+        middleware_system_prompts=middleware_system_prompts,
+        bounded_overlay_material=bounded_overlay_material,
+        bounded_overlay_utf8_bytes=bounded_overlay_utf8_bytes,
+        bounded_overlay_message_count=bounded_overlay_message_count,
+        supports_vision=supports_vision,
+        unsupported_reason=reason,
+        authority_identity=authority_identity,
+        capture_provider_input_tokens=capture_provider_input_tokens,
+        closure_identity=closure_identity,
+        mcp_closure_present=mcp_closure_present,
+        runtime_policy_identity=runtime_policy_identity,
+        workload_profile=workload_profile,
+    )
+    effective_middleware_prompts = tuple(prompt for prompt in middleware_system_prompts if isinstance(prompt, str) and prompt)
+    return ProviderRequestProfile(
+        model_name=model_name,
+        provider_adapter=snapshot["provider_adapter"],
+        system_prompt=system_prompt,
+        middleware_system_prompts=effective_middleware_prompts,
+        tools=effective_tools,
+        bounded_overlay_material=tuple(bounded_overlay_material),
+        bounded_overlay_message_count=max(0, bounded_overlay_message_count),
+        supports_vision=supports_vision,
+        max_input_tokens=snapshot["max_input_tokens"],
+        supported=snapshot["supported"],
+        unsupported_reason=snapshot["unsupported_reason"],
+        provider_fixed_overhead_tokens=snapshot["provider_fixed_overhead_tokens"],
+        provider_per_message_overhead_tokens=snapshot["provider_per_message_overhead_tokens"],
+        provider_per_tool_overhead_tokens=snapshot["provider_per_tool_overhead_tokens"],
+        static_system_utf8_bytes=snapshot["static_system_utf8_bytes"],
+        full_tool_schema_utf8_bytes=snapshot["full_tool_schema_utf8_bytes"],
+        full_tool_schema_facts=snapshot["full_tool_schema_facts"],
+        bounded_overlay_utf8_bytes=snapshot["bounded_overlay_utf8_bytes"],
+        profile_fingerprint=snapshot["profile_fingerprint"],
+        authority_identity=authority_identity,
+        capture_provider_input_tokens=capture_provider_input_tokens,
+        closure_identity=closure_identity,
+        mcp_closure_present=mcp_closure_present,
+        runtime_policy_identity=runtime_policy_identity,
+        workload_profile=workload_profile,
+        error_allowance_ratio=snapshot["error_allowance_ratio"],
+        visual_max_tokens_per_image=snapshot.get("visual_max_tokens_per_image"),
+    )
+
+
+def build_provider_request_profile_snapshot_from_facts(
+    *,
+    model: object,
+    model_name: str,
+    provider_adapter: str | None,
+    system_prompt: str,
+    tool_schema_facts: Sequence[Mapping[str, object]],
+    middleware_system_prompts: Sequence[str] = (),
+    bounded_overlay_material: Sequence[object] = (),
+    bounded_overlay_utf8_bytes: int = 0,
+    bounded_overlay_message_count: int = 1,
+    supports_vision: bool = False,
+    provider_class_path: str | None = None,
+    unsupported_reason: str | None = None,
+    authority_identity: str | None = None,
+    capture_provider_input_tokens: bool = True,
+    closure_identity: str | None = None,
+    mcp_closure_present: bool = False,
+    runtime_policy_identity: str | None = None,
+    workload_profile: str | None = None,
+) -> ProviderRequestProfileSnapshot:
+    """Build the same immutable profile from secret-free schema facts."""
+
+    resolved_adapter = resolve_provider_adapter(
+        provider_adapter,
+        provider_class_path,
+        model=model,
+    )
+    reason = unsupported_reason
+    if resolved_adapter is None and reason is None:
+        reason = "provider_request_usage_unsupported: provider overhead is undeclared"
+    if type(capture_provider_input_tokens) is not bool:
+        reason = "provider_request_usage_unsupported: token usage capture contract is invalid"
+    if closure_identity is not None and (not isinstance(closure_identity, str) or not closure_identity):
+        reason = "provider_request_usage_unsupported: closure identity is invalid"
+    if type(mcp_closure_present) is not bool:
+        reason = "provider_request_usage_unsupported: MCP closure contract is invalid"
+    if runtime_policy_identity is not None and (not isinstance(runtime_policy_identity, str) or not runtime_policy_identity):
+        reason = "provider_request_usage_unsupported: runtime policy identity is invalid"
+    if workload_profile is not None and workload_profile not in {"interactive", "research"}:
+        reason = "provider_request_usage_unsupported: workload profile is invalid"
+    overhead = _PROVIDER_OVERHEAD.get(resolved_adapter or "", (0, 0, 0))
+    allowance_ratio = _PROVIDER_ERROR_ALLOWANCE_RATIO.get(resolved_adapter or "", 0.0)
+    visual_max_tokens = _PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE.get(resolved_adapter or "") if supports_vision else None
+    try:
+        effective_facts = _canonicalize_tool_schema_facts(tool_schema_facts)
+        effective_middleware_prompts = tuple(prompt for prompt in middleware_system_prompts if isinstance(prompt, str) and prompt)
+        if resolved_adapter is None:
+            raise ValueError("provider adapter is unavailable")
+        system_bytes = sum(
+            len(
+                _material_bytes(
+                    SystemMessage(content=prompt),
+                    provider_adapter=resolved_adapter,
+                )
+            )
+            for prompt in (system_prompt, *effective_middleware_prompts)
+        )
+        tool_bytes = _tool_schema_list_utf8_bytes(effective_facts)
+        if (
+            not isinstance(bounded_overlay_utf8_bytes, int)
+            or isinstance(bounded_overlay_utf8_bytes, bool)
+            or bounded_overlay_utf8_bytes < 0
+            or not isinstance(bounded_overlay_message_count, int)
+            or isinstance(bounded_overlay_message_count, bool)
+            or bounded_overlay_message_count < 0
+        ):
+            raise ValueError("bounded overlay contract is invalid")
+        overlay_bytes = bounded_overlay_utf8_bytes + sum(
+            len(
+                _material_bytes(
+                    item,
+                    provider_adapter=resolved_adapter,
+                )
+            )
+            for item in bounded_overlay_material
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        effective_facts = ()
+        effective_middleware_prompts = ()
+        system_bytes = len(system_prompt.encode("utf-8"))
+        tool_bytes = 2
+        overlay_bytes = 0
+        reason = "provider_request_usage_unsupported: profile material is invalid"
+    fingerprint_material = _canonical_json(
+        {
+            "revision": PROVIDER_REQUEST_ESTIMATOR_REVISION,
+            "model_name": model_name,
+            "provider_adapter": resolved_adapter,
+            "system_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+            "middleware_system_sha256": [hashlib.sha256(prompt.encode("utf-8")).hexdigest() for prompt in effective_middleware_prompts],
+            "system_bytes": system_bytes,
+            "tool_facts": effective_facts,
+            "tool_bytes": tool_bytes,
+            "overlay_bytes": overlay_bytes,
+            "overlay_messages": bounded_overlay_message_count,
+            "overhead": overhead,
+            "supports_vision": supports_vision,
+            "visual_max_tokens_per_image": visual_max_tokens,
+            "authority_identity": authority_identity,
+            "capture_provider_input_tokens": capture_provider_input_tokens,
+            "closure_identity": closure_identity,
+            "mcp_closure_present": mcp_closure_present,
+            "runtime_policy_identity": runtime_policy_identity,
+            "workload_profile": workload_profile,
+            "allowance_ratio": allowance_ratio,
+        }
+    )
+    return {
+        "version": 1,
+        "estimator_revision": PROVIDER_REQUEST_ESTIMATOR_REVISION,
+        "error_contract": PROVIDER_REQUEST_ERROR_CONTRACT,
+        "model_name": model_name,
+        "provider_adapter": resolved_adapter,
+        "profile_fingerprint": hashlib.sha256(fingerprint_material).hexdigest(),
+        "authority_identity": authority_identity,
+        "capture_provider_input_tokens": capture_provider_input_tokens,
+        "closure_identity": closure_identity,
+        "mcp_closure_present": mcp_closure_present,
+        "runtime_policy_identity": runtime_policy_identity,
+        "workload_profile": workload_profile,
+        "supported": reason is None,
+        "unsupported_reason": reason,
+        "supports_vision": supports_vision,
+        "visual_max_tokens_per_image": visual_max_tokens,
+        "max_input_tokens": _model_max_input_tokens(model),
+        "static_system_utf8_bytes": system_bytes,
+        "full_tool_schema_utf8_bytes": tool_bytes,
+        "full_tool_count": len(effective_facts),
+        "full_tool_schema_facts": effective_facts,
+        "bounded_overlay_utf8_bytes": overlay_bytes,
+        "bounded_overlay_message_count": max(0, bounded_overlay_message_count),
+        "provider_fixed_overhead_tokens": overhead[0],
+        "provider_per_message_overhead_tokens": overhead[1],
+        "provider_per_tool_overhead_tokens": overhead[2],
+        "error_allowance_ratio": allowance_ratio,
+    }
