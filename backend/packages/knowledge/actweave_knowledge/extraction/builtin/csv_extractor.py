@@ -1,4 +1,4 @@
-"""CSV document loader adapted from Dify's pinned CSVExtractor.
+"""CSV document loader adapted from upstream's pinned CSVExtractor.
 
 Upstream: api/core/rag/extractor/csv_extractor.py at
 9c16c865977e9d89a9ec7ae0536e893f4385a758. See UPSTREAM.md and patches.md.

@@ -8,7 +8,7 @@ export const adminKnowledgeAccountIdSchema = z.union([
 const positiveInteger = z.number().int().positive().safe();
 const knowledgeSettingsFields = {
   enabled: z.boolean(),
-  etl_type: z.enum(["dify", "unstructured_local"]),
+  etl_type: z.enum(["builtin", "unstructured_local"]),
   extraction_cache_enabled: z.boolean(),
   worker_concurrency: z.number().int().min(1).max(16),
   task_timeout_seconds: z.number().int().min(30).max(7200),

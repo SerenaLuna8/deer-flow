@@ -1,4 +1,4 @@
-"""Dify's fixed local XML branch, with entity rejection before partitioning."""
+"""upstream's fixed local XML branch, with entity rejection before partitioning."""
 
 from __future__ import annotations
 

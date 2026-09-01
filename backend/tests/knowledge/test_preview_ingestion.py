@@ -264,7 +264,7 @@ async def test_actual_docx_preview_uses_p1_runner_and_p3_splitter_without_exposi
     assert preview.chunks[0].source_spans
     assert preview.chunks[0].attachments
     assert preview.source_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
-    assert preview.effective_profile.parse.extractor_id == "dify.word"
+    assert preview.effective_profile.parse.extractor_id == "builtin.word"
     assert preview.preview_fingerprint != preview.source_sha256
     assert preview.preview_attachments[0].ref == preview.chunks[0].attachments[0].ref
     assert preview.omitted_preview_attachment_count == 0

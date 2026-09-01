@@ -16,7 +16,7 @@ from .contracts import ExtractionError
 from .runtime_resources import ADAPTER_REVISION, probe_parser_resources, runtime_digest
 
 UPSTREAM_COMMIT = "9c16c865977e9d89a9ec7ae0536e893f4385a758"
-_BOTH = ("dify", "unstructured_local")
+_BOTH = ("builtin", "unstructured_local")
 _DEPENDENCY_PINS = {
     "beautifulsoup4": "4.14.3",
     "charset-normalizer": "3.4.7",
@@ -105,7 +105,7 @@ def _registration(
 
     return ExtractorRegistration(
         extractor_id=extractor_id,
-        extractor_version=f"{'unstructured_local' if extractor_id.startswith('unstructured.') else 'dify'}:{UPSTREAM_COMMIT}:{ADAPTER_REVISION}:{digest}",
+        extractor_version=f"{'unstructured_local' if extractor_id.startswith('unstructured.') else 'builtin'}:{UPSTREAM_COMMIT}:{ADAPTER_REVISION}:{digest}",
         extensions=extensions,
         etl_types=etl_types,
         supports_embedded_images=images,
@@ -120,14 +120,14 @@ def default_registry() -> ExtractorRegistry:
     local = ("unstructured", "python-magic", "lxml", "spacy", "en-core-web-sm")
     return ExtractorRegistry(
         (
-            _registration("dify.text", "builtin.text_extractor", "TextExtractor", (".txt",), _BOTH, ("charset-normalizer",), digest),
-            _registration("dify.markdown", "builtin.markdown_extractor", "MarkdownExtractor", (".md", ".markdown", ".mdx"), ("dify",), ("charset-normalizer", "markdown-it-py"), digest),
-            _registration("dify.pdf", "builtin.pdf_extractor", "PdfExtractor", (".pdf",), _BOTH, ("pypdfium2", "pillow"), digest, images=True),
-            _registration("dify.word", "builtin.word_extractor", "WordExtractor", (".docx",), _BOTH, ("python-docx", "lxml", "pillow"), digest, images=True),
-            _registration("dify.excel", "builtin.excel_extractor", "ExcelExtractor", (".xlsx",), _BOTH, ("openpyxl", "pandas", "numpy", "pillow"), digest, images=True),
-            _registration("dify.excel", "builtin.excel_extractor", "ExcelExtractor", (".xls",), _BOTH, ("pandas", "numpy", "xlrd"), digest),
-            _registration("dify.csv", "builtin.csv_extractor", "CSVExtractor", (".csv",), _BOTH, ("charset-normalizer",), digest),
-            _registration("dify.html", "builtin.html_extractor", "HtmlExtractor", (".html", ".htm"), _BOTH, ("beautifulsoup4", "charset-normalizer"), digest),
+            _registration("builtin.text", "builtin.text_extractor", "TextExtractor", (".txt",), _BOTH, ("charset-normalizer",), digest),
+            _registration("builtin.markdown", "builtin.markdown_extractor", "MarkdownExtractor", (".md", ".markdown", ".mdx"), ("builtin",), ("charset-normalizer", "markdown-it-py"), digest),
+            _registration("builtin.pdf", "builtin.pdf_extractor", "PdfExtractor", (".pdf",), _BOTH, ("pypdfium2", "pillow"), digest, images=True),
+            _registration("builtin.word", "builtin.word_extractor", "WordExtractor", (".docx",), _BOTH, ("python-docx", "lxml", "pillow"), digest, images=True),
+            _registration("builtin.excel", "builtin.excel_extractor", "ExcelExtractor", (".xlsx",), _BOTH, ("openpyxl", "pandas", "numpy", "pillow"), digest, images=True),
+            _registration("builtin.excel", "builtin.excel_extractor", "ExcelExtractor", (".xls",), _BOTH, ("pandas", "numpy", "xlrd"), digest),
+            _registration("builtin.csv", "builtin.csv_extractor", "CSVExtractor", (".csv",), _BOTH, ("charset-normalizer",), digest),
+            _registration("builtin.html", "builtin.html_extractor", "HtmlExtractor", (".html", ".htm"), _BOTH, ("beautifulsoup4", "charset-normalizer"), digest),
             _registration("unstructured.pptx", "unstructured_local.unstructured_pptx_extractor", "UnstructuredPPTXExtractor", (".pptx",), _BOTH, (*local, "python-pptx"), digest),
             _registration("unstructured.epub", "unstructured_local.unstructured_epub_extractor", "UnstructuredEpubExtractor", (".epub",), _BOTH, (*local, "pypandoc-binary"), digest),
             _registration(

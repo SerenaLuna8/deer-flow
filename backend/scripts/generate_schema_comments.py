@@ -510,7 +510,7 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_segment_attachments", "position"): "图片在本片段中从 1 开始的顺序；与 segment_id 构成主键",
     ("knowledge_segment_attachments", "alt_text"): "此出现位置的图片替代文本（属于私有内容）",
     ("knowledge_tasks", "extraction_id"): "活跃索引任务的提取结果回收 pin；仅 open 摄取、重嵌入、摘要任务可持有，结算或 claim 失效须清空",
-    ("knowledge_system_settings", "etl_type"): "平台解析路线，dify 或 unstructured_local；默认 dify",
+    ("knowledge_system_settings", "etl_type"): "平台解析路线，builtin 或 unstructured_local；默认 builtin",
     ("knowledge_system_settings", "extraction_cache_enabled"): "是否复用完整提取缓存；默认开启",
     ("knowledge_segments", "index_text"): "用于索引的纯文本；旧字符行默认空串，由显式兼容 Adapter 读取旧正文，不作隐式迁移",
     ("knowledge_segments", "token_count"): "索引文本 Token 数，非负；旧字符行默认为 0",

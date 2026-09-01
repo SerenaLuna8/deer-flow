@@ -2,19 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 将知识库切换到 Dify 解析器移植、本地 Unstructured、可追踪 Markdown、图片资产和真实 Token 切分，并通过端到端与离线门禁。
+**Goal:** 将知识库切换到 upstream 解析器移植、本地 Unstructured、可追踪 Markdown、图片资产和真实 Token 切分，并通过端到端与离线门禁。
 
 **Architecture:** 本计划是四个交付包的总入口。Extraction 只处理已授权的本地文件，宿主控制数据库、MinIO、配额和模型调用；不可变提取结果同时承担附件归属和解析缓存。预览与正式入库使用同一规范化/切分流程，只有附件落地方式不同。
 
-**Tech Stack:** Python 3.12、SQLAlchemy/asyncpg/PostgreSQL/pgvector、MinIO、Dify 固定版本解析器、Unstructured 本地库、tiktoken、Next.js/React/TypeScript、pytest/Rstest/Playwright。
+**Tech Stack:** Python 3.12、SQLAlchemy/asyncpg/PostgreSQL/pgvector、MinIO、upstream 固定版本解析器、Unstructured 本地库、tiktoken、Next.js/React/TypeScript、pytest/Rstest/Playwright。
 
 **Spec:** [RAG 文件解析重构规格](../specs/2026-08-31-rag-document-parsing-design.md)。各分计划都必须与规格和本总计划一起阅读。
 
 ## Global Constraints
 
-- ActWeave 核对基线 `b96581974b057c0ae4d853815130d99c0ed23823`；Dify 源码固定 `9c16c865977e9d89a9ec7ae0536e893f4385a758`。
-- 数据源本期只交付 `file`；ETL 枚举 `dify|unstructured_local`，默认 `dify`。没有 Unstructured API、URL 下载或运行时资源下载。
-- `actweave_knowledge` 不得导入 `app.*`、`deerflow.*` 或 Dify 的 `models/extensions/core.file`。
+- ActWeave 核对基线 `b96581974b057c0ae4d853815130d99c0ed23823`；upstream 源码固定 `9c16c865977e9d89a9ec7ae0536e893f4385a758`。
+- 数据源本期只交付 `file`；ETL 枚举 `builtin|unstructured_local`，默认 `builtin`。没有 Unstructured API、URL 下载或运行时资源下载。
+- `actweave_knowledge` 不得导入 `app.*`、`deerflow.*` 或 upstream 的 `models/extensions/core.file`。
 - 原文件继续 ≤50 MiB，MinIO 每次单 PUT，复用现有每 store 单上传槽。
 - 提取正文最多 5,000,000 字符；父段及实际向量条目分别不超过当前每文档 5,000 配额。
 - 图片最多 100 个独立字节对象，每张 ≤5 MiB、≤20,000,000 像素，单文档图片合计 ≤50 MiB。
@@ -74,7 +74,7 @@
 
 所有公开数据模型使用 frozen Pydantic model、`extra='forbid'`；带 sink/callback 的内部 ExtractionContext 另启用 `arbitrary_types_allowed=True`，不序列化到 manifest。路径对象仅出现在内部输入。禁止从 metadata 读取项目权限。所有集合默认空 tuple，不能共享可变默认值。
 
-`extractor_version` 包含固定 Dify commit、Adapter 修订及实际解析依赖/资源摘要，不含 Tokenizer/切分器摘要。文本编码保存在 `SourceSpan.location['encoding']`，前端不能将其解释为页号。
+`extractor_version` 包含固定 upstream commit、Adapter 修订及实际解析依赖/资源摘要，不含 Tokenizer/切分器摘要。文本编码保存在 `SourceSpan.location['encoding']`，前端不能将其解释为页号。
 
 ### 3.1 解析与序列化 Interface（P1 产出）
 
@@ -142,9 +142,9 @@ preview_fingerprint(*, source_sha256: str, extension: str,
 
 ```json
 {
-  "effective_etl": "dify",
+  "effective_etl": "builtin",
   "capability_revision": "sha256-of-runtime-manifest",
-  "formats": [{"extension": ".pdf", "parser_id": "dify.pdf", "available": true,
+  "formats": [{"extension": ".pdf", "parser_id": "builtin.pdf", "available": true,
                "reason_code": null, "embedded_images": true}],
   "chunk_limits": {"unit": "token", "tokenizer_profile_id": "knowledge-cl100k-v1",
                    "parent_min": 200, "parent_max": 4000, "parent_max_chars": 4000,
@@ -164,9 +164,9 @@ Document DTO 新增安全 `parsing_profile`（ProcessingProfile）、`parse_warn
 
 ## 4. 共用测试约定
 
-- P1-T1 创建 `backend/tests/knowledge/parsing_test_helpers.py`，公开 `make_parse_profile(extension, *, etl_type='dify', header_rules=())`、`make_chunk_profile(**overrides)`、`make_document(text, *, location=None, heading_path=())`、`make_setting(path, **overrides)`、`CollectingAttachmentSink(work_dir:Path)`、`make_context(work_dir:Path)`、`write_pdf(path,pages)`。P3-T4 再添加 `write_docx_with_image(path)`。后续计划引用这些 helpers，不私自定义另一套 profile 字段。
+- P1-T1 创建 `backend/tests/knowledge/parsing_test_helpers.py`，公开 `make_parse_profile(extension, *, etl_type='builtin', header_rules=())`、`make_chunk_profile(**overrides)`、`make_document(text, *, location=None, heading_path=())`、`make_setting(path, **overrides)`、`CollectingAttachmentSink(work_dir:Path)`、`make_context(work_dir:Path)`、`write_pdf(path,pages)`。P3-T4 再添加 `write_docx_with_image(path)`。后续计划引用这些 helpers，不私自定义另一套 profile 字段。
 - P2 创建 `backend/tests/knowledge/extraction_test_helpers.py`，公开异步上下文管理器 `extraction_harness(postgres_database_url, *, quota_bytes=524288000)`。yield 对象必须有 `store, object_store, quota, session_factory, claim, project_id, base_id, document_id, read_rows(), published_result()`；故障点用 `object_store.fail_next(operation)` 和可 await 的 barrier，不能靠 sleep 制造竞态。
-- P3 创建 `backend/tests/knowledge/ingestion_test_helpers.py`，公开 `ingestion_harness(postgres_database_url, *, etl_type='dify', cache_enabled=True)`，复用 P2 harness，新增 `upload(path, profile), preview(path, profile), run_next_task(), segments(document_id), reparse(document_id, profile), reembed(base_id)`。记录模型输入供 assertions 使用。
+- P3 创建 `backend/tests/knowledge/ingestion_test_helpers.py`，公开 `ingestion_harness(postgres_database_url, *, etl_type='builtin', cache_enabled=True)`，复用 P2 harness，新增 `upload(path, profile), preview(path, profile), run_next_task(), segments(document_id), reparse(document_id, profile), reembed(base_id)`。记录模型输入供 assertions 使用。
 - 新 helpers 不从其它测试模块导入 `_private` fixture。现有 `test_ingestion.py` 的文件生成器迁到 parsing_test_helpers 时，同步修改原测试引用，保持原门禁覆盖。
 - 纯解析测试使用 `env -u DATABASE_URL .venv/bin/python -m pytest ...`，不会连接开发数据库；数据库测试通过现有 core_gate_plugin 和 postgres fixtures 创建随机测试库，不能直接连业务库跑 DDL。
 

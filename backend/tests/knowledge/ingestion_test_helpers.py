@@ -225,7 +225,7 @@ async def _authority(resources: ExtractionHarness) -> ProjectKnowledgeAuthority:
 async def ingestion_harness(
     postgres_database_url: str,
     *,
-    etl_type: str = "dify",
+    etl_type: str = "builtin",
     cache_enabled: bool = True,
 ) -> AsyncIterator[IngestionHarness]:
     async with extraction_harness(postgres_database_url) as resources:

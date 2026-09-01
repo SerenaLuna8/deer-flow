@@ -46,8 +46,8 @@ import { knowledgeAttachmentURL } from '@/core/knowledge/api';
 describe('file capability contract', () => {
   it('rejects storage locators in an otherwise valid capability response', () => {
     const response = {
-      effective_etl: 'dify', capability_revision: 'a'.repeat(64),
-      formats: [{ extension: '.pdf', parser_id: 'dify.pdf', available: true, reason_code: null, embedded_images: true }],
+      effective_etl: 'builtin', capability_revision: 'a'.repeat(64),
+      formats: [{ extension: '.pdf', parser_id: 'builtin.pdf', available: true, reason_code: null, embedded_images: true }],
       chunk_limits: { unit: 'token', tokenizer_profile_id: 'knowledge-cl100k-v1', parent_min: 200,
         parent_max: 4000, parent_max_chars: 4000, overlap_max: 500, child_min: 100, child_max: 2000 },
     };
@@ -372,10 +372,10 @@ uv sync --all-packages --extra extraction-local
 
 ```bash
 docker build -f backend/Dockerfile -t actweave-rag-plan:local .
-docker run --rm --network none --read-only --tmpfs /tmp:rw,size=536870912 --workdir /app/backend --entrypoint /app/backend/.venv/bin/python actweave-rag-plan:local -m pytest tests/knowledge/test_dify_text_extractors.py tests/knowledge/test_dify_tabular_extractors.py tests/knowledge/test_dify_office_pdf.py tests/knowledge/test_local_unstructured.py tests/knowledge/test_extraction_runtime.py tests/knowledge/test_extraction_offline_matrix.py tests/knowledge/test_knowledge_tokenizer.py -q -p no:cacheprovider
+docker run --rm --network none --read-only --tmpfs /tmp:rw,size=536870912 --workdir /app/backend --entrypoint /app/backend/.venv/bin/python actweave-rag-plan:local -m pytest tests/knowledge/test_builtin_text_extractors.py tests/knowledge/test_builtin_tabular_extractors.py tests/knowledge/test_builtin_office_pdf.py tests/knowledge/test_local_unstructured.py tests/knowledge/test_extraction_runtime.py tests/knowledge/test_extraction_offline_matrix.py tests/knowledge/test_knowledge_tokenizer.py -q -p no:cacheprovider
 ```
 
-先确认P1已创建上述测试；容器依赖缺失或资源下载尝试必须失败，不能跳过格式。生产镜像不包含Dify源码目录依赖、不依赖用户缓存。分别验证实际目标CPU架构的二进制wheel与系统资源，无法运行的架构只报告未验证。
+先确认P1已创建上述测试；容器依赖缺失或资源下载尝试必须失败，不能跳过格式。生产镜像不包含upstream源码目录依赖、不依赖用户缓存。分别验证实际目标CPU架构的二进制wheel与系统资源，无法运行的架构只报告未验证。
 - [ ] **4. 运行模块与整体门禁。**
 
 ```bash

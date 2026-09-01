@@ -29,8 +29,8 @@ from pydantic import ValidationError
 
 def _profile() -> ParseProfile:
     return ParseProfile(
-        etl_type="dify",
-        extractor_id="dify.pdf",
+        etl_type="builtin",
+        extractor_id="builtin.pdf",
         extractor_version="upstream-adapter-build",
         normalization_version="md-v1",
         image_policy_version="raster-v1",

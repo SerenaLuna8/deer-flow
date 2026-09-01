@@ -62,8 +62,8 @@ function response(marker: string): KnowledgeChunkPreviewResponse {
     source_sha256: "b".repeat(64),
     effective_profile: {
       parse: {
-        etl_type: "dify",
-        extractor_id: "dify.text",
+        etl_type: "builtin",
+        extractor_id: "builtin.text",
         extractor_version: "1",
         normalization_version: "md-v1",
         image_policy_version: "raster-v1",

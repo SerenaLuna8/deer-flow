@@ -547,11 +547,11 @@ recreated explicitly, never repaired in place.
   writable. A missing or denied sandbox fails closed. Parser process-group
   teardown and started parent asset I/O settlement precede caller temp cleanup.
   Tests under `tests/knowledge/test_extraction_*`, `test_extractor_registry.py`,
-  `test_dify_*` and `test_local_unstructured.py` cover this package;
+  `test_builtin_*` and `test_local_unstructured.py` cover this package;
   `scripts/check_extraction_runtime.py --matrix --output PATH` records actual
   local format results. Unit/adaptor checks do not certify OS isolation on a
   target Linux host, database/object storage, or model calls.
-- PostgreSQL Knowledge settings also own `etl_type` (`dify` or
+- PostgreSQL Knowledge settings also own `etl_type` (`builtin` or
   `unstructured_local`) and `extraction_cache_enabled`; these are materialized
   at process startup and never read from YAML. File capabilities revalidate
   `shared_assets.read` in the serving transaction and return a process snapshot

@@ -97,7 +97,7 @@ function filterDraftValue(
   return Number.isFinite(ms) ? Math.round(ms / 1000) : undefined;
 }
 
-/** Retrieval test scoped to one knowledge base, like Dify's in-base 召回测试. */
+/** Retrieval test scoped to one knowledge base, like upstream's in-base 召回测试. */
 export function KnowledgeSearchPanel({
   scope,
   base,

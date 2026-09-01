@@ -499,11 +499,9 @@ function KnowledgeSettingsEditor({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="dify">Dify</SelectItem>
+              <SelectItem value="builtin">{labels.builtInParser}</SelectItem>
               <SelectItem value="unstructured_local">
-                {locale === "zh-CN"
-                  ? "本地 Unstructured"
-                  : "Local Unstructured"}
+                {labels.localUnstructuredParser}
               </SelectItem>
             </SelectContent>
           </Select>

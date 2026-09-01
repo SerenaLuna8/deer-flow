@@ -1,4 +1,4 @@
-"""Markdown loader adapted from Dify 9c16c865977e9d89a9ec7ae0536e893f4385a758.
+"""Markdown loader adapted from upstream 9c16c865977e9d89a9ec7ae0536e893f4385a758.
 
 Retains extract -> parse_tups -> markdown_to_tups and its line/fence grouping.
 Tuple outputs become Documents so original locations survive section grouping.

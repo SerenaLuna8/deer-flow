@@ -142,7 +142,7 @@ export const knowledgeProcessingProfileSchema = z
   .object({
     parse: z
       .object({
-        etl_type: z.enum(["dify", "unstructured_local"]),
+        etl_type: z.enum(["builtin", "unstructured_local"]),
         extractor_id: z.string().min(1),
         extractor_version: z.string().min(1),
         normalization_version: z.string().min(1),
@@ -184,7 +184,7 @@ export type KnowledgeProcessingProfile = z.infer<
 
 export const knowledgeFileCapabilitiesSchema = z
   .object({
-    effective_etl: z.enum(["dify", "unstructured_local"]),
+    effective_etl: z.enum(["builtin", "unstructured_local"]),
     capability_revision: knowledgeSha256Schema,
     formats: z.array(
       z

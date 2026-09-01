@@ -31,7 +31,7 @@ _EXCESS_BLANK_LINES = re.compile(r"\n{3,}")
 
 # Fallback boundaries tried in order when a piece is still oversized; the
 # empty string means character-level packing and always terminates. Mirrors
-# Dify's FixedRecursiveCharacterTextSplitter fallback sequence.
+# upstream's FixedRecursiveCharacterTextSplitter fallback sequence.
 _FALLBACK_SEPARATORS: tuple[str, ...] = ("\n\n", "\n", "。", ". ", " ", "")
 
 _SEPARATOR_ESCAPES = {"\\n": "\n", "\\t": "\t", "\\r": "\r"}

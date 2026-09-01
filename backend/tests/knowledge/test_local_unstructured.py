@@ -60,7 +60,7 @@ def parse(path, tmp_path, etl="unstructured_local"):
     return ExtractProcessor().extract(make_setting(path, profile=profile), make_context(tmp_path / "work"))
 
 
-@pytest.mark.parametrize("etl", ["dify", "unstructured_local"])
+@pytest.mark.parametrize("etl", ["builtin", "unstructured_local"])
 def test_real_pptx(tmp_path, etl):
     from pptx import Presentation
 
@@ -76,7 +76,7 @@ def test_real_pptx(tmp_path, etl):
     assert {s.location.get("slide") for d in docs for s in d.source_spans} == {1, 2}
 
 
-@pytest.mark.parametrize("etl", ["dify", "unstructured_local"])
+@pytest.mark.parametrize("etl", ["builtin", "unstructured_local"])
 def test_real_epub(tmp_path, etl):
     from ebooklib import epub
 

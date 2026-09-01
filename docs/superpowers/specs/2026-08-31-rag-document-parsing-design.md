@@ -1,23 +1,23 @@
-# RAG 文件解析重构规格：Dify 解析器复用与本地 Unstructured
+# RAG 文件解析重构规格：upstream 解析器复用与本地 Unstructured
 
 > 状态：设计草案，待用户审阅；不代表实现已完成，不授权修改数据库、提交或部署。
 > 日期：2026-08-31。
 > ActWeave 核对基线：`b96581974b057c0ae4d853815130d99c0ed23823`。
-> Dify 源码基线：`9c16c865977e9d89a9ec7ae0536e893f4385a758`，本地 `/Users/jiangfeng/dify`。
+> upstream 源码基线：`9c16c865977e9d89a9ec7ae0536e893f4385a758`，本地 `<upstream-checkout>`。
 > 本文是目标行为和验收规格，不是逐步实施计划；批准后再使用 Superpowers writing-plans 拆解实施任务。
 
 ## 1. 目标、事实与范围决定
 
-本次将现有知识库解析改造成“数据源类型 → ETL 模式 → 扩展名”的路由架构，固定版本复用 Dify 的具体解析类，通过本项目的适配器接入存储、权限和任务系统。主流格式保留表格、链接、图片和来源位置；长尾格式只使用可本地执行的 Unstructured 路径。所有解析器输出同一内部 `Document` 表示，再进行结构保护与 Token 切分。
+本次将现有知识库解析改造成“数据源类型 → ETL 模式 → 扩展名”的路由架构，固定版本复用 upstream 的具体解析类，通过本项目的适配器接入存储、权限和任务系统。主流格式保留表格、链接、图片和来源位置；长尾格式只使用可本地执行的 Unstructured 路径。所有解析器输出同一内部 `Document` 表示，再进行结构保护与 Token 切分。
 
 ### 1.1 已确认事实
 
 - 当前项目的解析、清洗、切分入口是 `ingestion/preview.py::extract_clean_split`；预览和 Worker 摄取复用它。预览不写数据库、MinIO 或任务队列。
 - 原文件属于 Knowledge Document；PostgreSQL 是身份、版本、授权、分段和任务的权威，MinIO 只保存字节。Worker 使用任务租约和文档版本检查后原子发布。
 - 当前分段按字符计算且不跨 `ExtractedBlock` 合并，Markdown 按纯文本读，CSV/XLSX 不为每条数据附加表头。Word 已支持正文顺序和嵌套表格文字提取，这些能力不能倒退。
-- Dify 的解析类不是独立可安装的 Dify 解析 SDK；PDF、Word、Excel 直接依赖其 storage、UploadFile 和数据库上下文，不能不加适配地导入本项目。
-- Dify 当前 splitter 虽使用 `max_tokens` 命名，实际绑定 `len(text)`；本文要求的 Token 切分是新增行为，不能以“照搬 Dify 已有 Token 实现”验收。
-- Dify PDF 默认读取文字层和嵌入图片，不做 OCR；图片持久化与多模态 Embedding 是两个不同阶段。
+- upstream 的解析类不是独立可安装的 upstream 解析 SDK；PDF、Word、Excel 直接依赖其 storage、UploadFile 和数据库上下文，不能不加适配地导入本项目。
+- upstream 当前 splitter 虽使用 `max_tokens` 命名，实际绑定 `len(text)`；本文要求的 Token 切分是新增行为，不能以“照搬 upstream 已有 Token 实现”验收。
+- upstream PDF 默认读取文字层和嵌入图片，不做 OCR；图片持久化与多模态 Embedding 是两个不同阶段。
 - M11 已有部分摘要和系统设置 schema/契约，但核对时宿主配置读取仍走 YAML。不能把 M11 设计文档等同已完成实现，也不能依据旧指南中的表数量推导当前 schema。
 
 ### 1.2 本草案采用的范围决定
@@ -28,7 +28,7 @@
 | D02 数据源 | 本期交付 FILE；路由先判断数据源，但不实现 Notion、网页抓取、邮箱账号同步 | 按“各种文件解析”主请求收敛；新数据源应另立规格 |
 | D03 图片能力 | 交付图片提取、持久化、分段绑定、受控预览和展示；本期不交付 OCR、图片向量或视觉模型回答 | “为多模态检索/展示铺路”解释为完成附件基础能力，不宣称图像内容已可检索 |
 | D04 Token 口径 | 新解析采用固定、本地、可复现的知识库 Tokenizer，明确不同于目标模型的计费 Token | 具体口径见第 6 节，随规格一并审阅 |
-| D05 复用 | 固定 Dify commit 移植解析器源码，保留来源与最小修正记录；不在运行时依赖 Dify 服务或用户本机源码目录 | 选定方案 |
+| D05 复用 | 固定 upstream commit 移植解析器源码，保留来源与最小修正记录；不在运行时依赖 upstream 服务或用户本机源码目录 | 选定方案 |
 
 用户第 2 点中的“API 卸载到独立服务”与 D01 不同时实现。未来可以新增 ETL Adapter，但本期没有 API 配置项、客户端或隐藏降级调用。D01 若变更，必须同步修改网络、凭据、部署与验收契约，不仅修改一句描述。
 
@@ -36,8 +36,8 @@
 
 | 方案 | 结果 | 结论 |
 | --- | --- | --- |
-| 固定版本源码移植 + 宿主适配 | 复用具体格式处理逻辑，隔离 Dify 的数据库/存储/网络耦合，能够逐文件追踪差异 | 选定方案 |
-| 运行时直接导入整个 Dify 后端 | 带入 Flask/SQLAlchemy 上下文、Dify 模型与存储配置，部署依赖大且所有权冲突 | 不采用 |
+| 固定版本源码移植 + 宿主适配 | 复用具体格式处理逻辑，隔离 upstream 的数据库/存储/网络耦合，能够逐文件追踪差异 | 选定方案 |
+| 运行时直接导入整个 upstream 后端 | 带入 Flask/SQLAlchemy 上下文、upstream 模型与存储配置，部署依赖大且所有权冲突 | 不采用 |
 | 只模仿算法、全部重新实现 | 可独立维护，但不满足本次“直接使用内部解析器替换”的要求 | 不作为本规格的替代交付 |
 
 外部 Interface 保持小：调用方提交已授权的本地文件与冻结解析配置，获得统一 Document 列表、附件描述和警告。格式差异、上游修正和本地依赖藏在解析模块内。
@@ -47,7 +47,7 @@
 ### 2.1 路由规则
 
 1. 判断 `datasource_type`。本期仅接受 `file`，其他值返回明确的“不支持的数据源”，不尝试下载 URL。
-2. 读取服务器有效 ETL 模式：`dify` 或 `unstructured_local`；默认 `dify`。这些是本项目受约束的枚举，不沿用可任意填写的 Dify 字符串。
+2. 读取服务器有效 ETL 模式：`builtin` 或 `unstructured_local`；默认 `builtin`。这些是本项目受约束的枚举，不沿用可任意填写的 upstream 字符串。
 3. 以规范化扩展名在显式注册表中查找 Adapter。扩展名之外还检查容器/文件签名是否与声明类型一致；错配失败，不把未知二进制兜底读成文本。
 4. Adapter 输出统一 `list[Document]`；下游不得依赖扩展名选择自己的解析逻辑。
 5. 注册表同时生成支持格式响应和服务端准入规则。一个 Adapter 的登记必须包含扩展名、适用 ETL 模式、依赖探测和固定样例测试。
@@ -56,21 +56,21 @@
 
 ### 2.2 格式矩阵
 
-| 扩展名 | `dify` | `unstructured_local` | 输出预分段 |
+| 扩展名 | `builtin` | `unstructured_local` | 输出预分段 |
 | --- | --- | --- | --- |
-| `.txt` | Dify TextExtractor | 同左 | 全文，保留行位置映射 |
-| `.md/.markdown/.mdx` | Dify MarkdownExtractor + 内容保护修正 | Dify UnstructuredMarkdownExtractor 的本地路径 | 标题节；MDX 不执行代码 |
-| `.pdf` | Dify PdfExtractor | 同左 | 每页；图片为该页附件，不宣称恢复图文相对版面 |
-| `.docx` | Dify WordExtractor | 同左 | 有序正文和表格，携带段落/表格来源映射，之后按章节组织 |
-| `.xlsx/.xls` | Dify ExcelExtractor | 同左 | 每个工作表的数据行；XLS 不承诺图片提取 |
-| `.csv` | Dify CSVExtractor | 同左 | 每个数据行，列名和值绑定 |
-| `.html/.htm` | Dify HtmlExtractor + 安全规范化 | 同左 | 有序正文；不执行 JS、不加载外部资源 |
-| `.pptx` | Dify UnstructuredPPTXExtractor 本地路径 | 同左 | 每页 |
-| `.epub` | Dify UnstructuredEpubExtractor 本地路径 | 同左 | 章节/标题块 |
-| `.eml/.msg/.xml` | 不支持 | 对应 Dify Unstructured 本地 Adapter | 标题/正文块；保留库实际提供的位置 |
+| `.txt` | upstream TextExtractor | 同左 | 全文，保留行位置映射 |
+| `.md/.markdown/.mdx` | upstream MarkdownExtractor + 内容保护修正 | upstream UnstructuredMarkdownExtractor 的本地路径 | 标题节；MDX 不执行代码 |
+| `.pdf` | upstream PdfExtractor | 同左 | 每页；图片为该页附件，不宣称恢复图文相对版面 |
+| `.docx` | upstream WordExtractor | 同左 | 有序正文和表格，携带段落/表格来源映射，之后按章节组织 |
+| `.xlsx/.xls` | upstream ExcelExtractor | 同左 | 每个工作表的数据行；XLS 不承诺图片提取 |
+| `.csv` | upstream CSVExtractor | 同左 | 每个数据行，列名和值绑定 |
+| `.html/.htm` | upstream HtmlExtractor + 安全规范化 | 同左 | 有序正文；不执行 JS、不加载外部资源 |
+| `.pptx` | upstream UnstructuredPPTXExtractor 本地路径 | 同左 | 每页 |
+| `.epub` | upstream UnstructuredEpubExtractor 本地路径 | 同左 | 章节/标题块 |
+| `.eml/.msg/.xml` | 不支持 | 对应 upstream Unstructured 本地 Adapter | 标题/正文块；保留库实际提供的位置 |
 | `.doc/.ppt/.odt`、未知扩展名 | 拒绝并提示转换格式 | 同左 | 无文本兜底 |
 
-PPTX/EPUB 在 `dify` 模式保留是本项目兼容性决定：当前项目已支持，不能为了逐字复制 Dify 默认白名单而删掉。旧版 DOC/PPT 的 Dify Adapter 依赖 API，本期不移植；这不代表 Unstructured 库在其他集成方式下必然无法本地解析它们。
+PPTX/EPUB 在 `builtin` 模式保留是本项目兼容性决定：当前项目已支持，不能为了逐字复制 upstream 默认白名单而删掉。旧版 DOC/PPT 的 upstream Adapter 依赖 API，本期不移植；这不代表 Unstructured 库在其他集成方式下必然无法本地解析它们。
 
 Unstructured 的粗分块仍可能使用字符参数，那只是第一阶段预分段预算；所有输出还必须经过本项目第二阶段 Token 校验和切分。
 
@@ -93,7 +93,7 @@ Unstructured 的粗分块仍可能使用字符参数，那只是第一阶段预�
 | `backend/app/quotas/integration.py` 及宿主配额 Adapter | Knowledge 原文件/派生对象的字节预留、结算和校准汇总 |
 | `frontend/src/core/knowledge/`、`frontend/src/components/projects/knowledge/` | 严格 DTO、动态格式列表、分段与附件展示 |
 
-`actweave_knowledge` 不得导入 `app.*`、`deerflow.*` 或 Dify 的 `models/extensions/core.file`。移植代码对外部能力的调用由注入的 Adapter 完成；不通过 monkey patch 全局 Dify 模块伪装兼容。
+`actweave_knowledge` 不得导入 `app.*`、`deerflow.*` 或 upstream 的 `models/extensions/core.file`。移植代码对外部能力的调用由注入的 Adapter 完成；不通过 monkey patch 全局 upstream 模块伪装兼容。
 
 ### 3.1 统一 Document 契约
 
@@ -150,7 +150,7 @@ Embedding、词法索引和文本 Reranker 使用同一版本 `index_text`。Age
 
 ### 5.1 领域实体与 schema
 
-新增三个 Knowledge 域实体；在实现时同步补充 CONTEXT.md，避免使用 Dify UploadFile 作为本项目宿主表的名称。
+新增三个 Knowledge 域实体；在实现时同步补充 CONTEXT.md，避免使用 upstream UploadFile 作为本项目宿主表的名称。
 
 | 表/字段 | 最小内容与约束 |
 | --- | --- |
@@ -213,7 +213,7 @@ Markdown 使用逻辑形式 `![说明](knowledge-attachment:<ref>)`。ref 为安
 
 ### 6.1 Token 定义
 
-为避免把所有模型的 tokenizer 接口强行引入解析器，本期使用固定的本地 `cl100k_base` 作为**知识库切分 Token**；初始依赖候选为 Dify lock 中已有的 `tiktoken==0.12.0`，实施时在 Python 3.12 与目标镜像中验证并锁定。编码数据在构建/安装时固化到只读资源包并登记 SHA-256，运行时不得触发下载。
+为避免把所有模型的 tokenizer 接口强行引入解析器，本期使用固定的本地 `cl100k_base` 作为**知识库切分 Token**；初始依赖候选为 upstream lock 中已有的 `tiktoken==0.12.0`，实施时在 Python 3.12 与目标镜像中验证并锁定。编码数据在构建/安装时固化到只读资源包并登记 SHA-256，运行时不得触发下载。
 
 Tokenizer Profile ID 固定为 `knowledge-cl100k-v1`，代码/词表摘要进入 parsing_profile。它是产品的可复现分段单位，**不声称等于 Qwen、其他 Embedding/Reranker 或 LLM 的真实输入 Token，也不用于费用估算**。Provider 输入超限仍明确失败，不静默截断；未来若要求模型精确 tokenizer，需要单独扩展模型注册契约。
 
@@ -272,7 +272,7 @@ PDF 缓存复用完整 ready extraction，不另建一份不受治理的明文�
 
 配置沿用 M11 的 PostgreSQL Knowledge 系统设置方向，只有一份权威来源。本规格实施接入前须先完成/核对 M11 配置读取链路；不得在 YAML、环境变量和管理页各新建一份 ETL 配置。配置保存仍按宿主约定重启生效，不承诺热切换。
 
-系统设置新增最小字段：`etl_type`（dify/unstructured_local，默认 dify）、`extraction_cache_enabled`（默认 true，覆盖 PDF 等提取结果）。保护性上限和 Tokenizer 初始版本是包内固定契约，不增加任意路径/远程地址输入框。
+系统设置新增最小字段：`etl_type`（builtin/unstructured_local，默认 builtin）、`extraction_cache_enabled`（默认 true，覆盖 PDF 等提取结果）。保护性上限和 Tokenizer 初始版本是包内固定契约，不增加任意路径/远程地址输入框。
 
 文档上传/重解析准入固化 parsing_profile：effective_etl、extractor_id/version、source_kind、normalization/cleaner/splitter versions、chunk_size_unit、tokenizer_profile_id/digest、父/子分隔符、表头参数及图片策略。重试沿用原快照；软件不再支持原 fingerprint 时明确要求用户重解析，不悄悄选新解析器。
 
@@ -288,7 +288,7 @@ PDF 缓存复用完整 ready extraction，不另建一份不受治理的明文�
 
 ## 9. 本地运行、依赖与隔离
 
-主流解析依赖复用 Dify 对应库：pypdfium2、python-docx、openpyxl、pandas/xlrd、BeautifulSoup、charset-normalizer、图像库；长尾通过明确 extras 引入 Unstructured。实施时只移植所选解析器，不安装 Dify 全部后端依赖。
+主流解析依赖复用 upstream 对应库：pypdfium2、python-docx、openpyxl、pandas/xlrd、BeautifulSoup、charset-normalizer、图像库；长尾通过明确 extras 引入 Unstructured。实施时只移植所选解析器，不安装 upstream 全部后端依赖。
 
 从上游 lock 提取候选版本，分别验证 Python 3.12、macOS 开发环境及生产 Linux 镜像后，写入本项目依赖和 lock。上游可运行不等于本项目已兼容；不允许仅写宽泛 `>=` 后宣称复用完成。
 
@@ -333,7 +333,7 @@ Pandoc、libmagic、图像编解码器、Unstructured 使用的 NLP 资源以及
 | 编号 | 场景与通过标准 |
 | --- | --- |
 | A01 路由 | 两模式每种允许格式命中唯一 Adapter；未知扩展名、伪装 ZIP/Office、DOC/PPT/ODT 明确拒绝；没有 API fallback |
-| A02 隔离 | 新解析包不存在 Dify 宿主 import；原始来源文件、固定版本与补丁清单可追踪 |
+| A02 隔离 | 新解析包不存在 upstream 宿主 import；原始来源文件、固定版本与补丁清单可追踪 |
 | A03 Excel | 标题行+空行+表头、空表头有数据、重复表头、空值、公式缓存、多 sheet、图片锚点全部保留正确字段和实际行位置 |
 | A04 CSV | UTF-8/UTF-16/GB18030 与探测编码；带逗号/引号/换行字段；错误行可见失败，不静默少行 |
 | A05 Word | 标题—说明—表格—段落順序；嵌套/合并单元格；重复正文不去重；跨格式 Run 的空格保留；链接与图片不丢 |
@@ -363,7 +363,7 @@ Pandoc、libmagic、图像编解码器、Unstructured 使用的 NLP 资源以及
 | A29 位置与参数 | Word同章节三段合并后在第二段中间切开，两个结果只列真实覆盖来源；父/子自定义中文和转义分隔符生效，表格/代码/图片结构不被破坏 |
 | A30 文件身份 | 使用文件A的预览fingerprint上传同名/同扩展名的文件B被拒绝；无预览的API上传可冻结服务器配置正常执行 |
 
-计划新增测试文件：`backend/tests/knowledge/test_extractor_registry.py`、`test_dify_extractors.py`、`test_local_unstructured.py`、`test_markdown_chunking.py`、`test_knowledge_attachments.py`、`test_extraction_cache.py`；扩展既有 ingestion/upload/schema/worker/storage/governance/reembedding/retrieval 测试。前端新增能力与预览身份单测，扩展 `project-knowledge.spec.ts` 和真实后端知识库浏览器测试。
+计划新增测试文件：`backend/tests/knowledge/test_extractor_registry.py`、`test_builtin_extractors.py`、`test_local_unstructured.py`、`test_markdown_chunking.py`、`test_knowledge_attachments.py`、`test_extraction_cache.py`；扩展既有 ingestion/upload/schema/worker/storage/governance/reembedding/retrieval 测试。前端新增能力与预览身份单测，扩展 `project-knowledge.spec.ts` 和真实后端知识库浏览器测试。
 
 实施完成后需实际运行并记录的门禁：
 
@@ -396,7 +396,7 @@ Pandoc、libmagic、图像编解码器、Unstructured 使用的 NLP 资源以及
 | 策略模式 + 三级路由 + list[Document] | 2、3、A01/A02 | 只有file数据源本期实际启用；不新增空壳Notion/网页功能 |
 | 专用解析器 + Unstructured分工 | 2.2、9、A08/A24 | 仅本地，不提供API卸载；默认模式保留现有PPTX/EPUB支持 |
 | 万物皆Markdown | 3.1、4、A03–A11/A22 | 来源、身份、警告仍结构化；附加index_text用于文本检索 |
-| 解析预分段 + Token细分 | 6、A09/A10 | 明确新增真实Token口径，不能使用Dify字符实现冒充 |
+| 解析预分段 + Token细分 | 6、A09/A10 | 明确新增真实Token口径，不能使用upstream字符实现冒充 |
 | 图片一等公民、持久化、幂等 | 5、7、A12/A15–A20 | 正式摄取持久化；预览无副作用；先完成展示和关系，OCR/图片向量另立范围 |
 | 编码探测、降级、PDF缓存、动态白名单 | 5.3、7.3、8、9、A04/A14/A18/A23–A25 | 超时需可终止；缓存保留结构；基础设施失败不静默降级 |
 
@@ -407,6 +407,5 @@ Pandoc、libmagic、图像编解码器、Unstructured 使用的 NLP 资源以及
 - 本项目：[根指南](../../../AGENTS.md)、[后端指南](../../../backend/AGENTS.md)、[前端指南](../../../frontend/AGENTS.md)、[领域词汇](../../../CONTEXT.md)。
 - 本项目：[提取器](../../../backend/packages/knowledge/actweave_knowledge/ingestion/extractor.py)、[共用预览路径](../../../backend/packages/knowledge/actweave_knowledge/ingestion/preview.py)、[切分器](../../../backend/packages/knowledge/actweave_knowledge/ingestion/splitter.py)、[摄取发布](../../../backend/packages/knowledge/actweave_knowledge/ingestion/pipeline.py)、[重嵌入](../../../backend/packages/knowledge/actweave_knowledge/ingestion/reembed.py)。
 - 本项目：[MinIO](../../../backend/packages/knowledge/actweave_knowledge/storage/minio_store.py)、[权限](../../../backend/packages/knowledge/actweave_knowledge/authority.py)、[M11设计](backup/2026-08-31-rag-knowledge-m11-design.md)。
-- Dify：[路由](/Users/jiangfeng/dify/api/core/rag/extractor/extract_processor.py)、[默认白名单](/Users/jiangfeng/dify/api/constants/__init__.py)、[实际字符计量](/Users/jiangfeng/dify/api/core/rag/splitter/fixed_text_splitter.py)、[依赖锁文件](/Users/jiangfeng/dify/api/uv.lock)。
-- Dify：[Word](/Users/jiangfeng/dify/api/core/rag/extractor/word_extractor.py)、[Excel](/Users/jiangfeng/dify/api/core/rag/extractor/excel_extractor.py)、[Markdown](/Users/jiangfeng/dify/api/core/rag/extractor/markdown_extractor.py)、[PDF](/Users/jiangfeng/dify/api/core/rag/extractor/pdf_extractor.py)、[Unstructured目录](/Users/jiangfeng/dify/api/core/rag/extractor/unstructured/)。
-- 用户参考文档：[Dify知识库文件解析机制分析](../../knowledge/Dify知识库文件解析机制分析.md)。其中“默认缓存必然生效”“按Token计数”“Unstructured无法做同类提取”等概括不作为已确认事实。
+- upstream：[路由](<upstream-checkout>/api/core/rag/extractor/extract_processor.py)、[默认白名单](<upstream-checkout>/api/constants/__init__.py)、[实际字符计量](<upstream-checkout>/api/core/rag/splitter/fixed_text_splitter.py)、[依赖锁文件](<upstream-checkout>/api/uv.lock)。
+- upstream：[Word](<upstream-checkout>/api/core/rag/extractor/word_extractor.py)、[Excel](<upstream-checkout>/api/core/rag/extractor/excel_extractor.py)、[Markdown](<upstream-checkout>/api/core/rag/extractor/markdown_extractor.py)、[PDF](<upstream-checkout>/api/core/rag/extractor/pdf_extractor.py)、[Unstructured目录](<upstream-checkout>/api/core/rag/extractor/unstructured/)。

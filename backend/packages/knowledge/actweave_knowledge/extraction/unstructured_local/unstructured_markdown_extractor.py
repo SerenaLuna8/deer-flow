@@ -1,4 +1,4 @@
-"""Dify's local partition_md branch with a checked source-fidelity side channel.
+"""upstream's local partition_md branch with a checked source-fidelity side channel.
 
 Unstructured's HTML intermediate discards Markdown punctuation and source lines.
 Token-map blocks therefore carry unique delimiters; dangerous/literal blocks are

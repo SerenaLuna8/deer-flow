@@ -71,7 +71,7 @@ async def test_file_capabilities_http_uses_server_snapshot_not_frontend_format_l
         response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/file-capabilities")
     assert response.status_code == 200
     body = response.json()
-    assert body["effective_etl"] == "dify"
+    assert body["effective_etl"] == "builtin"
     assert not any(item["available"] for item in body["formats"])
     assert not {"minio", "storage_key", "source_path"} & body.keys()
 

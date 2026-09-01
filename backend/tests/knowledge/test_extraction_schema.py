@@ -379,7 +379,7 @@ async def test_profile_json_index_defaults_and_settings(postgres_database_url):
                         await session.execute(text(f"UPDATE {table} SET {column}={invalid}"))
             await session.execute(text("INSERT INTO knowledge_system_settings (id) VALUES (1)"))
             settings = (await session.execute(text("SELECT etl_type,extraction_cache_enabled FROM knowledge_system_settings"))).one()
-            assert settings == ("dify", True)
+            assert settings == ("builtin", True)
             await session.execute(text("UPDATE knowledge_system_settings SET etl_type='unstructured_local',extraction_cache_enabled=false"))
             with pytest.raises(IntegrityError):
                 async with session.begin_nested():

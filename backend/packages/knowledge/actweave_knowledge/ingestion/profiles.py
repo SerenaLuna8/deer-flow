@@ -119,7 +119,7 @@ class FileChunkLimits(BaseModel):
 
 class FileCapabilities(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    effective_etl: Literal["dify", "unstructured_local"]
+    effective_etl: Literal["builtin", "unstructured_local"]
     capability_revision: str
     formats: tuple[FileFormatCapability, ...]
     chunk_limits: FileChunkLimits = Field(default_factory=FileChunkLimits)

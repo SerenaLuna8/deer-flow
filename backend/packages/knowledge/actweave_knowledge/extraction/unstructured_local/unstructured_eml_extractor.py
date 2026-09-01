@@ -1,4 +1,4 @@
-"""Local branch adapted from Dify 9c16c865977e9d89a9ec7ae0536e893f4385a758.
+"""Local branch adapted from upstream 9c16c865977e9d89a9ec7ae0536e893f4385a758.
 
 See ../UPSTREAM.md and ../patches.md. API credentials, runtime downloads,
 second-pass decoding, and host configuration are deliberately absent.

@@ -17,7 +17,7 @@ from actweave_knowledge.extraction.contracts import (
 )
 
 
-def make_parse_profile(extension: str, *, etl_type: str = "dify", header_rules: tuple = ()) -> ParseProfile:
+def make_parse_profile(extension: str, *, etl_type: str = "builtin", header_rules: tuple = ()) -> ParseProfile:
     from actweave_knowledge.extraction.registry import default_registry
 
     item = default_registry().resolve(

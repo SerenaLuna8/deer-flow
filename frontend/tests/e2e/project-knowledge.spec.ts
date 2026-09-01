@@ -15,8 +15,8 @@ const SAFE_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQ1sAAAAASUVORK5CYII=";
 const PROCESSING_PROFILE = {
   parse: {
-    etl_type: "dify",
-    extractor_id: "dify.text",
+    etl_type: "builtin",
+    extractor_id: "builtin.text",
     extractor_version: "1",
     normalization_version: "md-v1",
     image_policy_version: "raster-v1",
@@ -39,7 +39,7 @@ const PROCESSING_PROFILE = {
   },
 };
 type MockFileCapabilities = {
-  effective_etl: "dify" | "unstructured_local";
+  effective_etl: "builtin" | "unstructured_local";
   capability_revision: string;
   formats: Array<{
     extension: string;
@@ -61,27 +61,27 @@ type MockFileCapabilities = {
 };
 
 const FILE_CAPABILITIES: MockFileCapabilities = {
-  effective_etl: "dify",
+  effective_etl: "builtin",
   capability_revision: "a".repeat(64),
   formats: [
     {
       extension: ".txt",
-      parser_id: "dify.text",
+      parser_id: "builtin.text",
       available: true,
       reason_code: null,
       embedded_images: false,
     },
     ...[
-      [".md", "dify.markdown", false],
-      [".markdown", "dify.markdown", false],
-      [".mdx", "dify.markdown", false],
-      [".pdf", "dify.pdf", true],
-      [".docx", "dify.word", true],
-      [".xlsx", "dify.excel", true],
-      [".xls", "dify.excel", false],
-      [".csv", "dify.csv", false],
-      [".html", "dify.html", false],
-      [".htm", "dify.html", false],
+      [".md", "builtin.markdown", false],
+      [".markdown", "builtin.markdown", false],
+      [".mdx", "builtin.markdown", false],
+      [".pdf", "builtin.pdf", true],
+      [".docx", "builtin.word", true],
+      [".xlsx", "builtin.excel", true],
+      [".xls", "builtin.excel", false],
+      [".csv", "builtin.csv", false],
+      [".html", "builtin.html", false],
+      [".htm", "builtin.html", false],
       [".pptx", "unstructured.pptx", false],
       [".epub", "unstructured.epub", false],
     ].map(([extension, parser_id, embedded_images]) => ({
@@ -5565,7 +5565,7 @@ test("the wizard admits only currently available server formats and retries capa
       FILE_CAPABILITIES.formats.find((item) => item.extension === ".csv")!,
       {
         extension: ".pdf",
-        parser_id: "dify.pdf",
+        parser_id: "builtin.pdf",
         available: false,
         reason_code: "PARSER_DEPENDENCY_UNAVAILABLE",
         embedded_images: true,
@@ -6261,7 +6261,7 @@ test("document governance shows real profiles and warnings while a failed public
           }),
           parse: {
             ...PROCESSING_PROFILE.parse,
-            extractor_id: "dify.csv",
+            extractor_id: "builtin.csv",
           },
         },
         parse_warnings: [
@@ -6363,7 +6363,7 @@ test("document governance shows real profiles and warnings while a failed public
   const tokenRow = rows.getByRole("row").filter({ hasText: "token.csv" });
   await expect(tokenRow).toContainText("1,000 Knowledge Tokens");
   await expect(tokenRow).toContainText("knowledge-cl100k-v1");
-  await expect(tokenRow).toContainText("Dify · dify.csv · 1");
+  await expect(tokenRow).toContainText("Built-in parser · builtin.csv · 1");
   await expect(tokenRow).toContainText("2 parsing notices");
   await expect(tokenRow).toContainText("Header row was inferred");
   await expect(tokenRow).toContainText("1 image could not be saved");
@@ -6371,7 +6371,7 @@ test("document governance shows real profiles and warnings while a failed public
   const legacyRow = rows.getByRole("row").filter({ hasText: "legacy.txt" });
   await expect(legacyRow).toContainText("1,000 characters");
   await expect(legacyRow).toContainText("Historical profile");
-  await expect(legacyRow).not.toContainText("dify.text");
+  await expect(legacyRow).not.toContainText("builtin.text");
 
   const imageOnlyRow = rows.getByRole("row").filter({ hasText: "scan.pdf" });
   await expect(imageOnlyRow).toContainText("文件没有可提取的文本");

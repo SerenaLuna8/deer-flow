@@ -458,7 +458,7 @@ export interface Translations {
       reparseConflict: string;
       legacyProfile: string;
       parserProfile: (
-        etlType: "dify" | "unstructured_local",
+        etlType: "builtin" | "unstructured_local",
         extractorId: string,
         extractorVersion: string,
       ) => string;
@@ -1610,6 +1610,8 @@ export interface Translations {
     retry: string;
     secretConfigured: string;
     secretUnset: string;
+    builtInParser: string;
+    localUnstructuredParser: string;
     noSummaryModel: string;
     unavailableModel: string;
     modelsUnavailable: string;

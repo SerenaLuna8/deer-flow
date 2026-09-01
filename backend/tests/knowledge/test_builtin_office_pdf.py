@@ -1,4 +1,4 @@
-"""Real local Office/PDF fixtures for the fixed-source Dify adapters."""
+"""Real local Office/PDF fixtures for the fixed-source upstream adapters."""
 
 from __future__ import annotations
 

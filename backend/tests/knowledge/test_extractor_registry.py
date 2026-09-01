@@ -24,18 +24,18 @@ def signatures():
     return importlib.import_module("actweave_knowledge.extraction.signatures")
 
 
-@pytest.mark.parametrize("etl", ["dify", "unstructured_local"])
+@pytest.mark.parametrize("etl", ["builtin", "unstructured_local"])
 @pytest.mark.parametrize(
     "ext,parser",
     [
-        (".txt", "dify.text"),
-        (".pdf", "dify.pdf"),
-        (".docx", "dify.word"),
-        (".xlsx", "dify.excel"),
-        (".xls", "dify.excel"),
-        (".csv", "dify.csv"),
-        (".html", "dify.html"),
-        (".htm", "dify.html"),
+        (".txt", "builtin.text"),
+        (".pdf", "builtin.pdf"),
+        (".docx", "builtin.word"),
+        (".xlsx", "builtin.excel"),
+        (".xls", "builtin.excel"),
+        (".csv", "builtin.csv"),
+        (".html", "builtin.html"),
+        (".htm", "builtin.html"),
         (".pptx", "unstructured.pptx"),
         (".epub", "unstructured.epub"),
     ],
@@ -46,7 +46,7 @@ def test_unique_routes(registry_module, etl, ext, parser):
 
 
 @pytest.mark.parametrize("ext", [".md", ".markdown", ".mdx"])
-@pytest.mark.parametrize("etl,parser", [("dify", "dify.markdown"), ("unstructured_local", "unstructured.markdown")])
+@pytest.mark.parametrize("etl,parser", [("builtin", "builtin.markdown"), ("unstructured_local", "unstructured.markdown")])
 def test_markdown_modes(registry_module, ext, etl, parser):
     assert registry_module.default_registry().resolve(datasource_type="file", etl_type=etl, extension=ext).extractor_id == parser
 
@@ -56,19 +56,19 @@ def test_long_tail_local_only(registry_module, ext, parser):
     registry = registry_module.default_registry()
     assert registry.resolve(datasource_type="file", etl_type="unstructured_local", extension=ext).extractor_id == parser
     with pytest.raises(ExtractionError, match="文件解析失败") as caught:
-        registry.resolve(datasource_type="file", etl_type="dify", extension=ext)
+        registry.resolve(datasource_type="file", etl_type="builtin", extension=ext)
     assert caught.value.reason_code == "UNSUPPORTED_FORMAT"
 
 
 @pytest.mark.parametrize("ext", [".doc", ".ppt", ".odt", ".zip", ".exe", "", "txt"])
-@pytest.mark.parametrize("etl", ["dify", "unstructured_local"])
+@pytest.mark.parametrize("etl", ["builtin", "unstructured_local"])
 def test_disallowed_formats_never_fall_back(registry_module, ext, etl):
     with pytest.raises(ExtractionError) as caught:
         registry_module.default_registry().resolve(datasource_type="file", etl_type=etl, extension=ext)
     assert caught.value.reason_code == "UNSUPPORTED_FORMAT"
 
 
-@pytest.mark.parametrize("datasource,etl", [("web", "dify"), ("file", "unknown")])
+@pytest.mark.parametrize("datasource,etl", [("web", "builtin"), ("file", "unknown")])
 def test_unknown_routing_dimensions_fail(registry_module, datasource, etl):
     with pytest.raises(ExtractionError) as caught:
         registry_module.default_registry().resolve(datasource_type=datasource, etl_type=etl, extension=".txt")
@@ -76,15 +76,15 @@ def test_unknown_routing_dimensions_fail(registry_module, datasource, etl):
 
 
 def test_duplicate_routes_rejected_case_insensitively(registry_module):
-    item = registry_module.default_registry().resolve(datasource_type="file", etl_type="dify", extension=".txt")
+    item = registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".txt")
     with pytest.raises(ValueError, match="duplicate"):
         registry_module.ExtractorRegistry((item, replace(item, extensions=(".TXT",))))
 
 
 def test_xls_does_not_inherit_xlsx_image_capability(registry_module):
     registry = registry_module.default_registry()
-    assert registry.resolve(datasource_type="file", etl_type="dify", extension=".xlsx").supports_embedded_images is True
-    assert registry.resolve(datasource_type="file", etl_type="dify", extension=".xls").supports_embedded_images is False
+    assert registry.resolve(datasource_type="file", etl_type="builtin", extension=".xlsx").supports_embedded_images is True
+    assert registry.resolve(datasource_type="file", etl_type="builtin", extension=".xls").supports_embedded_images is False
 
 
 def test_dependency_metadata_changes_version_and_missing_dependency_is_unavailable(registry_module, monkeypatch):
@@ -92,10 +92,10 @@ def test_dependency_metadata_changes_version_and_missing_dependency_is_unavailab
         raise registry_module.metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(registry_module.metadata, "version", absent)
-    missing = registry_module.default_registry().resolve(datasource_type="file", etl_type="dify", extension=".txt")
+    missing = registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".txt")
     assert missing.dependency_probe() == "PARSER_DEPENDENCY_UNAVAILABLE"
     monkeypatch.setattr(registry_module.metadata, "version", lambda name: "3.4.7")
-    available = registry_module.default_registry().resolve(datasource_type="file", etl_type="dify", extension=".txt")
+    available = registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".txt")
     assert available.dependency_probe() is None
     assert missing.extractor_version != available.extractor_version
     assert "9c16c865977e9d89a9ec7ae0536e893f4385a758" in available.extractor_version
@@ -106,7 +106,7 @@ def test_registration_does_not_import_adapters(registry_module, monkeypatch):
         pytest.fail("registration eagerly imported an adapter")
 
     monkeypatch.setattr(registry_module.importlib, "import_module", forbidden)
-    assert registry_module.default_registry().resolve(datasource_type="file", etl_type="dify", extension=".pdf").extractor_id == "dify.pdf"
+    assert registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".pdf").extractor_id == "builtin.pdf"
 
 
 OFFICE = [
@@ -244,7 +244,7 @@ def processor_case(registry_module, tmp_path):
         calls.append("probe")
         return None
 
-    item = registry_module.default_registry().resolve(datasource_type="file", etl_type="dify", extension=".txt")
+    item = registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".txt")
     registration = replace(item, factory=factory, dependency_probe=probe)
     setting = make_setting(tmp_path / "source.txt", source_path=path, original_name="original.TXT")
     return setting, context, registration, calls, documents
@@ -310,16 +310,16 @@ def test_cumulative_text_budget_counts_all_documents(registry_module, processor_
 @pytest.mark.parametrize(
     "etl,ext,module_name,class_name",
     [
-        ("dify", ".txt", "builtin.text_extractor", "TextExtractor"),
-        ("dify", ".md", "builtin.markdown_extractor", "MarkdownExtractor"),
-        ("dify", ".pdf", "builtin.pdf_extractor", "PdfExtractor"),
-        ("dify", ".docx", "builtin.word_extractor", "WordExtractor"),
-        ("dify", ".xlsx", "builtin.excel_extractor", "ExcelExtractor"),
-        ("dify", ".xls", "builtin.excel_extractor", "ExcelExtractor"),
-        ("dify", ".csv", "builtin.csv_extractor", "CSVExtractor"),
-        ("dify", ".html", "builtin.html_extractor", "HtmlExtractor"),
-        ("dify", ".pptx", "unstructured_local.unstructured_pptx_extractor", "UnstructuredPPTXExtractor"),
-        ("dify", ".epub", "unstructured_local.unstructured_epub_extractor", "UnstructuredEpubExtractor"),
+        ("builtin", ".txt", "builtin.text_extractor", "TextExtractor"),
+        ("builtin", ".md", "builtin.markdown_extractor", "MarkdownExtractor"),
+        ("builtin", ".pdf", "builtin.pdf_extractor", "PdfExtractor"),
+        ("builtin", ".docx", "builtin.word_extractor", "WordExtractor"),
+        ("builtin", ".xlsx", "builtin.excel_extractor", "ExcelExtractor"),
+        ("builtin", ".xls", "builtin.excel_extractor", "ExcelExtractor"),
+        ("builtin", ".csv", "builtin.csv_extractor", "CSVExtractor"),
+        ("builtin", ".html", "builtin.html_extractor", "HtmlExtractor"),
+        ("builtin", ".pptx", "unstructured_local.unstructured_pptx_extractor", "UnstructuredPPTXExtractor"),
+        ("builtin", ".epub", "unstructured_local.unstructured_epub_extractor", "UnstructuredEpubExtractor"),
         ("unstructured_local", ".md", "unstructured_local.unstructured_markdown_extractor", "UnstructuredMarkdownExtractor"),
         ("unstructured_local", ".eml", "unstructured_local.unstructured_eml_extractor", "UnstructuredEmlExtractor"),
         ("unstructured_local", ".msg", "unstructured_local.unstructured_msg_extractor", "UnstructuredMsgExtractor"),
@@ -377,7 +377,7 @@ def test_local_probe_uses_spacy_model_metadata_without_triggering_download(regis
         return installed[name]
 
     monkeypatch.setattr(registry_module.metadata, "version", version)
-    item = registry_module.default_registry().resolve(datasource_type="file", etl_type="dify", extension=".pptx")
+    item = registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".pptx")
     assert item.dependency_probe() is None
     del installed["en-core-web-sm"]
     assert item.dependency_probe() == "PARSER_DEPENDENCY_UNAVAILABLE"

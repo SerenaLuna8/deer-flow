@@ -1,4 +1,4 @@
-"""HTML loader adapted from Dify 9c16c865977e9d89a9ec7ae0536e893f4385a758.
+"""HTML loader adapted from upstream 9c16c865977e9d89a9ec7ae0536e893f4385a758.
 
 Keeps the binary-file -> BeautifulSoup flow. Structural Markdown replaces the
 upstream soup.get_text()/strip so headings, lists, tables and code survive.

@@ -62,13 +62,13 @@ RESOURCE_SCOPES = {
 _LOCAL_IDS = frozenset(f"unstructured.{name}" for name in ("pptx", "epub", "markdown", "eml", "msg", "xml"))
 _LOCAL_PACKAGES = {"unstructured", "spacy", "en-core-web-sm", "thinc", "python-magic", "lxml", "langdetect"}
 _PARSER_PACKAGES = {
-    "dify.text": {"charset-normalizer"},
-    "dify.markdown": {"charset-normalizer", "markdown-it-py"},
-    "dify.html": {"charset-normalizer", "beautifulsoup4"},
-    "dify.csv": {"charset-normalizer"},
-    "dify.word": {"python-docx", "lxml", "pillow"},
-    "dify.pdf": {"pypdfium2", "pillow"},
-    "dify.excel": {"openpyxl", "pandas", "numpy", "xlrd", "pillow"},
+    "builtin.text": {"charset-normalizer"},
+    "builtin.markdown": {"charset-normalizer", "markdown-it-py"},
+    "builtin.html": {"charset-normalizer", "beautifulsoup4"},
+    "builtin.csv": {"charset-normalizer"},
+    "builtin.word": {"python-docx", "lxml", "pillow"},
+    "builtin.pdf": {"pypdfium2", "pillow"},
+    "builtin.excel": {"openpyxl", "pandas", "numpy", "xlrd", "pillow"},
     **{
         name: _LOCAL_PACKAGES | extra
         for name, extra in (

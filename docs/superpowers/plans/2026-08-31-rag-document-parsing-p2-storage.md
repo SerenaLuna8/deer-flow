@@ -118,7 +118,7 @@ Run: `cd backend && PYTHONPATH=. uv run python tests/support/core_gate_plugin.py
 | Segment | `extraction_id` nullable、`index_text` Text 默认空串、`token_count` Integer ≥0 默认0、`source_spans` JSON array 默认[] |
 | Child | `index_text`、`token_count`、`source_spans`，同 Segment 的类型/默认值 |
 | Task | `extraction_id` nullable；仅 ingest/reembed/summarize 可带 pin，且只允许 open status；增加 `delete_extraction` kind、resource_id 唯一 open-delete partial index；该 kind 的 target_version/storage_key 均为NULL |
-| KnowledgeSystemSettingsRow | `etl_type` String(32) NOT NULL DEFAULT 'dify'，CHECK值为dify/unstructured_local；`extraction_cache_enabled` Boolean NOT NULL DEFAULT true。P3只实现读取/管理投影，不再新增DDL |
+| KnowledgeSystemSettingsRow | `etl_type` String(32) NOT NULL DEFAULT 'builtin'，CHECK值为builtin/unstructured_local；`extraction_cache_enabled` Boolean NOT NULL DEFAULT true。P3只实现读取/管理投影，不再新增DDL |
 
 状态闭包：Extraction/Attachment `state=staging|ready|deleting`；三类对象的 upload fact 是 `pending|stored|delete_pending|deleted`；三类 quota fact 是 `unreserved|reserved|committed|released`。manifest 未登记前 key/hash/size/quota 为 NULL/NULL/0/unreserved；manifest 登记后 key、hash、size必须同时存在。`ready` 必须 manifest stored、committed、completed_at 非空。Attachment `ready` 必须 stored+committed。`deleted` 对象可短暂保留 reserved/committed 供失败后校准释放；`released` 必须 deleted。pending/delete_pending 不能据父行 state 推断用量。
 

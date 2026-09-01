@@ -1,4 +1,4 @@
-"""Bounded strict decoding, adapted from Dify extractor/helpers.py.
+"""Bounded strict decoding, adapted from upstream extractor/helpers.py.
 
 Upstream 9c16c865977e9d89a9ec7ae0536e893f4385a758; see UPSTREAM.md.
 The detector is for the local parsing child's main thread, never an event loop.
@@ -36,7 +36,7 @@ def read_source_bytes(path: Path) -> bytes:
 
 
 def detect_encoding(sample: bytes) -> str:
-    """Dify's best-candidate detection, with an interruptible POSIX budget.
+    """upstream's best-candidate detection, with an interruptible POSIX budget.
 
     Unlike upstream's from_path/ThreadPoolExecutor this reads only the supplied
     1 MiB sample and cannot leave an uninterruptible detector thread running.

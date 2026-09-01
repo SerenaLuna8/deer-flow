@@ -547,7 +547,7 @@ export const enUS: Translations = {
         "The document changed outside this dialog. The latest parameters and version were reloaded; review and confirm again.",
       legacyProfile: "Historical profile",
       parserProfile: (etlType, extractorId, extractorVersion) =>
-        `${etlType === "dify" ? "Dify" : "Local Unstructured"} · ${extractorId} · ${extractorVersion}`,
+        `${etlType === "builtin" ? "Built-in parser" : "Local Unstructured"} · ${extractorId} · ${extractorVersion}`,
       parsingNotices: (count) =>
         `${count} parsing ${count === 1 ? "notice" : "notices"}`,
       imageFailures: (count) =>
@@ -1562,6 +1562,8 @@ export const enUS: Translations = {
     retry: "Retry",
     secretConfigured: "Configured — leave blank to keep",
     secretUnset: "Not configured",
+    builtInParser: "Built-in parser",
+    localUnstructuredParser: "Local Unstructured",
     noSummaryModel: "Not configured",
     unavailableModel: "Unavailable model — select another or clear",
     modelsUnavailable:

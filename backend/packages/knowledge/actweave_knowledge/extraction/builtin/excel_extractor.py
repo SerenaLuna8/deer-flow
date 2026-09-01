@@ -1,4 +1,4 @@
-"""Excel document extractor adapted from Dify's pinned ExcelExtractor.
+"""Excel document extractor adapted from upstream's pinned ExcelExtractor.
 
 Upstream: api/core/rag/extractor/excel_extractor.py at
 9c16c865977e9d89a9ec7ae0536e893f4385a758. See UPSTREAM.md and patches.md.

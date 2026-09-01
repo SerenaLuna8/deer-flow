@@ -136,7 +136,7 @@ FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
     "columns": CatalogInvariant(
         count=1444,
-        digest="b0df05347f70bb0754a2ac0eec50548a4c7cbe5622cf93ead4466ea6cb46a981",
+        digest="739049b17052ff5605d3f963644918e357826f339c5fed41f77880256aa22342",
     ),
     "table_comments": CatalogInvariant(
         count=113,
@@ -144,7 +144,7 @@ FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
     "column_comments": CatalogInvariant(
         count=1445,
-        digest="6ba29d52d03b9694ac1953ae21921de598686cdbcbd2219cf40894a6fc5364af",
+        digest="a20bbbd03bfebe3ee8703455b9c58b681470c486bce2fafbf9a719c01893b7ae",
     ),
     "sequences": CatalogInvariant(
         count=4,
@@ -152,7 +152,7 @@ FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
     "constraints": CatalogInvariant(
         count=1073,
-        digest="a06b63b0c798f3781a39a13f9ac075d9c2b1626dfcbe16dc5e04762808bfad78",
+        digest="8b488e479509b7d870053351ce545baf479cd9038f1b093303386403d7a22f8e",
     ),
     "indexes": CatalogInvariant(
         count=385,

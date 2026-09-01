@@ -91,7 +91,7 @@ class KnowledgeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    etl_type: Literal["dify", "unstructured_local"] = "dify"
+    etl_type: Literal["builtin", "unstructured_local"] = "builtin"
     extraction_cache_enabled: bool = True
     worker_concurrency: int = Field(default=2, ge=1, le=16)
     task_timeout_seconds: int = Field(default=900, ge=30, le=7200)

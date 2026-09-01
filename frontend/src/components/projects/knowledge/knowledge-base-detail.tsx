@@ -69,7 +69,7 @@ const RERANKER_NONE = "none";
 
 /**
  * In-base layout: a secondary menu (documents / retrieval test / settings)
- * beside the section content, mirroring Dify's in-knowledge-base navigation.
+ * beside the section content, mirroring upstream's in-knowledge-base navigation.
  * The active section comes from the URL (`view=`); switching sections and
  * leaving the base are resource moves, so both push history entries.
  */

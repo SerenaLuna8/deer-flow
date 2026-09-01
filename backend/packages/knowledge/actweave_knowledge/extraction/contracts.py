@@ -123,7 +123,7 @@ class HeaderRule(FrozenModel):
 
 
 class ParseProfile(FrozenModel):
-    etl_type: Literal["dify", "unstructured_local"]
+    etl_type: Literal["builtin", "unstructured_local"]
     extractor_id: str = Field(min_length=1)
     extractor_version: str = Field(min_length=1)
     normalization_version: str = Field(min_length=1)

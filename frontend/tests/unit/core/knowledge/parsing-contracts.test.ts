@@ -42,8 +42,8 @@ const DOCUMENT_ID = "50000000-0000-4000-8000-000000000001";
 
 const processingProfile = {
   parse: {
-    etl_type: "dify",
-    extractor_id: "dify.markdown",
+    etl_type: "builtin",
+    extractor_id: "builtin.markdown",
     extractor_version: "1",
     normalization_version: "md-v1",
     image_policy_version: "raster-v1",
@@ -75,12 +75,12 @@ const sourceSpan = {
 };
 
 const fileCapabilities = {
-  effective_etl: "dify",
+  effective_etl: "builtin",
   capability_revision: "a".repeat(64),
   formats: [
     {
       extension: ".pdf",
-      parser_id: "dify.pdf",
+      parser_id: "builtin.pdf",
       available: true,
       reason_code: null,
       embedded_images: true,

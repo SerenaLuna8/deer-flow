@@ -7,7 +7,7 @@ const SAFE_ERROR = "知识库配置无效，请检查存储连接、密钥和模
 function initialSettings() {
   return {
     enabled: false,
-    etl_type: "dify" as "dify" | "unstructured_local",
+    etl_type: "builtin" as "builtin" | "unstructured_local",
     extraction_cache_enabled: true,
     worker_concurrency: 2,
     task_timeout_seconds: 900,
@@ -37,9 +37,15 @@ test("an administrator saves the local parser and extraction cache in the existi
   const state = await mockKnowledgeSettings(page);
   await page.goto("/admin/settings/knowledge");
 
-  await page
-    .getByRole("combobox", { name: "Document parser", exact: true })
-    .click();
+  const parser = page.getByRole("combobox", {
+    name: "Document parser",
+    exact: true,
+  });
+  await expect(parser).toContainText("Built-in parser");
+  await parser.click();
+  await expect(
+    page.getByRole("option", { name: "Built-in parser", exact: true }),
+  ).toBeVisible();
   await page
     .getByRole("option", { name: "Local Unstructured", exact: true })
     .click();

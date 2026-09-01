@@ -1,4 +1,4 @@
-"""Local adaptation of Dify's PDF extractor at 9c16c865977e.
+"""Local adaptation of upstream's PDF extractor at 9c16c865977e.
 
 Retains load/parse and the PDFium image-object extraction loop. Host storage,
 UploadFile, tenant IDs, and the lossy joined-string cache are deliberately absent.

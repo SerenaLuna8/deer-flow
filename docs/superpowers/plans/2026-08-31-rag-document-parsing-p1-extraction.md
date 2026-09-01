@@ -2,19 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 交付可独立验证的纯本地解析包，保留 Dify 源码来源、Markdown 内容、完整来源位置、安全图片及离线执行证据，不切换生产摄取入口。
+**Goal:** 交付可独立验证的纯本地解析包，保留 upstream 源码来源、Markdown 内容、完整来源位置、安全图片及离线执行证据，不切换生产摄取入口。
 
 **Architecture:** 依照数据源、ETL、扩展名三级注册表调用固定版本 Adapter，输出统一 `Document`。子进程仅处理本地文件并通过受限 IPC 交付图片，父进程校验后调用注入回调；数据库、对象存储、授权和模型均由后续宿主编排负责。
 
-**Tech Stack:** Python 3.12、Pydantic v2、Dify 固定源码、pypdfium2、python-docx、openpyxl、pandas/xlrd、BeautifulSoup、charset-normalizer、Pillow、Unstructured 本地库、pytest、asyncio subprocess。
+**Tech Stack:** Python 3.12、Pydantic v2、upstream 固定源码、pypdfium2、python-docx、openpyxl、pandas/xlrd、BeautifulSoup、charset-normalizer、Pillow、Unstructured 本地库、pytest、asyncio subprocess。
 
 **Spec:** [权威规格](../specs/2026-08-31-rag-document-parsing-design.md)，必须同时阅读[总计划 §3/§4 共用契约](2026-08-31-rag-document-parsing.md)。总计划的类型、字段和 helpers 是跨包接口权威；规格中的 `AttachmentDraft` 在实施中具体化为 `Attachment`、`AttachmentOccurrence`，不创建第三套类型。
 
 ## Global Constraints
 
-- ActWeave 核对基线 `b96581974b057c0ae4d853815130d99c0ed23823`；Dify 源码固定 `9c16c865977e9d89a9ec7ae0536e893f4385a758`。
-- 数据源本期只交付 `file`；ETL 枚举 `dify|unstructured_local`，默认 `dify`。没有 Unstructured API、URL 下载或运行时资源下载。
-- `actweave_knowledge` 不得导入 `app.*`、`deerflow.*` 或 Dify 的 `models/extensions/core.file`。
+- ActWeave 核对基线 `b96581974b057c0ae4d853815130d99c0ed23823`；upstream 源码固定 `9c16c865977e9d89a9ec7ae0536e893f4385a758`。
+- 数据源本期只交付 `file`；ETL 枚举 `builtin|unstructured_local`，默认 `builtin`。没有 Unstructured API、URL 下载或运行时资源下载。
+- `actweave_knowledge` 不得导入 `app.*`、`deerflow.*` 或 upstream 的 `models/extensions/core.file`。
 - 原文件继续 ≤50 MiB，MinIO 每次单 PUT，复用现有每 store 单上传槽。
 - 提取正文最多 5,000,000 字符；父段及实际向量条目分别不超过当前每文档 5,000 配额。
 - 图片最多 100 个独立字节对象，每张 ≤5 MiB、≤20,000,000 像素，单文档图片合计 ≤50 MiB。
@@ -49,7 +49,7 @@
 | `extraction/UPSTREAM.md`、`patches.md` | 原文件摘要、版本和补丁/依赖差异；不含宿主凭据 |
 | `backend/tests/knowledge/parsing_test_helpers.py` | 总计划唯一解析测试 helper 来源 |
 
-**已确认：** 当前测试使用 `backend/.venv/bin/python -m pytest`，`tests/conftest.py` 会隔离导入期数据库地址；纯解析测试不申请 PostgreSQL fixture。当前环境没有 Unstructured；当前 lock 和环境的 pypdfium2 为 5.7.1。Dify 的 5.6.0 是候选而非降级要求，优先验证当前锁定 5.7.1；不能把本机已有库当作完整格式矩阵通过证据。
+**已确认：** 当前测试使用 `backend/.venv/bin/python -m pytest`，`tests/conftest.py` 会隔离导入期数据库地址；纯解析测试不申请 PostgreSQL fixture。当前环境没有 Unstructured；当前 lock 和环境的 pypdfium2 为 5.7.1。upstream 的 5.6.0 是候选而非降级要求，优先验证当前锁定 5.7.1；不能把本机已有库当作完整格式矩阵通过证据。
 
 **未验证：** 候选完整依赖在 Python 3.12/macOS 与生产 Linux 的可安装性、系统资源和隔离权限。P1-T2/T7/T8 为它们提供实际验证步骤；任何失败不能被“跳过”后标成格式通过。
 
@@ -86,7 +86,7 @@ from actweave_knowledge.extraction.manifest import (
 
 
 def test_manifest_roundtrip_keeps_structure_and_has_no_path():
-    profile = ParseProfile(etl_type="dify", extractor_id="dify.pdf",
+    profile = ParseProfile(etl_type="builtin", extractor_id="builtin.pdf",
         extractor_version="upstream-adapter-build", normalization_version="md-v1",
         image_policy_version="raster-v1", header_rules=())
     documents = tuple(Document(page_content=text,
@@ -147,7 +147,7 @@ class ExtractionError(KnowledgeError):
 
 `base.py` 用 `ABC`+`@abstractmethod` 定义总计划的 `BaseExtractor.extract`；`AttachmentSink` 为协议，禁止增加 store/session/tenant 参数。按总计划完整定义 `ParseProfile/ChunkProfile/ProcessingProfile`，即使 P1 尚不切分，也先锁定跨包签名。
 
-共用字段的具体代码接在上述模型后；不要从 Dify Document 继承或放进任意 metadata：
+共用字段的具体代码接在上述模型后；不要从 upstream Document 继承或放进任意 metadata：
 
 ```python
 from collections.abc import Callable
@@ -187,7 +187,7 @@ class HeaderRule(FrozenModel):
         return self
 
 class ParseProfile(FrozenModel):
-    etl_type: Literal["dify", "unstructured_local"]
+    etl_type: Literal["builtin", "unstructured_local"]
     extractor_id: str
     extractor_version: str
     normalization_version: str
@@ -351,7 +351,7 @@ from actweave_knowledge.extraction.contracts import (
 )
 
 
-def make_parse_profile(extension, *, etl_type="dify", header_rules=()):
+def make_parse_profile(extension, *, etl_type="builtin", header_rules=()):
     from actweave_knowledge.extraction.registry import default_registry
     item = default_registry().resolve(datasource_type="file", etl_type=etl_type,
                                       extension=extension)
@@ -425,7 +425,7 @@ def make_context(work_dir: Path) -> ExtractionContext:
 - Modify: `backend/uv.lock`
 - Create: `backend/tests/knowledge/test_extractor_registry.py`
 
-**Consumes:** P1-T1 DTO/BaseExtractor；固定 Dify `api/core/rag/extractor/` 及 `api/uv.lock`。
+**Consumes:** P1-T1 DTO/BaseExtractor；固定 upstream `api/core/rag/extractor/` 及 `api/uv.lock`。
 
 **Produces:** `ExtractorRegistration` 总计划字段；`ExtractorRegistry.resolve(*,datasource_type,etl_type,extension)`；`default_registry() -> ExtractorRegistry`；`ExtractProcessor(registry=None).extract(setting,context)`；`validate_file_signature(path,extension,limits) -> None`。registration.dependency_probe 为 `Callable[[], str|None]`，None 表示可用，reason_code 表示不可用；factory 为 `Callable[[], BaseExtractor]`。
 
@@ -439,11 +439,11 @@ from actweave_knowledge.extraction.contracts import ExtractionError, ExtractionL
 from actweave_knowledge.extraction.registry import default_registry
 from actweave_knowledge.extraction.signatures import validate_file_signature
 
-@pytest.mark.parametrize("etl", ["dify", "unstructured_local"])
+@pytest.mark.parametrize("etl", ["builtin", "unstructured_local"])
 @pytest.mark.parametrize("ext,parser", [
-    (".txt", "dify.text"), (".pdf", "dify.pdf"), (".docx", "dify.word"),
-    (".xlsx", "dify.excel"), (".xls", "dify.excel"), (".csv", "dify.csv"),
-    (".html", "dify.html"), (".htm", "dify.html"),
+    (".txt", "builtin.text"), (".pdf", "builtin.pdf"), (".docx", "builtin.word"),
+    (".xlsx", "builtin.excel"), (".xls", "builtin.excel"), (".csv", "builtin.csv"),
+    (".html", "builtin.html"), (".htm", "builtin.html"),
     (".pptx", "unstructured.pptx"), (".epub", "unstructured.epub"),
 ])
 def test_unique_routes(etl, ext, parser):
@@ -452,7 +452,7 @@ def test_unique_routes(etl, ext, parser):
 
 @pytest.mark.parametrize("ext", [".doc", ".ppt", ".odt", ".zip", ".exe"])
 def test_disallowed_formats_never_fall_back(ext):
-    for etl in ("dify", "unstructured_local"):
+    for etl in ("builtin", "unstructured_local"):
         with pytest.raises(ExtractionError) as caught:
             default_registry().resolve(datasource_type="file", etl_type=etl, extension=ext)
         assert caught.value.reason_code == "UNSUPPORTED_FORMAT"
@@ -468,7 +468,7 @@ def test_office_container_identity(tmp_path):
     assert caught.value.reason_code == "FORMAT_SIGNATURE_MISMATCH"
 ```
 
-补齐以下参数化输入及 assertions：`.md/.markdown/.mdx` 在两个模式分别唯一命中 dify.markdown/unstructured.markdown；EML/MSG/XML 仅 local；datasource=`web` 和未知 ETL 明确失败；空扩展名失败；依赖缺失返回 unavailable 且 processor 不调用 factory；ZIP 路径穿越、符号链接成员和解压总量超限失败。
+补齐以下参数化输入及 assertions：`.md/.markdown/.mdx` 在两个模式分别唯一命中 builtin.markdown/unstructured.markdown；EML/MSG/XML 仅 local；datasource=`web` 和未知 ETL 明确失败；空扩展名失败；依赖缺失返回 unavailable 且 processor 不调用 factory；ZIP 路径穿越、符号链接成员和解压总量超限失败。
 
 - [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_extractor_registry.py -q`。
 
@@ -478,7 +478,7 @@ def test_office_container_identity(tmp_path):
 python3 - <<'PY'
 import hashlib, subprocess
 from pathlib import Path
-root = Path('/Users/jiangfeng/dify')
+root = Path('<upstream-checkout>')
 commit = '9c16c865977e9d89a9ec7ae0536e893f4385a758'
 files = ['extractor_base.py','helpers.py','text_extractor.py','markdown_extractor.py',
          'pdf_extractor.py','word_extractor.py','excel_extractor.py','csv_extractor.py',
@@ -555,7 +555,7 @@ class ExtractorRegistry:
 
     def resolve(self, *, datasource_type: str, etl_type: str,
                 extension: str) -> ExtractorRegistration:
-        if datasource_type != "file" or etl_type not in {"dify", "unstructured_local"}:
+        if datasource_type != "file" or etl_type not in {"builtin", "unstructured_local"}:
             raise ExtractionError("UNSUPPORTED_FORMAT")
         item = self._routes.get((etl_type, extension.lower()))
         if item is None:
@@ -563,7 +563,7 @@ class ExtractorRegistry:
         return item
 ```
 
-`default_registry()` 依照 Step 1 矩阵建立 14 个登记组（共享扩展名放同一组，但 XLS/XLSX 因 embedded_images 不同分开登记，共用 dify.excel ID/工厂），factory 内部才 import 具体 Adapter。表内 ID 对应本计划各类：`TextExtractor/MarkdownExtractor/PdfExtractor/WordExtractor/ExcelExtractor/CSVExtractor/HtmlExtractor` 与 `UnstructuredPPTXExtractor/UnstructuredEpubExtractor/UnstructuredMarkdownExtractor/UnstructuredEmlExtractor/UnstructuredMsgExtractor/UnstructuredXmlExtractor`。版本由固定 upstream commit、adapter revision、P1-T7 runtime 资源摘要组合；P1-T7 前以纯依赖 metadata 指纹构建，最终交付前补资源指纹并重新冻结 fixtures。
+`default_registry()` 依照 Step 1 矩阵建立 14 个登记组（共享扩展名放同一组，但 XLS/XLSX 因 embedded_images 不同分开登记，共用 builtin.excel ID/工厂），factory 内部才 import 具体 Adapter。表内 ID 对应本计划各类：`TextExtractor/MarkdownExtractor/PdfExtractor/WordExtractor/ExcelExtractor/CSVExtractor/HtmlExtractor` 与 `UnstructuredPPTXExtractor/UnstructuredEpubExtractor/UnstructuredMarkdownExtractor/UnstructuredEmlExtractor/UnstructuredMsgExtractor/UnstructuredXmlExtractor`。版本由固定 upstream commit、adapter revision、P1-T7 runtime 资源摘要组合；P1-T7 前以纯依赖 metadata 指纹构建，最终交付前补资源指纹并重新冻结 fixtures。
 
 `ExtractProcessor.extract` 的执行顺序：resolve→确认 profile 的 ID/version 与登记一致（否则 `PARSER_PROFILE_UNAVAILABLE`）→probe（否则 `PARSER_DEPENDENCY_UNAVAILABLE`）→source ≤50 MiB→signature→factory.extract→检查累计字符预算。它不执行第二阶段切分，不生成 Token，不用返回图片 ref 代替实际文字判断。
 
@@ -580,7 +580,7 @@ class ExtractorRegistry:
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/text_extractor.py`
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/markdown_extractor.py`
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/html_extractor.py`
-- Create: `backend/tests/knowledge/test_dify_text_extractors.py`
+- Create: `backend/tests/knowledge/test_builtin_text_extractors.py`
 - Modify: `backend/packages/knowledge/actweave_knowledge/extraction/patches.md`
 
 **Consumes:** P1-T1 helpers/DTO；P1-T2 registry；原 `text_extractor.py/markdown_extractor.py/html_extractor.py/helpers.py`。
@@ -590,7 +590,7 @@ class ExtractorRegistry:
 - [x] **Step 1：写真实编码及字面值测试。**
 
 ```python
-# test_dify_text_extractors.py
+# test_builtin_text_extractors.py
 import pytest
 from actweave_knowledge.extraction.processor import ExtractProcessor
 from actweave_knowledge.extraction.encoding import decode_text_file
@@ -624,7 +624,7 @@ def test_markdown_keeps_generics_hash_and_fences(tmp_path):
         assert all(0 <= s.start <= s.end <= len(doc.page_content) for s in doc.source_spans)
 ```
 
-- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_dify_text_extractors.py -q`。
+- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_builtin_text_extractors.py -q`。
 
 - [x] **Step 3：先移植解码顺序，再限制探测预算。** BOM UTF-8/UTF-16→严格 UTF-8→charset-normalizer 对最多 1 MiB 采样。探测函数只做 `charset_normalizer.from_bytes(sample).best()`；在当前解析子进程内用 POSIX `setitimer(ITIMER_REAL, 5)` 限制该调用，并在 finally 恢复原 handler/timer；禁止不可终止的 ThreadPool timeout。Mac/Linux 解析子进程主线程执行此函数，主进程和异步事件循环不得直接调用有 signal 的探测分支。探测后必须严格解码完整文件；空候选/超时/失败均 `ExtractionError('TEXT_DECODING_FAILED')`，消息不能带路径或字节。
 
@@ -678,7 +678,7 @@ def parse_heading(line: str) -> tuple[int, str] | None:
 - [x] **Step 5：移植 HTML 的真实结构转换并补测试。** BeautifulSoup 使用 HTML/EPUB 自身声明编码，不先套通用猜编码；删除 script/style/iframe/object/embed 和事件属性；仅保留 http/https/mailto 安全链接及其文字，javascript/data/file 协议只留可见文字；不访问 img src，输出 warning 和占位；保留 h1–h6/list/table/pre/code 有序内容。`html_to_documents` 对每个有效正文块分配 `block_id='html:<序号>'`，location 只有可证实块序号，不捏造页面。
 
 ```python
-# 追加到 test_dify_text_extractors.py
+# 追加到 test_builtin_text_extractors.py
 from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
 
@@ -700,7 +700,7 @@ def test_html_drops_active_content_but_keeps_code_and_link_label():
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/tabular.py`
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/csv_extractor.py`
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/excel_extractor.py`
-- Create: `backend/tests/knowledge/test_dify_tabular_extractors.py`
+- Create: `backend/tests/knowledge/test_builtin_tabular_extractors.py`
 - Modify: `backend/packages/knowledge/actweave_knowledge/extraction/patches.md`
 
 **Consumes:** P1-T3 `decode_text_file`；`HeaderRule`；源 Excel/CSV Adapter。图片实际接收调用 P1-T5，当前任务用 `CollectingAttachmentSink` 验证调用位置，不独立实现第二套图片处理。
@@ -710,7 +710,7 @@ def test_html_drops_active_content_but_keeps_code_and_link_label():
 - [x] **Step 1：加入字符串、坏行、空列及表头上下文样例。**
 
 ```python
-# test_dify_tabular_extractors.py
+# test_builtin_tabular_extractors.py
 import pytest
 from actweave_knowledge.extraction.contracts import HeaderRule, ExtractionError
 from actweave_knowledge.extraction.processor import ExtractProcessor
@@ -756,7 +756,7 @@ def test_excel_blank_header_column_keeps_data_and_source(tmp_path):
     assert any(w.code == "HEADER_INFERRED" for d in docs for w in d.warnings)
 ```
 
-- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_dify_tabular_extractors.py -q`。
+- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_builtin_tabular_extractors.py -q`。
 
 - [x] **Step 3：实现确定表头规则；空列宽度从全部有效数据列计算。** 不再复用上游“非空最多业务行兜底”或只留下非空表头列的 column_map。行号从 1 起，explicit 必须在范围内；none 完全不吃首行。auto 只取前 10 行至少两个非空字符串单元格的首候选，并附 warning。重复名使用列字母消歧，空列补 `列 B` 等。
 
@@ -986,7 +986,7 @@ IPC `asset` 帧只有 LocalAttachment JSON，帧≤64 KiB；不在该帧传正�
 **Files:**
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/word_extractor.py`
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/pdf_extractor.py`
-- Create: `backend/tests/knowledge/test_dify_office_pdf.py`
+- Create: `backend/tests/knowledge/test_builtin_office_pdf.py`
 - Modify: `backend/tests/knowledge/parsing_test_helpers.py`
 - Modify: `backend/packages/knowledge/actweave_knowledge/extraction/patches.md`
 
@@ -997,7 +997,7 @@ IPC `asset` 帧只有 LocalAttachment JSON，帧≤64 KiB；不在该帧传正�
 - [x] **Step 1：写真实 DOCX 与 PDF 重点回归。**
 
 ```python
-# test_dify_office_pdf.py
+# test_builtin_office_pdf.py
 from docx import Document as WordFile
 from actweave_knowledge.extraction.processor import ExtractProcessor
 from parsing_test_helpers import make_context, make_setting, write_pdf
@@ -1066,7 +1066,7 @@ def write_pdf(path: Path, pages: list[str]) -> None:
     path.write_bytes(output)
 ```
 
-Run: `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_dify_office_pdf.py -q`。
+Run: `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_builtin_office_pdf.py -q`。
 
 - [x] **Step 3：以局部补丁保持 Word 的全部顺序信息。** `doc.iter_inner_content()` 按 Paragraph/Table 遍历；每个 cell 再 `iter_inner_content()` 递归，不能只取 `.paragraphs`。merged cell 在同一 table 的同一实际 cell 对象只输出一次，但禁止对正文字符串 set 去重。heading style 映射一级到六级标题并更新 heading_path。文档顶层 paragraph 编号按实际 paragraph 出现递增；nested table 用 `table_path` 字符串携带层级，兼容 `table/row/column` 仍为一基。
 
@@ -1242,7 +1242,7 @@ PY
 
 先确认实际选用 NLP 分支及加载器；在安装/镜像构建阶段准备其请求的模型/字典，以固定 wheel/资源 SHA 登记。Pandoc 从 pypandoc-binary 所带文件定位并校验 SHA；libmagic、codec 以系统包版本及探测输出记录，不能向终端/响应打印宿主私有路径。遥测若可通过锁定源码的公开开关禁用则设置并测试；若仍有 import-time 或运行时网络请求，则对该确切调用做本地最小禁用补丁并记录，不通过 monkey patch requests 充当生产安全边界。
 
-缺少任何必需资源时 probe 返回 `PARSER_DEPENDENCY_UNAVAILABLE`；启动能力清单明确格式不可用，不在 parse 中下载。生产 Dify 模式包含 PPTX/EPUB，故其必要 Pandoc/NLP 资源也必须安装。若当前目标平台无法满足资源安装，记录失败并停止宣称该模式 ready；不得改路由到 API/旧解析器。
+缺少任何必需资源时 probe 返回 `PARSER_DEPENDENCY_UNAVAILABLE`；启动能力清单明确格式不可用，不在 parse 中下载。生产 upstream 模式包含 PPTX/EPUB，故其必要 Pandoc/NLP 资源也必须安装。若当前目标平台无法满足资源安装，记录失败并停止宣称该模式 ready；不得改路由到 API/旧解析器。
 
 - [x] **Step 5：实现可复现资源清单并做篡改测试。** manifest 只记录解析库包名/版本、所需文件的包相对逻辑名/SHA、adapter 修订和实际禁网策略版本；不含绝对路径、构建机器用户名、timestamp、Tokenizer/ChunkProfile，防止不同构建时间无意义失效。
 
@@ -1262,9 +1262,9 @@ def test_runtime_manifest_is_stable_safe_and_not_chunk_dependent():
     assert all(len(item["sha256"]) == 64 for item in manifest["resources"])
 ```
 
-`build_extraction_resources.py` 读取 explicit allowlist 中所需包的 `distribution(name).version` 和实际资源文件 bytes，排序后写 canonical JSON；这些资源路径来自 Step 4 已审查清单，不遍历整个虚拟环境。`runtime_manifest` 启动时重新验 SHA，与 checked-in platform 分项比对；Mac/Linux 原生 binary 允许不同分项，但同一部署 Gateway/Worker 必须消费同一平台分项。`runtime_digest` 为 canonical JSON 的 SHA-256，`extractor_version` 采用 `dify:<full-commit>:adapter-v1:<runtime-digest>`，Unstructured 类同。仅更换 Tokenizer 不改变此值；换解析/NLP/图像资源必须改变。
+`build_extraction_resources.py` 读取 explicit allowlist 中所需包的 `distribution(name).version` 和实际资源文件 bytes，排序后写 canonical JSON；这些资源路径来自 Step 4 已审查清单，不遍历整个虚拟环境。`runtime_manifest` 启动时重新验 SHA，与 checked-in platform 分项比对；Mac/Linux 原生 binary 允许不同分项，但同一部署 Gateway/Worker 必须消费同一平台分项。`runtime_digest` 为 canonical JSON 的 SHA-256，`extractor_version` 采用 `builtin:<full-commit>:adapter-v1:<runtime-digest>`，Unstructured 类同。仅更换 Tokenizer 不改变此值；换解析/NLP/图像资源必须改变。
 
-- [x] **Step 6：真实格式矩阵 green。** 使用 Step 1 元素单测之外的真实 `.pptx/.epub/.md/.eml/.msg/.xml` 文件，逐项断言文本/位置/警告；PPTX/EPUB 分别跑 dify 与 local；EML 构造带 UTF-8 encoded MIME 及字面 Base64 的正文；XML 用本地与 HTTP 外部实体两种恶意输入。MSG 使用锁定 python-oxmsg 上游测试库中的小 fixture，固定其 bytes SHA/出处并检查正文，不将假的 OLE header 算 MSG 通过。fixture 导入是实施阶段下载，运行时不下载。重跑 Step 2；记录资源安装和格式通过分别的结果。
+- [x] **Step 6：真实格式矩阵 green。** 使用 Step 1 元素单测之外的真实 `.pptx/.epub/.md/.eml/.msg/.xml` 文件，逐项断言文本/位置/警告；PPTX/EPUB 分别跑 builtin 与 local；EML 构造带 UTF-8 encoded MIME 及字面 Base64 的正文；XML 用本地与 HTTP 外部实体两种恶意输入。MSG 使用锁定 python-oxmsg 上游测试库中的小 fixture，固定其 bytes SHA/出处并检查正文，不将假的 OLE header 算 MSG 通过。fixture 导入是实施阶段下载，运行时不下载。重跑 Step 2；记录资源安装和格式通过分别的结果。
 
 ## P1-T8：受控子进程、取消结算与禁网矩阵（A12、A18、A23、A24、A25）
 

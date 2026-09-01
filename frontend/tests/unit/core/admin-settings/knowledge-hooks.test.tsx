@@ -21,7 +21,7 @@ const MODEL_ID = "22222222-2222-4222-8222-222222222222";
 const SECRET = "fictional-minio-secret-for-contract-test";
 const fields = {
   enabled: false,
-  etl_type: "dify" as const,
+  etl_type: "builtin" as const,
   extraction_cache_enabled: true,
   worker_concurrency: 2,
   task_timeout_seconds: 900,
@@ -72,7 +72,7 @@ describe("admin knowledge settings boundary", () => {
 
   test("keeps the parser and extraction cache in the single strict settings contract", () => {
     expect(adminKnowledgeSettingsSchema.parse(settings)).toMatchObject({
-      etl_type: "dify",
+      etl_type: "builtin",
       extraction_cache_enabled: true,
     });
     expect(

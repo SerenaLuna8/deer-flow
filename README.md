@@ -203,7 +203,7 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   不跳过召回与终审的权限检查，诊断面板显示缓存命中、摘要候选和命中来源。
   RAG 文件解析的预览与 Worker 摄取共用本地 `extraction`、Knowledge Token
   分段和原子发布路径；处理结果保留来源位置、解析警告和受权图片绑定。
-  格式解析限制为本地文件，默认 `dify`，可选 `unstructured_local`；
+  格式解析限制为本地文件，默认 `builtin`，可选 `unstructured_local`；
   不执行 OCR，不调用解析 API，也不在运行时下载 Pandoc 或 NLP 资源。
   本地环境准备需安装固定的 `extraction-local` 依赖与平台 libmagic，并生成、
   审查解析资源锁。

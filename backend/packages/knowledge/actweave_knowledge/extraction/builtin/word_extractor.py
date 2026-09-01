@@ -1,4 +1,4 @@
-"""Local adaptation of Dify's Word extractor at 9c16c865977e.
+"""Local adaptation of upstream's Word extractor at 9c16c865977e.
 
 Retains parse_docx, row/cell traversal and run/hyperlink/legacy-field/drawing
 branches. Replaces host persistence with a sink and emits ordered source spans.

@@ -1265,7 +1265,7 @@ async def test_http_chunk_preview_round_trips_and_cleans_temp_file(temp_path_tra
     assert payload["items"][0]["attachments"] == [{"ref": "a" * 64, "alt_text": "拓扑图"}]
     assert payload["preview_fingerprint"] == "b" * 64
     assert payload["source_sha256"] == "c" * 64
-    assert payload["effective_profile"]["parse"]["extractor_id"] == "dify.markdown"
+    assert payload["effective_profile"]["parse"]["extractor_id"] == "builtin.markdown"
     assert payload["warnings"] == [
         {
             "code": "HEADER_INFERRED",

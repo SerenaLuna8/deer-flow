@@ -326,7 +326,7 @@ def _candidate_corpus(
     from actweave_knowledge.ingestion.splitter import split_documents
 
     registry = default_registry()
-    settings = KnowledgeSettings(enabled=False, etl_type="dify")
+    settings = KnowledgeSettings(enabled=False, etl_type="builtin")
     result: dict[str, Any] = {
         "segments": [],
         "source_sha256": {},

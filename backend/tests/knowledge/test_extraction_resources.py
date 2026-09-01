@@ -51,7 +51,7 @@ def test_nlp_resource_missing_or_tampered_closes_capability_before_fallback(reso
     assert resources.probe_parser_resources("unstructured.pptx") == "PARSER_DEPENDENCY_UNAVAILABLE"
     from actweave_knowledge.extraction.registry import default_registry
 
-    entry = default_registry().resolve(datasource_type="file", etl_type="dify", extension=".pptx")
+    entry = default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".pptx")
     assert entry.dependency_probe() == "PARSER_DEPENDENCY_UNAVAILABLE"
 
 

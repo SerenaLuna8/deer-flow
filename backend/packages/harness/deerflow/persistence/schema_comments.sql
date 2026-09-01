@@ -1671,5 +1671,5 @@ COMMENT ON COLUMN knowledge_system_settings.query_cache_enabled IS '知识系统
 COMMENT ON COLUMN knowledge_system_settings.query_cache_max_entries IS '知识系统设置：查询向量缓存的最大条目数（LRU 淘汰）。';
 COMMENT ON COLUMN knowledge_system_settings.query_cache_ttl_seconds IS '知识系统设置：查询向量缓存条目的存活秒数。';
 COMMENT ON COLUMN knowledge_system_settings.updated_at IS '知识系统设置：记录最近更新时间。';
-COMMENT ON COLUMN knowledge_system_settings.etl_type IS '知识系统设置：平台解析路线，dify 或 unstructured_local；默认 dify。';
+COMMENT ON COLUMN knowledge_system_settings.etl_type IS '知识系统设置：平台解析路线，builtin 或 unstructured_local；默认 builtin。';
 COMMENT ON COLUMN knowledge_system_settings.extraction_cache_enabled IS '知识系统设置：是否复用完整提取缓存；默认开启。';

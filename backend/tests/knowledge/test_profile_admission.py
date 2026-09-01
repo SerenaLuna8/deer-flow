@@ -41,7 +41,7 @@ async def test_headless_upload_and_retry_keep_original_profile_after_etl_changes
     try:
         project, base = await _seed_base(harness)
         uploaded = await harness.service.upload_document(project, base, _upload(tmp_path))
-        assert uploaded.parsing_profile.parse.etl_type == "dify"
+        assert uploaded.parsing_profile.parse.etl_type == "builtin"
         async with harness.factory() as session, session.begin():
             document = await session.get(KnowledgeDocumentRow, uploaded.id)
             original = document.parsing_profile
@@ -53,7 +53,7 @@ async def test_headless_upload_and_retry_keep_original_profile_after_etl_changes
             task.finished_at = datetime.now(UTC)
         harness.service._settings.etl_type = "unstructured_local"
         retried = await harness.service.retry_document(project, uploaded.id)
-        assert retried.parsing_profile.parse.etl_type == "dify"
+        assert retried.parsing_profile.parse.etl_type == "builtin"
         async with harness.factory() as session:
             document = await session.get(KnowledgeDocumentRow, uploaded.id)
             assert document.parsing_profile == original

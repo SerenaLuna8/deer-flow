@@ -517,7 +517,7 @@ export const zhCN: Translations = {
         "文档在本对话框之外发生了变化，已刷新最新参数与版本，请核对后重新确认。",
       legacyProfile: "历史参数",
       parserProfile: (etlType, extractorId, extractorVersion) =>
-        `${etlType === "dify" ? "Dify" : "本地 Unstructured"} · ${extractorId} · ${extractorVersion}`,
+        `${etlType === "builtin" ? "内置解析器" : "本地 Unstructured"} · ${extractorId} · ${extractorVersion}`,
       parsingNotices: (count) => `${count} 条解析提示`,
       imageFailures: (count) => `${count} 张图片未能保存`,
       warningMessages: {
@@ -1480,6 +1480,8 @@ export const zhCN: Translations = {
     retry: "重试",
     secretConfigured: "已配置，留空保留",
     secretUnset: "未配置",
+    builtInParser: "内置解析器",
+    localUnstructuredParser: "本地 Unstructured",
     noSummaryModel: "未配置",
     unavailableModel: "模型不可用，请更换或清除",
     modelsUnavailable: "模型目录暂不可用，请重试后选择。",

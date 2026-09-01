@@ -37,7 +37,7 @@ def test_server_resolves_etl_and_token_identity_with_user_header_rules():
     parameters = ProcessingParameters(mode="parent_child", size=800, child_size=300, header_rules=({"sheet": None, "mode": "none"},))
     profile = resolve_processing_profile(KnowledgeSettings(etl_type="unstructured_local"), parameters, default_registry(), extension=".CSV")
     assert profile.parse.etl_type == "unstructured_local"
-    assert profile.parse.extractor_id == "dify.csv"
+    assert profile.parse.extractor_id == "builtin.csv"
     assert profile.parse.header_rules[0].mode == "none"
     assert (profile.chunk.size, profile.chunk.child_size, profile.chunk.unit) == (800, 300, "token")
     assert profile.chunk.tokenizer_profile_id == "knowledge-cl100k-v1"
@@ -48,7 +48,7 @@ def test_server_resolves_etl_and_token_identity_with_user_header_rules():
     "bad",
     [
         {"extractor_version": "attacker"},
-        {"etl_type": "dify"},
+        {"etl_type": "builtin"},
         {"tokenizer_digest": "a" * 64},
         {"size": True},
         {"size": 199},
