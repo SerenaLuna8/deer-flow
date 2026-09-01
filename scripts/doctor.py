@@ -333,7 +333,9 @@ def _run_model_catalog_query(database_url: str) -> dict[str, int | bool]:
                 table_exists = bool(await connection.scalar(text("SELECT to_regclass('system_model_configs') IS NOT NULL")))
                 if not table_exists:
                     return {"table_exists": False, "active_count": 0}
-                active_count = await connection.scalar(text("SELECT count(*) FROM system_model_configs WHERE status = 'active' AND current_version_id IS NOT NULL"))
+                active_count = await connection.scalar(
+                    text("SELECT count(*) FROM system_model_configs WHERE status = 'active'")
+                )
                 return {
                     "table_exists": True,
                     "active_count": int(active_count or 0),
