@@ -415,7 +415,7 @@ def test_aio_dood_mount_uses_host_view_but_validates_worker_view(
         _restore_mount_source(source)
 
 
-def test_aio_run_mount_readiness_fails_closed_without_dood_mapping(
+def test_aio_run_mount_readiness_fails_closed_for_distinct_docker_host_view(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -429,33 +429,22 @@ def test_aio_run_mount_readiness_fails_closed_without_dood_mapping(
         "deerflow.community.aio_sandbox.aio_sandbox_provider.get_paths",
         lambda: paths,
     )
-    acceptance = SimpleNamespace(
-        skills=SimpleNamespace(container_path="/mnt/skills"),
-        sandbox=SimpleNamespace(compose_dood_p03_v1_verified=False),
-    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.aio_sandbox_provider.get_app_config",
-        lambda: acceptance,
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
     )
     monkeypatch.setenv("ACT_WEAVE_SANDBOX_HOST", "host.docker.internal")
-    monkeypatch.delenv("ACT_WEAVE_HOST_BASE_DIR", raising=False)
-
-    assert provider.run_readonly_mounts_ready() is False
-
     monkeypatch.setenv(
         "ACT_WEAVE_HOST_BASE_DIR",
         str(tmp_path / "host-state"),
     )
     assert provider.run_readonly_mounts_ready() is False
 
-    acceptance.sandbox.compose_dood_p03_v1_verified = True
-    assert provider.run_readonly_mounts_ready() is True
-
     provider._backend = object()
     assert provider.run_readonly_mounts_ready() is False
 
 
-def test_native_aio_readiness_does_not_require_compose_dood_acceptance(
+def test_aio_run_mount_readiness_allows_shared_docker_host_view(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -471,10 +460,7 @@ def test_native_aio_readiness_does_not_require_compose_dood_acceptance(
     )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.aio_sandbox_provider.get_app_config",
-        lambda: SimpleNamespace(
-            skills=SimpleNamespace(container_path="/mnt/skills"),
-            sandbox=SimpleNamespace(compose_dood_p03_v1_verified=False),
-        ),
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
     )
     monkeypatch.setenv("ACT_WEAVE_SANDBOX_HOST", "localhost")
     monkeypatch.delenv("ACT_WEAVE_HOST_BASE_DIR", raising=False)

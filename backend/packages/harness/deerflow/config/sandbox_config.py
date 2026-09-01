@@ -116,11 +116,6 @@ class SandboxConfig(BaseModel):
         default=False,
         description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
     )
-    compose_dood_p03_v1_verified: bool = Field(
-        default=False,
-        strict=True,
-        description=("Operator attestation that the versioned P-03 Compose DooD read-only mount probe passed for this deployment. Keep false unless the real dual-view guest and cross-Worker probe succeeds."),
-    )
     boxlite_p04_v1_verified: bool = Field(
         default=False,
         strict=True,

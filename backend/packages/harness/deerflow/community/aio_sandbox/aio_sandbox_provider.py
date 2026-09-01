@@ -225,10 +225,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             paths_ready = paths.run_skill_host_mapping_ready()
             runtime_ready = self._backend.run_readonly_mounts_ready()
             configured_root = config.skills.container_path.rstrip("/") or "/"
-            p03_accepted = self._backend.runtime != "docker" or not paths.run_skill_uses_distinct_host_view() or config.sandbox.compose_dood_p03_v1_verified is True
+            path_view_is_compatible = self._backend.runtime != "docker" or not paths.run_skill_uses_distinct_host_view()
         except Exception:
             return False
-        return configured_root == "/mnt/skills" and paths_ready and runtime_ready and p03_accepted
+        return configured_root == "/mnt/skills" and paths_ready and runtime_ready and path_view_is_compatible
 
     # ── Factory methods ──────────────────────────────────────────────────
 

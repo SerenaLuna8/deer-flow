@@ -118,7 +118,7 @@ Commit: `refactor: remove application container deployment`
 - Consumes: `Paths.run_skill_uses_distinct_host_view() -> bool` and `LocalContainerBackend.runtime`.
 - Produces: `AioSandboxProvider.run_readonly_mounts_ready() -> bool` with no Compose attestation input.
 
-- [ ] **Step 1: Rewrite the focused lifecycle expectation before implementation**
+- [x] **Step 1: Rewrite the focused lifecycle expectation before implementation**
 
 Replace attestation toggling with two explicit cases:
 
@@ -155,13 +155,13 @@ In both tests, retain the existing monkeypatches for module `get_paths`, module 
 
 Remove the config acceptance test for `compose_dood_p03_v1_verified`; keep the independent BoxLite and E2B strict-boolean tests.
 
-- [ ] **Step 2: Run focused tests and confirm the new contract fails**
+- [x] **Step 2: Run focused tests and confirm the new contract fails**
 
 Run: `cd backend && uv run pytest tests/test_app_config_access_paths.py tests/test_aio_private_sandbox_lifecycle.py -q`
 
 Expected: FAIL until provider/config behavior is changed.
 
-- [ ] **Step 3: Remove the field, marker, probe, and attestation branch**
+- [x] **Step 3: Remove the field, marker, probe, and attestation branch**
 
 Delete the Pydantic field and example YAML block. Remove the `p03_compose_dood` pytest marker and both Compose-only test files. Implement the readiness rule as:
 
@@ -175,7 +175,7 @@ return path_view_is_compatible and self._backend.run_readonly_mounts_ready()
 
 Retain the existing error handling around config/path/backend access.
 
-- [ ] **Step 4: Run focused tests and commit**
+- [x] **Step 4: Run focused tests and commit**
 
 Run: `cd backend && uv run pytest tests/test_app_config_access_paths.py tests/test_aio_private_sandbox_lifecycle.py -q`
 

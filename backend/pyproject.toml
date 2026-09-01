@@ -47,7 +47,6 @@ markers = [
     "provider_integration: opt-in probes against a real configured Sandbox provider",
     "p01_native_local: Native Local Run Skill mount probe",
     "p02_native_aio: Native AIO Apple Container Run Skill mount probe",
-    "p03_compose_dood: Compose Worker plus host Docker-daemon dual-view mount probe",
     "p04_boxlite: BoxLite micro-VM Run Skill mount probe",
     "p05_e2b: E2B cloud VM Run Skill upload probe",
 ]

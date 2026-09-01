@@ -15,26 +15,6 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
 
-def test_compose_dood_p03_acceptance_is_explicit_and_strict() -> None:
-    provider = "deerflow.community.aio_sandbox:AioSandboxProvider"
-
-    assert SandboxConfig(use=provider).compose_dood_p03_v1_verified is False
-    assert (
-        SandboxConfig(
-            use=provider,
-            compose_dood_p03_v1_verified=True,
-        ).compose_dood_p03_v1_verified
-        is True
-    )
-    with pytest.raises(ValidationError):
-        SandboxConfig.model_validate(
-            {
-                "use": provider,
-                "compose_dood_p03_v1_verified": "true",
-            }
-        )
-
-
 @pytest.mark.parametrize(
     ("field", "provider"),
     [

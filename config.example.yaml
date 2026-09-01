@@ -106,11 +106,6 @@ sandbox:
   # host Bash disabled unless the deployment is fully trusted. This flag and
   # host_execution_approval.mode=approval_required are mutually exclusive.
   allow_host_bash: false
-  # Release gate for Compose Worker + AioSandboxProvider/DooD exact Run Skill
-  # mounts. Keep false by default. Set the literal YAML boolean true only after
-  # the real P-03 dual-view guest and cross-Worker probe passes for this exact
-  # deployment; environment-variable strings are intentionally rejected.
-  compose_dood_p03_v1_verified: false
   # Release gates for the BoxLite P-04 and E2B P-05 typed Run Skill mount
   # adapters. Keep both false until the matching real provider_integration
   # command exits 0 for this exact host/account/template. Only literal YAML
