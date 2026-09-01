@@ -173,6 +173,31 @@ def test_skill_design_contracts_are_exact_reexports() -> None:
         assert getattr(legacy, name) is getattr(owning, name)
 
 
+def test_skill_design_codec_is_the_owning_module() -> None:
+    from app.shared_assets import skill_design_codec as owning
+    from app.shared_assets.skill_design_service import SkillDesignService
+
+    names = (
+        "_conversation_brief",
+        "_validation_from_preview",
+        "_validation_matches_preview",
+        "_validation_json",
+        "_validation_from_json",
+        "_message_json",
+        "_progress_json",
+        "_clarification_request",
+        "_clarification_json",
+        "_clarification_from_json",
+        "_session_summary",
+        "_idempotency_hash",
+        "_request_checksum",
+        "_jsonable",
+        "_stable_generation_error_message",
+    )
+    for name in names:
+        assert SkillDesignService.__dict__[name].__func__ is getattr(owning, name)
+
+
 def test_production_consumers_use_skill_package_integrity_owner() -> None:
     paths = (
         BACKEND_ROOT / "app/shared_assets/bootstrap/service.py",
