@@ -135,6 +135,44 @@ def test_skill_package_integrity_is_the_owning_module() -> None:
     assert legacy.SkillService._verified_archive_files is owning.verified_archive_files
 
 
+def test_skill_design_contracts_are_exact_reexports() -> None:
+    from app.shared_assets import skill_design_contracts as owning
+    from app.shared_assets import skill_design_service as legacy
+
+    names = (
+        "SkillDesignStatus",
+        "SkillDesignProgressStatus",
+        "SkillDesignServiceErrorCode",
+        "CreateSkillDesignSession",
+        "CreateSkillDesignRevisionSession",
+        "SkillDesignMessage",
+        "SkillDesignProgressItem",
+        "SkillDesignClarificationOption",
+        "SkillDesignClarificationRequest",
+        "SkillDesignClarificationResponse",
+        "SkillDesignTurnAttachment",
+        "SkillDesignMessageTurn",
+        "SkillDesignClarificationTurn",
+        "SkillDesignDraftUpdateTurn",
+        "SkillDesignTurn",
+        "SubmitSkillDesignTurn",
+        "ValidateSkillDesignSession",
+        "CommitSkillDesignSession",
+        "CancelSkillDesignSession",
+        "SetSkillDesignExecutionPreference",
+        "SkillDesignExecutionPreference",
+        "SkillDesignFileView",
+        "SkillDesignBaseFile",
+        "SkillDesignSecretRequirement",
+        "SkillDesignValidation",
+        "SkillDesignSessionView",
+        "SkillDesignSessionSummary",
+        "SkillDesignCommitResult",
+    )
+    for name in names:
+        assert getattr(legacy, name) is getattr(owning, name)
+
+
 def test_production_consumers_use_skill_package_integrity_owner() -> None:
     paths = (
         BACKEND_ROOT / "app/shared_assets/bootstrap/service.py",
