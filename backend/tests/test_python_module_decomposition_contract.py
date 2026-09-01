@@ -53,10 +53,7 @@ def _route_digest(router) -> tuple[int, str]:
                 "status_code": route.status_code,
                 "response_model": _response_name(route.response_model),
                 "route_class": _callable_name(type(route)),
-                "dependencies": sorted(
-                    _callable_name(getattr(dependency, "call", None))
-                    for dependency in route.dependant.dependencies
-                ),
+                "dependencies": sorted(_callable_name(getattr(dependency, "call", None)) for dependency in route.dependant.dependencies),
             }
         )
     encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -115,14 +112,7 @@ def test_package_dependency_direction_is_one_way() -> None:
     assert not {name for name in harness_imports if name == "app" or name.startswith("app.")}
 
     knowledge_imports = _absolute_imports(BACKEND_ROOT / "packages" / "knowledge" / "actweave_knowledge")
-    forbidden = {
-        name
-        for name in knowledge_imports
-        if name == "app"
-        or name.startswith("app.")
-        or name == "deerflow"
-        or name.startswith("deerflow.")
-    }
+    forbidden = {name for name in knowledge_imports if name == "app" or name.startswith("app.") or name == "deerflow" or name.startswith("deerflow.")}
     assert not forbidden
 
 
@@ -143,3 +133,18 @@ def test_skill_package_integrity_is_the_owning_module() -> None:
         assert getattr(legacy, name) is getattr(owning, name)
     assert legacy._analyze_skill_files is owning.analyze_skill_files
     assert legacy.SkillService._verified_archive_files is owning.verified_archive_files
+
+
+def test_production_consumers_use_skill_package_integrity_owner() -> None:
+    paths = (
+        BACKEND_ROOT / "app/shared_assets/bootstrap/service.py",
+        BACKEND_ROOT / "app/shared_assets/catalog_provider.py",
+        BACKEND_ROOT / "app/shared_assets/resolver.py",
+        BACKEND_ROOT / "app/shared_assets/skill_design_service.py",
+        BACKEND_ROOT / "app/private_work/legacy_run_skill_snapshot_writer.py",
+        BACKEND_ROOT / "scripts/generate_public_system_skill_catalog.py",
+    )
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        assert "SkillService._verified_archive_files" not in source
+        assert "_analyze_skill_files" not in source

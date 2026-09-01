@@ -95,6 +95,7 @@ from app.shared_assets.skill_design_generation import (
     contains_secret_like_material,
 )
 from app.shared_assets.skill_design_repository import SkillDesignRepository
+from app.shared_assets.skill_package_integrity import verified_archive_files
 from app.shared_assets.skill_repository import SkillRepository, SkillVersionRecord
 from app.shared_assets.skill_service import (
     CreateSkill,
@@ -948,7 +949,7 @@ class SkillDesignService:
         """Copy byte-verified base files, rejecting shapes the Builder cannot hold."""
 
         try:
-            files = SkillService._verified_archive_files(record, context.request_id)
+            files = verified_archive_files(record, context.request_id)
         except SharedAssetError:
             raise SkillDesignTargetUnsupported(context.request_id) from None
         for item in files:

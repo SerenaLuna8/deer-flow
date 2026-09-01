@@ -56,9 +56,9 @@ from app.shared_assets.models import (
     SkillSecretRequirementSnapshot,
     WorkflowStatus,
 )
+from app.shared_assets.skill_package_integrity import verified_archive_files
 from app.shared_assets.skill_repository import SkillVersionRecord
 from app.shared_assets.skill_secret_policy import parse_skill_secret_declarations
-from app.shared_assets.skill_service import SkillService
 from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.persistence.shared_assets import (
     AgentMcpRefRow,
@@ -1447,7 +1447,7 @@ class ProjectAssetResolver:
         skill_record = SkillVersionRecord(version, rows)
         try:
             files = await asyncio.to_thread(
-                SkillService._verified_archive_files,
+                verified_archive_files,
                 skill_record,
                 context.request_id,
             )

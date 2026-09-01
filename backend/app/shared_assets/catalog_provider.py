@@ -39,8 +39,8 @@ from app.shared_assets.resolver import ProjectAssetResolver
 from app.shared_assets.resolver import (
     materialize_mcp_secrets as materialize_resolved_mcp_secrets,
 )
+from app.shared_assets.skill_package_integrity import verified_archive_files
 from app.shared_assets.skill_repository import SkillVersionRecord
-from app.shared_assets.skill_service import SkillService
 from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.assets.catalog import (
     AssetCatalogAgentSnapshot,
@@ -497,7 +497,7 @@ class PostgresAssetCatalogProvider:
             files = tuple((await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version.id).order_by(SkillVersionFileRow.path))).scalars().all())
             try:
                 verified_files = await asyncio.to_thread(
-                    SkillService._verified_archive_files,
+                    verified_archive_files,
                     SkillVersionRecord(version, files),
                     "asset-catalog-runtime",
                 )

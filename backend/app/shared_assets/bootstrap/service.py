@@ -41,11 +41,11 @@ from app.shared_assets.models import (
     SkillArchiveFile,
     SkillAssetRef,
 )
-from app.shared_assets.skill_repository import assemble_and_seal_skill_version
-from app.shared_assets.skill_service import (
-    _analyze_skill_files,
+from app.shared_assets.skill_package_integrity import (
+    analyze_skill_files,
     normalize_skill_files,
 )
+from app.shared_assets.skill_repository import assemble_and_seal_skill_version
 from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.persistence.projects import ProjectMembershipRow
 from deerflow.persistence.shared_assets import (
@@ -158,7 +158,7 @@ def _validated_skill_preview(
     archive_files: tuple[SkillArchiveFile, ...],
 ):
     try:
-        preview = _analyze_skill_files(
+        preview = analyze_skill_files(
             archive_files,
             entry.source_key,
         )

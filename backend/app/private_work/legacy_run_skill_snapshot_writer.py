@@ -29,8 +29,8 @@ from app.shared_assets.run_snapshot_codec import (
     encode_run_asset_snapshot,
     encoded_run_asset_snapshot_json_size,
 )
+from app.shared_assets.skill_package_integrity import verified_archive_files
 from app.shared_assets.skill_repository import SkillVersionRecord
-from app.shared_assets.skill_service import SkillService
 from deerflow.config.run_skill_snapshot_config import (
     RunSkillSnapshotConfig,
     RunSkillSnapshotWriterMode,
@@ -204,7 +204,7 @@ def _encode_exact_legacy_skill(
     rows: tuple[SkillVersionFileRow, ...],
     request_id: str,
 ) -> dict[str, object]:
-    files = SkillService._verified_archive_files(  # noqa: SLF001
+    files = verified_archive_files(
         SkillVersionRecord(version, rows),
         request_id,
     )

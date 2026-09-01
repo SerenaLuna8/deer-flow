@@ -23,7 +23,7 @@ from app.shared_assets.bootstrap.skill_archive import (
     load_skill_archive,
 )
 from app.shared_assets.errors import AssetValidationFailed
-from app.shared_assets.skill_service import _analyze_skill_files
+from app.shared_assets.skill_package_integrity import analyze_skill_files
 from scripts.import_project_skills import ProjectSkillImportError, load_project_skill_sources
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -37,7 +37,7 @@ _SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 def _skill_preview(files):
     try:
-        preview = _analyze_skill_files(
+        preview = analyze_skill_files(
             tuple(files),
             "public-system-skill-catalog",
         )
