@@ -379,3 +379,11 @@ def test_provider_request_profile_is_the_owning_module() -> None:
     )
     for name in names:
         assert getattr(legacy, name) is getattr(owning, name)
+
+
+def test_provider_request_measurement_is_the_owning_module() -> None:
+    from deerflow.agents.middlewares import provider_request_measurement as owning
+    from deerflow.agents.middlewares import provider_request_usage as legacy
+
+    assert legacy.measure_profile_snapshot_context is owning.measure_profile_snapshot_context
+    assert legacy.measure_profile_context is owning.measure_profile_context

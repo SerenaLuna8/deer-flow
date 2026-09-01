@@ -50,12 +50,14 @@ from deerflow.agents.memory.snip import (
     validate_snip_output,
 )
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
-from deerflow.agents.middlewares.provider_request_usage import (
+from deerflow.agents.middlewares.provider_request_measurement import (
+    measure_profile_snapshot_context,
+)
+from deerflow.agents.middlewares.provider_request_profile import (
     ProviderRequestContextMeasurement,
     ProviderRequestProfile,
     ProviderRequestUsageUnsupported,
     contains_visual_material,
-    measure_profile_snapshot_context,
 )
 from deerflow.agents.provider_request_contract import (
     CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
