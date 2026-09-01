@@ -44,9 +44,11 @@ from deerflow.agents.middlewares.provider_request_cost_adapter import (
     ProviderModelRequestCostAdapter,
     SystemPromptProvenance,
 )
-from deerflow.agents.middlewares.provider_request_usage import (
+from deerflow.agents.middlewares.provider_request_guard import (
     FinalProviderRequestGuard,
     ProviderRequestEvidenceObserver,
+)
+from deerflow.agents.middlewares.provider_request_profile import (
     build_provider_request_profile,
     collect_custom_middleware_request_contract,
     collect_middleware_system_prompts,

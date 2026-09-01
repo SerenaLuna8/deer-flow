@@ -387,3 +387,17 @@ def test_provider_request_measurement_is_the_owning_module() -> None:
 
     assert legacy.measure_profile_snapshot_context is owning.measure_profile_snapshot_context
     assert legacy.measure_profile_context is owning.measure_profile_context
+
+
+def test_provider_request_guard_is_the_owner_and_usage_is_a_facade() -> None:
+    from deerflow.agents.middlewares import provider_request_guard as owning
+    from deerflow.agents.middlewares import provider_request_usage as legacy
+
+    names = (
+        "ProviderDispatchOutcomeAmbiguous",
+        "ProviderRequestEvidenceObserver",
+        "FinalProviderRequestGuard",
+    )
+    for name in names:
+        assert getattr(legacy, name) is getattr(owning, name)
+    assert _export_digest(legacy) == EXPECTED_EXPORT_DIGESTS["provider_request"]

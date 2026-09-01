@@ -13,7 +13,7 @@ from app.shared_assets.mcp_tool_inventory_repository import (
     MAX_MCP_TOOL_INVENTORY_DESCRIPTION_CHARS,
 )
 from app.shared_assets.models import AssetScope, ResolvedMcpSnapshot
-from deerflow.agents.middlewares.provider_request_usage import (
+from deerflow.agents.middlewares.provider_request_profile import (
     provider_tool_schema_fact,
 )
 from deerflow.mcp.http_security import SecureMcpHttpClientFactory
