@@ -84,8 +84,8 @@ Kubernetes workload that runs the Provisioner.
 | `K8S_API_SERVER`              | unset                  | Trusted-local API-server override; disables TLS verification |
 | `PROVISIONER_API_KEY`         | empty                  | Shared control key; empty disables all `/api/*` calls        |
 | `SKILLS_HOST_PATH`            | `/skills`              | HostPath base for public and optional legacy Skills          |
-| `ACT_WEAVE_HOST_BASE_DIR`     | `/.deer-flow`          | HostPath base for per-user custom Skills                     |
-| `THREADS_HOST_PATH`           | `/.deer-flow/threads`  | HostPath base for thread user-data                           |
+| `ACT_WEAVE_HOST_BASE_DIR`     | `/.fluva-flow`          | HostPath base for per-user custom Skills                     |
+| `THREADS_HOST_PATH`           | `/.fluva-flow/threads`  | HostPath base for thread user-data                           |
 | `SKILLS_PVC_NAME`             | empty                  | PVC replacing Skill HostPaths                                |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty                  | Optional Skill PVC subpath using `{user_id}`/`{thread_id}`   |
 | `USERDATA_PVC_NAME`           | empty                  | PVC for user-data with scoped subpath                        |

@@ -20,7 +20,7 @@ def runtime_home() -> Path:
     """Return the writable ActWeave state directory."""
     if env_home := os.getenv("ACT_WEAVE_HOME"):
         return Path(env_home).resolve()
-    return project_root() / ".deer-flow"
+    return project_root() / ".fluva-flow"
 
 
 def resolve_path(value: str | os.PathLike[str], *, base: Path | None = None) -> Path:

@@ -65,7 +65,7 @@ def _normalize_presented_filepath(
     Accepts either:
     - A virtual sandbox path such as `/mnt/user-data/outputs/report.md`
     - A host-side thread outputs path such as
-      `/app/backend/.deer-flow/threads/<thread>/user-data/outputs/report.md`
+      `/app/backend/.fluva-flow/threads/<thread>/user-data/outputs/report.md`
 
     Returns:
         The normalized virtual path.

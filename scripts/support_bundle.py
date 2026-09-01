@@ -1016,7 +1016,7 @@ def _default_out_path(project_root: Path) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     return (
         project_root
-        / ".deer-flow"
+        / ".fluva-flow"
         / "support-bundles"
         / f"deer-flow-support-bundle-{timestamp}.zip"
     )

@@ -369,7 +369,7 @@ if [ -z "$ACT_WEAVE_PROJECT_ROOT" ]; then
     export ACT_WEAVE_PROJECT_ROOT="$REPO_ROOT"
 fi
 
-BACKEND_RUNTIME_HOME="$REPO_ROOT/backend/.deer-flow"
+BACKEND_RUNTIME_HOME="$REPO_ROOT/backend/.fluva-flow"
 if [ -z "$ACT_WEAVE_HOME" ]; then
     export ACT_WEAVE_HOME="$BACKEND_RUNTIME_HOME"
 fi

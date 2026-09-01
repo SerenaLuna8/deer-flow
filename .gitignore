@@ -41,7 +41,7 @@ extensions_config.json
 # Coverage report
 coverage.xml
 coverage/
-.deer-flow/
+.fluva-flow/
 .claude/
 skills/custom/*
 logs/

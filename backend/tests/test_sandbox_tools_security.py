@@ -1463,7 +1463,7 @@ def test_replace_virtual_paths_in_command_does_not_replace_acp_workspace() -> No
     PathMapping at execution time, not pre-resolved, to ensure user_id
     consistency with the sandbox mapping.
     """
-    acp_host = "/home/user/.deer-flow/acp-workspace"
+    acp_host = "/home/user/.fluva-flow/acp-workspace"
     with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=acp_host):
         cmd = "cp /mnt/acp-workspace/hello.py /mnt/user-data/outputs/hello.py"
         result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
@@ -1477,7 +1477,7 @@ def test_replace_virtual_paths_in_command_does_not_replace_acp_workspace() -> No
 
 def test_mask_local_paths_in_output_hides_acp_workspace_host_paths() -> None:
     """ACP workspace host paths in bash output should be masked to virtual paths."""
-    acp_host = "/home/user/.deer-flow/acp-workspace"
+    acp_host = "/home/user/.fluva-flow/acp-workspace"
     with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=acp_host):
         output = f"Copied: {acp_host}/hello.py"
         masked = mask_local_paths_in_output(output, _THREAD_DATA)

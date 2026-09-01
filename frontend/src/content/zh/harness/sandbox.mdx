@@ -137,7 +137,7 @@ sandbox:
 | 主机路径                                    | 容器路径                                      | 访问权限 |
 | ------------------------------------------- | --------------------------------------------- | -------- |
 | `skills/`（来自 `skills.path`）             | `/mnt/skills`（来自 `skills.container_path`） | 只读     |
-| `.deer-flow/threads/{thread_id}/user-data/` | `/mnt/user-data/`                             | 读写     |
+| `.fluva-flow/threads/{thread_id}/user-data/` | `/mnt/user-data/`                             | 读写     |
 
 技能目录始终以只读方式挂载。线程将其工作数据（上传文件、输出、中间文件）写入 `/mnt/user-data/`。
 

@@ -111,10 +111,10 @@ PostgreSQL 驱动已是默认依赖；独立的 `checkpointer` 配置不再接�
 在已经创建的会话中选择、粘贴或拖入附件后，Fluva 会立即在后台上传，输入文字不会
 被锁定。发送消息只等待尚未完成的部分，并直接复用已就绪的上传结果，不会重复上传同一附件。
 
-每个线程在 `.deer-flow/threads/{thread_id}/` 下有一个专用目录：
+每个线程在 `.fluva-flow/threads/{thread_id}/` 下有一个专用目录：
 
 ```
-.deer-flow/threads/{thread_id}/
+.fluva-flow/threads/{thread_id}/
   user-data/
     uploads/     ← 用户上传的文件
     outputs/     ← Agent 生成的产出物
