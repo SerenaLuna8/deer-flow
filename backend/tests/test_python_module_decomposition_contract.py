@@ -16,7 +16,7 @@ from deerflow.sandbox import tools as sandbox_tools
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED_ROUTE_DIGESTS = {
-    "private_work": (45, "7867b20667bd2ccd1d5934b6db162a05efe54d8ed0e2637b58e0ed76098b7ca3"),
+    "private_work": (45, "a81e85093f732414a5ce8edc38040dc6783e85e4d8316c5eb08c2362850ae2e2"),
     "project_assets": (58, "66a88150e12038d66e561a1577456ddb3630e1f3263b31ab77a43f5aaf4d28b6"),
     "asset_catalog": (5, "2bf16801b2f52d284dee015b4b2ade6d15df02ad695816766c94e4cc3fb12a8d"),
 }
