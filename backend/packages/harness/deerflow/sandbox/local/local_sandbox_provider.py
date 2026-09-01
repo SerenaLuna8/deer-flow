@@ -222,8 +222,7 @@ class LocalSandboxProvider(SandboxProvider):
                         )
                     else:
                         logger.error(
-                            "sandbox.mounts entry %s -> %s ignored: host_path %s does not exist from the "
-                            "perspective of the Worker process. Use an absolute host path visible to that process.",
+                            "sandbox.mounts entry %s -> %s ignored: host_path %s does not exist from the perspective of the Worker process. Use an absolute host path visible to that process.",
                             mount.host_path,
                             mount.container_path,
                             mount.host_path,

@@ -246,13 +246,13 @@ Commit: `docs: document local application runtime`
 - Consumes: completed repository layout, Sandbox safety contract, and active docs.
 - Produces: verified branch merged into `main` without touching unrelated user files.
 
-- [ ] **Step 1: Format changed backend Python files**
+- [x] **Step 1: Format changed backend Python files**
 
 Run: `cd backend && make format`
 
 Expected: formatter completes successfully; review its diff and retain only relevant formatting.
 
-- [ ] **Step 2: Run focused backend tests**
+- [x] **Step 2: Run focused backend tests**
 
 Run:
 
@@ -266,13 +266,13 @@ cd backend && uv run pytest \
 
 Expected: PASS.
 
-- [ ] **Step 3: Validate shell/config/document references**
+- [x] **Step 3: Validate shell/config/document references**
 
 Run `bash -n scripts/serve.sh scripts/nginx.sh scripts/setup-sandbox.sh scripts/cleanup-containers.sh`, `git diff --check`, the Task 3 scoped `rg`, and `test ! -e docker`.
 
 Expected: all syntax and whitespace checks pass; the stale-reference scan returns no application deployment references.
 
-- [ ] **Step 4: Review the final diff and commit fixes**
+- [x] **Step 4: Review the final diff and commit fixes**
 
 Run: `git status --short`, `git diff --stat`, and `git diff --check`.
 
