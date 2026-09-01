@@ -5,7 +5,7 @@ RUNTIME_ENV_RUNNER = uv run python scripts/run_runtime.py --
 .PHONY: reset-db
 
 install:
-	uv sync
+	uv sync --all-packages --extra extraction-local
 
 dev:
 	GATEWAY_WORKERS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload

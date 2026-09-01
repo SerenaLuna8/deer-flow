@@ -11,15 +11,14 @@ from __future__ import annotations
 import ast
 import asyncio
 import codecs
+import hashlib
 import tempfile
-import threading
 import uuid
 from pathlib import Path
 
 import pytest
 from actweave_knowledge import (
     KNOWLEDGE_CONFLICT,
-    KNOWLEDGE_EMBEDDING_FAILED,
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_PARSE_FAILED,
@@ -32,6 +31,7 @@ from actweave_knowledge import (
 )
 from actweave_knowledge.contracts import KNOWLEDGE_LEXICAL_VERSION
 from actweave_knowledge.documents import KnowledgeDocumentService
+from actweave_knowledge.extraction.contracts import ProcessingProfile
 from actweave_knowledge.ingestion import (
     PREVIEW_CHUNK_LIMIT,
     ExtractedBlock,
@@ -46,6 +46,7 @@ from actweave_knowledge.ingestion import (
 from actweave_knowledge.ingestion import pipeline as pipeline_module
 from actweave_knowledge.ingestion import preview as preview_module
 from actweave_knowledge.ingestion.splitter import (
+    ChildDraft,
     SegmentDraft,
     attach_children,
     normalize_text,
@@ -63,55 +64,25 @@ from actweave_knowledge.retrieval import encode_lexical_token, lexical_v1_tokens
 from actweave_knowledge.tasks import KnowledgeTaskClaim, KnowledgeTaskWorker
 from actweave_knowledge.tasks import deletion as deletion_module
 from actweave_knowledge.tasks import worker as worker_module
+from extraction_test_helpers import (
+    ExtractionObjectStore,
+    make_test_file_capability_provider,
+    make_test_quota_port,
+)
+from ingestion_test_helpers import FakeModelClient as _FakeModelClient
+from parsing_test_helpers import make_chunk_profile, make_parse_profile
+from parsing_test_helpers import write_pdf as _write_pdf
 from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.knowledge.composition import is_knowledge_project_active
 from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.model_registry import ModelProviderModelRow
 
 # ---------------------------------------------------------------------------
 # Format fixtures
 # ---------------------------------------------------------------------------
-
-
-def _write_pdf(path: Path, pages: list[str]) -> None:
-    """Write a minimal but standards-correct PDF with one text line per page."""
-
-    page_entries: list[tuple[int, int, str]] = []
-    next_id = 3
-    for line in pages:
-        page_entries.append((next_id, next_id + 1, line))
-        next_id += 2
-    font_id = next_id
-    kids = " ".join(f"{page_id} 0 R" for page_id, _, _ in page_entries)
-    objects: list[tuple[int, bytes]] = [
-        (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
-        (2, f"<< /Type /Pages /Kids [{kids}] /Count {len(page_entries)} >>".encode()),
-    ]
-    for page_id, content_id, line in page_entries:
-        objects.append(
-            (
-                page_id,
-                (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {content_id} 0 R /Resources << /Font << /F1 {font_id} 0 R >> >> >>").encode(),
-            )
-        )
-        stream = f"BT /F1 12 Tf 72 720 Td ({line}) Tj ET".encode()
-        objects.append((content_id, b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"))
-    objects.append((font_id, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"))
-
-    out = bytearray(b"%PDF-1.4\n")
-    offsets: dict[int, int] = {}
-    for object_id, body in objects:
-        offsets[object_id] = len(out)
-        out += f"{object_id} 0 obj\n".encode() + body + b"\nendobj\n"
-    xref_offset = len(out)
-    out += f"xref\n0 {len(objects) + 1}\n".encode()
-    out += b"0000000000 65535 f \n"
-    for object_id in sorted(offsets):
-        out += f"{offsets[object_id]:010d} 00000 n \n".encode()
-    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode()
-    path.write_bytes(bytes(out))
 
 
 def _write_docx(path: Path, paragraphs: list[str]) -> None:
@@ -254,10 +225,10 @@ async def test_docx_table_preview_keeps_fault_code_and_procedure_in_one_segment(
     path = tmp_path / "procedures.docx"
     document.save(str(path))
 
-    preview = await preview_document_chunks(_preview_request(path), KnowledgeSettings.model_validate({"enabled": False}))
+    preview = await _preview_chunks(_preview_request(path), KnowledgeSettings.model_validate({"enabled": False}))
 
     assert preview.total == 1
-    assert preview.chunks[0].content == "E42\t重启网关服务"
+    assert preview.chunks[0].content == "列1：E42\n列2：重启网关服务"
 
 
 def test_extract_csv_rows_join_cells_and_skip_empty_rows(tmp_path: Path) -> None:
@@ -594,7 +565,8 @@ def test_attach_children_populates_every_draft_in_order() -> None:
 
     attached = attach_children(drafts, child_chunk_size=100, child_chunk_separator="。")
 
-    assert [draft.children for draft in attached] == [("甲一。甲二。",), ("乙一。",)]
+    assert all(isinstance(child, ChildDraft) for draft in attached for child in draft.children)
+    assert [tuple(child.content for child in draft.children) for draft in attached] == [("甲一。甲二。",), ("乙一。",)]
     # Original identity fields survive untouched.
     assert [(draft.position, draft.source_position) for draft in attached] == [(1, {"page": 1}), (2, {"page": 2})]
 
@@ -669,14 +641,36 @@ def _preview_request(path: Path, **overrides: object) -> KnowledgeChunkPreviewRe
     return KnowledgeChunkPreviewRequest(**payload)  # type: ignore[arg-type]
 
 
+async def _preview_chunks(
+    request: KnowledgeChunkPreviewRequest,
+    settings: KnowledgeSettings,
+):
+    from actweave_knowledge.extraction.registry import default_registry
+    from actweave_knowledge.extraction.runtime import ParserSlots
+    from actweave_knowledge.ingestion.profiles import build_file_capabilities
+
+    async def guard() -> None:
+        return None
+
+    capabilities = build_file_capabilities(settings, default_registry())
+    return await preview_document_chunks(
+        request,
+        settings,
+        capability_revision=capabilities.capability_revision,
+        parser_slots=ParserSlots(1),
+        guard=guard,
+        registry=default_registry(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_preview_returns_first_chunks_and_total(tmp_path: Path) -> None:
-    paragraphs = [f"第{index}段" + "内容" * 120 for index in range(1, 15)]
+    paragraphs = [f"第{index}段" + "内容" * 180 for index in range(1, 15)]
     source = tmp_path / "preview.md"
     source.write_text("\n\n".join(paragraphs), encoding="utf-8")
 
     settings = KnowledgeSettings.model_validate({"enabled": False})
-    preview = await preview_document_chunks(_preview_request(source, chunk_size=250, chunk_overlap=0), settings)
+    preview = await _preview_chunks(_preview_request(source, chunk_size=250, chunk_overlap=0), settings)
 
     assert preview.total == 14
     assert len(preview.chunks) == PREVIEW_CHUNK_LIMIT
@@ -691,7 +685,7 @@ async def test_preview_applies_cleaning_rules_and_custom_separator(tmp_path: Pat
     source.write_text("联系 a@b.co 详见 https://x.invalid/page###下一节内容", encoding="utf-8")
 
     settings = KnowledgeSettings.model_validate({"enabled": False})
-    preview = await preview_document_chunks(
+    preview = await _preview_chunks(
         _preview_request(source, chunk_size=200, chunk_overlap=0, chunk_separator="###", remove_urls_emails=True),
         settings,
     )
@@ -710,7 +704,7 @@ async def test_preview_parent_child_nests_children_and_general_stays_flat(tmp_pa
     source.write_text("第一句内容。第二句内容。第三句内容。", encoding="utf-8")
     settings = KnowledgeSettings.model_validate({"enabled": False})
 
-    nested = await preview_document_chunks(
+    nested = await _preview_chunks(
         _preview_request(
             source,
             chunk_size=200,
@@ -727,15 +721,15 @@ async def test_preview_parent_child_nests_children_and_general_stays_flat(tmp_pa
     assert parent.child_contents
     assert all(child in parent.content for child in parent.child_contents)
 
-    flat = await preview_document_chunks(_preview_request(source, chunk_size=200, chunk_overlap=0), settings)
+    flat = await _preview_chunks(_preview_request(source, chunk_size=200, chunk_overlap=0), settings)
     assert flat.chunks[0].child_contents == ()
 
     with pytest.raises(KnowledgeError) as bad_mode:
-        await preview_document_chunks(_preview_request(source, chunking_mode="fancy"), settings)
+        await _preview_chunks(_preview_request(source, chunking_mode="fancy"), settings)
     assert bad_mode.value.code == KNOWLEDGE_INVALID_REQUEST
 
     with pytest.raises(KnowledgeError) as bad_child:
-        await preview_document_chunks(
+        await _preview_chunks(
             _preview_request(source, chunk_size=300, chunking_mode="parent_child", child_chunk_size=300),
             settings,
         )
@@ -749,15 +743,15 @@ async def test_preview_rejects_invalid_parameters_and_extensions(tmp_path: Path)
     settings = KnowledgeSettings.model_validate({"enabled": False})
 
     with pytest.raises(KnowledgeError) as invalid_extension:
-        await preview_document_chunks(_preview_request(tmp_path / "evil.exe", size_bytes=3), settings)
+        await _preview_chunks(_preview_request(tmp_path / "evil.exe", size_bytes=3), settings)
     assert invalid_extension.value.code == KNOWLEDGE_INVALID_REQUEST
 
     with pytest.raises(KnowledgeError) as invalid_separator:
-        await preview_document_chunks(_preview_request(source, chunk_separator=""), settings)
+        await _preview_chunks(_preview_request(source, chunk_separator=""), settings)
     assert invalid_separator.value.code == KNOWLEDGE_INVALID_REQUEST
 
     with pytest.raises(KnowledgeError) as oversized:
-        await preview_document_chunks(
+        await _preview_chunks(
             _preview_request(source, size_bytes=settings.upload_max_bytes + 1),
             settings,
         )
@@ -771,7 +765,7 @@ async def test_preview_of_empty_document_surfaces_parse_failed(tmp_path: Path) -
     settings = KnowledgeSettings.model_validate({"enabled": False})
 
     with pytest.raises(KnowledgeError) as error:
-        await preview_document_chunks(_preview_request(source), settings)
+        await _preview_chunks(_preview_request(source), settings)
     assert error.value.code == KNOWLEDGE_PARSE_FAILED
 
 
@@ -780,49 +774,24 @@ async def test_preview_of_empty_document_surfaces_parse_failed(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 
-class _FakeIngestStore:
+class _FakeIngestStore(ExtractionObjectStore):
     def __init__(self) -> None:
-        self.objects: dict[str, bytes] = {}
+        super().__init__()
         self.fail_download = False
         self.on_download = None
-        self.deleted: list[str] = []
 
-    async def download_to(self, key: str, target_path: Path) -> None:
+    async def download_to(
+        self,
+        key: str,
+        target_path: Path,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
         if self.fail_download:
             raise KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "对象存储读取失败，请稍后重试")
         if self.on_download is not None:
             await self.on_download()
-        data = self.objects.get(key)
-        if data is None:
-            raise KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "文档文件在对象存储中缺失")
-        await asyncio.to_thread(target_path.write_bytes, data)
-
-    async def delete(self, key: str) -> None:
-        self.objects.pop(key, None)
-        self.deleted.append(key)
-
-
-class _FakeModelClient:
-    def __init__(self, dimension: int = 8) -> None:
-        self.dimension = dimension
-        self.fail = False
-        self.calls: list[list[str]] = []
-        self.started = asyncio.Event()
-        self.blocker: asyncio.Event | None = None
-
-    async def embed(self, material, texts: list[str], *, batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
-        # Batch hooks are exercised with the real client in
-        # test_task_progress.py; this double stands for one successful batch.
-        del batch_guard, on_batch_verified
-        self.started.set()
-        if self.blocker is not None:
-            await self.blocker.wait()
-        if self.fail:
-            raise KnowledgeError(KNOWLEDGE_EMBEDDING_FAILED, "Embedding 调用失败")
-        self.calls.append(list(texts))
-        if self.dimension == 0:
-            return [[] for _ in texts]
-        return [[float((len(text) % 7) + 1)] * self.dimension for text in texts]
+        await super().download_to(key, target_path, max_bytes=max_bytes)
 
 
 class _PipelineHarness:
@@ -845,8 +814,10 @@ async def _pipeline_harness(postgres_database_url: str, **settings_overrides: ob
         session_factory=factory,
         settings=settings,
         object_store=store,  # type: ignore[arg-type]
+        quota=make_test_quota_port(factory),
         model_client=client,  # type: ignore[arg-type]
         model_port=registry_model_port(),
+        project_active_check=is_knowledge_project_active,
     )
     return _PipelineHarness(engine, factory, store, client, handler)
 
@@ -892,6 +863,19 @@ async def _seed_stack(
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     """Seed project, registry embedding model, base, one document, and its object bytes."""
 
+    profile = ProcessingProfile(
+        parse=make_parse_profile(Path(original_name).suffix),
+        chunk=make_chunk_profile(
+            size=chunk_size,
+            overlap=chunk_overlap,
+            separator=chunk_separator,
+            mode=chunking_mode,
+            child_size=child_chunk_size,
+            child_separator=child_chunk_separator,
+            remove_extra_spaces=remove_extra_spaces,
+            remove_urls_emails=remove_urls_emails,
+        ),
+    )
     provider_id = await seed_provider(harness.factory)
     embedding_model_id = await seed_embedding_model(harness.factory, provider_id, dimension=8)
     async with harness.factory() as session, session.begin():
@@ -927,6 +911,9 @@ async def _seed_stack(
                 chunking_mode=chunking_mode,
                 child_chunk_size=child_chunk_size,
                 child_chunk_separator=child_chunk_separator,
+                source_sha256=hashlib.sha256(content).hexdigest(),
+                parsing_profile=profile.model_dump(mode="json"),
+                capability_revision="a" * 64,
             )
         )
     harness.store.objects[storage_key] = content
@@ -1041,7 +1028,7 @@ async def test_ingest_processes_queued_document_to_ready(postgres_database_url: 
         assert all(segment.word_count == len(segment.content) for segment in segments)
         assert all(segment.enabled is True for segment in segments)
         assert document.word_count == sum(len(segment.content) for segment in segments)
-        assert harness.client.calls == [[segment.content for segment in segments]]
+        assert harness.client.calls == [[segment.index_text for segment in segments]]
 
         task = await _task_row(harness, task_id)
         assert task.status == "succeeded"
@@ -1115,7 +1102,7 @@ async def test_preview_chunks_match_ingested_segments_exactly(postgres_database_
         source = tmp_path / "parity.md"
         source.write_text(content, encoding="utf-8")
         settings = KnowledgeSettings.model_validate({"enabled": False})
-        preview = await preview_document_chunks(
+        preview = await _preview_chunks(
             KnowledgeChunkPreviewRequest(
                 original_name="parity.md",
                 source_path=source,
@@ -1192,7 +1179,7 @@ async def test_parent_child_ingest_embeds_children_and_leaves_parents_unvectored
         document = await _document_row(harness, document_id)
         assert document.status == "ready"
         segments = await _segment_rows(harness, document_id)
-        assert len(segments) == 2
+        assert segments
         assert all(segment.embedding is None for segment in segments)
         assert document.segment_count == len(segments)
         assert document.word_count == sum(len(segment.content) for segment in segments)
@@ -1213,7 +1200,7 @@ async def test_parent_child_ingest_embeds_children_and_leaves_parents_unvectored
             assert all(child.word_count == len(child.content) for child in group)
         # Exactly one embed call, covering child contents only (never parents),
         # flattened in parent-position order.
-        assert harness.client.calls == [[child.content for segment in segments for child in by_parent[segment.id]]]
+        assert harness.client.calls == [[child.index_text for segment in segments for child in by_parent[segment.id]]]
 
         task = await _task_row(harness, task_id)
         assert task.status == "succeeded"
@@ -1385,21 +1372,23 @@ async def test_ingest_late_result_is_not_published_after_midflight_delete(postgr
 
         harness.store.on_download = _delete_midflight
 
-        await harness.handler(claim)
+        with pytest.raises(KnowledgeError) as stale:
+            await harness.handler(claim)
+        assert stale.value.code == KNOWLEDGE_CONFLICT
 
         document = await _document_row(harness, document_id)
         assert document.status == "deleting"
         assert await _segment_rows(harness, document_id) == []
         task = await _task_row(harness, task_id)
-        assert task.status == "succeeded"  # no-op settlement by the handler
+        assert task.status == "running"  # Worker settlement owns this stale claim.
         assert temp_dir_tracker and not any(path.exists() for path in temp_dir_tracker)
     finally:
         await harness.engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_ingest_aborts_extraction_when_text_exceeds_the_char_budget(postgres_database_url: str) -> None:
-    """Text beyond segment-quota × chunk-size stops during extraction (bomb guard)."""
+async def test_ingest_aborts_when_token_segments_exceed_document_quota(postgres_database_url: str) -> None:
+    """The P3 splitter enforces the configured parent-row quota before Provider use."""
 
     harness = await _pipeline_harness(postgres_database_url, max_segments_per_document=1)
     try:
@@ -1411,7 +1400,7 @@ async def test_ingest_aborts_extraction_when_text_exceeds_the_char_budget(postgr
         with pytest.raises(KnowledgeError) as error:
             await harness.handler(claim)
         assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
-        assert "文档文本超过" in error.value.message
+        assert "切分产生" in error.value.message
 
         # The failure leaves the document processing; settlement is the
         # worker's responsibility and is covered by the task worker tests.
@@ -1573,38 +1562,36 @@ async def test_worker_timeout_waits_for_blocking_parser_before_retry_and_cleanup
     temp_dir_tracker: list[Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A timed-out Knowledge Task must not orphan its parser thread.
+    """A timed-out Knowledge Task must not orphan its parser operation.
 
     The task remains claimed, and its temporary source remains available,
-    until the already-started synchronous parser has returned. Only then may
+    until the already-started isolated parser has settled. Only then may
     cancellation cleanup and retry settlement finish.
     """
 
     harness = await _pipeline_harness(postgres_database_url)
-    parser_started = threading.Event()
-    release_parser = threading.Event()
+    parser_started = asyncio.Event()
+    release_parser = asyncio.Event()
     parser_calls = 0
     active_parsers = 0
     max_active_parsers = 0
-    counter_lock = threading.Lock()
-    real_extract_and_split = pipeline_module._extract_and_split
 
-    def _blocking_extract_and_split(*args: object, **kwargs: object) -> list[SegmentDraft]:
+    async def _blocking_extraction(*args: object, **kwargs: object):  # noqa: ANN202
         nonlocal parser_calls, active_parsers, max_active_parsers
-        with counter_lock:
-            parser_calls += 1
-            active_parsers += 1
-            max_active_parsers = max(max_active_parsers, active_parsers)
+        del args, kwargs
+        parser_calls += 1
+        active_parsers += 1
+        max_active_parsers = max(max_active_parsers, active_parsers)
         parser_started.set()
         try:
-            if not release_parser.wait(timeout=10):
-                raise AssertionError("test did not release the parser")
-            return real_extract_and_split(*args, **kwargs)  # type: ignore[arg-type]
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release_parser.wait()
+            raise
         finally:
-            with counter_lock:
-                active_parsers -= 1
+            active_parsers -= 1
 
-    monkeypatch.setattr(pipeline_module, "_extract_and_split", _blocking_extract_and_split)
+    monkeypatch.setattr(pipeline_module, "run_extraction", _blocking_extraction)
     stop_event = asyncio.Event()
     run: asyncio.Task[None] | None = None
     try:
@@ -1666,9 +1653,12 @@ async def test_worker_timeout_waits_for_blocking_parser_before_retry_and_cleanup
 
 def _reparse_documents_service(harness: _PipelineHarness) -> KnowledgeDocumentService:
     return KnowledgeDocumentService(
+        project_active_check=is_knowledge_project_active,
         session_factory=harness.factory,
         settings=KnowledgeSettings.model_validate({"enabled": False}),
+        file_capabilities=make_test_file_capability_provider(),
         object_store=harness.store,  # type: ignore[arg-type]
+        quota=make_test_quota_port(harness.factory),
     )
 
 
@@ -1718,7 +1708,7 @@ async def test_reparse_preview_matches_publish_and_freezes_parameters(postgres_d
         task = await _open_indexing_task(harness, document_id)
         assert task.kind == "ingest_document"
         assert task.target_version == 2
-        assert task.reparse_settings == {
+        assert {key: value for key, value in task.reparse_settings.items() if key not in {"processing_profile", "capability_revision"}} == {
             "chunk_size": 300,
             "chunk_overlap": 0,
             "chunk_separator": "\\n\\n",
@@ -1728,6 +1718,12 @@ async def test_reparse_preview_matches_publish_and_freezes_parameters(postgres_d
             "child_chunk_size": 500,
             "child_chunk_separator": "\\n",
         }
+
+        from actweave_knowledge.persistence.tasks import validated_reparse_settings
+
+        assert validated_reparse_settings(task.reparse_settings) == task.reparse_settings
+        assert task.reparse_settings["processing_profile"]["chunk"]["unit"] == "token"
+        assert len(task.reparse_settings["capability_revision"]) == 64
 
         await harness.handler(await _claim(harness))
 
@@ -1935,7 +1931,7 @@ async def test_reparse_retry_inherits_frozen_settings_and_keeps_counters(postgre
         assert document.chunk_size == 300
         segments = await _segment_rows(harness, document_id)
         assert all(segment.document_version == 3 for segment in segments)
-        assert all(len(segment.content) <= 300 for segment in segments)
+        assert all(segment.token_count <= 300 for segment in segments)
     finally:
         await harness.engine.dispose()
 

@@ -175,6 +175,13 @@ async def run_worker(
         engine = get_engine()
         if engine is None:
             raise WorkerConfigurationUnavailable()
+        audit_keyring = AuditHmacKeyring.from_environment()
+        quota_service = QuotaService(
+            session_factory,
+            getattr(config, "quotas", None) or QuotaConfig(),
+            source_ref_hasher=audit_keyring,
+            current_policy_reader=SystemQuotaPolicyReader(),
+        )
         # Knowledge is startup-only: a missing/disabled settings row keeps
         # the feature module absent, so no Knowledge task loop runs. Project
         # cleanup remains independently composed because historical Knowledge
@@ -183,7 +190,7 @@ async def run_worker(
             create_knowledge_worker_resources_from_database,
         )
 
-        knowledge_resources = await create_knowledge_worker_resources_from_database(app_config=config)
+        knowledge_resources = await create_knowledge_worker_resources_from_database(app_config=config, quota_service=quota_service)
         knowledge_module = knowledge_resources.feature_module
         if knowledge_module is not None:
             stack.push_async_callback(knowledge_module.aclose)
@@ -220,7 +227,6 @@ async def run_worker(
         await automation_reconciler.reconcile_restart(
             datetime.now(UTC),
         )
-        audit_keyring = AuditHmacKeyring.from_environment()
         from app.audit.service import AuditService, _bind_worker_audit_process
         from app.audit.sinks import OperationalAuditSink, TrustedOperationAuditSink
 
@@ -234,15 +240,7 @@ async def run_worker(
             audit_service,
             process_context=worker_audit_context,
         )
-        quota_config = getattr(config, "quotas", None) or QuotaConfig()
-        quota_enforcer = ProjectQuotaEnforcer(
-            QuotaService(
-                session_factory,
-                quota_config,
-                source_ref_hasher=audit_keyring,
-                current_policy_reader=SystemQuotaPolicyReader(),
-            )
-        )
+        quota_enforcer = ProjectQuotaEnforcer(quota_service)
         run_event_notify_enabled = config.worker.stream.run_event_notify_enabled
         run_event_store = DbRunEventStore(
             session_factory,

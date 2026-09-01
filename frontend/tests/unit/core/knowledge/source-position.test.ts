@@ -2,6 +2,7 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   formatKnowledgeSourcePosition,
+  formatKnowledgeSourceSpans,
   type KnowledgeSourcePositionLabels,
 } from "@/core/knowledge/source-position";
 
@@ -70,5 +71,35 @@ describe("formatKnowledgeSourcePosition", () => {
     expect(
       formatKnowledgeSourcePosition({ page: Number.NaN }, labels),
     ).toBeNull();
+  });
+
+  it("keeps every source span and its source or context role", () => {
+    expect(
+      formatKnowledgeSourceSpans(
+        [
+          {
+            location: { page: 2 },
+            role: "source",
+          },
+          {
+            location: { page: 1 },
+            role: "context_prefix",
+          },
+        ],
+        labels,
+      ),
+    ).toEqual([
+      { position: "页 2", role: "source" },
+      { position: "页 1", role: "context_prefix" },
+    ]);
+  });
+
+  it("does not reinterpret encoding metadata as a page", () => {
+    expect(
+      formatKnowledgeSourceSpans(
+        [{ location: { encoding: "gb18030" }, role: "source" }],
+        labels,
+      ),
+    ).toEqual([]);
   });
 });

@@ -24,6 +24,7 @@ from .contracts import (
     KnowledgeBaseView,
     KnowledgeChunkPreview,
     KnowledgeChunkPreviewRequest,
+    KnowledgeDocumentAttachmentView,
     KnowledgeDocumentUpload,
     KnowledgeDocumentView,
     KnowledgeError,
@@ -45,24 +46,30 @@ from .contracts import (
     KnowledgeSettings,
 )
 from .documents import KnowledgeDocumentService
+from .extraction.contracts import ExtractionError
+from .extraction.runtime import ParserSlots
 from .ingestion import (
     KnowledgeIngestionHandler,
     KnowledgeReembedHandler,
     preview_document_chunks,
 )
+from .ingestion.profiles import FileCapabilities, required_file_formats_ready
 from .ingestion.summarize import KnowledgeSummarizeHandler
 from .metadata import KnowledgeMetadataService
 from .models import KnowledgeModelClient
-from .project_retention import create_knowledge_project_purger
+from .project_retention import ProjectCleanupCheck, create_knowledge_project_purger
 from .registry import retrieval_model_in_use
 from .retrieval import KnowledgeSearchService
 from .retrieval.query_cache import KnowledgeQueryEmbeddingCache
 from .segments import KnowledgeSegmentService
 from .storage import MinioObjectStore
+from .storage.attachment_reads import AttachmentReadMetadata, KnowledgeAttachmentReadService
+from .storage.quota import KnowledgeStorageQuotaPort
 from .tasks import (
     KnowledgeBaseDeletionHandler,
     KnowledgeDocumentDeletionHandler,
     KnowledgeDocumentObjectDeletionHandler,
+    KnowledgeExtractionDeletionHandler,
     KnowledgeTaskWorker,
     ProjectActiveCheck,
     TaskHandler,
@@ -76,7 +83,9 @@ def create_knowledge_module(
     settings: KnowledgeSettings,
     session_factory: async_sessionmaker[AsyncSession],
     model_port: KnowledgeModelPort,
+    quota: KnowledgeStorageQuotaPort,
     project_active_check: ProjectActiveCheck,
+    project_cleanup_check: ProjectCleanupCheck,
 ) -> KnowledgeModule:
     """Build a module on host persistence, model-registry, and Project ports."""
 
@@ -84,7 +93,9 @@ def create_knowledge_module(
         settings=settings,
         session_factory=session_factory,
         model_port=model_port,
+        quota=quota,
         project_active_check=project_active_check,
+        project_cleanup_check=project_cleanup_check,
     )
 
 
@@ -105,13 +116,19 @@ class KnowledgeModule:
         settings: KnowledgeSettings,
         session_factory: async_sessionmaker[AsyncSession],
         model_port: KnowledgeModelPort,
-        project_active_check: ProjectActiveCheck | None = None,
+        quota: KnowledgeStorageQuotaPort,
+        project_active_check: ProjectActiveCheck,
+        project_cleanup_check: ProjectCleanupCheck,
         model_client: KnowledgeModelClient | None = None,
     ) -> None:
+        self._quota = quota
         self._settings = settings
+        self._file_capabilities_snapshot: FileCapabilities | None = None
         self._session_factory = session_factory
         self._model_port = model_port
         self._project_active_check = project_active_check
+        self._project_cleanup_check = project_cleanup_check
+        self._preview_parser_slots = ParserSlots(1)
         # Injectable for integration tests (e.g. an httpx.MockTransport-backed
         # client); production hosts leave it None and the module owns one.
         self._model_client = model_client or KnowledgeModelClient()
@@ -123,15 +140,29 @@ class KnowledgeModule:
         # Constructing the store performs no I/O; it only exists when MinIO is
         # configured (always true for an enabled module).
         self._object_store = MinioObjectStore(settings.minio) if settings.minio is not None else None
+        self._attachment_read_service = (
+            KnowledgeAttachmentReadService(
+                session_factory=session_factory,
+                object_store=self._object_store,
+            )
+            if self._object_store is not None
+            else None
+        )
         self._project_purger = create_knowledge_project_purger(
+            quota=quota,
             settings=settings,
             session_factory=session_factory,
+            project_cleanup_check=project_cleanup_check,
         )
         self._document_service = (
             KnowledgeDocumentService(
+                quota=self._quota,
+                project_active_check=self._project_active_check,
                 session_factory=session_factory,
                 settings=settings,
                 object_store=self._object_store,
+                file_capabilities=self._require_file_capabilities,
+                preview_parser_slots=self._preview_parser_slots,
             )
             if self._object_store is not None
             else None
@@ -153,6 +184,25 @@ class KnowledgeModule:
             model_port=model_port,
         )
         self._metadata_service = KnowledgeMetadataService(session_factory=session_factory)
+
+    def install_file_capabilities(self, capabilities: FileCapabilities) -> None:
+        if self._file_capabilities_snapshot is not None and self._file_capabilities_snapshot != capabilities:
+            raise RuntimeError("Knowledge file capabilities already installed")
+        self._file_capabilities_snapshot = capabilities
+
+    def _require_file_capabilities(self) -> FileCapabilities:
+        if self._file_capabilities_snapshot is None:
+            raise ExtractionError("PARSER_SANDBOX_UNAVAILABLE", "解析能力尚未完成启动检查")
+        return self._file_capabilities_snapshot
+
+    async def file_capabilities(self, *, authority: KnowledgeProjectAuthority) -> FileCapabilities:
+        async with self._session_factory() as session, session.begin():
+            await revalidate_project_authority(authority, session, project_id=authority.project_id)
+            return self._require_file_capabilities()
+
+    def _require_parsing_ready(self) -> None:
+        if not required_file_formats_ready(self._require_file_capabilities()):
+            raise ExtractionError("PARSER_SANDBOX_UNAVAILABLE", "文件解析暂不可用，请联系管理员")
 
     @property
     def settings(self) -> KnowledgeSettings:
@@ -375,6 +425,7 @@ class KnowledgeModule:
         *,
         authority: KnowledgeProjectAuthority,
     ) -> KnowledgeDocumentView:
+        self._require_parsing_ready()
         return await self._documents().upload_document(
             project_id,
             base_id,
@@ -407,6 +458,19 @@ class KnowledgeModule:
         authority: KnowledgeProjectAuthority,
     ) -> KnowledgeDocumentView:
         return await self._documents().get_document(
+            project_id,
+            document_id,
+            authority=authority,
+        )
+
+    async def list_document_attachments(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority,
+    ) -> tuple[list[KnowledgeDocumentAttachmentView], int]:
+        return await self._documents().list_document_attachments(
             project_id,
             document_id,
             authority=authority,
@@ -450,6 +514,7 @@ class KnowledgeModule:
         *,
         authority: KnowledgeProjectAuthority,
     ) -> KnowledgeReparsePreview:
+        self._require_parsing_ready()
         return await self._documents().preview_reparse(
             project_id,
             document_id,
@@ -465,6 +530,7 @@ class KnowledgeModule:
         *,
         authority: KnowledgeProjectAuthority,
     ) -> KnowledgeDocumentView:
+        self._require_parsing_ready()
         return await self._documents().reparse_document(
             project_id,
             document_id,
@@ -543,6 +609,54 @@ class KnowledgeModule:
             authority=authority,
         )
 
+    async def download_segment_attachment(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        segment_id: UUID,
+        attachment_id: UUID,
+        target_path: Path,
+        *,
+        expected_document_version: int,
+        expected_content_digest: str,
+        authority: KnowledgeProjectAuthority,
+    ) -> AttachmentReadMetadata:
+        return await self._attachment_reads().download_managed(
+            project_id,
+            document_id,
+            segment_id,
+            attachment_id,
+            target_path,
+            expected_document_version=expected_document_version,
+            expected_content_digest=expected_content_digest,
+            authority=authority,
+        )
+
+    async def download_citation_attachment(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        document_id: UUID,
+        segment_id: UUID,
+        attachment_id: UUID,
+        target_path: Path,
+        *,
+        expected_document_version: int,
+        expected_content_digest: str,
+        authority: KnowledgeProjectAuthority,
+    ) -> AttachmentReadMetadata:
+        return await self._attachment_reads().download_citation(
+            project_id,
+            base_id,
+            document_id,
+            segment_id,
+            attachment_id,
+            target_path,
+            expected_document_version=expected_document_version,
+            expected_content_digest=expected_content_digest,
+            authority=authority,
+        )
+
     async def preview_document_chunks(
         self,
         request: KnowledgeChunkPreviewRequest,
@@ -551,23 +665,29 @@ class KnowledgeModule:
     ) -> KnowledgeChunkPreview:
         """Stateless extract → clean → split preview; no rows, objects, or tasks."""
 
-        async with self._session_factory() as session, session.begin():
-            await revalidate_project_authority(
-                authority,
-                session,
-                project_id=authority.project_id,
-            )
-        preview = await preview_document_chunks(request, self._settings)
+        async def guard() -> None:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=authority.project_id,
+                )
+
+        await guard()
+        capabilities = self._require_file_capabilities()
+        self._require_parsing_ready()
+        preview = await preview_document_chunks(
+            request,
+            self._settings,
+            capability_revision=capabilities.capability_revision,
+            parser_slots=self._preview_parser_slots,
+            guard=guard,
+        )
         # Parsing runs outside PostgreSQL and can be expensive for PDF/DOCX
         # inputs. Revalidate in a fresh short transaction after it settles so a
         # membership or capability revoked during parser work cannot receive
         # the already-computed preview.
-        async with self._session_factory() as session, session.begin():
-            await revalidate_project_authority(
-                authority,
-                session,
-                project_id=authority.project_id,
-            )
+        await guard()
         return preview
 
     # -- segments ----------------------------------------------------------------
@@ -696,6 +816,7 @@ class KnowledgeModule:
                 session_factory=self._session_factory,
                 settings=self._settings,
                 object_store=object_store,
+                quota=self._quota,
                 model_client=self._model_client,
                 model_port=self._model_port,
                 project_active_check=project_active_check,
@@ -717,14 +838,26 @@ class KnowledgeModule:
             "delete_document": KnowledgeDocumentDeletionHandler(
                 session_factory=self._session_factory,
                 object_store=object_store,
+                quota=self._quota,
+                project_active_check=project_active_check,
             ),
             "delete_document_object": KnowledgeDocumentObjectDeletionHandler(
                 session_factory=self._session_factory,
                 object_store=object_store,
+                quota=self._quota,
+                project_active_check=project_active_check,
             ),
             "delete_knowledge_base": KnowledgeBaseDeletionHandler(
                 session_factory=self._session_factory,
                 object_store=object_store,
+                quota=self._quota,
+                project_active_check=project_active_check,
+            ),
+            "delete_extraction": KnowledgeExtractionDeletionHandler(
+                session_factory=self._session_factory,
+                object_store=object_store,
+                quota=self._quota,
+                project_active_check=project_active_check,
             ),
         }
         worker = KnowledgeTaskWorker(
@@ -744,6 +877,8 @@ class KnowledgeModule:
         """Probe the database and the configured MinIO bucket with real credentials."""
 
         problems: list[str] = []
+        if self._file_capabilities_snapshot is not None and not required_file_formats_ready(self._file_capabilities_snapshot):
+            problems.append("文件解析暂不可用")
         database_ok = False
         try:
             async with self._session_factory() as session, session.begin():
@@ -810,3 +945,8 @@ class KnowledgeModule:
         if self._document_service is None:
             raise KnowledgeError(KNOWLEDGE_DISABLED, "Knowledge 功能未启用")
         return self._segment_service
+
+    def _attachment_reads(self) -> KnowledgeAttachmentReadService:
+        if self._attachment_read_service is None:
+            raise KnowledgeError(KNOWLEDGE_DISABLED, "Knowledge 功能未启用")
+        return self._attachment_read_service

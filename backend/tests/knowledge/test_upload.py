@@ -24,15 +24,19 @@ from actweave_knowledge import (
     KNOWLEDGE_QUOTA_EXCEEDED,
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeChunkPreview,
+    KnowledgeChunkPreviewAttachment,
     KnowledgeChunkPreviewChunk,
     KnowledgeChunkPreviewRequest,
     KnowledgeDocumentUpload,
     KnowledgeDocumentView,
     KnowledgeError,
     KnowledgeHealth,
+    KnowledgePreviewAttachment,
+    KnowledgePreviewTableSource,
     KnowledgeSettings,
 )
 from actweave_knowledge.documents import ALLOWED_DOCUMENT_EXTENSIONS, KnowledgeDocumentService
+from actweave_knowledge.extraction.contracts import ParseWarning, ProcessingProfile, SourceSpan
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
@@ -41,20 +45,22 @@ from actweave_knowledge.persistence.models import (
 from actweave_knowledge.persistence.tasks import (
     claim_next_task,
     settle_task_failure,
-    settle_task_success,
 )
 from actweave_knowledge.tasks import (
     KnowledgeDocumentDeletionHandler,
     KnowledgeDocumentObjectDeletionHandler,
     KnowledgeTaskClaim,
 )
+from extraction_test_helpers import make_test_file_capability_provider, make_test_quota_port
 from fastapi import FastAPI
+from parsing_test_helpers import make_chunk_profile, make_parse_profile
 from registry_helpers import seed_embedding_model, seed_provider
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.knowledge import gateway
+from app.knowledge.composition import is_knowledge_project_active
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
@@ -95,6 +101,13 @@ class _FakeObjectStore:
         self.deletes.append(key)
         self.objects.pop(key, None)
 
+    async def require_absent(self, key: str) -> None:
+        if key in self.objects:
+            raise KnowledgeError(
+                KNOWLEDGE_STORAGE_UNAVAILABLE,
+                "对象存储删除结果无法确认",
+            )
+
 
 class _UploadHarness:
     def __init__(self, engine, factory, store: _FakeObjectStore, service: KnowledgeDocumentService) -> None:  # noqa: ANN001
@@ -126,8 +139,11 @@ async def _harness(postgres_database_url: str, **settings_overrides: object) -> 
     settings = KnowledgeSettings.model_validate({"enabled": False, **settings_overrides})
     store = _FakeObjectStore()
     service = KnowledgeDocumentService(
+        project_active_check=is_knowledge_project_active,
+        quota=make_test_quota_port(factory),
         session_factory=factory,
         settings=settings,
+        file_capabilities=make_test_file_capability_provider(settings),
         object_store=store,  # type: ignore[arg-type]
     )
     return _UploadHarness(engine, factory, store, service)
@@ -362,7 +378,7 @@ async def test_upload_freezes_parent_child_mode_and_normalizes_general_child_par
 @pytest.mark.asyncio
 @pytest.mark.parametrize("extension", sorted(ALLOWED_DOCUMENT_EXTENSIONS))
 async def test_upload_accepts_every_frozen_extension(postgres_database_url: str, tmp_path: Path, extension: str) -> None:
-    harness = await _harness(postgres_database_url)
+    harness = await _harness(postgres_database_url, etl_type="unstructured_local")
     try:
         project_id, base_id = await _seed_base(harness)
         original_name = f"文件{extension.upper()}"  # extension matching is case-insensitive
@@ -631,23 +647,44 @@ async def test_upload_cleanup_persists_orphan_delete_after_worker_removed_the_ro
             delete_task = await claim_next_task(session, lease_seconds=60)
             assert delete_task is not None
             assert delete_task.kind == "delete_document"
+            delete_task.attempt_count = 3
         handler = KnowledgeDocumentDeletionHandler(
             session_factory=harness.factory,
             object_store=harness.store,  # type: ignore[arg-type]
+            quota=make_test_quota_port(harness.factory),
+            project_active_check=is_knowledge_project_active,
         )
-        await handler(
-            KnowledgeTaskClaim(
-                id=delete_task.id,
-                project_id=project_id,
-                resource_id=document_id,
-                kind="delete_document",
-                target_version=None,
-                storage_key=None,
-                claim_token=delete_task.claim_token,  # type: ignore[arg-type]
-                attempt_count=delete_task.attempt_count,
-                max_attempts=3,
+        delete_claim = KnowledgeTaskClaim(
+            id=delete_task.id,
+            project_id=project_id,
+            resource_id=document_id,
+            kind="delete_document",
+            target_version=None,
+            storage_key=None,
+            claim_token=delete_task.claim_token,  # type: ignore[arg-type]
+            attempt_count=3,
+            max_attempts=3,
+        )
+        with pytest.raises(KnowledgeError) as pending_error:
+            await handler(delete_claim)
+        assert pending_error.value.code == "KNOWLEDGE_TASK_FAILED"
+        async with harness.factory() as session, session.begin():
+            outcome = await settle_task_failure(
+                session,
+                delete_task.id,
+                delete_task.claim_token,  # type: ignore[arg-type]
+                error_message=pending_error.value.message,
+                retry_delay_seconds=0,
             )
-        )
+        assert outcome == "failed"
+        async with harness.factory() as session:
+            pending = await session.get(KnowledgeDocumentRow, document_id)
+            original_task = await session.get(KnowledgeTaskRow, delete_task.id)
+        assert pending is not None
+        assert (pending.upload_state, pending.quota_state) == ("pending", "reserved")
+        assert original_task is not None and original_task.status == "failed"
+        assert harness.store.objects == {}
+        assert harness.store.deletes == []
 
         harness.store.fail_delete = True
         allow_upload_to_finish.set()
@@ -668,7 +705,7 @@ async def test_upload_cleanup_persists_orphan_delete_after_worker_removed_the_ro
             tombstone = await session.get(KnowledgeDocumentRow, document_id)
         assert cleanup_task is not None
         assert cleanup_task.storage_key in harness.store.objects
-        assert original_task is not None and original_task.status == "running"
+        assert original_task is not None and original_task.status == "failed"
         assert tombstone is not None
         assert tombstone.status == "deleting"
         assert tombstone.storage_key == cleanup_task.storage_key
@@ -682,6 +719,8 @@ async def test_upload_cleanup_persists_orphan_delete_after_worker_removed_the_ro
         object_handler = KnowledgeDocumentObjectDeletionHandler(
             session_factory=harness.factory,
             object_store=harness.store,  # type: ignore[arg-type]
+            quota=make_test_quota_port(harness.factory),
+            project_active_check=is_knowledge_project_active,
         )
         object_claim = KnowledgeTaskClaim(
             id=cleanup_claim.id,
@@ -705,12 +744,6 @@ async def test_upload_cleanup_persists_orphan_delete_after_worker_removed_the_ro
                 retry_delay_seconds=0,
             )
         assert outcome == "failed"
-        async with harness.factory() as session, session.begin():
-            assert await settle_task_success(
-                session,
-                delete_task.id,
-                delete_task.claim_token,  # type: ignore[arg-type]
-            )
         stuck = await harness.service.get_document(project_id, document_id)
         assert stuck.status == "deleting"
         assert stuck.delete_error == cleanup_error.value.message
@@ -720,7 +753,7 @@ async def test_upload_cleanup_persists_orphan_delete_after_worker_removed_the_ro
         retried = await harness.service.delete_document(project_id, document_id)
         assert retried.status == "deleting"
         assert retried.delete_error is None
-        async with harness.factory() as session:
+        async with harness.factory() as session, session.begin():
             retry_task = await session.scalar(
                 select(KnowledgeTaskRow).where(
                     KnowledgeTaskRow.resource_id == document_id,
@@ -728,20 +761,22 @@ async def test_upload_cleanup_persists_orphan_delete_after_worker_removed_the_ro
                     KnowledgeTaskRow.status == "queued",
                 )
             )
+            claimed_retry = await claim_next_task(session, lease_seconds=60)
         assert retry_task is not None
+        assert claimed_retry is not None and claimed_retry.id == retry_task.id
 
         harness.store.fail_delete = False
         await handler(
             KnowledgeTaskClaim(
-                id=retry_task.id,
+                id=claimed_retry.id,
                 project_id=project_id,
                 resource_id=document_id,
                 kind="delete_document",
                 target_version=None,
                 storage_key=None,
-                claim_token=uuid.uuid4(),
-                attempt_count=1,
-                max_attempts=3,
+                claim_token=claimed_retry.claim_token,  # type: ignore[arg-type]
+                attempt_count=claimed_retry.attempt_count,
+                max_attempts=claimed_retry.max_attempts,
             )
         )
         assert harness.store.objects == {}
@@ -950,8 +985,11 @@ async def test_download_final_guard_database_failure_maps_to_storage_unavailable
                 return self._inner()
 
         service = KnowledgeDocumentService(
+            project_active_check=is_knowledge_project_active,
+            quota=make_test_quota_port(harness.factory),
             session_factory=_DiesOnFinalGuard(harness.factory),  # type: ignore[arg-type]
             settings=KnowledgeSettings(),
+            file_capabilities=make_test_file_capability_provider(),
             object_store=harness.store,  # type: ignore[arg-type]
         )
         target = tmp_path / "db-failed-download.txt"
@@ -1044,6 +1082,8 @@ class _FakeModule:
         self.staged_content = Path(request.source_path).read_bytes()
         if self.preview_error is not None:
             raise self.preview_error
+        span = SourceSpan(block_id="preview:1", start=0, end=7, location={"paragraph": 1})
+        ref = "a" * 64
         return KnowledgeChunkPreview(
             total=12,
             chunks=tuple(
@@ -1052,9 +1092,22 @@ class _FakeModule:
                     content=f"chunk-{index}",
                     word_count=7,
                     child_contents=(("child-a", "child-b") if request.chunking_mode == "parent_child" else ()),
+                    token_count=3,
+                    source_spans=(span,),
+                    attachments=(KnowledgeChunkPreviewAttachment(ref=ref, alt_text="拓扑图"),),
                 )
                 for index in range(1, 3)
             ),
+            preview_fingerprint="b" * 64,
+            source_sha256="c" * 64,
+            effective_profile=ProcessingProfile(
+                parse=make_parse_profile(".md"),
+                chunk=make_chunk_profile(),
+            ),
+            warnings=(ParseWarning(code="HEADER_INFERRED", message="已自动识别表头，请确认", source_position={"row": 1}),),
+            preview_attachments=(KnowledgePreviewAttachment(ref=ref, media_type="image/png", data_base64="aGVsbG8="),),
+            omitted_preview_attachment_count=2,
+            table_sources=(KnowledgePreviewTableSource(sheet=None, header_mode="auto", header_row=1, header_cells=("设备", "端口")),),
         )
 
     async def download_document(self, project_id: uuid.UUID, document_id: uuid.UUID, target_path: Path, *, authority):  # noqa: ANN001
@@ -1199,6 +1252,39 @@ async def test_http_chunk_preview_round_trips_and_cleans_temp_file(temp_path_tra
     assert payload["total"] == 12
     assert [item["content"] for item in payload["items"]] == ["chunk-1", "chunk-2"]
     assert payload["items"][0]["word_count"] == 7
+    assert payload["items"][0]["token_count"] == 3
+    assert payload["items"][0]["source_spans"] == [
+        {
+            "block_id": "preview:1",
+            "start": 0,
+            "end": 7,
+            "location": {"paragraph": 1},
+            "role": "source",
+        }
+    ]
+    assert payload["items"][0]["attachments"] == [{"ref": "a" * 64, "alt_text": "拓扑图"}]
+    assert payload["preview_fingerprint"] == "b" * 64
+    assert payload["source_sha256"] == "c" * 64
+    assert payload["effective_profile"]["parse"]["extractor_id"] == "dify.markdown"
+    assert payload["warnings"] == [
+        {
+            "code": "HEADER_INFERRED",
+            "message": "已自动识别表头，请确认",
+            "source_position": {"row": 1},
+        }
+    ]
+    assert payload["preview_attachments"] == [{"ref": "a" * 64, "media_type": "image/png", "data_base64": "aGVsbG8="}]
+    assert payload["omitted_preview_attachment_count"] == 2
+    assert payload["table_sources"] == [
+        {
+            "sheet": None,
+            "header_mode": "auto",
+            "header_row": 1,
+            "header_cells": ["设备", "端口"],
+        }
+    ]
+    assert "index_text" not in str(payload)
+    assert "relative_path" not in str(payload)
     assert payload["request_id"] == _REQUEST_ID
 
     verb, request = module.calls[0]
@@ -1620,7 +1706,21 @@ async def test_http_reparse_routes_round_trip_the_module_views() -> None:
         document_version=2,
         preview=KnowledgeChunkPreview(
             total=3,
-            chunks=(KnowledgeChunkPreviewChunk(position=1, content="第一段", word_count=3, child_contents=("子块",)),),
+            chunks=(
+                KnowledgeChunkPreviewChunk(
+                    position=1,
+                    content="第一段",
+                    word_count=3,
+                    child_contents=("子块",),
+                    token_count=3,
+                ),
+            ),
+            preview_fingerprint="d" * 64,
+            source_sha256="e" * 64,
+            effective_profile=ProcessingProfile(
+                parse=make_parse_profile(".txt"),
+                chunk=make_chunk_profile(),
+            ),
         ),
     )
 
@@ -1665,7 +1765,19 @@ async def test_http_reparse_routes_round_trip_the_module_views() -> None:
     body = previewed.json()
     assert body["document_version"] == 2
     assert body["total"] == 3
-    assert body["items"] == [{"position": 1, "content": "第一段", "word_count": 3, "child_contents": ["子块"]}]
+    assert body["items"] == [
+        {
+            "position": 1,
+            "content": "第一段",
+            "word_count": 3,
+            "child_contents": ["子块"],
+            "token_count": 3,
+            "source_spans": [],
+            "attachments": [],
+        }
+    ]
+    assert body["preview_fingerprint"] == "d" * 64
+    assert body["source_sha256"] == "e" * 64
 
     assert reparsed.status_code == 200
     assert reparsed.json()["item"]["status"] == "queued"
@@ -1785,16 +1897,20 @@ async def test_cancelled_upload_still_removes_the_row_and_object(postgres_databa
     try:
         project_id, base_id = await _seed_base(harness)
         put_started = asyncio.Event()
+        finish_put = asyncio.Event()
 
         async def _stalled_put(key: str, source_path: Path, *, media_type: str | None = None) -> None:
             put_started.set()
-            await asyncio.Event().wait()  # parks forever until cancelled
+            await finish_put.wait()  # finite external I/O must drain before cleanup
 
         monkeypatch.setattr(harness.store, "upload_from", _stalled_put)
 
         upload_task = asyncio.create_task(harness.service.upload_document(project_id, base_id, _upload(tmp_path)))
         await asyncio.wait_for(put_started.wait(), timeout=5)
         upload_task.cancel()
+        await asyncio.get_running_loop().run_in_executor(None, lambda: None)
+        assert not upload_task.done()
+        finish_put.set()
         with pytest.raises(asyncio.CancelledError):
             await upload_task
 
@@ -1940,6 +2056,7 @@ def test_project_routes_declare_exactly_the_documented_capability_guards() -> No
     prefix = "/api/projects/{project_id}/knowledge"
     expected = {
         ("GET", f"{prefix}/model-options"): "read",
+        ("GET", f"{prefix}/file-capabilities"): "read",
         ("GET", f"{prefix}/health"): "read",
         ("POST", f"{prefix}/bases"): "edit",
         ("GET", f"{prefix}/bases"): "read",
@@ -1950,7 +2067,9 @@ def test_project_routes_declare_exactly_the_documented_capability_guards() -> No
         ("POST", f"{prefix}/chunk-preview"): "edit",
         ("GET", f"{prefix}/bases/{{base_id}}/documents"): "read",
         ("GET", f"{prefix}/documents/{{document_id}}"): "read",
+        ("GET", f"{prefix}/documents/{{document_id}}/attachments"): "edit",
         ("GET", f"{prefix}/documents/{{document_id}}/download"): "read",
+        ("GET", f"{prefix}/documents/{{document_id}}/segments/{{segment_id}}/attachments/{{attachment_id}}"): "read",
         ("DELETE", f"{prefix}/documents/{{document_id}}"): "edit",
         ("POST", f"{prefix}/documents/{{document_id}}/retry"): "edit",
         ("POST", f"{prefix}/documents/{{document_id}}/reparse-preview"): "edit",
@@ -1960,6 +2079,7 @@ def test_project_routes_declare_exactly_the_documented_capability_guards() -> No
         ("POST", f"{prefix}/documents/batch-delete"): "edit",
         ("GET", f"{prefix}/documents/{{document_id}}/segments"): "read",
         ("GET", f"{prefix}/bases/{{base_id}}/documents/{{document_id}}/segments/{{segment_id}}"): "read",
+        ("GET", f"{prefix}/bases/{{base_id}}/documents/{{document_id}}/segments/{{segment_id}}/attachments/{{attachment_id}}"): "read",
         ("POST", f"{prefix}/documents/{{document_id}}/segments"): "edit",
         ("PATCH", f"{prefix}/segments/{{segment_id}}"): "edit",
         ("DELETE", f"{prefix}/segments/{{segment_id}}"): "edit",
@@ -1988,3 +2108,282 @@ def test_project_routes_declare_exactly_the_documented_capability_guards() -> No
             seen[(method, route.path)] = capabilities[0]
 
     assert seen == expected
+
+
+@pytest.mark.asyncio
+async def test_original_put_observes_reserved_row_and_commits_bytes(postgres_database_url, tmp_path):
+    import hashlib
+
+    from extraction_test_helpers import ExtractionObjectStore
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        store = ExtractionObjectStore()
+        harness.service._object_store = store
+        gate = store.pause("put")
+        pending = asyncio.create_task(harness.service.upload_document(project_id, base_id, _upload(tmp_path, b"original")))
+        async with asyncio.timeout(10):
+            await gate.entered.wait()
+            try:
+                async with harness.factory() as session:
+                    row = await session.scalar(select(KnowledgeDocumentRow))
+                    assert row.quota_state == "reserved"
+                    assert row.upload_state == "pending"
+                    assert row.source_sha256 == hashlib.sha256(b"original").hexdigest()
+            finally:
+                gate.released.set()
+            await pending
+        async with harness.factory() as session:
+            row = await session.scalar(select(KnowledgeDocumentRow))
+            assert row.quota_state == "committed"
+            assert row.upload_state == "stored"
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_original_put_retains_committed_tombstone_if_cleanup_fails(postgres_database_url, tmp_path):
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        harness.store.fail_delete = True
+        with pytest.raises(KnowledgeError):
+            await harness.service.upload_document(project_id, base_id, _upload(tmp_path), authority=_RevokedAfterFirstTransaction(project_id))
+        async with harness.factory() as session:
+            row = await session.scalar(select(KnowledgeDocumentRow))
+            assert row.status == "deleting"
+            assert row.quota_state == "committed"
+            assert row.upload_state == "delete_pending"
+            assert row.storage_key in harness.store.objects
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_original_cleanup_requires_confirmed_absence_before_release(
+    postgres_database_url,
+    tmp_path,
+    monkeypatch,
+):
+    from deerflow.persistence.quotas.model import ProjectUsageCounterRow
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+
+        async def acknowledged_noop_delete(key: str) -> None:
+            harness.store.deletes.append(key)
+
+        monkeypatch.setattr(harness.store, "delete", acknowledged_noop_delete)
+        with pytest.raises(KnowledgeError):
+            await harness.service.upload_document(
+                project_id,
+                base_id,
+                _upload(tmp_path),
+                authority=_RevokedAfterFirstTransaction(project_id),
+            )
+
+        async with harness.factory() as session:
+            row = await session.scalar(select(KnowledgeDocumentRow))
+            cleanup = await session.scalar(
+                select(KnowledgeTaskRow).where(
+                    KnowledgeTaskRow.kind == "delete_document_object",
+                    KnowledgeTaskRow.status == "queued",
+                )
+            )
+            counter = await session.scalar(
+                select(ProjectUsageCounterRow).where(
+                    ProjectUsageCounterRow.project_id == project_id,
+                    ProjectUsageCounterRow.dimension == "storage_bytes",
+                )
+            )
+            assert row is not None
+            assert (row.status, row.upload_state, row.quota_state) == (
+                "deleting",
+                "delete_pending",
+                "committed",
+            )
+            assert cleanup is not None and cleanup.storage_key == row.storage_key
+            assert counter is not None and (counter.used, counter.reserved) == (
+                row.size_bytes,
+                0,
+            )
+            assert row.storage_key in harness.store.objects
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_late_original_delete_releases_same_reservation_after_row_was_removed(postgres_database_url, tmp_path):
+    from extraction_test_helpers import ExtractionObjectStore
+    from sqlalchemy import delete
+
+    from deerflow.persistence.quotas.model import ProjectUsageCounterRow
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        store = ExtractionObjectStore()
+        harness.service._object_store = store
+        gate = store.pause("put")
+        pending = asyncio.create_task(harness.service.upload_document(project_id, base_id, _upload(tmp_path)))
+        async with asyncio.timeout(10):
+            await gate.entered.wait()
+            async with harness.factory() as session, session.begin():
+                await session.execute(delete(KnowledgeDocumentRow))
+            gate.released.set()
+            with pytest.raises(KnowledgeError):
+                await pending
+        async with harness.factory() as session:
+            counter = await session.scalar(select(ProjectUsageCounterRow).where(ProjectUsageCounterRow.dimension == "storage_bytes"))
+            assert counter.reserved == 0 and counter.used == 0
+        assert not store.objects
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_joins_started_original_cleanup(postgres_database_url, tmp_path):
+    from extraction_test_helpers import ExtractionObjectStore
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        store = ExtractionObjectStore()
+        harness.service._object_store = store
+        gate = store.pause("delete")
+        pending = asyncio.create_task(harness.service.upload_document(project_id, base_id, _upload(tmp_path), authority=_RevokedAfterFirstTransaction(project_id)))
+        async with asyncio.timeout(10):
+            await gate.entered.wait()
+            pending.cancel()
+            await asyncio.get_running_loop().run_in_executor(None, lambda: None)
+            try:
+                assert not pending.done()
+            finally:
+                gate.released.set()
+            with pytest.raises((KnowledgeError, asyncio.CancelledError)):
+                await pending
+        assert not store.objects
+        assert await _table_counts(harness) == (0, 0)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_joins_started_original_absence_confirmation(
+    postgres_database_url,
+    tmp_path,
+):
+    from extraction_test_helpers import ExtractionObjectStore
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        store = ExtractionObjectStore()
+        harness.service._object_store = store
+        gate = store.pause("get")
+        pending = asyncio.create_task(
+            harness.service.upload_document(
+                project_id,
+                base_id,
+                _upload(tmp_path),
+                authority=_RevokedAfterFirstTransaction(project_id),
+            )
+        )
+        async with asyncio.timeout(10):
+            await gate.entered.wait()
+            pending.cancel()
+            await asyncio.get_running_loop().run_in_executor(None, lambda: None)
+            try:
+                assert not pending.done()
+            finally:
+                gate.released.set()
+            with pytest.raises((KnowledgeError, asyncio.CancelledError)):
+                await pending
+        assert not store.objects
+        assert await _table_counts(harness) == (0, 0)
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_inactive_project_does_not_bypass_resource_hiding_authority(postgres_database_url, tmp_path):
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id = await _seed_base(harness)
+        async with harness.factory() as session, session.begin():
+            await session.execute(text("UPDATE projects SET status='pending_deletion' WHERE id=:id"), {"id": project_id})
+        authority = _RevokedAfterFirstTransaction(project_id)
+        authority.calls = 1
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.upload_document(project_id, base_id, _upload(tmp_path), authority=authority)
+        assert error.value.code == KNOWLEDGE_NOT_FOUND
+        assert not harness.store.objects
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_real_adapter_put_commits_confirmed_bytes_when_delete_fails(postgres_database_url, tmp_path, monkeypatch):
+    import threading
+
+    from actweave_knowledge.contracts import KnowledgeMinioSettings
+    from actweave_knowledge.storage import MinioObjectStore
+    from actweave_knowledge.storage import minio_store as minio_store_module
+
+    from deerflow.persistence.quotas.model import ProjectUsageCounterRow
+
+    harness = await _harness(postgres_database_url)
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    physical = {}
+
+    class BarrierMinio:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def bucket_exists(self, bucket):
+            return True
+
+        def get_bucket_versioning(self, bucket):
+            return SimpleNamespace(status=None)
+
+        def fput_object(self, bucket, key, source_path, **kwargs):
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(timeout=10):
+                raise AssertionError("PUT barrier was not released")
+            physical[key] = Path(source_path).read_bytes()
+
+        def remove_object(self, bucket, key):
+            raise RuntimeError("injected delete failure")
+
+    monkeypatch.setattr(minio_store_module, "Minio", BarrierMinio)
+    harness.service._object_store = MinioObjectStore(KnowledgeMinioSettings(endpoint="minio.invalid:9000", bucket="test-cancel", access_key="test", secret_key="test", secure=False))
+    pending = None
+    try:
+        project_id, base_id = await _seed_base(harness)
+        payload = b"confirmed original PUT"
+        pending = asyncio.create_task(harness.service.upload_document(project_id, base_id, _upload(tmp_path, payload)))
+        async with asyncio.timeout(10):
+            await entered.wait()
+            for _ in range(2):
+                pending.cancel()
+                await asyncio.get_running_loop().run_in_executor(None, lambda: None)
+                assert not pending.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        async with harness.factory() as session:
+            document = await session.scalar(select(KnowledgeDocumentRow))
+            counter = await session.scalar(select(ProjectUsageCounterRow).where(ProjectUsageCounterRow.project_id == project_id, ProjectUsageCounterRow.dimension == "storage_bytes"))
+            assert document.storage_key in physical
+            assert document.status == "deleting" and document.upload_state == "delete_pending"
+            assert document.quota_state == "committed"
+            assert counter.used == len(payload) and counter.reserved == 0
+    finally:
+        release.set()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+        await harness.engine.dispose()

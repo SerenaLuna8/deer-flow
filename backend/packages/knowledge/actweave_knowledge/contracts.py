@@ -9,11 +9,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from .extraction.contracts import ParseWarning, ProcessingProfile, SourceSpan
+    from .ingestion.profiles import ProcessingParameters
 
 # ---------------------------------------------------------------------------
 # Error codes and error type
@@ -73,6 +77,9 @@ class KnowledgeMinioSettings(BaseModel):
         return cleaned
 
 
+KNOWLEDGE_MAX_SEGMENTS_PER_DOCUMENT = 5000
+
+
 class KnowledgeSettings(BaseModel):
     """Startup configuration for the Knowledge feature.
 
@@ -84,6 +91,8 @@ class KnowledgeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    etl_type: Literal["dify", "unstructured_local"] = "dify"
+    extraction_cache_enabled: bool = True
     worker_concurrency: int = Field(default=2, ge=1, le=16)
     task_timeout_seconds: int = Field(default=900, ge=30, le=7200)
     # MinIO's Python SDK buffers a single PUT part in process memory. Keep the
@@ -92,7 +101,7 @@ class KnowledgeSettings(BaseModel):
     upload_max_bytes: int = Field(default=52428800, ge=1, le=50 * 1024**2)
     max_knowledge_bases_per_project: int = Field(default=20, ge=1)
     max_documents_per_knowledge_base: int = Field(default=500, ge=1)
-    max_segments_per_document: int = Field(default=5000, ge=1, le=5000)
+    max_segments_per_document: int = Field(default=KNOWLEDGE_MAX_SEGMENTS_PER_DOCUMENT, ge=1, le=KNOWLEDGE_MAX_SEGMENTS_PER_DOCUMENT)
     # In-process query-vector cache (per Gateway/Worker process, LRU + TTL).
     # ``enabled=false`` keeps the cache object constructed but never hitting.
     query_cache_enabled: bool = True
@@ -369,6 +378,8 @@ class KnowledgeDocumentUpload:
     chunking_mode: KnowledgeChunkingMode = "general"
     child_chunk_size: int = 500
     child_chunk_separator: str = KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
+    processing_profile: ProcessingParameters | None = None
+    expected_preview_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +417,19 @@ class KnowledgeDocumentView:
     content_initialized: bool = False
     # Open indexing task bound to the current target version, if any.
     task_progress: KnowledgeTaskProgress | None = None
+    parsing_profile: ProcessingProfile | None = None
+    parse_warnings: tuple[ParseWarning, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeDocumentAttachmentView:
+    """One selectable image from a Document's current publication."""
+
+    attachment_id: UUID
+    ref: str
+    media_type: Literal["image/png", "image/jpeg", "image/webp"]
+    width: int
+    height: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +443,8 @@ class KnowledgeSegmentView:
     hit_count: int
     source_position: dict[str, Any]
     created_at: datetime
+    token_count: int = 0
+    source_spans: tuple[SourceSpan, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,6 +507,18 @@ class KnowledgeSegmentSummaryView:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgeSegmentAttachmentView:
+    """One safe published image occurrence in Segment-detail order."""
+
+    attachment_id: UUID
+    ref: str
+    alt_text: str
+    media_type: Literal["image/png", "image/jpeg", "image/webp"]
+    width: int
+    height: int
+
+
+@dataclass(frozen=True, slots=True)
 class KnowledgeSegmentDetail:
     """Authoritative single-segment read with paged children.
 
@@ -502,6 +540,7 @@ class KnowledgeSegmentDetail:
     child_page: int
     children: tuple[KnowledgeSegmentChildView, ...] = ()
     summary: KnowledgeSegmentSummaryView | None = None
+    attachments: tuple[KnowledgeSegmentAttachmentView, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +653,33 @@ class KnowledgeMetadataBatchPatch:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgeChunkPreviewAttachment:
+    """Logical image occurrence projected without storage or database identity."""
+
+    ref: str
+    alt_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgePreviewAttachment:
+    """One bounded safe raster embedded in the preview response."""
+
+    ref: str
+    media_type: Literal["image/png", "image/jpeg", "image/webp"]
+    data_base64: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgePreviewTableSource:
+    """Server-derived table-header diagnostic for CSV and Excel previews."""
+
+    sheet: str | None
+    header_mode: Literal["auto", "none", "explicit"]
+    header_row: int | None
+    header_cells: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class KnowledgeChunkPreviewRequest:
     """Preview input staged like an upload; nothing is stored or queued."""
 
@@ -628,6 +694,8 @@ class KnowledgeChunkPreviewRequest:
     chunking_mode: KnowledgeChunkingMode = "general"
     child_chunk_size: int = 500
     child_chunk_separator: str = KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
+    processing_profile: ProcessingParameters | None = None
+    expected_preview_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,6 +706,9 @@ class KnowledgeChunkPreviewChunk:
     content: str
     word_count: int
     child_contents: tuple[str, ...] = ()
+    token_count: int = 0
+    source_spans: tuple[SourceSpan, ...] = ()
+    attachments: tuple[KnowledgeChunkPreviewAttachment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -646,6 +717,13 @@ class KnowledgeChunkPreview:
 
     total: int
     chunks: tuple[KnowledgeChunkPreviewChunk, ...]
+    preview_fingerprint: str = ""
+    source_sha256: str = ""
+    effective_profile: ProcessingProfile | None = None
+    warnings: tuple[ParseWarning, ...] = ()
+    preview_attachments: tuple[KnowledgePreviewAttachment, ...] = ()
+    omitted_preview_attachment_count: int = 0
+    table_sources: tuple[KnowledgePreviewTableSource, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +750,8 @@ class KnowledgeReparseRequest:
     chunking_mode: KnowledgeChunkingMode = "general"
     child_chunk_size: int = 500
     child_chunk_separator: str = KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
+    processing_profile: ProcessingParameters | None = None
+    expected_preview_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

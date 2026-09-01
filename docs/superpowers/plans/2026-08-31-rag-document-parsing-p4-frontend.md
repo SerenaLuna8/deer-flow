@@ -70,7 +70,7 @@ pnpm exec rstest tests/unit/core/knowledge/parsing-contracts.test.ts
 ```
 
 - [ ] **3. 按真实响应写strict Zod。** 每层`.strict()`，etls为明确枚举，SourceSpan与总计划字段相同，offset为非负整数、end≥start。安全 MIME 仅PNG/JPEG/WebP；base64字符串长度先限制再解码验证实际字节预算。缺少能力响应不能退回“全部格式可上传”。
-- [ ] **4. 新增项目作用域查询和附件fetch。** 能力key包含现有scope的project/actor/generation，不跨项目共享。附件URL核心：
+- [ ] **4. 新增项目作用域查询和附件fetch。** 能力key绑定现有 ProjectClientScope 的 accountId/projectId；当前共享scope没有actorId/generation字段。请求generation由本功能生命周期token或现有作用域机制单独约束，不为此扩大全局scope类型；A→B→A后旧响应不得恢复能力状态，不跨账号/项目共享。附件URL核心：
 
 ```typescript
 export function knowledgeAttachmentURL(input: KnowledgeAttachmentRead): string {
@@ -263,7 +263,7 @@ pnpm exec playwright test tests/e2e/project-knowledge.spec.ts --project=chromium
 - Produces: 端到端解析→预览→上传→检索→图片→reparse/reembed→删除证据，不依赖外部商业模型。
 
 - [ ] **1. 扩展现有测试而非创建平行启动器。** 已有真实目录是`tests/e2e-real-backend/`，不能把路径写成`tests/e2e/knowledge-real-backend.spec.ts`。继续使用registerReplayProject与隔离3317/8117默认端口，不复用ambient开发服务。
-- [ ] **2. 新增流程断言。** 在现有测试文件内部复用其private辅助函数，增加带图DOCX：预览前后Project对象列表相同；上传后原件+manifest+asset可见；详情图片200且MIME为安全图；调用reembed对象key集合不增；调用reparse改变参数后旧citation409；删除后Project前缀对象清空。
+- [ ] **2. 新增流程断言。** 在现有测试文件内部复用其private辅助函数，增加带图DOCX：预览前后Project对象列表相同；上传后原件+manifest+asset可见；详情图片200且MIME为安全图；调用reembed对象key集合不增；调用reparse改变参数后，已级联删除的旧Segment引用按防枚举契约返回404且不读对象（只有仍存续Segment的version/digest过期才返回409）；删除后Project前缀对象清空。
 
 在该文件中新增断言助手：
 
@@ -298,9 +298,13 @@ pnpm exec playwright test --config playwright.real-backend.config.ts tests/e2e-r
 
 ## P4-T6：离线生产镜像、检索对比与最终交付
 
+> 2026-09-01 范围更新：用户明确不使用 Docker 部署，因此本任务的 Dockerfile、dev-entrypoint 和生产镜像门从交付范围移除；保留本地/裸机安装入口、平台资源锁、OS 隔离 fail-closed 行为和其余质量门。
+
 **Files**
 
 - Modify: `backend/Dockerfile`、`README.md`、`Install.md`、`backend/AGENTS.md`、`frontend/AGENTS.md`、`CONTEXT.md`。
+- Modify: `Makefile`、`backend/Makefile`、`scripts/serve.sh`、`docker/dev-entrypoint.sh`（仅安装入口保留必需解析 extra）；Create: `backend/tests/test_knowledge_dependency_install.py`。
+- Modify: `backend/tests/knowledge/test_extraction_resources.py`（多平台资源锁的当前平台比较与保留其他平台条目回归）。
 - Create: `backend/tests/knowledge/test_parsing_quality.py`、`fixtures/parsing_retrieval_cases.json`。
 - Modify: `backend/tests/knowledge/eval_quality.py`、`eval_metrics.py`（复用M10评测基础，补现有尚无的reciprocal_rank_at_k）。
 - Create: `backend/tests/knowledge/parsing_quality.py`（测试用的基线导出/双语料评测适配），不进入生产包。
@@ -360,6 +364,10 @@ uv sync --all-packages --extra extraction-local
 .venv/bin/python scripts/prepare_knowledge_tokenizer.py --output packages/knowledge/actweave_knowledge/ingestion/tokenizer_data
 ```
 
+本地安装和开发容器启动也必须保留 `--all-packages --extra extraction-local`。现有 `make install`、`scripts/serve.sh` 和 `docker/dev-entrypoint.sh` 会执行精确 `uv sync`，若未显式选择该 extra，启动时会卸载已经准备的长尾解析/NLP 依赖；不能只修生产 Dockerfile。仅在这些安装入口加入必需 extra，保留既有可选 `UV_EXTRAS` 检测/校验，不把 PostgreSQL ETL 设置搬回 YAML。用开发入口现有 `--print-extras` 和隔离的命令捕获测试确认必需与可选 extra 同时保留；不启动或改动用户正在运行的服务。系统资源安装和资源锁的生成仍是明确环境准备步骤，不从解析请求触发。
+
+加入 Linux 资源锁条目时同时收敛 P1-T7 审阅保留的小问题：`test_build_manifest_is_reproducible` 不能把一次本机生成的单平台 map 与完整多平台 lock map 比较。比较当前平台的条目，并另测更新 lock 时保留其他平台条目；不因跨平台新增而误报资源不一致。
+
 随后从仓库根目录构建并验证。下面的运行不添加privileged或宽泛capability；若Docker默认策略不允许P1的隔离，则记录部署前置失败，先确定并验证最小隔离部署方式，不能擅自扩大容器权限来让测试变绿。
 
 ```bash
@@ -387,7 +395,7 @@ pnpm exec playwright test tests/e2e/project-knowledge.spec.ts --project=chromium
 pnpm exec playwright test --config playwright.real-backend.config.ts tests/e2e-real-backend/knowledge-real-backend.spec.ts --project=chromium --workers=1
 ```
 
-两个代码块分别从仓库根目录开始；不要在backend目录继续执行`cd frontend`。记录各门实际计数和跳过原因，数据库schema安装只在fixtures创建的新空库发生。
+两个代码块分别从仓库根目录开始；不要在backend目录继续执行`cd frontend`。 全后端门包含真实 MinIO 测试；core_gate_plugin 仅加载 DATABASE_URL，不加载其余 .env。运行前在测试子进程环境中仅注入已配置的 ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY 三个测试变量（优先保留调用者值），不整份source .env、不输出值；这些测试只创建并清理随机临时bucket。缺少或不可连接时明确记门禁未通过，不能跳过后称全量通过。记录各门实际计数和跳过原因，数据库schema安装只在fixtures创建的新空库发生。
 - [ ] **5. 更新文档与术语。** CONTEXT新增Knowledge Extraction/Attachment含义；指南和README更新本地ETL格式、Token口径、图片仍无OCR、预览不持久化、配额和重处理语义。保留原Schema V1无在线升级约束，Install说明构建时资源准备和启动探测。
 - [ ] **6. 完成最终核对。** 将A01–A30映射到任务和测试node ID，实际报告中零未说明失败；完整原件、图片、缓存和临时对象清理可复现。现有开发工作区无关修改未被纳入。用户授权提交后按变更归属逐文件提交；不自动push或部署。
 

@@ -15,6 +15,7 @@ import pytest
 from actweave_knowledge import KNOWLEDGE_NOT_FOUND, KnowledgeBaseCreate, KnowledgeError, KnowledgeModule, KnowledgeSettings
 from actweave_knowledge.models.client import KnowledgeModelClient
 from actweave_knowledge.persistence.models import KnowledgeDocumentRow, KnowledgeSegmentRow
+from extraction_test_helpers import make_test_quota_port
 from registry_helpers import registry_model_port
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,10 @@ from test_retrieval import (
 )
 
 from app.knowledge.authority import ProjectKnowledgeAuthority
+from app.knowledge.composition import (
+    is_knowledge_project_active,
+    is_knowledge_project_pending_deletion,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context
 
@@ -85,6 +90,9 @@ async def _cache_harness(
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(replay)) as http:
             module = KnowledgeModule(
+                project_active_check=is_knowledge_project_active,
+                project_cleanup_check=is_knowledge_project_pending_deletion,
+                quota=make_test_quota_port(retrieval.factory),
                 settings=KnowledgeSettings(query_cache_enabled=enabled),
                 session_factory=retrieval.factory,
                 model_port=registry_model_port(),

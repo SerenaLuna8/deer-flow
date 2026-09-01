@@ -143,7 +143,7 @@ check:
 # Dependency installation
 install:
 	@echo "Installing backend dependencies..."
-	@cd backend && uv sync
+	@cd backend && uv sync --all-packages --extra extraction-local
 	@echo "Installing frontend dependencies..."
 	@$(PYTHON) ./scripts/pnpm.py install
 	@echo "✓ All dependencies installed"

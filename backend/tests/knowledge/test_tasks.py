@@ -45,10 +45,15 @@ from actweave_knowledge.tasks import (
     KnowledgeTaskClaim,
     purge_project_knowledge,
 )
+from extraction_test_helpers import make_test_file_capability_provider, make_test_quota_port
 from registry_helpers import registry_model_port, seed_registry_models
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.knowledge.composition import (
+    is_knowledge_project_active,
+    is_knowledge_project_pending_deletion,
+)
 from deerflow.persistence.bootstrap import _install_full_schema
 
 # ---------------------------------------------------------------------------
@@ -83,6 +88,13 @@ class _FakeStore:
         self.objects.pop(key, None)
         self.deleted.append(key)
 
+    async def require_absent(self, key: str) -> None:
+        if key in self.objects:
+            raise KnowledgeError(
+                KNOWLEDGE_STORAGE_UNAVAILABLE,
+                "对象存储删除结果无法确认",
+            )
+
     async def download_to(self, key: str, target_path: Path) -> None:  # pragma: no cover - unused
         raise AssertionError("not used in these tests")
 
@@ -94,17 +106,29 @@ class _FakeStore:
 
 
 class _Harness:
-    def __init__(self, engine, factory, store: _FakeStore) -> None:  # noqa: ANN001
+    def __init__(self, engine, factory, store: _FakeStore, quota) -> None:  # noqa: ANN001
         self.engine = engine
         self.factory = factory
         self.store = store
+        self.quota = quota
 
 
 async def _harness(postgres_database_url: str) -> _Harness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     await _install_full_schema(engine)
-    return _Harness(engine, factory, _FakeStore())
+    return _Harness(engine, factory, _FakeStore(), make_test_quota_port(factory))
+
+
+async def _mark_project_pending_deletion(
+    harness: _Harness,
+    project_id: uuid.UUID,
+) -> None:
+    async with harness.factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE projects SET status = 'pending_deletion', deletion_requested_at = now(), deletion_effective_at = now() WHERE id = :project_id"),
+            {"project_id": project_id},
+        )
 
 
 async def _seed_project(session: AsyncSession, label: str) -> uuid.UUID:
@@ -174,6 +198,7 @@ async def _seed_document(
                 original_name="note.md",
                 storage_key=storage_key,
                 size_bytes=32,
+                upload_state="stored" if with_object else "pending",
                 status=status,
                 version=version,
                 error_message=error_message,
@@ -211,6 +236,7 @@ async def _seed_task(
     claim_token: uuid.UUID | None = None,
     lease_until: datetime | None = None,
     error_message: str | None = None,
+    storage_key: str | None = None,
 ) -> uuid.UUID:
     task_id = uuid.uuid4()
     async with harness.factory() as session, session.begin():
@@ -226,6 +252,7 @@ async def _seed_task(
                 claim_token=claim_token,
                 lease_until=lease_until,
                 error_message=error_message,
+                storage_key=storage_key,
             )
         )
     return task_id
@@ -251,14 +278,19 @@ async def _claim_snapshot(harness: _Harness, *, lease_seconds: int = 60) -> Know
             claim_token=row.claim_token,  # type: ignore[arg-type]
             attempt_count=row.attempt_count,
             max_attempts=row.max_attempts,
+            storage_key=row.storage_key,
+            reparse_settings=row.reparse_settings,
         )
 
 
 def _documents_service(harness: _Harness, **settings_overrides: object) -> KnowledgeDocumentService:
     settings = KnowledgeSettings.model_validate({"enabled": False, **settings_overrides})
     return KnowledgeDocumentService(
+        project_active_check=is_knowledge_project_active,
+        quota=make_test_quota_port(harness.factory),
         session_factory=harness.factory,
         settings=settings,
+        file_capabilities=make_test_file_capability_provider(settings),
         object_store=harness.store,  # type: ignore[arg-type]
     )
 
@@ -753,6 +785,31 @@ def _handler_claim(
     )
 
 
+async def _claimed_deletion(
+    harness: _Harness,
+    project_id: uuid.UUID,
+    resource_id: uuid.UUID,
+    kind: str,
+    *,
+    storage_key: str | None = None,
+) -> KnowledgeTaskClaim:
+    await _seed_task(
+        harness,
+        project_id,
+        resource_id,
+        kind=kind,
+        target_version=None,
+        storage_key=storage_key,
+    )
+    claim = await _claim_snapshot(harness, lease_seconds=600)
+    assert (claim.project_id, claim.resource_id, claim.kind) == (
+        project_id,
+        resource_id,
+        kind,
+    )
+    return claim
+
+
 @pytest.mark.asyncio
 async def test_delete_document_handler_removes_object_then_row(postgres_database_url: str) -> None:
     harness = await _harness(postgres_database_url)
@@ -761,9 +818,15 @@ async def test_delete_document_handler_removes_object_then_row(postgres_database
             project_id = await _seed_project(session, uuid.uuid4().hex[:8])
         base_id = await _seed_base(harness, project_id)
         document_id = await _seed_document(harness, project_id, base_id, status="deleting", segments=2)
-        handler = KnowledgeDocumentDeletionHandler(session_factory=harness.factory, object_store=harness.store)  # type: ignore[arg-type]
+        claim = await _claimed_deletion(harness, project_id, document_id, "delete_document")
+        handler = KnowledgeDocumentDeletionHandler(
+            session_factory=harness.factory,
+            object_store=harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_active_check=is_knowledge_project_active,
+        )
 
-        await handler(_handler_claim(uuid.uuid4(), project_id, document_id, "delete_document"))
+        await handler(claim)
 
         assert harness.store.objects == {}
         async with harness.factory() as session:
@@ -772,7 +835,7 @@ async def test_delete_document_handler_removes_object_then_row(postgres_database
             assert int(remaining_segments or 0) == 0
 
         # Idempotent: the document is already gone.
-        await handler(_handler_claim(uuid.uuid4(), project_id, document_id, "delete_document"))
+        await handler(claim)
     finally:
         await harness.engine.dispose()
 
@@ -785,9 +848,15 @@ async def test_delete_document_handler_skips_documents_not_marked_deleting(postg
             project_id = await _seed_project(session, uuid.uuid4().hex[:8])
         base_id = await _seed_base(harness, project_id)
         document_id = await _seed_document(harness, project_id, base_id, status="ready")
-        handler = KnowledgeDocumentDeletionHandler(session_factory=harness.factory, object_store=harness.store)  # type: ignore[arg-type]
+        claim = await _claimed_deletion(harness, project_id, document_id, "delete_document")
+        handler = KnowledgeDocumentDeletionHandler(
+            session_factory=harness.factory,
+            object_store=harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_active_check=is_knowledge_project_active,
+        )
 
-        await handler(_handler_claim(uuid.uuid4(), project_id, document_id, "delete_document"))
+        await handler(claim)
 
         assert harness.store.deleted == []
         async with harness.factory() as session:
@@ -818,17 +887,18 @@ async def test_delete_document_object_handler_uses_exact_key_and_removes_tombsto
         handler = KnowledgeDocumentObjectDeletionHandler(
             session_factory=harness.factory,
             object_store=harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_active_check=is_knowledge_project_active,
+        )
+        claim = await _claimed_deletion(
+            harness,
+            project_id,
+            document_id,
+            "delete_document_object",
+            storage_key=orphan_key,
         )
 
-        await handler(
-            _handler_claim(
-                uuid.uuid4(),
-                project_id,
-                document_id,
-                "delete_document_object",
-                storage_key=orphan_key,
-            )
-        )
+        await handler(claim)
 
         assert orphan_key not in harness.store.objects
         assert same_document_other_key in harness.store.objects
@@ -864,6 +934,8 @@ async def test_document_object_delete_rejects_forged_storage_authority(
         handler = KnowledgeDocumentObjectDeletionHandler(
             session_factory=harness.factory,
             object_store=harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_active_check=is_knowledge_project_active,
         )
 
         with pytest.raises(KnowledgeError):
@@ -899,9 +971,15 @@ async def test_delete_base_handler_drains_documents_then_deletes_the_base(postgr
                 segments=1 if status == "ready" else 0,
                 error_message="失败" if status == "failed" else None,
             )
-        handler = KnowledgeBaseDeletionHandler(session_factory=harness.factory, object_store=harness.store)  # type: ignore[arg-type]
+        claim = await _claimed_deletion(harness, project_id, base_id, "delete_knowledge_base")
+        handler = KnowledgeBaseDeletionHandler(
+            session_factory=harness.factory,
+            object_store=harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_active_check=is_knowledge_project_active,
+        )
 
-        await handler(_handler_claim(uuid.uuid4(), project_id, base_id, "delete_knowledge_base"))
+        await handler(claim)
 
         assert harness.store.objects == {}
         assert len(harness.store.deleted) == 3
@@ -911,7 +989,7 @@ async def test_delete_base_handler_drains_documents_then_deletes_the_base(postgr
             assert int(remaining or 0) == 0
 
         # Idempotent for an already-deleted base.
-        await handler(_handler_claim(uuid.uuid4(), project_id, base_id, "delete_knowledge_base"))
+        await handler(claim)
     finally:
         await harness.engine.dispose()
 
@@ -927,10 +1005,16 @@ async def test_delete_base_handler_storage_failure_keeps_the_base_for_retry(post
         async with harness.factory() as session:
             blocked_key = (await session.get(KnowledgeDocumentRow, blocked_document)).storage_key  # type: ignore[union-attr]
         harness.store.fail_delete_keys.add(blocked_key)
-        handler = KnowledgeBaseDeletionHandler(session_factory=harness.factory, object_store=harness.store)  # type: ignore[arg-type]
+        claim = await _claimed_deletion(harness, project_id, base_id, "delete_knowledge_base")
+        handler = KnowledgeBaseDeletionHandler(
+            session_factory=harness.factory,
+            object_store=harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_active_check=is_knowledge_project_active,
+        )
 
         with pytest.raises(KnowledgeError) as error:
-            await handler(_handler_claim(uuid.uuid4(), project_id, base_id, "delete_knowledge_base"))
+            await handler(claim)
         assert error.value.code == KNOWLEDGE_STORAGE_UNAVAILABLE
 
         async with harness.factory() as session:
@@ -954,17 +1038,13 @@ async def test_empty_base_delete_checks_bucket_versioning_before_row_delete(
         handler = KnowledgeBaseDeletionHandler(
             session_factory=harness.factory,
             object_store=harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_active_check=is_knowledge_project_active,
         )
+        claim = await _claimed_deletion(harness, project_id, base_id, "delete_knowledge_base")
 
         with pytest.raises(KnowledgeError):
-            await handler(
-                _handler_claim(
-                    uuid.uuid4(),
-                    project_id,
-                    base_id,
-                    "delete_knowledge_base",
-                )
-            )
+            await handler(claim)
 
         async with harness.factory() as session:
             assert await session.get(KnowledgeBaseRow, base_id) is not None
@@ -993,8 +1073,15 @@ async def test_purge_project_knowledge_removes_everything_and_is_idempotent(post
         other_document = await _seed_document(harness, other_project, other_base, segments=1)
         orphan_key = f"projects/{project_id}/knowledge/{uuid.uuid4()}/{uuid.uuid4()}.pdf"
         harness.store.objects[orphan_key] = b"orphan"
+        await _mark_project_pending_deletion(harness, project_id)
 
-        await purge_project_knowledge(harness.factory, harness.store, project_id=project_id)  # type: ignore[arg-type]
+        await purge_project_knowledge(
+            harness.factory,
+            harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
+            project_id=project_id,
+        )
 
         async with harness.factory() as session:
             for model in (KnowledgeBaseRow, KnowledgeDocumentRow, KnowledgeTaskRow, KnowledgeSegmentRow):
@@ -1007,7 +1094,13 @@ async def test_purge_project_knowledge_removes_everything_and_is_idempotent(post
         }
 
         # Idempotent: purging again with nothing left succeeds.
-        await purge_project_knowledge(harness.factory, harness.store, project_id=project_id)  # type: ignore[arg-type]
+        await purge_project_knowledge(
+            harness.factory,
+            harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
+            project_id=project_id,
+        )
     finally:
         await harness.engine.dispose()
 
@@ -1027,10 +1120,13 @@ async def test_project_purge_defers_recent_upload_without_touching_storage_or_ro
             base_id,
             status="uploading",
         )
+        await _mark_project_pending_deletion(harness, project_id)
 
         completed = await purge_project_knowledge(
             harness.factory,
             harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
             project_id=project_id,
         )
 
@@ -1064,10 +1160,13 @@ async def test_project_purge_converts_stale_upload_then_cleans_on_next_attempt(
             document = await session.get(KnowledgeDocumentRow, document_id)
             assert document is not None
             document.updated_at = datetime.now(UTC) - timedelta(days=2)
+        await _mark_project_pending_deletion(harness, project_id)
 
         first = await purge_project_knowledge(
             harness.factory,
             harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
             project_id=project_id,
         )
 
@@ -1093,6 +1192,8 @@ async def test_project_purge_converts_stale_upload_then_cleans_on_next_attempt(
         second = await purge_project_knowledge(
             harness.factory,
             harness.store,  # type: ignore[arg-type]
+            quota=harness.quota,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
             project_id=project_id,
         )
 
@@ -1116,12 +1217,15 @@ async def test_purge_project_checks_bucket_versioning_before_deleting_rows(
         async with harness.factory() as session, session.begin():
             project_id = await _seed_project(session, uuid.uuid4().hex[:8])
         base_id = await _seed_base(harness, project_id)
+        await _mark_project_pending_deletion(harness, project_id)
         harness.store.fail_versioning_check = True
 
         with pytest.raises(KnowledgeError) as error:
             await purge_project_knowledge(
                 harness.factory,
                 harness.store,  # type: ignore[arg-type]
+                quota=harness.quota,
+                project_cleanup_check=is_knowledge_project_pending_deletion,
                 project_id=project_id,
             )
 
@@ -1155,6 +1259,12 @@ async def test_retry_document_bumps_version_and_queues_a_new_ingest_task(postgre
         base_id = await _seed_base(harness, project_id)
         document_id = await _seed_document(harness, project_id, base_id, status="failed", error_message="解析失败")
 
+        from actweave_knowledge.extraction.contracts import ProcessingProfile
+        from parsing_test_helpers import make_chunk_profile, make_parse_profile
+
+        async with harness.factory() as session, session.begin():
+            document = await session.get(KnowledgeDocumentRow, document_id)
+            document.parsing_profile = ProcessingProfile(parse=make_parse_profile(Path(document.original_name).suffix), chunk=make_chunk_profile()).model_dump(mode="json")
         view = await service.retry_document(project_id, document_id)
 
         assert view.status == "queued"

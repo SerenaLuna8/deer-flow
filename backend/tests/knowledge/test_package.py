@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from extraction_test_helpers import make_test_quota_port
 from pydantic import ValidationError
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -76,6 +77,9 @@ PUBLIC_EXPORTS = [
     "KnowledgeSummaryBackfill",
     "KnowledgeBaseUpdateResult",
     "KnowledgeMatchedVia",
+    "KnowledgeChunkPreviewAttachment",
+    "KnowledgePreviewAttachment",
+    "KnowledgePreviewTableSource",
     "KNOWLEDGE_SUMMARY_PROMPT_VERSION",
     "KNOWLEDGE_SUMMARY_MIN_SOURCE_CHARS",
     "KNOWLEDGE_SUMMARY_MAX_CHARS",
@@ -281,11 +285,17 @@ def test_create_knowledge_module_binds_host_resources() -> None:
         del session, project_id
         return True
 
+    async def _project_cleanup(session, project_id):  # pragma: no cover - shape only
+        del session, project_id
+        return False
+
     module = create_knowledge_module(
+        quota=make_test_quota_port(object()),
         settings=KnowledgeSettings(),
         session_factory=object(),  # type: ignore[arg-type]  # shape-only for M0
         model_port=_MemoryModelPort(),
         project_active_check=_project_active,
+        project_cleanup_check=_project_cleanup,
     )
     assert module.settings.enabled is False
 

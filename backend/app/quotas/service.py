@@ -37,13 +37,14 @@ from app.quotas.models import (
     QuotaSourceRef,
     QuotaUnavailable,
     QuotaUsageDimension,
+    StorageUsageTotals,
     _is_issued_project_storage_quota_authority,
     _is_issued_quota_compensation_authority,
     _is_issued_quota_reconciliation_authority,
 )
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
-from deerflow.persistence.quotas.model import ProjectQuotaRow, ProjectUsageCounterRow
+from deerflow.persistence.quotas.model import ProjectQuotaRow, ProjectUsageCounterRow, ProjectUsageLedgerRow
 from deerflow.persistence.quotas.sql import QuotaRepository
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -690,8 +691,11 @@ class QuotaService:
         operation: QuotaOperation,
         now: datetime | None,
         allow_missing_reservation: bool = False,
+        storage_axis: Literal["reserved", "used"] = "reserved",
     ) -> QuotaMutation | None:
         selected = self._dimension(dimension)
+        if storage_axis not in {"reserved", "used"} or (storage_axis == "used" and (selected != "storage_bytes" or operation != "release" or type(authority) is not ProjectStorageQuotaAuthority)):
+            raise QuotaPolicyInvalid("storage axis is invalid")
         if type(amount) is not int or amount < 1 or not isinstance(key, str) or not 1 <= len(key) <= 512:
             raise QuotaPolicyInvalid("quota mutation is invalid")
         if (selected == "mcp_calls_daily" and operation != "consume") or (selected != "mcp_calls_daily" and operation == "consume"):
@@ -799,9 +803,11 @@ class QuotaService:
                 or reservation.source_ref_hmac != reserve_ref.hmac_hex
             ):
                 raise QuotaConflict("quota release requires its exact reservation")
-            if counter.reserved < amount:
+            if storage_axis == "used":
+                await self._require_storage_commit(session, project_id, bucket, amount, key)
+            if getattr(counter, storage_axis) < amount:
                 raise QuotaConflict("quota release exceeds reservation")
-            counter.reserved -= amount
+            setattr(counter, storage_axis, getattr(counter, storage_axis) - amount)
         else:
             if before + amount > limit:
                 raise QuotaExceeded(selected, limit)
@@ -837,6 +843,93 @@ class QuotaService:
             created=True,
         )
 
+    async def _storage_ledger_match(
+        self,
+        session: AsyncSession,
+        project_id: uuid.UUID,
+        bucket: str,
+        amount: int,
+        key: str,
+        operation: str,
+    ) -> ProjectUsageLedgerRow | None:
+        repository = QuotaRepository(session)
+        matches = []
+        for ref in self._source_refs(project_id=project_id, owner_user_id=_PROJECT_STORAGE_OWNER_SUBJECT, dimension="storage_bytes", bucket=bucket, operation=operation, key=key):
+            row = await repository.ledger_entry(project_id, "storage_bytes", self._idempotency_digest(source_ref=ref))
+            if row is not None:
+                matches.append((ref, row))
+        if len(matches) > 1:
+            raise QuotaConflict("storage idempotency authority conflict")
+        if not matches:
+            return None
+        ref, row = matches[0]
+        if row.bucket != bucket or row.delta != amount or row.source_kind not in {operation, f"{operation}_threshold"} or row.source_ref_key_id != ref.key_id or row.source_ref_hmac != ref.hmac_hex:
+            raise QuotaConflict("storage idempotency authority conflict")
+        return row
+
+    async def _require_storage_commit(
+        self,
+        session: AsyncSession,
+        project_id: uuid.UUID,
+        bucket: str,
+        amount: int,
+        key: str,
+    ) -> None:
+        debit = await self._storage_ledger_match(session, project_id, bucket, -amount, key, "storage_commit_debit")
+        credit = await self._storage_ledger_match(session, project_id, bucket, amount, key, "storage_commit_credit")
+        if debit is None or credit is None:
+            raise QuotaConflict("storage commit is missing")
+
+    async def commit_project_storage(
+        self,
+        session: AsyncSession,
+        authority: ProjectStorageQuotaAuthority,
+        amount: int,
+        idempotency_key: str,
+    ) -> None:
+        """Move an admitted reservation to used without renewed quota admission."""
+        if not _is_issued_project_storage_quota_authority(authority) or authority.operation != "commit":
+            raise QuotaForbidden("trusted project storage quota authority is required")
+        if type(amount) is not int or amount < 1 or not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 512:
+            raise QuotaPolicyInvalid("quota mutation is invalid")
+        project_id = await self._lock_project_storage_authority(session, authority)
+        moment = self._now(None)
+        bucket = self.bucket_for("storage_bytes", now=moment)
+        repository = QuotaRepository(session)
+        counter = await repository.lock_counter(project_id, "storage_bytes", bucket)
+        reservation = await self._storage_ledger_match(session, project_id, bucket, amount, idempotency_key, "reserve")
+        if reservation is None:
+            raise QuotaConflict("storage commit requires its exact reservation")
+        debit = await self._storage_ledger_match(session, project_id, bucket, -amount, idempotency_key, "storage_commit_debit")
+        credit = await self._storage_ledger_match(session, project_id, bucket, amount, idempotency_key, "storage_commit_credit")
+        if debit is not None and credit is not None:
+            return
+        if debit is not None or credit is not None:
+            raise QuotaConflict("storage commit pair is incomplete")
+        if await self._storage_ledger_match(session, project_id, bucket, -amount, idempotency_key, "release") is not None:
+            raise QuotaConflict("storage reservation was released")
+        if counter.reserved < amount:
+            raise QuotaConflict("storage reservation is missing")
+        for kind, delta in (("storage_commit_debit", -amount), ("storage_commit_credit", amount)):
+            ref = self._source_ref(project_id=project_id, owner_user_id=_PROJECT_STORAGE_OWNER_SUBJECT, dimension="storage_bytes", bucket=bucket, operation=kind, key=idempotency_key)
+            await repository.append_ledger(
+                project_id=project_id,
+                dimension="storage_bytes",
+                delta=delta,
+                bucket=bucket,
+                source_kind=kind,
+                source_ref_key_id=ref.key_id,
+                source_ref_hmac=ref.hmac_hex,
+                idempotency_key=self._idempotency_digest(source_ref=ref),
+                request_id=None,
+                occurred_at=moment,
+            )
+        counter.reserved -= amount
+        counter.used += amount
+        counter.version += 1
+        counter.updated_at = moment
+        await session.flush()
+
     async def mutate_project_storage(
         self,
         session: AsyncSession,
@@ -845,8 +938,9 @@ class QuotaService:
         idempotency_key: str,
         *,
         now: datetime | None = None,
+        storage_axis: Literal["reserved", "used"] = "reserved",
     ) -> QuotaMutation:
-        if not _is_issued_project_storage_quota_authority(authority):
+        if not _is_issued_project_storage_quota_authority(authority) or authority.operation not in {"reserve", "release"}:
             raise QuotaForbidden(
                 "trusted project storage quota authority is required",
             )
@@ -858,6 +952,7 @@ class QuotaService:
             idempotency_key,
             operation=authority.operation,
             now=now,
+            storage_axis=storage_axis,
         )
         assert mutation is not None
         return mutation
@@ -960,33 +1055,58 @@ class QuotaService:
         session: AsyncSession,
         authority: QuotaReconciliationAuthority,
         *,
-        expected_loader: Callable[[], Awaitable[int]],
+        expected_loader: Callable[[], Awaitable[int | StorageUsageTotals]],
         now: datetime | None = None,
     ) -> tuple[int, int] | None:
-        """Converge one project's storage aggregate inside the caller transaction."""
-
+        """Lock Project, load business facts, then lock and repair both axes."""
         if not _is_issued_quota_reconciliation_authority(authority) or authority.operation != "quota_repair":
-            raise QuotaForbidden(
-                "trusted quota reconciliation authority is required",
-            )
+            raise QuotaForbidden("trusted quota reconciliation authority is required")
         project_id = self._project_id(authority.project_id)
         if not callable(expected_loader):
             raise QuotaPolicyInvalid("quota reconciliation loader is invalid")
-        if not await session.scalar(select(ProjectRow.id).where(ProjectRow.id == project_id)):
+        if not await session.scalar(select(ProjectRow.id).where(ProjectRow.id == project_id).with_for_update()):
             raise QuotaPolicyInvalid("quota reconciliation project is missing")
+        # The loader may release confirmed-deleted facts. It locks every owning
+        # business row before any release acquires the shared storage counter.
+        loaded = await expected_loader()
+        expected = StorageUsageTotals(used=0, reserved=loaded) if type(loaded) is int else loaded
+        if type(expected) is not StorageUsageTotals:
+            raise QuotaPolicyInvalid("quota reconciliation value is invalid")
         occurred_at = self._now(now)
-        counter = await QuotaRepository(session).lock_counter(
-            project_id,
-            "storage_bytes",
-            self.bucket_for("storage_bytes", now=occurred_at),
-        )
-        expected = await expected_loader()
-        return await self._reconcile_locked(
-            session,
-            counter,
-            expected=expected,
-            now=occurred_at,
-        )
+        repository = QuotaRepository(session)
+        counter = await repository.lock_counter(project_id, "storage_bytes", self.bucket_for("storage_bytes", now=occurred_at))
+        if (counter.used, counter.reserved) == (expected.used, expected.reserved):
+            return None
+        before = counter.used + counter.reserved
+        after = expected.used + expected.reserved
+        config = await self.current_config(session)
+        limit = await self.effective_limit(session, project_id, "storage_bytes", config=config)
+        threshold_missing = self._threshold_reached(usage=after, limit=limit, threshold=config.warning_threshold) and not await repository.threshold_recorded(project_id, "storage_bytes", counter.bucket)
+        for axis in ("used", "reserved"):
+            delta = getattr(expected, axis) - getattr(counter, axis)
+            if delta == 0:
+                continue
+            kind = "reconcile_threshold" if threshold_missing else "reconcile_adjustment"
+            threshold_missing = False
+            key = f"reconcile:storage_bytes:{counter.bucket}:{counter.version}:{axis}:{getattr(counter, axis)}:{getattr(expected, axis)}"
+            ref = self._source_ref(project_id=project_id, owner_user_id="trusted:quota_reconciliation", dimension="storage_bytes", bucket=counter.bucket, operation=kind, key=key)
+            await repository.append_ledger(
+                project_id=project_id,
+                dimension="storage_bytes",
+                delta=delta,
+                bucket=counter.bucket,
+                source_kind=kind,
+                source_ref_key_id=ref.key_id,
+                source_ref_hmac=ref.hmac_hex,
+                idempotency_key=self._idempotency_digest(source_ref=ref),
+                request_id=None,
+                occurred_at=occurred_at,
+            )
+        counter.used, counter.reserved = expected.used, expected.reserved
+        counter.version += 1
+        counter.updated_at = occurred_at
+        await session.flush()
+        return before, after
 
     async def reserve_new_session(
         self,

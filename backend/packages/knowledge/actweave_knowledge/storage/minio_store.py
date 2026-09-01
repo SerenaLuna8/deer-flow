@@ -11,7 +11,9 @@ SDK exceptions may embed the endpoint, so neither may enter logs.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -30,7 +32,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MISSING_OBJECT_CODES = frozenset({"NoSuchKey", "NoSuchObject"})
-DOCUMENT_STORAGE_EXTENSIONS = frozenset({".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".html", ".htm", ".pptx", ".epub"})
+DOCUMENT_STORAGE_EXTENSIONS = frozenset({".pdf", ".docx", ".txt", ".md", ".markdown", ".mdx", ".csv", ".xls", ".xlsx", ".html", ".htm", ".pptx", ".epub", ".eml", ".msg", ".xml"})
+MAX_OBJECT_BYTES = 50 * 1024 * 1024
+
+
+class ObjectMissingError(KnowledgeError):
+    """Confirmed exact-key absence; transport and access failures never qualify."""
+
+    def __init__(self) -> None:
+        super().__init__(KNOWLEDGE_STORAGE_UNAVAILABLE, "文档文件在对象存储中缺失")
+
+
+@dataclass(frozen=True, slots=True)
+class StoredObjectInfo:
+    size_bytes: int
+    sha256: str | None
 
 
 def _failure_class(exc: Exception) -> str:
@@ -96,11 +112,24 @@ class MinioObjectStore:
 
         def _put() -> None:
             file_size = source_path.stat().st_size
+            if file_size > MAX_OBJECT_BYTES:
+                raise ValueError("object exceeds the single PUT limit")
+            digest = hashlib.sha256()
+            actual = 0
+            with source_path.open("rb") as source:
+                while block := source.read(65536):
+                    actual += len(block)
+                    if actual > MAX_OBJECT_BYTES:
+                        raise ValueError("object exceeds the single PUT limit")
+                    digest.update(block)
+            if actual != file_size:
+                raise ValueError("object changed while hashing")
             self._client.fput_object(
                 self._bucket,
                 key,
                 str(source_path),
                 content_type=media_type or "application/octet-stream",
+                metadata={"sha256": digest.hexdigest()},
                 # The validated 50 MiB ceiling bounds the SDK's one-part
                 # in-memory buffer. One PUT also means a crashed process cannot
                 # leave an invisible incomplete multipart upload behind.
@@ -119,15 +148,53 @@ class MinioObjectStore:
                 logger.warning("knowledge object upload failed: %s", _failure_class(exc))
                 raise KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "对象存储写入失败，请稍后重试") from exc
 
-    async def download_to(self, key: str, target_path: Path) -> None:
+    async def stat_object(self, key: str) -> StoredObjectInfo:
+        try:
+            result = await run_sync_to_completion(self._client.stat_object, self._bucket, key)
+            metadata = {str(k).lower(): v for k, v in (result.metadata or {}).items()}
+            return StoredObjectInfo(size_bytes=result.size, sha256=metadata.get("x-amz-meta-sha256"))
+        except Exception as exc:
+            if isinstance(exc, S3Error) and exc.code in _MISSING_OBJECT_CODES:
+                raise ObjectMissingError() from exc
+            logger.warning("knowledge object stat failed: %s", _failure_class(exc))
+            raise KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "对象存储读取失败，请稍后重试") from exc
+
+    async def download_to(self, key: str, target_path: Path, *, max_bytes: int | None = None) -> None:
         """Download object ``key`` to ``target_path`` (parent directory must exist)."""
 
+        def _bounded_get() -> None:
+            info = self._client.stat_object(self._bucket, key)
+            if info.size > max_bytes:
+                raise ValueError("object exceeds download limit")
+            response = self._client.get_object(self._bucket, key)
+            try:
+                total = 0
+                with target_path.open("wb") as target:
+                    while block := response.read(min(65536, max_bytes + 1 - total)):
+                        total += len(block)
+                        if total > max_bytes:
+                            raise ValueError("object exceeds download limit")
+                        target.write(block)
+                if total != info.size or target_path.stat().st_size != total:
+                    raise ValueError("object changed while downloading")
+            except BaseException:
+                target_path.unlink(missing_ok=True)
+                raise
+            finally:
+                response.close()
+                response.release_conn()
+
         try:
-            await run_sync_to_completion(self._client.fget_object, self._bucket, key, str(target_path))
+            if max_bytes is None:
+                await run_sync_to_completion(self._client.fget_object, self._bucket, key, str(target_path))
+            else:
+                if type(max_bytes) is not int or max_bytes < 0:
+                    raise ValueError("invalid download limit")
+                await run_sync_to_completion(_bounded_get)
         except S3Error as exc:
             if exc.code in _MISSING_OBJECT_CODES:
                 logger.error("knowledge object missing in bucket")
-                raise KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "文档文件在对象存储中缺失") from exc
+                raise ObjectMissingError() from exc
             logger.warning("knowledge object download failed: %s", _failure_class(exc))
             raise KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "对象存储读取失败，请稍后重试") from exc
         except Exception as exc:
@@ -139,6 +206,18 @@ class MinioObjectStore:
 
         await self.require_unversioned_bucket()
         await self._delete_after_bucket_check(key)
+
+    async def require_absent(self, key: str) -> None:
+        """Confirm exact-key absence without treating transport denial as absence."""
+
+        try:
+            await self.stat_object(key)
+        except ObjectMissingError:
+            return
+        raise KnowledgeError(
+            KNOWLEDGE_STORAGE_UNAVAILABLE,
+            "对象存储删除结果无法确认，请稍后重试",
+        )
 
     async def delete_many(self, keys: list[str]) -> None:
         """Delete an object batch after one fail-closed bucket-policy check."""

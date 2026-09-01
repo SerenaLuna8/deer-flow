@@ -45,6 +45,9 @@ from deerflow.persistence.model_registry import ModelProviderModelRow, ModelProv
 
 KNOWLEDGE_TABLES = (
     "knowledge_bases",
+    "knowledge_extractions",
+    "knowledge_attachments",
+    "knowledge_segment_attachments",
     "knowledge_documents",
     "knowledge_metadata_fields",
     "knowledge_segments",

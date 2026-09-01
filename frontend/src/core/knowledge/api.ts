@@ -10,8 +10,10 @@ import {
   knowledgeBaseUpdateResponseSchema,
   knowledgeChunkPreviewResponseSchema,
   knowledgeDocumentBatchResponseSchema,
+  knowledgeDocumentAttachmentListResponseSchema,
   knowledgeDocumentListResponseSchema,
   knowledgeDocumentMutationResponseSchema,
+  knowledgeFileCapabilitiesSchema,
   knowledgeHealthResponseSchema,
   knowledgeMetadataFieldDeleteResponseSchema,
   knowledgeMetadataFieldListResponseSchema,
@@ -23,16 +25,18 @@ import {
   knowledgeSegmentDetailResponseSchema,
   knowledgeSegmentListResponseSchema,
   knowledgeSegmentMutationResponseSchema,
+  knowledgeProcessingParametersSchema,
   type CreateKnowledgeBaseInput,
   type CreateKnowledgeMetadataFieldInput,
   type KnowledgeBaseItem,
   type KnowledgeBaseListResponse,
   type KnowledgeBaseRebuildResponse,
-  type KnowledgeChunkingMode,
   type KnowledgeChunkPreviewResponse,
   type KnowledgeDocumentItem,
+  type KnowledgeDocumentAttachmentListResponse,
   type KnowledgeDocumentListResponse,
   type KnowledgeDocumentsMetadataInput,
+  type KnowledgeFileCapabilities,
   type KnowledgeHealthResponse,
   type KnowledgeMetadataFieldItem,
   type KnowledgeModelOptions,
@@ -44,6 +48,7 @@ import {
   type KnowledgeSegmentDetailResponse,
   type KnowledgeSegmentItem,
   type KnowledgeSegmentListResponse,
+  type KnowledgeAttachmentRead,
   type PreviewKnowledgeChunksInput,
   type SetKnowledgeDocumentMetadataInput,
   type UpdateKnowledgeBaseInput,
@@ -123,6 +128,22 @@ function knowledgeBaseURL(projectId: string): string {
   return `${getBackendBaseURL()}/api/projects/${encodeURIComponent(projectId)}/knowledge`;
 }
 
+export function knowledgeAttachmentURL(input: KnowledgeAttachmentRead): string {
+  const encode = encodeURIComponent;
+  const base =
+    input.purpose === "citation" ? `/bases/${encode(input.baseId)}` : "";
+  const path =
+    `${knowledgeBaseURL(input.projectId)}${base}` +
+    `/documents/${encode(input.documentId)}` +
+    `/segments/${encode(input.segmentId)}` +
+    `/attachments/${encode(input.attachmentId)}`;
+  const query = new URLSearchParams({
+    expected_document_version: String(input.expectedDocumentVersion),
+    expected_content_digest: input.expectedContentDigest,
+  });
+  return `${path}?${query.toString()}`;
+}
+
 async function requestKnowledge(
   input: string,
   init?: RequestInit,
@@ -199,6 +220,26 @@ async function readKnowledgeResponse<T>(
     );
   }
   return parsed.data;
+}
+
+async function throwKnowledgeResponseError(response: Response): Promise<never> {
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new KnowledgeApiError(
+      response.status,
+      "INVALID_RESPONSE",
+      "Knowledge response was invalid.",
+    );
+  }
+  const envelope = readErrorEnvelope(body);
+  throw new KnowledgeApiError(
+    response.status,
+    "REQUEST_FAILED",
+    envelope.serverMessage ?? "Knowledge request failed.",
+    envelope,
+  );
 }
 
 function jsonRequestInit(
@@ -363,45 +404,24 @@ export async function listKnowledgeDocuments(
   );
 }
 
-function chunkSettingsFormData(input: {
+function processingSettingsFormData(input: {
   file: File;
-  chunk_size?: number;
-  chunk_overlap?: number;
-  chunk_separator?: string;
-  remove_extra_spaces?: boolean;
-  remove_urls_emails?: boolean;
-  chunking_mode?: KnowledgeChunkingMode;
-  child_chunk_size?: number;
-  child_chunk_separator?: string;
+  processing_profile: unknown;
+  expected_preview_fingerprint?: string;
 }): FormData {
   const formData = new FormData();
   formData.append("file", input.file);
-  if (input.chunk_size !== undefined) {
-    formData.append("chunk_size", String(input.chunk_size));
-  }
-  if (input.chunk_overlap !== undefined) {
-    formData.append("chunk_overlap", String(input.chunk_overlap));
-  }
-  if (input.chunk_separator !== undefined && input.chunk_separator.length > 0) {
-    formData.append("chunk_separator", input.chunk_separator);
-  }
-  if (input.remove_extra_spaces !== undefined) {
-    formData.append("remove_extra_spaces", String(input.remove_extra_spaces));
-  }
-  if (input.remove_urls_emails !== undefined) {
-    formData.append("remove_urls_emails", String(input.remove_urls_emails));
-  }
-  if (input.chunking_mode !== undefined) {
-    formData.append("chunking_mode", input.chunking_mode);
-  }
-  if (input.child_chunk_size !== undefined) {
-    formData.append("child_chunk_size", String(input.child_chunk_size));
-  }
-  if (
-    input.child_chunk_separator !== undefined &&
-    input.child_chunk_separator.length > 0
-  ) {
-    formData.append("child_chunk_separator", input.child_chunk_separator);
+  formData.append(
+    "processing_profile",
+    JSON.stringify(
+      knowledgeProcessingParametersSchema.parse(input.processing_profile),
+    ),
+  );
+  if (input.expected_preview_fingerprint !== undefined) {
+    formData.append(
+      "expected_preview_fingerprint",
+      input.expected_preview_fingerprint,
+    );
   }
   return formData;
 }
@@ -412,7 +432,7 @@ export async function uploadKnowledgeDocument(
   input: UploadKnowledgeDocumentInput,
   signal?: AbortSignal,
 ): Promise<KnowledgeDocumentItem> {
-  const formData = chunkSettingsFormData(input);
+  const formData = processingSettingsFormData(input);
   if (input.name !== undefined && input.name.trim().length > 0) {
     formData.append("name", input.name.trim());
   }
@@ -437,7 +457,7 @@ export async function previewKnowledgeChunks(
     `${knowledgeBaseURL(projectId)}/chunk-preview`,
     {
       method: "POST",
-      body: chunkSettingsFormData(input),
+      body: processingSettingsFormData(input),
       ...(signal ? { signal } : {}),
     },
   );
@@ -458,6 +478,21 @@ export async function deleteKnowledgeDocument(
     knowledgeDocumentMutationResponseSchema,
   );
   return parsed.item;
+}
+
+export async function listKnowledgeDocumentAttachments(
+  projectId: string,
+  documentId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeDocumentAttachmentListResponse> {
+  const response = await requestKnowledge(
+    `${knowledgeBaseURL(projectId)}/documents/${encodeURIComponent(documentId)}/attachments`,
+    signal ? { signal } : undefined,
+  );
+  return readKnowledgeResponse(
+    response,
+    knowledgeDocumentAttachmentListResponseSchema,
+  );
 }
 
 export async function retryKnowledgeDocument(
@@ -596,6 +631,53 @@ export async function listKnowledgeDocumentSegments(
     signal ? { signal } : undefined,
   );
   return readKnowledgeResponse(response, knowledgeSegmentListResponseSchema);
+}
+
+export async function listKnowledgeFileCapabilities(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeFileCapabilities> {
+  const response = await requestKnowledge(
+    `${knowledgeBaseURL(projectId)}/file-capabilities`,
+    signal ? { signal } : undefined,
+  );
+  return readKnowledgeResponse(response, knowledgeFileCapabilitiesSchema);
+}
+
+const KNOWLEDGE_ATTACHMENT_MEDIA_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+]);
+
+export async function fetchKnowledgeAttachment(
+  input: KnowledgeAttachmentRead,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const response = await requestKnowledge(
+    knowledgeAttachmentURL(input),
+    signal ? { signal } : undefined,
+  );
+  if (!response.ok) {
+    return throwKnowledgeResponseError(response);
+  }
+  const mediaType = response.headers.get("content-type")?.trim().toLowerCase();
+  if (!mediaType || !KNOWLEDGE_ATTACHMENT_MEDIA_TYPES.has(mediaType)) {
+    throw new KnowledgeApiError(
+      response.status,
+      "INVALID_RESPONSE",
+      "Knowledge attachment response was invalid.",
+    );
+  }
+  const blob = await response.blob();
+  if (blob.type !== mediaType) {
+    throw new KnowledgeApiError(
+      response.status,
+      "INVALID_RESPONSE",
+      "Knowledge attachment response was invalid.",
+    );
+  }
+  return blob;
 }
 
 /**

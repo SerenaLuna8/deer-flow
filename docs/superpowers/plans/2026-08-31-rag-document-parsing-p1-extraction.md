@@ -69,7 +69,7 @@
 
 **Produces:** 总计划 §3 的所有 DTO、`BaseExtractor.extract(setting, context) -> list[Document]`、`AttachmentSink.accept(source_path, *, alt_text, source) -> Attachment`、`canonical_parse_fingerprint(profile) -> str`、`encode_manifest(result) -> bytes`、`decode_manifest(payload, limits) -> ExtractionResult`；总计划 §4 五个 helpers，外加下文明确命名的 `make_context(work_dir)`。
 
-- [ ] **Step 1：加入可执行的 DTO 与缓存边界测试。**
+- [x] **Step 1：加入可执行的 DTO 与缓存边界测试。**
 
 ```python
 # backend/tests/knowledge/test_extraction_contracts.py
@@ -114,9 +114,9 @@ def test_manifest_enforces_current_budget_and_span_bounds():
             block_id="p:1", start=0, end=2, location={"paragraph": 1}),))
 ```
 
-- [ ] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_extraction_contracts.py -q`。预期新增模块尚不存在；不得接受无关导入失败作为 red。
+- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_extraction_contracts.py -q`。预期新增模块尚不存在；不得接受无关导入失败作为 red。
 
-- [ ] **Step 3：实现 DTO 和协议。** 所有总计划字段逐个定义为 frozen Pydantic model，`ConfigDict(frozen=True, extra='forbid')`；`ExtractionContext` 另启用 `arbitrary_types_allowed=True` 以接收 `Path`/回调/协议实现，不能序列化成 manifest。`HeaderRule` explicit 必须 row≥1，其他模式拒绝非空 row；`SourceSpan` 满足 0≤start≤end，位置中的已知数字字段从 1 开始；`Document` 校验 span end≤len(page_content)，attachment source 同样校验。`Attachment.ref/source_sha256/parse_fingerprint` 均只接受 64 个小写十六进制字符。
+- [x] **Step 3：实现 DTO 和协议。** 所有总计划字段逐个定义为 frozen Pydantic model，`ConfigDict(frozen=True, extra='forbid')`；`ExtractionContext` 另启用 `arbitrary_types_allowed=True` 以接收 `Path`/回调/协议实现，不能序列化成 manifest。`HeaderRule` explicit 必须 row≥1，其他模式拒绝非空 row；`SourceSpan` 满足 0≤start≤end，位置中的已知数字字段从 1 开始；`Document` 校验 span end≤len(page_content)，attachment source 同样校验。`Attachment.ref/source_sha256/parse_fingerprint` 均只接受 64 个小写十六进制字符。
 
 ```python
 # contracts.py 的预算、基础模型及异常；其余 DTO 字段逐项采用总计划 §3。
@@ -278,7 +278,7 @@ class ExtractionContext(FrozenModel):
 
 SourceSpan.location 与 ParseWarning.source_position 的接收校验允许已定义的 `page,paragraph,table,row,row_end,column,sheet,slide,chapter,line,line_end,element,image_index,table_path,encoding`；禁止任意 authority/path/URL 键，数字定位字段必须≥1。table_path 只允许数字和点分层级；sheet 是显示名称并按普通文本转义，不作为文件路径。
 
-- [ ] **Step 4：实现 canonical JSON。** `encode_manifest` 封装 `{"format_version":1,"result":...}`，sort_keys/紧凑分隔符/ensure_ascii=False/allow_nan=False；解析 fingerprint 只包含 ParseProfile，依赖资源摘要归入 extractor_version，不含 ChunkProfile。
+- [x] **Step 4：实现 canonical JSON。** `encode_manifest` 封装 `{"format_version":1,"result":...}`，sort_keys/紧凑分隔符/ensure_ascii=False/allow_nan=False；解析 fingerprint 只包含 ParseProfile，依赖资源摘要归入 extractor_version，不含 ChunkProfile。
 
 ```python
 # manifest.py 的关键完整函数
@@ -339,7 +339,7 @@ def decode_manifest(payload: bytes, limits: ExtractionLimits) -> ExtractionResul
 
 再对逻辑图片链接与 attachments 做双向引用一致性校验：不在附件清单里的 ref 必须失败，清单无出现位置的 ref 必须失败；不能仅靠正则提取 URL 判断授权。未知 manifest 版本报 `PARSER_PROFILE_UNAVAILABLE`，损坏内容报安全解析错误，均不返回部分结果。
 
-- [ ] **Step 5：写唯一公开 helpers。** registry 依赖在 helper 函数内部导入，P1-T1 的 DTO 测试直接构造 profile，P1-T2 后才调用 `make_parse_profile`。`CollectingAttachmentSink` 是纯测试接收器，不冒充生产图片规范化。
+- [x] **Step 5：写唯一公开 helpers。** registry 依赖在 helper 函数内部导入，P1-T1 的 DTO 测试直接构造 profile，P1-T2 后才调用 `make_parse_profile`。`CollectingAttachmentSink` 是纯测试接收器，不冒充生产图片规范化。
 
 ```python
 # backend/tests/knowledge/parsing_test_helpers.py
@@ -411,7 +411,7 @@ def make_context(work_dir: Path) -> ExtractionContext:
                              limits=ExtractionLimits(), check_cancelled=lambda: None)
 ```
 
-- [ ] **Step 6：运行 green，并确认不触碰现有 ingestion。** 重跑 Step 2；增加未知 JSON 字段、零/负预算、重复 ref、缺失 ref、路径字段泄漏样例到同一文件；`git diff --check`。此任务不迁移既有 `_write_pdf` 等 fixture，后续只新建本计划内公开生成器，避免跨测试模块导入私有方法。
+- [x] **Step 6：运行 green，并确认不触碰现有 ingestion。** 重跑 Step 2；增加未知 JSON 字段、零/负预算、重复 ref、缺失 ref、路径字段泄漏样例到同一文件；`git diff --check`。此任务不迁移既有 `_write_pdf` 等 fixture，后续只新建本计划内公开生成器，避免跨测试模块导入私有方法。
 
 ## P1-T2：固定来源、安装候选、三级路由与签名（A01、A02、A25）
 
@@ -429,7 +429,7 @@ def make_context(work_dir: Path) -> ExtractionContext:
 
 **Produces:** `ExtractorRegistration` 总计划字段；`ExtractorRegistry.resolve(*,datasource_type,etl_type,extension)`；`default_registry() -> ExtractorRegistry`；`ExtractProcessor(registry=None).extract(setting,context)`；`validate_file_signature(path,extension,limits) -> None`。registration.dependency_probe 为 `Callable[[], str|None]`，None 表示可用，reason_code 表示不可用；factory 为 `Callable[[], BaseExtractor]`。
 
-- [ ] **Step 1：写三级路由与伪装容器测试。**
+- [x] **Step 1：写三级路由与伪装容器测试。**
 
 ```python
 # test_extractor_registry.py
@@ -470,9 +470,9 @@ def test_office_container_identity(tmp_path):
 
 补齐以下参数化输入及 assertions：`.md/.markdown/.mdx` 在两个模式分别唯一命中 dify.markdown/unstructured.markdown；EML/MSG/XML 仅 local；datasource=`web` 和未知 ETL 明确失败；空扩展名失败；依赖缺失返回 unavailable 且 processor 不调用 factory；ZIP 路径穿越、符号链接成员和解压总量超限失败。
 
-- [ ] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_extractor_registry.py -q`。
+- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_extractor_registry.py -q`。
 
-- [ ] **Step 3：记录上游文件摘要与补丁矩阵。** 只复制本任务列明的解析器及所需局部 helper，不复制整套后端。使用下面脚本输出表格并将真实输出写入 `UPSTREAM.md`；不要预填猜测 SHA。
+- [x] **Step 3：记录上游文件摘要与补丁矩阵。** 只复制本任务列明的解析器及所需局部 helper，不复制整套后端。使用下面脚本输出表格并将真实输出写入 `UPSTREAM.md`；不要预填猜测 SHA。
 
 ```bash
 python3 - <<'PY'
@@ -494,7 +494,7 @@ PY
 
 `patches.md` 每项记录原文件→本地文件、补丁理由和验证节点：宿主 import/存储移除、缓存移交 P2、禁止外链/API/download、MD 字面值、Word 顺序/嵌套/空格、Excel 空列与定位、CSV 字符串与坏行、PPTX 无页码、邮件重复解码删除。保留上游代码结构和可比对函数，不借适配进行无关重写。DOC/PPT 的上游 API 路径明确排除；ODT 不支持；PPTX/EPUB 两模式保留。
 
-- [ ] **Step 4：在实施工作区安装确切候选并生成锁文件。** 在 knowledge 包声明下列 exact pins，保留原有与解析无关依赖；旧 pypdf/ebooklib 暂留给旧 profile 路径，P3 完成兼容审查前不删除。Unstructured 使用已在上游 lock 核实存在的 epub/md/pptx extras，不写 all-docs，也不虚构 eml/xml extras。
+- [x] **Step 4：在实施工作区安装确切候选并生成锁文件。** 在 knowledge 包声明下列 exact pins，保留原有与解析无关依赖；旧 pypdf/ebooklib 暂留给旧 profile 路径，P3 完成兼容审查前不删除。Unstructured 使用已在上游 lock 核实存在的 epub/md/pptx extras，不写 all-docs，也不虚构 eml/xml extras。
 
 ```toml
 # 将当前同名解析依赖替换为这些版本，并加入新增主流依赖。
@@ -522,7 +522,7 @@ extraction-local = [
 
 安装命令（有网络，不是测试）：`uv lock`，随后 `uv sync --all-packages --extra extraction-local`。安装后执行 `uv pip check` 和 metadata 版本打印；若冲突记录 resolver 输出并在源码/规格审阅后调整候选，不能直接放宽到 `>=`。生产需要两模式中的 PPTX/EPUB，因此正式镜像必须安装该 extra；未装 extra 的开发环境只能显示明确不可用，不能切新摄取入口。
 
-- [ ] **Step 5：实现显式登记及准入链。** 下列代码是 resolve 的核心，不使用默认 text fallback：
+- [x] **Step 5：实现显式登记及准入链。** 下列代码是 resolve 的核心，不使用默认 text fallback：
 
 ```python
 # registry.py
@@ -569,7 +569,7 @@ class ExtractorRegistry:
 
 `signatures.py` 对 PDF 检查 `%PDF-`；OOXML 检查 ZIP、`[Content_Types].xml` 的实际 MIME 声明和对应主部件 `word/document.xml`、`xl/workbook.xml`、`ppt/presentation.xml`；EPUB 检查 mimetype=`application/epub+zip` 和 `META-INF/container.xml`；XLS/MSG 检查 OLE magic 后仍由对应格式库校验流结构；TXT/MD/CSV/HTML/XML/EML 拒绝 NUL 二进制（有 UTF-16 BOM 除外）和 ZIP/OLE/PDF 签名，不执行文档。ZIP 在格式库加载前检查累计声明解压量≤512 MiB，不解包绝对路径、`..` 或 symlink，不能宣称这等于峰值内存上限。
 
-- [ ] **Step 6：运行 green 与来源依赖边界检查。** 重跑 Step 2；`rg -n '^(from|import) (app|deerflow|models|extensions|configs|core)' packages/knowledge/actweave_knowledge/extraction` 应没有匹配；`git diff --check`。记录安装是否成功，不能把仅 resolve 通过算作格式解析通过。
+- [x] **Step 6：运行 green 与来源依赖边界检查。** 重跑 Step 2；`rg -n '^(from|import) (app|deerflow|models|extensions|configs|core)' packages/knowledge/actweave_knowledge/extraction` 应没有匹配；`git diff --check`。记录安装是否成功，不能把仅 resolve 通过算作格式解析通过。
 
 ## P1-T3：文本编码、Markdown 内容保护和安全 HTML（A04、A06、A11）
 
@@ -587,7 +587,7 @@ class ExtractorRegistry:
 
 **Produces:** `decode_text_file(path:Path) -> tuple[str,str,tuple[ParseWarning,...]]`；`normalize_documents(documents:list[Document]) -> list[Document]`；`TextExtractor/MarkdownExtractor/HtmlExtractor`；`html_to_documents(markup:bytes|str) -> list[Document]`；`markdown_sections(text:str, *, encoding:str='utf-8') -> list[Document]`。三个 Extractor 均实现总计划接口。
 
-- [ ] **Step 1：写真实编码及字面值测试。**
+- [x] **Step 1：写真实编码及字面值测试。**
 
 ```python
 # test_dify_text_extractors.py
@@ -624,9 +624,9 @@ def test_markdown_keeps_generics_hash_and_fences(tmp_path):
         assert all(0 <= s.start <= s.end <= len(doc.page_content) for s in doc.source_spans)
 ```
 
-- [ ] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_dify_text_extractors.py -q`。
+- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_dify_text_extractors.py -q`。
 
-- [ ] **Step 3：先移植解码顺序，再限制探测预算。** BOM UTF-8/UTF-16→严格 UTF-8→charset-normalizer 对最多 1 MiB 采样。探测函数只做 `charset_normalizer.from_bytes(sample).best()`；在当前解析子进程内用 POSIX `setitimer(ITIMER_REAL, 5)` 限制该调用，并在 finally 恢复原 handler/timer；禁止不可终止的 ThreadPool timeout。Mac/Linux 解析子进程主线程执行此函数，主进程和异步事件循环不得直接调用有 signal 的探测分支。探测后必须严格解码完整文件；空候选/超时/失败均 `ExtractionError('TEXT_DECODING_FAILED')`，消息不能带路径或字节。
+- [x] **Step 3：先移植解码顺序，再限制探测预算。** BOM UTF-8/UTF-16→严格 UTF-8→charset-normalizer 对最多 1 MiB 采样。探测函数只做 `charset_normalizer.from_bytes(sample).best()`；在当前解析子进程内用 POSIX `setitimer(ITIMER_REAL, 5)` 限制该调用，并在 finally 恢复原 handler/timer；禁止不可终止的 ThreadPool timeout。Mac/Linux 解析子进程主线程执行此函数，主进程和异步事件循环不得直接调用有 signal 的探测分支。探测后必须严格解码完整文件；空候选/超时/失败均 `ExtractionError('TEXT_DECODING_FAILED')`，消息不能带路径或字节。
 
 ```python
 # encoding.py：预算有限且可恢复的探测器
@@ -655,7 +655,7 @@ def detect_encoding(sample: bytes) -> str:
 
 `decode_text_file` 分块读取源文件，累计≤50 MiB；不使用 errors=ignore/replace。成功选择的 encoding 写入各 Document span.location['encoding']，探测时附 `ENCODING_DETECTED` warning。encoding 是安全元数据，不是页/行定位。换行从 CRLF/CR→LF 的变换在 source_spans 创建之前完成，行位置来自原始行序号，之后不得盲目 strip 整个正文。
 
-- [ ] **Step 4：修正 Markdown 并写可追踪规范化。** 保留上游逐行标题/围栏组织，删除 `re.sub(r'<.*?>',...)` 和对完整标题的全局删 `#`。标题只消除开头的 ATX 标记；识别 backtick/tilde、最多 3 个前导空格和闭合长度≥开启长度；围栏内不识别标题。`markdown_sections` 返回每个标题节、祖先 heading_path、逐原始行 span（block_id=`line:<一基行号>`）。祖先标题不在当前片段内时仅保留 heading_path，P3 再插入 context_prefix，不提前伪造偏移。
+- [x] **Step 4：修正 Markdown 并写可追踪规范化。** 保留上游逐行标题/围栏组织，删除 `re.sub(r'<.*?>',...)` 和对完整标题的全局删 `#`。标题只消除开头的 ATX 标记；识别 backtick/tilde、最多 3 个前导空格和闭合长度≥开启长度；围栏内不识别标题。`markdown_sections` 返回每个标题节、祖先 heading_path、逐原始行 span（block_id=`line:<一基行号>`）。祖先标题不在当前片段内时仅保留 heading_path，P3 再插入 context_prefix，不提前伪造偏移。
 
 ```python
 # markdown_extractor.py 中标题识别的关键实现
@@ -675,7 +675,7 @@ def parse_heading(line: str) -> tuple[int, str] | None:
 
 `normalize_documents` 必须保持无变更输入的 byte-equivalent 文本和全部 span，不清除泛型、代码、不可见于 renderer 的普通字面尖括号。仅转换受控格式产物（换行、安全链接和明确的 HTML 元素），每次替换通过原区间→新区间更新 offset；可先在格式 Adapter 内生成规范文本，再生成 span，从而减少二次变换。外链 Markdown 图片改为可见“外部图片未获取”占位和 `EXTERNAL_IMAGE_NOT_FETCHED` warning；不得请求 URL，也不得删光 alt。生成的外图占位span标记context_prefix并指向原图片位置，不冒充source正文；安全 HTML 渲染属于 P4，P1 保留 Markdown/MDX 原文但不执行。
 
-- [ ] **Step 5：移植 HTML 的真实结构转换并补测试。** BeautifulSoup 使用 HTML/EPUB 自身声明编码，不先套通用猜编码；删除 script/style/iframe/object/embed 和事件属性；仅保留 http/https/mailto 安全链接及其文字，javascript/data/file 协议只留可见文字；不访问 img src，输出 warning 和占位；保留 h1–h6/list/table/pre/code 有序内容。`html_to_documents` 对每个有效正文块分配 `block_id='html:<序号>'`，location 只有可证实块序号，不捏造页面。
+- [x] **Step 5：移植 HTML 的真实结构转换并补测试。** BeautifulSoup 使用 HTML/EPUB 自身声明编码，不先套通用猜编码；删除 script/style/iframe/object/embed 和事件属性；仅保留 http/https/mailto 安全链接及其文字，javascript/data/file 协议只留可见文字；不访问 img src，输出 warning 和占位；保留 h1–h6/list/table/pre/code 有序内容。`html_to_documents` 对每个有效正文块分配 `block_id='html:<序号>'`，location 只有可证实块序号，不捏造页面。
 
 ```python
 # 追加到 test_dify_text_extractors.py
@@ -692,7 +692,7 @@ def test_html_drops_active_content_but_keeps_code_and_link_label():
     assert any(w.code == "EXTERNAL_IMAGE_NOT_FETCHED" for d in docs for w in d.warnings)
 ```
 
-- [ ] **Step 6：运行 green 和内容定位检查。** 重跑 Step 2；补不闭合围栏、tilde 围栏、MDX 表达式原文、未知/截断 BOM 和完整文件尾部坏编码样例。每个变换测试比较实际 covered slice，不能只比较 span 数；`git diff --check`。
+- [x] **Step 6：运行 green 和内容定位检查。** 重跑 Step 2；补不闭合围栏、tilde 围栏、MDX 表达式原文、未知/截断 BOM 和完整文件尾部坏编码样例。每个变换测试比较实际 covered slice，不能只比较 span 数；`git diff --check`。
 
 ## P1-T4：CSV/Excel 字符串、表头和真实行位置（A03、A04、A09）
 
@@ -707,7 +707,7 @@ def test_html_drops_active_content_but_keeps_code_and_link_label():
 
 **Produces:** `CSVExtractor/ExcelExtractor`；`select_header(rows:list[list[object]], rule:HeaderRule) -> int|None`（返回一基行号）；`column_labels(values:list[object]) -> list[str]`；`rows_to_documents(rows:list[tuple[int,int,list[object]]], *, sheet:str|None, rule:HeaderRule) -> list[Document]`（前两项为原始起/止行）；每个数据行一个 Document，字段名和值绑定。
 
-- [ ] **Step 1：加入字符串、坏行、空列及表头上下文样例。**
+- [x] **Step 1：加入字符串、坏行、空列及表头上下文样例。**
 
 ```python
 # test_dify_tabular_extractors.py
@@ -756,9 +756,9 @@ def test_excel_blank_header_column_keeps_data_and_source(tmp_path):
     assert any(w.code == "HEADER_INFERRED" for d in docs for w in d.warnings)
 ```
 
-- [ ] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_dify_tabular_extractors.py -q`。
+- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_dify_tabular_extractors.py -q`。
 
-- [ ] **Step 3：实现确定表头规则；空列宽度从全部有效数据列计算。** 不再复用上游“非空最多业务行兜底”或只留下非空表头列的 column_map。行号从 1 起，explicit 必须在范围内；none 完全不吃首行。auto 只取前 10 行至少两个非空字符串单元格的首候选，并附 warning。重复名使用列字母消歧，空列补 `列 B` 等。
+- [x] **Step 3：实现确定表头规则；空列宽度从全部有效数据列计算。** 不再复用上游“非空最多业务行兜底”或只留下非空表头列的 column_map。行号从 1 起，explicit 必须在范围内；none 完全不吃首行。auto 只取前 10 行至少两个非空字符串单元格的首候选，并附 warning。重复名使用列字母消歧，空列补 `列 B` 等。
 
 ```python
 # tabular.py 关键完整算法
@@ -788,7 +788,7 @@ def column_labels(values: list[object]) -> list[str]:
 
 `rows_to_documents` 先保留表头前非空行为 context Document，原表头作为 `kind='table_header'` 保存，每个原始单元格独立span并记录column位置，原值含空值完整保留，供P3投影表头预览；数据行 Markdown 为 `- 列名: 值`。重复列名前缀的 SourceSpan.role=context_prefix 指回 header 原行，值的 span.role=source 指当前数据行/列；没有真实表头时稳定列标签属于生成上下文，source 位置沿当前行/列，不伪造 header row。Excel 的 location 含 sheet,row,column；CSV 的 row/row_end 是物理行范围，包含 quoted 多行。空值输出空字符串而非 `None/nan`；内嵌换行保留，必要转义不破坏原值。
 
-- [ ] **Step 4：移植 CSV 行生成，并用 strict csv 校验替换 pandas 的跳行/类型推断。** 这是局部数据完整性补丁，保留上游 Adapter 结构和输出职责，不把 CSV 变成新 ingestion。
+- [x] **Step 4：移植 CSV 行生成，并用 strict csv 校验替换 pandas 的跳行/类型推断。** 这是局部数据完整性补丁，保留上游 Adapter 结构和输出职责，不把 CSV 变成新 ingestion。
 
 ```python
 # csv_extractor.py 内部输入读取；后续调用 rows_to_documents。
@@ -825,9 +825,9 @@ def validate_csv_width(rows: list[tuple[int, int, list[str]]],
 
 先按 HeaderRule 找表头再调用 validate_csv_width：已确认表头之前的非空说明记录保留为上下文，只有表头及其之后的数据记录要求列数一致；none 模式从第一条非空记录校验，不把坏行猜成备注。explicit 的 row 是物理起始行号，应先通过 rows.start 找到逻辑 header_index；auto 仍仅查看原始前10行，不把 quoted 多行当多条记录。CSV 全程字符串，没有 pandas 默认 NA 语义，也不手动 `.strip()` 数据值。
 
-- [ ] **Step 5：移植 Excel 并绑定原行与图片锚点。** XLSX 使用 openpyxl `data_only=True, read_only=False`，另以 `data_only=False` 检查公式；公式存在但缓存缺失时保持空值并附 `FORMULA_CACHE_MISSING`，不计算公式。XLS 使用 pandas `header=None,dtype=object,keep_default_na=False` 或 xlrd 原单元格读取，行号使用原表格索引+1；不 dropna 后重新编号。图片遍历所有 sheet._images 锚点，不因表头列空、图片在说明行、重复 SHA 而丢出现位置；`.xls` supports_embedded_images=false。所有 workbook 在 finally close。
+- [x] **Step 5：移植 Excel 并绑定原行与图片锚点。** XLSX 使用 openpyxl `data_only=True, read_only=False`，另以 `data_only=False` 检查公式；公式存在但缓存缺失时保持空值并附 `FORMULA_CACHE_MISSING`，不计算公式。XLS 使用 pandas `header=None,dtype=object,keep_default_na=False` 或 xlrd 原单元格读取，行号使用原表格索引+1；不 dropna 后重新编号。图片遍历所有 sheet._images 锚点，不因表头列空、图片在说明行、重复 SHA 而丢出现位置；`.xls` supports_embedded_images=false。所有 workbook 在 finally close。
 
-- [ ] **Step 6：补边界样例并运行 green。** 在此测试文件增加 header none/explicit、全数值无可信表头、多个 sheet、前置空行、CSV quote 内逗号/换行、空字段、公式缓存、XLS 原行号与同图不同锚点断言；前述测试代码为重点最小样例，不替代完整格式矩阵。重跑 Step 2；`git diff --check`。
+- [x] **Step 6：补边界样例并运行 green。** 在此测试文件增加 header none/explicit、全数值无可信表头、多个 sheet、前置空行、CSV quote 内逗号/换行、空字段、公式缓存、XLS 原行号与同图不同锚点断言；前述测试代码为重点最小样例，不替代完整格式矩阵。重跑 Step 2；`git diff --check`。
 
 ## P1-T5：安全栅格规范化与父进程 IPC 接收（A07、A15、A18、A23）
 
@@ -840,7 +840,7 @@ def validate_csv_width(rows: list[tuple[int, int, list[str]]],
 
 **Produces:** `LocalAttachmentSink(work_dir:Path, limits:ExtractionLimits)`（有 assets/warnings）；`normalize_image(source_path:Path, target_dir:Path, limits:ExtractionLimits) -> LocalAttachment`；`ImageRejected(warning:ParseWarning)`；`receive_asset(asset:LocalAttachment, *, work_dir:Path, limits:ExtractionLimits, accepted:dict[str,Attachment]) -> LocalAttachment`。receive_asset 同步执行有限文件校验/复制，由 async 父进程 `asyncio.to_thread` 调用；on_asset 仍是总计划唯一异步外部回调。
 
-- [ ] **Step 1：加入内容哈希去重、元数据清除、路径逃逸测试。**
+- [x] **Step 1：加入内容哈希去重、元数据清除、路径逃逸测试。**
 
 ```python
 # test_extraction_images.py
@@ -892,9 +892,9 @@ def test_parent_rejects_symlink_in_any_path_component(tmp_path):
     assert caught.value.reason_code == "PARSER_OUTPUT_INVALID"
 ```
 
-- [ ] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_extraction_images.py -q`。
+- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_extraction_images.py -q`。
 
-- [ ] **Step 3：规范化在解码前检查像素，再首帧/去 metadata/确定字节。** 不透传 SVG、动画或原始图片。静态编码统一 PNG；RGB/RGBA/灰度转换保持可见内容，EXIF 方向应用后删除元数据。GIF/TIFF/WebP 多帧只取首帧并给 `IMAGE_FIRST_FRAME_ONLY` warning；不能在失败时把原图 URL 拼回正文。
+- [x] **Step 3：规范化在解码前检查像素，再首帧/去 metadata/确定字节。** 不透传 SVG、动画或原始图片。静态编码统一 PNG；RGB/RGBA/灰度转换保持可见内容，EXIF 方向应用后删除元数据。GIF/TIFF/WebP 多帧只取首帧并给 `IMAGE_FIRST_FRAME_ONLY` warning；不能在失败时把原图 URL 拼回正文。
 
 ```python
 # images.py 核心；sink 将不含位置的 warning 用本次 source.location 具体化。
@@ -943,7 +943,7 @@ def normalize_image(source_path: Path, target_dir: Path,
 
 完整实现将 Pillow DecompressionBombWarning 提升为受控拒绝，原始文件读入和转换临时空间受工作目录预算约束；提前关闭 frame/clean/output。LocalAttachmentSink 在 normalize 成功后按 ref 判断是否已收录，仅新字节计入 max_images/max_total_image_bytes；超限先删除本次未接收临时产物，再抛 ImageRejected。`accept` 返回 Attachment，Adapter 根据最终 Markdown 占位长度创建 occurrence.source 的正确 start/end；source 参数提供原位置，不用尚未知长度的 span 作为最终输出。
 
-- [ ] **Step 4：父进程重新验证，不相信子进程描述。** `receive_asset` 限定相对路径仅在 child 输出目录；逐组件 `openat`+`O_NOFOLLOW`+目录 FD，最终 `fstat` 只接受普通文件。reject `..`、绝对路径、空组件、符号链接、hardlink（st_nlink≠1）、超大文件。复制到父进程专有 `received/`，边复制边计数/SHA-256；此目录不允许解析 sandbox 写入。父进程从实际 PNG header/verify 得到尺寸，验证尺寸/MIME/字节数/hash 与宣称一致，重新应用此次全部图片预算后才返回；accepted/ref 成功才登记。父目录和子目录分离消除“校验后子进程改路径”的窗口。
+- [x] **Step 4：父进程重新验证，不相信子进程描述。** `receive_asset` 限定相对路径仅在 child 输出目录；逐组件 `openat`+`O_NOFOLLOW`+目录 FD，最终 `fstat` 只接受普通文件。reject `..`、绝对路径、空组件、符号链接、hardlink（st_nlink≠1）、超大文件。复制到父进程专有 `received/`，边复制边计数/SHA-256；此目录不允许解析 sandbox 写入。父进程从实际 PNG header/verify 得到尺寸，验证尺寸/MIME/字节数/hash 与宣称一致，重新应用此次全部图片预算后才返回；accepted/ref 成功才登记。父目录和子目录分离消除“校验后子进程改路径”的窗口。
 
 ```python
 # ipc.py 的安全目录遍历关键完整函数；调用者持有返回 fd 并负责关闭。
@@ -963,7 +963,7 @@ def open_child_regular(work_dir: Path, relative_path: str) -> int:
             next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             os.close(directory)
             directory = next_fd
-        result = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+        result = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         mode = os.fstat(result)
         if not stat.S_ISREG(mode.st_mode) or mode.st_nlink != 1:
             os.close(result)
@@ -975,9 +975,11 @@ def open_child_regular(work_dir: Path, relative_path: str) -> int:
         os.close(directory)
 ```
 
+最终文件打开必须带 `O_NONBLOCK`，使 FIFO 等非普通文件不会在 `fstat` 前阻塞；仅在验证普通文件后执行有界读取。增加 FIFO、目录、socket 和符号链接的及时拒绝测试；取消结算同时等待父进程已经启动的文件接收工作与对象 I/O 完成，不能只回收解析子进程。
+
 IPC `asset` 帧只有 LocalAttachment JSON，帧≤64 KiB；不在该帧传正文/数据库 ID/URL。每次只允许一张等待 ACK：父进程 receive→guard→await on_asset→guard→ACK，避免无界任务队列。图片的多个出现位置放完整 manifest，不以事件数量计去重后的图片数。source_path 泄漏禁止；最终安全相对路径仅在 LocalAttachment 中到 P2，不入 manifest/API。
 
-- [ ] **Step 5：只捕获可降级错误。** 格式 Adapter 只 catch `ImageRejected`，产出占位和 warning；生成占位span标为context_prefix，P3不能将其当真实可索引文字；回调异常、权限、租约、数据库/MinIO 失败由父进程原样走编排失败，不包装成 IMAGE_CORRUPT。追加测试：错误 SHA/大小/非PNG、超限新图与重复图、动画首帧、脚本 SVG 拒绝、回调失败不返回完整 result。重跑 Step 2；`git diff --check`。
+- [x] **Step 5：只捕获可降级错误。** 格式 Adapter 只 catch `ImageRejected`，产出占位和 warning；生成占位span标为context_prefix，P3不能将其当真实可索引文字；回调异常、权限、租约、数据库/MinIO 失败由父进程原样走编排失败，不包装成 IMAGE_CORRUPT。追加测试：错误 SHA/大小/非PNG、超限新图与重复图、动画首帧、脚本 SVG 拒绝、回调失败不返回完整 result。重跑 Step 2；`git diff --check`。
 
 ## P1-T6：Word 顺序/嵌套/Run 空格与 PDF 逐页图片（A05、A07、A18、A29）
 
@@ -992,7 +994,7 @@ IPC `asset` 帧只有 LocalAttachment JSON，帧≤64 KiB；不在该帧传正�
 
 **Produces:** `WordExtractor/PdfExtractor`；公开纯 fixture `write_pdf(path:Path,pages:list[str]) -> None`（从现有 minimal PDF 生成算法复制到 helper，保留出处，不导入 `_write_pdf`）；PDF 按 page，Word 按有序段落/表格行生成 Document。
 
-- [ ] **Step 1：写真实 DOCX 与 PDF 重点回归。**
+- [x] **Step 1：写真实 DOCX 与 PDF 重点回归。**
 
 ```python
 # test_dify_office_pdf.py
@@ -1032,7 +1034,7 @@ def test_pdf_keeps_individual_pages_without_string_cache(tmp_path):
     assert "first page" in docs[0].page_content and "second page" in docs[1].page_content
 ```
 
-- [ ] **Step 2：实现纯样例生成器后运行 red。** fixture 不是产品实现；它必须先可运行，不能以缺少测试 helper 作为解析器 red。
+- [x] **Step 2：实现纯样例生成器后运行 red。** fixture 不是产品实现；它必须先可运行，不能以缺少测试 helper 作为解析器 red。
 
 ```python
 # parsing_test_helpers.py 新增；完整可生成多页 PDF，不需要额外下载。
@@ -1066,7 +1068,7 @@ def write_pdf(path: Path, pages: list[str]) -> None:
 
 Run: `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_dify_office_pdf.py -q`。
 
-- [ ] **Step 3：以局部补丁保持 Word 的全部顺序信息。** `doc.iter_inner_content()` 按 Paragraph/Table 遍历；每个 cell 再 `iter_inner_content()` 递归，不能只取 `.paragraphs`。merged cell 在同一 table 的同一实际 cell 对象只输出一次，但禁止对正文字符串 set 去重。heading style 映射一级到六级标题并更新 heading_path。文档顶层 paragraph 编号按实际 paragraph 出现递增；nested table 用 `table_path` 字符串携带层级，兼容 `table/row/column` 仍为一基。
+- [x] **Step 3：以局部补丁保持 Word 的全部顺序信息。** `doc.iter_inner_content()` 按 Paragraph/Table 遍历；每个 cell 再 `iter_inner_content()` 递归，不能只取 `.paragraphs`。merged cell 在同一 table 的同一实际 cell 对象只输出一次，但禁止对正文字符串 set 去重。heading style 映射一级到六级标题并更新 heading_path。文档顶层 paragraph 编号按实际 paragraph 出现递增；nested table 用 `table_path` 字符串携带层级，兼容 `table/row/column` 仍为一基。
 
 ```python
 # word_extractor.py 核心顺序/空格补丁，保留上游 hyperlink/drawing 分支。
@@ -1093,7 +1095,7 @@ def paragraph_plain_text(paragraph: Paragraph) -> str:
 
 超链接继续沿上游字段/relationship 解析，仅保留安全链接或可见文字。远程 relationship 图片不下载；embedded rId 的字节通过 LocalAttachmentSink 接收，按原 paragraph/table 位置插入逻辑 ref。表格有显式重复表头标记时生成 Markdown 短表并记录表头 span；没有实际表头证据时输出列位置字段列表，不能默认首行是标题。每个单元格、原段落、图片分别有 SourceSpan，不给每个文档附全章所有 paragraph。
 
-- [ ] **Step 4：PDF 移植每页提取与图片循环，彻底移除上游字符串缓存。** `PdfDocument`、每页、textpage、image 对象均 finally close；`page_number+1`。图片只有页位置时 alt 为“本页图片”，放页末并用 page+image_index 标识，不声称二维位置；正文空页保留 page Document。读取文字/图片各阶段调用 context.check_cancelled，累加正文时先检查预算再 append。
+- [x] **Step 4：PDF 移植每页提取与图片循环，彻底移除上游字符串缓存。** `PdfDocument`、每页、textpage、image 对象均 finally close；`page_number+1`。图片只有页位置时 alt 为“本页图片”，放页末并用 page+image_index 标识，不声称二维位置；正文空页保留 page Document。读取文字/图片各阶段调用 context.check_cancelled，累加正文时先检查预算再 append。
 
 ```python
 # pdf_extractor.py 最小文字页实现，图片循环紧接 textpage.close 后写入同一页。
@@ -1127,7 +1129,7 @@ class PdfExtractor(BaseExtractor):
 
 完整 Adapter 保留源 `_extract_images` 的 pypdfium2 image object 提取，但将 UploadFile/storage/session/base_url 替换为 sink；禁止把多个 pages join 到一份私有缓存。纯图片 PDF 的 ExtractionResult 允许承载图片/空文本，以便 P2 完成失败清理；P3 的“可索引文字”判定必须明确 `NO_INDEXABLE_TEXT`，不能因有 Markdown 图片链接就 ready。
 
-- [ ] **Step 5：增加图片页与合并单元格 fixture。** helper 的 `write_pdf` 从已核实的 `test_ingestion.py` 生成算法完整迁入公开函数并转义 `\\`、`(`、`)`；为图片 PDF 使用 pypdf 已有 Image XObject 写入 API 构造小 RGB 图片流，记录预期页数/出现位置；合并单元格测试 assert 一个物理 cell 的内容一次、相同字符串在两个独立段落两次。附带“第二段中间切开”交给 P3-T2 的 span slicing 测试，P1 提供准确逐段输入。重跑 Step 2 和 P1-T5 图像测试；`git diff --check`。
+- [x] **Step 5：增加图片页与合并单元格 fixture。** helper 的 `write_pdf` 从已核实的 `test_ingestion.py` 生成算法完整迁入公开函数并转义 `\\`、`(`、`)`；为图片 PDF 使用 pypdf 已有 Image XObject 写入 API 构造小 RGB 图片流，记录预期页数/出现位置；合并单元格测试 assert 一个物理 cell 的内容一次、相同字符串在两个独立段落两次。附带“第二段中间切开”交给 P3-T2 的 span slicing 测试，P1 提供准确逐段输入。重跑 Step 2 和 P1-T5 图像测试；`git diff --check`。
 
 ## P1-T7：Unstructured 纯本地适配与离线依赖资源（A02、A06、A08、A24、A25）
 
@@ -1153,7 +1155,7 @@ class PdfExtractor(BaseExtractor):
 
 **Produces:** 六个具体类遵守 BaseExtractor；`elements_to_documents(elements, *, kind:str) -> list[Document]`；`runtime_manifest() -> dict`、`runtime_digest() -> str`、`probe_parser_resources(parser_id:str) -> str|None`；`build_extraction_resources.py --output PATH` 构建清单入口。资源位于包只读 extraction 资源区域；Tokenizer 文件属于 P3 `ingestion/tokenizer_data`，不进解析 fingerprint。
 
-- [ ] **Step 1：用真实结构元素验证缺少位置也不丢正文、邮件不重复解码。**
+- [x] **Step 1：用真实结构元素验证缺少位置也不丢正文、邮件不重复解码。**
 
 ```python
 # test_local_unstructured.py
@@ -1181,9 +1183,9 @@ def test_email_element_is_already_decoded():
     assert docs[0].page_content == text
 ```
 
-- [ ] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_local_unstructured.py tests/knowledge/test_extraction_resources.py -q`；resource 测试文件先含 Step 5 代码。不接受 missing Unstructured 的 import error 当功能 red；依赖准备按 P1-T2 单独执行。
+- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_local_unstructured.py tests/knowledge/test_extraction_resources.py -q`；resource 测试文件先含 Step 5 代码。不接受 missing Unstructured 的 import error 当功能 red；依赖准备按 P1-T2 单独执行。
 
-- [ ] **Step 3：移植时只保留本地分支，删除 API 参数、配置 import、运行时下载和隐含解码。**
+- [x] **Step 3：移植时只保留本地分支，删除 API 参数、配置 import、运行时下载和隐含解码。**
 
 | Adapter | 唯一允许 partition 入口 | 本地修正 |
 | --- | --- | --- |
@@ -1224,7 +1226,7 @@ Markdown 保护以 `markdown-it-py==4.2.0` 已锁定解析 token.map 为源行�
 
 XML 用 `lxml.etree.XMLParser(resolve_entities=False,load_dtd=False,no_network=True)` 预读并检查 docinfo.doctype；任何 DTD/实体声明直接拒绝 `FORMAT_SIGNATURE_MISMATCH`，防止随后 partition 自己换解析器展开实体。输入字节先识别 XML 自带编码，不能只扫描 UTF-8 字符串漏掉 UTF-16 DTD。禁网隔离是 P1-T8 的额外边界，不取代 XML 自身限制。
 
-- [ ] **Step 4：按锁定 wheel 源码核查资源/遥测，不编造环境变量。** 安装时用以下只读命令定位真实库，检查下载、HTTP、模型加载调用，并把确切文件/符号和采用的禁用方式写入 resources 清单说明。
+- [x] **Step 4：按锁定 wheel 源码核查资源/遥测，不编造环境变量。** 安装时用以下只读命令定位真实库，检查下载、HTTP、模型加载调用，并把确切文件/符号和采用的禁用方式写入 resources 清单说明。
 
 ```bash
 .venv/bin/python - <<'PY'
@@ -1242,7 +1244,7 @@ PY
 
 缺少任何必需资源时 probe 返回 `PARSER_DEPENDENCY_UNAVAILABLE`；启动能力清单明确格式不可用，不在 parse 中下载。生产 Dify 模式包含 PPTX/EPUB，故其必要 Pandoc/NLP 资源也必须安装。若当前目标平台无法满足资源安装，记录失败并停止宣称该模式 ready；不得改路由到 API/旧解析器。
 
-- [ ] **Step 5：实现可复现资源清单并做篡改测试。** manifest 只记录解析库包名/版本、所需文件的包相对逻辑名/SHA、adapter 修订和实际禁网策略版本；不含绝对路径、构建机器用户名、timestamp、Tokenizer/ChunkProfile，防止不同构建时间无意义失效。
+- [x] **Step 5：实现可复现资源清单并做篡改测试。** manifest 只记录解析库包名/版本、所需文件的包相对逻辑名/SHA、adapter 修订和实际禁网策略版本；不含绝对路径、构建机器用户名、timestamp、Tokenizer/ChunkProfile，防止不同构建时间无意义失效。
 
 ```python
 # test_extraction_resources.py
@@ -1262,7 +1264,7 @@ def test_runtime_manifest_is_stable_safe_and_not_chunk_dependent():
 
 `build_extraction_resources.py` 读取 explicit allowlist 中所需包的 `distribution(name).version` 和实际资源文件 bytes，排序后写 canonical JSON；这些资源路径来自 Step 4 已审查清单，不遍历整个虚拟环境。`runtime_manifest` 启动时重新验 SHA，与 checked-in platform 分项比对；Mac/Linux 原生 binary 允许不同分项，但同一部署 Gateway/Worker 必须消费同一平台分项。`runtime_digest` 为 canonical JSON 的 SHA-256，`extractor_version` 采用 `dify:<full-commit>:adapter-v1:<runtime-digest>`，Unstructured 类同。仅更换 Tokenizer 不改变此值；换解析/NLP/图像资源必须改变。
 
-- [ ] **Step 6：真实格式矩阵 green。** 使用 Step 1 元素单测之外的真实 `.pptx/.epub/.md/.eml/.msg/.xml` 文件，逐项断言文本/位置/警告；PPTX/EPUB 分别跑 dify 与 local；EML 构造带 UTF-8 encoded MIME 及字面 Base64 的正文；XML 用本地与 HTTP 外部实体两种恶意输入。MSG 使用锁定 python-oxmsg 上游测试库中的小 fixture，固定其 bytes SHA/出处并检查正文，不将假的 OLE header 算 MSG 通过。fixture 导入是实施阶段下载，运行时不下载。重跑 Step 2；记录资源安装和格式通过分别的结果。
+- [x] **Step 6：真实格式矩阵 green。** 使用 Step 1 元素单测之外的真实 `.pptx/.epub/.md/.eml/.msg/.xml` 文件，逐项断言文本/位置/警告；PPTX/EPUB 分别跑 dify 与 local；EML 构造带 UTF-8 encoded MIME 及字面 Base64 的正文；XML 用本地与 HTTP 外部实体两种恶意输入。MSG 使用锁定 python-oxmsg 上游测试库中的小 fixture，固定其 bytes SHA/出处并检查正文，不将假的 OLE header 算 MSG 通过。fixture 导入是实施阶段下载，运行时不下载。重跑 Step 2；记录资源安装和格式通过分别的结果。
 
 ## P1-T8：受控子进程、取消结算与禁网矩阵（A12、A18、A23、A24、A25）
 
@@ -1291,7 +1293,7 @@ async run_extraction(setting: ExtractSetting, *, work_dir: Path,
 
 另产出 `ParserSlots(capacity:int)`（async context manager，无等待队列）、`sandbox_command(command:list[str],*,work_dir:Path)->list[str]`、`parser_environment(work_dir:Path)->dict[str,str]`、`stop_process_group(process:asyncio.subprocess.Process)->None`、`check_extraction_runtime.py --matrix --output PATH`。Gateway 由 P3 创建进程级 `ParserSlots(1)`；Worker 使用既有并发默认 2 的任务槽，不根据 timeout 值猜当前角色，不创建第二个全局并发体系。
 
-- [ ] **Step 1：先写真正会阻塞的子进程 fixture 和回收测试。** 注入的是测试 `sandbox_command` 输出，不是新增生产任意 executable 输入；正式生产只能运行固定 child module。
+- [x] **Step 1：先写真正会阻塞的子进程 fixture 和回收测试。** 注入的是测试 `sandbox_command` 输出，不是新增生产任意 executable 输入；正式生产只能运行固定 child module。
 
 ```python
 # fixtures/parser_child_hang.py
@@ -1345,9 +1347,9 @@ async def test_parser_slots_reject_busy_without_queueing():
     assert caught.value.reason_code == "PARSER_BUSY"
 ```
 
-- [ ] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_extraction_runtime.py -q`。
+- [x] **Step 2：运行 red。** `env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_extraction_runtime.py -q`。
 
-- [ ] **Step 3：实现 launcher、严格 wire 协议与有界接收。** parent 仅把 ExtractSetting/ExtractionLimits 的 JSON 发 stdin（受50 MiB源文件准入保护，不传正文）；source_path 在 sandbox 只读挂载/规则内。child 重建 context/registry/LocalAttachmentSink，读取固定输入，发 asset/result/error JSON 帧到专用 pipe；库 stdout/stderr 不当协议，stderr 限长且仅映射安全 code，不写源文件内容或原生 stack 到公开错误。
+- [x] **Step 3：实现 launcher、严格 wire 协议与有界接收。** parent 仅把 ExtractSetting/ExtractionLimits 的 JSON 发 stdin（受50 MiB源文件准入保护，不传正文）；source_path 在 sandbox 只读挂载/规则内。child 重建 context/registry/LocalAttachmentSink，读取固定输入，发 asset/result/error JSON 帧到专用 pipe；库 stdout/stderr 不当协议，stderr 限长且仅映射安全 code，不写源文件内容或原生 stack 到公开错误。
 
 child 为每张规范图发送 asset 帧并等 ACK，父进程 receive_asset→guard→on_asset→guard 后才 ACK。final result 序列化为 child/manifest.json，父进程从安全 FD 读≤50 MiB、decode_manifest、校验 final 清单恰好等于已接受 ref 集合；source_sha256 必须重新计算和输入一致。缺失末帧、额外对象、未知消息类型、重复完成、损坏帧均 `PARSER_OUTPUT_INVALID`；frame 长度上限64 KiB，固定 `readuntil` limit，无无限缓冲。JSON 不允许 pickle 或 Python import 指令。
 
@@ -1402,7 +1404,7 @@ async def stop_process_group(process: asyncio.subprocess.Process) -> None:
 
 work_dir 包含 `source`、child 输出和 parent received；输入本地 source 如果在目录之外，以受限复制进入 source 子目录，复制字节也计入512 MiB；不得重复将同一 source 同时计两遍。父进程在读asset/manifest前检查目录字节，加上运行时每≤1秒的有限文件统计检查；超限立即终止，ZIP声明/正文/图片预算仍在各加载点提前限制。并发临时空间按宿主槽数预留，此检查不承诺严格 RSS 或瞬时磁盘峰值。
 
-- [ ] **Step 4：以操作系统边界禁网并削减文件/凭据可见性。** parser_environment 使用白名单：locale、只读 Python/package 运行路径、任务 TMPDIR、已审查资源位置与遥测禁用设置；不继承数据库、MinIO、代理、云、模型 Key 环境变量。不得简单 `os.environ.copy()` 再删几个已知 key。固定子进程只读其 Python 标准库/虚拟环境/解析资源及原件，仅可写 child/，不能写 parent received/或任意宿主 home。
+- [x] **Step 4：以操作系统边界禁网并削减文件/凭据可见性。** parser_environment 使用白名单：locale、只读 Python/package 运行路径、任务 TMPDIR、已审查资源位置与遥测禁用设置；不继承数据库、MinIO、代理、云、模型 Key 环境变量。不得简单 `os.environ.copy()` 再删几个已知 key。固定子进程只读其 Python 标准库/虚拟环境/解析资源及原件，仅可写 child/，不能写 parent received/或任意宿主 home。
 
 Linux 使用可用且经部署验证的 bubblewrap，至少 `--unshare-net --unshare-pid --die-with-parent --proc /proc --dev /dev`，对 Python/运行库/资源做只读 bind，对 child 目录做唯一 writable bind；不 `--ro-bind / /` 暴露宿主所有秘密。Mac 使用系统 `sandbox-exec` 和 checked-in deny-default profile，明确允许解释器/动态库读取、child 文件写入、必要进程 syscall，显式 deny network。profile 路径参数仅由宿主 Path 生成，不接受用户自由规则。若平台不支持或权限禁用相应 sandbox，probe 返回不可用，新解析流程 fail closed；不能悄悄裸跑 Python。测试机 mock 网络仅是补充检查。
 

@@ -27,7 +27,9 @@ import {
   listKnowledgeBaseQueries,
   listKnowledgeBases,
   listKnowledgeDocumentSegments,
+  listKnowledgeDocumentAttachments,
   listKnowledgeDocuments,
+  listKnowledgeFileCapabilities,
   listKnowledgeMetadataFields,
   listKnowledgeModelOptions,
   previewKnowledgeChunks,
@@ -45,7 +47,10 @@ import {
   updateKnowledgeSegment,
   uploadKnowledgeDocument,
 } from "./api";
-import { knowledgeQueryKey } from "./query-keys";
+import {
+  knowledgeFileCapabilitiesQueryKey,
+  knowledgeQueryKey,
+} from "./query-keys";
 import {
   KNOWLEDGE_DOCUMENT_ACTIVE_STATUSES,
   type CreateKnowledgeBaseInput,
@@ -116,6 +121,16 @@ export function useKnowledgeModelOptions(
     queryKey: knowledgeQueryKey(scope, "model-options"),
     queryFn: ({ signal }) => listKnowledgeModelOptions(scope.projectId, signal),
     enabled,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useKnowledgeFileCapabilities(scope: ProjectClientScope) {
+  return useQuery({
+    queryKey: knowledgeFileCapabilitiesQueryKey(scope),
+    queryFn: ({ signal }) =>
+      listKnowledgeFileCapabilities(scope.projectId, signal),
+    retry: false,
     refetchOnWindowFocus: false,
   });
 }
@@ -341,8 +356,13 @@ export function useUploadKnowledgeDocument(scope: ProjectClientScope) {
 export function useKnowledgeChunkPreview(scope: ProjectClientScope) {
   return useMutation({
     mutationKey: knowledgeQueryKey(scope, "mutation", "chunk-preview"),
-    mutationFn: (input: PreviewKnowledgeChunksInput) =>
-      previewKnowledgeChunks(scope.projectId, input),
+    mutationFn: ({
+      input,
+      signal,
+    }: {
+      input: PreviewKnowledgeChunksInput;
+      signal?: AbortSignal;
+    }) => previewKnowledgeChunks(scope.projectId, input, signal),
   });
 }
 
@@ -793,22 +813,53 @@ export function useKnowledgeSearchHitDetail(
 
 const SEGMENT_PAGE_SIZE = 20;
 
+export function useKnowledgeDocumentAttachments(
+  scope: ProjectClientScope,
+  document: Pick<KnowledgeDocumentItem, "id" | "status" | "version"> | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: knowledgeQueryKey(
+      scope,
+      "document-attachments",
+      document?.id ?? null,
+      document?.version ?? null,
+    ),
+    queryFn: ({ signal }) =>
+      listKnowledgeDocumentAttachments(
+        scope.projectId,
+        document?.id ?? "",
+        signal,
+      ),
+    enabled: enabled && document?.status === "ready",
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useKnowledgeDocumentSegments(
   scope: ProjectClientScope,
-  documentId: string | null,
+  document: Pick<KnowledgeDocumentItem, "id" | "status" | "version"> | null,
   page: number,
 ) {
   return useQuery({
-    queryKey: knowledgeQueryKey(scope, "segments", documentId, page),
+    queryKey: knowledgeQueryKey(
+      scope,
+      "segments",
+      document?.id ?? null,
+      document?.version ?? null,
+      document?.status ?? null,
+      page,
+    ),
     queryFn: ({ signal }) =>
       listKnowledgeDocumentSegments(
         scope.projectId,
-        documentId ?? "",
+        document?.id ?? "",
         page,
         SEGMENT_PAGE_SIZE,
         signal,
       ),
-    enabled: documentId !== null,
+    enabled: document !== null,
     refetchOnWindowFocus: false,
   });
 }

@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/scanny/python-oxmsg",
+  "commit": "d0ee4645d4a8bf6d18517d33bc1f7dcb23e7620b",
+  "files": [
+    {
+      "path": "no-attachments.msg",
+      "url": "https://raw.githubusercontent.com/scanny/python-oxmsg/d0ee4645d4a8bf6d18517d33bc1f7dcb23e7620b/tests/test_files/no-attachments.msg",
+      "sha256": "44f38934c6bbad9ada1b00c09149e22749609c8d5ed2e6432a8a273718ec6a88"
+    },
+    {
+      "path": "LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/scanny/python-oxmsg/d0ee4645d4a8bf6d18517d33bc1f7dcb23e7620b/LICENSE.txt",
+      "sha256": "c2458afc527e978a8f12eb4b5776cab74faede98e09c57684d54735e1439e08c"
+    }
+  ]
+}

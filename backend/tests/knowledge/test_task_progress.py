@@ -17,20 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import httpx
 import pytest
-from actweave_knowledge import (
-    KNOWLEDGE_STORAGE_UNAVAILABLE,
-    KNOWLEDGE_TASK_FAILED,
-    KnowledgeError,
-    KnowledgeSettings,
-)
+from actweave_knowledge import KNOWLEDGE_TASK_FAILED, KnowledgeError, KnowledgeSettings
 from actweave_knowledge.documents import KnowledgeDocumentService
+from actweave_knowledge.extraction.contracts import ProcessingProfile
 from actweave_knowledge.ingestion.pipeline import KnowledgeIngestionHandler
 from actweave_knowledge.ingestion.reembed import KnowledgeReembedHandler
 from actweave_knowledge.models import KnowledgeModelClient
@@ -42,6 +38,12 @@ from actweave_knowledge.persistence.models import (
 )
 from actweave_knowledge.persistence.tasks import claim_next_task, settle_task_failure
 from actweave_knowledge.tasks import KnowledgeTaskClaim, KnowledgeTaskWorker
+from extraction_test_helpers import (
+    ExtractionObjectStore,
+    make_test_file_capability_provider,
+    make_test_quota_port,
+)
+from parsing_test_helpers import make_chunk_profile, make_parse_profile
 from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -57,15 +59,8 @@ from deerflow.persistence.projects.model import ProjectRow
 _DIMENSION = 4
 
 
-class _FakeStore:
-    def __init__(self) -> None:
-        self.objects: dict[str, bytes] = {}
-
-    async def download_to(self, key: str, target_path: Path) -> None:
-        data = self.objects.get(key)
-        if data is None:
-            raise KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "文档文件在对象存储中缺失")
-        await asyncio.to_thread(target_path.write_bytes, data)
+class _FakeStore(ExtractionObjectStore):
+    pass
 
 
 class _Provider:
@@ -113,6 +108,7 @@ class _Harness:
             session_factory=self.factory,
             settings=KnowledgeSettings.model_validate({"enabled": False}),
             object_store=self.store,  # type: ignore[arg-type]
+            quota=make_test_quota_port(self.factory),
             model_client=self.client,
             model_port=registry_model_port(),
             project_active_check=is_knowledge_project_active,
@@ -128,8 +124,11 @@ class _Harness:
 
     def documents(self) -> KnowledgeDocumentService:
         return KnowledgeDocumentService(
+            project_active_check=is_knowledge_project_active,
+            quota=make_test_quota_port(self.factory),
             session_factory=self.factory,
             settings=KnowledgeSettings.model_validate({"enabled": False}),
+            file_capabilities=make_test_file_capability_provider(),
             object_store=self.store,  # type: ignore[arg-type]
         )
 
@@ -201,11 +200,21 @@ async def _seed_queued_document(
 ) -> uuid.UUID:
     """A queued document whose stored original splits into three segments.
 
-    Each paragraph is 150 characters against ``chunk_size=200`` with zero
+    Each paragraph is 75 CJK characters (150 cl100k tokens) against
+    ``chunk_size=200`` with zero
     overlap, so the splitter cannot merge neighbours: exactly three drafts.
     """
 
-    content = "\n\n".join(("甲" * 150, "乙" * 150, "丙" * 150)).encode()
+    content = "\n\n".join(("甲" * 75, "乙" * 75, "丙" * 75)).encode()
+    profile = ProcessingProfile(
+        parse=make_parse_profile(".md"),
+        chunk=make_chunk_profile(
+            size=200,
+            overlap=0,
+            separator="\\n\\n",
+            child_separator="\\n",
+        ),
+    )
     document_id = uuid.uuid4()
     storage_key = f"projects/{project_id}/knowledge/{base_id}/{document_id}.md"
     async with harness.factory() as session, session.begin():
@@ -222,6 +231,9 @@ async def _seed_queued_document(
                 version=1,
                 chunk_size=200,
                 chunk_overlap=0,
+                source_sha256=hashlib.sha256(content).hexdigest(),
+                parsing_profile=profile.model_dump(mode="json"),
+                capability_revision="a" * 64,
             )
         )
         session.add(

@@ -221,6 +221,7 @@ export interface Translations {
       existingConfigurationHint: string;
       configuredModelUnavailable: string;
       retryFailedUploads: string;
+      refreshStalePreview: string;
       heroTitle: string;
       uploadCreateTitle: string;
       uploadCreateHint: string;
@@ -237,10 +238,24 @@ export interface Translations {
       dropzoneTitle: string;
       removeFile: (name: string) => string;
       filesSelected: (count: number) => string;
+      availableFormats: (extensions: string) => string;
+      capabilitiesLoading: string;
+      capabilitiesFailed: string;
+      retryFormats: string;
+      fileUnavailable: (name: string) => string;
+      unsupportedFormatReason: string;
+      dependencyUnavailableReason: string;
+      sandboxUnavailableReason: string;
+      tokenizerUnavailableReason: string;
+      unknownUnavailableReason: (code: string) => string;
       next: string;
       previous: string;
       saveAndProcess: string;
       chunkSectionTitle: string;
+      knowledgeTokenUnit: string;
+      chunkSizeTokenLabel: string;
+      chunkOverlapTokenLabel: string;
+      childChunkSizeTokenLabel: string;
       parentContextTitle: string;
       childRetrievalTitle: string;
       previewParentText: string;
@@ -265,6 +280,19 @@ export interface Translations {
       previewCharacters: (count: number) => string;
       previewChildCount: (count: number) => string;
       previewChildLabel: (index: number) => string;
+      headerSettingsTitle: string;
+      headerModeLabel: (source: string) => string;
+      headerRowLabel: (source: string) => string;
+      headerCsvSource: string;
+      headerAuto: string;
+      headerNone: string;
+      headerExplicit: string;
+      headerCandidateRow: (row: number) => string;
+      headerSelectedRow: (row: number) => string;
+      headerNotSelected: string;
+      actualProfile: (size: number, unit: string) => string;
+      knowledgeTokenShort: string;
+      characterUnit: string;
     };
     detail: {
       navLabel: string;
@@ -421,11 +449,34 @@ export interface Translations {
       reparse: string;
       reparseTitle: (name: string) => string;
       reparseWarning: string;
+      reparseLegacyUnitWarning: string;
       reparsePreviewButton: string;
       reparsePreviewShowing: (shown: number, total: number) => string;
+      reparsePreviewAttachmentsOmitted: (count: number) => string;
       reparseSubmit: string;
       reparsePending: string;
       reparseConflict: string;
+      legacyProfile: string;
+      parserProfile: (
+        etlType: "dify" | "unstructured_local",
+        extractorId: string,
+        extractorVersion: string,
+      ) => string;
+      parsingNotices: (count: number) => string;
+      imageFailures: (count: number) => string;
+      warningMessages: {
+        HEADER_INFERRED: string;
+        IMAGE_CORRUPT: string;
+        IMAGE_LIMIT_EXCEEDED: string;
+        EXTERNAL_IMAGE_NOT_FETCHED: string;
+        ENCODING_DETECTED: string;
+        FORMULA_CACHE_MISSING: string;
+        SOURCE_POSITION_UNAVAILABLE: string;
+        TABLE_STRUCTURE_UNAVAILABLE: string;
+        IMAGE_FIRST_FRAME_ONLY: string;
+        IMAGE_ANCHOR_UNAVAILABLE: string;
+      };
+      viewPublishedSegments: string;
     };
     segments: {
       title: (documentName: string) => string;
@@ -455,6 +506,22 @@ export interface Translations {
       locateFailed: string;
       locateStale: string;
       dismissLocate: string;
+      tokenCount: (count: number) => string;
+      sourceRoles: { source: string; context_prefix: string };
+      publishedReadonly: string;
+      savedImages: (count: number) => string;
+      attachmentInfo: (
+        altText: string,
+        mediaType: string,
+        width: number,
+        height: number,
+      ) => string;
+      currentDocumentImages: string;
+      documentImagesLoading: string;
+      documentImagesEmpty: string;
+      documentImagesChanged: string;
+      insertImage: (index: number) => string;
+      insertedImageAlt: (index: number) => string;
     };
     sourcePosition: {
       page: (page: string) => string;

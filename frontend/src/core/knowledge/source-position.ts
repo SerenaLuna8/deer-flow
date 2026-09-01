@@ -51,3 +51,24 @@ export function formatKnowledgeSourcePosition(
   if (row !== null) return labels.row(row);
   return null;
 }
+
+export type KnowledgeSourceSpanPosition = Readonly<{
+  location: Record<string, unknown>;
+  role: "source" | "context_prefix";
+}>;
+
+export type FormattedKnowledgeSourceSpan = Readonly<{
+  position: string;
+  role: KnowledgeSourceSpanPosition["role"];
+}>;
+
+/** Preserve every verifiable source while ignoring metadata-only locations. */
+export function formatKnowledgeSourceSpans(
+  spans: readonly KnowledgeSourceSpanPosition[],
+  labels: KnowledgeSourcePositionLabels,
+): FormattedKnowledgeSourceSpan[] {
+  return spans.flatMap((span) => {
+    const position = formatKnowledgeSourcePosition(span.location, labels);
+    return position === null ? [] : [{ position, role: span.role }];
+  });
+}

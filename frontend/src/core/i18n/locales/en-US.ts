@@ -257,7 +257,7 @@ export const enUS: Translations = {
       rebuildSectionTitle: "Embedding model",
       rebuildModelLabel: "Embedding model",
       rebuildHint:
-        "Regenerate vectors with the current or a new model, preserving all segment text, IDs, enabled states, and manual edits. Documents stay out of retrieval until processing finishes.",
+        "Regenerate vectors with the current or a new model. This does not read the original file or run parsing; segment text, IDs, enabled states, manual edits, attachment bindings, and image bytes remain unchanged. Documents stay out of retrieval until processing finishes.",
       rebuildButton: "Re-embed documents",
       rebuildPending: "Submitting…",
       rebuildOutcome: (accepted, skipped) =>
@@ -266,7 +266,7 @@ export const enUS: Translations = {
           : `Re-embedding accepted for ${accepted} documents.`,
       rebuildConfirmTitle: "Re-embed knowledge base documents",
       rebuildConfirmDescription: (name) =>
-        `This re-embeds every published document of "${name}" with the selected model. Segment text, manual edits, and enabled states are preserved; only vectors are regenerated. Documents are excluded from retrieval while they process, and embedding calls incur model cost.`,
+        `This re-embeds every published document of "${name}" with the selected model. Segment text, manual edits, and enabled states are preserved; only vectors are regenerated. It does not read the original file or run the parser; attachment bindings and bytes remain unchanged. Documents are excluded from retrieval while they process, and embedding calls incur model cost.`,
       rebuildConfirm: "Re-embed",
     },
     wizard: {
@@ -277,6 +277,7 @@ export const enUS: Translations = {
         "Uses the base’s saved models and retrieval settings. Change them in Settings.",
       configuredModelUnavailable: "Configured; model name unavailable",
       retryFailedUploads: "Retry failed uploads",
+      refreshStalePreview: "Refresh stale preview",
       heroTitle: "Create your first knowledge base",
       uploadCreateTitle: "Create from documents",
       uploadCreateHint:
@@ -295,10 +296,27 @@ export const enUS: Translations = {
       removeFile: (name) => `Remove ${name}`,
       filesSelected: (count) =>
         `${count} ${count === 1 ? "file" : "files"} selected`,
+      availableFormats: (extensions) => `Available formats: ${extensions}`,
+      capabilitiesLoading: "Loading available file formats…",
+      capabilitiesFailed: "Could not load file formats.",
+      retryFormats: "Retry formats",
+      fileUnavailable: (name) => `${name} cannot be processed`,
+      unsupportedFormatReason: "This file format is not supported.",
+      dependencyUnavailableReason:
+        "The parser dependency for this format is unavailable.",
+      sandboxUnavailableReason: "The local parser runtime is unavailable.",
+      tokenizerUnavailableReason: "The Knowledge Tokenizer is unavailable.",
+      unknownUnavailableReason: (code) =>
+        `This format is unavailable (${code}).`,
       next: "Next",
       previous: "Previous",
       saveAndProcess: "Save & process",
       chunkSectionTitle: "Chunk settings",
+      knowledgeTokenUnit:
+        "New documents use Knowledge Tokens, a fixed local chunking unit that is separate from model billing tokens.",
+      chunkSizeTokenLabel: "Chunk size (Knowledge Tokens)",
+      chunkOverlapTokenLabel: "Chunk overlap (Knowledge Tokens)",
+      childChunkSizeTokenLabel: "Child chunk size (Knowledge Tokens)",
       parentContextTitle: "Parent chunks provide context",
       childRetrievalTitle: "Child chunks are searched",
       previewParentText: "View full parent chunk",
@@ -329,6 +347,19 @@ export const enUS: Translations = {
       previewChildCount: (count) =>
         `${count} child ${count === 1 ? "chunk" : "chunks"}`,
       previewChildLabel: (index) => `C-${String(index).padStart(2, "0")}`,
+      headerSettingsTitle: "Table headers",
+      headerModeLabel: (source) => `Header mode for ${source}`,
+      headerRowLabel: (source) => `Header row for ${source}`,
+      headerCsvSource: "CSV",
+      headerAuto: "Auto",
+      headerNone: "No header",
+      headerExplicit: "Use row",
+      headerCandidateRow: (row) => `Candidate row ${row}`,
+      headerSelectedRow: (row) => `Selected row ${row}`,
+      headerNotSelected: "No header selected",
+      actualProfile: (size, unit) => `Actual profile: ${size} ${unit}`,
+      knowledgeTokenShort: "Knowledge Tokens",
+      characterUnit: "characters",
     },
     detail: {
       navLabel: "Knowledge base sections",
@@ -502,14 +533,41 @@ export const enUS: Translations = {
       reparse: "Reparse from original",
       reparseTitle: (name) => `Reparse ${name}`,
       reparseWarning:
-        "Reparses the stored original file with the parameters below and replaces every segment. Manual segment edits and per-segment disables are overwritten, re-embedding incurs model cost, and the document is not searchable while it processes.",
+        "Reparses the stored original file with the parameters below and replaces every segment. Manual segment edits and per-segment disables are overwritten. Published attachment bindings are replaced by the new parse. Re-embedding incurs model cost, and the document is not searchable while it processes.",
+      reparseLegacyUnitWarning:
+        "This document uses historical character limits. Reparse uses Knowledge Tokens and may change chunk boundaries.",
       reparsePreviewButton: "Preview split",
       reparsePreviewShowing: (shown, total) =>
         `Showing ${shown} of ${total} chunks`,
+      reparsePreviewAttachmentsOmitted: (count) =>
+        `${count} preview ${count === 1 ? "thumbnail was" : "thumbnails were"} omitted; published attachments are not lost.`,
       reparseSubmit: "Reparse",
       reparsePending: "Submitting…",
       reparseConflict:
         "The document changed outside this dialog. The latest parameters and version were reloaded; review and confirm again.",
+      legacyProfile: "Historical profile",
+      parserProfile: (etlType, extractorId, extractorVersion) =>
+        `${etlType === "dify" ? "Dify" : "Local Unstructured"} · ${extractorId} · ${extractorVersion}`,
+      parsingNotices: (count) =>
+        `${count} parsing ${count === 1 ? "notice" : "notices"}`,
+      imageFailures: (count) =>
+        `${count} ${count === 1 ? "image" : "images"} could not be saved`,
+      warningMessages: {
+        HEADER_INFERRED: "Header row was inferred",
+        IMAGE_CORRUPT: "An image could not be decoded safely",
+        IMAGE_LIMIT_EXCEEDED: "An image exceeded the safety limits",
+        EXTERNAL_IMAGE_NOT_FETCHED:
+          "An external image was not fetched by policy",
+        ENCODING_DETECTED: "A detected text encoding was used",
+        FORMULA_CACHE_MISSING: "A formula had no saved calculated value",
+        SOURCE_POSITION_UNAVAILABLE:
+          "The parser did not provide a source position",
+        TABLE_STRUCTURE_UNAVAILABLE:
+          "The parser did not provide table structure",
+        IMAGE_FIRST_FRAME_ONLY: "Only the first image frame was saved",
+        IMAGE_ANCHOR_UNAVAILABLE: "The image did not include a cell anchor",
+      },
+      viewPublishedSegments: "View published segments",
     },
     segments: {
       title: (documentName) => `${documentName} · Segments`,
@@ -545,6 +603,20 @@ export const enUS: Translations = {
       locateStale:
         "This segment belongs to an earlier document version; the content may have changed.",
       dismissLocate: "Dismiss",
+      tokenCount: (count) => `${count.toLocaleString()} Knowledge Tokens`,
+      sourceRoles: { source: "Source", context_prefix: "Context" },
+      publishedReadonly: "Previously published content (read only)",
+      savedImages: (count) =>
+        `${count} ${count === 1 ? "image" : "images"} saved; image text is not recognized or included in text search.`,
+      attachmentInfo: (altText, mediaType, width, height) =>
+        `${altText || "Image"} · ${mediaType} · ${width}×${height}`,
+      currentDocumentImages: "Current document images",
+      documentImagesLoading: "Loading current document images…",
+      documentImagesEmpty: "This document has no selectable images.",
+      documentImagesChanged:
+        "The document publication changed. Close and reopen the editor.",
+      insertImage: (index) => `Insert image ${index}`,
+      insertedImageAlt: (index) => `Image ${index}`,
     },
     sourcePosition: {
       page: (page) => `Page ${page}`,

@@ -359,7 +359,7 @@ async def gateway_platform_runtime(
             create_knowledge_module_from_database,
         )
 
-        knowledge_module, knowledge_state = await create_knowledge_module_from_database(app_config=config)
+        knowledge_module, knowledge_state = await create_knowledge_module_from_database(app_config=config, quota_service=app.state.project_quota_service)
         app.state.knowledge_module = knowledge_module
         app.state.knowledge_startup_state = knowledge_state
         if knowledge_module is not None:

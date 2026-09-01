@@ -43,12 +43,17 @@ from actweave_knowledge.persistence.models import (
 from actweave_knowledge.retrieval import encode_lexical_token
 from actweave_knowledge.segments import KnowledgeSegmentService
 from actweave_knowledge.segments.service import MAX_SEGMENT_CONTENT_CHARS
+from extraction_test_helpers import make_test_file_capability_provider, make_test_quota_port
 from fastapi import FastAPI
 from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.knowledge import gateway
+from app.knowledge.composition import (
+    is_knowledge_project_active,
+    is_knowledge_project_pending_deletion,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
@@ -372,6 +377,9 @@ async def test_update_segment_enabled_toggle_never_embeds(postgres_database_url:
     harness = await _harness(postgres_database_url)
     try:
         seeded = await _seed_ready_document(harness, segments=["第一段", "第二段"])
+        before = await _segment_row_of(harness, seeded.segment_ids[1])
+        assert before is not None
+        before_position = dict(before.source_position)
         view = await harness.service.update_segment(
             seeded.project_id,
             seeded.segment_ids[1],
@@ -383,6 +391,8 @@ async def test_update_segment_enabled_toggle_never_embeds(postgres_database_url:
         segment = await _segment_row_of(harness, seeded.segment_ids[1])
         assert segment is not None
         assert segment.enabled is False
+        assert segment.source_position == before_position
+        assert view.source_position == before_position
         # The vector survives disabling; re-enabling needs no re-embedding.
         assert [round(float(value), 3) for value in segment.embedding] == [1.0, 0.0, 0.0]
     finally:
@@ -486,6 +496,9 @@ async def test_segment_governance_stops_batches_and_retries_after_revocation(
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
             module = KnowledgeModule(
+                project_active_check=is_knowledge_project_active,
+                project_cleanup_check=is_knowledge_project_pending_deletion,
+                quota=make_test_quota_port(harness.factory),
                 settings=KnowledgeSettings.model_validate(
                     {
                         "enabled": True,
@@ -520,6 +533,9 @@ async def test_update_segment_revalidates_authority_after_embedding_before_commi
         seeded = await _seed_ready_document(harness, segments=["第一段"])
         authority = _RevokedAfterProviderAuthority(seeded.project_id)
         module = KnowledgeModule(
+            project_active_check=is_knowledge_project_active,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
+            quota=make_test_quota_port(harness.factory),
             settings=KnowledgeSettings.model_validate(
                 {
                     "enabled": True,
@@ -852,8 +868,11 @@ async def test_segment_operations_scope_to_the_project(postgres_database_url: st
 def _documents_service(harness: _Harness) -> KnowledgeDocumentService:
     settings = KnowledgeSettings.model_validate({"enabled": False})
     return KnowledgeDocumentService(
+        project_active_check=is_knowledge_project_active,
+        quota=make_test_quota_port(harness.factory),
         session_factory=harness.factory,
         settings=settings,
+        file_capabilities=make_test_file_capability_provider(settings),
         object_store=SimpleNamespace(),  # type: ignore[arg-type] - governance never touches storage
     )
 
@@ -1014,6 +1033,8 @@ def _segment_view(**overrides: object) -> KnowledgeSegmentView:
         "hit_count": 0,
         "source_position": {"manual": True},
         "created_at": _NOW,
+        "token_count": 19,
+        "source_spans": (),
     }
     values.update(overrides)
     return KnowledgeSegmentView(**values)  # type: ignore[arg-type]
@@ -1120,8 +1141,19 @@ async def test_http_k1_routes_round_trip() -> None:
     assert created.status_code == 200
     assert created.json()["item"]["content"] == "新增分段"
     assert created.json()["item"]["word_count"] == 4
+    assert created.json()["item"]["token_count"] == 19
+    assert created.json()["item"]["source_spans"] == []
     assert updated.status_code == 200
     assert updated.json()["item"]["enabled"] is False
+    assert updated.json()["item"]["source_position"] == {"manual": True}
+    assert updated.json()["item"]["token_count"] == 19
+    assert updated.json()["item"]["source_spans"] == []
+    serialized = json.dumps(
+        {"created": created.json(), "updated": updated.json()},
+        ensure_ascii=False,
+    )
+    for forbidden in ("index_text", "extraction_id", "storage_key", "url"):
+        assert forbidden not in serialized
     assert deleted.status_code == 200
     assert deleted.json()["item"]["segment_count"] == 0
 

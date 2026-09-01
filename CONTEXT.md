@@ -114,6 +114,18 @@ _Avoid_: Dataset, vector table
 A source file uploaded to one Knowledge Base. It owns the stored file location, processing status, metadata values, segments, and embeddings.
 _Avoid_: Source Blob, upload row
 
+**Knowledge Extraction**:
+A document-owned parsing generation containing the complete normalized manifest and its Knowledge Attachments. A ready Extraction means parsing output is complete and stored; it does not mean the Knowledge Document is ready or published. The Document's published pointer and its Segments switch together in one transaction.
+_Avoid_: parsing session, published document, UploadFile
+
+**Knowledge Attachment**:
+One normalized PNG, JPEG, or WebP byte object owned by one Knowledge Extraction in one Project, Knowledge Base, and Knowledge Document. Equal image bytes share an Attachment only within that Extraction; its upload and quota facts are independent of its lifecycle state.
+_Avoid_: UploadFile, global image, storage URL
+
+**Attachment Occurrence**:
+One ordered appearance of a Knowledge Attachment in parsed content or a Knowledge Segment. Repeated appearances of the same image retain separate positions and alternative text; they do not duplicate the stored byte object.
+_Avoid_: duplicate attachment, image identity
+
 **Knowledge Segment**:
 A stable, ordered text chunk derived from one version of a Knowledge Document.
 _Avoid_: random chunk

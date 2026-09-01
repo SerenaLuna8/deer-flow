@@ -23,6 +23,7 @@ their parameter types as unresolvable strings (FastAPI would then read the
 request body parameters as query parameters).
 """
 
+import asyncio
 import hashlib
 import os
 import socket
@@ -31,10 +32,12 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 _MINIO_ENDPOINT_ENV = "ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT"
 _MINIO_ACCESS_KEY_ENV = "ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY"
 _MINIO_SECRET_KEY_ENV = "ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY"
+_STORAGE_CONTROL_ROOT_ENV = "ACT_WEAVE_REPLAY_KNOWLEDGE_CONTROL_ROOT"
 
 _REPLAY_KNOWLEDGE_NAMESPACE = uuid.UUID("9a1de0f4-63b7-5c58-9f2e-0d84a3c14b72")
 
@@ -49,6 +52,174 @@ REPLAY_SUMMARY_OUTPUT_MARKER = "摘要索引回放"
 # first). Specs must keep the marker out of their queries.
 DOC_RERANK_MARKER = "深海列车"
 RERANK_MARKER_SCORE = 0.95
+
+_STORAGE_COUNTERS = frozenset(
+    {
+        "source_reads",
+        "manifest_reads",
+        "attachment_reads",
+        "source_put_failures",
+        "manifest_put_failures",
+        "attachment_put_failures",
+        "delete_failures",
+    }
+)
+
+
+class ReplayKnowledgeStorageControl:
+    """Cross-process replay counters containing no keys, secrets, or bytes."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._thread_lock = threading.Lock()
+
+    @classmethod
+    def from_environment(cls) -> "ReplayKnowledgeStorageControl | None":
+        raw = os.environ.get(_STORAGE_CONTROL_ROOT_ENV, "").strip()
+        return cls(Path(raw)) if raw else None
+
+    def _mutate(self, name: str, update: Callable[[int], int]) -> int:
+        if name not in _STORAGE_COUNTERS:
+            raise ValueError("unsupported replay storage counter")
+        import fcntl
+
+        path = self.root / f"{name}.count"
+        with self._thread_lock, path.open("a+", encoding="ascii") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.seek(0)
+                raw = handle.read().strip()
+                current = int(raw) if raw else 0
+                next_value = update(current)
+                if next_value < 0:
+                    raise ValueError("replay storage counter cannot be negative")
+                handle.seek(0)
+                handle.truncate()
+                handle.write(str(next_value))
+                handle.flush()
+                return next_value
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def read(self, name: str) -> int:
+        return self._mutate(name, lambda current: current)
+
+    def set(self, name: str, value: int) -> None:
+        if type(value) is not int or value < 0:
+            raise ValueError("replay storage counter must be a non-negative integer")
+        self._mutate(name, lambda _current: value)
+
+    def increment(self, name: str) -> None:
+        self._mutate(name, lambda current: current + 1)
+
+    def consume(self, name: str) -> bool:
+        consumed = False
+
+        def decrement(current: int) -> int:
+            nonlocal consumed
+            consumed = current > 0
+            return current - 1 if consumed else current
+
+        self._mutate(name, decrement)
+        return consumed
+
+    def storage_snapshot(self) -> dict[str, int]:
+        return {
+            name: self.read(name)
+            for name in (
+                "source_reads",
+                "manifest_reads",
+                "attachment_reads",
+            )
+        }
+
+    def replace_faults(
+        self,
+        *,
+        source_put_failures: int,
+        manifest_put_failures: int,
+        attachment_put_failures: int,
+        delete_failures: int,
+    ) -> None:
+        values = {
+            "source_put_failures": source_put_failures,
+            "manifest_put_failures": manifest_put_failures,
+            "attachment_put_failures": attachment_put_failures,
+            "delete_failures": delete_failures,
+        }
+        for name, value in values.items():
+            self.set(name, value)
+
+
+def _storage_object_kind(key: str) -> str:
+    if key.endswith("/manifest.json"):
+        return "manifest"
+    if "/assets/" in key:
+        return "attachment"
+    return "source"
+
+
+def install_replay_knowledge_storage_controls() -> None:
+    """Install replay-only MinIO counters and faults in this test process."""
+
+    control = ReplayKnowledgeStorageControl.from_environment()
+    if control is None:
+        return
+
+    from functools import wraps
+
+    from actweave_knowledge.contracts import (
+        KNOWLEDGE_STORAGE_UNAVAILABLE,
+        KnowledgeError,
+    )
+    from actweave_knowledge.storage import MinioObjectStore
+
+    if getattr(MinioObjectStore, "_replay_storage_controls_installed", False):
+        return
+
+    original_upload = MinioObjectStore.upload_from
+    original_download = MinioObjectStore.download_to
+    original_delete = MinioObjectStore._delete_after_bucket_check
+
+    @wraps(original_upload)
+    async def controlled_upload(self, key, source_path, *, media_type=None):
+        kind = _storage_object_kind(key)
+        if control.consume(f"{kind}_put_failures"):
+            raise KnowledgeError(
+                KNOWLEDGE_STORAGE_UNAVAILABLE,
+                "对象存储写入失败，请稍后重试",
+            )
+        return await original_upload(
+            self,
+            key,
+            source_path,
+            media_type=media_type,
+        )
+
+    @wraps(original_download)
+    async def counted_download(self, key, target_path, *, max_bytes=None):
+        control.increment(f"{_storage_object_kind(key)}_reads")
+        return await original_download(
+            self,
+            key,
+            target_path,
+            max_bytes=max_bytes,
+        )
+
+    @wraps(original_delete)
+    async def controlled_delete(self, key):
+        if control.consume("delete_failures"):
+            raise KnowledgeError(
+                KNOWLEDGE_STORAGE_UNAVAILABLE,
+                "对象存储删除失败，请稍后重试",
+            )
+        return await original_delete(self, key)
+
+    MinioObjectStore.upload_from = controlled_upload
+    MinioObjectStore.download_to = counted_download
+    MinioObjectStore._delete_after_bucket_check = controlled_delete
+    MinioObjectStore._replay_storage_controls_installed = True
 
 
 def knowledge_minio_environment_ready() -> bool:
@@ -277,8 +448,14 @@ class KnowledgeReplayState:
     embedding_failures_remaining: int = 0
     rerank_failures_remaining: int = 0
     chat_failures_remaining: int = 0
+    embedding_blocked: bool = False
+    embedding_waiters: int = 0
+    condition: threading.Condition = field(init=False, repr=False)
 
-    def snapshot(self) -> dict[str, int]:
+    def __post_init__(self) -> None:
+        self.condition = threading.Condition(self.lock)
+
+    def snapshot(self) -> dict[str, int | bool]:
         with self.lock:
             return {
                 "embedding_calls": self.embedding_calls,
@@ -287,7 +464,36 @@ class KnowledgeReplayState:
                 "embedding_failures_remaining": self.embedding_failures_remaining,
                 "rerank_failures_remaining": self.rerank_failures_remaining,
                 "chat_failures_remaining": self.chat_failures_remaining,
+                "embedding_blocked": self.embedding_blocked,
+                "embedding_waiters": self.embedding_waiters,
             }
+
+    def replace_faults(
+        self,
+        *,
+        embedding_failures: int,
+        rerank_failures: int,
+        chat_failures: int,
+        embedding_blocked: bool,
+    ) -> None:
+        with self.condition:
+            self.embedding_failures_remaining = embedding_failures
+            self.rerank_failures_remaining = rerank_failures
+            self.chat_failures_remaining = chat_failures
+            self.embedding_blocked = embedding_blocked
+            if not embedding_blocked:
+                self.condition.notify_all()
+
+    def wait_for_embedding_release(self) -> None:
+        with self.condition:
+            if not self.embedding_blocked:
+                return
+            self.embedding_waiters += 1
+            try:
+                while self.embedding_blocked:
+                    self.condition.wait()
+            finally:
+                self.embedding_waiters -= 1
 
 
 def replay_embedding(text: str, dimension: int) -> list[float]:
@@ -358,6 +564,7 @@ def _build_provider_app(state: KnowledgeReplayState):
             if state.embedding_failures_remaining > 0:
                 state.embedding_failures_remaining -= 1
                 return JSONResponse({"error": "replay embedding fault"}, status_code=500)
+        await asyncio.to_thread(state.wait_for_embedding_release)
         texts = body["input"]
         dimension = int(body["dimensions"])
         return {
@@ -441,13 +648,23 @@ def build_replay_knowledge_router(
     state: KnowledgeReplayState,
     *,
     list_objects: Callable[[], list[str]],
+    storage_control: ReplayKnowledgeStorageControl,
 ):
     """Build the ``/api/test-only/replay-knowledge`` control API."""
 
-    import asyncio
-
-    from fastapi import APIRouter
+    from actweave_knowledge.persistence.models import (
+        KnowledgeAttachmentRow,
+        KnowledgeDocumentRow,
+        KnowledgeExtractionRow,
+        KnowledgeTaskRow,
+    )
+    from fastapi import APIRouter, HTTPException
     from pydantic import BaseModel, ConfigDict, Field
+    from sqlalchemy import func, select
+
+    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.projects.model import ProjectRow
+    from deerflow.persistence.quotas.model import ProjectUsageCounterRow
 
     class ProviderFaults(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -455,6 +672,20 @@ def build_replay_knowledge_router(
         embedding_failures: int = Field(default=0, ge=0, le=1000)
         rerank_failures: int = Field(default=0, ge=0, le=1000)
         chat_failures: int = Field(default=0, ge=0, le=1000)
+        embedding_blocked: bool = False
+
+    class StorageFaults(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        source_put_failures: int = Field(default=0, ge=0, le=1000)
+        manifest_put_failures: int = Field(default=0, ge=0, le=1000)
+        attachment_put_failures: int = Field(default=0, ge=0, le=1000)
+        delete_failures: int = Field(default=0, ge=0, le=1000)
+
+    class ProjectAuthorityFault(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        revoked: bool
 
     router = APIRouter(
         prefix="/api/test-only/replay-knowledge",
@@ -462,21 +693,129 @@ def build_replay_knowledge_router(
     )
 
     @router.get("/provider")
-    async def provider_state() -> dict[str, int]:
+    async def provider_state() -> dict[str, int | bool]:
         return state.snapshot()
 
     @router.post("/provider/faults")
-    async def set_provider_faults(faults: ProviderFaults) -> dict[str, int]:
+    async def set_provider_faults(
+        faults: ProviderFaults,
+    ) -> dict[str, int | bool]:
         """Replace the whole fault-injection state with the posted values."""
 
-        with state.lock:
-            state.embedding_failures_remaining = faults.embedding_failures
-            state.rerank_failures_remaining = faults.rerank_failures
-            state.chat_failures_remaining = faults.chat_failures
+        state.replace_faults(
+            embedding_failures=faults.embedding_failures,
+            rerank_failures=faults.rerank_failures,
+            chat_failures=faults.chat_failures,
+            embedding_blocked=faults.embedding_blocked,
+        )
         return state.snapshot()
 
     @router.get("/objects")
     async def bucket_objects() -> dict[str, list[str]]:
         return {"keys": await asyncio.to_thread(list_objects)}
+
+    @router.get("/storage")
+    async def storage_state() -> dict[str, int]:
+        return await asyncio.to_thread(storage_control.storage_snapshot)
+
+    @router.post("/storage/faults")
+    async def set_storage_faults(faults: StorageFaults) -> dict[str, int]:
+        await asyncio.to_thread(
+            storage_control.replace_faults,
+            source_put_failures=faults.source_put_failures,
+            manifest_put_failures=faults.manifest_put_failures,
+            attachment_put_failures=faults.attachment_put_failures,
+            delete_failures=faults.delete_failures,
+        )
+        return storage_control.storage_snapshot()
+
+    @router.get("/projects/{project_id}/facts")
+    async def project_facts(project_id: uuid.UUID) -> dict[str, int]:
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            project = await session.get(ProjectRow, project_id)
+            if project is None:
+                raise HTTPException(status_code=404, detail="Not Found")
+            document_rows = int(await session.scalar(select(func.count()).select_from(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id)) or 0)
+            published_documents = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(KnowledgeDocumentRow)
+                    .where(
+                        KnowledgeDocumentRow.project_id == project_id,
+                        KnowledgeDocumentRow.published_version.is_not(None),
+                    )
+                )
+                or 0
+            )
+            extraction_rows = int(await session.scalar(select(func.count()).select_from(KnowledgeExtractionRow).where(KnowledgeExtractionRow.project_id == project_id)) or 0)
+            ready_attachments = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(KnowledgeAttachmentRow)
+                    .where(
+                        KnowledgeAttachmentRow.project_id == project_id,
+                        KnowledgeAttachmentRow.state == "ready",
+                    )
+                )
+                or 0
+            )
+            open_tasks = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(KnowledgeTaskRow)
+                    .where(
+                        KnowledgeTaskRow.project_id == project_id,
+                        KnowledgeTaskRow.status.in_(("queued", "running", "retry_wait")),
+                    )
+                )
+                or 0
+            )
+            running_tasks = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(KnowledgeTaskRow)
+                    .where(
+                        KnowledgeTaskRow.project_id == project_id,
+                        KnowledgeTaskRow.status == "running",
+                    )
+                )
+                or 0
+            )
+            quota = await session.scalar(
+                select(ProjectUsageCounterRow).where(
+                    ProjectUsageCounterRow.project_id == project_id,
+                    ProjectUsageCounterRow.dimension == "storage_bytes",
+                    ProjectUsageCounterRow.bucket == "lifetime",
+                )
+            )
+        prefix = f"projects/{project_id}/knowledge/"
+        object_count = sum(key.startswith(prefix) for key in await asyncio.to_thread(list_objects))
+        return {
+            "object_count": object_count,
+            "document_rows": document_rows,
+            "published_documents": published_documents,
+            "extraction_rows": extraction_rows,
+            "ready_attachments": ready_attachments,
+            "open_tasks": open_tasks,
+            "running_tasks": running_tasks,
+            "quota_used": int(quota.used if quota is not None else 0),
+            "quota_reserved": int(quota.reserved if quota is not None else 0),
+        }
+
+    @router.post("/projects/{project_id}/authority")
+    async def set_project_authority(
+        project_id: uuid.UUID,
+        fault: ProjectAuthorityFault,
+    ) -> dict[str, bool]:
+        session_factory = get_session_factory()
+        async with session_factory() as session, session.begin():
+            project = await session.get(ProjectRow, project_id, with_for_update=True)
+            if project is None:
+                raise HTTPException(status_code=404, detail="Not Found")
+            project.status = "pending_deletion" if fault.revoked else "active"
+            project.is_suspended = fault.revoked
+            project.membership_version += 1
+        return {"revoked": fault.revoked}
 
     return router

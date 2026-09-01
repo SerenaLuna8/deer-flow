@@ -10,12 +10,42 @@ settle nor extend the row.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import KnowledgeDocumentRow, KnowledgeTaskRow
+from .models import KnowledgeBaseRow, KnowledgeDocumentRow, KnowledgeTaskRow
+
+if TYPE_CHECKING:
+    from ..tasks.worker import KnowledgeTaskClaim
+
+
+async def lock_extraction_claim(session: AsyncSession, claim: KnowledgeTaskClaim) -> tuple[KnowledgeTaskRow, KnowledgeDocumentRow]:
+    """Lock Task -> Base -> Document after the caller's required Project fence.
+
+    The caller must invoke its injected ProjectActiveCheck in this same
+    transaction first. This package helper never reconstructs host authority.
+    """
+    from ..contracts import KNOWLEDGE_CONFLICT, KNOWLEDGE_TASK_FAILED, KnowledgeError
+
+    locked = await _lock_live_task_claim(session, claim.id, claim.claim_token)
+    if locked is None:
+        raise KnowledgeError(KNOWLEDGE_TASK_FAILED, "Knowledge 任务租约已失效")
+    task, _ = locked
+    if (task.project_id, task.resource_id, task.kind, task.target_version, task.attempt_count) != (claim.project_id, claim.resource_id, claim.kind, claim.target_version, claim.attempt_count):
+        raise KnowledgeError(KNOWLEDGE_TASK_FAILED, "Knowledge 任务身份已失效")
+    base_id = await session.scalar(select(KnowledgeDocumentRow.knowledge_base_id).where(KnowledgeDocumentRow.id == task.resource_id, KnowledgeDocumentRow.project_id == task.project_id))
+    base = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.id == base_id, KnowledgeBaseRow.project_id == task.project_id).with_for_update())
+    document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == task.resource_id, KnowledgeDocumentRow.project_id == task.project_id).with_for_update().execution_options(populate_existing=True))
+    if base is None or base.status == "deleting" or document is None or document.status == "deleting" or document.knowledge_base_id != base.id or document.version != claim.target_version or task.kind not in VERSIONED_TASK_KINDS:
+        raise KnowledgeError(KNOWLEDGE_CONFLICT, "Document 或版本已变更")
+    moment = await session.scalar(select(func.clock_timestamp()))
+    if task.lease_until is None or task.lease_until <= moment:
+        raise KnowledgeError(KNOWLEDGE_TASK_FAILED, "Knowledge 任务租约已失效")
+    return task, document
+
 
 TASK_OPEN_STATUSES = ("queued", "running", "retry_wait")
 
@@ -72,6 +102,7 @@ async def claim_next_task(
         .values(
             status="running",
             claim_token=claim_token,
+            extraction_id=None,
             lease_until=moment + timedelta(seconds=lease_seconds),
             attempt_count=KnowledgeTaskRow.attempt_count + 1,
             # A new attempt starts from zero: stale progress of a lost or
@@ -168,6 +199,7 @@ async def defer_task_claim_for_inactive_project(
     if row.lease_until <= database_now:
         return False
     row.status = "retry_wait"
+    row.extraction_id = None
     row.attempt_count -= 1
     row.available_at = database_now + timedelta(seconds=pause_seconds)
     row.claim_token = None
@@ -196,6 +228,7 @@ def settle_task_row_success(row: KnowledgeTaskRow, *, now: datetime) -> None:
     """
 
     row.status = "succeeded"
+    row.extraction_id = None
     row.stage = "done"
     row.claim_token = None
     row.lease_until = None
@@ -278,6 +311,7 @@ async def settle_task_failure(
         return None
     row, moment = locked
     row.claim_token = None
+    row.extraction_id = None
     row.lease_until = None
     row.error_message = error_message
     row.updated_at = moment
@@ -321,6 +355,7 @@ async def recover_expired_tasks(
     expired = (await session.execute(select(KnowledgeTaskRow).where(*filters).with_for_update(skip_locked=True))).scalars().all()
     for row in expired:
         row.claim_token = None
+        row.extraction_id = None
         row.lease_until = None
         row.updated_at = moment
         if row.attempt_count >= row.max_attempts:
@@ -362,3 +397,26 @@ async def _mark_indexed_document_failed(
         )
         .values(status="failed", error_message=error_message, updated_at=now)
     )
+
+
+def validated_reparse_settings(value: dict) -> dict:
+    """Project the exact frozen profile, rejecting legacy/inconsistent task data."""
+    import re
+
+    from ..extraction.contracts import ExtractionError, ProcessingProfile
+    from ..ingestion.profiles import ProcessingParameters, chunk_settings
+
+    try:
+        profile = ProcessingProfile.model_validate(value["processing_profile"])
+        ProcessingParameters(**profile.chunk.model_dump(exclude={"tokenizer_profile_id", "tokenizer_digest", "cleaner_version", "splitter_version"}), header_rules=profile.parse.header_rules)
+        projected = chunk_settings(profile)
+        revision = value["capability_revision"]
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{64}", revision) is None:
+            raise ValueError
+        if set(value) != set(projected) | {"processing_profile", "capability_revision"}:
+            raise ValueError
+        if any(type(value[key]) is not type(expected) or value[key] != expected for key, expected in projected.items()):
+            raise ValueError
+        return {**projected, "processing_profile": profile.model_dump(mode="json"), "capability_revision": revision}
+    except (KeyError, TypeError, ValueError):
+        raise ExtractionError("PROCESSING_PROFILE_UNAVAILABLE", "原解析配置已不可用，请显式重新解析") from None

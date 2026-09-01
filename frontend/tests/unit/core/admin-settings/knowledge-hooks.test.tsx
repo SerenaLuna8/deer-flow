@@ -21,6 +21,8 @@ const MODEL_ID = "22222222-2222-4222-8222-222222222222";
 const SECRET = "fictional-minio-secret-for-contract-test";
 const fields = {
   enabled: false,
+  etl_type: "dify" as const,
+  extraction_cache_enabled: true,
   worker_concurrency: 2,
   task_timeout_seconds: 900,
   upload_max_bytes: 10_485_760,
@@ -66,6 +68,28 @@ describe("admin knowledge settings boundary", () => {
         summary_model: { model_name: MODEL_ID, display_name: "Summary model" },
       }).summary_model?.model_name,
     ).toBe(MODEL_ID);
+  });
+
+  test("keeps the parser and extraction cache in the single strict settings contract", () => {
+    expect(adminKnowledgeSettingsSchema.parse(settings)).toMatchObject({
+      etl_type: "dify",
+      extraction_cache_enabled: true,
+    });
+    expect(
+      adminKnowledgeSettingsUpdateSchema.safeParse({
+        ...fields,
+        expected_revision: 1,
+        etl_type: "unstructured_local",
+        extraction_cache_enabled: false,
+      }).success,
+    ).toBe(true);
+    expect(
+      adminKnowledgeSettingsUpdateSchema.safeParse({
+        ...fields,
+        expected_revision: 1,
+        etl_type: "remote_parser",
+      }).success,
+    ).toBe(false);
   });
 
   test("rejects secret echoes and unknown GET fields before caching", async () => {

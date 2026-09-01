@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import sys
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,6 +33,7 @@ from ..contracts import (
     KnowledgeEmbeddingMaterial,
     KnowledgeError,
     KnowledgeModelPort,
+    KnowledgeSegmentAttachmentView,
     KnowledgeSegmentChildView,
     KnowledgeSegmentCreate,
     KnowledgeSegmentDetail,
@@ -41,13 +43,24 @@ from ..contracts import (
     KnowledgeSettings,
 )
 from ..documents.service import document_view
-from ..ingestion.splitter import split_child_chunks
+from ..extraction.contracts import Document as ParsedDocument
+from ..extraction.contracts import ProcessingProfile, SourceSpan
+from ..ingestion.index_text import build_index_text
+from ..ingestion.splitter import (
+    ChildDraft,
+    fits_chunk,
+    split_child_chunks,
+    split_documents,
+)
 from ..ingestion.summary_admission import enqueue_summary_refresh
+from ..ingestion.tokenizer import count_knowledge_tokens
 from ..models.client import KnowledgeModelClient
 from ..persistence.derivations import document_delete_error_expression
 from ..persistence.models import (
+    KnowledgeAttachmentRow,
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
+    KnowledgeSegmentAttachmentRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
     KnowledgeSegmentSummaryRow,
@@ -59,6 +72,8 @@ logger = logging.getLogger(__name__)
 # Manual and edited segments obey the same ceiling as the splitter's largest
 # allowed chunk, so one segment can never dwarf ingested ones.
 MAX_SEGMENT_CONTENT_CHARS = 4000
+_LOGICAL_ATTACHMENT_PREFIX = "knowledge-attachment:"
+_LOGICAL_ATTACHMENT_IMAGE = re.compile(r"!\[((?:\\.|[^\]\\])*)\]\(knowledge-attachment:([0-9a-f]{64})\)")
 
 
 def _invalid(message: str) -> KnowledgeError:
@@ -98,8 +113,127 @@ class _EmbeddedContent:
     """Pre-transaction embedding result for one segment's new content."""
 
     parent_vector: list[float] | None
-    children: tuple[str, ...]
+    index_text: str
+    token_count: int
+    children: tuple[ChildDraft, ...]
     child_vectors: tuple[list[float], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ManualAttachment:
+    ref: str
+    alt_text: str
+
+
+def _manual_attachments(content: str) -> tuple[_ManualAttachment, ...]:
+    """Parse ordered logical image refs and reject malformed/raw identities."""
+
+    matches = list(_LOGICAL_ATTACHMENT_IMAGE.finditer(content))
+    outside = _LOGICAL_ATTACHMENT_IMAGE.sub("", content)
+    if _LOGICAL_ATTACHMENT_PREFIX in outside:
+        raise _invalid("content 包含无效的附件引用")
+    return tuple(
+        _ManualAttachment(
+            ref=match.group(2),
+            alt_text=re.sub(r"\\([\\\]])", r"\1", match.group(1)),
+        )
+        for match in matches
+    )
+
+
+def _manual_derivation(
+    document: KnowledgeDocumentRow,
+    content: str,
+) -> tuple[str, int, tuple[ChildDraft, ...]]:
+    """Derive one manually governed parent without claiming source offsets."""
+
+    index_text = build_index_text(content)
+    if not index_text or not fits_chunk(content, 4000):
+        raise _invalid("content 超出 Knowledge 分段预算或没有可索引文字")
+    token_count = count_knowledge_tokens(index_text)
+    if document.chunking_mode != "parent_child":
+        return index_text, token_count, ()
+
+    profile_value = document.parsing_profile
+    if profile_value is None:
+        children = split_child_chunks(
+            content,
+            child_chunk_size=document.child_chunk_size,
+            child_chunk_separator=document.child_chunk_separator,
+        )
+        return (
+            index_text,
+            token_count,
+            tuple(
+                ChildDraft(
+                    child,
+                    build_index_text(child),
+                    count_knowledge_tokens(build_index_text(child)),
+                )
+                for child in children
+            ),
+        )
+
+    try:
+        profile = ProcessingProfile.model_validate(profile_value)
+    except ValueError:
+        raise _storage_unavailable() from None
+    if profile.chunk.unit == "character":
+        children = split_child_chunks(
+            content,
+            child_chunk_size=document.child_chunk_size,
+            child_chunk_separator=document.child_chunk_separator,
+        )
+        return (
+            index_text,
+            token_count,
+            tuple(
+                ChildDraft(
+                    child,
+                    build_index_text(child),
+                    count_knowledge_tokens(build_index_text(child)),
+                )
+                for child in children
+            ),
+        )
+
+    manual_profile = profile.chunk.model_copy(
+        update={
+            "mode": "parent_child",
+            "size": 4000,
+            "overlap": 0,
+            "child_size": document.child_chunk_size,
+            "child_separator": document.child_chunk_separator,
+            "remove_extra_spaces": False,
+            "remove_urls_emails": False,
+        }
+    )
+    synthetic = ParsedDocument(
+        page_content=content,
+        source_spans=(
+            SourceSpan(
+                block_id="manual",
+                start=0,
+                end=len(content),
+                location={},
+            ),
+        ),
+    )
+    drafts = split_documents((synthetic,), profile=manual_profile)
+    if len(drafts) != 1 or drafts[0].content != content:
+        raise _invalid("content 超出 Knowledge 分段预算")
+    return (
+        index_text,
+        token_count,
+        tuple(
+            ChildDraft(
+                child.content,
+                child.index_text,
+                child.token_count,
+            )
+            for child in drafts[0].children
+        ),
+    )
 
 
 def _segment_view(row: KnowledgeSegmentRow) -> KnowledgeSegmentView:
@@ -113,7 +247,94 @@ def _segment_view(row: KnowledgeSegmentRow) -> KnowledgeSegmentView:
         hit_count=row.hit_count,
         source_position=dict(row.source_position),
         created_at=row.created_at,
+        token_count=row.token_count,
+        source_spans=tuple(SourceSpan.model_validate(span) for span in row.source_spans),
     )
+
+
+async def _load_published_segment(
+    session: AsyncSession,
+    project_id: UUID,
+    document_id: UUID,
+    segment_id: UUID,
+    *,
+    base_id: UUID | None = None,
+    expected_document_version: int | None,
+    expected_content_digest: str | None,
+) -> tuple[KnowledgeSegmentRow, KnowledgeDocumentRow, KnowledgeBaseRow]:
+    """Load retained publication for management, including disabled content.
+
+    The caller owns project authorization and the transaction. Expectations
+    bind the Segment's publication, never a newer failed processing target.
+    """
+    scope = (
+        KnowledgeBaseRow.project_id == project_id,
+        KnowledgeDocumentRow.project_id == project_id,
+        KnowledgeSegmentRow.project_id == project_id,
+        KnowledgeSegmentRow.knowledge_base_id == KnowledgeBaseRow.id,
+        KnowledgeDocumentRow.id == document_id,
+        KnowledgeSegmentRow.id == segment_id,
+        KnowledgeBaseRow.status != "deleting",
+        KnowledgeDocumentRow.status != "deleting",
+    )
+    if base_id is not None:
+        scope += (KnowledgeBaseRow.id == base_id,)
+    result = (
+        await session.execute(
+            select(KnowledgeSegmentRow, KnowledgeDocumentRow, KnowledgeBaseRow)
+            .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
+            .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
+            .where(*scope)
+        )
+    ).one_or_none()
+    if result is None:
+        raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Segment 不存在")
+    segment, document, base = result
+    if document.published_version is None or segment.document_version != document.published_version:
+        raise _conflict()
+    if expected_document_version is not None and expected_document_version != segment.document_version:
+        raise _conflict()
+    if expected_content_digest is not None and expected_content_digest != hashlib.sha256(segment.content.encode("utf-8")).hexdigest():
+        raise _conflict()
+    return segment, document, base
+
+
+async def load_managed_segment(
+    session: AsyncSession,
+    project_id: UUID,
+    document_id: UUID,
+    segment_id: UUID,
+    *,
+    expected_document_version: int | None,
+    expected_content_digest: str | None,
+) -> tuple[KnowledgeSegmentRow, KnowledgeDocumentRow, KnowledgeBaseRow]:
+    """Management expectations identify the retained published Segment."""
+    return await _load_published_segment(session, project_id, document_id, segment_id, expected_document_version=expected_document_version, expected_content_digest=expected_content_digest)
+
+
+async def load_citation_segment(
+    session: AsyncSession,
+    project_id: UUID,
+    base_id: UUID,
+    document_id: UUID,
+    segment_id: UUID,
+    *,
+    expected_document_version: int | None,
+    expected_content_digest: str | None,
+) -> tuple[KnowledgeSegmentRow, KnowledgeDocumentRow, KnowledgeBaseRow]:
+    """Load only an enabled current publication eligible for citations."""
+    segment, document, base = await _load_published_segment(
+        session,
+        project_id,
+        document_id,
+        segment_id,
+        base_id=base_id,
+        expected_document_version=expected_document_version,
+        expected_content_digest=expected_content_digest,
+    )
+    if base.status != "active" or document.status != "ready" or not document.enabled or not segment.enabled or segment.document_version != document.version:
+        raise _conflict()
+    return segment, document, base
 
 
 class KnowledgeSegmentService:
@@ -150,12 +371,15 @@ class KnowledgeSegmentService:
 
         vector: list[float] | None = None
         embedded: _EmbeddedContent | None = None
+        attachments: tuple[_ManualAttachment, ...] = ()
         snapshot_version: int | None = None
         embedded_model_id: UUID | None = None
         if content is not None:
+            attachments = _manual_attachments(content)
             document, _segment, other_vector_entries = await self._load_segment_snapshot(
                 project_id,
                 segment_id,
+                attachments=attachments,
                 authority=authority,
             )
             # Freeze the pre-provider-call coordinates. Re-embedding keeps
@@ -194,6 +418,12 @@ class KnowledgeSegmentService:
                 if content is not None and not await self._binding_unchanged(session, document.knowledge_base_id, embedded_model_id):
                     raise _conflict()
                 if content is not None and embedded is not None:
+                    attachment_rows = await self._validated_attachment_rows(
+                        session,
+                        document,
+                        attachments,
+                        lock=True,
+                    )
                     other_vector_entries = await self._vector_entry_count(
                         session,
                         document,
@@ -207,14 +437,28 @@ class KnowledgeSegmentService:
                     document.word_count = document.word_count - segment.word_count + word_count
                     document.updated_at = func.now()  # type: ignore[assignment]
                     segment.content = content
+                    segment.index_text = embedded.index_text
+                    segment.token_count = embedded.token_count
+                    segment.source_spans = []
+                    segment.source_position = {"manual": True}
                     segment.word_count = word_count
                     segment.embedding = vector
                     # The lexical derivation moves with the text in the same
                     # transaction; an enabled-only toggle never touches it.
-                    segment.lexical_tsv = func.to_tsvector("simple", lexical_index_input(content))
+                    segment.lexical_tsv = func.to_tsvector(
+                        "simple",
+                        lexical_index_input(embedded.index_text),
+                    )
                     segment.lexical_version = KNOWLEDGE_LEXICAL_VERSION
                     if document.chunking_mode == "parent_child":
                         await self._replace_children(session, segment, embedded)
+                    await self._replace_attachments(
+                        session,
+                        document,
+                        segment,
+                        attachments,
+                        attachment_rows,
+                    )
                 if update.enabled is not None:
                     segment.enabled = update.enabled
                 if content is not None:
@@ -240,9 +484,11 @@ class KnowledgeSegmentService:
         """Append one manual segment to the document's current version."""
 
         content = _validated_content(create.content)
+        attachments = _manual_attachments(content)
         document, current_vector_entries = await self._load_document_snapshot(
             project_id,
             document_id,
+            attachments=attachments,
             authority=authority,
         )
         material = await self._embedding_material(
@@ -274,6 +520,12 @@ class KnowledgeSegmentService:
                     raise _conflict()
                 if not await self._binding_unchanged(session, document.knowledge_base_id, material.model_id):
                     raise _conflict()
+                attachment_rows = await self._validated_attachment_rows(
+                    session,
+                    document,
+                    attachments,
+                    lock=True,
+                )
                 current = (
                     KnowledgeSegmentRow.knowledge_document_id == document.id,
                     KnowledgeSegmentRow.document_version == document.version,
@@ -294,17 +546,33 @@ class KnowledgeSegmentService:
                     knowledge_base_id=document.knowledge_base_id,
                     knowledge_document_id=document.id,
                     document_version=document.version,
+                    extraction_id=document.published_extraction_id,
                     position=next_position,
                     content=content,
+                    index_text=embedded.index_text,
+                    token_count=embedded.token_count,
+                    source_spans=[],
                     word_count=word_count,
                     source_position={"manual": True},
                     embedding=vector,
-                    lexical_tsv=func.to_tsvector("simple", lexical_index_input(content)),
+                    lexical_tsv=func.to_tsvector(
+                        "simple",
+                        lexical_index_input(embedded.index_text),
+                    ),
                     lexical_version=KNOWLEDGE_LEXICAL_VERSION,
                 )
                 session.add(segment)
-                if document.chunking_mode == "parent_child":
+                if document.chunking_mode == "parent_child" or attachments:
                     await session.flush()
+                if attachments:
+                    await self._replace_attachments(
+                        session,
+                        document,
+                        segment,
+                        attachments,
+                        attachment_rows,
+                    )
+                if document.chunking_mode == "parent_child":
                     await self._replace_children(session, segment, embedded)
                 document.segment_count = document.segment_count + 1
                 document.word_count = document.word_count + word_count
@@ -355,32 +623,27 @@ class KnowledgeSegmentService:
                     session,
                     project_id=project_id,
                 )
-                result = (
-                    await session.execute(
-                        select(KnowledgeSegmentRow, KnowledgeDocumentRow)
-                        .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
-                        .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
-                        .where(
-                            KnowledgeBaseRow.project_id == project_id,
-                            KnowledgeBaseRow.id == base_id,
-                            KnowledgeDocumentRow.id == document_id,
-                            KnowledgeSegmentRow.id == segment_id,
-                        )
-                    )
-                ).one_or_none()
-                if result is None:
-                    raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Segment 不存在")
-                segment, document = result
-                content_state = "current" if segment.document_version == document.version else "stale"
                 if expected_document_version is not None or expected_content_digest is not None:
-                    # Search-hit semantics: the row must still be the ready
-                    # document's current generation and byte-identical.
-                    if document.status != "ready" or content_state != "current":
-                        raise _conflict()
-                    if expected_document_version is not None and expected_document_version != segment.document_version:
-                        raise _conflict()
-                    if expected_content_digest is not None and expected_content_digest != hashlib.sha256(segment.content.encode("utf-8")).hexdigest():
-                        raise _conflict()
+                    segment, document, _base = await load_citation_segment(
+                        session,
+                        project_id,
+                        base_id,
+                        document_id,
+                        segment_id,
+                        expected_document_version=expected_document_version,
+                        expected_content_digest=expected_content_digest,
+                    )
+                else:
+                    segment, document, _base = await _load_published_segment(
+                        session,
+                        project_id,
+                        document_id,
+                        segment_id,
+                        base_id=base_id,
+                        expected_document_version=None,
+                        expected_content_digest=None,
+                    )
+                content_state = "current" if segment.document_version == document.version else "stale"
                 children_scope = (
                     KnowledgeSegmentChildRow.knowledge_segment_id == segment.id,
                     KnowledgeSegmentChildRow.document_version == segment.document_version,
@@ -405,6 +668,35 @@ class KnowledgeSegmentService:
                         KnowledgeSegmentSummaryRow.source_content_digest == hashlib.sha256(segment.content.encode("utf-8")).hexdigest(),
                     )
                 )
+                attachment_rows = (
+                    await session.execute(
+                        select(
+                            KnowledgeSegmentAttachmentRow,
+                            KnowledgeAttachmentRow,
+                        )
+                        .join(
+                            KnowledgeAttachmentRow,
+                            and_(
+                                KnowledgeAttachmentRow.id == KnowledgeSegmentAttachmentRow.attachment_id,
+                                KnowledgeAttachmentRow.project_id == KnowledgeSegmentAttachmentRow.project_id,
+                                KnowledgeAttachmentRow.knowledge_base_id == KnowledgeSegmentAttachmentRow.knowledge_base_id,
+                                KnowledgeAttachmentRow.knowledge_document_id == KnowledgeSegmentAttachmentRow.knowledge_document_id,
+                                KnowledgeAttachmentRow.extraction_id == KnowledgeSegmentAttachmentRow.extraction_id,
+                            ),
+                        )
+                        .where(
+                            KnowledgeSegmentAttachmentRow.project_id == segment.project_id,
+                            KnowledgeSegmentAttachmentRow.knowledge_base_id == segment.knowledge_base_id,
+                            KnowledgeSegmentAttachmentRow.knowledge_document_id == segment.knowledge_document_id,
+                            KnowledgeSegmentAttachmentRow.extraction_id == segment.extraction_id,
+                            KnowledgeSegmentAttachmentRow.segment_id == segment.id,
+                        )
+                        .order_by(
+                            KnowledgeSegmentAttachmentRow.position.asc(),
+                            KnowledgeSegmentAttachmentRow.attachment_id.asc(),
+                        )
+                    )
+                ).all()
                 return KnowledgeSegmentDetail(
                     segment=_segment_view(segment),
                     knowledge_base_id=base_id,
@@ -416,6 +708,17 @@ class KnowledgeSegmentService:
                     children_total=children_total,
                     child_page=child_page,
                     summary=KnowledgeSegmentSummaryView(content=summary.content, created_at=summary.created_at) if summary is not None else None,
+                    attachments=tuple(
+                        KnowledgeSegmentAttachmentView(
+                            attachment_id=attachment.id,
+                            ref=attachment.sha256,
+                            alt_text=binding.alt_text,
+                            media_type=attachment.media_type,
+                            width=attachment.width,
+                            height=attachment.height,
+                        )
+                        for binding, attachment in attachment_rows
+                    ),
                     children=tuple(
                         KnowledgeSegmentChildView(
                             id=row.id,
@@ -466,6 +769,7 @@ class KnowledgeSegmentService:
         project_id: UUID,
         segment_id: UUID,
         *,
+        attachments: tuple[_ManualAttachment, ...] = (),
         authority: KnowledgeProjectAuthority | None = None,
     ) -> tuple[KnowledgeDocumentRow, KnowledgeSegmentRow, int]:
         """Pre-embedding read: the segment must sit on a ready current version."""
@@ -492,6 +796,12 @@ class KnowledgeSegmentService:
                         document,
                         excluding_segment_id=segment.id,
                     )
+                    await self._validated_attachment_rows(
+                        session,
+                        document,
+                        attachments,
+                        lock=False,
+                    )
         except SQLAlchemyError:
             raise _storage_unavailable() from None
         if result is None:
@@ -503,6 +813,7 @@ class KnowledgeSegmentService:
         project_id: UUID,
         document_id: UUID,
         *,
+        attachments: tuple[_ManualAttachment, ...] = (),
         authority: KnowledgeProjectAuthority | None = None,
     ) -> tuple[KnowledgeDocumentRow, int]:
         try:
@@ -520,11 +831,88 @@ class KnowledgeSegmentService:
                         session,
                         document,
                     )
+                    await self._validated_attachment_rows(
+                        session,
+                        document,
+                        attachments,
+                        lock=False,
+                    )
         except SQLAlchemyError:
             raise _storage_unavailable() from None
         if document is None:
             raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
         return document, vector_entries
+
+    @staticmethod
+    async def _validated_attachment_rows(
+        session: AsyncSession,
+        document: KnowledgeDocumentRow,
+        attachments: tuple[_ManualAttachment, ...],
+        *,
+        lock: bool,
+    ) -> dict[str, KnowledgeAttachmentRow]:
+        """Resolve refs only inside this Document's current publication."""
+
+        refs = {attachment.ref for attachment in attachments}
+        if not refs:
+            return {}
+        if document.published_extraction_id is None:
+            raise _invalid("content 引用了当前文档不可用的附件")
+        statement = select(KnowledgeAttachmentRow).where(
+            KnowledgeAttachmentRow.project_id == document.project_id,
+            KnowledgeAttachmentRow.knowledge_base_id == document.knowledge_base_id,
+            KnowledgeAttachmentRow.knowledge_document_id == document.id,
+            KnowledgeAttachmentRow.extraction_id == document.published_extraction_id,
+            KnowledgeAttachmentRow.sha256.in_(refs),
+            KnowledgeAttachmentRow.state == "ready",
+            KnowledgeAttachmentRow.upload_state == "stored",
+            KnowledgeAttachmentRow.quota_state == "committed",
+        )
+        if lock:
+            statement = statement.with_for_update()
+        rows = list((await session.scalars(statement)).all())
+        by_ref = {row.sha256: row for row in rows}
+        if set(by_ref) != refs:
+            raise _invalid("content 引用了当前文档不可用的附件")
+        return by_ref
+
+    @staticmethod
+    async def _replace_attachments(
+        session: AsyncSession,
+        document: KnowledgeDocumentRow,
+        segment: KnowledgeSegmentRow,
+        attachments: tuple[_ManualAttachment, ...],
+        attachment_rows: dict[str, KnowledgeAttachmentRow],
+    ) -> None:
+        """Atomically replace ordered bindings for edited Markdown."""
+
+        await session.execute(
+            delete(KnowledgeSegmentAttachmentRow).where(
+                KnowledgeSegmentAttachmentRow.segment_id == segment.id,
+            )
+        )
+        if not attachments:
+            return
+        extraction_id = document.published_extraction_id
+        if extraction_id is None:  # guarded by _validated_attachment_rows
+            raise _invalid("content 引用了当前文档不可用的附件")
+        segment.extraction_id = extraction_id
+        await session.flush()
+        session.add_all(
+            [
+                KnowledgeSegmentAttachmentRow(
+                    project_id=document.project_id,
+                    knowledge_base_id=document.knowledge_base_id,
+                    knowledge_document_id=document.id,
+                    extraction_id=extraction_id,
+                    segment_id=segment.id,
+                    attachment_id=attachment_rows[attachment.ref].id,
+                    position=position,
+                    alt_text=attachment.alt_text,
+                )
+                for position, attachment in enumerate(attachments, start=1)
+            ]
+        )
 
     async def _binding_unchanged(
         self,
@@ -583,6 +971,8 @@ class KnowledgeSegmentService:
         children — the parent row keeps a NULL vector.
         """
 
+        index_text, token_count, children = _manual_derivation(document, content)
+
         async def before_batch() -> None:
             if authority is None:
                 return
@@ -598,23 +988,36 @@ class KnowledgeSegmentService:
                     self._settings.max_segments_per_document,
                 )
             return _EmbeddedContent(
-                parent_vector=(await self._client.embed(material, [content], batch_guard=before_batch))[0],
+                parent_vector=(
+                    await self._client.embed(
+                        material,
+                        [index_text],
+                        batch_guard=before_batch,
+                    )
+                )[0],
+                index_text=index_text,
+                token_count=token_count,
                 children=(),
                 child_vectors=(),
             )
-        children = split_child_chunks(
-            content,
-            child_chunk_size=document.child_chunk_size,
-            child_chunk_separator=document.child_chunk_separator,
-        )
         if not children:  # pragma: no cover - non-empty content always splits
             raise _invalid("内容未能切分出子块")
         if len(children) > available_vector_entries:
             raise _quota_exceeded(
                 self._settings.max_segments_per_document,
             )
-        child_vectors = await self._client.embed(material, list(children), batch_guard=before_batch)
-        return _EmbeddedContent(parent_vector=None, children=children, child_vectors=tuple(child_vectors))
+        child_vectors = await self._client.embed(
+            material,
+            [child.index_text for child in children],
+            batch_guard=before_batch,
+        )
+        return _EmbeddedContent(
+            parent_vector=None,
+            index_text=index_text,
+            token_count=token_count,
+            children=children,
+            child_vectors=tuple(child_vectors),
+        )
 
     async def _replace_children(
         self,
@@ -635,13 +1038,19 @@ class KnowledgeSegmentService:
                     knowledge_segment_id=segment.id,
                     document_version=segment.document_version,
                     position=position,
-                    content=content,
-                    word_count=len(content),
+                    content=child.content,
+                    index_text=child.index_text,
+                    token_count=child.token_count,
+                    source_spans=[],
+                    word_count=len(child.content),
                     embedding=vector,
-                    lexical_tsv=func.to_tsvector("simple", lexical_index_input(content)),
+                    lexical_tsv=func.to_tsvector(
+                        "simple",
+                        lexical_index_input(child.index_text),
+                    ),
                     lexical_version=KNOWLEDGE_LEXICAL_VERSION,
                 )
-                for position, (content, vector) in enumerate(
+                for position, (child, vector) in enumerate(
                     zip(embedded.children, embedded.child_vectors, strict=True),
                     start=1,
                 )

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 import type { Capability, Project } from "@/core/projects/types";
@@ -7,6 +9,117 @@ const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const MODEL_ID = "30000000-0000-4000-8000-000000000001";
 const RERANK_MODEL_ID = "30000000-0000-4000-8000-000000000002";
 const TIMESTAMP = "2026-08-29T00:00:00Z";
+const KNOWLEDGE_IMAGE_REF = "a".repeat(64);
+const KNOWLEDGE_IMAGE_ATTACHMENT_ID = "62000000-0000-4000-8000-000000000001";
+const SAFE_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQ1sAAAAASUVORK5CYII=";
+const PROCESSING_PROFILE = {
+  parse: {
+    etl_type: "dify",
+    extractor_id: "dify.text",
+    extractor_version: "1",
+    normalization_version: "md-v1",
+    image_policy_version: "raster-v1",
+    header_rules: [],
+  },
+  chunk: {
+    unit: "token",
+    mode: "general",
+    size: 1000,
+    overlap: 100,
+    separator: "\\n\\n",
+    child_size: 500,
+    child_separator: "\\n",
+    remove_extra_spaces: false,
+    remove_urls_emails: false,
+    tokenizer_profile_id: "knowledge-cl100k-v1",
+    tokenizer_digest: "d".repeat(64),
+    cleaner_version: "cleaner-v1",
+    splitter_version: "splitter-v1",
+  },
+};
+type MockFileCapabilities = {
+  effective_etl: "dify" | "unstructured_local";
+  capability_revision: string;
+  formats: Array<{
+    extension: string;
+    parser_id: string;
+    available: boolean;
+    reason_code: string | null;
+    embedded_images: boolean;
+  }>;
+  chunk_limits: {
+    unit: "token";
+    tokenizer_profile_id: string;
+    parent_min: number;
+    parent_max: number;
+    parent_max_chars: number;
+    overlap_max: number;
+    child_min: number;
+    child_max: number;
+  };
+};
+
+const FILE_CAPABILITIES: MockFileCapabilities = {
+  effective_etl: "dify",
+  capability_revision: "a".repeat(64),
+  formats: [
+    {
+      extension: ".txt",
+      parser_id: "dify.text",
+      available: true,
+      reason_code: null,
+      embedded_images: false,
+    },
+    ...[
+      [".md", "dify.markdown", false],
+      [".markdown", "dify.markdown", false],
+      [".mdx", "dify.markdown", false],
+      [".pdf", "dify.pdf", true],
+      [".docx", "dify.word", true],
+      [".xlsx", "dify.excel", true],
+      [".xls", "dify.excel", false],
+      [".csv", "dify.csv", false],
+      [".html", "dify.html", false],
+      [".htm", "dify.html", false],
+      [".pptx", "unstructured.pptx", false],
+      [".epub", "unstructured.epub", false],
+    ].map(([extension, parser_id, embedded_images]) => ({
+      extension: extension as string,
+      parser_id: parser_id as string,
+      available: true,
+      reason_code: null,
+      embedded_images: embedded_images as boolean,
+    })),
+  ],
+  chunk_limits: {
+    unit: "token",
+    tokenizer_profile_id: "knowledge-cl100k-v1",
+    parent_min: 200,
+    parent_max: 4000,
+    parent_max_chars: 4000,
+    overlap_max: 500,
+    child_min: 100,
+    child_max: 2000,
+  },
+};
+
+type MockProcessingParameters = {
+  unit: "character" | "token";
+  mode: "general" | "parent_child";
+  size: number;
+  overlap: number;
+  separator: string;
+  child_size: number;
+  child_separator: string;
+  remove_extra_spaces: boolean;
+  remove_urls_emails: boolean;
+  header_rules: Array<{
+    sheet: string | null;
+    mode: "auto" | "none" | "explicit";
+    row: number | null;
+  }>;
+};
 
 const READ_CAPABILITIES: Capability[] = [
   "project.read",
@@ -68,10 +181,90 @@ function knowledgeError(
   );
 }
 
+type KnowledgeObjectURLStats = {
+  created: string[];
+  revoked: string[];
+};
+
+async function installKnowledgeObjectURLTracker(page: Page) {
+  await page.addInitScript(() => {
+    const stats: KnowledgeObjectURLStats = { created: [], revoked: [] };
+    const create = URL.createObjectURL.bind(URL);
+    const revoke = URL.revokeObjectURL.bind(URL);
+    (
+      window as typeof window & {
+        __knowledgeObjectURLStats: KnowledgeObjectURLStats;
+        __knowledgeExecuted: boolean;
+      }
+    ).__knowledgeObjectURLStats = stats;
+    (
+      window as typeof window & { __knowledgeExecuted: boolean }
+    ).__knowledgeExecuted = false;
+    URL.createObjectURL = (object: Blob | MediaSource) => {
+      const url = create(object);
+      stats.created.push(url);
+      return url;
+    };
+    URL.revokeObjectURL = (url: string) => {
+      stats.revoked.push(url);
+      revoke(url);
+    };
+  });
+}
+
+function knowledgeObjectURLStats(page: Page) {
+  return page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __knowledgeObjectURLStats: KnowledgeObjectURLStats;
+        }
+      ).__knowledgeObjectURLStats,
+  );
+}
+
 /** Read one text field out of a multipart/form-data request body. */
 function multipartField(body: string, name: string): string | null {
   const pattern = new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r]*)\\r\\n`, "u");
   return pattern.exec(body)?.[1] ?? null;
+}
+
+function multipartJson<T>(body: string, name: string): T | null {
+  const value = multipartField(body, name);
+  return value === null ? null : (JSON.parse(value) as T);
+}
+
+function multipartProcessingParameters(
+  body: string,
+): MockProcessingParameters | null {
+  const profile = multipartJson<MockProcessingParameters>(
+    body,
+    "processing_profile",
+  );
+  if (profile !== null) return profile;
+  const legacySize = multipartField(body, "chunk_size");
+  if (legacySize === null) return null;
+  return {
+    unit: "token",
+    mode:
+      multipartField(body, "chunking_mode") === "parent_child"
+        ? "parent_child"
+        : "general",
+    size: Number.parseInt(legacySize, 10),
+    overlap: Number.parseInt(
+      multipartField(body, "chunk_overlap") ?? "100",
+      10,
+    ),
+    separator: multipartField(body, "chunk_separator") ?? "\\n\\n",
+    child_size: Number.parseInt(
+      multipartField(body, "child_chunk_size") ?? "500",
+      10,
+    ),
+    child_separator: multipartField(body, "child_chunk_separator") ?? "\\n",
+    remove_extra_spaces: multipartField(body, "remove_extra_spaces") === "true",
+    remove_urls_emails: multipartField(body, "remove_urls_emails") === "true",
+    header_rules: [],
+  };
 }
 
 type MockBase = {
@@ -120,6 +313,15 @@ type MockDocument = {
   version?: number;
   /** current-generation indexing task progress rendered by the status cell */
   task_progress?: Record<string, unknown> | null;
+  parsing_profile?: ReturnType<typeof processingProfileFor> | null;
+  parse_warnings?: Array<{
+    code: string;
+    message: string;
+    source_position: Record<string, string | number>;
+  }>;
+  chunk_size_unit?: "character" | "token";
+  tokenizer_profile_id?: string | null;
+  content_initialized: boolean;
   /** statuses the document walks through on subsequent list polls */
   progression?: MockDocument["status"][];
 };
@@ -136,8 +338,32 @@ type MockSegment = {
   position: number;
   content: string;
   enabled: boolean;
-  source_position: Record<string, unknown>;
+  source_position: Record<string, string | number> | { manual: true };
+  token_count?: number;
+  source_spans?: Array<{
+    block_id: string;
+    start: number;
+    end: number;
+    location: Record<string, string | number>;
+    role: "source" | "context_prefix";
+  }>;
+  attachments?: Array<{
+    attachment_id: string;
+    ref: string;
+    alt_text: string;
+    media_type: "image/png" | "image/jpeg" | "image/webp";
+    width: number;
+    height: number;
+  }>;
   summary?: { content: string; created_at: string } | null;
+};
+
+type MockDocumentAttachment = {
+  attachment_id: string;
+  ref: string;
+  media_type: "image/png" | "image/jpeg" | "image/webp";
+  width: number;
+  height: number;
 };
 
 type MockQuery = {
@@ -173,6 +399,17 @@ function baseView(base: MockBase) {
 
 function documentView(document: MockDocument) {
   return {
+    parsing_profile:
+      document.parsing_profile === undefined
+        ? PROCESSING_PROFILE
+        : document.parsing_profile,
+    parse_warnings: document.parse_warnings ?? [],
+    chunk_size_unit: document.chunk_size_unit ?? "token",
+    tokenizer_profile_id:
+      document.tokenizer_profile_id === undefined
+        ? "knowledge-cl100k-v1"
+        : document.tokenizer_profile_id,
+    content_initialized: document.content_initialized,
     id: document.id,
     project_id: PROJECT_ID,
     knowledge_base_id: document.knowledge_base_id,
@@ -227,6 +464,9 @@ function segmentView(segment: MockSegment) {
     hit_count: 0,
     source_position: segment.source_position,
     created_at: TIMESTAMP,
+    token_count:
+      segment.token_count ?? Math.max(1, Math.ceil(segment.content.length / 2)),
+    source_spans: segment.source_spans ?? [],
   };
 }
 
@@ -250,6 +490,102 @@ function listPayload(items: unknown[]) {
     page_size: 100,
     request_id: "req-list",
   };
+}
+
+function previewPayload(
+  items: Array<{
+    position: number;
+    content: string;
+    word_count: number;
+    child_contents: string[];
+  }>,
+  total: number,
+  requestId: string,
+  options: {
+    fingerprint?: string;
+    profile?: ReturnType<typeof processingProfileFor>;
+    tableSources?: Array<{
+      sheet: string | null;
+      header_mode: "auto" | "none" | "explicit";
+      header_row: number | null;
+      header_cells: string[];
+    }>;
+  } = {},
+) {
+  return {
+    items: items.map((item) => ({
+      ...item,
+      token_count: Math.max(1, Math.ceil(item.content.length / 2)),
+      source_spans: [
+        {
+          block_id: `preview:${item.position}`,
+          start: 0,
+          end: item.content.length,
+          location: { paragraph: item.position },
+          role: "source",
+        },
+      ],
+      attachments: [] as Array<{ ref: string; alt_text: string }>,
+    })),
+    total,
+    preview_fingerprint: options.fingerprint ?? "b".repeat(64),
+    source_sha256: "c".repeat(64),
+    effective_profile: options.profile ?? PROCESSING_PROFILE,
+    warnings: [],
+    preview_attachments: [] as Array<{
+      ref: string;
+      media_type: "image/png" | "image/jpeg" | "image/webp";
+      data_base64: string;
+    }>,
+    omitted_preview_attachment_count: 0,
+    table_sources: options.tableSources ?? [],
+    request_id: requestId,
+  };
+}
+
+function processingProfileFor(parameters: MockProcessingParameters) {
+  return {
+    parse: {
+      ...PROCESSING_PROFILE.parse,
+      header_rules: parameters.header_rules,
+    },
+    chunk: {
+      ...PROCESSING_PROFILE.chunk,
+      unit: parameters.unit,
+      mode: parameters.mode,
+      size: parameters.size,
+      overlap: parameters.overlap,
+      separator: parameters.separator,
+      child_size: parameters.child_size,
+      child_separator: parameters.child_separator,
+      remove_extra_spaces: parameters.remove_extra_spaces,
+      remove_urls_emails: parameters.remove_urls_emails,
+      tokenizer_profile_id:
+        parameters.unit === "token" ? "knowledge-cl100k-v1" : null,
+      tokenizer_digest: parameters.unit === "token" ? "d".repeat(64) : null,
+    },
+  };
+}
+
+function tableSourcesFor(
+  fileName: string,
+  parameters: MockProcessingParameters,
+) {
+  const extension = fileName.split(".").at(-1)?.toLowerCase();
+  const sheets = extension === "csv" ? [null] : ["Data", "Totals"];
+  if (extension !== "csv" && extension !== "xls" && extension !== "xlsx") {
+    return [];
+  }
+  return sheets.map((sheet, index) => {
+    const rule = parameters.header_rules.find((item) => item.sheet === sheet);
+    const mode = rule?.mode ?? "auto";
+    return {
+      sheet,
+      header_mode: mode,
+      header_row: mode === "none" ? null : (rule?.row ?? index + 2),
+      header_cells: sheet === "Totals" ? ["地区", "总计"] : ["设备", "端口"],
+    };
+  });
 }
 
 type KnowledgeMockOptions = {
@@ -284,10 +620,20 @@ type KnowledgeMockOptions = {
     string,
     Array<{ id: string; position: number; content: string }>
   >;
+  /** write-authorized attachment choices from the current publication */
+  documentAttachments?: Record<string, MockDocumentAttachment[]>;
   /** seeded query log, newest first; searches prepend to it */
   queries?: MockQuery[];
   /** seeded metadata field definitions */
   metadataFields?: MockMetadataField[];
+  fileCapabilities?: MockFileCapabilities;
+  fileCapabilitiesFailure?: {
+    status: number;
+    code: string;
+    message: string;
+  };
+  /** Park authorized attachment bytes until a lifecycle test releases them. */
+  attachmentResponseGate?: Promise<void>;
 };
 
 /**
@@ -303,10 +649,14 @@ async function mockKnowledgeRoutes(
     options.capabilities ?? EDIT_CAPABILITIES,
   );
   const state = {
+    project: routedProject,
     bases: options.bases ?? [],
     documents: options.documents ?? [],
     segments: new Map(Object.entries(options.segments ?? {})),
     segmentChildren: new Map(Object.entries(options.segmentChildren ?? {})),
+    documentAttachments: new Map(
+      Object.entries(options.documentAttachments ?? {}),
+    ),
     // The digest/version the detail endpoint currently serves; tests bump
     // these to simulate the document changing after a search was scored.
     detailDigest: "d".repeat(64),
@@ -319,15 +669,29 @@ async function mockKnowledgeRoutes(
     fieldCounter: 0,
     documentListRequests: 0,
     modelOptionsRequests: 0,
+    fileCapabilitiesRequests: 0,
+    fileCapabilities: options.fileCapabilities ?? FILE_CAPABILITIES,
+    fileCapabilitiesFailure: options.fileCapabilitiesFailure ?? null,
     documentListFailure: options.documentListFailure ?? null,
     searchRequests: [] as Array<Record<string, unknown>>,
     previewRequests: [] as Array<Record<string, string>>,
+    previewProcessingRequests: [] as Array<{
+      file: string;
+      profile: MockProcessingParameters | null;
+      fingerprint: string;
+    }>,
+    previewFingerprints: new Map<string, string>(),
     baseCreates: [] as Array<Record<string, unknown>>,
     baseUpdates: [] as Array<Record<string, unknown>>,
     uploadRequests: [] as Array<{
       baseId: string;
       fileName: string;
       displayName: string | null;
+    }>,
+    uploadProcessingRequests: [] as Array<{
+      fileName: string;
+      profile: MockProcessingParameters | null;
+      expectedFingerprint: string | null;
     }>,
     baseUpdateFailure: null as null | {
       status: number;
@@ -348,6 +712,13 @@ async function mockKnowledgeRoutes(
     },
     reparsePreviewRequests: [] as Array<Record<string, unknown>>,
     reparseRequests: [] as Array<Record<string, unknown>>,
+    attachmentRequests: [] as Array<{
+      purpose: "management" | "citation";
+      expectedVersion: string | null;
+      expectedDigest: string | null;
+    }>,
+    documentAttachmentListRequests: [] as string[],
+    segmentMutationRequests: [] as Array<{ method: string; path: string }>,
     // Uploads whose filename contains "reject" fail until a test flips this.
     acceptRejectedUploads: false,
     // A "slowrace" search parks here until the test releases it, so late
@@ -402,6 +773,18 @@ async function mockKnowledgeRoutes(
         message: "",
         request_id: "req-health",
       });
+    }
+    if (path === `${knowledgeBase}/file-capabilities` && method === "GET") {
+      state.fileCapabilitiesRequests += 1;
+      if (state.fileCapabilitiesFailure !== null) {
+        return knowledgeError(
+          route,
+          state.fileCapabilitiesFailure.status,
+          state.fileCapabilitiesFailure.code,
+          state.fileCapabilitiesFailure.message,
+        );
+      }
+      return json(route, state.fileCapabilities);
     }
     if (path === `${knowledgeBase}/model-options` && method === "GET") {
       state.modelOptionsRequests += 1;
@@ -682,7 +1065,7 @@ async function mockKnowledgeRoutes(
         if (item.knowledge_base_id !== base.id) continue;
         // Never-published failed documents stay failed: re-embedding has no
         // current content to work on, re-parsing is a separate action.
-        if (item.status === "failed" && item.segment_count === 0) {
+        if (!item.content_initialized) {
           skippedIds.push(item.id);
           continue;
         }
@@ -768,22 +1151,25 @@ async function mockKnowledgeRoutes(
         body.chunking_mode === "parent_child" ? ["子块甲", "子块乙"] : [];
       return json(route, {
         document_version: target.version ?? 1,
-        items: [
-          {
-            position: 1,
-            content: `重解析预览首段 · chunk_size=${String(body.chunk_size)}`,
-            word_count: 42,
-            child_contents: childContents,
-          },
-          {
-            position: 2,
-            content: "重解析预览次段",
-            word_count: 36,
-            child_contents: childContents,
-          },
-        ],
-        total: 5,
-        request_id: "req-reparse-preview",
+        ...previewPayload(
+          [
+            {
+              position: 1,
+              content: `重解析预览首段 · chunk_size=${String(body.chunk_size)}`,
+              word_count: 42,
+              child_contents: childContents,
+            },
+            {
+              position: 2,
+              content: "重解析预览次段",
+              word_count: 36,
+              child_contents: childContents,
+            },
+          ],
+          5,
+          "req-reparse-preview",
+        ),
+        omitted_preview_attachment_count: 2,
       });
     }
 
@@ -894,6 +1280,11 @@ async function mockKnowledgeRoutes(
       const form = request.postData() ?? "";
       const uploadFileName =
         /name="file"; filename="([^"]+)"/u.exec(form)?.[1] ?? "";
+      const profile = multipartProcessingParameters(form);
+      const expectedFingerprint = multipartField(
+        form,
+        "expected_preview_fingerprint",
+      );
       // Count every attempt, including rejected files, so retry coverage can
       // distinguish a failed-only retry from silently re-uploading successes.
       state.uploadRequests.push({
@@ -901,6 +1292,24 @@ async function mockKnowledgeRoutes(
         fileName: uploadFileName,
         displayName: multipartField(form, "name"),
       });
+      state.uploadProcessingRequests.push({
+        fileName: uploadFileName,
+        profile,
+        expectedFingerprint,
+      });
+      if (
+        expectedFingerprint !== null &&
+        state.previewFingerprints.get(
+          `${uploadFileName}\0${JSON.stringify(profile)}`,
+        ) !== expectedFingerprint
+      ) {
+        return knowledgeError(
+          route,
+          409,
+          "KNOWLEDGE_CONFLICT",
+          "Preview is stale; refresh it before uploading.",
+        );
+      }
       if (uploadFileName.includes("reject") && !state.acceptRejectedUploads) {
         return knowledgeError(
           route,
@@ -910,8 +1319,6 @@ async function mockKnowledgeRoutes(
         );
       }
       state.uploadCounter += 1;
-      const uploadedMode = multipartField(form, "chunking_mode");
-      const uploadedChildSize = multipartField(form, "child_chunk_size");
       const uploaded: MockDocument = {
         id: `50000000-0000-4000-8000-00000000000${state.uploadCounter}`,
         knowledge_base_id: documentsMatch[1]!,
@@ -919,19 +1326,17 @@ async function mockKnowledgeRoutes(
         original_name: `handbook-${state.uploadCounter}.txt`,
         status: "queued",
         segment_count: 0,
-        chunk_separator: multipartField(form, "chunk_separator") ?? "\\n\\n",
-        remove_extra_spaces:
-          multipartField(form, "remove_extra_spaces") === "true",
-        remove_urls_emails:
-          multipartField(form, "remove_urls_emails") === "true",
-        chunking_mode:
-          uploadedMode === "parent_child" ? "parent_child" : "general",
-        child_chunk_size:
-          uploadedChildSize === null
-            ? undefined
-            : Number.parseInt(uploadedChildSize, 10),
-        child_chunk_separator:
-          multipartField(form, "child_chunk_separator") ?? undefined,
+        content_initialized: false,
+        chunk_separator: profile?.separator ?? "\\n\\n",
+        remove_extra_spaces: profile?.remove_extra_spaces ?? false,
+        remove_urls_emails: profile?.remove_urls_emails ?? false,
+        chunking_mode: profile?.mode ?? "general",
+        child_chunk_size: profile?.child_size,
+        child_chunk_separator: profile?.child_separator,
+        parsing_profile: profile ? processingProfileFor(profile) : undefined,
+        chunk_size_unit: profile?.unit ?? "token",
+        tokenizer_profile_id:
+          profile?.unit === "character" ? null : "knowledge-cl100k-v1",
         error_message: null,
         delete_error: null,
         progression: ["processing", "ready"],
@@ -948,19 +1353,33 @@ async function mockKnowledgeRoutes(
 
     if (path === `${knowledgeBase}/chunk-preview` && method === "POST") {
       const form = request.postData() ?? "";
+      const profile = multipartProcessingParameters(form);
       const fields = {
         file: /name="file"; filename="([^"]+)"/u.exec(form)?.[1] ?? "",
-        chunk_size: multipartField(form, "chunk_size") ?? "",
-        chunk_overlap: multipartField(form, "chunk_overlap") ?? "",
-        chunk_separator: multipartField(form, "chunk_separator") ?? "",
-        remove_extra_spaces: multipartField(form, "remove_extra_spaces") ?? "",
-        remove_urls_emails: multipartField(form, "remove_urls_emails") ?? "",
-        chunking_mode: multipartField(form, "chunking_mode") ?? "",
-        child_chunk_size: multipartField(form, "child_chunk_size") ?? "",
-        child_chunk_separator:
-          multipartField(form, "child_chunk_separator") ?? "",
+        chunk_size: profile === null ? "" : String(profile.size),
+        chunk_overlap: profile === null ? "" : String(profile.overlap),
+        chunk_separator: profile?.separator ?? "",
+        remove_extra_spaces:
+          profile === null ? "" : String(profile.remove_extra_spaces),
+        remove_urls_emails:
+          profile === null ? "" : String(profile.remove_urls_emails),
+        chunking_mode: profile?.mode ?? "",
+        child_chunk_size: profile === null ? "" : String(profile.child_size),
+        child_chunk_separator: profile?.child_separator ?? "",
       };
       state.previewRequests.push(fields);
+      const fingerprint = ((state.previewProcessingRequests.length + 1) % 16)
+        .toString(16)
+        .repeat(64);
+      state.previewProcessingRequests.push({
+        file: fields.file,
+        profile,
+        fingerprint,
+      });
+      state.previewFingerprints.set(
+        `${fields.file}\0${JSON.stringify(profile)}`,
+        fingerprint,
+      );
       // Sentinel separator lets tests exercise the error surface.
       if (fields.chunk_separator === "BOOM") {
         return knowledgeError(
@@ -980,8 +1399,8 @@ async function mockKnowledgeRoutes(
         `预览分段二 spaces=${fields.remove_extra_spaces} urls=${fields.remove_urls_emails}`,
         `预览来源 ${fields.file}`,
       ];
-      return json(route, {
-        items: contents.map((content, index) => ({
+      const payload = previewPayload(
+        contents.map((content, index) => ({
           position: index + 1,
           content,
           word_count: content.length,
@@ -992,9 +1411,40 @@ async function mockKnowledgeRoutes(
               ]
             : [],
         })),
-        total: 7,
-        request_id: "req-preview",
-      });
+        7,
+        "req-preview",
+        {
+          fingerprint,
+          ...(profile
+            ? {
+                profile: processingProfileFor(profile),
+                tableSources: tableSourcesFor(fields.file, profile),
+              }
+            : {}),
+        },
+      );
+      if (fields.file === "safe-images.md") {
+        payload.items[0]!.content = [
+          "# Safe Knowledge image",
+          `![preview](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})`,
+          "![remote](https://outside.invalid/track.png)",
+          '<img src="x" onerror="window.__knowledgeExecuted = true">',
+          "<script>window.__knowledgeExecuted = true</script>",
+          "[unsafe link](javascript:window.__knowledgeExecuted=true)",
+          `\`![code](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})\``,
+        ].join("\n\n");
+        payload.items[0]!.attachments = [
+          { ref: KNOWLEDGE_IMAGE_REF, alt_text: "preview" },
+        ];
+        payload.preview_attachments = [
+          {
+            ref: KNOWLEDGE_IMAGE_REF,
+            media_type: "image/png",
+            data_base64: SAFE_PNG_BASE64,
+          },
+        ];
+      }
+      return json(route, payload);
     }
 
     if (
@@ -1108,6 +1558,95 @@ async function mockKnowledgeRoutes(
         request_id: "req-retry",
       });
     }
+    const documentAttachmentsMatch =
+      /\/documents\/([0-9a-f-]{36})\/attachments$/u.exec(path);
+    if (documentAttachmentsMatch && method === "GET") {
+      const documentId = documentAttachmentsMatch[1]!;
+      state.documentAttachmentListRequests.push(documentId);
+      const owner = state.documents.find((item) => item.id === documentId);
+      if (owner?.status !== "ready") {
+        return knowledgeError(route, 422, "KNOWLEDGE_INVALID", "文档不可编辑");
+      }
+      return json(route, {
+        items: state.documentAttachments.get(documentId) ?? [],
+        document_version: owner.version ?? 1,
+        request_id: "req-document-attachments",
+      });
+    }
+    const citationAttachmentMatch =
+      /\/bases\/([0-9a-f-]{36})\/documents\/([0-9a-f-]{36})\/segments\/([0-9a-f-]{36})\/attachments\/([0-9a-f-]{36})$/u.exec(
+        path,
+      );
+    const managementAttachmentMatch =
+      /\/documents\/([0-9a-f-]{36})\/segments\/([0-9a-f-]{36})\/attachments\/([0-9a-f-]{36})$/u.exec(
+        path,
+      );
+    if (
+      method === "GET" &&
+      (citationAttachmentMatch !== null || managementAttachmentMatch !== null)
+    ) {
+      const purpose =
+        citationAttachmentMatch === null ? "management" : "citation";
+      const baseId = citationAttachmentMatch?.[1];
+      const documentId =
+        citationAttachmentMatch?.[2] ?? managementAttachmentMatch?.[1];
+      const segmentId =
+        citationAttachmentMatch?.[3] ?? managementAttachmentMatch?.[2];
+      const attachmentId =
+        citationAttachmentMatch?.[4] ?? managementAttachmentMatch?.[3];
+      const owner = state.documents.find(
+        (item) =>
+          item.id === documentId &&
+          (baseId === undefined || item.knowledge_base_id === baseId),
+      );
+      const segment = (state.segments.get(documentId ?? "") ?? []).find(
+        (item) => item.id === segmentId,
+      );
+      const attachment = segment?.attachments?.find(
+        (item) => item.attachment_id === attachmentId,
+      );
+      if (!owner || !segment || !attachment) {
+        return knowledgeError(route, 404, "KNOWLEDGE_NOT_FOUND", "附件不存在");
+      }
+      const expectedVersion = url.searchParams.get("expected_document_version");
+      const expectedDigest = url.searchParams.get("expected_content_digest");
+      state.attachmentRequests.push({
+        purpose,
+        expectedVersion,
+        expectedDigest,
+      });
+      const authoritativeDigest =
+        purpose === "citation"
+          ? state.detailDigest
+          : createHash("sha256").update(segment.content, "utf8").digest("hex");
+      if (
+        Number(expectedVersion) !== state.detailVersion ||
+        expectedDigest !== authoritativeDigest
+      ) {
+        return knowledgeError(
+          route,
+          409,
+          "KNOWLEDGE_CONFLICT",
+          "文档内容已更新",
+        );
+      }
+      await options.attachmentResponseGate;
+      try {
+        return await route.fulfill({
+          status: 200,
+          contentType: attachment.media_type,
+          headers: {
+            "cache-control": "private, no-store",
+            "x-content-type-options": "nosniff",
+          },
+          body: Buffer.from(SAFE_PNG_BASE64, "base64"),
+        });
+      } catch {
+        // The browser can abort this route before a parked response is
+        // released; that is the lifecycle behavior under test.
+        return;
+      }
+    }
     // Single-segment detail: validates the base/document/segment lineage so
     // cross-base id combinations and deleted resources answer 404.
     const segmentDetailMatch =
@@ -1154,7 +1693,7 @@ async function mockKnowledgeRoutes(
         document_name: owner.name,
         content_state: owner.status === "ready" ? "current" : "stale",
         stored_content_version: state.detailVersion,
-        current_document_version: state.detailVersion,
+        current_document_version: owner.version ?? 1,
         children_total: childList.length,
         summary: segment.summary ?? null,
         child_page: childPage,
@@ -1164,6 +1703,7 @@ async function mockKnowledgeRoutes(
           content: child.content,
           word_count: child.content.length,
         })),
+        attachments: segment.attachments ?? [],
         request_id: "req-segment-detail",
       });
     }
@@ -1194,6 +1734,7 @@ async function mockKnowledgeRoutes(
       });
     }
     if (segmentsMatch && method === "POST") {
+      state.segmentMutationRequests.push({ method, path });
       const documentId = segmentsMatch[1]!;
       const target = state.documents.find((item) => item.id === documentId);
       if (!target)
@@ -1220,6 +1761,7 @@ async function mockKnowledgeRoutes(
 
     const segmentMatch = /\/segments\/([0-9a-f-]{36})$/u.exec(path);
     if (segmentMatch && (method === "PATCH" || method === "DELETE")) {
+      state.segmentMutationRequests.push({ method, path });
       let owner: MockDocument | undefined;
       let segment: MockSegment | undefined;
       for (const [documentId, list] of state.segments) {
@@ -1384,6 +1926,45 @@ async function mockKnowledgeRoutes(
           ],
           diagnostics: null,
           request_id: "req-search-slow",
+        });
+      }
+      if (query.includes("disabled-only")) {
+        const citations = Array.from(state.segments.entries()).flatMap(
+          ([documentId, segments]) => {
+            const owner = state.documents.find(
+              (document) => document.id === documentId,
+            );
+            if (owner?.status !== "ready" || owner.enabled === false) return [];
+            return segments
+              .filter(
+                (segment) =>
+                  segment.enabled && segment.content.includes("disabled-only"),
+              )
+              .map((segment) => ({
+                knowledge_base_id: owner.knowledge_base_id,
+                knowledge_base_name:
+                  state.bases.find(
+                    (base) => base.id === owner.knowledge_base_id,
+                  )?.name ?? "Knowledge",
+                document_id: owner.id,
+                document_name: owner.name,
+                segment_id: segment.id,
+                segment_position: segment.position,
+                snippet: segment.content,
+                score: 0.9,
+                source_position: segment.source_position,
+                document_version: owner.version ?? 1,
+                content_digest: createHash("sha256")
+                  .update(segment.content, "utf8")
+                  .digest("hex"),
+                score_kind: "rerank" as const,
+              }));
+          },
+        );
+        return json(route, {
+          citations,
+          diagnostics: null,
+          request_id: "req-search-disabled-state",
         });
       }
       const emptyKeyword = (
@@ -1576,7 +2157,7 @@ test("creates a base through the wizard and watches the upload reach ready", asy
 
   // Invalid values never trigger a request and keep refresh disabled. Revert
   // to the submitted value and the existing preview is authoritative again.
-  const chunkSize = page.getByLabel("Chunk size (characters)");
+  const chunkSize = page.getByLabel("Chunk size (Knowledge Tokens)");
   await chunkSize.fill("100");
   await expect(
     previewPanel.getByText(
@@ -1719,8 +2300,8 @@ test("creates a base through the wizard and watches the upload reach ready", asy
     remove_extra_spaces: "true",
     remove_urls_emails: "false",
     chunking_mode: "general",
-    child_chunk_size: "",
-    child_chunk_separator: "",
+    child_chunk_size: "500",
+    child_chunk_separator: "\\n",
   });
 });
 
@@ -1749,9 +2330,9 @@ test("freezes wizard controls and submitted settings while base creation is pend
   await page.getByRole("button", { name: "Next" }).click();
 
   await page.getByRole("radio", { name: /Parent-child/u }).check();
-  await page.getByLabel("Chunk overlap (characters)").fill("0");
+  await page.getByLabel("Chunk overlap (Knowledge Tokens)").fill("0");
   await page.getByLabel(/^Delimiter/u).fill("。");
-  await page.getByLabel("Child chunk size (characters)").fill("300");
+  await page.getByLabel("Child chunk size (Knowledge Tokens)").fill("300");
   await page
     .getByLabel("Replace consecutive spaces, newlines and tabs")
     .check();
@@ -1798,11 +2379,15 @@ test("freezes wizard controls and submitted settings while base creation is pend
     await expect(
       page.getByRole("radio", { name: /Parent-child/u }),
     ).toBeDisabled();
-    await expect(page.getByLabel(/^Chunk size \(characters\)/u)).toBeDisabled();
-    await expect(page.getByLabel("Chunk overlap (characters)")).toBeDisabled();
+    await expect(
+      page.getByLabel(/^Chunk size \(Knowledge Tokens\)/u),
+    ).toBeDisabled();
+    await expect(
+      page.getByLabel("Chunk overlap (Knowledge Tokens)"),
+    ).toBeDisabled();
     await expect(page.getByLabel(/^Delimiter/u)).toBeDisabled();
     await expect(
-      page.getByLabel("Child chunk size (characters)"),
+      page.getByLabel("Child chunk size (Knowledge Tokens)"),
     ).toBeDisabled();
     await expect(page.getByLabel("Child delimiter")).toBeDisabled();
     await expect(
@@ -2039,7 +2624,7 @@ test("failed initial configuration stays in wizard step two and preserves upload
     "Previewing: preserved.txt",
   );
   await wizard
-    .getByLabel("Chunk size (characters)", { exact: true })
+    .getByLabel("Chunk size (Knowledge Tokens)", { exact: true })
     .fill("1200");
   await wizard
     .getByLabel("Display name (optional)", { exact: true })
@@ -2068,7 +2653,7 @@ test("failed initial configuration stays in wizard step two and preserves upload
     "SiliconFlow · BAAI/bge-reranker-v2-m3",
   );
   await expect(
-    wizard.getByLabel("Chunk size (characters)", { exact: true }),
+    wizard.getByLabel("Chunk size (Knowledge Tokens)", { exact: true }),
   ).toHaveValue("1200");
   await expect(
     wizard.getByLabel("Display name (optional)", { exact: true }),
@@ -2365,6 +2950,7 @@ test("failed document shows the error, retry re-queues it, and the segment brows
         original_name: "broken.pdf",
         status: "failed",
         segment_count: 0,
+        content_initialized: false,
         error_message: "Embedding 请求连续失败已耗尽重试",
         delete_error: null,
       },
@@ -2428,6 +3014,7 @@ test("keeps document actions reachable at 1280px and reveals a bounded error in 
         original_name: "guide.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -2438,6 +3025,7 @@ test("keeps document actions reachable at 1280px and reveals a bounded error in 
         original_name: longOriginalName,
         status: "failed",
         segment_count: 0,
+        content_initialized: false,
         error_message: longError,
         delete_error: null,
       },
@@ -2512,6 +3100,7 @@ test("keeps cached document rows visible when a background refresh fails and ret
         original_name: "cached.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -2575,6 +3164,7 @@ test("hides an open segment browser after authority loss and recovers on another
         original_name: "revoked.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -2585,6 +3175,7 @@ test("hides an open segment browser after authority loss and recovers on another
         original_name: "other-base.txt",
         status: "ready",
         segment_count: 1,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -2689,6 +3280,7 @@ test("deletes ready and failed documents after confirmation", async ({
         original_name: "old.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -2699,6 +3291,7 @@ test("deletes ready and failed documents after confirmation", async ({
         original_name: "bad.pdf",
         status: "failed",
         segment_count: 0,
+        content_initialized: false,
         error_message: "文件解析失败",
         delete_error: null,
       },
@@ -2764,6 +3357,7 @@ test("parks a failed document delete with the reason, stops polling, and re-dele
         original_name: "stuck-notes.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -2987,10 +3581,22 @@ test("read-only members see lists but no write controls", async ({ page }) => {
         original_name: "guide.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
     ],
+    segments: {
+      "50000000-0000-4000-8000-000000000001": [
+        {
+          id: "60000000-0000-4000-8000-000000000001",
+          position: 1,
+          content: "disabled-only maintenance content",
+          enabled: false,
+          source_position: { page: 1 },
+        },
+      ],
+    },
   });
   await page.goto("/projects/alpha/knowledge");
 
@@ -3024,8 +3630,11 @@ test("read-only members see lists but no write controls", async ({ page }) => {
   await readOnlyMenu.getByRole("menuitem", { name: "View segments" }).click();
   const browser = page.getByTestId("knowledge-segment-browser");
   await expect(
-    browser.getByTestId("knowledge-segment-list").getByText("分段 1 的内容"),
+    browser
+      .getByTestId("knowledge-segment-list")
+      .getByText("disabled-only maintenance content"),
   ).toBeVisible();
+  await expect(browser.getByText("Disabled", { exact: true })).toBeVisible();
   await expect(
     browser.getByRole("button", { name: "Add segment" }),
   ).toHaveCount(0);
@@ -3036,6 +3645,13 @@ test("read-only members see lists but no write controls", async ({ page }) => {
   expect(state.baseCreates).toHaveLength(0);
   expect(state.baseUpdates).toHaveLength(0);
   expect(state.uploadRequests).toHaveLength(0);
+  expect(state.documentAttachmentListRequests).toHaveLength(0);
+
+  await browser.getByRole("button", { name: "Documents" }).click();
+  await page.getByRole("button", { name: "Retrieval test" }).click();
+  await page.getByLabel("Query").fill("disabled-only");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText("No matching content found")).toBeVisible();
 });
 
 test("toggles a document's retrieval switch and renames it from the list", async ({
@@ -3061,6 +3677,7 @@ test("toggles a document's retrieval switch and renames it from the list", async
         original_name: "guide.txt",
         status: "ready",
         segment_count: 3,
+        content_initialized: true,
         word_count: 1500,
         error_message: null,
         delete_error: null,
@@ -3093,6 +3710,252 @@ test("toggles a document's retrieval switch and renames it from the list", async
   await expect(rows.getByText("guide.txt")).toBeVisible();
 });
 
+test("manual segment editors insert only current-document attachment refs", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const DOCUMENT_ID = "50000000-0000-4000-8000-000000000001";
+  const OTHER_DOCUMENT_ID = "50000000-0000-4000-8000-000000000002";
+  const OTHER_REF = "b".repeat(64);
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "附件知识库",
+        description: "",
+        status: "active",
+        document_count: 2,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: DOCUMENT_ID,
+        knowledge_base_id: BASE_ID,
+        name: "current.docx",
+        original_name: "current.docx",
+        status: "ready",
+        segment_count: 1,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: OTHER_DOCUMENT_ID,
+        knowledge_base_id: BASE_ID,
+        name: "other.docx",
+        original_name: "other.docx",
+        status: "ready",
+        segment_count: 1,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+    segments: {
+      [DOCUMENT_ID]: [
+        {
+          id: "60000000-0000-4000-8000-000000000001",
+          position: 1,
+          content: "现有正文",
+          enabled: true,
+          source_position: { page: 1 },
+        },
+      ],
+    },
+    documentAttachments: {
+      [DOCUMENT_ID]: [
+        {
+          attachment_id: KNOWLEDGE_IMAGE_ATTACHMENT_ID,
+          ref: KNOWLEDGE_IMAGE_REF,
+          media_type: "image/png",
+          width: 640,
+          height: 480,
+        },
+      ],
+      [OTHER_DOCUMENT_ID]: [
+        {
+          attachment_id: "62000000-0000-4000-8000-000000000002",
+          ref: OTHER_REF,
+          media_type: "image/webp",
+          width: 320,
+          height: 200,
+        },
+      ],
+    },
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Actions for current.docx" }).click();
+  await page.getByRole("menuitem", { name: "View segments" }).click();
+
+  await page.getByRole("button", { name: "Add segment" }).click();
+  let editor = page.getByRole("dialog");
+  const choices = editor.getByTestId("knowledge-document-attachment-choices");
+  await expect(choices).toContainText("Current document images");
+  await expect(choices).toContainText("image/png · 640×480");
+  await expect(choices).not.toContainText(OTHER_REF.slice(0, 12));
+  await choices.getByRole("button", { name: "Insert image 1" }).click();
+  await expect(editor.getByLabel("Content")).toHaveValue(
+    `![Image 1](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})`,
+  );
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(editor).toBeHidden();
+
+  const list = page.getByTestId("knowledge-segment-list");
+  const created = list.getByRole("listitem").filter({ hasText: "Image 1" });
+  await created.getByRole("button", { name: "Edit", exact: true }).click();
+  editor = page.getByRole("dialog");
+  await expect(
+    editor.getByTestId("knowledge-document-attachment-choices"),
+  ).toContainText("Current document images");
+  expect(state.documentAttachmentListRequests.length).toBeGreaterThan(0);
+  expect(new Set(state.documentAttachmentListRequests)).toEqual(
+    new Set([DOCUMENT_ID]),
+  );
+});
+
+test("open segment editors retire drafts and catalogs on status or capability loss", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const DOCUMENT_ID = "50000000-0000-4000-8000-000000000001";
+  const SEGMENT_ID = "60000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "实时治理知识库",
+        description: "",
+        status: "active",
+        document_count: 1,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: DOCUMENT_ID,
+        knowledge_base_id: BASE_ID,
+        name: "live.docx",
+        original_name: "live.docx",
+        status: "ready",
+        segment_count: 1,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+        task_progress: {
+          kind: "summarize_document",
+          status: "running",
+          stage: "summarizing",
+          completed_units: 0,
+          total_units: 1,
+          attempt_count: 1,
+          max_attempts: 3,
+          target_version: 1,
+          next_attempt_at: null,
+        },
+      },
+    ],
+    segments: {
+      [DOCUMENT_ID]: [
+        {
+          id: SEGMENT_ID,
+          position: 1,
+          content: "管理正文仍然可读",
+          enabled: true,
+          source_position: { page: 1 },
+        },
+      ],
+    },
+    documentAttachments: {
+      [DOCUMENT_ID]: [
+        {
+          attachment_id: KNOWLEDGE_IMAGE_ATTACHMENT_ID,
+          ref: KNOWLEDGE_IMAGE_REF,
+          media_type: "image/png",
+          width: 640,
+          height: 480,
+        },
+      ],
+    },
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await page.getByRole("button", { name: "Actions for live.docx" }).click();
+  await page.getByRole("menuitem", { name: "View segments" }).click();
+  const browser = page.getByTestId("knowledge-segment-browser");
+
+  await browser.getByRole("button", { name: "Add segment" }).click();
+  let editor = page.getByRole("dialog");
+  await expect(
+    editor.getByTestId("knowledge-document-attachment-choices"),
+  ).toBeVisible();
+  await editor.getByLabel("Content").fill("不得提交的新增草稿");
+  const catalogRequestsBeforeStatusLoss =
+    state.documentAttachmentListRequests.length;
+
+  state.documents[0]!.status = "processing";
+  state.documents[0]!.task_progress = {
+    kind: "ingest_document",
+    status: "running",
+    stage: "extracting_splitting",
+    completed_units: 0,
+    total_units: null,
+    attempt_count: 1,
+    max_attempts: 3,
+    target_version: 1,
+    next_attempt_at: null,
+  };
+  await expect(editor).toBeHidden({ timeout: 10_000 });
+  await expect(browser).toContainText("管理正文仍然可读");
+  await expect(
+    browser.getByTestId("knowledge-published-readonly"),
+  ).toBeVisible();
+  await page.waitForTimeout(2_500);
+  expect(state.documentAttachmentListRequests).toHaveLength(
+    catalogRequestsBeforeStatusLoss,
+  );
+  expect(state.segmentMutationRequests).toHaveLength(0);
+
+  state.documents[0]!.status = "ready";
+  state.documents[0]!.task_progress = {
+    kind: "summarize_document",
+    status: "running",
+    stage: "summarizing",
+    completed_units: 0,
+    total_units: 1,
+    attempt_count: 1,
+    max_attempts: 3,
+    target_version: 1,
+    next_attempt_at: null,
+  };
+  await expect(browser.getByRole("button", { name: "Edit" })).toBeVisible({
+    timeout: 10_000,
+  });
+  await browser.getByRole("button", { name: "Edit" }).click();
+  editor = page.getByRole("dialog");
+  await expect(
+    editor.getByTestId("knowledge-document-attachment-choices"),
+  ).toBeVisible();
+  await editor.getByLabel("Content").fill("不得提交的编辑草稿");
+  const catalogRequestsBeforeCapabilityLoss =
+    state.documentAttachmentListRequests.length;
+
+  state.project.capabilities = [...READ_CAPABILITIES];
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("focus"));
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(editor).toBeHidden({ timeout: 10_000 });
+  await expect(browser).toContainText("管理正文仍然可读");
+  await expect(browser.getByRole("button", { name: "Edit" })).toHaveCount(0);
+  await page.waitForTimeout(1_000);
+  expect(state.documentAttachmentListRequests).toHaveLength(
+    catalogRequestsBeforeCapabilityLoss,
+  );
+  expect(state.segmentMutationRequests).toHaveLength(0);
+});
+
 test("batch selection disables, re-enables, and deletes documents", async ({
   page,
 }) => {
@@ -3104,6 +3967,7 @@ test("batch selection disables, re-enables, and deletes documents", async ({
     original_name: `doc-${index}.txt`,
     status: "ready",
     segment_count: 2,
+    content_initialized: true,
     error_message: null,
     delete_error: null,
   }));
@@ -3180,7 +4044,7 @@ test("wizard parent-child mode nests preview children and freezes child params o
 
   // Switching to parent-child reveals the child parameters with defaults.
   await page.getByRole("radio", { name: /Parent-child/u }).check();
-  const childSize = page.getByLabel("Child chunk size (characters)");
+  const childSize = page.getByLabel("Child chunk size (Knowledge Tokens)");
   await expect(childSize).toHaveValue("500");
   await expect(page.getByLabel("Child delimiter")).toHaveValue("\\n");
 
@@ -3228,7 +4092,9 @@ test("wizard parent-child mode nests preview children and freezes child params o
   await expect(page.getByText("Knowledge base created")).toBeVisible();
   await expect(page.getByText("Chunking mode")).toBeVisible();
   await expect(page.getByText("Parent-child", { exact: true })).toBeVisible();
-  await expect(page.getByText("Child chunk size (characters)")).toBeVisible();
+  await expect(
+    page.getByText("Child chunk size (Knowledge Tokens)"),
+  ).toBeVisible();
 
   // The upload froze the parent-child parameters.
   expect(state.documents.at(-1)?.chunking_mode).toBe("parent_child");
@@ -3262,6 +4128,7 @@ test("an existing configured base uploads through the wizard without changing it
         original_name: "guide.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -3304,7 +4171,7 @@ test("an existing configured base uploads through the wizard without changing it
     .fill("Uploaded guide");
   await wizard.getByRole("radio", { name: /Parent-child/u }).check();
   await wizard
-    .getByLabel("Child chunk size (characters)", { exact: true })
+    .getByLabel("Child chunk size (Knowledge Tokens)", { exact: true })
     .fill("200");
   await preview.getByRole("button", { name: "Refresh preview" }).click();
   await expect(
@@ -3394,7 +4261,7 @@ test("cancelling an existing-base upload returns to the original documents view 
     "Previewing: cancelled.txt",
   );
   await wizard
-    .getByLabel("Chunk size (characters)", { exact: true })
+    .getByLabel("Chunk size (Knowledge Tokens)", { exact: true })
     .fill("1200");
   await wizard.getByRole("button", { name: "Back", exact: true }).click();
   await expect(wizard).toHaveCount(0);
@@ -3431,6 +4298,7 @@ test("browser back clears an existing-base upload before reopening the same base
         original_name: "existing-guide.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -3794,6 +4662,7 @@ test("segment browser edits, toggles, adds, and deletes segments", async ({
         original_name: "guide.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         word_count: 12,
         error_message: null,
         delete_error: null,
@@ -3970,6 +4839,7 @@ test("document metadata dialog saves typed values and clears emptied fields", as
         original_name: "guide.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         doc_metadata: { author: "旧作者" },
         error_message: null,
         delete_error: null,
@@ -4099,7 +4969,7 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
         name: "产品手册",
         description: "",
         status: "active",
-        document_count: 2,
+        document_count: 3,
         delete_error: null,
       },
     ],
@@ -4111,6 +4981,21 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
         original_name: "guide.txt",
         status: "ready",
         segment_count: 3,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        // A published document may legitimately contain zero Segments. Its
+        // published-content fact still makes it eligible for management and
+        // re-embedding.
+        id: "50000000-0000-4000-8000-000000000003",
+        knowledge_base_id: BASE_ID,
+        name: "published-empty.txt",
+        original_name: "published-empty.txt",
+        status: "ready",
+        segment_count: 0,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -4123,6 +5008,7 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
         original_name: "never-published.txt",
         status: "failed",
         segment_count: 0,
+        content_initialized: false,
         error_message: "Embedding 请求连续失败已耗尽重试",
         delete_error: null,
       },
@@ -4130,6 +5016,22 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
   });
   await page.goto("/projects/alpha/knowledge");
   await page.getByRole("button", { name: "View documents" }).click();
+
+  await page
+    .getByRole("button", { name: "Actions for published-empty.txt" })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "View segments" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page
+    .getByRole("button", { name: "Actions for never-published.txt" })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "View published segments" }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
   await page.getByRole("button", { name: "Settings" }).click();
 
   // The re-embed block sits under the settings form with its own confirm.
@@ -4148,21 +5050,30 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
   await expect(
     confirm.getByText(/manual edits, and enabled states are preserved/i),
   ).toBeVisible();
+  await expect(
+    confirm.getByText(
+      /does not read the original file or run the parser; attachment bindings and bytes remain unchanged/i,
+    ),
+  ).toBeVisible();
   await confirm.getByRole("button", { name: "Re-embed", exact: true }).click();
   // The admission outcome reports real counts: accepted and skipped.
   await expect(page.getByTestId("knowledge-rebuild-outcome")).toHaveText(
-    "Re-embedding accepted for 1 documents; 1 never-published documents were skipped (retry them to parse from the original file).",
+    "Re-embedding accepted for 2 documents; 1 never-published documents were skipped (retry them to parse from the original file).",
   );
   expect(state.rebuildRequests.at(-1)).toEqual({
     embedding_model_id: MODEL_ID,
   });
 
-  // The published document re-queues and walks back to ready on subsequent
+  // Both published documents re-queue and walk back to ready on subsequent
   // polls; the never-published one stays failed rather than pretending.
   await page.getByRole("button", { name: "Documents", exact: true }).click();
   const rows = page.getByTestId("knowledge-document-rows");
-  await expect(rows.getByText("guide.txt")).toBeVisible();
-  await expect(rows.getByText("Ready")).toBeVisible({ timeout: 15_000 });
+  await expect(
+    rows.getByRole("row").filter({ hasText: "guide.txt" }),
+  ).toContainText("Ready", { timeout: 15_000 });
+  await expect(
+    rows.getByRole("row").filter({ hasText: "published-empty.txt" }),
+  ).toContainText("Ready", { timeout: 15_000 });
   await expect(
     rows.getByRole("row").filter({ hasText: "never-published.txt" }),
   ).toContainText("Failed");
@@ -4190,10 +5101,15 @@ test("the existing-base upload wizard accepts the K4 document formats", async ({
 
   const wizard = page.getByTestId("knowledge-create-wizard");
   await expect(wizard).toBeVisible();
-  await expect(wizard.getByText(/HTML, PPTX, and EPUB/u)).toBeVisible();
+  const available = FILE_CAPABILITIES.formats
+    .filter((format) => format.available)
+    .map((format) => format.extension);
+  await expect(
+    wizard.getByText(`Available formats: ${available.join(", ")}`),
+  ).toBeVisible();
   await expect(wizard.getByLabel("File")).toHaveAttribute(
     "accept",
-    ".pdf,.docx,.txt,.md,.csv,.xlsx,.html,.htm,.pptx,.epub",
+    available.join(","),
   );
 });
 
@@ -4223,6 +5139,7 @@ function t9Documents(count: number): MockDocument[] {
     original_name: `doc-${String(index + 1).padStart(3, "0")}.txt`,
     status: "ready",
     segment_count: 3,
+    content_initialized: true,
     error_message: null,
     delete_error: null,
   }));
@@ -4638,6 +5555,181 @@ test("the preview file picker previews each shown file exactly once", async ({
   expect(state.previewRequests.at(-1)?.file).toBe("alpha.txt");
 });
 
+test("the wizard admits only currently available server formats and retries capability loading", async ({
+  page,
+}) => {
+  const capabilities: MockFileCapabilities = {
+    ...FILE_CAPABILITIES,
+    formats: [
+      FILE_CAPABILITIES.formats.find((item) => item.extension === ".txt")!,
+      FILE_CAPABILITIES.formats.find((item) => item.extension === ".csv")!,
+      {
+        extension: ".pdf",
+        parser_id: "dify.pdf",
+        available: false,
+        reason_code: "PARSER_DEPENDENCY_UNAVAILABLE",
+        embedded_images: true,
+      },
+    ],
+  };
+  const state = await mockKnowledgeRoutes(page, {
+    fileCapabilities: capabilities,
+    fileCapabilitiesFailure: {
+      status: 503,
+      code: "KNOWLEDGE_UNAVAILABLE",
+      message: "Parsing capabilities unavailable",
+    },
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Could not load file formats" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("File", { exact: true })).toBeDisabled();
+  state.fileCapabilitiesFailure = null;
+  await page.getByRole("button", { name: "Retry formats" }).click();
+  await expect(page.getByLabel("File", { exact: true })).toHaveAttribute(
+    "accept",
+    ".txt,.csv",
+  );
+
+  await page.getByLabel("File", { exact: true }).setInputFiles([
+    {
+      name: "guide.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("supported"),
+    },
+    {
+      name: "scanned.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from("unavailable"),
+    },
+  ]);
+  await expect(page.getByText("scanned.pdf cannot be processed")).toBeVisible();
+  await expect(
+    page.getByText("The parser dependency for this format is unavailable."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+});
+
+test("table header choices invalidate preview and only matching files upload its fingerprint", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page);
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+  await expect(page.getByLabel("File", { exact: true })).toBeEnabled();
+  await page.getByLabel("File", { exact: true }).setInputFiles([
+    {
+      name: "devices.CSV",
+      mimeType: "text/csv",
+      buffer: Buffer.from("title\n设备,端口\na,1"),
+    },
+    {
+      name: "notes.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("headless upload"),
+    },
+  ]);
+  await page.getByRole("button", { name: "Next" }).click();
+
+  const preview = page.getByTestId("chunk-preview-panel");
+  const headers = preview.getByTestId("knowledge-header-settings");
+  await expect(headers).toContainText("Candidate row 2");
+  await expect(headers).toContainText("设备");
+  await expect(headers).toContainText("端口");
+  await headers.getByRole("combobox", { name: "Header mode for CSV" }).click();
+  await page.getByRole("option", { name: "No header" }).click();
+  await expect(preview).toContainText(
+    "Preview is out of date. Refresh to apply the current settings.",
+  );
+  await preview.getByRole("button", { name: "Refresh preview" }).click();
+  await expect(headers).toContainText("No header selected");
+  expect(state.previewProcessingRequests.at(-1)?.profile?.header_rules).toEqual(
+    [{ sheet: null, mode: "none", row: null }],
+  );
+
+  await page.getByLabel("Name", { exact: true }).fill("设备库");
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+  await page.getByRole("button", { name: "Save & process" }).click();
+  await expect(page.getByText("Knowledge base created")).toBeVisible();
+
+  expect(state.uploadProcessingRequests).toHaveLength(2);
+  expect(state.uploadProcessingRequests[0]).toMatchObject({
+    fileName: "devices.CSV",
+    expectedFingerprint:
+      state.previewProcessingRequests.at(-1)?.fingerprint ?? "missing",
+  });
+  expect(state.uploadProcessingRequests[0]?.profile?.header_rules).toEqual([
+    { sheet: null, mode: "none", row: null },
+  ]);
+  expect(state.uploadProcessingRequests[1]).toMatchObject({
+    fileName: "notes.txt",
+    expectedFingerprint: null,
+  });
+});
+
+test("an upload fingerprint conflict keeps the file and retries only that file after refresh", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeRoutes(page);
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+  await expect(page.getByLabel("File", { exact: true })).toBeEnabled();
+  await page.getByLabel("File", { exact: true }).setInputFiles([
+    {
+      name: "first.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("previewed"),
+    },
+    {
+      name: "second.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("headless"),
+    },
+  ]);
+  await page.getByRole("button", { name: "Next" }).click();
+  const preview = page.getByTestId("chunk-preview-panel");
+  await expect(preview).toContainText("预览来源 first.txt");
+  await page.getByLabel("Name", { exact: true }).fill("Conflict base");
+  await page.getByLabel("Embedding model").click();
+  await page.getByRole("option", { name: "SiliconFlow · BAAI/bge-m3" }).click();
+
+  state.previewFingerprints.clear();
+  await page.getByRole("button", { name: "Save & process" }).click();
+  await expect(
+    page.getByRole("button", { name: "Refresh stale preview" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("wizard-document-status").getByRole("listitem"),
+  ).toHaveCount(1);
+  expect(state.uploadRequests.map((item) => item.fileName)).toEqual([
+    "first.txt",
+    "second.txt",
+  ]);
+
+  await page.getByRole("button", { name: "Refresh stale preview" }).click();
+  await expect(preview).toContainText(
+    "Preview is out of date. Refresh to apply the current settings.",
+  );
+  await preview.getByRole("button", { name: "Refresh preview" }).click();
+  await expect(preview).toContainText("预览来源 first.txt");
+  await page.getByRole("button", { name: "Save & process" }).click();
+  await expect(page.getByText("Knowledge base created")).toBeVisible();
+
+  expect(state.uploadRequests.map((item) => item.fileName)).toEqual([
+    "first.txt",
+    "second.txt",
+    "first.txt",
+  ]);
+  expect(state.baseCreates).toHaveLength(1);
+  expect(state.uploadProcessingRequests.at(-1)?.expectedFingerprint).toBe(
+    state.previewProcessingRequests.at(-1)?.fingerprint,
+  );
+});
+
 test("a replaced slow preview never overwrites the winner and removing the file clears it", async ({
   page,
 }) => {
@@ -4826,6 +5918,7 @@ test("hit detail pins the scored content, highlights true child matches, and loc
         original_name: "发布说明.pdf",
         status: "ready",
         segment_count: 1,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -4991,6 +6084,7 @@ test("task progress shows stages, counts, and attempts, and a new attempt restar
         original_name: "embedding.txt",
         status: "processing",
         segment_count: 0,
+        content_initialized: false,
         error_message: null,
         delete_error: null,
         task_progress: progress({}),
@@ -5002,6 +6096,7 @@ test("task progress shows stages, counts, and attempts, and a new attempt restar
         original_name: "retrywait.txt",
         status: "processing",
         segment_count: 0,
+        content_initialized: false,
         error_message: null,
         delete_error: null,
         task_progress: progress({
@@ -5017,6 +6112,7 @@ test("task progress shows stages, counts, and attempts, and a new attempt restar
         original_name: "exhausted.txt",
         status: "failed",
         segment_count: 0,
+        content_initialized: false,
         error_message: "Embedding 请求连续失败已耗尽重试",
         delete_error: null,
         task_progress: progress({ status: "failed", attempt_count: 3 }),
@@ -5028,6 +6124,7 @@ test("task progress shows stages, counts, and attempts, and a new attempt restar
         original_name: "done.txt",
         status: "ready",
         segment_count: 4,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -5038,11 +6135,12 @@ test("task progress shows stages, counts, and attempts, and a new attempt restar
         original_name: "reading.txt",
         status: "processing",
         segment_count: 0,
+        content_initialized: false,
         error_message: null,
         delete_error: null,
         task_progress: progress({
           kind: "reembed_document",
-          stage: "reading_source",
+          stage: "loading_segments",
           completed_units: 0,
           total_units: null,
         }),
@@ -5071,7 +6169,7 @@ test("task progress shows stages, counts, and attempts, and a new attempt restar
 
   // A stage without a verifiable total renders indeterminate: no counter.
   await expect(rowFor("reading.txt")).toContainText(
-    "Re-embed · Reading source",
+    "Re-embed · Loading segments",
   );
   await expect(rowFor("reading.txt")).not.toContainText("0/");
 
@@ -5119,6 +6217,199 @@ test("task progress shows stages, counts, and attempts, and a new attempt restar
   ).toHaveCount(0);
 });
 
+test("document governance shows real profiles and warnings while a failed publication stays read only", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const TOKEN_ID = "50000000-0000-4000-8000-000000000001";
+  const LEGACY_ID = "50000000-0000-4000-8000-000000000002";
+  const STALE_ID = "50000000-0000-4000-8000-000000000003";
+  const IMAGE_ONLY_ID = "50000000-0000-4000-8000-000000000004";
+  const STALE_SEGMENT_ID = "60000000-0000-4000-8000-000000000003";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "治理知识库",
+        description: "",
+        status: "active",
+        document_count: 4,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: TOKEN_ID,
+        knowledge_base_id: BASE_ID,
+        name: "token.csv",
+        original_name: "token.csv",
+        status: "ready",
+        segment_count: 2,
+        content_initialized: true,
+        parsing_profile: {
+          ...processingProfileFor({
+            unit: "token",
+            mode: "general",
+            size: 1000,
+            overlap: 100,
+            separator: "\\n\\n",
+            child_size: 500,
+            child_separator: "\\n",
+            remove_extra_spaces: false,
+            remove_urls_emails: false,
+            header_rules: [],
+          }),
+          parse: {
+            ...PROCESSING_PROFILE.parse,
+            extractor_id: "dify.csv",
+          },
+        },
+        parse_warnings: [
+          {
+            code: "HEADER_INFERRED",
+            message: "已自动识别表头，请确认",
+            source_position: { row: 1 },
+          },
+          {
+            code: "IMAGE_CORRUPT",
+            message: "图片无法安全解码",
+            source_position: { row: 2, column: 3 },
+          },
+        ],
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: LEGACY_ID,
+        knowledge_base_id: BASE_ID,
+        name: "legacy.txt",
+        original_name: "legacy.txt",
+        status: "ready",
+        segment_count: 1,
+        content_initialized: true,
+        parsing_profile: null,
+        chunk_size_unit: "character",
+        tokenizer_profile_id: null,
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: STALE_ID,
+        knowledge_base_id: BASE_ID,
+        name: "failed-reparse.docx",
+        original_name: "failed-reparse.docx",
+        status: "failed",
+        segment_count: 1,
+        content_initialized: true,
+        version: 2,
+        error_message: "重新解析失败",
+        delete_error: null,
+      },
+      {
+        id: IMAGE_ONLY_ID,
+        knowledge_base_id: BASE_ID,
+        name: "scan.pdf",
+        original_name: "scan.pdf",
+        status: "failed",
+        segment_count: 0,
+        content_initialized: false,
+        error_message: "文件没有可提取的文本",
+        delete_error: null,
+      },
+    ],
+    segments: {
+      [STALE_ID]: [
+        {
+          id: STALE_SEGMENT_ID,
+          position: 1,
+          content: `旧发布正文\n\n![拓扑图](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})`,
+          enabled: false,
+          source_position: { page: 2 },
+          token_count: 23,
+          source_spans: [
+            {
+              block_id: "page:2:body",
+              start: 0,
+              end: 5,
+              location: { page: 2 },
+              role: "source",
+            },
+            {
+              block_id: "page:1:title",
+              start: 0,
+              end: 4,
+              location: { page: 1 },
+              role: "context_prefix",
+            },
+          ],
+          attachments: [
+            {
+              attachment_id: KNOWLEDGE_IMAGE_ATTACHMENT_ID,
+              ref: KNOWLEDGE_IMAGE_REF,
+              alt_text: "拓扑图",
+              media_type: "image/png",
+              width: 1,
+              height: 1,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  const rows = page.getByTestId("knowledge-document-rows");
+  const tokenRow = rows.getByRole("row").filter({ hasText: "token.csv" });
+  await expect(tokenRow).toContainText("1,000 Knowledge Tokens");
+  await expect(tokenRow).toContainText("knowledge-cl100k-v1");
+  await expect(tokenRow).toContainText("Dify · dify.csv · 1");
+  await expect(tokenRow).toContainText("2 parsing notices");
+  await expect(tokenRow).toContainText("Header row was inferred");
+  await expect(tokenRow).toContainText("1 image could not be saved");
+
+  const legacyRow = rows.getByRole("row").filter({ hasText: "legacy.txt" });
+  await expect(legacyRow).toContainText("1,000 characters");
+  await expect(legacyRow).toContainText("Historical profile");
+  await expect(legacyRow).not.toContainText("dify.text");
+
+  const imageOnlyRow = rows.getByRole("row").filter({ hasText: "scan.pdf" });
+  await expect(imageOnlyRow).toContainText("文件没有可提取的文本");
+
+  await page
+    .getByRole("button", { name: "Actions for failed-reparse.docx" })
+    .click();
+  await page.getByRole("menuitem", { name: "View published segments" }).click();
+  const browser = page.getByTestId("knowledge-segment-browser");
+  await expect(browser).toContainText(
+    "Previously published content (read only)",
+  );
+  await expect(browser).toContainText("23 Knowledge Tokens");
+  await expect(browser).toContainText("Source · Page 2");
+  await expect(browser).toContainText("Context · Page 1");
+  await expect(browser.getByRole("button", { name: "Edit" })).toHaveCount(0);
+  await expect(browser.getByRole("button", { name: "Delete" })).toHaveCount(0);
+  await expect(
+    browser.getByRole("button", { name: "Add segment" }),
+  ).toHaveCount(0);
+
+  await browser.getByRole("button", { name: "View full content" }).click();
+  const detail = page.getByRole("dialog");
+  await expect(detail).toContainText(
+    "1 image saved; image text is not recognized or included in text search.",
+  );
+  await expect(detail).toContainText("拓扑图 · image/png · 1×1");
+  await expect(detail.locator('img[alt="拓扑图"]')).toBeVisible();
+  const staleContent = `旧发布正文\n\n![拓扑图](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})`;
+  expect(state.attachmentRequests.at(-1)).toEqual({
+    purpose: "management",
+    expectedVersion: "1",
+    expectedDigest: createHash("sha256")
+      .update(staleContent, "utf8")
+      .digest("hex"),
+  });
+});
+
 test("batch metadata shows mixed values and applies one all-or-nothing patch", async ({
   page,
 }) => {
@@ -5131,6 +6422,7 @@ test("batch metadata shows mixed values and applies one all-or-nothing patch", a
       original_name: "运维手册.txt",
       status: "ready",
       segment_count: 3,
+      content_initialized: true,
       error_message: null,
       delete_error: null,
       doc_metadata: { category: "运维", priority: 2 },
@@ -5142,6 +6434,7 @@ test("batch metadata shows mixed values and applies one all-or-nothing patch", a
       original_name: "研发手册.txt",
       status: "ready",
       segment_count: 3,
+      content_initialized: true,
       error_message: null,
       delete_error: null,
       doc_metadata: { category: "研发", priority: 2 },
@@ -5279,6 +6572,10 @@ test("reparse previews the split, freezes parameters, and a stale confirmation c
         original_name: "重解析文档.txt",
         status: "ready",
         segment_count: 4,
+        content_initialized: true,
+        parsing_profile: null,
+        chunk_size_unit: "character",
+        tokenizer_profile_id: null,
         error_message: null,
         delete_error: null,
       },
@@ -5297,12 +6594,23 @@ test("reparse previews the split, freezes parameters, and a stale confirmation c
   await expect(
     dialog.getByText(/Manual segment edits and per-segment disables/),
   ).toBeVisible();
+  await expect(dialog).toContainText(
+    "Published attachment bindings are replaced by the new parse.",
+  );
+  await expect(
+    dialog.getByText(
+      "This document uses historical character limits. Reparse uses Knowledge Tokens and may change chunk boundaries.",
+    ),
+  ).toBeVisible();
 
   // Server-side preview with the edited parameters.
-  await dialog.getByLabel("Chunk size (characters)").fill("600");
+  await dialog.getByLabel("Chunk size (Knowledge Tokens)").fill("600");
   await dialog.getByRole("button", { name: "Preview split" }).click();
   const preview = dialog.getByTestId("knowledge-reparse-preview");
   await expect(preview).toContainText("Showing 2 of 5 chunks");
+  await expect(preview).toContainText(
+    "2 preview thumbnails were omitted; published attachments are not lost.",
+  );
   await expect(preview).toContainText("重解析预览首段 · chunk_size=600");
   expect(state.reparsePreviewRequests.at(-1)).toMatchObject({
     expected_version: 1,
@@ -5311,7 +6619,7 @@ test("reparse previews the split, freezes parameters, and a stale confirmation c
   });
 
   // Editing a parameter retires the preview: it described another reparse.
-  await dialog.getByLabel("Chunk overlap (characters)").fill("50");
+  await dialog.getByLabel("Chunk overlap (Knowledge Tokens)").fill("50");
   await expect(preview).toHaveCount(0);
 
   // The document changes elsewhere; the stale confirmation must conflict,
@@ -5326,7 +6634,9 @@ test("reparse previews the split, freezes parameters, and a stale confirmation c
   await expect(dialog.getByTestId("knowledge-reparse-conflict")).toBeVisible();
   expect(state.reparseRequests).toHaveLength(1);
   expect(state.reparseRequests.at(-1)).toMatchObject({ expected_version: 1 });
-  await expect(dialog.getByLabel("Chunk size (characters)")).toHaveValue("600");
+  await expect(dialog.getByLabel("Chunk size (Knowledge Tokens)")).toHaveValue(
+    "600",
+  );
 
   // Re-confirming against the refreshed version freezes the parameters.
   await authorityRefresh;
@@ -5369,6 +6679,7 @@ test("a stale reparse preview conflicts, refreshes the version, and the next att
         original_name: "重解析文档.txt",
         status: "ready",
         segment_count: 4,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -5439,6 +6750,7 @@ test("a batch metadata conflict refreshes the selection for re-confirmation", as
         original_name: "保留文档.txt",
         status: "ready",
         segment_count: 3,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
         doc_metadata: { category: "运维" },
@@ -5450,6 +6762,7 @@ test("a batch metadata conflict refreshes the selection for re-confirmation", as
         original_name: "消失文档.txt",
         status: "ready",
         segment_count: 3,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
         doc_metadata: { category: "研发" },
@@ -5531,6 +6844,7 @@ test("the document metadata dialog follows the authoritative row after a conflic
         original_name: "保留文档.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -5541,6 +6855,7 @@ test("the document metadata dialog follows the authoritative row after a conflic
         original_name: "消失文档.txt",
         status: "ready",
         segment_count: 2,
+        content_initialized: true,
         doc_metadata: { author: "旧作者" },
         error_message: null,
         delete_error: null,
@@ -5625,6 +6940,7 @@ test("summary index saves its switch and shows the backfill receipt", async ({
         original_name: "Ready.txt",
         status: "ready",
         segment_count: 1,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -5635,6 +6951,7 @@ test("summary index saves its switch and shows the backfill receipt", async ({
         original_name: "Pending.txt",
         status: "queued",
         segment_count: 0,
+        content_initialized: false,
         error_message: null,
         delete_error: null,
       },
@@ -5664,6 +6981,7 @@ test("summary index evidence stays separate from original content in search and 
         original_name: "发布说明.pdf",
         status: "ready",
         segment_count: 1,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
       },
@@ -5732,6 +7050,7 @@ test("summary index progress keeps polling while the document remains ready", as
         original_name: "Summary progress.txt",
         status: "ready",
         segment_count: 3,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
         task_progress: {
@@ -5776,6 +7095,7 @@ test("summary index failures can be retried without hiding ready source content"
         original_name: "Summary retry.txt",
         status: "ready",
         segment_count: 3,
+        content_initialized: true,
         error_message: null,
         delete_error: null,
         task_progress: {
@@ -5803,4 +7123,302 @@ test("summary index failures can be retried without hiding ready source content"
   await expect(row.getByTestId("knowledge-task-progress")).toContainText(
     "Generate summaries · Queued",
   );
+});
+
+test("Knowledge preview renders only response-bound images and releases every Blob URL", async ({
+  page,
+}) => {
+  await installKnowledgeObjectURLTracker(page);
+  const externalRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).hostname === "outside.invalid") {
+      externalRequests.push(request.url());
+    }
+  });
+  await mockKnowledgeRoutes(page);
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+  await page.getByLabel("File").setInputFiles({
+    name: "safe-images.md",
+    mimeType: "text/markdown",
+    buffer: Buffer.from("# image preview"),
+  });
+  await page.getByRole("button", { name: "Next" }).click();
+
+  const preview = page.getByTestId("chunk-preview-panel");
+  await expect(preview.getByTestId("knowledge-image")).toHaveCount(1);
+  await expect(
+    preview.getByText("External image not loaded", { exact: true }),
+  ).toBeVisible();
+  await expect(preview).toContainText(
+    `![code](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})`,
+  );
+  expect(externalRequests).toEqual([]);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as typeof window & { __knowledgeExecuted: boolean })
+          .__knowledgeExecuted,
+    ),
+  ).toBe(false);
+  await expect(page.locator('a[href^="javascript:"]')).toHaveCount(0);
+
+  await page
+    .getByLabel("Chunk size (Knowledge Tokens)", { exact: true })
+    .fill("1200");
+  await expect(preview).toContainText(
+    "Preview is out of date. Refresh to apply the current settings.",
+  );
+  await expect
+    .poll(async () => knowledgeObjectURLStats(page))
+    .toEqual({
+      created: [expect.stringMatching(/^blob:/u)],
+      revoked: [expect.stringMatching(/^blob:/u)],
+    });
+
+  await preview.getByRole("button", { name: "Refresh preview" }).click();
+  await expect(preview.getByTestId("knowledge-image")).toHaveCount(1);
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect
+    .poll(async () => {
+      const stats = await knowledgeObjectURLStats(page);
+      return [stats.created.length, stats.revoked.length];
+    })
+    .toEqual([2, 2]);
+});
+
+test("published Knowledge images use distinct pinned citation and management reads", async ({
+  page,
+}) => {
+  await installKnowledgeObjectURLTracker(page);
+  const documentId = "50000000-0000-4000-8000-000000000001";
+  const segmentId = "60000000-0000-4000-8000-000000000011";
+  const content = [
+    "# Published content",
+    `![diagram](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})`,
+    "![remote](https://outside.invalid/published.png)",
+  ].join("\n\n");
+  const externalRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).hostname === "outside.invalid") {
+      externalRequests.push(request.url());
+    }
+  });
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [T11_BASE],
+    documents: [
+      {
+        id: documentId,
+        knowledge_base_id: T11_BASE.id,
+        name: "发布说明.pdf",
+        original_name: "发布说明.pdf",
+        status: "ready",
+        segment_count: 1,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+    segments: {
+      [documentId]: [
+        {
+          id: segmentId,
+          position: 7,
+          content,
+          enabled: true,
+          source_position: { page: 7 },
+          attachments: [
+            {
+              attachment_id: KNOWLEDGE_IMAGE_ATTACHMENT_ID,
+              ref: KNOWLEDGE_IMAGE_REF,
+              alt_text: "diagram",
+              media_type: "image/png",
+              width: 1,
+              height: 1,
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  await page.goto(`/projects/alpha/knowledge?kb=${T11_BASE.id}&view=search`);
+  await page.getByLabel("Query").fill("发布流程");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page
+    .getByTestId("knowledge-search-results")
+    .getByRole("button", { name: "View segment #7 in full" })
+    .click();
+  await expect(
+    page.getByRole("dialog").getByTestId("knowledge-image"),
+  ).toBeVisible();
+  expect(state.attachmentRequests.at(-1)).toEqual({
+    purpose: "citation",
+    expectedVersion: "1",
+    expectedDigest: "d".repeat(64),
+  });
+  await page.keyboard.press("Escape");
+  await expect
+    .poll(async () => {
+      const stats = await knowledgeObjectURLStats(page);
+      return [stats.created.length, stats.revoked.length];
+    })
+    .toEqual([1, 1]);
+
+  await page.goto(
+    `/projects/alpha/knowledge?kb=${T11_BASE.id}&view=documents&doc=${documentId}`,
+  );
+  await page.getByRole("button", { name: "View full content" }).click();
+  await expect(
+    page.getByRole("dialog").getByTestId("knowledge-image"),
+  ).toBeVisible();
+  expect(state.attachmentRequests.at(-1)).toEqual({
+    purpose: "management",
+    expectedVersion: "1",
+    expectedDigest: createHash("sha256").update(content, "utf8").digest("hex"),
+  });
+  await page.keyboard.press("Escape");
+  await expect
+    .poll(async () => {
+      const stats = await knowledgeObjectURLStats(page);
+      return [stats.created.length, stats.revoked.length];
+    })
+    .toEqual([1, 1]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("direct Knowledge placeholder paths cannot borrow a current Segment attachment binding", async ({
+  page,
+}) => {
+  await installKnowledgeObjectURLTracker(page);
+  const documentId = "50000000-0000-4000-8000-000000000001";
+  const segmentId = "60000000-0000-4000-8000-000000000011";
+  const content = [
+    `![forged](/__knowledge-image/${KNOWLEDGE_IMAGE_REF})`,
+    `![extra](/__knowledge-image/${KNOWLEDGE_IMAGE_REF}/extra)`,
+    `\`![code](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})\``,
+    `<img src="/__knowledge-image/${KNOWLEDGE_IMAGE_REF}" data-knowledge-image-ref="${KNOWLEDGE_IMAGE_REF}">`,
+  ].join("\n\n");
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [T11_BASE],
+    documents: [
+      {
+        id: documentId,
+        knowledge_base_id: T11_BASE.id,
+        name: "伪造占位路径.md",
+        original_name: "伪造占位路径.md",
+        status: "ready",
+        segment_count: 1,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+    segments: {
+      [documentId]: [
+        {
+          id: segmentId,
+          position: 1,
+          content,
+          enabled: true,
+          source_position: { paragraph: 1 },
+          attachments: [
+            {
+              attachment_id: KNOWLEDGE_IMAGE_ATTACHMENT_ID,
+              ref: KNOWLEDGE_IMAGE_REF,
+              alt_text: "real binding",
+              media_type: "image/png",
+              width: 1,
+              height: 1,
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  await page.goto(
+    `/projects/alpha/knowledge?kb=${T11_BASE.id}&view=documents&doc=${documentId}`,
+  );
+  await page.getByRole("button", { name: "View full content" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByTestId("knowledge-image-placeholder")).toHaveCount(
+    2,
+  );
+  await expect(dialog.getByTestId("knowledge-image")).toHaveCount(0);
+  await expect(dialog).toContainText(
+    `![code](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})`,
+  );
+  await expect(dialog).toContainText("data-knowledge-image-ref");
+  expect(state.attachmentRequests).toEqual([]);
+  expect(await knowledgeObjectURLStats(page)).toEqual({
+    created: [],
+    revoked: [],
+  });
+});
+
+test("a protected image response released after project scope disposal cannot create a Blob URL", async ({
+  page,
+}) => {
+  await installKnowledgeObjectURLTracker(page);
+  let releaseAttachment!: () => void;
+  const attachmentResponseGate = new Promise<void>((resolve) => {
+    releaseAttachment = resolve;
+  });
+  const documentId = "50000000-0000-4000-8000-000000000001";
+  const segmentId = "60000000-0000-4000-8000-000000000011";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [T11_BASE],
+    documents: [
+      {
+        id: documentId,
+        knowledge_base_id: T11_BASE.id,
+        name: "发布说明.pdf",
+        original_name: "发布说明.pdf",
+        status: "ready",
+        segment_count: 1,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+    segments: {
+      [documentId]: [
+        {
+          id: segmentId,
+          position: 7,
+          content: `![diagram](knowledge-attachment:${KNOWLEDGE_IMAGE_REF})`,
+          enabled: true,
+          source_position: { page: 7 },
+          attachments: [
+            {
+              attachment_id: KNOWLEDGE_IMAGE_ATTACHMENT_ID,
+              ref: KNOWLEDGE_IMAGE_REF,
+              alt_text: "diagram",
+              media_type: "image/png",
+              width: 1,
+              height: 1,
+            },
+          ],
+        },
+      ],
+    },
+    attachmentResponseGate,
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${T11_BASE.id}&view=search`);
+  await page.getByLabel("Query").fill("发布流程");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page
+    .getByTestId("knowledge-search-results")
+    .getByRole("button", { name: "View segment #7 in full" })
+    .click();
+  await expect.poll(() => state.attachmentRequests.length).toBe(1);
+
+  await page.goto("/workspace");
+  releaseAttachment();
+  await page.waitForTimeout(100);
+  expect(await knowledgeObjectURLStats(page)).toEqual({
+    created: [],
+    revoked: [],
+  });
 });

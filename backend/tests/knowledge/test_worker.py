@@ -26,6 +26,7 @@ from actweave_knowledge.persistence.models import (
     KnowledgeTaskRow,
 )
 from actweave_knowledge.tasks import KnowledgeTaskClaim, KnowledgeTaskWorker, purge_project_knowledge
+from extraction_test_helpers import make_test_quota_port, make_test_quota_service
 from registry_helpers import seed_registry_models
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -33,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.knowledge.composition import (
     create_knowledge_worker_resources_from_database,
     is_knowledge_project_active,
+    is_knowledge_project_pending_deletion,
 )
 from app.knowledge.worker import run_worker_loops
 from app.private_work.retention_jobs import project_retention_key
@@ -86,6 +88,18 @@ async def _seed_project(session: AsyncSession, label: str) -> uuid.UUID:
     return project_id
 
 
+async def _mark_project_pending_deletion(
+    harness: _Harness,
+    project_id: uuid.UUID,
+) -> None:
+    async with harness.factory() as session, session.begin():
+        project = await session.get(ProjectRow, project_id, with_for_update=True)
+        assert project is not None
+        project.status = "pending_deletion"
+        project.deletion_requested_at = datetime.now(UTC)
+        project.deletion_effective_at = datetime.now(UTC)
+
+
 async def _seed_retained_knowledge_graph(
     harness: _Harness,
     *,
@@ -128,6 +142,7 @@ async def _seed_retained_knowledge_graph(
                     original_name="retained.md",
                     storage_key=storage_key,
                     size_bytes=8,
+                    upload_state="stored",
                     status="ready",
                 ),
             ]
@@ -368,6 +383,13 @@ async def test_project_purge_waits_for_running_task_before_deleting_storage(
                 self.objects.discard(key)
                 self.deleted.append(key)
 
+        async def delete(self, key: str) -> None:
+            self.objects.discard(key)
+            self.deleted.append(key)
+
+        async def require_absent(self, key: str) -> None:
+            assert key not in self.objects
+
         async def delete_project_objects(self, project_id: uuid.UUID) -> None:
             prefix = f"projects/{project_id}/knowledge/"
             for key in tuple(self.objects):
@@ -411,6 +433,8 @@ async def test_project_purge_waits_for_running_task_before_deleting_storage(
         completed = await purge_project_knowledge(
             harness.factory,
             store,  # type: ignore[arg-type] - external object-store boundary
+            quota=make_test_quota_port(harness.factory),
+            project_cleanup_check=is_knowledge_project_pending_deletion,
             project_id=project_id,
         )
 
@@ -448,6 +472,8 @@ async def test_project_purge_waits_for_running_task_before_deleting_storage(
         assert await purge_project_knowledge(
             harness.factory,
             store,  # type: ignore[arg-type] - external object-store boundary
+            quota=make_test_quota_port(harness.factory),
+            project_cleanup_check=is_knowledge_project_pending_deletion,
             project_id=project_id,
         )
         assert store.objects == set()
@@ -838,6 +864,7 @@ async def test_disabled_worker_retention_with_preserved_storage_removes_project_
 ) -> None:
     """Disabling product surfaces must retain the Project cleanup capability."""
 
+    monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
     harness = await _harness(postgres_database_url)
     bucket = "retained-knowledge"
     objects: set[tuple[str, str]] = set()
@@ -856,6 +883,20 @@ async def test_disabled_worker_retention_with_preserved_storage_removes_project_
             assert object_bucket == bucket
             return SimpleNamespace(status=None)
 
+        def stat_object(self, object_bucket: str, key: str) -> SimpleNamespace:
+            if (object_bucket, key) not in objects:
+                from minio.error import S3Error
+
+                raise S3Error(
+                    response=None,
+                    code="NoSuchKey",
+                    message="fixture",
+                    resource="fixture",
+                    request_id="fixture",
+                    host_id="fixture",
+                )
+            return SimpleNamespace(size=1, metadata={})
+
         def list_objects(
             self,
             object_bucket: str,
@@ -872,6 +913,7 @@ async def test_disabled_worker_retention_with_preserved_storage_removes_project_
             harness,
             label=label,
         )
+        await _mark_project_pending_deletion(harness, project_id)
         objects.add((bucket, storage_key))
 
         import actweave_knowledge.storage.minio_store as minio_store_module
@@ -889,7 +931,7 @@ async def test_disabled_worker_retention_with_preserved_storage_removes_project_
         row.minio_secret_nonce, row.minio_secret_ciphertext = envelope.nonce, envelope.ciphertext
         async with harness.factory() as session, session.begin():
             session.add(row)
-        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
+        resources = await create_knowledge_worker_resources_from_database(quota_service=make_test_quota_service(engine_module.get_session_factory()), app_config=SimpleNamespace())
         assert resources.feature_module is None
 
         sequence: list[str] = []
@@ -930,10 +972,11 @@ async def test_disabled_worker_retention_without_storage_retries_when_documents_
             harness,
             label=uuid.uuid4().hex[:8],
         )
+        await _mark_project_pending_deletion(harness, project_id)
         import deerflow.persistence.engine as engine_module
 
         monkeypatch.setattr(engine_module, "get_session_factory", lambda: harness.factory)
-        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
+        resources = await create_knowledge_worker_resources_from_database(quota_service=make_test_quota_service(engine_module.get_session_factory()), app_config=SimpleNamespace())
         assert resources.feature_module is None
 
         sequence: list[str] = []
@@ -962,10 +1005,11 @@ async def test_disabled_worker_retention_without_historical_documents_can_contin
     try:
         async with harness.factory() as session, session.begin():
             project_id = await _seed_project(session, uuid.uuid4().hex[:8])
+        await _mark_project_pending_deletion(harness, project_id)
         import deerflow.persistence.engine as engine_module
 
         monkeypatch.setattr(engine_module, "get_session_factory", lambda: harness.factory)
-        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
+        resources = await create_knowledge_worker_resources_from_database(quota_service=make_test_quota_service(engine_module.get_session_factory()), app_config=SimpleNamespace())
 
         sequence: list[str] = []
         rows: list[object] = [_gate_job_row(project_id), _gate_project_row()]
@@ -1002,6 +1046,7 @@ async def test_disabled_worker_without_storage_fails_closed_for_object_cleanup_t
                     storage_key=(f"projects/{project_id}/knowledge/{uuid.uuid4()}/{document_id}.pdf"),
                 )
             )
+        await _mark_project_pending_deletion(harness, project_id)
 
         import deerflow.persistence.engine as engine_module
 
@@ -1010,7 +1055,7 @@ async def test_disabled_worker_without_storage_fails_closed_for_object_cleanup_t
             "get_session_factory",
             lambda: harness.factory,
         )
-        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
+        resources = await create_knowledge_worker_resources_from_database(quota_service=make_test_quota_service(engine_module.get_session_factory()), app_config=SimpleNamespace())
 
         assert await resources.project_purge(project_id) is False
         async with harness.factory() as session:
@@ -1052,6 +1097,7 @@ async def test_disabled_worker_without_storage_accepts_succeeded_object_cleanup_
                     finished_at=datetime.now(UTC),
                 )
             )
+        await _mark_project_pending_deletion(harness, project_id)
 
         import deerflow.persistence.engine as engine_module
 
@@ -1060,7 +1106,7 @@ async def test_disabled_worker_without_storage_accepts_succeeded_object_cleanup_
             "get_session_factory",
             lambda: harness.factory,
         )
-        resources = await create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
+        resources = await create_knowledge_worker_resources_from_database(quota_service=make_test_quota_service(engine_module.get_session_factory()), app_config=SimpleNamespace())
 
         assert await resources.project_purge(project_id) is True
         async with harness.factory() as session:

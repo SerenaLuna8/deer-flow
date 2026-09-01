@@ -10,6 +10,7 @@ from uuid import UUID
 
 from actweave_knowledge import KNOWLEDGE_MODEL_UNAVAILABLE, KnowledgeError, KnowledgeSettings
 from actweave_knowledge.contracts import KnowledgeMinioSettings
+from actweave_knowledge.ingestion.profiles import probe_file_capabilities, required_file_formats_ready
 from actweave_knowledge.storage.minio_store import MinioObjectStore
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -197,6 +198,8 @@ async def update_knowledge_system_settings(
         if settings.enabled:
             try:
                 await asyncio.wait_for(storage_probe(settings.minio), timeout=10)
+                if not required_file_formats_ready(await probe_file_capabilities(settings)):
+                    raise KnowledgeSettingsError()
             except Exception:
                 raise KnowledgeSettingsError() from None
         async with session_factory() as session, session.begin():

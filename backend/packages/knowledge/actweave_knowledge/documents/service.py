@@ -3,21 +3,26 @@
 Upload is a three-step pipeline: persist an ``uploading`` row, write the
 object to MinIO, then in one transaction flip the row to ``queued`` and create
 the ingest task. An ingest task therefore only ever references an object that
-was written successfully; any failure deletes both the object and the
-``uploading`` row before the error reaches the caller.
+was written successfully. Failed writes retain their reservation until object
+absence is confirmed; uncertain cleanup leaves an exact-object tombstone.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,6 +38,7 @@ from ..contracts import (
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeChunkingMode,
     KnowledgeChunkPreviewRequest,
+    KnowledgeDocumentAttachmentView,
     KnowledgeDocumentUpload,
     KnowledgeDocumentView,
     KnowledgeError,
@@ -42,15 +48,24 @@ from ..contracts import (
     KnowledgeSettings,
     KnowledgeTaskProgress,
 )
+from ..extraction.contracts import ParseWarning, ProcessingProfile, SourceSpan
+from ..extraction.registry import default_registry
+from ..extraction.runtime import ParserSlots
 from ..persistence.derivations import document_delete_error_expression
 from ..persistence.models import (
+    KnowledgeAttachmentRow,
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
 )
-from ..persistence.tasks import TASK_OPEN_STATUSES, VERSIONED_TASK_KINDS
+from ..persistence.tasks import TASK_OPEN_STATUSES, VERSIONED_TASK_KINDS, validated_reparse_settings
 from ..storage import DOCUMENT_STORAGE_EXTENSIONS, MinioObjectStore, document_storage_key
+from ..storage.quota import KnowledgeStorageQuotaPort
+from ..tasks.worker import KnowledgeProjectInactive, ProjectActiveCheck
+
+if TYPE_CHECKING:
+    from ..ingestion.profiles import FileCapabilities, ProcessingParameters
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +186,47 @@ def validated_chunking_mode(
     return "parent_child", child_chunk_size, child_chunk_separator
 
 
+def _processing_parameters(request: KnowledgeDocumentUpload | KnowledgeReparseRequest) -> ProcessingParameters:
+    from ..ingestion.profiles import ProcessingParameters
+
+    if request.processing_profile is not None:
+        return ProcessingParameters.model_validate(request.processing_profile)
+    return ProcessingParameters(
+        size=request.chunk_size,
+        overlap=request.chunk_overlap,
+        separator=request.chunk_separator,
+        mode=request.chunking_mode,
+        child_size=request.child_chunk_size,
+        child_separator=request.child_chunk_separator,
+        remove_extra_spaces=request.remove_extra_spaces,
+        remove_urls_emails=request.remove_urls_emails,
+    )
+
+
+def _apply_processing_parameters(request: KnowledgeDocumentUpload | KnowledgeReparseRequest) -> KnowledgeDocumentUpload | KnowledgeReparseRequest:
+    from ..ingestion.profiles import ProcessingParameters
+
+    if request.processing_profile is None:
+        return request
+    try:
+        p = ProcessingParameters.model_validate(request.processing_profile)
+        return replace(
+            request,
+            chunk_size=p.size,
+            chunk_overlap=p.overlap,
+            chunk_separator=p.separator,
+            chunking_mode=p.mode,
+            child_chunk_size=p.child_size,
+            child_chunk_separator=p.child_separator,
+            remove_extra_spaces=p.remove_extra_spaces,
+            remove_urls_emails=p.remove_urls_emails,
+        )
+    except ValidationError:
+        raise _invalid("分段参数无效") from None
+
+
 def _validated_upload(upload: KnowledgeDocumentUpload, settings: KnowledgeSettings) -> KnowledgeDocumentUpload:
+    upload = _apply_processing_parameters(upload)
     name = upload.name.strip()
     if not name or len(name) > _MAX_NAME_LENGTH:
         raise _invalid(f"name 必须是 1-{_MAX_NAME_LENGTH} 个字符的非空文本")
@@ -191,6 +246,8 @@ def _validated_upload(upload: KnowledgeDocumentUpload, settings: KnowledgeSettin
     return KnowledgeDocumentUpload(
         name=name,
         original_name=original_name,
+        processing_profile=upload.processing_profile,
+        expected_preview_fingerprint=upload.expected_preview_fingerprint,
         source_path=upload.source_path,
         size_bytes=size_bytes,
         media_type=media_type,
@@ -205,9 +262,28 @@ def _validated_upload(upload: KnowledgeDocumentUpload, settings: KnowledgeSettin
     )
 
 
+def _source_digest(upload: KnowledgeDocumentUpload) -> str:
+    """Hash actual admitted bytes before registering any quota fact."""
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with upload.source_path.open("rb") as source:
+            while block := source.read(65536):
+                size += len(block)
+                if size > upload.size_bytes:
+                    raise _invalid("实际文件大小与上传声明不一致")
+                digest.update(block)
+    except OSError:
+        raise _invalid("无法读取上传文件") from None
+    if size != upload.size_bytes:
+        raise _invalid("实际文件大小与上传声明不一致")
+    return digest.hexdigest()
+
+
 def _validated_reparse(request: KnowledgeReparseRequest) -> KnowledgeReparseRequest:
     """Full parameter validation before anything is frozen or downloaded."""
 
+    request = _apply_processing_parameters(request)
     if type(request.expected_version) is not int or request.expected_version < 1:
         raise _invalid("expected_version 必须是不小于 1 的整数")
     chunk_size, chunk_overlap, chunk_separator = validated_chunk_settings(request.chunk_size, request.chunk_overlap, request.chunk_separator)
@@ -220,6 +296,8 @@ def _validated_reparse(request: KnowledgeReparseRequest) -> KnowledgeReparseRequ
     )
     return KnowledgeReparseRequest(
         expected_version=request.expected_version,
+        processing_profile=request.processing_profile,
+        expected_preview_fingerprint=request.expected_preview_fingerprint,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         chunk_separator=chunk_separator,
@@ -229,21 +307,6 @@ def _validated_reparse(request: KnowledgeReparseRequest) -> KnowledgeReparseRequ
         child_chunk_size=child_chunk_size,
         child_chunk_separator=child_chunk_separator,
     )
-
-
-def _frozen_reparse_settings(validated: KnowledgeReparseRequest) -> dict:
-    """The task-borne parameter snapshot; the handler applies exactly this."""
-
-    return {
-        "chunk_size": validated.chunk_size,
-        "chunk_overlap": validated.chunk_overlap,
-        "chunk_separator": validated.chunk_separator,
-        "remove_extra_spaces": validated.remove_extra_spaces,
-        "remove_urls_emails": validated.remove_urls_emails,
-        "chunking_mode": validated.chunking_mode,
-        "child_chunk_size": validated.child_chunk_size,
-        "child_chunk_separator": validated.child_chunk_separator,
-    }
 
 
 # Statuses that accept an explicit re-parse: the document must be settled.
@@ -295,6 +358,8 @@ def document_view(
         # stays initialized while a never-published one does not.
         content_initialized=row.published_version is not None,
         task_progress=task_progress,
+        parsing_profile=ProcessingProfile.model_validate(row.parsing_profile) if row.parsing_profile else None,
+        parse_warnings=tuple(ParseWarning.model_validate(w) for w in row.parse_warnings),
     )
 
 
@@ -357,6 +422,43 @@ async def indexing_task_progress(
     return {document_id: _task_progress_view(row) for document_id, row in newest.items() if row.status != "succeeded"}
 
 
+def _failed_upload_tombstone(project_id: UUID, base_id: UUID, document_id: UUID, storage_key: str, upload: KnowledgeDocumentUpload, source_sha256: str) -> KnowledgeDocumentRow:
+    return KnowledgeDocumentRow(
+        id=document_id,
+        project_id=project_id,
+        knowledge_base_id=base_id,
+        name=upload.name,
+        original_name=upload.original_name,
+        storage_key=storage_key,
+        media_type=upload.media_type,
+        size_bytes=upload.size_bytes,
+        source_sha256=source_sha256,
+        quota_state="reserved",
+        upload_state="pending",
+        status="deleting",
+        version=2,
+        chunk_size=upload.chunk_size,
+        chunk_overlap=upload.chunk_overlap,
+        chunk_separator=upload.chunk_separator,
+        remove_extra_spaces=upload.remove_extra_spaces,
+        remove_urls_emails=upload.remove_urls_emails,
+        chunking_mode=upload.chunking_mode,
+        child_chunk_size=upload.child_chunk_size,
+        child_chunk_separator=upload.child_chunk_separator,
+    )
+
+
+async def _latest_indexing_task(session: AsyncSession, document_id: UUID):  # noqa: ANN202 - SQLAlchemy row projection
+    return (
+        await session.execute(
+            select(KnowledgeTaskRow.kind, KnowledgeTaskRow.reparse_settings, KnowledgeTaskRow.status, KnowledgeTaskRow.target_version)
+            .where(KnowledgeTaskRow.resource_id == document_id, KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS))
+            .order_by(KnowledgeTaskRow.created_at.desc(), KnowledgeTaskRow.id.desc())
+            .limit(1)
+        )
+    ).one_or_none()
+
+
 class KnowledgeDocumentService:
     """Upload, list, read, and download documents scoped to one project."""
 
@@ -366,10 +468,28 @@ class KnowledgeDocumentService:
         session_factory: async_sessionmaker[AsyncSession],
         settings: KnowledgeSettings,
         object_store: MinioObjectStore,
+        quota: KnowledgeStorageQuotaPort,
+        project_active_check: ProjectActiveCheck,
+        file_capabilities: Callable[[], FileCapabilities],
+        preview_parser_slots: ParserSlots | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._object_store = object_store
+        self._quota = quota
+        self._project_active_check = project_active_check
+        self._file_capabilities = file_capabilities
+        self._preview_parser_slots = preview_parser_slots or ParserSlots(1)
+
+    def _require_parsing_capabilities(self) -> FileCapabilities:
+        from ..ingestion.profiles import required_file_formats_ready
+
+        capabilities = self._file_capabilities()
+        if not required_file_formats_ready(capabilities):
+            from ..extraction.contracts import ExtractionError
+
+            raise ExtractionError("PARSER_SANDBOX_UNAVAILABLE", "文件解析暂不可用，请联系管理员")
+        return capabilities
 
     async def upload_document(
         self,
@@ -379,7 +499,21 @@ class KnowledgeDocumentService:
         *,
         authority: KnowledgeProjectAuthority | None = None,
     ) -> KnowledgeDocumentView:
+        from ..ingestion.profiles import chunk_settings, preview_fingerprint, resolve_processing_profile
+
         validated = _validated_upload(upload, self._settings)
+        source_sha256 = await run_sync_to_completion(_source_digest, validated)
+        registry = await run_sync_to_completion(default_registry)
+        try:
+            profile = await run_sync_to_completion(resolve_processing_profile, self._settings, _processing_parameters(validated), registry, extension=Path(validated.original_name).suffix)
+        except ValueError:
+            raise _invalid("分段参数无效") from None
+        capabilities = self._require_parsing_capabilities()
+        if validated.expected_preview_fingerprint is not None and validated.expected_preview_fingerprint != preview_fingerprint(
+            source_sha256=source_sha256, extension=Path(validated.original_name).suffix, profile=profile, capability_revision=capabilities.capability_revision
+        ):
+            raise KnowledgeError(KNOWLEDGE_CONFLICT, "预览已过期，请重新预览")
+        validated = replace(validated, **chunk_settings(profile))
         document_id = uuid4()
         storage_key = document_storage_key(project_id, base_id, document_id, validated.original_name)
 
@@ -389,14 +523,36 @@ class KnowledgeDocumentService:
             document_id,
             storage_key,
             validated,
+            source_sha256=source_sha256,
+            profile=profile,
+            capability_revision=capabilities.capability_revision,
             authority=authority,
         )
+        stored = False
         try:
-            await self._object_store.upload_from(
-                storage_key,
-                validated.source_path,
-                media_type=validated.media_type,
+            uploading = asyncio.create_task(
+                self._object_store.upload_from(
+                    storage_key,
+                    validated.source_path,
+                    media_type=validated.media_type,
+                )
             )
+            cancelled = None
+            while True:
+                try:
+                    # Do not cancel the adapter: its sync bridge otherwise
+                    # drains a successful PUT but discards that success when
+                    # it propagates cancellation. Retain the physical outcome
+                    # for compensation before forwarding the cancellation.
+                    await asyncio.shield(uploading)
+                    stored = True
+                    break
+                except asyncio.CancelledError as exc:
+                    if uploading.cancelled():
+                        raise
+                    cancelled = cancelled or exc
+            if cancelled is not None:
+                raise cancelled
             return await self._publish_queued_document(
                 project_id,
                 document_id,
@@ -406,15 +562,24 @@ class KnowledgeDocumentService:
             # Cancellation (client disconnect) and unexpected bugs must roll
             # back exactly like KnowledgeError; the shield keeps a second
             # cancellation from interrupting the cleanup itself.
-            await asyncio.shield(
+            cleanup = asyncio.create_task(
                 self._cleanup_failed_upload(
                     project_id,
                     base_id,
                     document_id,
                     storage_key,
                     validated,
+                    stored=stored,
+                    source_sha256=source_sha256,
                 )
             )
+            while True:
+                try:
+                    await asyncio.shield(cleanup)
+                    break
+                except asyncio.CancelledError:
+                    if cleanup.cancelled():
+                        raise
             raise
 
     async def _create_uploading_row(
@@ -425,6 +590,9 @@ class KnowledgeDocumentService:
         storage_key: str,
         validated: KnowledgeDocumentUpload,
         *,
+        source_sha256: str,
+        profile: ProcessingProfile,
+        capability_revision: str,
         authority: KnowledgeProjectAuthority | None = None,
     ) -> None:
         """Reserve the document under the base lock: status gate, quota, row insert."""
@@ -436,6 +604,8 @@ class KnowledgeDocumentService:
                     session,
                     project_id=project_id,
                 )
+                if not await self._project_active_check(session, project_id):
+                    raise KnowledgeProjectInactive()
                 base = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id).with_for_update())
                 if base is None:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
@@ -459,6 +629,9 @@ class KnowledgeDocumentService:
                         storage_key=storage_key,
                         media_type=validated.media_type,
                         size_bytes=validated.size_bytes,
+                        source_sha256=source_sha256,
+                        parsing_profile=profile.model_dump(mode="json"),
+                        capability_revision=capability_revision,
                         status="uploading",
                         version=1,
                         chunk_size=validated.chunk_size,
@@ -471,6 +644,8 @@ class KnowledgeDocumentService:
                         child_chunk_separator=validated.child_chunk_separator,
                     )
                 )
+                await session.flush()
+                await self._quota.reserve(session, project_id=project_id, object_id=document_id, size_bytes=validated.size_bytes)
         except KnowledgeError:
             raise
         except SQLAlchemyError:
@@ -497,6 +672,8 @@ class KnowledgeDocumentService:
                     session,
                     project_id=project_id,
                 )
+                if not await self._project_active_check(session, project_id):
+                    raise KnowledgeProjectInactive()
                 row = await session.scalar(
                     select(KnowledgeDocumentRow)
                     .where(
@@ -507,6 +684,8 @@ class KnowledgeDocumentService:
                 )
                 if row is None or row.status != "uploading" or row.version != 1:
                     raise KnowledgeError(KNOWLEDGE_CONFLICT, "Document 上传期间已被删除")
+                row.upload_state = "stored"
+                await self._quota.commit(session, object_id=row.id)
                 row.status = "queued"
                 row.updated_at = func.now()  # type: ignore[assignment]
                 session.add(
@@ -534,6 +713,9 @@ class KnowledgeDocumentService:
         document_id: UUID,
         storage_key: str,
         validated: KnowledgeDocumentUpload,
+        *,
+        stored: bool,
+        source_sha256: str,
     ) -> None:
         """Roll back a failed upload without ever orphaning the object.
 
@@ -547,6 +729,7 @@ class KnowledgeDocumentService:
 
         try:
             await self._object_store.delete(storage_key)
+            await self._object_store.require_absent(storage_key)
         except KnowledgeError:
             # Log the document id, not the storage key: object keys are
             # storage locators and must stay out of logs.
@@ -557,10 +740,27 @@ class KnowledgeDocumentService:
                 document_id,
                 storage_key,
                 validated,
+                stored=stored,
+                source_sha256=source_sha256,
             )
             return
         try:
             async with self._session_factory() as session, session.begin():
+                # Compensation still takes the Project fence when inactive;
+                # it may release only an existing, confirmed-deleted object.
+                await self._project_active_check(session, project_id)
+                base = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.id == base_id, KnowledgeBaseRow.project_id == project_id).with_for_update())
+                row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == document_id, KnowledgeDocumentRow.project_id == project_id).with_for_update())
+                if row is None and base is not None:
+                    # A concurrent legacy delete may have removed the row
+                    # while this PUT was still in flight. Restore only this
+                    # admission's exact UUID and already-reserved bytes.
+                    row = _failed_upload_tombstone(project_id, base_id, document_id, storage_key, validated, source_sha256)
+                    session.add(row)
+                    await session.flush()
+                if row is not None:
+                    row.upload_state = "deleted"
+                    await self._quota.release(session, object_id=row.id)
                 await session.execute(delete(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == document_id))
         except SQLAlchemyError:
             logger.warning("uploading document row left behind after failed upload: %s", document_id, exc_info=True)
@@ -572,50 +772,34 @@ class KnowledgeDocumentService:
         document_id: UUID,
         storage_key: str,
         validated: KnowledgeDocumentUpload,
+        *,
+        stored: bool,
+        source_sha256: str,
     ) -> None:
         """Persist exact-key cleanup and retain a user-retry tombstone when possible."""
 
         try:
             async with self._session_factory() as session, session.begin():
+                # Lock even for inactive Projects, with no publication rights.
+                await self._project_active_check(session, project_id)
+                base = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.id == base_id, KnowledgeBaseRow.project_id == project_id).with_for_update())
                 row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.id == document_id).with_for_update())
                 if row is None:
-                    base = await session.scalar(
-                        select(KnowledgeBaseRow)
-                        .where(
-                            KnowledgeBaseRow.project_id == project_id,
-                            KnowledgeBaseRow.id == base_id,
-                        )
-                        .with_for_update()
-                    )
                     if base is not None:
-                        session.add(
-                            KnowledgeDocumentRow(
-                                id=document_id,
-                                project_id=project_id,
-                                knowledge_base_id=base_id,
-                                name=validated.name,
-                                original_name=validated.original_name,
-                                storage_key=storage_key,
-                                media_type=validated.media_type,
-                                size_bytes=validated.size_bytes,
-                                status="deleting",
-                                version=2,
-                                chunk_size=validated.chunk_size,
-                                chunk_overlap=validated.chunk_overlap,
-                                chunk_separator=validated.chunk_separator,
-                                remove_extra_spaces=validated.remove_extra_spaces,
-                                remove_urls_emails=validated.remove_urls_emails,
-                                chunking_mode=validated.chunking_mode,
-                                child_chunk_size=validated.child_chunk_size,
-                                child_chunk_separator=validated.child_chunk_separator,
-                            )
-                        )
+                        row = _failed_upload_tombstone(project_id, base_id, document_id, storage_key, validated, source_sha256)
+                        session.add(row)
+                        await session.flush()
                 else:
                     if row.status != "deleting":
                         row.version = row.version + 1
                     row.status = "deleting"
                     row.error_message = None
                     row.updated_at = func.now()  # type: ignore[assignment]
+                if row is not None:
+                    if stored:
+                        row.upload_state = "stored"
+                        await self._quota.commit(session, object_id=row.id)
+                    row.upload_state = "delete_pending"
                 if not await _open_delete_task_exists(
                     session,
                     "delete_document_object",
@@ -687,6 +871,66 @@ class KnowledgeDocumentService:
         )
         return document_view(row, delete_error=delete_error, task_progress=task_progress)
 
+    async def list_document_attachments(
+        self,
+        project_id: UUID,
+        document_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> tuple[list[KnowledgeDocumentAttachmentView], int]:
+        """List selectable images from the ready Document's current publication."""
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                document = await session.scalar(
+                    select(KnowledgeDocumentRow).where(
+                        KnowledgeDocumentRow.project_id == project_id,
+                        KnowledgeDocumentRow.id == document_id,
+                    )
+                )
+                if document is None:
+                    raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
+                if document.status != "ready" or document.published_extraction_id is None or document.published_version is None or document.published_version != document.version:
+                    raise _invalid("仅 ready 状态且内容为当前发布版本的文档支持选择附件")
+                rows = list(
+                    (
+                        await session.scalars(
+                            select(KnowledgeAttachmentRow)
+                            .where(
+                                KnowledgeAttachmentRow.project_id == project_id,
+                                KnowledgeAttachmentRow.knowledge_base_id == document.knowledge_base_id,
+                                KnowledgeAttachmentRow.knowledge_document_id == document.id,
+                                KnowledgeAttachmentRow.extraction_id == document.published_extraction_id,
+                                KnowledgeAttachmentRow.state == "ready",
+                                KnowledgeAttachmentRow.upload_state == "stored",
+                            )
+                            .order_by(KnowledgeAttachmentRow.sha256.asc(), KnowledgeAttachmentRow.id.asc())
+                        )
+                    ).all()
+                )
+                return (
+                    [
+                        KnowledgeDocumentAttachmentView(
+                            attachment_id=row.id,
+                            ref=row.sha256,
+                            media_type=row.media_type,  # type: ignore[arg-type]  # database constraint
+                            width=row.width,
+                            height=row.height,
+                        )
+                        for row in rows
+                    ],
+                    document.version,
+                )
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            raise _storage_unavailable() from None
+
     async def download_document(
         self,
         project_id: UUID,
@@ -736,7 +980,24 @@ class KnowledgeDocumentService:
         into a re-parse of the original file.
         """
 
+        from ..ingestion.profiles import validate_frozen_processing_profile
+
         try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(authority, session, project_id=project_id)
+                snapshot = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id))
+                if snapshot is None:
+                    raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
+                if await session.scalar(select(KnowledgeBaseRow.status).where(KnowledgeBaseRow.id == snapshot.knowledge_base_id)) != "active":
+                    raise _invalid("所属 Knowledge Base 不是 active 状态，不能重试")
+                prior_indexing = await _latest_indexing_task(session, snapshot.id)
+            prior_kind = prior_indexing.kind if prior_indexing is not None else "ingest_document"
+            if snapshot.status == "failed" and prior_kind == "ingest_document":
+                self._require_parsing_capabilities()
+                registry = await run_sync_to_completion(default_registry)
+                prior_reparse = prior_indexing.reparse_settings if prior_indexing is not None else None
+                frozen_profile = validated_reparse_settings(prior_reparse)["processing_profile"] if prior_reparse is not None else snapshot.parsing_profile
+                await run_sync_to_completion(validate_frozen_processing_profile, frozen_profile, extension=Path(snapshot.original_name).suffix, registry=registry)
             async with self._session_factory() as session, session.begin():
                 await revalidate_project_authority(
                     authority,
@@ -749,17 +1010,9 @@ class KnowledgeDocumentService:
                 base_status = await session.scalar(select(KnowledgeBaseRow.status).where(KnowledgeBaseRow.id == row.knowledge_base_id))
                 if base_status != "active":
                     raise _invalid("所属 Knowledge Base 不是 active 状态，不能重试")
-                last_indexing = (
-                    await session.execute(
-                        select(KnowledgeTaskRow.kind, KnowledgeTaskRow.reparse_settings, KnowledgeTaskRow.status, KnowledgeTaskRow.target_version)
-                        .where(
-                            KnowledgeTaskRow.resource_id == row.id,
-                            KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS),
-                        )
-                        .order_by(KnowledgeTaskRow.created_at.desc(), KnowledgeTaskRow.id.desc())
-                        .limit(1)
-                    )
-                ).one_or_none()
+                last_indexing = await _latest_indexing_task(session, row.id)
+                if (row.version, row.original_name, row.parsing_profile, row.status) != (snapshot.version, snapshot.original_name, snapshot.parsing_profile, snapshot.status) or last_indexing != prior_indexing:
+                    raise KnowledgeError(KNOWLEDGE_CONFLICT, "Document 已变更，请刷新后重试")
                 if row.status == "ready":
                     if last_indexing is None or last_indexing.kind != "summarize_document" or last_indexing.status != "failed" or last_indexing.target_version != row.version:
                         raise _invalid("仅失败的文档或摘要任务支持重试")
@@ -840,6 +1093,16 @@ class KnowledgeDocumentService:
         # Deferred import: ingestion.preview imports this module's validators.
         from ..ingestion.preview import preview_document_chunks
 
+        capabilities = self._require_parsing_capabilities()
+
+        async def guard() -> None:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+
         temp_dir = Path(
             await run_sync_to_completion(
                 tempfile.mkdtemp,
@@ -855,6 +1118,7 @@ class KnowledgeDocumentService:
                     original_name=row.original_name,
                     source_path=source_path,
                     size_bytes=row.size_bytes,
+                    processing_profile=validated.processing_profile,
                     chunk_size=validated.chunk_size,
                     chunk_overlap=validated.chunk_overlap,
                     chunk_separator=validated.chunk_separator,
@@ -865,6 +1129,9 @@ class KnowledgeDocumentService:
                     child_chunk_separator=validated.child_chunk_separator,
                 ),
                 self._settings,
+                capability_revision=capabilities.capability_revision,
+                parser_slots=self._preview_parser_slots,
+                guard=guard,
             )
         finally:
             await run_sync_to_completion(shutil.rmtree, temp_dir, ignore_errors=True)
@@ -904,7 +1171,18 @@ class KnowledgeDocumentService:
         never a model change — the request carries no model field at all.
         """
 
+        from ..ingestion.profiles import chunk_settings, preview_fingerprint, resolve_processing_profile
+
         validated = _validated_reparse(request)
+        snapshot, _, _ = await self._load_document(project_id, document_id, authority=authority)
+        if snapshot.version != validated.expected_version:
+            raise KnowledgeError(KNOWLEDGE_CONFLICT, "文档已被其他操作更新，请刷新后重试")
+        registry = await run_sync_to_completion(default_registry)
+        capabilities = self._require_parsing_capabilities()
+        try:
+            profile = await run_sync_to_completion(resolve_processing_profile, self._settings, _processing_parameters(validated), registry, extension=Path(snapshot.original_name).suffix)
+        except ValueError:
+            raise _invalid("分段参数无效") from None
         try:
             async with self._session_factory() as session, session.begin():
                 await revalidate_project_authority(
@@ -920,7 +1198,7 @@ class KnowledgeDocumentService:
                 base_status = await session.scalar(select(KnowledgeBaseRow.status).where(KnowledgeBaseRow.id == row.knowledge_base_id))
                 if base_status != "active":
                     raise _invalid("所属 Knowledge Base 不是 active 状态，不能重新解析")
-                if row.version != validated.expected_version:
+                if row.version != validated.expected_version or row.original_name != snapshot.original_name:
                     raise KnowledgeError(KNOWLEDGE_CONFLICT, "文档已被其他操作更新，请刷新后重试")
                 open_indexing = await session.scalar(
                     select(KnowledgeTaskRow.id).where(
@@ -931,6 +1209,13 @@ class KnowledgeDocumentService:
                 )
                 if open_indexing is not None:
                     raise _invalid("文档存在未完成的索引任务，暂不能重新解析")
+                if validated.expected_preview_fingerprint is not None:
+                    if row.source_sha256 is None or validated.expected_preview_fingerprint != preview_fingerprint(
+                        source_sha256=row.source_sha256, extension=Path(row.original_name).suffix, profile=profile, capability_revision=capabilities.capability_revision
+                    ):
+                        raise KnowledgeError(KNOWLEDGE_CONFLICT, "预览已过期，请重新预览")
+                frozen = {**chunk_settings(profile), "processing_profile": profile.model_dump(mode="json"), "capability_revision": capabilities.capability_revision}
+                validated_reparse_settings(frozen)
                 row.version = row.version + 1
                 row.status = "queued"
                 row.error_message = None
@@ -943,7 +1228,7 @@ class KnowledgeDocumentService:
                         kind="ingest_document",
                         target_version=row.version,
                         status="queued",
-                        reparse_settings=_frozen_reparse_settings(validated),
+                        reparse_settings=frozen,
                     )
                 )
                 await session.flush()
@@ -1123,6 +1408,8 @@ class KnowledgeDocumentService:
                         hit_count=segment.hit_count,
                         source_position=dict(segment.source_position),
                         created_at=segment.created_at,
+                        token_count=segment.token_count,
+                        source_spans=tuple(SourceSpan.model_validate(span) for span in segment.source_spans),
                     )
                     for segment in rows.all()
                 ]

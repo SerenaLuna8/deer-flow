@@ -37,6 +37,14 @@ def install_replay_knowledge_fast_retry() -> None:
     KnowledgeTaskWorker.__init__ = fast_retry_init  # type: ignore[method-assign]
 
 
+def install_replay_knowledge_storage_controls() -> None:
+    """Install storage probes only when the replay Gateway supplied a root."""
+
+    from replay_knowledge import install_replay_knowledge_storage_controls as install
+
+    install()
+
+
 def install_replay_worker_fault_controls() -> None:
     """Wrap production seams only inside this standalone test process."""
 
@@ -84,6 +92,7 @@ def main() -> None:
     install_replay_model_adapter()
     install_replay_worker_fault_controls()
     install_replay_knowledge_fast_retry()
+    install_replay_knowledge_storage_controls()
 
     from app.worker.app import main as worker_main
 

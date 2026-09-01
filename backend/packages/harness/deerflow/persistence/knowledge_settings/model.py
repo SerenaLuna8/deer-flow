@@ -132,7 +132,11 @@ class KnowledgeSystemSettingsRow(Base):
         server_default=text("now()"),
     )
 
+    etl_type: Mapped[str] = mapped_column(String(32), nullable=False, default="dify", server_default=text("'dify'"))
+    extraction_cache_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+
     __table_args__ = (
+        CheckConstraint("etl_type IN ('dify', 'unstructured_local')", name="ck_knowledge_system_settings_etl_type"),
         CheckConstraint("id = 1", name="ck_knowledge_system_settings_singleton"),
         CheckConstraint(
             "worker_concurrency BETWEEN 1 AND 16",

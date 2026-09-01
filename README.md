@@ -139,14 +139,23 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   和删除对象；存储启动检查失败只停用 Knowledge，管理页和其他功能仍可用，运维页显示
   Knowledge `unavailable`；每次上传的 PUT 前检查和 Project purge 仍失败关闭。
   单文件上限硬限制为 50 MiB，单 PUT 在每个对象存储实例内串行执行，以约束 MinIO SDK
-  的整 part 内存峰值。摄取与重嵌入在每批模型请求和发布前复核 Project 状态及任务租约，
+  的整 part 内存峰值。原件上传先提交字节配额预留，确认 PUT 后结算；响应丢失或清理失败时
+  保留原对象身份与计量事实，只有确认对象删除后才释放配额。派生附件与完整 manifest 缓存按
+  数据库登记的精确对象身份存储、校验和回收；删除文档时先撤回已发布 Segment 与 Extraction
+  指针，再逐个确认附件、manifest 和原件已不存在，随后释放各自配额并删除权威行。上传仍在
+  `pending` 结算时保留 tombstone 与预留，待补偿路径落定 `stored/delete_pending` 后由重试清理。
+  关闭 Knowledge 不会关闭独立的 Project retention 清理能力。已发布 Segment 的图片通过两条认证 GET 路径读取：
+  管理读取可查看停用内容和失败重处理保留的已发布图片，引用读取只允许当前 ready 且启用的 Base、Document 和 Segment。
+  两者都必须提供 Segment 已发布版本与内容 SHA-256，不使用 Document 最新失败目标版本。服务端只返回授权绑定的图片字节，
+  不下发 MinIO locator 或签名 URL，响应使用 `private, no-store` 和 `nosniff`。摄取与重嵌入在每批模型请求和发布前复核 Project 状态及任务租约，
   失效后停止未派发工作、禁止发布。Project 进入待删除状态后，Knowledge Task 不消耗重试预算地暂停；
   恢复 Project 会自动继续，最终清理则等待所有仍在运行的 Task 静默后才删除对象。启用后项目侧
   提供知识库/文档管理与检索测试页面（导航按模块可用性自动显示，页面状态随 URL
   可深链接/前进后退），支持文档与分段级
   治理：启停开关（停用即从检索与引用中排除，不删除向量）、文档重命名与批量启停/删除、
   分段列表可在侧栏查看全文、编辑或手工新增分段，删除需确认
-  （内容修改同步重算向量，每批及重试前复核权限）
+  （内容修改同步重算 Token、索引文本、向量、词法索引、父子块和当前已发布图片绑定，
+  每批及重试前复核权限；人工替换的文字不保留无法证明的原文件位置）
   及字数统计，维护操作同步刷新已打开的分段定位；文档列表支持搜索/状态过滤/排序/分页，
   跨页读取发生总数变化或重复条目时明确提示刷新，不显示伪完整列表。处理中的文档展示真实任务进度（阶段、已验证批次
   计数、尝试次数与自动重试等待），列表上方汇总处理中/等待重试/失败/就绪数量；上传按
@@ -176,8 +185,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   知识库可定义元数据字段（文本/数字/时间）并为文档赋值（支持多选文档批量
   保持/设置/清空，一次全量成功或全量回滚），检索测试与
   Agent 工具支持按元数据条件过滤（等于/包含/范围，AND 组合）；
-  设置页可换绑 Embedding 模型并对已发布文档重嵌入（保留分段 UUID/文本/
-  人工编辑/启停状态，仅重算向量，处理期间退出召回，未发布文档跳过并报
+  设置页可换绑 Embedding 模型并对已发布文档重嵌入（不读取或重解析原文件，保留分段 UUID/Markdown/
+  来源、图片绑定、解析参数、人工编辑和启停状态，仅从已发布索引文本重算向量，处理期间退出召回，未发布文档跳过并报
   真实计数），文档操作里可从原文件重新解析（可改切分参数并先服务端预览，
   确认后替换全部分段、覆盖人工编辑与启停），并可按库选配或解绑 Reranker
   模型（保存即生效，无需重建）；创建向导也可直接选择可选的 Reranker 模型，
@@ -192,6 +201,16 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   [M11 质量门](docs/superpowers/plans/2026-08-31-rag-knowledge-m11.md#t11真实质量门文档与交付确认)。
   查询向量使用进程内 LRU+TTL 缓存，同模型同查询命中时不重复请求 Embedding；缓存
   不跳过召回与终审的权限检查，诊断面板显示缓存命中、摘要候选和命中来源。
+  RAG 文件解析的预览与 Worker 摄取共用本地 `extraction`、Knowledge Token
+  分段和原子发布路径；处理结果保留来源位置、解析警告和受权图片绑定。
+  格式解析限制为本地文件，默认 `dify`，可选 `unstructured_local`；
+  不执行 OCR，不调用解析 API，也不在运行时下载 Pandoc 或 NLP 资源。
+  本地环境准备需安装固定的 `extraction-local` 依赖与平台 libmagic，并生成、
+  审查解析资源锁；具体来源、许可证和命令见
+  [解析移植说明](backend/packages/knowledge/actweave_knowledge/extraction/patches.md)。
+  子进程必须通过 macOS `sandbox-exec` 或 Linux bubblewrap 隔离；缺失资源或不具备
+  隔离权限时明确不可用，不能退回裸进程。部署到 Linux 主机前必须在目标机验证
+  bubblewrap、libmagic 和当前平台资源锁；macOS 或单格式测试不代替该验收。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
   System Runtime Policy v6 在系统设置中分别配置主 Agent 每 Run 与每个 Sub-Agent Task 的

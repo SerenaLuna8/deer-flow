@@ -62,6 +62,20 @@ def recall_hit(target_ids: Sequence[str], retrieved_ids: Sequence[str]) -> bool:
     return any(item_id in retrieved for item_id in target_ids)
 
 
+def reciprocal_rank_at_k(
+    target_ids: Sequence[str],
+    retrieved_ids: Sequence[str],
+    k: int = 5,
+) -> float:
+    """Reciprocal rank of the first target in the first ``k`` results."""
+
+    targets = set(target_ids)
+    for rank, item_id in enumerate(retrieved_ids[:k], start=1):
+        if item_id in targets:
+            return 1.0 / rank
+    return 0.0
+
+
 def mean_or_none(values: Sequence[float]) -> float | None:
     if not values:
         return None

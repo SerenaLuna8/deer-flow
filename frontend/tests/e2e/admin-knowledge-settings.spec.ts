@@ -7,6 +7,8 @@ const SAFE_ERROR = "知识库配置无效，请检查存储连接、密钥和模
 function initialSettings() {
   return {
     enabled: false,
+    etl_type: "dify" as "dify" | "unstructured_local",
+    extraction_cache_enabled: true,
     worker_concurrency: 2,
     task_timeout_seconds: 900,
     upload_max_bytes: 10_485_760,
@@ -28,6 +30,34 @@ function initialSettings() {
     request_id: "admin-knowledge-browser",
   };
 }
+
+test("an administrator saves the local parser and extraction cache in the existing settings record", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeSettings(page);
+  await page.goto("/admin/settings/knowledge");
+
+  await page
+    .getByRole("combobox", { name: "Document parser", exact: true })
+    .click();
+  await page
+    .getByRole("option", { name: "Local Unstructured", exact: true })
+    .click();
+  await page
+    .getByRole("switch", { name: "Cache extraction results", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Save settings", exact: true })
+    .click();
+
+  await expect(page.getByRole("status")).toContainText("Settings saved.");
+  expect(state.writes).toHaveLength(1);
+  expect(state.writes[0]).toMatchObject({
+    expected_revision: 1,
+    etl_type: "unstructured_local",
+    extraction_cache_enabled: false,
+  });
+});
 
 function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({

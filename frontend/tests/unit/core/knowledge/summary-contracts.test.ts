@@ -120,6 +120,8 @@ test("segment details accept a read-only summary without exposing its vector", (
       hit_count: 0,
       source_position: {},
       created_at: base.created_at,
+      token_count: 2,
+      source_spans: [],
     },
     knowledge_base_id: base.id,
     document_id: base.id,
@@ -130,6 +132,7 @@ test("segment details accept a read-only summary without exposing its vector", (
     children_total: 0,
     child_page: 1,
     children: [],
+    attachments: [],
     request_id: "detail",
     summary: { content: "Generated summary", created_at: base.created_at },
   };

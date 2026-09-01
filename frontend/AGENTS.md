@@ -401,7 +401,9 @@ rename/delete controls remain sibling buttons outside the navigation link.
   reranker model (effective on save, no
   rebuild; the search panel drops stale results on the change), and its
   re-embed block confirms what is preserved (text, manual edits, enabled
-  states) before POSTing the selected embedding model, then reports the real
+  states, attachment bindings, and image bytes) and states that it does not
+  read or reparse the original before POSTing the selected embedding model,
+  then reports the real
   admission outcome (accepted count plus skipped never-published documents);
   documents then repoll back to ready. Settings controls placed outside the
   PATCH form retain explicit `form` association for native validation and Enter
@@ -409,7 +411,9 @@ rename/delete controls remain sibling buttons outside the navigation link.
   original" action opens a dialog prefilled with the document's frozen chunk
   parameters: edits invalidate the server-side preview, submission carries
   `expected_version`, and a conflict keeps the form, retires the preview, and
-  refreshes the authoritative row for an explicit re-confirmation.
+  refreshes the authoritative row for an explicit re-confirmation. Reparse
+  warns that manual edits, per-segment disables, and attachment bindings are
+  replaced; omitted preview thumbnails are not reported as lost attachments.
 - The documents table carries per-row enabled switches, rename, a characters
   column, and (with `shared_assets.edit`) row checkboxes with a batch bar for
   enable/disable/delete plus batch metadata; rows in `deleting` are not
@@ -430,7 +434,17 @@ rename/delete controls remain sibling buttons outside the navigation link.
   enable toggles, right-side edit/add sheets (4000-character ceiling mirroring
   the backend), and confirmed deletion. Condensed list previews open complete
   text in a read-only sheet, also available to read-only members; those members
-  still receive no mutation controls. These sheets use `SheetContent`'s optional
+  still receive no mutation controls. Document rows show the frozen parsing
+  profile and safe parse warnings: new profiles label Knowledge Tokens and the
+  tokenizer profile, while null/historical character profiles remain character
+  based and never invent parser identity. Failed reprocessing keeps a prior
+  publication browsable in read-only maintenance mode. Segment rows show their
+  Token count only for Token profiles and preserve every source/context span.
+  Published images are attachment-backed Markdown; they are saved for display,
+  but image text is not recognized or included in text retrieval. Edit/add
+  sheets list only the current Document's write-authorized published attachment
+  catalog and insert logical refs; the backend revalidates every ref on save.
+  These sheets use `SheetContent`'s optional
   `overlayClassName` for a light backdrop while keeping the shared modal,
   focus, and dismissal behavior; other sheets retain their default overlay.
 - `/admin/settings/models` is one unified "Model providers" surface:
@@ -451,7 +465,10 @@ rename/delete controls remain sibling buttons outside the navigation link.
   secret retains the value, while changing the endpoint requires re-entry.
   Version conflicts and storage-probe failures keep the draft and a safe error.
   The page distinguishes restart-required settings from the summary System
-  Model reference that applies to subsequent tasks immediately.
+  Model reference that applies to subsequent tasks immediately. `etl_type` and
+  `extraction_cache_enabled` remain fields of this PostgreSQL-owned settings
+  record and take effect after Gateway/Worker restart; the page does not expose
+  OCR, parser paths, or a second configuration source.
 - Base settings expose the summary-index flag only when a summary System Model
   is available. Saving ON reports accepted/skipped backfill documents and
   invalidates the document list. Segment and hit details label generated

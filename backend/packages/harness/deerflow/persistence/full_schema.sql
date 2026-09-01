@@ -4332,11 +4332,18 @@ CREATE TABLE knowledge_documents (
     error_message TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    source_sha256 VARCHAR(64),
+    published_extraction_id UUID,
+    parsing_profile JSONB,
+    parse_warnings JSONB DEFAULT '[]'::jsonb NOT NULL,
+    capability_revision VARCHAR(64),
+    upload_state VARCHAR(16) DEFAULT 'pending' NOT NULL,
+    quota_state VARCHAR(16) DEFAULT 'unreserved' NOT NULL,
     CONSTRAINT pk_knowledge_documents PRIMARY KEY (id),
     CONSTRAINT uq_knowledge_documents_project_base_id UNIQUE (project_id, knowledge_base_id, id),
     CONSTRAINT ck_knowledge_documents_name CHECK (btrim(name) <> '' AND btrim(original_name) <> ''),
     CONSTRAINT ck_knowledge_documents_storage_key CHECK (btrim(storage_key) <> ''),
-    CONSTRAINT ck_knowledge_documents_size CHECK (size_bytes >= 0),
+    CONSTRAINT ck_knowledge_documents_size CHECK (size_bytes BETWEEN 0 AND 52428800),
     CONSTRAINT ck_knowledge_documents_status CHECK (
         status IN ('uploading', 'queued', 'processing', 'ready', 'failed', 'deleting')
     ),
@@ -4372,7 +4379,14 @@ CREATE TABLE knowledge_documents (
         OR (status <> 'failed' AND error_message IS NULL)
     ),
     CONSTRAINT fk_knowledge_documents_base FOREIGN KEY (project_id, knowledge_base_id)
-        REFERENCES knowledge_bases (project_id, id) ON DELETE RESTRICT
+        REFERENCES knowledge_bases (project_id, id) ON DELETE RESTRICT,
+    CONSTRAINT ck_knowledge_documents_parse_warnings CHECK (jsonb_typeof(parse_warnings) = 'array'),
+    CONSTRAINT ck_knowledge_documents_parsing_profile CHECK (parsing_profile IS NULL OR jsonb_typeof(parsing_profile) = 'object'),
+    CONSTRAINT ck_knowledge_documents_quota_released CHECK (quota_state <> 'released' OR upload_state = 'deleted'),
+    CONSTRAINT ck_knowledge_documents_quota_state CHECK (quota_state IN ('unreserved', 'reserved', 'committed', 'released')),
+    CONSTRAINT ck_knowledge_documents_source_sha256 CHECK (source_sha256 IS NULL OR source_sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_knowledge_documents_upload_state CHECK (upload_state IN ('pending', 'stored', 'delete_pending', 'deleted')),
+    CONSTRAINT uq_knowledge_documents_published_extraction UNIQUE (project_id, knowledge_base_id, id, published_extraction_id)
 );
 
 CREATE UNIQUE INDEX uq_knowledge_documents_storage_key
@@ -4384,6 +4398,90 @@ CREATE INDEX ix_knowledge_documents_base_status
 -- Accelerates the search-path metadata equality filter (doc_metadata @> {...}).
 CREATE INDEX ix_knowledge_documents_doc_metadata
     ON knowledge_documents USING gin (doc_metadata);
+
+CREATE TABLE knowledge_extractions (
+    id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    knowledge_document_id UUID NOT NULL,
+    source_sha256 VARCHAR(64) NOT NULL,
+    parser_fingerprint VARCHAR(64) NOT NULL,
+    normalization_version VARCHAR(64) NOT NULL,
+    state VARCHAR(16) DEFAULT 'staging' NOT NULL,
+    manifest_storage_key VARCHAR(1024),
+    manifest_sha256 VARCHAR(64),
+    manifest_size_bytes BIGINT DEFAULT 0 NOT NULL,
+    manifest_upload_state VARCHAR(16) DEFAULT 'pending' NOT NULL,
+    manifest_quota_state VARCHAR(16) DEFAULT 'unreserved' NOT NULL,
+    created_task_id UUID NOT NULL,
+    created_attempt SMALLINT NOT NULL,
+    created_claim_token UUID NOT NULL,
+    target_document_version INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    unpublished_expires_at TIMESTAMP WITH TIME ZONE,
+    delete_error TEXT,
+    CONSTRAINT pk_knowledge_extractions PRIMARY KEY (id),
+    CONSTRAINT uq_knowledge_extractions_project_id UNIQUE (project_id, id),
+    CONSTRAINT uq_knowledge_extractions_scope UNIQUE (project_id, knowledge_base_id, knowledge_document_id, id),
+    CONSTRAINT uq_knowledge_extractions_creation_attempt UNIQUE (knowledge_document_id, created_task_id, created_attempt, created_claim_token),
+    CONSTRAINT fk_knowledge_extractions_document FOREIGN KEY(project_id, knowledge_base_id, knowledge_document_id) REFERENCES knowledge_documents (project_id, knowledge_base_id, id) ON DELETE RESTRICT,
+    CONSTRAINT ck_knowledge_extractions_source_sha256 CHECK (source_sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_knowledge_extractions_parser_fingerprint CHECK (parser_fingerprint ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_knowledge_extractions_normalization_version CHECK (btrim(normalization_version) <> ''),
+    CONSTRAINT ck_knowledge_extractions_state CHECK (state IN ('staging', 'ready', 'deleting')),
+    CONSTRAINT ck_knowledge_extractions_manifest_sha256 CHECK (manifest_sha256 IS NULL OR manifest_sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_knowledge_extractions_manifest_size CHECK (manifest_size_bytes BETWEEN 0 AND 52428800),
+    CONSTRAINT ck_knowledge_extractions_manifest_registration CHECK ((manifest_storage_key IS NULL AND manifest_sha256 IS NULL AND manifest_size_bytes = 0 AND manifest_quota_state = 'unreserved') OR (manifest_storage_key IS NOT NULL AND btrim(manifest_storage_key) <> '' AND manifest_sha256 IS NOT NULL)),
+    CONSTRAINT ck_knowledge_extractions_upload_state CHECK (manifest_upload_state IN ('pending', 'stored', 'delete_pending', 'deleted')),
+    CONSTRAINT ck_knowledge_extractions_quota_state CHECK (manifest_quota_state IN ('unreserved', 'reserved', 'committed', 'released')),
+    CONSTRAINT ck_knowledge_extractions_stored_manifest CHECK (manifest_upload_state NOT IN ('stored', 'delete_pending') OR manifest_storage_key IS NOT NULL),
+    CONSTRAINT ck_knowledge_extractions_quota_released CHECK (manifest_quota_state <> 'released' OR manifest_upload_state = 'deleted'),
+    CONSTRAINT ck_knowledge_extractions_ready CHECK (state <> 'ready' OR (manifest_upload_state = 'stored' AND manifest_quota_state = 'committed' AND completed_at IS NOT NULL)),
+    CONSTRAINT ck_knowledge_extractions_created_attempt CHECK (created_attempt BETWEEN 1 AND 3),
+    CONSTRAINT ck_knowledge_extractions_target_version CHECK (target_document_version >= 1)
+);
+
+CREATE INDEX ix_knowledge_extractions_document ON knowledge_extractions (project_id, knowledge_base_id, knowledge_document_id, state);
+CREATE INDEX ix_knowledge_extractions_unpublished_expires ON knowledge_extractions (unpublished_expires_at, id);
+CREATE UNIQUE INDEX uq_knowledge_extractions_manifest_key ON knowledge_extractions (manifest_storage_key);
+
+CREATE TABLE knowledge_attachments (
+    id UUID NOT NULL,
+    extraction_id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    knowledge_document_id UUID NOT NULL,
+    sha256 VARCHAR(64) NOT NULL,
+    media_type VARCHAR(32) NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    storage_key VARCHAR(1024) NOT NULL,
+    state VARCHAR(16) DEFAULT 'staging' NOT NULL,
+    upload_state VARCHAR(16) DEFAULT 'pending' NOT NULL,
+    quota_state VARCHAR(16) DEFAULT 'unreserved' NOT NULL,
+    delete_error TEXT,
+    CONSTRAINT pk_knowledge_attachments PRIMARY KEY (id),
+    CONSTRAINT fk_knowledge_attachments_extraction FOREIGN KEY(project_id, knowledge_base_id, knowledge_document_id, extraction_id) REFERENCES knowledge_extractions (project_id, knowledge_base_id, knowledge_document_id, id) ON DELETE RESTRICT,
+    CONSTRAINT uq_knowledge_attachments_hash UNIQUE (extraction_id, sha256),
+    CONSTRAINT uq_knowledge_attachments_scope UNIQUE (project_id, knowledge_base_id, knowledge_document_id, extraction_id, id),
+    CONSTRAINT ck_knowledge_attachments_sha256 CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_knowledge_attachments_media_type CHECK (media_type IN ('image/png', 'image/jpeg', 'image/webp')),
+    CONSTRAINT ck_knowledge_attachments_size CHECK (size_bytes BETWEEN 0 AND 5242880),
+    CONSTRAINT ck_knowledge_attachments_pixels CHECK (width > 0 AND height > 0 AND width::bigint * height::bigint <= 20000000),
+    CONSTRAINT ck_knowledge_attachments_storage_key CHECK (btrim(storage_key) <> ''),
+    CONSTRAINT ck_knowledge_attachments_state CHECK (state IN ('staging', 'ready', 'deleting')),
+    CONSTRAINT ck_knowledge_attachments_upload_state CHECK (upload_state IN ('pending', 'stored', 'delete_pending', 'deleted')),
+    CONSTRAINT ck_knowledge_attachments_quota_state CHECK (quota_state IN ('unreserved', 'reserved', 'committed', 'released')),
+    CONSTRAINT ck_knowledge_attachments_quota_released CHECK (quota_state <> 'released' OR upload_state = 'deleted'),
+    CONSTRAINT ck_knowledge_attachments_ready CHECK (state <> 'ready' OR (upload_state = 'stored' AND quota_state = 'committed'))
+);
+
+CREATE UNIQUE INDEX uq_knowledge_attachments_storage_key ON knowledge_attachments (storage_key);
+
+-- Forward reference completes the document/extraction ownership cycle.
+ALTER TABLE knowledge_documents ADD CONSTRAINT fk_knowledge_documents_published_extraction FOREIGN KEY(project_id, knowledge_base_id, id, published_extraction_id) REFERENCES knowledge_extractions (project_id, knowledge_base_id, knowledge_document_id, id) DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE knowledge_metadata_fields (
     id UUID NOT NULL,
@@ -4419,6 +4517,10 @@ CREATE TABLE knowledge_segments (
     lexical_tsv TSVECTOR DEFAULT to_tsvector('simple', '') NOT NULL,
     lexical_version INTEGER DEFAULT 0 NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    index_text TEXT DEFAULT '' NOT NULL,
+    token_count INTEGER DEFAULT 0 NOT NULL,
+    source_spans JSONB DEFAULT '[]'::jsonb NOT NULL,
+    extraction_id UUID,
     CONSTRAINT pk_knowledge_segments PRIMARY KEY (id),
     CONSTRAINT uq_knowledge_segments_document_version_position UNIQUE (
         knowledge_document_id,
@@ -4443,7 +4545,11 @@ CREATE TABLE knowledge_segments (
         project_id,
         knowledge_base_id,
         id
-    ) ON DELETE CASCADE
+    ) ON DELETE CASCADE,
+    CONSTRAINT ck_knowledge_segments_source_spans CHECK (jsonb_typeof(source_spans) = 'array'),
+    CONSTRAINT ck_knowledge_segments_token_count CHECK (token_count >= 0),
+    CONSTRAINT fk_knowledge_segments_published_extraction FOREIGN KEY(project_id, knowledge_base_id, knowledge_document_id, extraction_id) REFERENCES knowledge_documents (project_id, knowledge_base_id, id, published_extraction_id) DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT uq_knowledge_segments_extraction_scope UNIQUE (project_id, knowledge_base_id, knowledge_document_id, extraction_id, id)
 );
 
 CREATE INDEX ix_knowledge_segments_document
@@ -4459,6 +4565,23 @@ CREATE INDEX ix_knowledge_segments_document
 CREATE INDEX ix_knowledge_segments_lexical
     ON knowledge_segments USING gin (lexical_tsv);
 
+CREATE TABLE knowledge_segment_attachments (
+    project_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    knowledge_document_id UUID NOT NULL,
+    extraction_id UUID NOT NULL,
+    segment_id UUID NOT NULL,
+    attachment_id UUID NOT NULL,
+    position INTEGER NOT NULL,
+    alt_text TEXT DEFAULT '' NOT NULL,
+    CONSTRAINT pk_knowledge_segment_attachments PRIMARY KEY (segment_id, position),
+    CONSTRAINT fk_knowledge_segment_attachments_segment FOREIGN KEY(project_id, knowledge_base_id, knowledge_document_id, extraction_id, segment_id) REFERENCES knowledge_segments (project_id, knowledge_base_id, knowledge_document_id, extraction_id, id) ON DELETE CASCADE,
+    CONSTRAINT fk_knowledge_segment_attachments_attachment FOREIGN KEY(project_id, knowledge_base_id, knowledge_document_id, extraction_id, attachment_id) REFERENCES knowledge_attachments (project_id, knowledge_base_id, knowledge_document_id, extraction_id, id) ON DELETE RESTRICT,
+    CONSTRAINT ck_knowledge_segment_attachments_position CHECK (position >= 1)
+);
+
+CREATE INDEX ix_knowledge_segment_attachments_attachment ON knowledge_segment_attachments (attachment_id);
+
 CREATE TABLE knowledge_segment_children (
     id UUID NOT NULL,
     project_id UUID NOT NULL,
@@ -4473,6 +4596,9 @@ CREATE TABLE knowledge_segment_children (
     lexical_tsv TSVECTOR DEFAULT to_tsvector('simple', '') NOT NULL,
     lexical_version INTEGER DEFAULT 0 NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    index_text TEXT DEFAULT '' NOT NULL,
+    token_count INTEGER DEFAULT 0 NOT NULL,
+    source_spans JSONB DEFAULT '[]'::jsonb NOT NULL,
     CONSTRAINT pk_knowledge_segment_children PRIMARY KEY (id),
     CONSTRAINT uq_knowledge_segment_children_segment_position UNIQUE (
         knowledge_segment_id,
@@ -4487,7 +4613,9 @@ CREATE TABLE knowledge_segment_children (
         public.vector_dims(embedding) BETWEEN 1 AND 16000
     ),
     CONSTRAINT fk_knowledge_segment_children_segment FOREIGN KEY (knowledge_segment_id)
-        REFERENCES knowledge_segments (id) ON DELETE CASCADE
+        REFERENCES knowledge_segments (id) ON DELETE CASCADE,
+    CONSTRAINT ck_knowledge_segment_children_source_spans CHECK (jsonb_typeof(source_spans) = 'array'),
+    CONSTRAINT ck_knowledge_segment_children_token_count CHECK (token_count >= 0)
 );
 
 CREATE INDEX ix_knowledge_segment_children_document
@@ -4589,9 +4717,10 @@ CREATE TABLE knowledge_tasks (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     finished_at TIMESTAMP WITH TIME ZONE,
+    extraction_id UUID,
     CONSTRAINT pk_knowledge_tasks PRIMARY KEY (id),
     CONSTRAINT ck_knowledge_tasks_kind CHECK (
-        kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')
+        kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base', 'delete_extraction')
     ),
     CONSTRAINT ck_knowledge_tasks_target_version CHECK (
         (kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND target_version IS NOT NULL AND target_version >= 1)
@@ -4627,9 +4756,13 @@ CREATE TABLE knowledge_tasks (
         OR (status NOT IN ('succeeded', 'failed') AND finished_at IS NULL)
     ),
     CONSTRAINT fk_knowledge_tasks_project FOREIGN KEY (project_id)
-        REFERENCES projects (id) ON DELETE CASCADE
+        REFERENCES projects (id) ON DELETE CASCADE,
+    CONSTRAINT ck_knowledge_tasks_extraction_pin CHECK (extraction_id IS NULL OR (kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND status IN ('queued', 'running', 'retry_wait'))),
+    CONSTRAINT fk_knowledge_tasks_extraction FOREIGN KEY(project_id, extraction_id) REFERENCES knowledge_extractions (project_id, id) ON DELETE RESTRICT
 );
 
+
+CREATE UNIQUE INDEX uq_knowledge_tasks_open_extraction_delete ON knowledge_tasks (resource_id) WHERE kind = 'delete_extraction' AND status IN ('queued', 'running', 'retry_wait');
 CREATE INDEX ix_knowledge_tasks_claim
     ON knowledge_tasks (available_at, created_at, id)
     WHERE status IN ('queued', 'retry_wait');
@@ -4682,6 +4815,8 @@ CREATE TABLE knowledge_system_settings (
     query_cache_max_entries INTEGER DEFAULT 512 NOT NULL,
     query_cache_ttl_seconds INTEGER DEFAULT 300 NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    etl_type VARCHAR(32) DEFAULT 'dify' NOT NULL,
+    extraction_cache_enabled BOOLEAN DEFAULT true NOT NULL,
     CONSTRAINT pk_knowledge_system_settings PRIMARY KEY (id),
     CONSTRAINT ck_knowledge_system_settings_singleton CHECK (id = 1),
     CONSTRAINT ck_knowledge_system_settings_worker_concurrency CHECK (
@@ -4724,7 +4859,8 @@ CREATE TABLE knowledge_system_settings (
             AND minio_secret_nonce IS NOT NULL
             AND minio_secret_ciphertext IS NOT NULL
         )
-    )
+    ),
+    CONSTRAINT ck_knowledge_system_settings_etl_type CHECK (etl_type IN ('dify', 'unstructured_local'))
 );
 
 
@@ -4742,7 +4878,7 @@ INSERT INTO alembic_version (version_num) VALUES ('schema_v1');
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 110 static tables and 1384 columns.
+-- Coverage: 113 static tables and 1445 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE project_invitation_rate_limits IS '记录项目邀请码失败尝试的限流窗口。';
@@ -6237,6 +6373,53 @@ COMMENT ON COLUMN knowledge_documents.doc_metadata IS '知识文档：按知识�
 COMMENT ON COLUMN knowledge_documents.error_message IS '知识文档：摄取最终失败时向用户展示的错误。';
 COMMENT ON COLUMN knowledge_documents.created_at IS '知识文档：记录创建时间。';
 COMMENT ON COLUMN knowledge_documents.updated_at IS '知识文档：记录最近更新时间。';
+COMMENT ON COLUMN knowledge_documents.source_sha256 IS '知识文档：原文件内容的 64 位小写 SHA-256；尚未计算时为空。';
+COMMENT ON COLUMN knowledge_documents.published_extraction_id IS '知识文档：当前发布的提取世代标识；与全部带提取世代的片段在同一事务切换。';
+COMMENT ON COLUMN knowledge_documents.parsing_profile IS '知识文档：冻结的完整 ProcessingProfile JSON 对象，含 parse 与 chunk；旧字符流程可为空。';
+COMMENT ON COLUMN knowledge_documents.parse_warnings IS '知识文档：经过脱敏的解析警告 JSON 数组。';
+COMMENT ON COLUMN knowledge_documents.capability_revision IS '知识文档：冻结的解析能力版本标识；旧文档为空。';
+COMMENT ON COLUMN knowledge_documents.upload_state IS '知识文档：原文件上传事实（pending、stored、delete_pending、deleted），独立于文档处理状态。';
+COMMENT ON COLUMN knowledge_documents.quota_state IS '知识文档：原文件配额事实（unreserved、reserved、committed、released）；仅确认 deleted 后可 released。';
+
+COMMENT ON TABLE knowledge_extractions IS '保存同一知识文档的解析世代与完整 manifest；ready 仅表示提取完整，不等于文档已发布。';
+COMMENT ON COLUMN knowledge_extractions.id IS '知识提取结果：服务器分配的提取世代及 manifest 配额对象标识。';
+COMMENT ON COLUMN knowledge_extractions.project_id IS '知识提取结果：所属项目标识；所有权由数据库作用域约束确认。';
+COMMENT ON COLUMN knowledge_extractions.knowledge_base_id IS '知识提取结果：所属知识库标识。';
+COMMENT ON COLUMN knowledge_extractions.knowledge_document_id IS '知识提取结果：所属原始知识文档标识。';
+COMMENT ON COLUMN knowledge_extractions.source_sha256 IS '知识提取结果：原文件内容的 64 位小写 SHA-256。';
+COMMENT ON COLUMN knowledge_extractions.parser_fingerprint IS '知识提取结果：仅解析策略构成的 64 位小写指纹，不含切分和 Tokenizer 参数。';
+COMMENT ON COLUMN knowledge_extractions.normalization_version IS '知识提取结果：正文及图片规范化规则版本。';
+COMMENT ON COLUMN knowledge_extractions.state IS '知识提取结果：提取生命周期（staging、ready、deleting）；ready 要求 manifest 已存储、配额已结算且完成时间非空。';
+COMMENT ON COLUMN knowledge_extractions.manifest_storage_key IS '知识提取结果：服务器生成的完整 manifest 对象定位符；登记前为空，不得对浏览器或模型暴露。';
+COMMENT ON COLUMN knowledge_extractions.manifest_sha256 IS '知识提取结果：manifest 规范字节的 64 位小写 SHA-256；与对象定位符一起登记。';
+COMMENT ON COLUMN knowledge_extractions.manifest_size_bytes IS '知识提取结果：manifest 实际字节数，上限 50 MiB；登记前为 0。';
+COMMENT ON COLUMN knowledge_extractions.manifest_upload_state IS '知识提取结果：manifest 上传事实（pending、stored、delete_pending、deleted），不从提取状态推断。';
+COMMENT ON COLUMN knowledge_extractions.manifest_quota_state IS '知识提取结果：manifest 配额事实（unreserved、reserved、committed、released）；已删除可暂留 reserved 或 committed 等待校准。';
+COMMENT ON COLUMN knowledge_extractions.created_task_id IS '知识提取结果：创建时不可变任务标识证据；不设任务外键，以免阻止终结任务历史清理。';
+COMMENT ON COLUMN knowledge_extractions.created_attempt IS '知识提取结果：创建时不可变任务尝试号；由 Store 在事务内核验。';
+COMMENT ON COLUMN knowledge_extractions.created_claim_token IS '知识提取结果：创建时不可变领取令牌证据；不替代 Task 当前 claim 权限，不对外暴露。';
+COMMENT ON COLUMN knowledge_extractions.target_document_version IS '知识提取结果：创建时任务允许发布的目标文档处理版本号。';
+COMMENT ON COLUMN knowledge_extractions.created_at IS '知识提取结果：提取登记时间，以数据库时间为准。';
+COMMENT ON COLUMN knowledge_extractions.completed_at IS '知识提取结果：完整 manifest 确认后的完成时间；ready 必填。';
+COMMENT ON COLUMN knowledge_extractions.unpublished_expires_at IS '知识提取结果：完整未发布缓存的过期时间；当前发布引用和活跃 Task pin 阻止回收。';
+COMMENT ON COLUMN knowledge_extractions.delete_error IS '知识提取结果：耐久清理最近一次可安全记录的错误，供重试使用。';
+
+COMMENT ON TABLE knowledge_attachments IS '保存提取结果拥有的规范化图片字节对象；同世代按内容摘要去重，删除字节后才释放配额。';
+COMMENT ON COLUMN knowledge_attachments.id IS '知识附件：服务器分配的附件及其配额对象标识。';
+COMMENT ON COLUMN knowledge_attachments.extraction_id IS '知识附件：拥有本图片字节的提取世代标识。';
+COMMENT ON COLUMN knowledge_attachments.project_id IS '知识附件：所属项目标识。';
+COMMENT ON COLUMN knowledge_attachments.knowledge_base_id IS '知识附件：所属知识库标识。';
+COMMENT ON COLUMN knowledge_attachments.knowledge_document_id IS '知识附件：所属原始知识文档标识。';
+COMMENT ON COLUMN knowledge_attachments.sha256 IS '知识附件：安全规范化图片字节的 64 位小写 SHA-256；同提取世代唯一。';
+COMMENT ON COLUMN knowledge_attachments.media_type IS '知识附件：安全图片媒体类型，仅 image/png、image/jpeg 或 image/webp。';
+COMMENT ON COLUMN knowledge_attachments.size_bytes IS '知识附件：图片实际字节数，上限 5 MiB；重复出现不重复计量。';
+COMMENT ON COLUMN knowledge_attachments.width IS '知识附件：规范化图片宽度（像素），与高度乘积不超过 20000000。';
+COMMENT ON COLUMN knowledge_attachments.height IS '知识附件：规范化图片高度（像素）。';
+COMMENT ON COLUMN knowledge_attachments.storage_key IS '知识附件：服务器生成的图片对象定位符；仅供受保护的对象存储访问。';
+COMMENT ON COLUMN knowledge_attachments.state IS '知识附件：附件生命周期（staging、ready、deleting）；ready 必须已存储并已结算配额。';
+COMMENT ON COLUMN knowledge_attachments.upload_state IS '知识附件：图片上传事实（pending、stored、delete_pending、deleted）。';
+COMMENT ON COLUMN knowledge_attachments.quota_state IS '知识附件：图片配额事实（unreserved、reserved、committed、released）；确认删除后才可 released。';
+COMMENT ON COLUMN knowledge_attachments.delete_error IS '知识附件：图片耐久清理最近一次可安全记录的错误，供重试使用。';
 
 COMMENT ON TABLE knowledge_metadata_fields IS '保存知识库级自定义元数据字段定义；文档元数据值按字段名称存于知识文档行。';
 COMMENT ON COLUMN knowledge_metadata_fields.id IS '知识库元数据字段：主键标识。';
@@ -6263,6 +6446,20 @@ COMMENT ON COLUMN knowledge_segments.embedding IS '知识片段：与知识库 E
 COMMENT ON COLUMN knowledge_segments.lexical_tsv IS '知识片段：按包内 lexical_v1 规则派生的词法 tsvector（simple 配置）；内容变更同事务重算，重嵌入不改。';
 COMMENT ON COLUMN knowledge_segments.lexical_version IS '知识片段：词法派生规则版本；与当前版本不一致的行词法路明确失败，不运行时补数据。';
 COMMENT ON COLUMN knowledge_segments.created_at IS '知识片段：记录创建时间。';
+COMMENT ON COLUMN knowledge_segments.index_text IS '知识片段：用于索引的纯文本；旧字符行默认空串，由显式兼容 Adapter 读取旧正文，不作隐式迁移。';
+COMMENT ON COLUMN knowledge_segments.token_count IS '知识片段：索引文本 Token 数，非负；旧字符行默认为 0。';
+COMMENT ON COLUMN knowledge_segments.source_spans IS '知识片段：规范化正文来源跨度 JSON 数组，角色区分 source 与 context_prefix。';
+COMMENT ON COLUMN knowledge_segments.extraction_id IS '知识片段：片段所属提取世代；提交时必须匹配文档发布指针，旧字符段可为空。';
+
+COMMENT ON TABLE knowledge_segment_attachments IS '记录同一文档和提取世代内的片段图片位置；同图重复出现保留独立顺序。';
+COMMENT ON COLUMN knowledge_segment_attachments.project_id IS '附件出现位置：所属项目标识。';
+COMMENT ON COLUMN knowledge_segment_attachments.knowledge_base_id IS '附件出现位置：所属知识库标识。';
+COMMENT ON COLUMN knowledge_segment_attachments.knowledge_document_id IS '附件出现位置：所属原始知识文档标识。';
+COMMENT ON COLUMN knowledge_segment_attachments.extraction_id IS '附件出现位置：片段及附件共同所属的提取世代，非空且必须匹配当前发布指针。';
+COMMENT ON COLUMN knowledge_segment_attachments.segment_id IS '附件出现位置：拥有此图片出现位置的片段标识；删段可级联删除纯关系。';
+COMMENT ON COLUMN knowledge_segment_attachments.attachment_id IS '附件出现位置：被引用的规范化图片字节对象；同图可有多个出现位置。';
+COMMENT ON COLUMN knowledge_segment_attachments.position IS '附件出现位置：图片在本片段中从 1 开始的顺序；与 segment_id 构成主键。';
+COMMENT ON COLUMN knowledge_segment_attachments.alt_text IS '附件出现位置：此出现位置的图片替代文本（属于私有内容）。';
 
 COMMENT ON TABLE knowledge_segment_children IS '保存父子分块模式下父级片段内的二级子块及其向量；检索命中回卷到父级片段。';
 COMMENT ON COLUMN knowledge_segment_children.id IS '知识子块：主键标识。';
@@ -6278,6 +6475,9 @@ COMMENT ON COLUMN knowledge_segment_children.embedding IS '知识子块：与知
 COMMENT ON COLUMN knowledge_segment_children.lexical_tsv IS '知识子块：按包内 lexical_v1 规则派生的词法 tsvector（simple 配置）；parent_child 词法召回经子块回卷父段。';
 COMMENT ON COLUMN knowledge_segment_children.lexical_version IS '知识子块：词法派生规则版本；与当前版本不一致的行词法路明确失败，不运行时补数据。';
 COMMENT ON COLUMN knowledge_segment_children.created_at IS '知识子块：记录创建时间。';
+COMMENT ON COLUMN knowledge_segment_children.index_text IS '知识子块：用于索引的纯文本；旧字符行默认空串，由显式兼容 Adapter 读取旧正文，不作隐式迁移。';
+COMMENT ON COLUMN knowledge_segment_children.token_count IS '知识子块：索引文本 Token 数，非负；旧字符行默认为 0。';
+COMMENT ON COLUMN knowledge_segment_children.source_spans IS '知识子块：规范化正文来源跨度 JSON 数组，角色区分 source 与 context_prefix。';
 
 COMMENT ON TABLE knowledge_segment_summaries IS '保存系统生成的片段召回摘要及其向量；每片段至多一条完整行，仅作召回辅助，从不作为引用内容，删段级联删除。';
 COMMENT ON COLUMN knowledge_segment_summaries.id IS '知识片段摘要：主键标识。';
@@ -6307,8 +6507,8 @@ COMMENT ON COLUMN knowledge_queries.created_at IS '知识检索查询日志：�
 COMMENT ON TABLE knowledge_tasks IS '保存知识摄取、摘要生成、资源删除和晚到对象清理任务；领取、租约、精确存储标识与尝试次数直接保存在任务行。';
 COMMENT ON COLUMN knowledge_tasks.id IS '知识后台任务：主键标识。';
 COMMENT ON COLUMN knowledge_tasks.project_id IS '知识后台任务：所属项目标识。';
-COMMENT ON COLUMN knowledge_tasks.resource_id IS '知识后台任务：按任务类型指向知识文档或知识库的业务标识。';
-COMMENT ON COLUMN knowledge_tasks.kind IS '知识后台任务：任务类型（摄取文档、重嵌入文档、生成片段摘要、删除文档、清理晚到文档对象或删除知识库）。';
+COMMENT ON COLUMN knowledge_tasks.resource_id IS '知识后台任务：按任务类型指向知识文档、提取结果或知识库的业务标识。';
+COMMENT ON COLUMN knowledge_tasks.kind IS '知识后台任务：任务类型（摄取文档、重嵌入文档、生成片段摘要、删除文档、清理晚到文档对象、删除提取结果或删除知识库）。';
 COMMENT ON COLUMN knowledge_tasks.target_version IS '知识后台任务：ingest_document、reembed_document 与 summarize_document 任务允许发布的文档版本号。';
 COMMENT ON COLUMN knowledge_tasks.storage_key IS '知识后台任务：仅 delete_document_object 使用的精确 MinIO object key；属于受保护存储定位符。';
 COMMENT ON COLUMN knowledge_tasks.reparse_settings IS '知识后台任务：显式重新解析时固化的完整切分/清洗参数 JSON；重试继承，其余任务为空。';
@@ -6326,6 +6526,7 @@ COMMENT ON COLUMN knowledge_tasks.error_message IS '知识后台任务：最近�
 COMMENT ON COLUMN knowledge_tasks.created_at IS '知识后台任务：记录创建时间。';
 COMMENT ON COLUMN knowledge_tasks.updated_at IS '知识后台任务：记录最近更新时间。';
 COMMENT ON COLUMN knowledge_tasks.finished_at IS '知识后台任务：任务最终成功或失败的时间。';
+COMMENT ON COLUMN knowledge_tasks.extraction_id IS '知识后台任务：活跃索引任务的提取结果回收 pin；仅 open 摄取、重嵌入、摘要任务可持有，结算或 claim 失效须清空。';
 
 COMMENT ON TABLE knowledge_system_settings IS '保存平台级知识模块配置的单例行（id 固定为 1）：模块开关、Worker 限额、配额、MinIO 存储目标、摘要 System Model 引用与查询向量缓存参数。';
 COMMENT ON COLUMN knowledge_system_settings.id IS '知识系统设置：主键标识。';
@@ -6348,6 +6549,8 @@ COMMENT ON COLUMN knowledge_system_settings.query_cache_enabled IS '知识系统
 COMMENT ON COLUMN knowledge_system_settings.query_cache_max_entries IS '知识系统设置：查询向量缓存的最大条目数（LRU 淘汰）。';
 COMMENT ON COLUMN knowledge_system_settings.query_cache_ttl_seconds IS '知识系统设置：查询向量缓存条目的存活秒数。';
 COMMENT ON COLUMN knowledge_system_settings.updated_at IS '知识系统设置：记录最近更新时间。';
+COMMENT ON COLUMN knowledge_system_settings.etl_type IS '知识系统设置：平台解析路线，dify 或 unstructured_local；默认 dify。';
+COMMENT ON COLUMN knowledge_system_settings.extraction_cache_enabled IS '知识系统设置：是否复用完整提取缓存；默认开启。';
 -- END GENERATED SCHEMA COMMENTS
 
 

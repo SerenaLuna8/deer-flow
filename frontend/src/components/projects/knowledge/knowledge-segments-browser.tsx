@@ -34,17 +34,24 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
+import { knowledgeContentDigest } from "@/core/knowledge/attachment-images";
 import {
   useCreateKnowledgeSegment,
   useDeleteKnowledgeSegment,
+  useKnowledgeDocumentAttachments,
   useKnowledgeDocumentSegments,
   useKnowledgeSegmentLocate,
   useUpdateKnowledgeSegment,
 } from "@/core/knowledge/hooks";
-import { formatKnowledgeSourcePosition } from "@/core/knowledge/source-position";
+import { processingUnitLabel } from "@/core/knowledge/processing-profile";
+import {
+  formatKnowledgeSourcePosition,
+  formatKnowledgeSourceSpans,
+} from "@/core/knowledge/source-position";
 import type {
   KnowledgeBaseItem,
   KnowledgeDocumentItem,
+  KnowledgeSegmentDetailResponse,
   KnowledgeSegmentItem,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
@@ -52,10 +59,119 @@ import { cn } from "@/lib/utils";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeFileTypeIcon } from "./knowledge-file-type-icon";
+import type { KnowledgeImageSource } from "./knowledge-image";
+import { KnowledgeMarkdown } from "./knowledge-markdown";
 import { KnowledgeSummaryBlock } from "./knowledge-summary-block";
 
 /** Mirrors the backend's segment content ceiling (splitter's largest chunk). */
 const MAX_SEGMENT_CONTENT_CHARS = 4000;
+
+const EMPTY_KNOWLEDGE_IMAGE_SOURCES: ReadonlyMap<string, KnowledgeImageSource> =
+  new Map();
+
+function ManagedSegmentMarkdown({
+  scope,
+  detail,
+  className,
+}: {
+  scope: ProjectClientScope;
+  detail: KnowledgeSegmentDetailResponse;
+  className?: string;
+}) {
+  const scopeKey = `${scope.accountId}:${scope.projectId}`;
+  const identity = `${scopeKey}:${detail.request_id}:${detail.stored_content_version}`;
+  const [imageState, setImageState] = useState<{
+    identity: string;
+    sources: ReadonlyMap<string, KnowledgeImageSource>;
+  } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void knowledgeContentDigest(detail.segment.content).then(
+      (expectedContentDigest) => {
+        if (!active) return;
+        setImageState({
+          identity,
+          sources: new Map(
+            detail.attachments.map((attachment) => [
+              attachment.ref,
+              {
+                kind: "protected",
+                request: {
+                  purpose: "management",
+                  projectId: scope.projectId,
+                  documentId: detail.document_id,
+                  segmentId: detail.segment.id,
+                  attachmentId: attachment.attachment_id,
+                  expectedDocumentVersion: detail.stored_content_version,
+                  expectedContentDigest,
+                },
+              } as const,
+            ]),
+          ),
+        });
+      },
+      () => {
+        if (!active) return;
+        setImageState({
+          identity,
+          sources: EMPTY_KNOWLEDGE_IMAGE_SOURCES,
+        });
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [detail, identity, scope.projectId]);
+
+  return (
+    <KnowledgeMarkdown
+      content={detail.segment.content}
+      imageSources={
+        imageState?.identity === identity
+          ? imageState.sources
+          : EMPTY_KNOWLEDGE_IMAGE_SOURCES
+      }
+      scopeKey={scopeKey}
+      className={className}
+    />
+  );
+}
+
+function SegmentAttachmentFacts({
+  detail,
+}: {
+  detail: KnowledgeSegmentDetailResponse;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge.segments;
+  if (detail.attachments.length === 0) return null;
+  const savedImageCount = new Set(
+    detail.attachments.map((attachment) => attachment.attachment_id),
+  ).size;
+  return (
+    <div
+      className="border-border/60 bg-muted/25 space-y-1 rounded-md border px-3 py-2 text-xs"
+      data-testid="knowledge-segment-attachments"
+    >
+      <p className="text-muted-foreground">
+        {labels.savedImages(savedImageCount)}
+      </p>
+      <ul className="space-y-0.5">
+        {detail.attachments.map((attachment, index) => (
+          <li key={`${attachment.attachment_id}:${index}`}>
+            {labels.attachmentInfo(
+              attachment.alt_text,
+              attachment.media_type,
+              attachment.width,
+              attachment.height,
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 /**
  * Full segment browsing page for one document: list, enable toggles, edit,
@@ -86,7 +202,7 @@ export function KnowledgeSegmentsBrowser({
   const { t } = useI18n();
   const labels = t.knowledge;
   const [page, setPage] = useState(1);
-  const segments = useKnowledgeDocumentSegments(scope, document.id, page);
+  const segments = useKnowledgeDocumentSegments(scope, document, page);
   // Toggles surface errors at the list level; the edit dialog owns its own
   // mutation instance so its inline error does not leak onto the toggles.
   const toggleSegment = useUpdateKnowledgeSegment(scope);
@@ -98,6 +214,13 @@ export function KnowledgeSegmentsBrowser({
   const total = segments.data?.total ?? 0;
   const pageSize = segments.data?.page_size ?? 1;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const canGovernDocument = canEdit && document.status === "ready";
+
+  useEffect(() => {
+    if (canGovernDocument) return;
+    setAdding(false);
+    setEditing(null);
+  }, [canGovernDocument]);
 
   // Deleting the last segment of the last page must not strand the browser
   // on an empty page.
@@ -142,7 +265,7 @@ export function KnowledgeSegmentsBrowser({
             </p>
           </div>
         </div>
-        {canEdit && document.status === "ready" ? (
+        {canGovernDocument ? (
           <Button
             type="button"
             className="h-8 rounded-md bg-blue-600 text-[13px] text-white hover:bg-blue-700 focus-visible:ring-blue-300"
@@ -153,6 +276,15 @@ export function KnowledgeSegmentsBrowser({
           </Button>
         ) : null}
       </div>
+
+      {document.content_initialized && document.status !== "ready" ? (
+        <p
+          className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:bg-amber-950/30 dark:text-amber-200"
+          data-testid="knowledge-published-readonly"
+        >
+          {labels.segments.publishedReadonly}
+        </p>
+      ) : null}
 
       {toggleSegment.error ? (
         <p role="alert" className="text-destructive text-[13px]">
@@ -190,7 +322,14 @@ export function KnowledgeSegmentsBrowser({
               segment.source_position,
               labels.sourcePosition,
             );
+            const sources = formatKnowledgeSourceSpans(
+              segment.source_spans,
+              labels.sourcePosition,
+            );
             const manual = segment.source_position.manual === true;
+            const canGovernSegment =
+              canGovernDocument &&
+              segment.document_version === document.version;
             return (
               <li
                 key={segment.id}
@@ -212,8 +351,23 @@ export function KnowledgeSegmentsBrowser({
                     <GripIcon aria-hidden className="size-3" />
                     {labels.segments.position(segment.position)}
                   </span>
-                  {position ? <span>· {position}</span> : null}
+                  {sources.length > 0 ? (
+                    sources.map((source, index) => (
+                      <span key={`${source.role}:${source.position}:${index}`}>
+                        · {labels.segments.sourceRoles[source.role]} ·{" "}
+                        {source.position}
+                      </span>
+                    ))
+                  ) : position ? (
+                    <span>· {position}</span>
+                  ) : null}
                   <span>· {labels.segments.wordCount(segment.word_count)}</span>
+                  {processingUnitLabel(document.parsing_profile) ===
+                  "knowledgeTokens" ? (
+                    <span>
+                      · {labels.segments.tokenCount(segment.token_count)}
+                    </span>
+                  ) : null}
                   {manual ? (
                     <Badge
                       variant="outline"
@@ -231,7 +385,7 @@ export function KnowledgeSegmentsBrowser({
                     </Badge>
                   ) : null}
                   <div className="ml-auto flex items-center gap-1">
-                    {canEdit ? (
+                    {canGovernSegment ? (
                       <>
                         <Switch
                           className="mr-1 data-[state=checked]:bg-blue-600"
@@ -333,6 +487,8 @@ export function KnowledgeSegmentsBrowser({
           scope={scope}
           base={base}
           document={document}
+          sheetOpen={adding}
+          canGovernDocument={canGovernDocument}
           onClose={() => setAdding(false)}
         />
       ) : null}
@@ -344,6 +500,8 @@ export function KnowledgeSegmentsBrowser({
           base={base}
           document={document}
           segment={editing}
+          sheetOpen={editing !== null}
+          canGovernDocument={canGovernDocument}
           onClose={() => setEditing(null)}
         />
       ) : null}
@@ -456,9 +614,12 @@ function SegmentLocateCard({
               </Button>
             ) : null}
           </div>
-          <p className="text-foreground/85 text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-pre-wrap">
-            {locate.data.segment.content}
-          </p>
+          <ManagedSegmentMarkdown
+            scope={scope}
+            detail={locate.data}
+            className="text-foreground/85 text-[13px] leading-6 [overflow-wrap:anywhere]"
+          />
+          <SegmentAttachmentFacts detail={locate.data} />
           <KnowledgeSummaryBlock summary={locate.data.summary} />
         </div>
       )}
@@ -497,25 +658,119 @@ function SegmentContentField({
   );
 }
 
+function appendKnowledgeAttachment(
+  content: string,
+  ref: string,
+  altText: string,
+): string {
+  const image = `![${altText}](knowledge-attachment:${ref})`;
+  return content.trim().length === 0
+    ? image
+    : `${content.trimEnd()}\n\n${image}`;
+}
+
+function SegmentAttachmentPicker({
+  scope,
+  document,
+  enabled,
+  onInsert,
+}: {
+  scope: ProjectClientScope;
+  document: KnowledgeDocumentItem;
+  enabled: boolean;
+  onInsert: (ref: string, altText: string) => void;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge;
+  const attachments = useKnowledgeDocumentAttachments(scope, document, enabled);
+  const versionMatches =
+    attachments.data === undefined ||
+    attachments.data.document_version === document.version;
+  if (!enabled) return null;
+  return (
+    <section
+      className="border-border/60 bg-muted/20 space-y-2 rounded-md border px-3 py-2"
+      data-testid="knowledge-document-attachment-choices"
+    >
+      <h3 className="text-xs font-medium">
+        {labels.segments.currentDocumentImages}
+      </h3>
+      {attachments.isLoading ? (
+        <p className="text-muted-foreground text-xs">
+          {labels.segments.documentImagesLoading}
+        </p>
+      ) : attachments.error ? (
+        <p role="alert" className="text-destructive text-xs">
+          {knowledgeErrorMessage(attachments.error, labels.errors)}
+        </p>
+      ) : !versionMatches ? (
+        <p role="alert" className="text-destructive text-xs">
+          {labels.segments.documentImagesChanged}
+        </p>
+      ) : (attachments.data?.items.length ?? 0) === 0 ? (
+        <p className="text-muted-foreground text-xs">
+          {labels.segments.documentImagesEmpty}
+        </p>
+      ) : (
+        <ul className="space-y-1.5">
+          {attachments.data?.items.map((attachment, index) => {
+            const position = index + 1;
+            return (
+              <li
+                key={attachment.attachment_id}
+                className="flex items-center justify-between gap-3 text-xs"
+              >
+                <span className="text-muted-foreground min-w-0 truncate">
+                  {attachment.media_type} · {attachment.width}×
+                  {attachment.height}
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 shrink-0 rounded-md px-2 text-xs"
+                  onClick={() =>
+                    onInsert(
+                      attachment.ref,
+                      labels.segments.insertedImageAlt(position),
+                    )
+                  }
+                >
+                  {labels.segments.insertImage(position)}
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function AddSegmentSheet({
   scope,
   base,
   document,
+  sheetOpen,
+  canGovernDocument,
   onClose,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
   document: KnowledgeDocumentItem;
+  sheetOpen: boolean;
+  canGovernDocument: boolean;
   onClose: () => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
   const createSegment = useCreateKnowledgeSegment(scope);
   const [content, setContent] = useState("");
+  const governanceEnabled = canGovernDocument && sheetOpen;
 
   return (
     <Sheet
-      open
+      open={governanceEnabled}
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
@@ -538,7 +793,7 @@ function AddSegmentSheet({
           className="flex min-h-0 flex-1 flex-col"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!content.trim()) return;
+            if (!governanceEnabled || !content.trim()) return;
             createSegment.mutate(
               {
                 documentId: document.id,
@@ -551,6 +806,16 @@ function AddSegmentSheet({
         >
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 py-4">
             <SegmentContentField content={content} onChange={setContent} />
+            <SegmentAttachmentPicker
+              scope={scope}
+              document={document}
+              enabled={canGovernDocument && sheetOpen}
+              onInsert={(ref, altText) =>
+                setContent((current) =>
+                  appendKnowledgeAttachment(current, ref, altText),
+                )
+              }
+            />
             {createSegment.error ? (
               <p role="alert" className="text-destructive shrink-0 text-[13px]">
                 {knowledgeErrorMessage(createSegment.error, labels.errors)}
@@ -569,7 +834,9 @@ function AddSegmentSheet({
             <Button
               type="submit"
               className="h-8 rounded-md bg-blue-600 text-[13px] text-white hover:bg-blue-700 focus-visible:ring-blue-300"
-              disabled={createSegment.isPending || !content.trim()}
+              disabled={
+                !governanceEnabled || createSegment.isPending || !content.trim()
+              }
             >
               {createSegment.isPending
                 ? labels.common.saving
@@ -587,22 +854,27 @@ function EditSegmentSheet({
   base,
   document,
   segment,
+  sheetOpen,
+  canGovernDocument,
   onClose,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
   document: KnowledgeDocumentItem;
   segment: KnowledgeSegmentItem;
+  sheetOpen: boolean;
+  canGovernDocument: boolean;
   onClose: () => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
   const updateSegment = useUpdateKnowledgeSegment(scope);
   const [content, setContent] = useState(segment.content);
+  const governanceEnabled = canGovernDocument && sheetOpen;
 
   return (
     <Sheet
-      open
+      open={governanceEnabled}
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
@@ -625,7 +897,7 @@ function EditSegmentSheet({
           className="flex min-h-0 flex-1 flex-col"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!content.trim()) return;
+            if (!governanceEnabled || !content.trim()) return;
             updateSegment.mutate(
               {
                 segmentId: segment.id,
@@ -639,6 +911,16 @@ function EditSegmentSheet({
         >
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 py-4">
             <SegmentContentField content={content} onChange={setContent} />
+            <SegmentAttachmentPicker
+              scope={scope}
+              document={document}
+              enabled={canGovernDocument && sheetOpen}
+              onInsert={(ref, altText) =>
+                setContent((current) =>
+                  appendKnowledgeAttachment(current, ref, altText),
+                )
+              }
+            />
             {updateSegment.error ? (
               <p role="alert" className="text-destructive shrink-0 text-[13px]">
                 {knowledgeErrorMessage(updateSegment.error, labels.errors)}
@@ -657,7 +939,9 @@ function EditSegmentSheet({
             <Button
               type="submit"
               className="h-8 rounded-md bg-blue-600 text-[13px] text-white hover:bg-blue-700 focus-visible:ring-blue-300"
-              disabled={updateSegment.isPending || !content.trim()}
+              disabled={
+                !governanceEnabled || updateSegment.isPending || !content.trim()
+              }
             >
               {updateSegment.isPending
                 ? labels.common.saving
@@ -721,9 +1005,12 @@ function ViewSegmentSheet({
           ) : detail.data ? (
             <>
               <KnowledgeSummaryBlock summary={detail.data.summary} />
-              <p className="text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-pre-wrap">
-                {detail.data.segment.content}
-              </p>
+              <ManagedSegmentMarkdown
+                scope={scope}
+                detail={detail.data}
+                className="text-[13px] leading-6 [overflow-wrap:anywhere]"
+              />
+              <SegmentAttachmentFacts detail={detail.data} />
             </>
           ) : (
             <Skeleton className="h-28" />

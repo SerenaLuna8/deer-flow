@@ -111,6 +111,7 @@ from ..contracts import (
     KnowledgeSearchTimings,
 )
 from ..models.client import KnowledgeModelClient
+from ..persistence.derivations import stored_model_text
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
@@ -399,8 +400,9 @@ class _Candidate:
     """One recalled segment with its display fields and recall-stage score.
 
     ``vector_score`` is the maximum Segment/Child/Summary source cosine;
-    ``matched_via`` identifies its source. ``content`` is
-    the complete parent text frozen by the recall snapshot; hits carry it as
+    ``matched_via`` identifies its source. ``content`` is the complete parent
+    text frozen by the recall snapshot; ``index_text`` is the corresponding
+    persisted model input used only by the reranker. Hits carry ``content`` as
     the passage while citations only quote its head. ``matched_children``
     are the really-recalled child chunks, carried by the recall transaction
     itself (empty for general-mode segments).
@@ -409,6 +411,7 @@ class _Candidate:
     segment_id: UUID
     position: int
     content: str
+    index_text: str
     source_position: dict[str, Any]
     document_id: UUID
     document_name: str
@@ -792,7 +795,7 @@ class KnowledgeSearchService:
                     scores = await self._client.rerank(
                         group.rerank,
                         validated.query,
-                        [candidate.content for candidate in candidates],
+                        [candidate.index_text for candidate in candidates],
                         top_n=len(candidates),
                         batch_guard=_dispatch_guard,
                     )
@@ -1568,10 +1571,12 @@ class KnowledgeSearchService:
                 KnowledgeSegmentRow.id,
                 KnowledgeSegmentRow.position,
                 KnowledgeSegmentRow.content,
+                KnowledgeSegmentRow.index_text,
                 KnowledgeSegmentRow.source_position,
                 KnowledgeSegmentRow.document_version,
                 KnowledgeDocumentRow.id.label("document_id"),
                 KnowledgeDocumentRow.name.label("document_name"),
+                KnowledgeDocumentRow.parsing_profile,
                 KnowledgeBaseRow.id.label("knowledge_base_id"),
                 KnowledgeBaseRow.name.label("knowledge_base_name"),
                 vector_score,
@@ -1658,10 +1663,12 @@ class KnowledgeSearchService:
                 KnowledgeSegmentRow.id,
                 KnowledgeSegmentRow.position,
                 KnowledgeSegmentRow.content,
+                KnowledgeSegmentRow.index_text,
                 KnowledgeSegmentRow.source_position,
                 KnowledgeSegmentRow.document_version,
                 KnowledgeDocumentRow.id.label("document_id"),
                 KnowledgeDocumentRow.name.label("document_name"),
+                KnowledgeDocumentRow.parsing_profile,
                 KnowledgeBaseRow.id.label("knowledge_base_id"),
                 KnowledgeBaseRow.name.label("knowledge_base_name"),
                 all_children_cosine,
@@ -1695,6 +1702,11 @@ class KnowledgeSearchService:
             segment_id=row.id,
             position=row.position,
             content=row.content,
+            index_text=stored_model_text(
+                content=row.content,
+                index_text=row.index_text,
+                parsing_profile=row.parsing_profile,
+            ),
             source_position=dict(row.source_position),
             document_id=row.document_id,
             document_name=row.document_name,
@@ -1900,10 +1912,12 @@ class KnowledgeSearchService:
                 KnowledgeSegmentRow.id,
                 KnowledgeSegmentRow.position,
                 KnowledgeSegmentRow.content,
+                KnowledgeSegmentRow.index_text,
                 KnowledgeSegmentRow.source_position,
                 KnowledgeSegmentRow.document_version,
                 KnowledgeDocumentRow.id.label("document_id"),
                 KnowledgeDocumentRow.name.label("document_name"),
+                KnowledgeDocumentRow.parsing_profile,
                 KnowledgeBaseRow.id.label("knowledge_base_id"),
                 KnowledgeBaseRow.name.label("knowledge_base_name"),
                 vector_score,
@@ -1952,10 +1966,12 @@ class KnowledgeSearchService:
                 KnowledgeSegmentRow.id,
                 KnowledgeSegmentRow.position,
                 KnowledgeSegmentRow.content,
+                KnowledgeSegmentRow.index_text,
                 KnowledgeSegmentRow.source_position,
                 KnowledgeSegmentRow.document_version,
                 KnowledgeDocumentRow.id.label("document_id"),
                 KnowledgeDocumentRow.name.label("document_name"),
+                KnowledgeDocumentRow.parsing_profile,
                 KnowledgeBaseRow.id.label("knowledge_base_id"),
                 KnowledgeBaseRow.name.label("knowledge_base_name"),
                 vector_score.label("vector_score"),
@@ -2023,10 +2039,12 @@ class KnowledgeSearchService:
                 KnowledgeSegmentRow.id,
                 KnowledgeSegmentRow.position,
                 KnowledgeSegmentRow.content,
+                KnowledgeSegmentRow.index_text,
                 KnowledgeSegmentRow.source_position,
                 KnowledgeSegmentRow.document_version,
                 KnowledgeDocumentRow.id.label("document_id"),
                 KnowledgeDocumentRow.name.label("document_name"),
+                KnowledgeDocumentRow.parsing_profile,
                 KnowledgeBaseRow.id.label("knowledge_base_id"),
                 KnowledgeBaseRow.name.label("knowledge_base_name"),
                 vector_score,
@@ -2078,6 +2096,11 @@ class KnowledgeSearchService:
                 segment_id=row.id,
                 position=row.position,
                 content=row.content,
+                index_text=stored_model_text(
+                    content=row.content,
+                    index_text=row.index_text,
+                    parsing_profile=row.parsing_profile,
+                ),
                 source_position=dict(row.source_position),
                 document_id=row.document_id,
                 document_name=row.document_name,

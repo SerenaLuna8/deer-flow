@@ -27,23 +27,23 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
+import { isKnowledgeConflictError } from "@/core/knowledge/api";
+import { createPreviewImageURLs } from "@/core/knowledge/attachment-images";
 import {
   isChildChunkSizeValid,
   isChunkOverlapValid,
   isChunkSeparatorValid,
   isChunkSizeValid,
+  knowledgeFileExtension,
+  normalizeKnowledgeHeaderRules,
   KNOWLEDGE_BASE_NAME_MAX_CHARS,
-  KNOWLEDGE_CHILD_CHUNK_SIZE_MAX,
-  KNOWLEDGE_CHILD_CHUNK_SIZE_MIN,
-  KNOWLEDGE_CHUNK_OVERLAP_MAX,
   KNOWLEDGE_CHUNK_OVERLAP_MIN,
-  KNOWLEDGE_CHUNK_SIZE_MAX,
-  KNOWLEDGE_CHUNK_SIZE_MIN,
 } from "@/core/knowledge/chunk-settings";
 import {
   useCreateKnowledgeBase,
   useKnowledgeChunkPreview,
   useKnowledgeDocuments,
+  useKnowledgeFileCapabilities,
   useKnowledgeModelOptions,
   useUpdateKnowledgeBase,
   useUploadKnowledgeDocument,
@@ -51,14 +51,21 @@ import {
 import {
   KNOWLEDGE_PREVIEW_IDLE,
   knowledgePreviewReducer,
+  matchingPreviewFingerprint,
   previewParamsEqual,
+  previewProcessingParameters,
   type KnowledgePreviewParams,
+  type KnowledgeSuccessfulPreview,
 } from "@/core/knowledge/preview-identity";
 import {
   DEFAULT_CHILD_CHUNK_SEPARATOR,
   DEFAULT_CHUNK_SEPARATOR,
   type KnowledgeBaseItem,
+  type KnowledgeChunkPreviewResponse,
   type KnowledgeChunkingMode,
+  type KnowledgeFileCapabilities,
+  type KnowledgeHeaderRule,
+  type KnowledgeProcessingParameters,
   type KnowledgeRetrievalMode,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
@@ -67,10 +74,12 @@ import { cn } from "@/lib/utils";
 import {
   documentStatusClassName,
   documentStatusVariant,
-  KNOWLEDGE_UPLOAD_ACCEPT,
 } from "./knowledge-documents-view";
 import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeFileTypeIcon } from "./knowledge-file-type-icon";
+import { KnowledgeHeaderSettings } from "./knowledge-header-settings";
+import type { KnowledgeImageSource } from "./knowledge-image";
+import { KnowledgeMarkdown } from "./knowledge-markdown";
 import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
 
 type WizardStep = 1 | 2 | 3;
@@ -78,10 +87,17 @@ type WizardStep = 1 | 2 | 3;
 type UploadFailure = {
   fileName: string;
   message: string;
+  stalePreview?: boolean;
+};
+
+type KnowledgeSubmissionFile = {
+  file: File;
+  processingProfile: KnowledgeProcessingParameters;
+  expectedPreviewFingerprint?: string;
 };
 
 type KnowledgeSubmissionSnapshot = {
-  files: File[];
+  files: KnowledgeSubmissionFile[];
   name: string;
   description: string;
   displayName?: string;
@@ -97,6 +113,116 @@ type KnowledgeSubmissionSnapshot = {
   removeExtraSpaces: boolean;
   removeUrlsEmails: boolean;
 };
+
+const EMPTY_KNOWLEDGE_IMAGE_SOURCES: ReadonlyMap<string, KnowledgeImageSource> =
+  new Map();
+
+function PreviewChunkList({
+  data,
+  scopeKey,
+  stale,
+  labels,
+}: {
+  data: KnowledgeChunkPreviewResponse;
+  scopeKey: string;
+  stale: boolean;
+  labels: ReturnType<typeof useI18n>["t"]["knowledge"]["wizard"];
+}) {
+  const resourceIdentity = `${scopeKey}:${data.preview_fingerprint}:${stale ? "stale" : "current"}`;
+  const [imageState, setImageState] = useState<{
+    identity: string;
+    sources: ReadonlyMap<string, KnowledgeImageSource>;
+  } | null>(null);
+
+  useEffect(() => {
+    if (stale) return;
+    let resources: ReturnType<typeof createPreviewImageURLs> | null = null;
+    try {
+      resources = createPreviewImageURLs(data.preview_attachments);
+      setImageState({
+        identity: resourceIdentity,
+        sources: new Map(
+          [...resources.urls].map(([ref, url]) => [
+            ref,
+            { kind: "preview", url } as const,
+          ]),
+        ),
+      });
+    } catch {
+      setImageState({
+        identity: resourceIdentity,
+        sources: EMPTY_KNOWLEDGE_IMAGE_SOURCES,
+      });
+    }
+    return () => resources?.dispose();
+  }, [data, resourceIdentity, stale]);
+
+  const imageSources =
+    imageState?.identity === resourceIdentity
+      ? imageState.sources
+      : EMPTY_KNOWLEDGE_IMAGE_SOURCES;
+
+  return (
+    <ul className={cn("grid gap-6 transition-opacity", stale && "opacity-60")}>
+      {data.items.map((chunk) => (
+        <li key={chunk.position} className="space-y-2">
+          <p className="text-muted-foreground flex items-center justify-between gap-2 text-xs tabular-nums">
+            <span className="font-medium">
+              {labels.previewChunkLabel(chunk.position)}
+            </span>
+            <span>
+              {chunk.child_contents.length > 0
+                ? `${labels.previewChildCount(chunk.child_contents.length)} · `
+                : null}
+              {labels.previewCharacters(chunk.word_count)}
+            </span>
+          </p>
+          {chunk.child_contents.length === 0 ? (
+            <KnowledgeMarkdown
+              content={chunk.content}
+              imageSources={imageSources}
+              scopeKey={scopeKey}
+              className="text-[13px] leading-6 break-words"
+            />
+          ) : null}
+          {chunk.child_contents.length > 0 ? (
+            <ol className="flex flex-wrap items-start gap-x-1 gap-y-1.5">
+              {chunk.child_contents.map((childContent, index) => (
+                <li
+                  key={index}
+                  className="bg-muted/60 max-w-full rounded-sm px-1.5 py-0.5 text-[13px] leading-6 break-words"
+                >
+                  <span className="text-muted-foreground mr-1.5 inline-block text-[10px] font-medium tabular-nums">
+                    {labels.previewChildLabel(index + 1)}
+                  </span>
+                  <KnowledgeMarkdown
+                    content={childContent}
+                    imageSources={imageSources}
+                    scopeKey={scopeKey}
+                    className="inline whitespace-normal"
+                  />
+                </li>
+              ))}
+            </ol>
+          ) : null}
+          {chunk.child_contents.length > 0 ? (
+            <details className="text-muted-foreground text-xs">
+              <summary className="hover:text-foreground cursor-pointer py-1">
+                {labels.previewParentText}
+              </summary>
+              <KnowledgeMarkdown
+                content={chunk.content}
+                imageSources={imageSources}
+                scopeKey={scopeKey}
+                className="pt-1 text-[13px] leading-6 break-words"
+              />
+            </details>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function fileBaseName(fileName: string): string {
   const dot = fileName.lastIndexOf(".");
@@ -117,6 +243,16 @@ function formatSizeBytes(sizeBytes: number): string {
 function mergeFiles(current: File[], added: File[]): File[] {
   const addedNames = new Set(added.map((file) => file.name));
   return [...current.filter((file) => !addedNames.has(file.name)), ...added];
+}
+
+function capabilityForFile(
+  file: File,
+  capabilities: KnowledgeFileCapabilities | undefined,
+) {
+  const extension = knowledgeFileExtension(file.name);
+  return extension === null
+    ? undefined
+    : capabilities?.formats.find((item) => item.extension === extension);
 }
 
 function StepIndicator({
@@ -193,6 +329,12 @@ export function KnowledgeCreateWizard({
   const [step, setStep] = useState<WizardStep>(1);
   const [files, setFiles] = useState<File[]>([]);
   const [previewFileName, setPreviewFileName] = useState<string | null>(null);
+  const [headerRulesByFile, setHeaderRulesByFile] = useState<
+    Map<File, KnowledgeHeaderRule[]>
+  >(() => new Map());
+  const [successfulPreviews, setSuccessfulPreviews] = useState<
+    Map<File, KnowledgeSuccessfulPreview>
+  >(() => new Map());
   const [fileInputKey, setFileInputKey] = useState(0);
   const [name, setName] = useState(existingBase?.name ?? "");
   const [nameTouched, setNameTouched] = useState(false);
@@ -235,6 +377,12 @@ export function KnowledgeCreateWizard({
   const mountedRef = useRef(false);
   const submissionInFlightRef = useRef(false);
   const submissionGenerationRef = useRef(0);
+  const previewAbortControllerRef = useRef<AbortController | null>(null);
+  const previewActiveIdentityRef = useRef<{
+    file: File;
+    scopeKey: string;
+    sequence: number;
+  } | null>(null);
   const scopeKey = `${scope.accountId}:${scope.projectId}`;
   const scopeKeyRef = useRef(scopeKey);
 
@@ -245,15 +393,20 @@ export function KnowledgeCreateWizard({
       mountedRef.current = false;
       submissionInFlightRef.current = false;
       submissionGenerationRef.current += 1;
+      previewAbortControllerRef.current?.abort();
+      previewAbortControllerRef.current = null;
+      previewActiveIdentityRef.current = null;
     };
   }, [scopeKey]);
 
+  const fileCapabilities = useKnowledgeFileCapabilities(scope);
   const options = useKnowledgeModelOptions(scope, step === 2);
   const createBase = useCreateKnowledgeBase(scope);
   const updateBase = useUpdateKnowledgeBase(scope);
   const upload = useUploadKnowledgeDocument(scope);
   const documents = useKnowledgeDocuments(scope, createdBase?.id ?? null);
   const preview = useKnowledgeChunkPreview(scope);
+  const previewScopeKey = `${scopeKey}:${fileCapabilities.data?.capability_revision ?? "unavailable"}`;
   const [previewState, dispatchPreview] = useReducer(
     knowledgePreviewReducer,
     KNOWLEDGE_PREVIEW_IDLE,
@@ -279,60 +432,94 @@ export function KnowledgeCreateWizard({
 
   const parsedChunkSize = Number.parseInt(chunkSize, 10);
   const parsedChunkOverlap = Number.parseInt(chunkOverlap, 10);
-  // Bounds mirror the backend exactly: the base is created before the files
-  // upload, so a looser client check would strand the user with an empty base.
+  const chunkLimits = fileCapabilities.data?.chunk_limits;
   const chunkParamsValid =
-    isChunkSizeValid(parsedChunkSize) &&
-    isChunkOverlapValid(parsedChunkOverlap, parsedChunkSize);
+    chunkLimits !== undefined &&
+    isChunkSizeValid(parsedChunkSize, chunkLimits) &&
+    isChunkOverlapValid(parsedChunkOverlap, parsedChunkSize, chunkLimits);
   const separatorValid = isChunkSeparatorValid(chunkSeparator);
   const parsedChildChunkSize = Number.parseInt(childChunkSize, 10);
   const childParamsValid =
-    chunkingMode === "general" ||
-    (isChildChunkSizeValid(parsedChildChunkSize, parsedChunkSize) &&
-      isChunkSeparatorValid(childChunkSeparator));
+    chunkLimits !== undefined &&
+    (chunkingMode === "general" ||
+      (isChildChunkSizeValid(
+        parsedChildChunkSize,
+        parsedChunkSize,
+        chunkLimits,
+      ) &&
+        isChunkSeparatorValid(childChunkSeparator)));
+  const filesAvailable =
+    fileCapabilities.data !== undefined &&
+    files.every(
+      (file) => capabilityForFile(file, fileCapabilities.data)?.available,
+    );
   const configureValid =
     (isExistingUpload || name.trim().length > 0) &&
     !!effectiveEmbeddingModelId &&
     chunkParamsValid &&
     separatorValid &&
-    childParamsValid;
+    childParamsValid &&
+    filesAvailable;
 
   // Any selected file can be previewed; the picker falls back to the first
   // file when its selection was removed.
   const previewFile =
     files.find((file) => file.name === previewFileName) ?? files[0] ?? null;
+  const previewParamsForFile = (file: File): KnowledgePreviewParams | null => {
+    const capability = capabilityForFile(file, fileCapabilities.data);
+    if (
+      !chunkParamsValid ||
+      !separatorValid ||
+      !childParamsValid ||
+      fileCapabilities.data === undefined ||
+      capability?.available !== true
+    ) {
+      return null;
+    }
+    return {
+      chunk_size: parsedChunkSize,
+      chunk_overlap: parsedChunkOverlap,
+      chunk_separator: chunkSeparator,
+      remove_extra_spaces: removeExtraSpaces,
+      remove_urls_emails: removeUrlsEmails,
+      chunking_mode: chunkingMode,
+      unit: fileCapabilities.data.chunk_limits.unit,
+      tokenizer_profile_id:
+        fileCapabilities.data.chunk_limits.tokenizer_profile_id,
+      capability_revision: fileCapabilities.data.capability_revision,
+      header_rules: normalizeKnowledgeHeaderRules(
+        headerRulesByFile.get(file) ?? [],
+      ),
+      ...(chunkingMode === "parent_child"
+        ? {
+            child_chunk_size: parsedChildChunkSize,
+            child_chunk_separator: childChunkSeparator,
+          }
+        : {}),
+    };
+  };
   // Preview requests are deliberate full-file uploads carrying a full
   // identity (File, parameter snapshot, scope, sequence). Showing a file
   // starts one request; later edits only make that exact response stale
   // until the user explicitly refreshes it.
-  const currentPreviewParams: KnowledgePreviewParams | null =
-    chunkParamsValid && separatorValid && childParamsValid
-      ? {
-          chunk_size: parsedChunkSize,
-          chunk_overlap: parsedChunkOverlap,
-          chunk_separator: chunkSeparator,
-          remove_extra_spaces: removeExtraSpaces,
-          remove_urls_emails: removeUrlsEmails,
-          chunking_mode: chunkingMode,
-          // Hidden child fields are not part of a general-mode request or its
-          // freshness identity.
-          ...(chunkingMode === "parent_child"
-            ? {
-                child_chunk_size: parsedChildChunkSize,
-                child_chunk_separator: childChunkSeparator,
-              }
-            : {}),
-        }
-      : null;
+  const currentPreviewParams =
+    previewFile === null ? null : previewParamsForFile(previewFile);
   const previewMatchesFile =
     previewFile !== null && previewState.current?.file === previewFile;
+  const previewHasStaleConflict =
+    previewFile !== null &&
+    uploadFailures.some(
+      (failure) =>
+        failure.fileName === previewFile.name && failure.stalePreview === true,
+    );
   const previewIsStale =
-    previewMatchesFile &&
-    currentPreviewParams !== null &&
-    previewState.current !== null &&
-    !previewParamsEqual(previewState.current.params, currentPreviewParams);
+    previewHasStaleConflict ||
+    (previewMatchesFile &&
+      currentPreviewParams !== null &&
+      previewState.current !== null &&
+      !previewParamsEqual(previewState.current.params, currentPreviewParams));
   const previewLoading =
-    previewMatchesFile && previewState.status === "loading";
+    previewMatchesFile && !previewIsStale && previewState.status === "loading";
   const visiblePreviewData = previewMatchesFile ? previewState.data : null;
   const visiblePreviewError =
     previewMatchesFile && !previewIsStale && previewState.status === "error"
@@ -341,38 +528,100 @@ export function KnowledgeCreateWizard({
 
   const requestCurrentPreview = () => {
     if (previewFile === null || currentPreviewParams === null) return;
+    previewAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    previewAbortControllerRef.current = controller;
     previewSequenceRef.current += 1;
     const identity = {
       file: previewFile,
       params: currentPreviewParams,
-      scopeKey,
+      scopeKey: previewScopeKey,
       sequence: previewSequenceRef.current,
     };
+    previewActiveIdentityRef.current = identity;
     dispatchPreview({ type: "requested", identity });
-    // mutateAsync settles even after a newer call replaces this one; the
-    // reducer's sequence guard is what discards such latecomers.
-    preview.mutateAsync({ file: identity.file, ...identity.params }).then(
-      (data) =>
-        dispatchPreview({
-          type: "resolved",
-          scopeKey: identity.scopeKey,
-          sequence: identity.sequence,
-          data,
-        }),
-      (error: unknown) =>
-        dispatchPreview({
-          type: "failed",
-          scopeKey: identity.scopeKey,
-          sequence: identity.sequence,
-          error,
-        }),
-    );
+    preview
+      .mutateAsync({
+        input: {
+          file: identity.file,
+          processing_profile: previewProcessingParameters(identity.params),
+        },
+        signal: controller.signal,
+      })
+      .then(
+        (data) => {
+          const active = previewActiveIdentityRef.current;
+          if (
+            active?.file !== identity.file ||
+            active.scopeKey !== identity.scopeKey ||
+            active.sequence !== identity.sequence
+          ) {
+            return;
+          }
+          setSuccessfulPreviews((current) => {
+            const next = new Map(current);
+            next.set(identity.file, {
+              file: identity.file,
+              params: identity.params,
+              fingerprint: data.preview_fingerprint,
+            });
+            return next;
+          });
+          setUploadFailures((current) =>
+            current.map((failure) =>
+              failure.fileName === identity.file.name &&
+              failure.stalePreview === true
+                ? { ...failure, stalePreview: false }
+                : failure,
+            ),
+          );
+          dispatchPreview({
+            type: "resolved",
+            scopeKey: identity.scopeKey,
+            sequence: identity.sequence,
+            data,
+          });
+        },
+        (error: unknown) => {
+          if (
+            controller.signal.aborted ||
+            previewActiveIdentityRef.current?.sequence !== identity.sequence
+          ) {
+            return;
+          }
+          dispatchPreview({
+            type: "failed",
+            scopeKey: identity.scopeKey,
+            sequence: identity.sequence,
+            error,
+          });
+        },
+      );
   };
 
-  // Leaving the scope orphans every in-flight preview response.
+  // Scope and capability generations both retire in-flight requests and all
+  // fingerprints; returning A → B → A cannot recover the old generation.
   useEffect(() => {
-    dispatchPreview({ type: "scope_changed", scopeKey });
-  }, [scopeKey]);
+    previewAbortControllerRef.current?.abort();
+    previewAbortControllerRef.current = null;
+    previewActiveIdentityRef.current = null;
+    setSuccessfulPreviews(new Map());
+    dispatchPreview({ type: "scope_changed", scopeKey: previewScopeKey });
+  }, [previewScopeKey]);
+
+  useEffect(() => {
+    const requested = previewState.current;
+    if (
+      requested !== null &&
+      (requested.file !== previewFile ||
+        currentPreviewParams === null ||
+        !previewParamsEqual(requested.params, currentPreviewParams))
+    ) {
+      previewAbortControllerRef.current?.abort();
+      previewAbortControllerRef.current = null;
+      previewActiveIdentityRef.current = null;
+    }
+  }, [currentPreviewParams, previewFile, previewState]);
 
   // One automatic preview per newly shown File object (first entry, picker
   // switch, or same-name replacement). The ref both keeps the effect
@@ -391,12 +640,27 @@ export function KnowledgeCreateWizard({
   });
 
   const addFiles = (added: File[]) => {
-    if (added.length === 0) return;
+    if (added.length === 0 || fileCapabilities.error) return;
     // A same-name pick replaces the File object; its old preview (or a still
     // running request) must not survive the replacement.
     for (const file of files) {
       if (added.some((candidate) => candidate.name === file.name)) {
+        if (previewState.current?.file === file) {
+          previewAbortControllerRef.current?.abort();
+          previewAbortControllerRef.current = null;
+          previewActiveIdentityRef.current = null;
+        }
         dispatchPreview({ type: "file_removed", file });
+        setHeaderRulesByFile((current) => {
+          const next = new Map(current);
+          next.delete(file);
+          return next;
+        });
+        setSuccessfulPreviews((current) => {
+          const next = new Map(current);
+          next.delete(file);
+          return next;
+        });
       }
     }
     const next = mergeFiles(files, added);
@@ -416,42 +680,58 @@ export function KnowledgeCreateWizard({
 
   const handleDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
+    if (fileCapabilities.error) return;
     addFiles(Array.from(event.dataTransfer.files));
   };
 
   const startProcessing = async (retryFailedOnly = false) => {
     if (submissionInFlightRef.current) return;
-    if (!retryFailedOnly && (!configureValid || files.length === 0)) return;
+    if (!configureValid || files.length === 0) return;
 
-    const snapshot: KnowledgeSubmissionSnapshot | null = retryFailedOnly
-      ? submissionSnapshot
-      : {
-          files: [...files],
-          name: existingBase?.name ?? name.trim(),
-          description: existingBase?.description ?? description.trim(),
-          ...(isExistingUpload && files.length === 1 && displayName.trim()
-            ? { displayName: displayName.trim() }
-            : {}),
-          embeddingModelId: effectiveEmbeddingModelId ?? "",
-          rerankerModelId: effectiveRerankerModelId,
-          retrievalMode: effectiveRetrievalMode,
-          chunkSize: parsedChunkSize,
-          chunkOverlap: parsedChunkOverlap,
-          chunkSeparator,
-          chunkingMode,
-          ...(chunkingMode === "parent_child"
-            ? {
-                childChunkSize: parsedChildChunkSize,
-                childChunkSeparator,
-              }
-            : {}),
-          removeExtraSpaces,
-          removeUrlsEmails,
-        };
-    if (snapshot === null || (retryFailedOnly && createdBase === null)) return;
+    const submissionFiles: KnowledgeSubmissionFile[] = [];
+    for (const file of files) {
+      const params = previewParamsForFile(file);
+      if (params === null) return;
+      const fingerprint = matchingPreviewFingerprint(
+        successfulPreviews.get(file),
+        file,
+        params,
+      );
+      submissionFiles.push({
+        file,
+        processingProfile: previewProcessingParameters(params),
+        ...(fingerprint === null
+          ? {}
+          : { expectedPreviewFingerprint: fingerprint }),
+      });
+    }
+    const snapshot: KnowledgeSubmissionSnapshot = {
+      files: submissionFiles,
+      name: existingBase?.name ?? name.trim(),
+      description: existingBase?.description ?? description.trim(),
+      ...(isExistingUpload && files.length === 1 && displayName.trim()
+        ? { displayName: displayName.trim() }
+        : {}),
+      embeddingModelId: effectiveEmbeddingModelId ?? "",
+      rerankerModelId: effectiveRerankerModelId,
+      retrievalMode: effectiveRetrievalMode,
+      chunkSize: parsedChunkSize,
+      chunkOverlap: parsedChunkOverlap,
+      chunkSeparator,
+      chunkingMode,
+      ...(chunkingMode === "parent_child"
+        ? {
+            childChunkSize: parsedChildChunkSize,
+            childChunkSeparator,
+          }
+        : {}),
+      removeExtraSpaces,
+      removeUrlsEmails,
+    };
+    if (retryFailedOnly && createdBase === null) return;
     const pendingFiles = retryFailedOnly
-      ? snapshot.files.filter((file) =>
-          uploadFailures.some((failure) => failure.fileName === file.name),
+      ? snapshot.files.filter((item) =>
+          uploadFailures.some((failure) => failure.fileName === item.file.name),
         )
       : snapshot.files;
     if (pendingFiles.length === 0) return;
@@ -465,13 +745,13 @@ export function KnowledgeCreateWizard({
       mountedRef.current &&
       scopeKeyRef.current === submissionScopeKey &&
       submissionGenerationRef.current === submissionGeneration;
-    if (!retryFailedOnly) {
-      setSubmissionSnapshot(snapshot);
+    setSubmissionSnapshot(snapshot);
+    if (!retryFailedOnly && createdBase === null) {
       setUploadedDocumentIds([]);
     }
     try {
-      let base = retryFailedOnly ? createdBase : (existingBase ?? null);
-      if (!retryFailedOnly) {
+      let base = createdBase ?? existingBase ?? null;
+      if (createdBase === null && !retryFailedOnly) {
         try {
           if (existingBase) {
             // A configured base owns its models. An empty base gets exactly
@@ -514,7 +794,8 @@ export function KnowledgeCreateWizard({
       setUploadingTotal(pendingFiles.length);
 
       const failures: UploadFailure[] = [];
-      for (const [index, file] of pendingFiles.entries()) {
+      for (const [index, item] of pendingFiles.entries()) {
+        const file = item.file;
         if (!isSubmissionCurrent()) return;
         setUploadingIndex(index);
         try {
@@ -523,18 +804,13 @@ export function KnowledgeCreateWizard({
             input: {
               file,
               ...(snapshot.displayName ? { name: snapshot.displayName } : {}),
-              chunk_size: snapshot.chunkSize,
-              chunk_overlap: snapshot.chunkOverlap,
-              chunk_separator: snapshot.chunkSeparator,
-              remove_extra_spaces: snapshot.removeExtraSpaces,
-              remove_urls_emails: snapshot.removeUrlsEmails,
-              chunking_mode: snapshot.chunkingMode,
-              ...(snapshot.chunkingMode === "parent_child"
-                ? {
-                    child_chunk_size: snapshot.childChunkSize,
-                    child_chunk_separator: snapshot.childChunkSeparator,
-                  }
-                : {}),
+              processing_profile: item.processingProfile,
+              ...(item.expectedPreviewFingerprint === undefined
+                ? {}
+                : {
+                    expected_preview_fingerprint:
+                      item.expectedPreviewFingerprint,
+                  }),
             },
           });
           if (!isSubmissionCurrent()) return;
@@ -543,9 +819,19 @@ export function KnowledgeCreateWizard({
           );
         } catch (error) {
           if (!isSubmissionCurrent()) return;
+          const stalePreview = isKnowledgeConflictError(error);
+          if (stalePreview) {
+            setSuccessfulPreviews((current) => {
+              const next = new Map(current);
+              next.delete(file);
+              return next;
+            });
+            setPreviewFileName(file.name);
+          }
           failures.push({
             fileName: file.name,
             message: knowledgeErrorMessage(error, labels.errors),
+            ...(stalePreview ? { stalePreview: true } : {}),
           });
           setUploadFailures([...failures]);
         }
@@ -578,6 +864,26 @@ export function KnowledgeCreateWizard({
     : (submissionSnapshot?.rerankerModelId ?? effectiveRerankerModelId)
       ? wizard.configuredModelUnavailable
       : labels.bases.rerankerNone;
+  const availableExtensions =
+    fileCapabilities.data?.formats
+      .filter((format) => format.available)
+      .map((format) => format.extension) ?? [];
+  const fileAccept = availableExtensions.join(",");
+  const unavailableReason = (file: File) => {
+    const capability = capabilityForFile(file, fileCapabilities.data);
+    const code = capability?.reason_code;
+    if (capability === undefined) return wizard.unsupportedFormatReason;
+    if (code === "PARSER_DEPENDENCY_UNAVAILABLE") {
+      return wizard.dependencyUnavailableReason;
+    }
+    if (code === "PARSER_SANDBOX_UNAVAILABLE") {
+      return wizard.sandboxUnavailableReason;
+    }
+    if (code === "TOKENIZER_UNAVAILABLE") {
+      return wizard.tokenizerUnavailableReason;
+    }
+    return wizard.unknownUnavailableReason(code ?? "UNAVAILABLE");
+  };
 
   return (
     <section
@@ -625,13 +931,20 @@ export function KnowledgeCreateWizard({
                 </span>
               </span>
               <span className="text-muted-foreground text-xs leading-5">
-                {labels.documents.uploadDescription}
+                {fileCapabilities.data
+                  ? wizard.availableFormats(availableExtensions.join(", "))
+                  : wizard.capabilitiesLoading}
               </span>
               <input
                 key={fileInputKey}
                 type="file"
                 multiple
-                accept={KNOWLEDGE_UPLOAD_ACCEPT}
+                accept={
+                  fileCapabilities.data
+                    ? fileAccept
+                    : ".actweave-capabilities-loading"
+                }
+                disabled={fileCapabilities.error !== null}
                 aria-label={labels.documents.fileLabel}
                 className="sr-only"
                 onChange={(event) =>
@@ -639,6 +952,22 @@ export function KnowledgeCreateWizard({
                 }
               />
             </label>
+            {fileCapabilities.error ? (
+              <div className="flex items-center gap-3">
+                <p role="alert" className="text-destructive text-xs">
+                  {wizard.capabilitiesFailed}
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 rounded-lg text-xs"
+                  onClick={() => void fileCapabilities.refetch()}
+                >
+                  {wizard.retryFormats}
+                </Button>
+              </div>
+            ) : null}
 
             {files.length > 0 ? (
               <div className="space-y-2">
@@ -649,42 +978,68 @@ export function KnowledgeCreateWizard({
                   {wizard.filesSelected(files.length)}
                 </p>
                 <ul className="divide-border/60 bg-background border-border/70 divide-y overflow-hidden rounded-lg border">
-                  {files.map((file) => (
-                    <li
-                      key={file.name}
-                      className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-[13px]"
-                    >
-                      <KnowledgeFileTypeIcon fileName={file.name} />
-                      <span className="min-w-0 flex-1 truncate">
-                        {file.name}
-                      </span>
-                      <span className="text-muted-foreground shrink-0 text-xs">
-                        {formatSizeBytes(file.size)}
-                      </span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="size-7 shrink-0 rounded-lg"
-                        aria-label={wizard.removeFile(file.name)}
-                        onClick={() => {
-                          // A removed file's preview (or in-flight response)
-                          // must never be shown again.
-                          dispatchPreview({ type: "file_removed", file });
-                          if (file.name === previewFileName) {
-                            setPreviewFileName(null);
-                          }
-                          setFiles((current) =>
-                            current.filter(
-                              (candidate) => candidate.name !== file.name,
-                            ),
-                          );
-                        }}
+                  {files.map((file) => {
+                    const available =
+                      capabilityForFile(file, fileCapabilities.data)
+                        ?.available === true;
+                    return (
+                      <li
+                        key={file.name}
+                        className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-[13px]"
                       >
-                        <XIcon aria-hidden className="size-3.5" />
-                      </Button>
-                    </li>
-                  ))}
+                        <KnowledgeFileTypeIcon fileName={file.name} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate">{file.name}</span>
+                          {!available ? (
+                            <span className="text-destructive block text-xs">
+                              {wizard.fileUnavailable(file.name)} ·{" "}
+                              {unavailableReason(file)}
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="text-muted-foreground shrink-0 text-xs">
+                          {formatSizeBytes(file.size)}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-7 shrink-0 rounded-lg"
+                          aria-label={wizard.removeFile(file.name)}
+                          onClick={() => {
+                            // A removed file's preview (or in-flight response)
+                            // must never be shown again.
+                            dispatchPreview({ type: "file_removed", file });
+                            if (previewState.current?.file === file) {
+                              previewAbortControllerRef.current?.abort();
+                              previewAbortControllerRef.current = null;
+                              previewActiveIdentityRef.current = null;
+                            }
+                            if (file.name === previewFileName) {
+                              setPreviewFileName(null);
+                            }
+                            setFiles((current) =>
+                              current.filter(
+                                (candidate) => candidate.name !== file.name,
+                              ),
+                            );
+                            setHeaderRulesByFile((current) => {
+                              const next = new Map(current);
+                              next.delete(file);
+                              return next;
+                            });
+                            setSuccessfulPreviews((current) => {
+                              const next = new Map(current);
+                              next.delete(file);
+                              return next;
+                            });
+                          }}
+                        >
+                          <XIcon aria-hidden className="size-3.5" />
+                        </Button>
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             ) : null}
@@ -694,7 +1049,7 @@ export function KnowledgeCreateWizard({
             <Button
               className="h-9 rounded-lg bg-blue-600 text-[13px] text-white shadow-none hover:bg-blue-700"
               type="button"
-              disabled={files.length === 0}
+              disabled={files.length === 0 || !filesAvailable}
               onClick={() => setStep(2)}
             >
               {wizard.next}
@@ -722,7 +1077,7 @@ export function KnowledgeCreateWizard({
             className="flex min-h-0 flex-col gap-4"
             onSubmit={(event) => {
               event.preventDefault();
-              void startProcessing();
+              void startProcessing(createdBase !== null);
             }}
           >
             <div className="min-h-0 flex-1 space-y-5 pb-1 lg:overflow-y-auto lg:pr-4">
@@ -733,6 +1088,9 @@ export function KnowledgeCreateWizard({
                   </h2>
                   <p className="text-muted-foreground text-xs leading-5">
                     {labels.documents.chunkImmutableNote}
+                  </p>
+                  <p className="text-muted-foreground text-xs leading-5">
+                    {wizard.knowledgeTokenUnit}
                   </p>
                 </div>
                 <fieldset className="grid gap-2.5">
@@ -816,13 +1174,13 @@ export function KnowledgeCreateWizard({
                             </label>
                             <label className="grid gap-1.5 text-[13px]">
                               <span className="font-medium">
-                                {labels.documents.chunkSizeLabel}
+                                {wizard.chunkSizeTokenLabel}
                               </span>
                               <Input
                                 className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
                                 type="number"
-                                min={KNOWLEDGE_CHUNK_SIZE_MIN}
-                                max={KNOWLEDGE_CHUNK_SIZE_MAX}
+                                min={chunkLimits?.parent_min}
+                                max={chunkLimits?.parent_max}
                                 required
                                 disabled={isSubmitting}
                                 value={chunkSize}
@@ -833,13 +1191,13 @@ export function KnowledgeCreateWizard({
                             </label>
                             <label className="grid gap-1.5 text-[13px]">
                               <span className="font-medium">
-                                {labels.documents.chunkOverlapLabel}
+                                {wizard.chunkOverlapTokenLabel}
                               </span>
                               <Input
                                 className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
                                 type="number"
                                 min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
-                                max={KNOWLEDGE_CHUNK_OVERLAP_MAX}
+                                max={chunkLimits?.overlap_max}
                                 required
                                 disabled={isSubmitting}
                                 value={chunkOverlap}
@@ -857,13 +1215,13 @@ export function KnowledgeCreateWizard({
                               <div className="grid grid-cols-2 items-start gap-3">
                                 <label className="grid gap-1.5 text-[13px]">
                                   <span className="font-medium">
-                                    {labels.documents.childChunkSizeLabel}
+                                    {wizard.childChunkSizeTokenLabel}
                                   </span>
                                   <Input
                                     className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
                                     type="number"
-                                    min={KNOWLEDGE_CHILD_CHUNK_SIZE_MIN}
-                                    max={KNOWLEDGE_CHILD_CHUNK_SIZE_MAX}
+                                    min={chunkLimits?.child_min}
+                                    max={chunkLimits?.child_max}
                                     required
                                     disabled={isSubmitting}
                                     value={childChunkSize}
@@ -1249,6 +1607,26 @@ export function KnowledgeCreateWizard({
                 </p>
               ) : null}
             </div>
+            {visiblePreviewData && previewFile ? (
+              <KnowledgeHeaderSettings
+                sources={visiblePreviewData.table_sources}
+                rules={headerRulesByFile.get(previewFile) ?? []}
+                disabled={isSubmitting || previewLoading}
+                onChange={(rule) => {
+                  setHeaderRulesByFile((current) => {
+                    const next = new Map(current);
+                    const rules = [
+                      ...(next.get(previewFile) ?? []).filter(
+                        (item) => item.sheet !== rule.sheet,
+                      ),
+                      rule,
+                    ];
+                    next.set(previewFile, normalizeKnowledgeHeaderRules(rules));
+                    return next;
+                  });
+                }}
+              />
+            ) : null}
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
               {previewLoading ? (
                 <p
@@ -1275,60 +1653,12 @@ export function KnowledgeCreateWizard({
                 </p>
               ) : null}
               {visiblePreviewData ? (
-                <ul
-                  className={cn(
-                    "grid gap-6 transition-opacity",
-                    previewIsStale && "opacity-60",
-                  )}
-                >
-                  {visiblePreviewData.items.map((chunk) => (
-                    <li key={chunk.position} className="space-y-2">
-                      <p className="text-muted-foreground flex items-center justify-between gap-2 text-xs tabular-nums">
-                        <span className="font-medium">
-                          {wizard.previewChunkLabel(chunk.position)}
-                        </span>
-                        <span>
-                          {chunk.child_contents.length > 0
-                            ? `${wizard.previewChildCount(chunk.child_contents.length)} · `
-                            : null}
-                          {wizard.previewCharacters(chunk.word_count)}
-                        </span>
-                      </p>
-                      {chunk.child_contents.length === 0 ? (
-                        <p className="text-[13px] leading-6 break-words whitespace-pre-wrap">
-                          {chunk.content}
-                        </p>
-                      ) : null}
-                      {chunk.child_contents.length > 0 ? (
-                        <ol className="flex flex-wrap items-start gap-x-1 gap-y-1.5">
-                          {chunk.child_contents.map((childContent, index) => (
-                            <li
-                              key={index}
-                              className="bg-muted/60 max-w-full rounded-sm px-1.5 py-0.5 text-[13px] leading-6 break-words"
-                            >
-                              <span className="text-muted-foreground mr-1.5 inline-block text-[10px] font-medium tabular-nums">
-                                {wizard.previewChildLabel(index + 1)}
-                              </span>
-                              <span className="whitespace-normal">
-                                {childContent}
-                              </span>
-                            </li>
-                          ))}
-                        </ol>
-                      ) : null}
-                      {chunk.child_contents.length > 0 ? (
-                        <details className="text-muted-foreground text-xs">
-                          <summary className="hover:text-foreground cursor-pointer py-1">
-                            {wizard.previewParentText}
-                          </summary>
-                          <p className="pt-1 text-[13px] leading-6 break-words whitespace-pre-wrap">
-                            {chunk.content}
-                          </p>
-                        </details>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
+                <PreviewChunkList
+                  data={visiblePreviewData}
+                  scopeKey={previewScopeKey}
+                  stale={previewIsStale}
+                  labels={wizard}
+                />
               ) : null}
             </div>
           </aside>
@@ -1402,8 +1732,17 @@ export function KnowledgeCreateWizard({
                       <KnowledgeFileTypeIcon
                         fileName={document.original_name}
                       />
-                      <span className="min-w-0 flex-1 truncate">
-                        {document.name}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate">{document.name}</span>
+                        <span className="text-muted-foreground block text-xs">
+                          {wizard.actualProfile(
+                            document.parsing_profile?.chunk.size ??
+                              document.chunk_size,
+                            document.chunk_size_unit === "token"
+                              ? wizard.knowledgeTokenShort
+                              : wizard.characterUnit,
+                          )}
+                        </span>
                       </span>
                       <Badge
                         variant={documentStatusVariant(document.status)}
@@ -1434,9 +1773,23 @@ export function KnowledgeCreateWizard({
                     variant="outline"
                     className="mt-2 h-8 rounded-lg text-[13px] shadow-none"
                     disabled={isSubmitting}
-                    onClick={() => void startProcessing(true)}
+                    onClick={() => {
+                      if (
+                        uploadFailures.some(
+                          (failure) => failure.stalePreview === true,
+                        )
+                      ) {
+                        setStep(2);
+                      } else {
+                        void startProcessing(true);
+                      }
+                    }}
                   >
-                    {wizard.retryFailedUploads}
+                    {uploadFailures.some(
+                      (failure) => failure.stalePreview === true,
+                    )
+                      ? wizard.refreshStalePreview
+                      : wizard.retryFailedUploads}
                   </Button>
                 </div>
               ) : null}
@@ -1467,7 +1820,7 @@ export function KnowledgeCreateWizard({
                 </div>
                 <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
                   <dt className="text-muted-foreground">
-                    {labels.documents.chunkSizeLabel}
+                    {wizard.chunkSizeTokenLabel}
                   </dt>
                   <dd className="tabular-nums">
                     {submissionSnapshot.chunkSize}
@@ -1475,7 +1828,7 @@ export function KnowledgeCreateWizard({
                 </div>
                 <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
                   <dt className="text-muted-foreground">
-                    {labels.documents.chunkOverlapLabel}
+                    {wizard.chunkOverlapTokenLabel}
                   </dt>
                   <dd className="tabular-nums">
                     {submissionSnapshot.chunkOverlap}
@@ -1493,7 +1846,7 @@ export function KnowledgeCreateWizard({
                   <>
                     <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-4 py-0.5 sm:grid-cols-[180px_minmax(0,1fr)]">
                       <dt className="text-muted-foreground">
-                        {labels.documents.childChunkSizeLabel}
+                        {wizard.childChunkSizeTokenLabel}
                       </dt>
                       <dd className="tabular-nums">
                         {submissionSnapshot.childChunkSize}

@@ -24,6 +24,7 @@ from ..contracts import (
     KnowledgeModelPort,
 )
 from ..models import KnowledgeModelClient
+from ..persistence.derivations import stored_model_text
 from ..persistence.models import KnowledgeBaseRow, KnowledgeDocumentRow, KnowledgeSegmentRow, KnowledgeSegmentSummaryRow, KnowledgeTaskRow
 from ..persistence.tasks import settle_task_row_success
 from ..tasks.worker import KnowledgeTaskClaim, ProjectActiveCheck
@@ -126,7 +127,19 @@ class KnowledgeSummarizeHandler:
                 if model_ref is None:
                     raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "摘要模型未配置或已停用")
                 rows = await self._source_rows(session, document)
-                targets = tuple(_SummaryTarget(segment.id, segment.content, source_content_digest(segment.content)) for segment, summary in rows if self._needs_summary(segment, summary, document.version))
+                targets = tuple(
+                    _SummaryTarget(
+                        segment.id,
+                        stored_model_text(
+                            content=segment.content,
+                            index_text=segment.index_text,
+                            parsing_profile=document.parsing_profile,
+                        ),
+                        source_content_digest(segment.content),
+                    )
+                    for segment, summary in rows
+                    if self._needs_summary(segment, summary, document.version)
+                )
                 if not targets:
                     settle_task_row_success(task, now=datetime.now(UTC))
                     return None

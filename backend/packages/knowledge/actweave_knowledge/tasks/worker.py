@@ -20,7 +20,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from uuid import UUID
 
 from sqlalchemy import select
@@ -37,6 +37,7 @@ from ..persistence.tasks import (
     recover_expired_tasks,
     settle_task_failure,
     settle_task_success,
+    validated_reparse_settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -120,6 +121,21 @@ class KnowledgeTaskWorker:
     async def _run_once(self) -> bool:
         """Claim and execute at most one task; False when nothing was due."""
 
+        # GC admission owns a separate short transaction and completes before
+        # the claim transaction starts. Maintenance never scans while holding
+        # a claimed Task or performs object I/O in this boundary.
+        try:
+            from ..storage.extraction_gc import enqueue_extraction_gc
+
+            async with self._session_factory() as session, session.begin():
+                await enqueue_extraction_gc(
+                    session,
+                    project_active_check=self._project_active_check,
+                    limit=100,
+                )
+        except SQLAlchemyError:
+            logger.warning("knowledge extraction GC admission failed; database unavailable", exc_info=True)
+
         claimed_or_deferred = False
         try:
             async with self._session_factory() as session, session.begin():
@@ -173,6 +189,8 @@ class KnowledgeTaskWorker:
             # wait_for waits for handler cancellation to finish. Knowledge
             # handlers settle started blocking calls before propagating that
             # cancellation, so the heartbeat covers the complete drain.
+            if claim.reparse_settings is not None:
+                claim = replace(claim, reparse_settings=validated_reparse_settings(claim.reparse_settings))
             await asyncio.wait_for(handler(claim), timeout=self._task_timeout_seconds)
         except TimeoutError:
             error = KnowledgeError(KNOWLEDGE_TASK_FAILED, f"任务执行超过 {self._task_timeout_seconds} 秒")

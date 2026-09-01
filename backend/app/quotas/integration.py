@@ -17,9 +17,11 @@ from app.private_work.errors import (
 from app.private_work.run_repository import PrivateRunRecord
 from app.projects.errors import ProjectMemberQuotaExceeded, ProjectQuotaStateConflict
 from app.quotas.models import (
+    QuotaConflict,
     QuotaError,
     QuotaExceeded,
     QuotaUnavailable,
+    StorageUsageTotals,
     _issue_project_storage_quota_authority,
     _issue_quota_compensation_authority,
     _issue_quota_reconciliation_authority,
@@ -258,42 +260,69 @@ class ProjectQuotaEnforcer:
             self._skill_version_key(version_id),
         )
 
-    async def reconcile_project_storage(
-        self,
-        session: AsyncSession,
-        project_id: uuid.UUID,
-    ) -> None:
-        """Set storage usage to the authoritative post-mutation row total."""
+    async def storage_usage_totals(self, session: AsyncSession, project_id: uuid.UUID, *, repair_deleted: bool = False) -> StorageUsageTotals:
+        """Read shared storage facts; repair requires the caller's Project lock.
 
-        async def expected_storage_bytes() -> int:
-            private_file_bytes = await session.scalar(
-                select(func.coalesce(func.sum(PrivateFileRow.size), 0)).where(
-                    PrivateFileRow.project_id == project_id,
-                    PrivateFileRow.status == "ready",
-                )
-            )
-            project_skill_bytes = await session.scalar(
-                select(func.coalesce(func.sum(SkillVersionFileRow.size_bytes), 0))
-                .select_from(SkillVersionFileRow)
-                .join(
-                    SkillVersionRow,
-                    SkillVersionRow.id == SkillVersionFileRow.skill_version_id,
-                )
-                .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
-                .where(
-                    SkillRow.scope == "project",
-                    SkillRow.project_id == project_id,
-                )
-            )
-            return int(private_file_bytes or 0) + int(project_skill_bytes or 0)
+        Operator preview leaves all rows and ledgers untouched. Mutating
+        reconciliation locks all owning rows before releasing deleted facts.
+        """
+        from actweave_knowledge.persistence.models import KnowledgeAttachmentRow, KnowledgeDocumentRow, KnowledgeExtractionRow
 
-        await self._quotas.reconcile_project_storage(
+        from app.knowledge.quota_port import HostKnowledgeStorageQuotaPort, KnowledgeObjectFact
+
+        # Project is already locked by QuotaService. Lock all Knowledge
+        # owning rows before any release takes the counter lock.
+        facts = []
+        identities = set()
+        for model in (KnowledgeDocumentRow, KnowledgeAttachmentRow, KnowledgeExtractionRow):
+            query = select(model).where(model.project_id == project_id).order_by(model.id)
+            if repair_deleted:
+                query = query.with_for_update()
+            rows = (await session.scalars(query)).all()
+            for row in rows:
+                if row.id in identities:
+                    raise QuotaConflict("ambiguous Knowledge object identity")
+                identities.add(row.id)
+                if isinstance(row, KnowledgeExtractionRow) and row.manifest_storage_key is None:
+                    continue
+                facts.append(KnowledgeObjectFact(row))
+        quota = HostKnowledgeStorageQuotaPort(self._quotas)
+        used = reserved = 0
+        for fact in facts:
+            if fact.upload_state == "deleted":
+                if repair_deleted:
+                    await quota.release(session, object_id=fact.row.id)
+            elif fact.quota_state == "reserved":
+                reserved += fact.size_bytes
+            elif fact.quota_state == "committed":
+                used += fact.size_bytes
+        private_file_bytes = await session.scalar(
+            select(func.coalesce(func.sum(PrivateFileRow.size), 0)).where(
+                PrivateFileRow.project_id == project_id,
+                PrivateFileRow.status == "ready",
+            )
+        )
+        project_skill_bytes = await session.scalar(
+            select(func.coalesce(func.sum(SkillVersionFileRow.size_bytes), 0))
+            .select_from(SkillVersionFileRow)
+            .join(
+                SkillVersionRow,
+                SkillVersionRow.id == SkillVersionFileRow.skill_version_id,
+            )
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(
+                SkillRow.scope == "project",
+                SkillRow.project_id == project_id,
+            )
+        )
+        return StorageUsageTotals(used=used, reserved=reserved + int(private_file_bytes or 0) + int(project_skill_bytes or 0))
+
+    async def reconcile_project_storage(self, session: AsyncSession, project_id: uuid.UUID, *, now: datetime | None = None) -> tuple[int, int] | None:
+        return await self._quotas.reconcile_project_storage(
             session,
-            _issue_quota_reconciliation_authority(
-                project_id,
-                operation="quota_repair",
-            ),
-            expected_loader=expected_storage_bytes,
+            _issue_quota_reconciliation_authority(project_id, operation="quota_repair"),
+            expected_loader=lambda: self.storage_usage_totals(session, project_id, repair_deleted=True),
+            now=now,
         )
 
     async def consume_mcp_dispatch(

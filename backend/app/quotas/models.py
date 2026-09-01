@@ -15,7 +15,7 @@ QuotaDimension = Literal[
     "concurrent_runs",
     "mcp_calls_daily",
 ]
-ProjectStorageQuotaOperation = Literal["reserve", "release"]
+ProjectStorageQuotaOperation = Literal["reserve", "commit", "release"]
 
 QUOTA_DIMENSIONS: tuple[QuotaDimension, ...] = (
     "members",
@@ -203,7 +203,7 @@ def _issue_project_storage_quota_authority(
     *,
     operation: ProjectStorageQuotaOperation,
 ) -> ProjectStorageQuotaAuthority:
-    if operation not in {"reserve", "release"}:
+    if operation not in {"reserve", "commit", "release"}:
         raise QuotaForbidden("trusted project storage quota authority is required")
     try:
         selected = uuid.UUID(str(project_id))
@@ -309,6 +309,18 @@ class QuotaReconciliationReport:
     applied: bool
 
 
+@dataclass(frozen=True, slots=True)
+class StorageUsageTotals:
+    """Both authoritative storage axes; legacy assets retain reserved usage."""
+
+    used: int
+    reserved: int
+
+    def __post_init__(self) -> None:
+        if type(self.used) is not int or type(self.reserved) is not int or self.used < 0 or self.reserved < 0:
+            raise QuotaPolicyInvalid("storage totals are invalid")
+
+
 __all__ = [
     "EffectiveQuotaLimits",
     "ProjectStorageQuotaAuthority",
@@ -330,4 +342,5 @@ __all__ = [
     "QuotaReconciliationReport",
     "QuotaSourceRef",
     "QuotaUsageDimension",
+    "StorageUsageTotals",
 ]

@@ -364,3 +364,22 @@ async def test_storage_probe_returns_when_s3_peer_accepts_but_never_responds():
         await asyncio.to_thread(server.shutdown)
         server.server_close()
         thread.join(timeout=2)
+
+
+async def test_enable_rejects_unusable_parser_without_persisting_candidate(settings_env, monkeypatch):
+    from actweave_knowledge import KnowledgeSettings
+    from actweave_knowledge.extraction.registry import default_registry
+    from actweave_knowledge.ingestion.profiles import build_file_capabilities
+
+    from app.knowledge_settings import service
+
+    async def failed_probe(settings):
+        return build_file_capabilities(KnowledgeSettings(), default_registry(), runtime_reason="PARSER_SANDBOX_UNAVAILABLE")
+
+    monkeypatch.setattr(service, "probe_file_capabilities", failed_probe)
+    with pytest.raises(KnowledgeSettingsError) as error:
+        await _save(settings_env, _request(enabled=True, minio_endpoint="localhost:9000", minio_bucket="knowledge", minio_access_key="operator", minio_secret_key="test-secret"))
+    assert error.value.status_code == 422
+    async with settings_env.factory() as session:
+        row = await session.get(KnowledgeSystemSettingsRow, 1)
+        assert row.revision == 1 and row.enabled is False

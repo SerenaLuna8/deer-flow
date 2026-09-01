@@ -21,6 +21,9 @@ from deerflow.persistence.final_schema_digest import SCHEMA_V1_CANONICAL_DIGEST
 KNOWLEDGE_APP_TABLES = frozenset(
     {
         "knowledge_bases",
+        "knowledge_extractions",
+        "knowledge_attachments",
+        "knowledge_segment_attachments",
         "knowledge_documents",
         "knowledge_metadata_fields",
         "knowledge_segments",
@@ -128,32 +131,32 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=109,
-        digest="f9d4e3bc84d89d0dc6ad137aebddb702c0cab90bdba296d653f7b3d8063e9c1d",
+        count=112,
+        digest="0e651994a58ab95d5d1d450688646c2b1535cd2b162be118cc5c1d1864f608ef",
     ),
     "columns": CatalogInvariant(
-        count=1383,
-        digest="8fc08b8ddcdb3d8bd9ab033e50555e849da2bcbb2c1d763dec660b3775ab1236",
+        count=1444,
+        digest="b0df05347f70bb0754a2ac0eec50548a4c7cbe5622cf93ead4466ea6cb46a981",
     ),
     "table_comments": CatalogInvariant(
-        count=110,
-        digest="8c6746bacc9821b4abbf9a8f55d8af299e60f2ea236367da5b27577c4829e977",
+        count=113,
+        digest="1f6bbb7dd326c254e338176a11ff8269c054ecf4615ef46ebe0828a76afb61c3",
     ),
     "column_comments": CatalogInvariant(
-        count=1384,
-        digest="9417786a898b6461d836f902facbef9563963db97e311621970de05ab9088c48",
+        count=1445,
+        digest="6ba29d52d03b9694ac1953ae21921de598686cdbcbd2219cf40894a6fc5364af",
     ),
     "sequences": CatalogInvariant(
         count=4,
         digest="73cb0d46bc3afc9585d0959b1d57d093621113408f2629dad9a6b027550af894",
     ),
     "constraints": CatalogInvariant(
-        count=1019,
-        digest="024d8a0ab1f4cd29c537cca999de773034f0566fb1d97a2fc192d9952907c916",
+        count=1073,
+        digest="a06b63b0c798f3781a39a13f9ac075d9c2b1626dfcbe16dc5e04762808bfad78",
     ),
     "indexes": CatalogInvariant(
-        count=369,
-        digest="98e5f8a04abf30b3f69adf5a7099f2719ccd395c193638a5a470ffc13dafa296",
+        count=385,
+        digest="28750be2445b4430709e0969dab4f7f725a879a2a11e2e939e7d35719ea31bf9",
     ),
     "functions": CatalogInvariant(
         count=28,

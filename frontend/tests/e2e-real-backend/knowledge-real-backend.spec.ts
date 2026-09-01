@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 
@@ -10,6 +12,10 @@ import {
 const APP =
   process.env.E2E_APP_URL ??
   `http://localhost:${process.env.E2E_FRONTEND_PORT ?? "3000"}`;
+const PARSING_FIXTURES = resolve(
+  process.cwd(),
+  "tests/fixtures/knowledge-parsing",
+);
 
 const KNOWLEDGE_ENV_READY = Boolean(
   process.env.ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT &&
@@ -52,16 +58,153 @@ function buildDocumentText(): string {
   return `${markerParagraph}\n\n${fillerA}\n\n${fillerB}`;
 }
 
-async function listProjectObjects(
+type ProjectObjectInventory = {
+  count: number;
+  fingerprint: string;
+  originals: number;
+  manifests: number;
+  assets: number;
+};
+
+async function projectObjectInventory(
   context: BrowserContext,
   project: ReplayProjectScope,
-): Promise<string[]> {
+): Promise<ProjectObjectInventory> {
   const response = await context.request.get(
     `${APP}/api/test-only/replay-knowledge/objects`,
   );
-  expect(response.status(), await response.text()).toBe(200);
+  expect(response.status(), "object inventory probe failed").toBe(200);
   const body = (await response.json()) as { keys: string[] };
-  return body.keys.filter((key) => key.includes(project.id));
+  const keys = body.keys.filter((key) => key.includes(project.id)).sort();
+  const assets = keys.filter((key) => key.includes("/assets/")).length;
+  const manifests = keys.filter((key) => key.endsWith("/manifest.json")).length;
+  return {
+    count: keys.length,
+    fingerprint: createHash("sha256")
+      .update(keys.join("\u0000"), "utf8")
+      .digest("hex"),
+    originals: keys.length - manifests - assets,
+    manifests,
+    assets,
+  };
+}
+
+async function expectNoNewObjectsDuring(
+  page: Page,
+  project: ReplayProjectScope,
+  action: () => Promise<void>,
+): Promise<void> {
+  const before = await projectObjectInventory(page.context(), project);
+  await action();
+  const after = await projectObjectInventory(page.context(), project);
+  expect(after.count, "preview changed the Project object count").toBe(
+    before.count,
+  );
+  expect(
+    after.fingerprint === before.fingerprint,
+    "preview changed the Project object inventory",
+  ).toBe(true);
+}
+
+async function storageEvidence(context: BrowserContext): Promise<{
+  source_reads: number;
+  manifest_reads: number;
+  attachment_reads: number;
+}> {
+  const response = await context.request.get(
+    `${APP}/api/test-only/replay-knowledge/storage`,
+  );
+  expect(response.status(), "unexpected HTTP status").toBe(200);
+  return (await response.json()) as {
+    source_reads: number;
+    manifest_reads: number;
+    attachment_reads: number;
+  };
+}
+
+type ReplayProjectFacts = {
+  object_count: number;
+  document_rows: number;
+  published_documents: number;
+  extraction_rows: number;
+  ready_attachments: number;
+  open_tasks: number;
+  running_tasks: number;
+  quota_used: number;
+  quota_reserved: number;
+};
+
+async function projectFacts(
+  context: BrowserContext,
+  project: ReplayProjectScope,
+): Promise<ReplayProjectFacts> {
+  const response = await context.request.get(
+    `${APP}/api/test-only/replay-knowledge/projects/${project.id}/facts`,
+  );
+  expect(response.status(), "unexpected HTTP status").toBe(200);
+  return (await response.json()) as ReplayProjectFacts;
+}
+
+async function setStorageFaults(
+  context: BrowserContext,
+  project: ReplayProjectScope,
+  faults: Partial<{
+    source_put_failures: number;
+    manifest_put_failures: number;
+    attachment_put_failures: number;
+    delete_failures: number;
+  }>,
+): Promise<void> {
+  const response = await context.request.post(
+    `${APP}/api/test-only/replay-knowledge/storage/faults`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: {
+        source_put_failures: 0,
+        manifest_put_failures: 0,
+        attachment_put_failures: 0,
+        delete_failures: 0,
+        ...faults,
+      },
+    },
+  );
+  expect(response.status(), "unexpected HTTP status").toBe(200);
+}
+
+async function setProjectRevoked(
+  context: BrowserContext,
+  project: ReplayProjectScope,
+  revoked: boolean,
+): Promise<void> {
+  const response = await context.request.post(
+    `${APP}/api/test-only/replay-knowledge/projects/${project.id}/authority`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { revoked },
+    },
+  );
+  expect(response.status(), "unexpected HTTP status").toBe(200);
+}
+
+async function createAdditionalProject(
+  context: BrowserContext,
+  project: ReplayProjectScope,
+): Promise<string> {
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const response = await context.request.post(`${APP}/api/projects`, {
+    headers: { "X-CSRF-Token": project.csrf },
+    data: {
+      slug: `replay-extra-${suffix}`,
+      display_name: "Additional replay project",
+    },
+  });
+  expect(response.status(), "unexpected HTTP status").toBe(201);
+  const body = (await response.json()) as { id?: unknown };
+  expect(typeof body.id).toBe("string");
+  if (typeof body.id !== "string") {
+    throw new Error("additional replay Project response is invalid");
+  }
+  return body.id;
 }
 
 async function setEmbeddingFailures(
@@ -76,7 +219,7 @@ async function setEmbeddingFailures(
       data: { embedding_failures: failures },
     },
   );
-  expect(response.status(), await response.text()).toBe(200);
+  expect(response.status(), "unexpected HTTP status").toBe(200);
 }
 
 async function setRerankFailures(
@@ -91,7 +234,7 @@ async function setRerankFailures(
       data: { rerank_failures: failures },
     },
   );
-  expect(response.status(), await response.text()).toBe(200);
+  expect(response.status(), "unexpected HTTP status").toBe(200);
 }
 
 async function setSummaryFailures(
@@ -106,7 +249,7 @@ async function setSummaryFailures(
       data: { chat_failures: failures },
     },
   );
-  expect(response.status(), await response.text()).toBe(200);
+  expect(response.status(), "unexpected HTTP status").toBe(200);
 }
 
 async function providerCounters(context: BrowserContext): Promise<{
@@ -114,17 +257,36 @@ async function providerCounters(context: BrowserContext): Promise<{
   rerank_calls: number;
   chat_calls: number;
   embedding_failures_remaining: number;
+  embedding_blocked: boolean;
+  embedding_waiters: number;
 }> {
   const response = await context.request.get(
     `${APP}/api/test-only/replay-knowledge/provider`,
   );
-  expect(response.status(), await response.text()).toBe(200);
+  expect(response.status(), "unexpected HTTP status").toBe(200);
   return (await response.json()) as {
     embedding_calls: number;
     rerank_calls: number;
     chat_calls: number;
     embedding_failures_remaining: number;
+    embedding_blocked: boolean;
+    embedding_waiters: number;
   };
+}
+
+async function setEmbeddingBlocked(
+  context: BrowserContext,
+  project: ReplayProjectScope,
+  blocked: boolean,
+): Promise<void> {
+  const response = await context.request.post(
+    `${APP}/api/test-only/replay-knowledge/provider/faults`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { embedding_blocked: blocked },
+    },
+  );
+  expect(response.status(), "unexpected HTTP status").toBe(200);
 }
 
 async function createBaseThroughUI(page: Page, name: string): Promise<void> {
@@ -185,6 +347,32 @@ async function uploadDocumentThroughUI(
     buffer: Buffer.from(contents, "utf-8"),
   });
   await page.getByRole("button", { name: "Next", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Upload & process", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Go to documents" }).click();
+}
+
+async function selectFixtureForUpload(
+  page: Page,
+  project: ReplayProjectScope,
+  fileName: string,
+): Promise<void> {
+  await page.getByRole("button", { name: "Upload document" }).click();
+  await page
+    .getByLabel("File")
+    .setInputFiles(resolve(PARSING_FIXTURES, fileName));
+  await expectNoNewObjectsDuring(page, project, async () => {
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(
+      page
+        .getByTestId("chunk-preview-panel")
+        .getByText(/Showing \d+ of \d+ chunks/u),
+    ).toBeVisible({ timeout: 30_000 });
+  });
+}
+
+async function submitSelectedFixture(page: Page): Promise<void> {
   await page
     .getByRole("button", { name: "Upload & process", exact: true })
     .click();
@@ -324,7 +512,8 @@ test("deleting the document and the base removes their MinIO objects", async ({
 
   const rows = page.getByTestId("knowledge-document-rows");
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
-  expect(await listProjectObjects(context, project)).toHaveLength(1);
+  // Text publication owns the original plus its extraction manifest.
+  expect((await projectObjectInventory(context, project)).count).toBe(2);
 
   // Document deletion is a real worker task; the object must be gone after.
   await (await openDocumentActions(page, "first.txt"))
@@ -338,7 +527,7 @@ test("deleting the document and the base removes their MinIO objects", async ({
     page.getByText("No documents yet", { exact: false }),
   ).toBeVisible({ timeout: 60_000 });
   await expect
-    .poll(async () => (await listProjectObjects(context, project)).length, {
+    .poll(async () => (await projectObjectInventory(context, project)).count, {
       timeout: 30_000,
     })
     .toBe(0);
@@ -346,7 +535,7 @@ test("deleting the document and the base removes their MinIO objects", async ({
   // Base deletion also purges the objects of documents still inside it.
   await uploadDocumentThroughUI(page, "second.txt", buildDocumentText());
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
-  expect(await listProjectObjects(context, project)).toHaveLength(1);
+  expect((await projectObjectInventory(context, project)).count).toBe(2);
 
   // The documents view replaces the base list; return before deleting.
   await page.getByRole("button", { name: "Back" }).click();
@@ -364,7 +553,7 @@ test("deleting the document and the base removes their MinIO objects", async ({
     timeout: 60_000,
   });
   await expect
-    .poll(async () => (await listProjectObjects(context, project)).length, {
+    .poll(async () => (await projectObjectInventory(context, project)).count, {
       timeout: 30_000,
     })
     .toBe(0);
@@ -500,9 +689,16 @@ test("wizard chunk preview matches the segments the real pipeline ingests", asyn
   ]);
   await page.getByRole("button", { name: "Next" }).click();
 
+  // Let the automatic preview for the first file release the single replay
+  // parser slot before changing parameters and selecting the target file.
+  const previewPanel = page.getByTestId("chunk-preview-panel");
+  await expect(previewPanel.getByText(/Showing \d+ of \d+ chunks/)).toBeVisible(
+    { timeout: 30_000 },
+  );
+
   // Tune every K2 parameter away from its default.
-  await page.getByLabel("Chunk size (characters)").fill("200");
-  await page.getByLabel("Chunk overlap (characters)").fill("0");
+  await page.getByLabel("Chunk size (Knowledge Tokens)").fill("200");
+  await page.getByLabel("Chunk overlap (Knowledge Tokens)").fill("0");
   await page.getByLabel("Delimiter").fill("。");
   await page
     .getByLabel("Replace consecutive spaces, newlines and tabs")
@@ -517,30 +713,33 @@ test("wizard chunk preview matches the segments the real pipeline ingests", asyn
   // Parameter edits do not re-upload the full file. Picking the second file
   // in the preview picker switches the preview target and auto-previews it
   // once with the current parameters — the decoy content must not leak in.
-  const previewPanel = page.getByTestId("chunk-preview-panel");
   await expect(
     previewPanel.getByText(
       "Preview is out of date. Refresh to apply the current settings.",
     ),
   ).toBeVisible();
-  await previewPanel.getByLabel("Preview file").click();
-  await page.getByRole("option", { name: "preview.txt" }).click();
   const chunkParagraphs = previewPanel.locator("ul li p:last-child");
   let previewChunks: string[] = [];
-  await expect
-    .poll(
-      async () => {
-        previewChunks = await chunkParagraphs.allTextContents();
-        return (
-          previewChunks.length >= 3 &&
-          previewChunks.every((text) => !text.includes("https://")) &&
-          previewChunks.every((text) => !/ {2}/.test(text)) &&
-          previewChunks.every((text) => !text.includes(decoyText))
-        );
-      },
-      { timeout: 30_000 },
-    )
-    .toBe(true);
+  const beforePreviewReads = await storageEvidence(context);
+  await expectNoNewObjectsDuring(page, project, async () => {
+    await previewPanel.getByLabel("Preview file").click();
+    await page.getByRole("option", { name: "preview.txt" }).click();
+    await expect
+      .poll(
+        async () => {
+          previewChunks = await chunkParagraphs.allTextContents();
+          return (
+            previewChunks.length >= 3 &&
+            previewChunks.every((text) => !text.includes("https://")) &&
+            previewChunks.every((text) => !/ {2}/.test(text)) &&
+            previewChunks.every((text) => !text.includes(decoyText))
+          );
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+  });
+  expect(await storageEvidence(context)).toEqual(beforePreviewReads);
   await expect(
     previewPanel.getByText(/Showing \d+ of \d+ chunks/),
   ).toBeVisible();
@@ -567,6 +766,141 @@ test("wizard chunk preview matches the segments the real pipeline ingests", asyn
   // Byte-identical parity between the preview and the stored segments.
   const segmentTexts = await list.locator("li > p").allTextContents();
   expect(segmentTexts).toEqual(previewChunks);
+});
+
+test("a preview fingerprint cannot authorize different same-name bytes", async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(180_000);
+  const project = await registerReplayProject(context, APP);
+  await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
+  await createBaseThroughUI(page, "文件身份知识库");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await expect(page).toHaveURL(/[?&]kb=/u);
+  const baseId = new URL(page.url()).searchParams.get("kb");
+  expect(baseId).toBeTruthy();
+  const profile = {
+    unit: "token",
+    mode: "general",
+    size: 1000,
+    overlap: 100,
+    separator: "\\n\\n",
+    child_size: 500,
+    child_separator: "\\n",
+    remove_extra_spaces: false,
+    remove_urls_emails: false,
+    header_rules: [],
+  };
+  let fingerprint = "";
+  await expectNoNewObjectsDuring(page, project, async () => {
+    const preview = await context.request.post(
+      `${APP}/api/projects/${project.id}/knowledge/chunk-preview`,
+      {
+        headers: { "X-CSRF-Token": project.csrf },
+        multipart: {
+          file: {
+            name: "same-name.txt",
+            mimeType: "text/plain",
+            buffer: Buffer.from("文件 A 的确定正文", "utf8"),
+          },
+          processing_profile: JSON.stringify(profile),
+        },
+      },
+    );
+    expect(preview.status(), "unexpected HTTP status").toBe(200);
+    fingerprint = ((await preview.json()) as { preview_fingerprint: string })
+      .preview_fingerprint;
+    expect(fingerprint).toMatch(/^[a-f0-9]{64}$/u);
+  });
+  const upload = await context.request.post(
+    `${APP}/api/projects/${project.id}/knowledge/bases/${baseId}/documents`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      multipart: {
+        file: {
+          name: "same-name.txt",
+          mimeType: "text/plain",
+          buffer: Buffer.from("文件 B 的不同确定正文", "utf8"),
+        },
+        processing_profile: JSON.stringify(profile),
+        expected_preview_fingerprint: fingerprint,
+      },
+    },
+  );
+  expect(upload.status()).toBe(409);
+  expect((await upload.json()) as object).toMatchObject({
+    detail: { code: "KNOWLEDGE_CONFLICT" },
+  });
+  expect(await projectFacts(context, project)).toMatchObject({
+    object_count: 0,
+    document_rows: 0,
+    quota_used: 0,
+    quota_reserved: 0,
+  });
+});
+
+test("the deterministic PDF and CSV fixtures preview and publish with source facts", async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(300_000);
+  const project = await registerReplayProject(context, APP);
+  await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
+  await createBaseThroughUI(page, "来源样例知识库");
+  await page.getByRole("button", { name: "View documents" }).click();
+
+  await selectFixtureForUpload(page, project, "two-pages.pdf");
+  const pdfPreview = page.getByTestId("chunk-preview-panel");
+  await expect(pdfPreview).toContainText("first page");
+  await expect(pdfPreview).toContainText("second page");
+  await submitSelectedFixture(page);
+  const rows = page.getByTestId("knowledge-document-rows");
+  const pdfRow = rows.getByRole("row").filter({ hasText: "two-pages.pdf" });
+  await expect(pdfRow.getByText("Ready", { exact: true })).toBeVisible({
+    timeout: 90_000,
+  });
+  await (await openDocumentActions(page, "two-pages.pdf"))
+    .getByRole("menuitem", { name: "View segments" })
+    .click();
+  const pdfBrowser = page.getByTestId("knowledge-segment-browser");
+  await expect(pdfBrowser).toContainText("first page");
+  await expect(pdfBrowser).toContainText("second page");
+  await expect(pdfBrowser).toContainText("Source · Page 1");
+  await expect(pdfBrowser).toContainText("Source · Page 2");
+  await pdfBrowser
+    .getByRole("button", { name: "Documents", exact: true })
+    .click();
+
+  await selectFixtureForUpload(page, project, "inventory.csv");
+  const csvPreview = page.getByTestId("chunk-preview-panel");
+  const headers = csvPreview.getByTestId("knowledge-header-settings");
+  await expect(headers).toContainText("Candidate row 2");
+  await expect(headers).toContainText("设备");
+  await expect(headers).toContainText("端口");
+  await headers.getByRole("combobox", { name: "Header mode for CSV" }).click();
+  await page.getByRole("option", { name: "Use row" }).click();
+  await headers.getByLabel("Header row for CSV").fill("2");
+  await expect(csvPreview).toContainText(
+    "Preview is out of date. Refresh to apply the current settings.",
+  );
+  await csvPreview.getByRole("button", { name: "Refresh preview" }).click();
+  await expect(headers).toContainText("Selected row 2");
+  await expect(csvPreview).toContainText("设备: R1");
+  await expect(csvPreview).toContainText("端口: Gi0/0");
+  await submitSelectedFixture(page);
+  const csvRow = rows.getByRole("row").filter({ hasText: "inventory.csv" });
+  await expect(csvRow.getByText("Ready", { exact: true })).toBeVisible({
+    timeout: 90_000,
+  });
+  await (await openDocumentActions(page, "inventory.csv"))
+    .getByRole("menuitem", { name: "View segments" })
+    .click();
+  const csvBrowser = page.getByTestId("knowledge-segment-browser");
+  await expect(csvBrowser).toContainText("设备: R1");
+  await expect(csvBrowser).toContainText("端口: Gi0/0");
+  await expect(csvBrowser).toContainText("Context · Row 2");
+  await expect(csvBrowser).toContainText("Source · Row 3");
 });
 
 test("parent-child upload rolls child hits up to one parent citation and base defaults drive the retrieval test", async ({
@@ -605,8 +939,8 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   });
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await page.getByRole("radio", { name: "Parent-child" }).check();
-  await page.getByLabel("Chunk overlap (characters)").fill("0");
-  await page.getByLabel("Child chunk size (characters)").fill("200");
+  await page.getByLabel("Chunk overlap (Knowledge Tokens)").fill("0");
+  await page.getByLabel("Child chunk size (Knowledge Tokens)").fill("200");
   await page
     .getByRole("button", { name: "Upload & process", exact: true })
     .click();
@@ -661,17 +995,19 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   await expect(detailContent).toContainText(MARKER_PHONE);
   await expect(detailContent).toContainText("凭工牌进入");
 
-  // Both children truly participated in recall (marker-axis embeddings), so
-  // the matched flag must cover the second child too — it cannot be inferred
-  // from list order, only from the per-hit matched_children evidence.
+  // At least two marker-derived children truly participated in recall. Token
+  // splitting may produce more children than the former character profile,
+  // so assert the match evidence instead of the old exact child count.
   const detailChildren = detail.getByTestId("knowledge-detail-children");
-  await expect(detailChildren.getByRole("listitem")).toHaveCount(2);
-  await expect(detailChildren.getByRole("listitem").nth(0)).toContainText(
-    "Matched",
-  );
-  await expect(detailChildren.getByRole("listitem").nth(1)).toContainText(
-    "Matched",
-  );
+  expect(
+    await detailChildren.getByRole("listitem").count(),
+  ).toBeGreaterThanOrEqual(2);
+  expect(
+    await detailChildren
+      .getByRole("listitem")
+      .filter({ hasText: "Matched" })
+      .count(),
+  ).toBeGreaterThanOrEqual(2);
   await expect(
     detail.getByLabel("Child chunks matched in this search"),
   ).toBeVisible();
@@ -719,7 +1055,7 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   const documentsResponse = await context.request.get(
     `${APP}/api/projects/${project.id}/knowledge/bases/${baseId}/documents?page=1&page_size=50`,
   );
-  expect(documentsResponse.status(), await documentsResponse.text()).toBe(200);
+  expect(documentsResponse.status(), "unexpected HTTP status").toBe(200);
   const documentsBody = (await documentsResponse.json()) as {
     items: Array<{ id: string; name: string }>;
   };
@@ -730,7 +1066,7 @@ test("parent-child upload rolls child hits up to one parent citation and base de
   const segmentsResponse = await context.request.get(
     `${APP}/api/projects/${project.id}/knowledge/documents/${documentId}/segments?page=1&page_size=10`,
   );
-  expect(segmentsResponse.status(), await segmentsResponse.text()).toBe(200);
+  expect(segmentsResponse.status(), "unexpected HTTP status").toBe(200);
   const segmentsBody = (await segmentsResponse.json()) as {
     items: Array<{ id: string; position: number; content: string }>;
   };
@@ -745,7 +1081,7 @@ test("parent-child upload rolls child hits up to one parent citation and base de
       data: { content: `${markerSegment!.content}\n补充：值班表每周一更新。` },
     },
   );
-  expect(patchResponse.status(), await patchResponse.text()).toBe(200);
+  expect(patchResponse.status(), "unexpected HTTP status").toBe(200);
 
   await page
     .getByTestId("knowledge-search-results")
@@ -964,7 +1300,7 @@ test("re-embedding keeps segment identity, edits, and disables; reparse replaces
     const response = await context.request.get(
       `${APP}/api/projects/${project.id}/knowledge/documents/${documentId}/segments?page=1&page_size=50`,
     );
-    expect(response.status(), await response.text()).toBe(200);
+    expect(response.status(), "unexpected HTTP status").toBe(200);
     return (await response.json()) as {
       items: Array<{
         id: string;
@@ -977,7 +1313,7 @@ test("re-embedding keeps segment identity, edits, and disables; reparse replaces
   const documentsResponse = await context.request.get(
     `${APP}/api/projects/${project.id}/knowledge/bases/${baseId}/documents?page=1&page_size=50`,
   );
-  expect(documentsResponse.status(), await documentsResponse.text()).toBe(200);
+  expect(documentsResponse.status(), "unexpected HTTP status").toBe(200);
   const documentId = (
     (await documentsResponse.json()) as {
       items: Array<{ id: string; name: string }>;
@@ -999,7 +1335,7 @@ test("re-embedding keeps segment identity, edits, and disables; reparse replaces
       data: { content: editedContent },
     },
   );
-  expect(editResponse.status(), await editResponse.text()).toBe(200);
+  expect(editResponse.status(), "unexpected HTTP status").toBe(200);
   const disableResponse = await context.request.patch(
     `${APP}/api/projects/${project.id}/knowledge/segments/${original[0]!.id}`,
     {
@@ -1007,7 +1343,7 @@ test("re-embedding keeps segment identity, edits, and disables; reparse replaces
       data: { enabled: false },
     },
   );
-  expect(disableResponse.status(), await disableResponse.text()).toBe(200);
+  expect(disableResponse.status(), "unexpected HTTP status").toBe(200);
 
   const before = await providerCounters(context);
 
@@ -1069,7 +1405,7 @@ test("re-embedding keeps segment identity, edits, and disables; reparse replaces
     .getByRole("menuitem", { name: "Reparse from original" })
     .click();
   const reparseDialog = page.getByRole("dialog");
-  await reparseDialog.getByLabel("Chunk size (characters)").fill("500");
+  await reparseDialog.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
   await reparseDialog
     .getByRole("button", { name: "Preview split", exact: true })
     .click();
@@ -1201,7 +1537,7 @@ test("summary indexing retries without hiding ready content, caches queries, and
     const response = await context.request.get(
       `${apiRoot}/bases/${baseId}/documents?page=1&page_size=50`,
     );
-    expect(response.status(), await response.text()).toBe(200);
+    expect(response.status(), "unexpected HTTP status").toBe(200);
     const body = (await response.json()) as { items: DocumentState[] };
     const document = body.items.find((item) => item.name === "summary.txt");
     expect(document).toBeDefined();
@@ -1216,14 +1552,14 @@ test("summary indexing retries without hiding ready content, caches queries, and
     const response = await context.request.get(
       `${apiRoot}/documents/${document.id}/segments?page=1&page_size=50`,
     );
-    expect(response.status(), await response.text()).toBe(200);
+    expect(response.status(), "unexpected HTTP status").toBe(200);
     return ((await response.json()) as { items: SegmentState[] }).items;
   };
   const detailUrl = (segmentId: string) =>
     `${apiRoot}/bases/${baseId}/documents/${document.id}/segments/${segmentId}`;
   const readDetail = async (segmentId: string): Promise<DetailState> => {
     const response = await context.request.get(detailUrl(segmentId));
-    expect(response.status(), await response.text()).toBe(200);
+    expect(response.status(), "unexpected HTTP status").toBe(200);
     return (await response.json()) as DetailState;
   };
   const originalSegments = await listSegments();
@@ -1249,7 +1585,7 @@ test("summary indexing retries without hiding ready content, caches queries, and
       ),
       page.getByRole("button", { name: "Search", exact: true }).click(),
     ]);
-    expect(response.status(), await response.text()).toBe(200);
+    expect(response.status(), "unexpected HTTP status").toBe(200);
     return (await response.json()) as {
       citations: Array<{ segment_id: string; snippet: string; score: number }>;
       diagnostics: {
@@ -1374,7 +1710,7 @@ test("summary indexing retries without hiding ready content, caches queries, and
     .getByRole("menuitem", { name: "Reparse from original" })
     .click();
   const reparseDialog = page.getByRole("dialog");
-  await reparseDialog.getByLabel("Chunk size (characters)").fill("500");
+  await reparseDialog.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
   await reparseDialog
     .getByRole("button", { name: "Preview split", exact: true })
     .click();
@@ -1414,6 +1750,445 @@ test("summary indexing retries without hiding ready content, caches queries, and
       404,
     );
   }
+});
+
+test("the P1 image fixture keeps preview ephemeral, pins image reads, reprocesses without source reads, and deletes durably", async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(420_000);
+  const project = await registerReplayProject(context, APP);
+  const apiRoot = `${APP}/api/projects/${project.id}/knowledge`;
+
+  await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
+  await createBaseThroughUI(page, "图片生命周期知识库");
+  await page.getByRole("button", { name: "View documents" }).click();
+  const beforeDocxPreviewReads = await storageEvidence(context);
+  await selectFixtureForUpload(page, project, "document-with-image.docx");
+  expect(await storageEvidence(context)).toEqual(beforeDocxPreviewReads);
+  await expect(
+    page.getByTestId("chunk-preview-panel").getByTestId("knowledge-image"),
+  ).toHaveCount(1);
+  expect((await projectObjectInventory(context, project)).count).toBe(0);
+  await submitSelectedFixture(page);
+
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(rows.getByText("Ready")).toBeVisible({ timeout: 90_000 });
+  const baseId = new URL(page.url()).searchParams.get("kb");
+  expect(baseId).toBeTruthy();
+
+  type DocumentState = {
+    id: string;
+    name: string;
+    status: string;
+    version: number;
+    delete_error: string | null;
+    task_progress: { status: string } | null;
+  };
+  type SegmentState = {
+    id: string;
+    content: string;
+    document_version: number;
+  };
+  type SegmentDetail = {
+    segment: SegmentState;
+    attachments: Array<{
+      attachment_id: string;
+      ref: string;
+      media_type: "image/png" | "image/jpeg" | "image/webp";
+    }>;
+  };
+  const readDocuments = async (): Promise<DocumentState[]> => {
+    const response = await context.request.get(
+      `${apiRoot}/bases/${baseId}/documents?page=1&page_size=50`,
+    );
+    expect(response.status(), "unexpected HTTP status").toBe(200);
+    return ((await response.json()) as { items: DocumentState[] }).items;
+  };
+  const readDocument = async (): Promise<DocumentState> => {
+    const item = (await readDocuments()).find(
+      (candidate) => candidate.name === "document-with-image.docx",
+    );
+    expect(item).toBeDefined();
+    return item!;
+  };
+  const listSegments = async (): Promise<SegmentState[]> => {
+    const item = await readDocument();
+    const response = await context.request.get(
+      `${apiRoot}/documents/${item.id}/segments?page=1&page_size=50`,
+    );
+    expect(response.status(), "unexpected HTTP status").toBe(200);
+    return ((await response.json()) as { items: SegmentState[] }).items;
+  };
+  const readDetail = async (segmentId: string): Promise<SegmentDetail> => {
+    const item = await readDocument();
+    const response = await context.request.get(
+      `${apiRoot}/bases/${baseId}/documents/${item.id}/segments/${segmentId}`,
+    );
+    expect(response.status(), "unexpected HTTP status").toBe(200);
+    return (await response.json()) as SegmentDetail;
+  };
+
+  const originalInventory = await projectObjectInventory(context, project);
+  expect(originalInventory).toMatchObject({
+    count: 3,
+    originals: 1,
+    manifests: 1,
+    assets: 1,
+  });
+  const originalFacts = await projectFacts(context, project);
+  expect(originalFacts).toMatchObject({
+    object_count: 3,
+    document_rows: 1,
+    published_documents: 1,
+    extraction_rows: 1,
+    ready_attachments: 1,
+    quota_reserved: 0,
+  });
+  expect(originalFacts.quota_used).toBeGreaterThan(0);
+
+  const originalDetails = await Promise.all(
+    (await listSegments()).map((segment) => readDetail(segment.id)),
+  );
+  const imageDetail = originalDetails.find(
+    (detail) => detail.attachments.length > 0,
+  );
+  expect(imageDetail).toBeDefined();
+  const document = await readDocument();
+  const attachment = imageDetail!.attachments[0]!;
+  const digest = createHash("sha256")
+    .update(imageDetail!.segment.content, "utf8")
+    .digest("hex");
+  const query = new URLSearchParams({
+    expected_document_version: String(document.version),
+    expected_content_digest: digest,
+  });
+  const managementPath = `${apiRoot}/documents/${document.id}/segments/${imageDetail!.segment.id}/attachments/${attachment.attachment_id}?${query}`;
+  const citationPath = `${apiRoot}/bases/${baseId}/documents/${document.id}/segments/${imageDetail!.segment.id}/attachments/${attachment.attachment_id}?${query}`;
+  const imageResponse = await context.request.get(managementPath);
+  expect(imageResponse.status(), "unexpected HTTP status").toBe(200);
+  expect(["image/png", "image/jpeg", "image/webp"]).toContain(
+    imageResponse.headers()["content-type"]?.split(";", 1)[0],
+  );
+  expect(imageResponse.headers()["cache-control"]).toContain("no-store");
+  const imageByteCount = Number(imageResponse.headers()["content-length"]);
+  expect(Number.isSafeInteger(imageByteCount) && imageByteCount > 0).toBe(true);
+
+  const otherProjectId = await createAdditionalProject(context, project);
+  const crossProject = await context.request.get(
+    managementPath.replace(
+      `/api/projects/${project.id}/`,
+      `/api/projects/${otherProjectId}/`,
+    ),
+  );
+  expect(crossProject.status()).toBe(404);
+  const browser = context.browser();
+  expect(browser).not.toBeNull();
+  const outsiderContext = await browser!.newContext();
+  try {
+    await registerReplayProject(outsiderContext, APP);
+    expect((await outsiderContext.request.get(managementPath)).status()).toBe(
+      404,
+    );
+  } finally {
+    await outsiderContext.close();
+  }
+
+  const disable = await context.request.patch(
+    `${apiRoot}/segments/${imageDetail!.segment.id}`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { enabled: false },
+    },
+  );
+  expect(disable.status(), "unexpected HTTP status").toBe(200);
+  expect((await context.request.get(citationPath)).status()).toBe(409);
+  const disabledDocument = await readDocument();
+  const disabledDetail = await readDetail(imageDetail!.segment.id);
+  const disabledQuery = new URLSearchParams({
+    expected_document_version: String(disabledDocument.version),
+    expected_content_digest: createHash("sha256")
+      .update(disabledDetail.segment.content, "utf8")
+      .digest("hex"),
+  });
+  const disabledManagementPath = `${apiRoot}/documents/${document.id}/segments/${imageDetail!.segment.id}/attachments/${attachment.attachment_id}?${disabledQuery}`;
+  const disabledCitationPath = `${apiRoot}/bases/${baseId}/documents/${document.id}/segments/${imageDetail!.segment.id}/attachments/${attachment.attachment_id}?${disabledQuery}`;
+  expect((await context.request.get(disabledCitationPath)).status()).toBe(409);
+  expect((await context.request.get(disabledManagementPath)).status()).toBe(
+    200,
+  );
+  const enable = await context.request.patch(
+    `${apiRoot}/segments/${imageDetail!.segment.id}`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { enabled: true },
+    },
+  );
+  expect(enable.status(), "unexpected HTTP status").toBe(200);
+
+  const enabledDocument = await readDocument();
+  const enabledDetail = await readDetail(imageDetail!.segment.id);
+  const enabledQuery = new URLSearchParams({
+    expected_document_version: String(enabledDocument.version),
+    expected_content_digest: createHash("sha256")
+      .update(enabledDetail.segment.content, "utf8")
+      .digest("hex"),
+  });
+  const enabledManagementPath = `${apiRoot}/documents/${document.id}/segments/${imageDetail!.segment.id}/attachments/${attachment.attachment_id}?${enabledQuery}`;
+
+  await setProjectRevoked(context, project, true);
+  expect((await context.request.get(enabledManagementPath)).status()).toBe(404);
+  await setProjectRevoked(context, project, false);
+
+  const beforeReembedObjects = await projectObjectInventory(context, project);
+  const beforeReembedReads = await storageEvidence(context);
+  const basesResponse = await context.request.get(
+    `${apiRoot}/bases?page=1&page_size=50`,
+  );
+  expect(basesResponse.status(), "unexpected HTTP status").toBe(200);
+  const base = (
+    (await basesResponse.json()) as {
+      items: Array<{ id: string; embedding_model_id: string | null }>;
+    }
+  ).items.find((item) => item.id === baseId);
+  expect(base?.embedding_model_id).toBeTruthy();
+  const beforeReembedDocument = await readDocument();
+  const rebuild = await context.request.post(
+    `${apiRoot}/bases/${baseId}/rebuild`,
+    {
+      headers: { "X-CSRF-Token": project.csrf },
+      data: { embedding_model_id: base!.embedding_model_id },
+    },
+  );
+  expect(rebuild.status(), "unexpected HTTP status").toBe(200);
+  await expect
+    .poll(
+      async () => {
+        const current = await readDocument();
+        return {
+          newer: current.version > beforeReembedDocument.version,
+          status: current.status,
+          task: current.task_progress,
+        };
+      },
+      { timeout: 90_000 },
+    )
+    .toEqual({ newer: true, status: "ready", task: null });
+  const afterReembedObjects = await projectObjectInventory(context, project);
+  expect(afterReembedObjects.count).toBe(beforeReembedObjects.count);
+  expect(
+    afterReembedObjects.fingerprint === beforeReembedObjects.fingerprint,
+    "re-embed changed the Project object inventory",
+  ).toBe(true);
+  expect((await storageEvidence(context)).source_reads).toBe(
+    beforeReembedReads.source_reads,
+  );
+  await page.reload();
+  await expect(rows.getByText("Ready")).toBeVisible({ timeout: 30_000 });
+
+  const afterReembedDetails = await Promise.all(
+    (await listSegments()).map((segment) => readDetail(segment.id)),
+  );
+  const oldCitationDetail = afterReembedDetails.find(
+    (detail) => detail.attachments.length > 0,
+  );
+  expect(oldCitationDetail).toBeDefined();
+  const beforeReparseDocument = await readDocument();
+  const oldAttachment = oldCitationDetail!.attachments[0]!;
+  const oldDigest = createHash("sha256")
+    .update(oldCitationDetail!.segment.content, "utf8")
+    .digest("hex");
+  const oldQuery = new URLSearchParams({
+    expected_document_version: String(beforeReparseDocument.version),
+    expected_content_digest: oldDigest,
+  });
+  const oldCitationPath = `${apiRoot}/bases/${baseId}/documents/${document.id}/segments/${oldCitationDetail!.segment.id}/attachments/${oldAttachment.attachment_id}?${oldQuery}`;
+  const oldManagementPath = `${apiRoot}/documents/${document.id}/segments/${oldCitationDetail!.segment.id}/attachments/${oldAttachment.attachment_id}?${oldQuery}`;
+
+  await (await openDocumentActions(page, "document-with-image.docx"))
+    .getByRole("menuitem", { name: "Reparse from original" })
+    .click();
+  const reparseDialog = page.getByRole("dialog");
+  await reparseDialog.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
+  await reparseDialog
+    .getByRole("button", { name: "Preview split", exact: true })
+    .click();
+  await expect(
+    reparseDialog.getByText(/Showing \d+ of \d+ chunks/u),
+  ).toBeVisible({ timeout: 45_000 });
+  await reparseDialog
+    .getByRole("button", { name: "Reparse", exact: true })
+    .click();
+  await expect(reparseDialog).toBeHidden();
+  await expect
+    .poll(
+      async () => {
+        const current = await readDocument();
+        return {
+          newer: current.version > beforeReparseDocument.version,
+          status: current.status,
+          task: current.task_progress,
+        };
+      },
+      { timeout: 90_000 },
+    )
+    .toEqual({ newer: true, status: "ready", task: null });
+  const beforeStaleReads = await storageEvidence(context);
+  expect((await context.request.get(oldCitationPath)).status()).toBe(404);
+  expect((await context.request.get(oldManagementPath)).status()).toBe(404);
+  expect((await storageEvidence(context)).attachment_reads).toBe(
+    beforeStaleReads.attachment_reads,
+  );
+
+  await setStorageFaults(context, project, { delete_failures: 100 });
+  await (await openDocumentActions(page, "document-with-image.docx"))
+    .getByRole("menuitem", { name: "Delete" })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+  await expect
+    .poll(
+      async () => {
+        const current = (await readDocuments()).find(
+          (item) => item.id === document.id,
+        );
+        return current?.delete_error ?? null;
+      },
+      { timeout: 90_000 },
+    )
+    .not.toBeNull();
+  const failedDeleteFacts = await projectFacts(context, project);
+  expect(failedDeleteFacts).toMatchObject({
+    document_rows: 1,
+    published_documents: 1,
+  });
+  expect(failedDeleteFacts.object_count).toBeGreaterThan(0);
+  expect(failedDeleteFacts.quota_used).toBeGreaterThan(0);
+
+  await setStorageFaults(context, project, {});
+  const retry = await context.request.delete(
+    `${apiRoot}/documents/${document.id}`,
+    { headers: { "X-CSRF-Token": project.csrf } },
+  );
+  expect(retry.status(), "unexpected HTTP status").toBe(200);
+  await expect
+    .poll(
+      async () => {
+        const facts = await projectFacts(context, project);
+        return {
+          documents: facts.document_rows,
+          objects: facts.object_count,
+          used: facts.quota_used,
+          reserved: facts.quota_reserved,
+        };
+      },
+      { timeout: 90_000 },
+    )
+    .toEqual({ documents: 0, objects: 0, used: 0, reserved: 0 });
+});
+
+test("a derived-image PUT failure never exposes a published attachment", async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(240_000);
+  const project = await registerReplayProject(context, APP);
+  const apiRoot = `${APP}/api/projects/${project.id}/knowledge`;
+
+  await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
+  await createBaseThroughUI(page, "图片写入故障知识库");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await selectFixtureForUpload(page, project, "document-with-image.docx");
+  await expect(
+    page.getByTestId("chunk-preview-panel").getByTestId("knowledge-image"),
+  ).toHaveCount(1);
+  await setStorageFaults(context, project, {
+    attachment_put_failures: 100,
+  });
+  try {
+    await submitSelectedFixture(page);
+    const rows = page.getByTestId("knowledge-document-rows");
+    await expect(rows.getByText("Failed", { exact: true })).toBeVisible({
+      timeout: 90_000,
+    });
+    const facts = await projectFacts(context, project);
+    expect(facts.published_documents).toBe(0);
+    expect(facts.ready_attachments).toBe(0);
+
+    const baseId = new URL(page.url()).searchParams.get("kb");
+    expect(baseId).toBeTruthy();
+    const documentsResponse = await context.request.get(
+      `${apiRoot}/bases/${baseId}/documents?page=1&page_size=50`,
+    );
+    expect(documentsResponse.status(), "unexpected HTTP status").toBe(200);
+    const document = (
+      (await documentsResponse.json()) as {
+        items: Array<{ id: string; name: string }>;
+      }
+    ).items.find((item) => item.name === "document-with-image.docx");
+    expect(document).toBeDefined();
+    const attachments = await context.request.get(
+      `${apiRoot}/documents/${document!.id}/attachments`,
+    );
+    expect(attachments.status()).toBe(422);
+  } finally {
+    await setStorageFaults(context, project, {});
+  }
+});
+
+test("a blocked model batch cannot publish after Project authority is revoked", async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(240_000);
+  const project = await registerReplayProject(context, APP);
+
+  await page.goto(`/projects/${encodeURIComponent(project.slug)}/knowledge`);
+  await createBaseThroughUI(page, "模型撤权知识库");
+  await page.getByRole("button", { name: "View documents" }).click();
+  await selectFixtureForUpload(page, project, "document-with-image.docx");
+  await setEmbeddingBlocked(context, project, true);
+  try {
+    await submitSelectedFixture(page);
+    await expect
+      .poll(async () => (await providerCounters(context)).embedding_waiters, {
+        timeout: 90_000,
+      })
+      .toBeGreaterThan(0);
+    const baseId = new URL(page.url()).searchParams.get("kb");
+    expect(baseId).toBeTruthy();
+    const documentsResponse = await context.request.get(
+      `${APP}/api/projects/${project.id}/knowledge/bases/${baseId}/documents?page=1&page_size=50`,
+    );
+    expect(documentsResponse.status(), "unexpected HTTP status").toBe(200);
+    const documentId = (
+      (await documentsResponse.json()) as { items: Array<{ id: string }> }
+    ).items[0]?.id;
+    expect(documentId).toBeTruthy();
+    await setProjectRevoked(context, project, true);
+    const revokedAttachments = await context.request.get(
+      `${APP}/api/projects/${project.id}/knowledge/documents/${documentId}/attachments`,
+    );
+    expect(revokedAttachments.status()).toBe(404);
+  } finally {
+    await setEmbeddingBlocked(context, project, false);
+  }
+  await expect
+    .poll(
+      async () => {
+        const provider = await providerCounters(context);
+        const facts = await projectFacts(context, project);
+        return {
+          waiters: provider.embedding_waiters,
+          running: facts.running_tasks,
+          published: facts.published_documents,
+        };
+      },
+      { timeout: 90_000 },
+    )
+    .toEqual({ waiters: 0, running: 0, published: 0 });
 });
 
 test("real knowledge settings render safely and a failed storage probe preserves the saved revision", async ({

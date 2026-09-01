@@ -8,9 +8,53 @@ from typing import Any
 from sqlalchemy import case, func, null, select
 from sqlalchemy.sql.elements import ColumnElement
 
+from ..contracts import KNOWLEDGE_STORAGE_UNAVAILABLE, KnowledgeError
+from ..extraction.contracts import ProcessingProfile
 from .models import KnowledgeDocumentRow, KnowledgeTaskRow
 
 OPEN_TASK_STATUSES = ("queued", "running", "retry_wait")
+
+
+def stored_model_text(
+    *,
+    content: str,
+    index_text: str,
+    parsing_profile: ProcessingProfile | dict[str, object] | None,
+) -> str:
+    """Return the persisted model input, with one narrow legacy fallback.
+
+    Token-era rows must carry their derived ``index_text``.  Only rows from
+    before that contract (a NULL profile or an explicit character profile)
+    may deterministically rebuild model text from their already stored
+    Markdown.  This adapter never reads the original file or invents a parser
+    identity.
+    """
+
+    if isinstance(index_text, str) and index_text.strip():
+        return index_text
+
+    legacy = parsing_profile is None
+    if parsing_profile is not None:
+        try:
+            profile = parsing_profile if isinstance(parsing_profile, ProcessingProfile) else ProcessingProfile.model_validate(parsing_profile)
+        except (TypeError, ValueError):
+            profile = None
+        legacy = profile is not None and profile.chunk.unit == "character"
+
+    if legacy:
+        # Kept lazy because importing the ``ingestion`` package while the
+        # persistence helpers initialize would pull DocumentService back into
+        # this module through the preview exports.
+        from ..ingestion.index_text import build_index_text
+
+        derived = build_index_text(content)
+        if derived:
+            return derived
+
+    raise KnowledgeError(
+        KNOWLEDGE_STORAGE_UNAVAILABLE,
+        "已发布索引文本不可用",
+    )
 
 
 def delete_error_expression(

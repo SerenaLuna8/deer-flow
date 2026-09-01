@@ -34,6 +34,7 @@ from ..contracts import (
     KnowledgeModelPort,
 )
 from ..models import KnowledgeModelClient
+from ..persistence.derivations import stored_model_text
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
@@ -137,7 +138,11 @@ class KnowledgeReembedHandler:
                 if parent_child:
                     rows = (
                         await session.execute(
-                            select(KnowledgeSegmentChildRow.id, KnowledgeSegmentChildRow.content)
+                            select(
+                                KnowledgeSegmentChildRow.id,
+                                KnowledgeSegmentChildRow.content,
+                                KnowledgeSegmentChildRow.index_text,
+                            )
                             .where(
                                 KnowledgeSegmentChildRow.knowledge_document_id == document.id,
                                 KnowledgeSegmentChildRow.document_version == document.published_version,
@@ -148,7 +153,11 @@ class KnowledgeReembedHandler:
                 else:
                     rows = (
                         await session.execute(
-                            select(KnowledgeSegmentRow.id, KnowledgeSegmentRow.content)
+                            select(
+                                KnowledgeSegmentRow.id,
+                                KnowledgeSegmentRow.content,
+                                KnowledgeSegmentRow.index_text,
+                            )
                             .where(
                                 KnowledgeSegmentRow.knowledge_document_id == document.id,
                                 KnowledgeSegmentRow.document_version == document.published_version,
@@ -170,7 +179,17 @@ class KnowledgeReembedHandler:
                     embedding_model_id=embedding_model_id,
                     material=material,
                     published_version=document.published_version,
-                    entries=tuple((row_id, content) for row_id, content in rows),
+                    entries=tuple(
+                        (
+                            row.id,
+                            stored_model_text(
+                                content=row.content,
+                                index_text=row.index_text,
+                                parsing_profile=document.parsing_profile,
+                            ),
+                        )
+                        for row in rows
+                    ),
                     summary_entries=tuple((row_id, content) for row_id, content in summaries),
                     parent_child=parent_child,
                 )

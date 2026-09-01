@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from actweave_knowledge import KNOWLEDGE_STORAGE_UNAVAILABLE, KnowledgeError, KnowledgeSettings
 from actweave_knowledge.contracts import KnowledgeMinioSettings
+from extraction_test_helpers import make_test_quota_service
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -80,7 +81,7 @@ async def test_composition_degrades_only_knowledge_and_closes_failed_module(monk
         return None
 
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: factory)
-    module = SimpleNamespace(settings=settings, aclose=AsyncMock())
+    module = SimpleNamespace(settings=settings, aclose=AsyncMock(), install_file_capabilities=lambda capabilities: setattr(module, "file_capabilities_snapshot", capabilities))
     probe = AsyncMock(side_effect=None if storage_ok else KnowledgeError(KNOWLEDGE_STORAGE_UNAVAILABLE, "private storage error"))
     monkeypatch.setattr(composition, "probe_knowledge_storage", probe)
     builds = []
@@ -90,7 +91,7 @@ async def test_composition_degrades_only_knowledge_and_closes_failed_module(monk
         return module
 
     monkeypatch.setattr(composition, "create_knowledge_module", build)
-    actual, state = await composition.create_knowledge_module_from_database(app_config=SimpleNamespace())
+    actual, state = await composition.create_knowledge_module_from_database(quota_service=make_test_quota_service(engine_module.get_session_factory()), app_config=SimpleNamespace())
     assert state == expected
     assert (actual is module) == (expected == "ready")
     assert len(builds) == int(enabled)
@@ -107,7 +108,7 @@ async def test_unreadable_storage_still_composes_fail_closed_retention(monkeypat
     monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: lambda: None)
     monkeypatch.setattr(composition, "load_knowledge_settings_from_db", AsyncMock(side_effect=KnowledgeSettingsError("KNOWLEDGE_SETTINGS_UNAVAILABLE", 503)))
-    resources = await composition.create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
+    resources = await composition.create_knowledge_worker_resources_from_database(quota_service=make_test_quota_service(engine_module.get_session_factory()), app_config=SimpleNamespace())
     assert resources.feature_module is None and resources.startup_state == "storage_failed"
     assert callable(resources.project_purge)
 
@@ -127,7 +128,7 @@ async def test_worker_malformed_endpoint_degrades_with_independent_retention(mon
 
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: forbidden_session)
     monkeypatch.setattr(composition, "load_knowledge_settings_from_db", AsyncMock(return_value=settings))
-    resources = await composition.create_knowledge_worker_resources_from_database(app_config=SimpleNamespace())
+    resources = await composition.create_knowledge_worker_resources_from_database(quota_service=make_test_quota_service(engine_module.get_session_factory()), app_config=SimpleNamespace())
     assert resources.feature_module is None
     assert resources.startup_state == "storage_failed"
     assert callable(resources.project_purge)
@@ -178,3 +179,46 @@ def test_provider_secret_roundtrip_binds_provider_id_and_endpoint() -> None:
             ciphertext=protected.ciphertext,
             key=key,
         )
+
+
+@pytest.mark.asyncio
+async def test_parser_policy_is_materialized_from_database_and_bootstrap_preserves_it(postgres_database_url):
+    from app.knowledge_settings.bootstrap import bootstrap_knowledge_system_settings
+
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        await _install_full_schema(engine)
+        await bootstrap_knowledge_system_settings(factory)
+        async with factory() as session, session.begin():
+            row = await session.get(KnowledgeSystemSettingsRow, 1)
+            row.etl_type = "unstructured_local"
+            row.extraction_cache_enabled = False
+        await bootstrap_knowledge_system_settings(factory)
+        loaded = await load_knowledge_settings_from_db(factory, secret_key=SecretKey(b"0" * 32))
+        assert loaded.etl_type == "unstructured_local"
+        assert loaded.extraction_cache_enabled is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_parser_failure_keeps_read_module_with_unavailable_parse_capabilities(monkeypatch):
+    from actweave_knowledge.extraction.registry import default_registry
+    from actweave_knowledge.ingestion.profiles import build_file_capabilities
+
+    import deerflow.persistence.engine as engine_module
+
+    monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+    settings = KnowledgeSettings(enabled=True, minio=KnowledgeMinioSettings(endpoint="localhost:9000", bucket="knowledge", access_key="test", secret_key="test"))
+    monkeypatch.setattr(composition, "load_knowledge_settings_from_db", AsyncMock(return_value=settings))
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: lambda: None)
+    module = SimpleNamespace(settings=settings, aclose=AsyncMock(), install_file_capabilities=lambda capabilities: setattr(module, "file_capabilities_snapshot", capabilities))
+    monkeypatch.setattr(composition, "create_knowledge_module", lambda **kwargs: module)
+    monkeypatch.setattr(composition, "probe_knowledge_storage", AsyncMock())
+    failed = build_file_capabilities(settings, default_registry(), runtime_reason="PARSER_SANDBOX_UNAVAILABLE")
+    monkeypatch.setattr(composition, "probe_file_capabilities", AsyncMock(return_value=failed), raising=False)
+    actual, state = await composition.create_knowledge_module_from_database(quota_service=make_test_quota_service(engine_module.get_session_factory()), app_config=SimpleNamespace())
+    assert actual is module and state == "parser_failed"
+    assert module.aclose.await_count == 0
+    assert not any(item.available for item in actual.file_capabilities_snapshot.formats)

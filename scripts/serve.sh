@@ -522,7 +522,8 @@ fi
 # present on PATH but not executable from Bash.
 DETECT_PYTHON="$ACT_WEAVE_PNPM_PYTHON"
 
-# Resolve existing optional extras (for example ollama or discord) from
+# Always retain the Knowledge package's build-provisioned local extraction
+# dependencies. Resolve additional optional extras (for example ollama or discord) from
 # UV_EXTRAS or config.yaml so that
 # `uv sync` does not wipe out optional dependencies on every restart. See
 # scripts/detect_uv_extras.py and Issue #2754 for context. The detector
@@ -533,7 +534,9 @@ DETECT_PYTHON="$ACT_WEAVE_PNPM_PYTHON"
 #   - whitelist warnings (e.g. "ignoring invalid UV_EXTRAS entry ';'");
 #   - detector crashes (e.g. unexpected Python error).
 # `|| true` keeps `set -e` from killing dev startup on a detector failure;
-# the result is just an empty UV_EXTRAS_FLAGS, which means "no extras".
+# the result is just an empty UV_EXTRAS_FLAGS; the required extraction extra
+# remains present independently.
+REQUIRED_UV_EXTRAS_FLAGS="--extra extraction-local"
 UV_EXTRAS_FLAGS=""
 if [ -n "$DETECT_PYTHON" ]; then
     UV_EXTRAS_FLAGS=$("$DETECT_PYTHON" "$REPO_ROOT/scripts/detect_uv_extras.py" || { echo "[serve.sh] detect_uv_extras.py failed (exit $?) — proceeding without extras" >&2; echo ""; })
@@ -546,7 +549,7 @@ if ! $SKIP_INSTALL; then
     fi
     # `--all-packages` propagates selected extras into workspace members.
     # Intentionally unquoted to splat multiple `--extra X` pairs.
-    (cd backend && uv sync --quiet --all-packages $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
+    (cd backend && uv sync --quiet --all-packages $REQUIRED_UV_EXTRAS_FLAGS $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
     "$ACT_WEAVE_PNPM_PYTHON" "$ACT_WEAVE_PNPM_RUNNER" install --silent || { echo "✗ Frontend dependency install failed"; exit 1; }
     echo "✓ Dependencies synced"
 else

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import re
 import tempfile
 import uuid
 from datetime import datetime
@@ -38,6 +40,7 @@ from actweave_knowledge import (
     KnowledgeBaseCreate,
     KnowledgeBaseUpdate,
     KnowledgeBaseView,
+    KnowledgeChunkPreview,
     KnowledgeChunkPreviewRequest,
     KnowledgeCitation,
     KnowledgeDocumentUpload,
@@ -57,9 +60,11 @@ from actweave_knowledge import (
     KnowledgeSegmentView,
     KnowledgeTaskProgress,
 )
+from actweave_knowledge.extraction.contracts import ParseWarning, ProcessingProfile
+from actweave_knowledge.ingestion.profiles import FileCapabilities, ProcessingParameters
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -425,6 +430,10 @@ class KnowledgeTaskProgressResponse(_StrictModel):
 
 
 class KnowledgeDocumentItemResponse(_StrictModel):
+    parsing_profile: ProcessingProfile | None
+    parse_warnings: list[ParseWarning]
+    chunk_size_unit: Literal["character", "token"]
+    tokenizer_profile_id: str | None
     id: uuid.UUID
     project_id: uuid.UUID
     knowledge_base_id: uuid.UUID
@@ -450,6 +459,7 @@ class KnowledgeDocumentItemResponse(_StrictModel):
     error_message: str | None
     delete_error: str | None
     task_progress: KnowledgeTaskProgressResponse | None
+    content_initialized: bool
     created_at: datetime
     updated_at: datetime
 
@@ -464,6 +474,20 @@ class KnowledgeDocumentListResponse(_StrictModel):
 
 class KnowledgeDocumentMutationResponse(_StrictModel):
     item: KnowledgeDocumentItemResponse
+    request_id: str
+
+
+class KnowledgeDocumentAttachmentItemResponse(_StrictModel):
+    attachment_id: uuid.UUID
+    ref: str
+    media_type: Literal["image/png", "image/jpeg", "image/webp"]
+    width: int
+    height: int
+
+
+class KnowledgeDocumentAttachmentListResponse(_StrictModel):
+    items: list[KnowledgeDocumentAttachmentItemResponse]
+    document_version: int
     request_id: str
 
 
@@ -563,23 +587,152 @@ class KnowledgeDocumentBatchResponse(_StrictModel):
     request_id: str
 
 
+class KnowledgePreviewSourceSpanResponse(_StrictModel):
+    block_id: str
+    start: int
+    end: int
+    location: dict[str, str | int]
+    role: Literal["source", "context_prefix"]
+
+
+class KnowledgePreviewLogicalAttachmentResponse(_StrictModel):
+    ref: str
+    alt_text: str
+
+
+class KnowledgePreviewAttachmentResponse(_StrictModel):
+    ref: str
+    media_type: Literal["image/png", "image/jpeg", "image/webp"]
+    data_base64: str
+
+
+class KnowledgePreviewTableSourceResponse(_StrictModel):
+    sheet: str | None
+    header_mode: Literal["auto", "none", "explicit"]
+    header_row: int | None
+    header_cells: list[str]
+
+
 class KnowledgeChunkPreviewItemResponse(_StrictModel):
     position: int
     content: str
     word_count: int
     child_contents: list[str]
+    token_count: int
+    source_spans: list[KnowledgePreviewSourceSpanResponse]
+    attachments: list[KnowledgePreviewLogicalAttachmentResponse]
 
 
 class KnowledgeChunkPreviewResponse(_StrictModel):
     items: list[KnowledgeChunkPreviewItemResponse]
     total: int
+    preview_fingerprint: str
+    source_sha256: str
+    effective_profile: ProcessingProfile
+    warnings: list[ParseWarning]
+    preview_attachments: list[KnowledgePreviewAttachmentResponse]
+    omitted_preview_attachment_count: int
+    table_sources: list[KnowledgePreviewTableSourceResponse]
     request_id: str
+
+
+def _preview_response_payload(preview: KnowledgeChunkPreview) -> dict[str, Any]:
+    if preview.effective_profile is None:
+        raise RuntimeError("preview response is missing its effective profile")
+    return {
+        "items": [
+            KnowledgeChunkPreviewItemResponse(
+                position=chunk.position,
+                content=chunk.content,
+                word_count=chunk.word_count,
+                child_contents=list(chunk.child_contents),
+                token_count=chunk.token_count,
+                source_spans=[KnowledgePreviewSourceSpanResponse(**span.model_dump(mode="json")) for span in chunk.source_spans],
+                attachments=[
+                    KnowledgePreviewLogicalAttachmentResponse(
+                        ref=attachment.ref,
+                        alt_text=attachment.alt_text,
+                    )
+                    for attachment in chunk.attachments
+                ],
+            )
+            for chunk in preview.chunks
+        ],
+        "total": preview.total,
+        "preview_fingerprint": preview.preview_fingerprint,
+        "source_sha256": preview.source_sha256,
+        "effective_profile": preview.effective_profile,
+        "warnings": list(preview.warnings),
+        "preview_attachments": [
+            KnowledgePreviewAttachmentResponse(
+                ref=attachment.ref,
+                media_type=attachment.media_type,
+                data_base64=attachment.data_base64,
+            )
+            for attachment in preview.preview_attachments
+        ],
+        "omitted_preview_attachment_count": preview.omitted_preview_attachment_count,
+        "table_sources": [
+            KnowledgePreviewTableSourceResponse(
+                sheet=table.sheet,
+                header_mode=table.header_mode,
+                header_row=table.header_row,
+                header_cells=list(table.header_cells),
+            )
+            for table in preview.table_sources
+        ],
+    }
+
+
+_LEGACY_PROCESSING_FIELDS = {
+    "chunk_size": "size",
+    "chunk_overlap": "overlap",
+    "chunk_separator": "separator",
+    "chunking_mode": "mode",
+    "child_chunk_size": "child_size",
+    "child_chunk_separator": "child_separator",
+    "remove_extra_spaces": "remove_extra_spaces",
+    "remove_urls_emails": "remove_urls_emails",
+}
+
+
+def processing_parameters(legacy: dict, submitted: dict | ProcessingParameters | None) -> ProcessingParameters:
+    """Merge only explicitly supplied legacy fields, rejecting conflicting values."""
+    try:
+        user = ProcessingParameters.model_validate(submitted or {})
+        new = user.model_dump(exclude_unset=True)
+        merged = {_LEGACY_PROCESSING_FIELDS[key]: value for key, value in legacy.items() if key in _LEGACY_PROCESSING_FIELDS}
+        if any(key in new and new[key] != value for key, value in merged.items()):
+            raise ValueError("conflicting processing parameters")
+        merged.update(new)
+        return ProcessingParameters.model_validate(merged)
+    except (ValueError, ValidationError):
+        raise KnowledgeError(KNOWLEDGE_INVALID_REQUEST, "分段参数无效或与 processing_profile 冲突") from None
+
+
+def multipart_processing_options(*, raw_profile: str | None, expected_fingerprint: str | None, form_keys: set[str], legacy_values: dict[str, object]) -> tuple[ProcessingParameters | None, str | None]:
+    """Apply one strict multipart profile/fingerprint policy for both routes."""
+
+    parameters = None
+    if raw_profile is not None:
+        try:
+            submitted = json.loads(raw_profile)
+            if not isinstance(submitted, dict):
+                raise ValueError("processing_profile must be an object")
+            parameters = processing_parameters({key: value for key, value in legacy_values.items() if key in form_keys}, submitted)
+        except (ValueError, KnowledgeError):
+            raise KnowledgeError(KNOWLEDGE_INVALID_REQUEST, "分段参数无效或冲突") from None
+    if expected_fingerprint is not None and re.fullmatch(r"[0-9a-f]{64}", expected_fingerprint) is None:
+        raise KnowledgeError(KNOWLEDGE_INVALID_REQUEST, "预览指纹无效")
+    return parameters, expected_fingerprint
 
 
 class KnowledgeDocumentReparseRequest(_StrictModel):
     """Explicit re-parse of the stored original file; never a model change."""
 
     expected_version: int
+    processing_profile: ProcessingParameters | None = None
+    expected_preview_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     chunk_size: int = 1000
     chunk_overlap: int = 100
     chunk_separator: str = KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR
@@ -589,11 +742,26 @@ class KnowledgeDocumentReparseRequest(_StrictModel):
     child_chunk_size: int = 500
     child_chunk_separator: str = KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
 
+    @model_validator(mode="after")
+    def check_processing_parameters(self):
+        try:
+            processing_parameters(self.model_dump(include=self.model_fields_set & _LEGACY_PROCESSING_FIELDS.keys()), self.processing_profile)
+        except KnowledgeError:
+            raise ValueError("conflicting processing parameters") from None
+        return self
+
 
 class KnowledgeReparsePreviewResponse(_StrictModel):
     document_version: int
     items: list[KnowledgeChunkPreviewItemResponse]
     total: int
+    preview_fingerprint: str
+    source_sha256: str
+    effective_profile: ProcessingProfile
+    warnings: list[ParseWarning]
+    preview_attachments: list[KnowledgePreviewAttachmentResponse]
+    omitted_preview_attachment_count: int
+    table_sources: list[KnowledgePreviewTableSourceResponse]
     request_id: str
 
 
@@ -607,6 +775,8 @@ class KnowledgeSegmentItemResponse(_StrictModel):
     hit_count: int
     source_position: dict[str, Any]
     created_at: datetime
+    token_count: int
+    source_spans: list[KnowledgePreviewSourceSpanResponse]
 
 
 class KnowledgeSegmentListResponse(_StrictModel):
@@ -768,6 +938,15 @@ class KnowledgeSegmentChildResponse(_StrictModel):
     word_count: int
 
 
+class KnowledgeSegmentAttachmentResponse(_StrictModel):
+    attachment_id: uuid.UUID
+    ref: str
+    alt_text: str
+    media_type: Literal["image/png", "image/jpeg", "image/webp"]
+    width: int
+    height: int
+
+
 class KnowledgeSegmentSummaryResponse(_StrictModel):
     content: str
     created_at: datetime
@@ -784,6 +963,7 @@ class KnowledgeSegmentDetailResponse(_StrictModel):
     children_total: int
     child_page: int
     children: list[KnowledgeSegmentChildResponse]
+    attachments: list[KnowledgeSegmentAttachmentResponse]
     summary: KnowledgeSegmentSummaryResponse | None
     request_id: str
 
@@ -861,6 +1041,10 @@ def _task_progress_response(progress: KnowledgeTaskProgress | None) -> Knowledge
 
 def _document_response(view: KnowledgeDocumentView) -> KnowledgeDocumentItemResponse:
     return KnowledgeDocumentItemResponse(
+        parsing_profile=view.parsing_profile,
+        parse_warnings=list(view.parse_warnings),
+        chunk_size_unit=view.parsing_profile.chunk.unit if view.parsing_profile else "character",
+        tokenizer_profile_id=view.parsing_profile.chunk.tokenizer_profile_id if view.parsing_profile else None,
         id=view.id,
         project_id=view.project_id,
         knowledge_base_id=view.knowledge_base_id,
@@ -886,6 +1070,7 @@ def _document_response(view: KnowledgeDocumentView) -> KnowledgeDocumentItemResp
         error_message=view.error_message,
         delete_error=view.delete_error,
         task_progress=_task_progress_response(view.task_progress),
+        content_initialized=view.content_initialized,
         created_at=view.created_at,
         updated_at=view.updated_at,
     )
@@ -939,6 +1124,17 @@ async def list_knowledge_model_options(
         summary_model=KnowledgeSummaryModelResponse(model_name=summary_model.model_name, display_name=summary_model.display_name) if summary_model is not None else None,
         request_id=context.request_id,
     )
+
+
+@project_router.get("/file-capabilities", response_model=FileCapabilities)
+async def knowledge_file_capabilities(
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_read)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+) -> FileCapabilities:
+    try:
+        return await module.file_capabilities(authority=_knowledge_read_authority(context))
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
 
 
 @project_router.get("/health", response_model=KnowledgeHealthResponse)
@@ -1263,6 +1459,8 @@ async def upload_knowledge_document(
     context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
     file: Annotated[UploadFile, File()],
+    processing_profile: Annotated[str | None, Form()] = None,
+    expected_preview_fingerprint: Annotated[str | None, Form()] = None,
     name: Annotated[str | None, Form()] = None,
     chunk_size: Annotated[int, Form()] = 1000,
     chunk_overlap: Annotated[int, Form()] = 100,
@@ -1284,6 +1482,25 @@ async def upload_knowledge_document(
         )
     original_name = file.filename or ""
     display_name = name.strip() if name and name.strip() else original_name
+    form = await request.form()
+    try:
+        parameters, expected_preview_fingerprint = multipart_processing_options(
+            raw_profile=processing_profile,
+            expected_fingerprint=expected_preview_fingerprint,
+            form_keys=set(form),
+            legacy_values={
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "chunk_separator": chunk_separator,
+                "remove_extra_spaces": remove_extra_spaces,
+                "remove_urls_emails": remove_urls_emails,
+                "chunking_mode": chunking_mode,
+                "child_chunk_size": child_chunk_size,
+                "child_chunk_separator": child_chunk_separator,
+            },
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
     staging_path, size_bytes = await _stage_upload_to_temp(
         file,
         module.settings.upload_max_bytes,
@@ -1298,6 +1515,8 @@ async def upload_knowledge_document(
                 original_name=original_name,
                 source_path=staging_path,
                 size_bytes=size_bytes,
+                processing_profile=parameters,
+                expected_preview_fingerprint=expected_preview_fingerprint,
                 media_type=file.content_type,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
@@ -1323,6 +1542,8 @@ async def preview_knowledge_chunks(
     context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
     module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
     file: Annotated[UploadFile, File()],
+    processing_profile: Annotated[str | None, Form()] = None,
+    expected_preview_fingerprint: Annotated[str | None, Form()] = None,
     chunk_size: Annotated[int, Form()] = 1000,
     chunk_overlap: Annotated[int, Form()] = 100,
     chunk_separator: Annotated[str, Form()] = KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR,
@@ -1340,6 +1561,25 @@ async def preview_knowledge_chunks(
             KnowledgeError(KNOWLEDGE_INVALID_REQUEST, f"文件大小超过上限 {module.settings.upload_max_bytes} 字节"),
             context.request_id,
         )
+    form = await request.form()
+    try:
+        parameters, expected_preview_fingerprint = multipart_processing_options(
+            raw_profile=processing_profile,
+            expected_fingerprint=expected_preview_fingerprint,
+            form_keys=set(form),
+            legacy_values={
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "chunk_separator": chunk_separator,
+                "remove_extra_spaces": remove_extra_spaces,
+                "remove_urls_emails": remove_urls_emails,
+                "chunking_mode": chunking_mode,
+                "child_chunk_size": child_chunk_size,
+                "child_chunk_separator": child_chunk_separator,
+            },
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
     staging_path, size_bytes = await _stage_upload_to_temp(
         file,
         module.settings.upload_max_bytes,
@@ -1351,6 +1591,8 @@ async def preview_knowledge_chunks(
                 original_name=file.filename or "",
                 source_path=staging_path,
                 size_bytes=size_bytes,
+                processing_profile=parameters,
+                expected_preview_fingerprint=expected_preview_fingerprint,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 chunk_separator=chunk_separator,
@@ -1367,16 +1609,7 @@ async def preview_knowledge_chunks(
     finally:
         await _remove_request_temp_path(staging_path)
     return KnowledgeChunkPreviewResponse(
-        items=[
-            KnowledgeChunkPreviewItemResponse(
-                position=chunk.position,
-                content=chunk.content,
-                word_count=chunk.word_count,
-                child_contents=list(chunk.child_contents),
-            )
-            for chunk in preview.chunks
-        ],
-        total=preview.total,
+        **_preview_response_payload(preview),
         request_id=context.request_id,
     )
 
@@ -1425,6 +1658,39 @@ async def get_knowledge_document(
     return KnowledgeDocumentMutationResponse(item=_document_response(view), request_id=context.request_id)
 
 
+@project_router.get(
+    "/documents/{document_id}/attachments",
+    response_model=KnowledgeDocumentAttachmentListResponse,
+)
+async def list_knowledge_document_attachments(
+    document_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+) -> KnowledgeDocumentAttachmentListResponse:
+    try:
+        attachments, document_version = await module.list_document_attachments(
+            context.project_id,
+            document_id,
+            authority=_knowledge_edit_authority(context),
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
+    return KnowledgeDocumentAttachmentListResponse(
+        items=[
+            KnowledgeDocumentAttachmentItemResponse(
+                attachment_id=attachment.attachment_id,
+                ref=attachment.ref,
+                media_type=attachment.media_type,
+                width=attachment.width,
+                height=attachment.height,
+            )
+            for attachment in attachments
+        ],
+        document_version=document_version,
+        request_id=context.request_id,
+    )
+
+
 @project_router.get("/documents/{document_id}/download")
 async def download_knowledge_document(
     document_id: uuid.UUID,
@@ -1449,6 +1715,44 @@ async def download_knowledge_document(
         path=target_path,
         filename=view.original_name,
         media_type=view.media_type or "application/octet-stream",
+    )
+
+
+@project_router.get("/documents/{document_id}/segments/{segment_id}/attachments/{attachment_id}")
+async def download_knowledge_segment_attachment(
+    document_id: uuid.UUID,
+    segment_id: uuid.UUID,
+    attachment_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_read)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+    expected_document_version: Annotated[int, Query(ge=1)],
+    expected_content_digest: Annotated[str, Query(pattern="^[0-9a-f]{64}$")],
+) -> FileResponse:
+    target_path = await _new_request_temp_path()
+    try:
+        metadata = await module.download_segment_attachment(
+            context.project_id,
+            document_id,
+            segment_id,
+            attachment_id,
+            target_path,
+            expected_document_version=expected_document_version,
+            expected_content_digest=expected_content_digest,
+            authority=_knowledge_read_authority(context),
+        )
+    except KnowledgeError as error:
+        await _remove_request_temp_path(target_path)
+        raise knowledge_http_exception(error, context.request_id) from None
+    except BaseException:
+        await _remove_request_temp_path(target_path)
+        raise
+    return _TempFileResponse(
+        path=target_path,
+        media_type=metadata.media_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -1506,6 +1810,8 @@ async def retry_knowledge_document(
 def _reparse_request(body: KnowledgeDocumentReparseRequest) -> KnowledgeReparseRequest:
     return KnowledgeReparseRequest(
         expected_version=body.expected_version,
+        processing_profile=processing_parameters(body.model_dump(include=body.model_fields_set & _LEGACY_PROCESSING_FIELDS.keys()), body.processing_profile) if body.processing_profile is not None else None,
+        expected_preview_fingerprint=body.expected_preview_fingerprint,
         chunk_size=body.chunk_size,
         chunk_overlap=body.chunk_overlap,
         chunk_separator=body.chunk_separator,
@@ -1537,16 +1843,7 @@ async def preview_knowledge_document_reparse(
         raise knowledge_http_exception(error, context.request_id) from None
     return KnowledgeReparsePreviewResponse(
         document_version=previewed.document_version,
-        items=[
-            KnowledgeChunkPreviewItemResponse(
-                position=chunk.position,
-                content=chunk.content,
-                word_count=chunk.word_count,
-                child_contents=list(chunk.child_contents),
-            )
-            for chunk in previewed.preview.chunks
-        ],
-        total=previewed.preview.total,
+        **_preview_response_payload(previewed.preview),
         request_id=context.request_id,
     )
 
@@ -1725,6 +2022,8 @@ def _segment_response(view: KnowledgeSegmentView) -> KnowledgeSegmentItemRespons
         hit_count=view.hit_count,
         source_position=view.source_position,
         created_at=view.created_at,
+        token_count=view.token_count,
+        source_spans=[KnowledgePreviewSourceSpanResponse(**span.model_dump(mode="json")) for span in view.source_spans],
     )
 
 
@@ -1791,6 +2090,46 @@ async def get_knowledge_segment_detail(
     except KnowledgeError as error:
         raise knowledge_http_exception(error, context.request_id) from None
     return _segment_detail_response(detail, context.request_id)
+
+
+@project_router.get("/bases/{base_id}/documents/{document_id}/segments/{segment_id}/attachments/{attachment_id}")
+async def download_knowledge_citation_attachment(
+    base_id: uuid.UUID,
+    document_id: uuid.UUID,
+    segment_id: uuid.UUID,
+    attachment_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_read)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+    expected_document_version: Annotated[int, Query(ge=1)],
+    expected_content_digest: Annotated[str, Query(pattern="^[0-9a-f]{64}$")],
+) -> FileResponse:
+    target_path = await _new_request_temp_path()
+    try:
+        metadata = await module.download_citation_attachment(
+            context.project_id,
+            base_id,
+            document_id,
+            segment_id,
+            attachment_id,
+            target_path,
+            expected_document_version=expected_document_version,
+            expected_content_digest=expected_content_digest,
+            authority=_knowledge_read_authority(context),
+        )
+    except KnowledgeError as error:
+        await _remove_request_temp_path(target_path)
+        raise knowledge_http_exception(error, context.request_id) from None
+    except BaseException:
+        await _remove_request_temp_path(target_path)
+        raise
+    return _TempFileResponse(
+        path=target_path,
+        media_type=metadata.media_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @project_router.get("/bases/{base_id}/queries", response_model=KnowledgeQueryListResponse)
@@ -1926,6 +2265,17 @@ def _segment_detail_response(detail: KnowledgeSegmentDetail, request_id: str) ->
             )
             for child in detail.children
         ],
+        attachments=[
+            KnowledgeSegmentAttachmentResponse(
+                attachment_id=attachment.attachment_id,
+                ref=attachment.ref,
+                alt_text=attachment.alt_text,
+                media_type=attachment.media_type,
+                width=attachment.width,
+                height=attachment.height,
+            )
+            for attachment in detail.attachments
+        ],
         request_id=request_id,
     )
 
@@ -1940,6 +2290,8 @@ __all__ = [
     "KnowledgeDocumentBatchDeleteRequest",
     "KnowledgeDocumentBatchResponse",
     "KnowledgeDocumentBatchStatusRequest",
+    "KnowledgeDocumentAttachmentItemResponse",
+    "KnowledgeDocumentAttachmentListResponse",
     "KnowledgeDocumentItemResponse",
     "KnowledgeDocumentListResponse",
     "KnowledgeBaseFilterFieldsResponse",

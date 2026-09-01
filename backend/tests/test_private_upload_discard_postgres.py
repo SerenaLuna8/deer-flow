@@ -567,3 +567,57 @@ async def test_delete_first_makes_strict_upload_admission_reject_whole_request(
                 )
     finally:
         await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_private_discard_and_reconcile_preserve_knowledge_and_skill_axes(migrated_postgres_database_url: str) -> None:
+    from actweave_knowledge.persistence.models import KnowledgeBaseRow, KnowledgeDocumentRow
+    from support.skill_version_fixture import SealedSkillVersionFixture, assemble_and_seal_skill_version
+
+    from app.knowledge.quota_port import HostKnowledgeStorageQuotaPort
+    from app.shared_assets.skill_version_facts import skill_version_archive_facts
+    from deerflow.persistence.shared_assets import SkillRow, SkillVersionRow
+
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    quotas = QuotaService(seed.factory, QuotaConfig(), source_ref_hasher=_quota_source_ref)
+    enforcer = ProjectQuotaEnforcer(quotas)
+    quota = HostKnowledgeStorageQuotaPort(quotas)
+    service = PrivateFileService(seed.factory, quota=enforcer)
+    thread_id = str(uuid.uuid4())
+    project_id = seed.owner_a.project_id
+    base_id, document_id, skill_id, version_id = (uuid.uuid4() for _ in range(4))
+    try:
+        await _add_thread(seed, thread_id)
+        upload = await _upload(seed, service, thread_id=thread_id, content=b"private", name="mixed.txt")
+        async with seed.factory() as session, session.begin():
+            session.add(KnowledgeBaseRow(id=base_id, project_id=project_id, name="Quota Base"))
+            await session.flush()
+            session.add(KnowledgeDocumentRow(id=document_id, project_id=project_id, knowledge_base_id=base_id, name="source", original_name="source.txt", storage_key=f"source/{document_id}", size_bytes=8))
+            await session.flush()
+            await quota.reserve(session, project_id=project_id, object_id=document_id, size_bytes=8)
+            document = await session.get(KnowledgeDocumentRow, document_id)
+            document.upload_state = "stored"
+            await quota.commit(session, object_id=document_id)
+            session.add(SkillRow(id=skill_id, scope="project", project_id=project_id, slug=f"mixed-{skill_id.hex}", display_name="Mixed quota", created_by_user_id=str(seed.owner_a.user_id)))
+            await session.flush()
+            checksum = hashlib.sha256(b"skill").hexdigest()
+            facts = skill_version_archive_facts((("SKILL.md", checksum, 5),))
+            session.add(SkillVersionRow(id=version_id, skill_id=skill_id, version_number=1, scan_decision="allow", payload_checksum=facts.payload_checksum, file_count=1, content_size_bytes=5, created_by_user_id=str(seed.owner_a.user_id)))
+            await session.flush()
+            await assemble_and_seal_skill_version(
+                session, SealedSkillVersionFixture(version_id=version_id, path="SKILL.md", media_type="text/markdown", content=b"skill", sha256=checksum, payload_checksum=facts.payload_checksum, file_count=1, content_size_bytes=5)
+            )
+            await enforcer.reserve_skill_version(session, project_id, version_id=version_id, size=5)
+            await enforcer.reconcile_project_storage(session, project_id)
+        before = await _stored_state(seed, file_id=upload.id)
+        assert before.counter[:2] == (8, 12)
+        await service.delete_ready(seed.owner_a, thread_id=thread_id, file_id=upload.id, only_if_unreferenced=True)
+        for _ in range(2):
+            async with seed.factory() as session, session.begin():
+                await enforcer.reconcile_project_storage(session, project_id)
+        after = await _stored_state(seed, file_id=upload.id)
+        assert after.file is None and after.counter[:2] == (8, 5)
+        assert sum(row[1] for row in after.ledger) == 13
+    finally:
+        await seed.engine.dispose()

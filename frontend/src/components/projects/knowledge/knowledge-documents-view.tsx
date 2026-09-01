@@ -87,7 +87,12 @@ import type {
   KnowledgeDocumentSort,
   KnowledgeNavigationState,
 } from "@/core/knowledge/navigation";
+import {
+  parseWarningSummary,
+  processingUnitLabel,
+} from "@/core/knowledge/processing-profile";
 import { knowledgeQueryKey } from "@/core/knowledge/query-keys";
+import { formatKnowledgeSourcePosition } from "@/core/knowledge/source-position";
 import {
   DEFAULT_CHILD_CHUNK_SEPARATOR,
   DEFAULT_CHUNK_SEPARATOR,
@@ -212,6 +217,79 @@ function TaskProgressLine({ progress }: { progress: KnowledgeTaskProgress }) {
               )
             : labels.retryWaitSoon}
         </span>
+      ) : null}
+    </div>
+  );
+}
+
+function DocumentProcessingFacts({
+  document,
+}: {
+  document: KnowledgeDocumentItem;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge;
+  const unit = processingUnitLabel(document.parsing_profile);
+  const unitText =
+    unit === "knowledgeTokens"
+      ? labels.wizard.knowledgeTokenShort
+      : labels.wizard.characterUnit;
+  const warnings = parseWarningSummary(document.parse_warnings);
+  const chunkSize = document.parsing_profile?.chunk.size ?? document.chunk_size;
+  const tokenizerProfileId =
+    document.parsing_profile?.chunk.unit === "token"
+      ? document.parsing_profile.chunk.tokenizer_profile_id
+      : null;
+  const warningText = (code: string, fallback: string): string =>
+    labels.documents.warningMessages[
+      code as keyof typeof labels.documents.warningMessages
+    ] ?? fallback;
+  return (
+    <div
+      className="text-muted-foreground mt-1 space-y-0.5 text-xs leading-4"
+      data-testid="knowledge-document-processing-facts"
+    >
+      <p>
+        {chunkSize.toLocaleString()} {unitText}
+        {document.parsing_profile === null ? (
+          <> · {labels.documents.legacyProfile}</>
+        ) : (
+          <>
+            {document.parsing_profile.chunk.unit === "token" &&
+            tokenizerProfileId
+              ? ` · ${tokenizerProfileId}`
+              : ""}
+            {` · ${labels.documents.parserProfile(
+              document.parsing_profile.parse.etl_type,
+              document.parsing_profile.parse.extractor_id,
+              document.parsing_profile.parse.extractor_version,
+            )}`}
+          </>
+        )}
+      </p>
+      {warnings.total > 0 ? (
+        <div className="text-amber-700 dark:text-amber-300">
+          <p>
+            {labels.documents.parsingNotices(warnings.total)}
+            {warnings.imageFailures > 0
+              ? ` · ${labels.documents.imageFailures(warnings.imageFailures)}`
+              : ""}
+          </p>
+          <ul className="list-inside list-disc">
+            {document.parse_warnings.map((warning, index) => {
+              const position = formatKnowledgeSourcePosition(
+                warning.source_position,
+                labels.sourcePosition,
+              );
+              return (
+                <li key={`${warning.code}:${index}`}>
+                  {warningText(warning.code, warning.message)}
+                  {position ? ` · ${position}` : ""}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       ) : null}
     </div>
   );
@@ -798,6 +876,7 @@ function DocumentsTable({
                             {document.original_name}
                           </span>
                         ) : null}
+                        <DocumentProcessingFacts document={document} />
                       </div>
                     </div>
                   </td>
@@ -877,13 +956,15 @@ function DocumentsTable({
                             align="end"
                             className="w-48 rounded-lg"
                           >
-                            {document.status === "ready" ? (
+                            {document.content_initialized ? (
                               <DropdownMenuItem
                                 className="text-[13px]"
                                 onSelect={() => onBrowse(document)}
                               >
                                 <ListTreeIcon aria-hidden className="size-4" />
-                                {labels.documents.viewSegments}
+                                {document.status === "ready"
+                                  ? labels.documents.viewSegments
+                                  : labels.documents.viewPublishedSegments}
                               </DropdownMenuItem>
                             ) : null}
                             {document.status !== "uploading" &&
@@ -1865,6 +1946,11 @@ function ReparseDocumentDialog({
             {labels.documents.reparseWarning}
           </DialogDescription>
         </DialogHeader>
+        {document.chunk_size_unit === "character" ? (
+          <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+            {labels.documents.reparseLegacyUnitWarning}
+          </p>
+        ) : null}
         <form
           className="grid gap-4"
           onSubmit={(event) => {
@@ -1875,7 +1961,7 @@ function ReparseDocumentDialog({
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
-                {labels.documents.chunkSizeLabel}
+                {labels.wizard.chunkSizeTokenLabel}
               </span>
               <Input
                 className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
@@ -1889,7 +1975,7 @@ function ReparseDocumentDialog({
             </label>
             <label className="grid gap-1.5 text-[13px]">
               <span className="font-medium">
-                {labels.documents.chunkOverlapLabel}
+                {labels.wizard.chunkOverlapTokenLabel}
               </span>
               <Input
                 className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
@@ -1945,7 +2031,7 @@ function ReparseDocumentDialog({
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
-                  {labels.documents.childChunkSizeLabel}
+                  {labels.wizard.childChunkSizeTokenLabel}
                 </span>
                 <Input
                   className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
@@ -2029,6 +2115,13 @@ function ReparseDocumentDialog({
                     previewData.total,
                   )}
                 </p>
+                {previewData.omitted_preview_attachment_count > 0 ? (
+                  <p className="text-muted-foreground text-xs">
+                    {labels.documents.reparsePreviewAttachmentsOmitted(
+                      previewData.omitted_preview_attachment_count,
+                    )}
+                  </p>
+                ) : null}
                 {previewData.items.map((item) => (
                   <div key={item.position} className="space-y-1">
                     <p className="text-muted-foreground text-xs font-medium">

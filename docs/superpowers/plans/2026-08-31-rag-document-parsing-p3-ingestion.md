@@ -1,6 +1,6 @@
 # P3 Token 切分与摄取接入 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 让正式摄取、预览、人工分段与重处理使用同一份可追踪 Markdown/Token 派生结果。
 
@@ -36,7 +36,7 @@
 - Consumes: P1 的规范化 Markdown；总计划 `ChunkProfile`。
 - Produces: `count_knowledge_tokens(text, *, profile_id='knowledge-cl100k-v1') -> int`；`build_index_text(markdown: str) -> str`；`tokenizer_fingerprint() -> str`。三者不能读网络或宿主配置。
 
-- [ ] **1. 写两个失败测试。**
+- [x] **1. 写两个失败测试。**
 
 ```python
 from actweave_knowledge.ingestion.tokenizer import count_knowledge_tokens
@@ -54,7 +54,7 @@ def test_index_text_keeps_code_and_labels_but_not_attachment_uri():
     assert 'knowledge-attachment:' not in indexed and 'a' * 64 not in indexed
 ```
 
-- [ ] **2. 运行 red。** 工作目录 `backend/`：
+- [x] **2. 运行 red。** 工作目录 `backend/`：
 
 ```bash
 env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_knowledge_tokenizer.py tests/knowledge/test_index_text.py -q
@@ -62,7 +62,7 @@ env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_knowledge_to
 
 预期新模块缺失或实际断言失败；依赖安装错误不能冒充功能 red。
 
-- [ ] **3. 构建时导出词表，运行时只读取本地资源。** 当前 lock 已有 tiktoken 0.12.0 和 markdown-it-py 4.2.0，给 knowledge 包声明直接依赖，不盲目降级其它包。准备脚本可在显式安装/镜像构建阶段读取 tiktoken 的 cl100k 配置，导出 base64-token/rank 文本、pat_str、special_tokens、文件 SHA-256；运行时不调用 `get_encoding()` 触发隐式下载。
+- [x] **3. 构建时导出词表，运行时只读取本地资源。** 当前 lock 已有 tiktoken 0.12.0 和 markdown-it-py 4.2.0，给 knowledge 包声明直接依赖，不盲目降级其它包。准备脚本可在显式安装/镜像构建阶段读取 tiktoken 的 cl100k 配置，导出 base64-token/rank 文本、pat_str、special_tokens、文件 SHA-256；运行时不调用 `get_encoding()` 触发隐式下载。
 
 准备脚本的核心输出逻辑：
 
@@ -116,7 +116,7 @@ def count_knowledge_tokens(text: str, *, profile_id: str = 'knowledge-cl100k-v1'
 
 将文件缺失、JSON损坏、hash错映射为现有 KnowledgeError 的安全 reason_code，不暴露路径。新增 `tokenizer_fingerprint() -> str` 返回规范 manifest 的 SHA-256，单独进入 ChunkProfile，不进入 ParseProfile；从本任务起，共用 `make_chunk_profile` 的 token 模式默认使用该真实摘要，character 模式的Tokenizer字段为null。
 
-- [ ] **4. 用 Markdown token tree 生成 index_text。** 使用 `MarkdownIt('commonmark', {'html': False}).enable('table')`；保留 inline 的 text/code_inline、fence/code_block 内容、图像非空 alt、软/硬换行；link_open/image 的 href/src 不进入结果。按块用换行连接并规范空行；不要对正文运行 `<.*?>` 删除。为表格、链接文本、字面 `<IP>`、恶意 HTML 字面量补充测试。
+- [x] **4. 用 Markdown token tree 生成 index_text。** 使用 `MarkdownIt('commonmark', {'html': False}).enable('table')`；保留 inline 的 text/code_inline、fence/code_block 内容、图像非空 alt、软/硬换行；link_open/image 的 href/src 不进入结果。按块用换行连接并规范空行；不要对正文运行 `<.*?>` 删除。为表格、链接文本、字面 `<IP>`、恶意 HTML 字面量补充测试。
 
 在同模块新增 `has_indexable_source_text(documents: tuple[Document,...]) -> bool`：按原始source span覆盖的节点判定真实非空文字，排除image节点的alt、context_prefix及生成的失败占位。它只决定文档是否可进入文本索引，不替代index_text。P3-T4/T5在分段和调用Embedding前使用它；纯图片即使有“本页图片”alt也必须返回 `NO_INDEXABLE_TEXT`。
 
@@ -130,20 +130,21 @@ def test_generated_image_alt_cannot_turn_scan_into_searchable_text():
         SourceSpan(block_id='page:1:image:1', start=0, end=len(markdown), location={'page': 1}),))
     assert not has_indexable_source_text((image_only,))
 ```
-- [ ] **5. 跑 green 和资源故障测试。** 新进程、空用户缓存且阻断网络连接时可 count；删资源或改一字节时必须失败，不下载。只有显式 prepare 脚本在构建阶段可联网。
+- [x] **5. 跑 green 和资源故障测试。** 新进程、空用户缓存且阻断网络连接时可 count；删资源或改一字节时必须失败，不下载。只有显式 prepare 脚本在构建阶段可联网。
 
 ```bash
 PYTHONPATH=. uv run python scripts/prepare_knowledge_tokenizer.py --output packages/knowledge/actweave_knowledge/ingestion/tokenizer_data
 env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_knowledge_tokenizer.py tests/knowledge/test_index_text.py -q
 ```
 
-- [ ] **6. 检查并交付本任务。** 覆盖 A10/A11/A24；检查资源 manifest 无本机路径，记录词表摘要和 lock。授权提交时仅暂存本任务 Files。
+- [x] **6. 检查并交付本任务。** 覆盖 A10/A11/A24；检查资源 manifest 无本机路径，记录词表摘要和 lock。授权提交时仅暂存本任务 Files。
 
 ## P3-T2：结构保护、来源映射与父子 Token 分段
 
 **Files**
 
 - Modify: `backend/packages/knowledge/actweave_knowledge/ingestion/splitter.py`、`cleaner.py`、`__init__.py`。
+- Modify: `backend/packages/knowledge/actweave_knowledge/ingestion/pipeline.py`、`preview.py`（仅现有 `draft.children` 的文本投影改为 `ChildDraft.content`，不提前切换摄取/预览流程）。
 - Create: `backend/packages/knowledge/actweave_knowledge/ingestion/structure.py`、`source_mapping.py`。
 - Test: `backend/tests/knowledge/test_markdown_chunking.py`；扩展 `test_ingestion.py` 中旧字符切分门。
 
@@ -152,7 +153,7 @@ env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_knowledge_to
 - Consumes: `Document`、`ChunkProfile`、P3-T1 的计量与 index_text。
 - Produces: 总计划定义的 `SegmentDraft`、`ChildDraft` 和 `split_documents`。内部 `StructureUnit(content, source_spans, heading_path, kind, attachments)` 只在 structure.py 使用，不扩大公开 DTO。
 
-- [ ] **1. 先写结构回归测试。**
+- [x] **1. 先写结构回归测试。**
 
 ```python
 from actweave_knowledge.ingestion.splitter import split_documents
@@ -178,13 +179,13 @@ def test_long_code_preserves_generics_and_balances_fences():
     assert sum(d.content.count('List<int> values;') for d in drafts) == 300
 ```
 
-- [ ] **2. 跑 red。**
+- [x] **2. 跑 red。**
 
 ```bash
 env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_markdown_chunking.py -q
 ```
 
-- [ ] **3. 实现结构单元和偏移映射。** Markdown parser 的 token.map 转成原规范字符串的字符 offset；从 P1 SourceSpan 取交集，保留真实来源，不附整章位置。新增映射函数及测试：
+- [x] **3. 实现结构单元和偏移映射。** Markdown parser 的 token.map 转成原规范字符串的字符 offset；从 P1 SourceSpan 取交集，保留真实来源，不附整章位置。新增映射函数及测试：
 
 ```python
 from actweave_knowledge.extraction.contracts import SourceSpan
@@ -200,7 +201,7 @@ def clip_source_spans(spans: tuple[SourceSpan, ...], start: int, end: int) -> tu
 
 测试三个段落合并后跨第二段切开，左段只含第一/第二来源，右段只含第二/第三。插入标题/表头时单独加 `role='context_prefix'`，指向原标题来源并修正后续偏移。
 
-- [ ] **4. 实现双预算打包。** 每次追加结构单元先构造“标题前缀+正文+必要闭合语法”，同时检查展示文字 Token、index_text Token 和字符数。超限则 flush 当前段；单单元超限按表格行→字段、代码行→Unicode边界、普通段落→用户separator→fallback逐级拆；图片ref不可拆。图片纯ref且没有有效 index_text 不生成可索引段。
+- [x] **4. 实现双预算打包。** 每次追加结构单元先构造“标题前缀+正文+必要闭合语法”，同时检查展示文字 Token、index_text Token 和字符数。超限则 flush 当前段；单单元超限按表格行→字段、代码行→Unicode边界、普通段落→用户separator→fallback逐级拆；图片ref不可拆。图片纯ref且没有有效 index_text 不生成可索引段。
 
 预算判定的共享函数：
 
@@ -213,9 +214,11 @@ def fits_chunk(markdown: str, token_limit: int) -> bool:
 
 如果必要的标题/表头前缀本身已超过预算，返回明确的参数/资源错误及安全原因 `CONTEXT_PREFIX_EXCEEDS_BUDGET`，提示增大分段预算或调整来源内容；不能截断列名、标题路径后伪装为完整结果。增加该样例验证有限步骤内终止、无部分发布。
 
-- [ ] **5. 实现重叠和 children。** 普通文本完整单位的后缀最多 overlap Token；表格行/PDF页间不跨界重叠；防止只含carry-over的新段。子块在父正文内部使用 child_separator 与子Token预算，零重叠，index_text非空；parent_child父段附图，child不重复独立存附件。
-- [ ] **6. 保留清洗及旧 profile。** `character` 继续走旧算法；新 `token` 不重解释旧值。URL/email清洗仅作用于可修改的普通文本节点，保留代码及内部ref。父/子separator只解码 `\\n/\\t/\\r`，中文自定义字符原样保存。
-- [ ] **7. 跑 green 和原分段门。**
+- [x] **5. 实现重叠和 children。** 普通文本完整单位的后缀最多 overlap Token；表格行/PDF页间不跨界重叠；防止只含carry-over的新段。子块在父正文内部使用 child_separator 与子Token预算，零重叠，index_text非空；parent_child父段附图，child不重复独立存附件。
+- [x] **6. 保留清洗及旧 profile。** `character` 继续走旧算法；新 `token` 不重解释旧值。URL/email清洗仅作用于可修改的普通文本节点，保留代码及内部ref。父/子separator只解码 `\\n/\\t/\\r`，中文自定义字符原样保存。
+沿用唯一 `SegmentDraft`，其 `children` 在所有调用路径始终为 `tuple[ChildDraft,...]`。旧 `split_blocks/attach_children` 入口将旧字符算法输出的字符串适配成 `ChildDraft`；独立旧 `split_child_chunks` 字符串函数可保留。同步 pipeline/preview 的既有文本投影及测试中的内容断言，不新增第二个 `LegacySegmentDraft`，也不把同一字段声明为字符串/对象联合。旧内容、切分参数和发布行为不因这次类型接线改变；真正的新解析与索引输入切换留给 P3-T4/T5。
+
+- [x] **7. 跑 green 和原分段门。**
 
 ```bash
 env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_markdown_chunking.py -q
@@ -224,7 +227,7 @@ PYTHONPATH=. uv run python tests/support/core_gate_plugin.py tests/knowledge/tes
 
 第一条为纯分段测试；第二条由现有 core runner 加载测试数据库配置并使用随机数据库 fixtures，要求零未说明跳过。最终有数据库的整体覆盖在 P4 运行。
 
-- [ ] **8. 检查并交付。** A09/A10/A11/A29；所有新增 SourceSpan/AttachmentOccurrence 字段与总计划一致。
+- [x] **8. 检查并交付。** A09/A10/A11/A29；所有新增 SourceSpan/AttachmentOccurrence 字段与总计划一致。
 
 ## P3-T3：配置快照、动态能力与文件身份
 
@@ -240,10 +243,12 @@ PYTHONPATH=. uv run python tests/support/core_gate_plugin.py tests/knowledge/tes
 **Interfaces**
 
 - Consumes: P1 registry、P2 schema、M11 PostgreSQL settings、P3-T1 tokenizer fingerprint。
-- Produces: `preview_fingerprint(...)`、`resolve_processing_profile(settings, user_parameters, registry) -> ProcessingProfile`；总计划 §3.4 的 HTTP DTO。
+- Produces: `preview_fingerprint(...)`、`resolve_processing_profile(settings, user_parameters, registry, *, extension) -> ProcessingProfile`；总计划 §3.4 的 HTTP DTO。
 
-- [ ] **1. 核对 M11 入口已存在并通过其定向测试。** `load_knowledge_settings_from_db` 是配置读取入口，`app/knowledge/config.py` 仅重导出，不再从 YAML 建立第二权威；summary handler 已实现。运行 `PYTHONPATH=. uv run python tests/support/core_gate_plugin.py tests/test_knowledge_settings_postgres.py -q`，记录基线提交；未满足则保留已完成的独立模块，不接通生产流程。
-- [ ] **2. 写 fingerprint red。**
+extension 是服务器已观察的原文件扩展名，显式 keyword-only 传入，不从用户 profile 猜测。用户 `processing_profile` 为严格扁平 ProcessingParameters：unit/mode/size/overlap/separator/child_size/child_separator/remove_extra_spaces/remove_urls_emails/header_rules；拒绝解析器、模型、存储身份和未知字段。系统设置请求/响应的现有 `app/knowledge_settings/models.py` 同步投影新增数据库字段，不另立配置 authority。
+
+- [x] **1. 核对 M11 入口已存在并通过其定向测试。** `load_knowledge_settings_from_db` 是配置读取入口，`app/knowledge/config.py` 仅重导出，不再从 YAML 建立第二权威；summary handler 已实现。运行 `PYTHONPATH=. uv run python tests/support/core_gate_plugin.py tests/test_knowledge_settings_postgres.py -q`，记录基线提交；未满足则保留已完成的独立模块，不接通生产流程。
+- [x] **2. 写 fingerprint red。**
 
 ```python
 from actweave_knowledge.extraction.contracts import ProcessingProfile
@@ -259,7 +264,7 @@ def test_preview_identity_binds_source_bytes_and_both_profiles():
     assert first != preview_fingerprint(source_sha256='a' * 64, extension='.pdf', profile=changed, capability_revision='r1')
 ```
 
-- [ ] **3. 跑 red 后实现规范摘要。**
+- [x] **3. 跑 red 后实现规范摘要。**
 
 ```python
 import hashlib
@@ -273,18 +278,20 @@ def preview_fingerprint(*, source_sha256, extension, profile, capability_revisio
 
 production函数补全总计划中的注解，并严格验证 source摘要与extension。上下游不在该函数里读文件；Gateway staging边读取边计算哈希，正式上传重新计算，不能相信客户端sha。
 
-- [ ] **4. 接入有效系统设置和能力响应。** settings新增 etl_type/extraction_cache_enabled；值从M11 PostgreSQL行 materialize，重启生效。能力revision组合P1解析资源fingerprint+P3Tokenizer/splitter能力；只影响file能力/预览，不把Tokenizer放入P2解析缓存键。GET能力在事务里复验shared_assets.read；缺少依赖格式available=false+稳定reason_code，必需格式不就绪阻止启用。
-- [ ] **5. 冻结上传/reparse/retry。** 服务器选择 extractor和版本，接收用户可配的分段/表头字段；同时传旧表单字段和processing_profile冲突字段则422，不静默决定优先级。收到expected_preview_fingerprint则核对后再创建uploading/PUT；未传则正常冻结当前配置。retry读取任务冻结profile；reparse新profile只有发布成功才写回Document。
+- [x] **4. 接入有效系统设置和能力响应。** settings新增 etl_type/extraction_cache_enabled；值从M11 PostgreSQL行 materialize，重启生效。能力revision组合P1解析资源fingerprint+P3Tokenizer/splitter能力；只影响file能力/预览，不把Tokenizer放入P2解析缓存键。GET能力在事务里复验shared_assets.read；缺少依赖格式available=false+稳定reason_code，必需格式不就绪阻止启用。
+
+宿主启动/启用探测必须实际通过 P1 `run_extraction` 执行固定微小本地样例，验证所选 OS 隔离确实能够启动；只检查 `bwrap` 文件存在或调用 `sandbox_command` 生成 argv 不足以证明权限可用。探测不得调用数据库、MinIO、模型或使用用户文档，临时目录由宿主清理；失败结果必须进入进程的能力/可用性状态。复用现有宿主启动与健康状态，不新增通用探测框架，也不在每次 GET 能力时反复启动解析器。Linux 默认 Docker 已实测为“binary 存在但命名空间 EPERM”，此情况必须显示不可用，实际请求仍由 P1 fail closed；启动可用性探测不替代完整离线隔离门禁。 已启用进程仅解析探测失败时保留已构造模块与不可用能力快照，禁止新的upload/preview/reparse解析准入；保留file-capabilities、已发布内容读取、reembed和retention。管理员尝试启用不具备必需解析能力的配置仍拒绝。存储失败沿用既有整个模块不可用边界。
+- [x] **5. 冻结上传/reparse/retry。** 服务器选择 extractor和版本，接收用户可配的分段/表头字段；同时传旧表单字段和processing_profile冲突字段则422，不静默决定优先级。收到expected_preview_fingerprint则核对后再创建uploading/PUT；未传则正常冻结当前配置。retry读取任务冻结profile；reparse新profile只有发布成功才写回Document。
 
 首次上传冻结在Document.parsing_profile（Document创建时写）；普通ingest task的reparse_settings仍NULL。显式reparse使用已有Task.reparse_settings，在原有chunk字段之外加入processing_profile完整结构与capability_revision；服务端校验旧chunk投影与chunk profile逐项一致。同步 `persistence/tasks.py` 的reparse参数校验与claim投影，不能只修改pipeline读取。重试从相同来源取值，禁止重新materialize当前系统ETL。已发布但无profile的历史文档仅按character显示/重嵌入；若历史待解析任务没有可复现的解析版本则要求显式reparse，不伪称能够复现旧解析。
-- [ ] **6. 测试headless与过期预览。** 使用现有upload fake store验证：文件B携带文件A fingerprint时Document数/对象数不增；无fingerprint正常入队；跨项目capability缓存不可复用；修改全局ETL后老queued任务仍使用原profile。
+- [x] **6. 测试headless与过期预览。** 使用现有upload fake store验证：文件B携带文件A fingerprint时Document数/对象数不增；无fingerprint正常入队；跨项目capability缓存不可复用；修改全局ETL后老queued任务仍使用原profile。
 
 ```bash
 env -u DATABASE_URL .venv/bin/python -m pytest tests/knowledge/test_parsing_profiles.py -q
 PYTHONPATH=. uv run python tests/support/core_gate_plugin.py tests/knowledge/test_file_capabilities.py tests/knowledge/test_upload.py tests/knowledge/test_host_config.py -q
 ```
 
-- [ ] **7. 检查交付。** A01/A13/A25/A30；同步backend/AGENTS.md中配置来源、分隔符和参数冻结说明。
+- [x] **7. 检查交付。** A01/A13/A25/A30；同步backend/AGENTS.md中配置来源、分隔符和参数冻结说明。
 
 ## P3-T4：无副作用预览接入
 
@@ -397,7 +404,7 @@ async def test_ingest_matches_preview_and_embeds_index_text(postgres_database_ur
         assert all('knowledge-attachment:' not in t for t in h.fake_model.calls[-1])
 ```
 
-- [ ] **2. 跑red，替换摄取阶段。** `_begin_processing`读取并验证已在准入时冻结的完整profile，不在执行时读取最新配置；reading_source后先检查缓存。miss则begin、传on_asset到run_extraction、complete；hit保留任务pin。缓存取回和解析前后都调用progress.ensure_claim_alive。normalize/split之后校验父段和子向量两种quota再请求Embedding。
+- [ ] **2. 跑red，替换摄取阶段。** `_begin_processing`读取并验证已在准入时冻结的完整profile，不在执行时读取最新配置；reading_source后先检查缓存。miss则begin、传on_asset到run_extraction；run返回时所有附件回调已结算，先关闭宿主解析临时目录，再调用complete写入Store独占的manifest临时目录，避免同时持有两份独立磁盘预算；hit保留任务pin。缓存取回和解析前后都调用progress.ensure_claim_alive。normalize/split之后校验父段和子向量两种quota再请求Embedding。
 - [ ] **3. 发布前构造所有派生值。** Parent/Child embedding输入只使用index_text；parent_child父向量仍NULL。每段word_count=len(content)，token_count按当前profile。内部表/属性名必须采用P2完成的schema，不再新增DDL。
 
 在现有发布事务内的行构造关键代码：
@@ -467,8 +474,8 @@ async def test_reembed_never_reextracts_or_changes_markdown(postgres_database_ur
 ```
 
 额外测试使用fake_model.rerank_calls（在harness中新增记录）：向reranker传入index_text，最终返回仍是带Markdown/逻辑图片ref的content且digest匹配。不要改现有rank融合、分数意义和预算算法。
-- [ ] **2. 跑red，复用派生函数到人工编辑。** 在Gateway授权之后校验content和允许引用的本Document附件；新index_text、tokens、children在Embedding前算好；每次真实model batch/retry复验权限；事务再锁Document检查generation，原子更换内容/附件关系/children/lexical。禁用不删向量/图片。
-- [ ] **3. 改reembed与reparse。** reembed用保存的index_text重新算向量，保留展示正文、source_spans、attachment bindings、parser/Tokenizer profile；禁止注入extractor/object_store。reparse用新确认profile，只有成功才替换全部内容与published_extraction_id；失败管理浏览可以读取旧published图片。
+- [ ] **2. 跑red，复用派生函数到人工编辑。** 在Gateway授权之后校验content和允许引用的本Document附件；新index_text、tokens、children在Embedding前算好；每次真实model batch/retry复验权限；事务再锁Document检查generation，原子更换内容/附件关系/children/lexical。用户自由替换的文字清空不可证明的 extraction source_spans，保留既有人工编辑标记，不为新文字编造原文件坐标；附件出现位置从编辑后的 Markdown 重新计算并验证当前 published extraction 归属。新增缩短替换、图片前插字、移除图片与手工新增的来源/偏移回归。禁用不删向量/图片。
+- [ ] **3. 改reembed与reparse。** reembed用保存的index_text重新算向量，保留展示正文、source_spans、attachment bindings、parser/Tokenizer profile；禁止注入extractor/object_store。历史 null/character profile 且新 index_text 为空的行，通过唯一兼容 Adapter 从已保存 content 确定性派生模型文本；检索/Reranker/摘要共用此兼容入口，不读原文件、不虚构旧解析器 fingerprint、不重解释字符参数。新增真正旧 parent/child 行 fixture 验证模型输入非空且 ID/正文/启停保持。reparse用新确认profile，只有成功才替换全部内容与published_extraction_id；失败管理浏览可以读取旧published图片。
 - [ ] **4. 接入M11派生契约。** 文本变化清除旧摘要并按库开关排队，新的摘要输入使用index_text；reembed不重新生成摘要，只重新嵌入已有摘要。缓存/附件标识不作为摘要正文，摘要不会替代引用原文。若M11实现名与计划不符，按其已通过测试的公开入口适配并更新Files记录，不能复制第二套调度。
 - [ ] **5. 保持检索授权和引文精确性。** 所有general/child/lexical候选查询同时选取content和index_text；rerank改读index_text，但统一终审继续校验实际content_digest和版本。新增source_spans仅安全投影，ToolMessage仍≤64KiB整段装包，禁止偷偷截断。
 - [ ] **6. 运行green和相关回归。**

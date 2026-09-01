@@ -54,6 +54,7 @@ from actweave_knowledge.retrieval import (
     KnowledgeSearchService,
     calculate_candidate_k,
 )
+from extraction_test_helpers import make_test_quota_port
 from fastapi import FastAPI
 from registry_helpers import (
     TEST_REGISTRY_API_KEY,
@@ -65,6 +66,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.knowledge import gateway
+from app.knowledge.composition import (
+    is_knowledge_project_active,
+    is_knowledge_project_pending_deletion,
+)
 from app.knowledge.model_port import RegistryKnowledgeModelPort
 from app.model_registry.secrets import protect_provider_api_key
 from app.projects.capabilities import Capability, capabilities_for
@@ -513,6 +518,37 @@ async def test_single_base_search_recalls_by_cosine_then_returns_reranked_top_k(
         assert first.knowledge_base_name.startswith("base-")
         assert first.document_name == "手册"
         assert first.segment_position == 3
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reranker_uses_index_text_but_hit_and_digest_keep_markdown(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        ref = "a" * 64
+        content = f"# 安装\n\n运行 `actweave up`。\n\n![机架](knowledge-attachment:{ref})"
+        project_id, _base_id, embedding_id, _rerank_id = await _seed_single_base(
+            harness,
+            segments=[(content, [1.0, 0.0, 0.0])],
+        )
+        async with harness.factory() as session, session.begin():
+            segment = await session.scalar(
+                select(KnowledgeSegmentRow).where(
+                    KnowledgeSegmentRow.project_id == project_id,
+                )
+            )
+            assert segment is not None
+            segment.index_text = "安装\n运行 actweave up。\n机架"
+
+        result = await harness.service.search(_request(project_id, top_k=1))
+
+        assert harness.client.embed_calls == [(embedding_id, ["如何安装产品"])]
+        assert harness.client.rerank_calls[0][2] == ["安装\n运行 actweave up。\n机架"]
+        assert result.hits[0].passage == content
+        assert result.citations[0].content_digest == hashlib.sha256(content.encode("utf-8")).hexdigest()
     finally:
         await harness.engine.dispose()
 
@@ -1439,6 +1475,9 @@ async def test_parent_child_recall_rolls_best_child_score_up_to_one_parent_candi
                     ("父块乙的完整内容", [("乙子一", [0.8, 0.6, 0.0])]),
                 ],
             )
+            parents = list((await session.scalars(select(KnowledgeSegmentRow).where(KnowledgeSegmentRow.knowledge_base_id == base.id))).all())
+            for parent in parents:
+                parent.index_text = f"父块索引{parent.position}"
         harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
 
         result = await harness.service.search(_request(project_id, top_k=4))
@@ -1449,7 +1488,7 @@ async def test_parent_child_recall_rolls_best_child_score_up_to_one_parent_candi
         assert [citation.segment_position for citation in result.citations] == [1, 2]
         # The reranker scored parent contents, not child chunks.
         (_, _, submitted, _) = harness.client.rerank_calls[0]
-        assert submitted == ["父块甲的完整内容", "父块乙的完整内容"]
+        assert submitted == ["父块索引1", "父块索引2"]
     finally:
         await harness.engine.dispose()
 
@@ -2485,6 +2524,9 @@ async def test_http_search_through_the_real_module_returns_reranked_citations(po
         # The reranker inverts the cosine order, proving both stages ran.
         scores = {"靠前但低分": 0.3, "靠后但高分": 0.9}
         module = KnowledgeModule(
+            project_active_check=is_knowledge_project_active,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
+            quota=make_test_quota_port(factory),
             settings=KnowledgeSettings(
                 enabled=True,
                 minio=KnowledgeMinioSettings(

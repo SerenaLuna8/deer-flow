@@ -39,6 +39,14 @@ const FIELD_COPY = {
       "Enable knowledge",
       "Allow projects to upload and search knowledge documents.",
     ],
+    etl_type: [
+      "Document parser",
+      "Local extraction engine used for new previews, uploads, and explicit reparses after services restart.",
+    ],
+    extraction_cache_enabled: [
+      "Cache extraction results",
+      "Reuse complete local extraction results when the source and parser profile are identical.",
+    ],
     worker_concurrency: [
       "Processing concurrency",
       "Concurrent document processing tasks per Worker (1–16).",
@@ -96,6 +104,14 @@ const FIELD_COPY = {
   },
   "zh-CN": {
     enabled: ["启用知识库", "允许项目上传与检索知识库文档。"],
+    etl_type: [
+      "文档解析器",
+      "服务重启后，用于新预览、上传及显式重新解析的本地提取引擎。",
+    ],
+    extraction_cache_enabled: [
+      "缓存提取结果",
+      "原文件和解析配置完全一致时，复用已完成的本地提取结果。",
+    ],
     worker_concurrency: [
       "处理并发数",
       "每个 Worker 同时处理的文档任务数（1–16）。",
@@ -333,7 +349,11 @@ function KnowledgeSettingsEditor({
   }
 
   function booleanField(
-    name: "enabled" | "minio_secure" | "query_cache_enabled",
+    name:
+      | "enabled"
+      | "extraction_cache_enabled"
+      | "minio_secure"
+      | "query_cache_enabled",
   ) {
     return (
       <FieldShell name={name} copy={copy[name]}>
@@ -460,6 +480,35 @@ function KnowledgeSettingsEditor({
           </p>
         )}
         {booleanField("enabled")}
+        <FieldShell name="etl_type" copy={copy.etl_type}>
+          <Select
+            value={draft.etl_type}
+            onValueChange={(value) =>
+              change(
+                "etl_type",
+                value as AdminKnowledgeSettingsDraft["etl_type"],
+              )
+            }
+            disabled={pending}
+          >
+            <SelectTrigger
+              id="knowledge-etl_type"
+              aria-describedby="knowledge-etl_type-hint"
+              className="h-9 w-full text-[13px]"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="dify">Dify</SelectItem>
+              <SelectItem value="unstructured_local">
+                {locale === "zh-CN"
+                  ? "本地 Unstructured"
+                  : "Local Unstructured"}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </FieldShell>
+        {booleanField("extraction_cache_enabled")}
         {NUMBER_FIELDS.slice(0, 2).map(numberField)}
         {(["minio_endpoint", "minio_bucket", "minio_access_key"] as const).map(
           (name) => (

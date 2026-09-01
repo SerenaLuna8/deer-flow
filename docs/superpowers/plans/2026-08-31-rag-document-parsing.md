@@ -33,10 +33,10 @@
 
 用户已要求生成执行计划。本计划按现有规格执行；前面讨论过的可选多模态 OCR 尚未写入规格，因此本核心计划不悄悄实现 OCR。已向用户询问是否纳入；若要求纳入，应先补充 OCR 模型、缓存和预览一致性契约，再加独立任务，不改写现有纯本地解析约束。
 
-当前 M11 仅部分 schema/契约存在，`app/knowledge/config.py` 仍读 YAML，`RegistryKnowledgeModelPort.generate_summary` 仍有未实现分支。不得把 M11 文档状态当作完成证据。相关任务见 [M11 计划归档](backup/2026-08-31-rag-knowledge-m11.md)。
+实施基线已在 2026-09-01 核实为 `8dc4e7667e69f6385987df67cca02d0a13d7acfc`，其中已合入 M11 的 `9f6bade2`。`app/knowledge/config.py` 现重导出 PostgreSQL 配置加载，Gateway/Worker 已装配数据库设置和摘要运行时，摘要生成、发布、重嵌入及管理配置界面已有实现。原先“仍读 YAML / 摘要未实现”的描述属于旧基线，不再作为实施前提；本轮仍须运行当前 checkout 的定向门，历史记录不能代替验证。相关任务见 [M11 计划归档](backup/2026-08-31-rag-knowledge-m11.md)。
 
 - P1 纯解析、数据类型、离线资源与样例测试可基于当前代码开展，不接通生产路径。
-- P2/P3/P4 接入前先完成 M11 既有计划中实际需要的 PostgreSQL 配置读取、摘要生命周期与管理配置界面，并记录新基线；不在本计划重新实施一套 M11。
+- P2/P3/P4 接入前验证该基线的 PostgreSQL 配置读取、摘要生命周期与管理配置界面；扩展既有实现，不重新实施一套 M11。
 - 若 M11 函数名或结构发生变化，更新本计划中的宿主接入位置及测试后再实施；不是在运行时动态猜测可用入口。
 - D01 按严格本地解析执行；API 服务不会作为“依赖缺失时的自动降级”。
 
@@ -156,7 +156,7 @@ preview_fingerprint(*, source_sha256: str, extension: str,
 
 现有预览响应保留 `total` 与 `chunks`；每个 chunk 保留 position/content/word_count/child_contents，并新增 token_count/source_spans/attachments（逻辑ref与alt，不含ID/URL）。顶层新增 `preview_fingerprint, source_sha256, effective_profile, warnings, preview_attachments, omitted_preview_attachment_count, table_sources`。`preview_attachments` 元素为 `ref, media_type, data_base64`，只允许安全缩略图类型；前端 Blob URL 不写回 API。`table_sources` 元素为 `sheet:str|None, header_mode:Literal['auto','none','explicit'], header_row:int|None, header_cells:list[str]`，仅为 CSV/Excel 的服务器表头诊断；无表格时为空列表，行号从 1 起。header_row 是当前auto候选或explicit选定的原始行号；none为null。header_cells保留原始表头值，来源为table_header的逐列source spans；它由解析结果投影，不由浏览器重新解析文件。
 
-新增上传/重解析参数：`processing_profile` 的用户可配字段（单位、分段参数、header_rules），可选 `expected_preview_fingerprint`。parser/model/storage 身份由服务器覆盖，不能接受客户端的任意 extractor_version 或对象位置。原有 chunk_size 等表单字段由 Gateway 统一映射，不提供两套冲突参数同时生效。
+新增上传/重解析参数：`processing_profile` 的用户可配字段（单位、分段参数、header_rules），可选 `expected_preview_fingerprint`。parser/model/storage 身份由服务器覆盖，不能接受客户端的任意 extractor_version 或对象位置。原有 chunk_size 等表单字段由 Gateway 统一映射，不提供两套冲突参数同时生效。 用户输入统一为严格扁平 ProcessingParameters：unit、mode、size、overlap、separator、child_size、child_separator、remove_extra_spaces、remove_urls_emails、header_rules；未知及服务器身份字段直接拒绝。profile resolver 另收服务器观察的 keyword-only extension，不从用户输入推测文件类型。
 
 Document DTO 新增安全 `parsing_profile`（ProcessingProfile）、`parse_warnings`；Segment 详情新增 token_count/source_spans/attachments，附件元素为 `attachment_id, ref, alt_text, media_type, width, height`。API 详情不得返回 index_text 的内部控制字段、storage_key 或工作目录。
 

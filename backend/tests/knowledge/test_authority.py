@@ -22,6 +22,7 @@ from actweave_knowledge.persistence.models import (
     KnowledgeDocumentRow,
     KnowledgeSegmentRow,
 )
+from extraction_test_helpers import make_test_file_capability_provider, make_test_quota_port
 from fastapi import FastAPI
 from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import text
@@ -29,6 +30,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.knowledge import gateway
+from app.knowledge.composition import (
+    is_knowledge_project_active,
+    is_knowledge_project_pending_deletion,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context
 from deerflow.persistence.bootstrap import _install_full_schema
@@ -209,8 +214,9 @@ async def test_chunk_preview_revalidates_membership_after_parser_work(
                 "req-knowledge-preview-authority",
             )
 
-        async def _parse_then_revoke(request, settings):  # noqa: ANN001
-            del request, settings
+        async def _parse_then_revoke(request, settings, *, capability_revision, parser_slots, guard):  # noqa: ANN001
+            del request, settings, parser_slots, guard
+            assert len(capability_revision) == 64
             async with factory() as session, session.begin():
                 await session.execute(
                     text(
@@ -237,10 +243,14 @@ async def test_chunk_preview_revalidates_membership_after_parser_work(
             _parse_then_revoke,
         )
         module = KnowledgeModule(
+            project_active_check=is_knowledge_project_active,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
+            quota=make_test_quota_port(factory),
             settings=KnowledgeSettings(),
             session_factory=factory,
             model_port=registry_model_port(),
         )
+        module.install_file_capabilities(make_test_file_capability_provider()())
         authority = ProjectKnowledgeAuthority(
             context,
             Capability.SHARED_ASSETS_EDIT,
@@ -405,8 +415,11 @@ async def test_reparse_preview_revalidates_after_download_and_cleans_temp(
             Capability.SHARED_ASSETS_EDIT,
         )
         service = KnowledgeDocumentService(
+            project_active_check=is_knowledge_project_active,
+            quota=make_test_quota_port(factory),
             session_factory=factory,
             settings=KnowledgeSettings(),
+            file_capabilities=make_test_file_capability_provider(),
             object_store=_RevokingStore(),  # type: ignore[arg-type]
         )
 
@@ -547,6 +560,9 @@ async def test_segment_content_api_revalidates_membership_inside_the_read_transa
             )
 
         module = KnowledgeModule(
+            project_active_check=is_knowledge_project_active,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
+            quota=make_test_quota_port(factory),
             settings=KnowledgeSettings(
                 enabled=True,
                 minio=KnowledgeMinioSettings(
@@ -705,6 +721,9 @@ async def test_batch_metadata_patch_revalidates_membership_and_rolls_back(
             )
 
         module = KnowledgeModule(
+            project_active_check=is_knowledge_project_active,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
+            quota=make_test_quota_port(factory),
             settings=KnowledgeSettings(),
             session_factory=factory,
             model_port=registry_model_port(),
@@ -768,6 +787,9 @@ async def test_project_health_final_guard_database_failure_uses_public_error(
             return factory()
 
     module = KnowledgeModule(
+        project_active_check=is_knowledge_project_active,
+        project_cleanup_check=is_knowledge_project_pending_deletion,
+        quota=make_test_quota_port(_DiesOnFinalGuard()),
         settings=KnowledgeSettings(),
         session_factory=_DiesOnFinalGuard(),  # type: ignore[arg-type]
         model_port=registry_model_port(),

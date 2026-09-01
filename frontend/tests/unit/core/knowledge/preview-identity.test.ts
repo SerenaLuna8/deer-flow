@@ -3,7 +3,9 @@ import { describe, expect, it } from "@rstest/core";
 import {
   KNOWLEDGE_PREVIEW_IDLE,
   knowledgePreviewReducer,
+  matchingPreviewFingerprint,
   previewParamsEqual,
+  previewProcessingParameters,
   type KnowledgePreviewIdentity,
   type KnowledgePreviewParams,
   type KnowledgePreviewState,
@@ -20,6 +22,10 @@ function params(
     remove_extra_spaces: false,
     remove_urls_emails: false,
     chunking_mode: "general",
+    unit: "token",
+    tokenizer_profile_id: "knowledge-cl100k-v1",
+    capability_revision: "a".repeat(64),
+    header_rules: [],
     ...overrides,
   };
 }
@@ -40,8 +46,49 @@ function identity(
 
 function response(marker: string): KnowledgeChunkPreviewResponse {
   return {
-    items: [{ position: 1, content: marker, word_count: 4, child_contents: [] }],
+    items: [
+      {
+        position: 1,
+        content: marker,
+        word_count: 4,
+        child_contents: [],
+        token_count: 1,
+        source_spans: [],
+        attachments: [],
+      },
+    ],
     total: 1,
+    preview_fingerprint: "a".repeat(64),
+    source_sha256: "b".repeat(64),
+    effective_profile: {
+      parse: {
+        etl_type: "dify",
+        extractor_id: "dify.text",
+        extractor_version: "1",
+        normalization_version: "md-v1",
+        image_policy_version: "raster-v1",
+        header_rules: [],
+      },
+      chunk: {
+        unit: "token",
+        mode: "general",
+        size: 1000,
+        overlap: 100,
+        separator: "\\n\\n",
+        child_size: 500,
+        child_separator: "\\n",
+        remove_extra_spaces: false,
+        remove_urls_emails: false,
+        tokenizer_profile_id: "knowledge-cl100k-v1",
+        tokenizer_digest: "c".repeat(64),
+        cleaner_version: "cleaner-v1",
+        splitter_version: "splitter-v1",
+      },
+    },
+    warnings: [],
+    preview_attachments: [],
+    omitted_preview_attachment_count: 0,
+    table_sources: [],
     request_id: `req-${marker}`,
   };
 }
@@ -59,7 +106,12 @@ describe("knowledgePreviewReducer", () => {
   it("a request starts loading and drops the other file's payload", () => {
     const afterA = run(
       { type: "requested", identity: identity(fileA, 1) },
-      { type: "resolved", scopeKey: "acct:proj", sequence: 1, data: response("A") },
+      {
+        type: "resolved",
+        scopeKey: "acct:proj",
+        sequence: 1,
+        data: response("A"),
+      },
     );
     expect(afterA.status).toBe("success");
 
@@ -76,7 +128,12 @@ describe("knowledgePreviewReducer", () => {
   it("the matching response publishes the payload", () => {
     const state = run(
       { type: "requested", identity: identity(fileA, 1) },
-      { type: "resolved", scopeKey: "acct:proj", sequence: 1, data: response("A") },
+      {
+        type: "resolved",
+        scopeKey: "acct:proj",
+        sequence: 1,
+        data: response("A"),
+      },
     );
     expect(state.status).toBe("success");
     expect(state.data?.items[0]?.content).toBe("A");
@@ -87,8 +144,18 @@ describe("knowledgePreviewReducer", () => {
     const state = run(
       { type: "requested", identity: identity(fileA, 1) },
       { type: "requested", identity: identity(fileB, 2) },
-      { type: "resolved", scopeKey: "acct:proj", sequence: 2, data: response("B") },
-      { type: "resolved", scopeKey: "acct:proj", sequence: 1, data: response("A") },
+      {
+        type: "resolved",
+        scopeKey: "acct:proj",
+        sequence: 2,
+        data: response("B"),
+      },
+      {
+        type: "resolved",
+        scopeKey: "acct:proj",
+        sequence: 1,
+        data: response("A"),
+      },
     );
     expect(state.status).toBe("success");
     expect(state.data?.items[0]?.content).toBe("B");
@@ -101,7 +168,12 @@ describe("knowledgePreviewReducer", () => {
     const midway = run(
       { type: "requested", identity: first },
       { type: "requested", identity: again },
-      { type: "resolved", scopeKey: "acct:proj", sequence: 1, data: response("old") },
+      {
+        type: "resolved",
+        scopeKey: "acct:proj",
+        sequence: 1,
+        data: response("old"),
+      },
     );
     expect(midway.status).toBe("loading");
     expect(midway.data).toBeNull();
@@ -120,7 +192,12 @@ describe("knowledgePreviewReducer", () => {
     const boom = new Error("boom");
     const state = run(
       { type: "requested", identity: identity(fileA, 1) },
-      { type: "resolved", scopeKey: "acct:proj", sequence: 1, data: response("A") },
+      {
+        type: "resolved",
+        scopeKey: "acct:proj",
+        sequence: 1,
+        data: response("A"),
+      },
       { type: "requested", identity: identity(fileA, 2) },
       { type: "failed", scopeKey: "acct:proj", sequence: 2, error: boom },
     );
@@ -133,7 +210,12 @@ describe("knowledgePreviewReducer", () => {
     const midway = run(
       { type: "requested", identity: identity(fileA, 1) },
       { type: "requested", identity: identity(fileB, 2) },
-      { type: "failed", scopeKey: "acct:proj", sequence: 1, error: new Error("late") },
+      {
+        type: "failed",
+        scopeKey: "acct:proj",
+        sequence: 1,
+        error: new Error("late"),
+      },
     );
     expect(midway.status).toBe("loading");
     expect(midway.error).toBeNull();
@@ -166,7 +248,12 @@ describe("knowledgePreviewReducer", () => {
   it("removing an unrelated file changes nothing", () => {
     const state = run(
       { type: "requested", identity: identity(fileA, 1) },
-      { type: "resolved", scopeKey: "acct:proj", sequence: 1, data: response("A") },
+      {
+        type: "resolved",
+        scopeKey: "acct:proj",
+        sequence: 1,
+        data: response("A"),
+      },
     );
     const after = knowledgePreviewReducer(state, {
       type: "file_removed",
@@ -194,7 +281,12 @@ describe("knowledgePreviewReducer", () => {
   it("the same scope key is not a reset", () => {
     const state = run(
       { type: "requested", identity: identity(fileA, 1) },
-      { type: "resolved", scopeKey: "acct:proj", sequence: 1, data: response("A") },
+      {
+        type: "resolved",
+        scopeKey: "acct:proj",
+        sequence: 1,
+        data: response("A"),
+      },
     );
     const after = knowledgePreviewReducer(state, {
       type: "scope_changed",
@@ -206,7 +298,12 @@ describe("knowledgePreviewReducer", () => {
   it("a response from another scope with a colliding sequence is rejected", () => {
     const state = run(
       { type: "requested", identity: identity(fileA, 1) },
-      { type: "resolved", scopeKey: "acct:other", sequence: 1, data: response("X") },
+      {
+        type: "resolved",
+        scopeKey: "acct:other",
+        sequence: 1,
+        data: response("X"),
+      },
     );
     expect(state.status).toBe("loading");
     expect(state.data).toBeNull();
@@ -219,13 +316,63 @@ describe("previewParamsEqual", () => {
   });
 
   it("any differing scalar breaks equality", () => {
-    expect(previewParamsEqual(params(), params({ chunk_size: 800 }))).toBe(false);
-    expect(previewParamsEqual(params(), params({ chunk_separator: "。" }))).toBe(false);
+    expect(previewParamsEqual(params(), params({ chunk_size: 800 }))).toBe(
+      false,
+    );
+    expect(
+      previewParamsEqual(params(), params({ chunk_separator: "。" })),
+    ).toBe(false);
     expect(
       previewParamsEqual(params(), params({ remove_extra_spaces: true })),
     ).toBe(false);
     expect(
       previewParamsEqual(params(), params({ chunking_mode: "parent_child" })),
+    ).toBe(false);
+    expect(previewParamsEqual(params(), params({ unit: "character" }))).toBe(
+      false,
+    );
+    expect(
+      previewParamsEqual(
+        params(),
+        params({ tokenizer_profile_id: "knowledge-cl100k-v2" }),
+      ),
+    ).toBe(false);
+    expect(
+      previewParamsEqual(
+        params(),
+        params({ capability_revision: "b".repeat(64) }),
+      ),
+    ).toBe(false);
+  });
+
+  it("normalizes header rules by sheet while retaining every rule value", () => {
+    const left = params({
+      header_rules: [
+        { sheet: "Totals", mode: "none", row: null },
+        { sheet: "Data", mode: "explicit", row: 3 },
+      ],
+    });
+    expect(
+      previewParamsEqual(
+        left,
+        params({
+          header_rules: [
+            { sheet: "Data", mode: "explicit", row: 3 },
+            { sheet: "Totals", mode: "none", row: null },
+          ],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      previewParamsEqual(
+        left,
+        params({
+          header_rules: [
+            { sheet: "Data", mode: "explicit", row: 4 },
+            { sheet: "Totals", mode: "none", row: null },
+          ],
+        }),
+      ),
     ).toBe(false);
   });
 
@@ -261,5 +408,50 @@ describe("previewParamsEqual", () => {
     expect(
       previewParamsEqual(params(), params({ child_chunk_size: 500 })),
     ).toBe(false);
+  });
+});
+
+describe("preview upload binding", () => {
+  it("returns a fingerprint only for the exact File object and parameters", () => {
+    const replacement = new File(["aaa"], "a.txt", { type: "text/plain" });
+    const record = {
+      file: fileA,
+      params: params(),
+      fingerprint: "f".repeat(64),
+    };
+    expect(matchingPreviewFingerprint(record, fileA, params())).toBe(
+      "f".repeat(64),
+    );
+    expect(
+      matchingPreviewFingerprint(record, replacement, params()),
+    ).toBeNull();
+    expect(
+      matchingPreviewFingerprint(
+        record,
+        fileA,
+        params({ capability_revision: "b".repeat(64) }),
+      ),
+    ).toBeNull();
+  });
+
+  it("projects only strict user processing parameters", () => {
+    expect(
+      previewProcessingParameters(
+        params({
+          header_rules: [{ sheet: null, mode: "none", row: null }],
+        }),
+      ),
+    ).toEqual({
+      unit: "token",
+      mode: "general",
+      size: 1000,
+      overlap: 100,
+      separator: "\\n\\n",
+      child_size: 500,
+      child_separator: "\\n",
+      remove_extra_spaces: false,
+      remove_urls_emails: false,
+      header_rules: [{ sheet: null, mode: "none", row: null }],
+    });
   });
 });

@@ -335,7 +335,12 @@ async def test_round_trip_between_two_stores_preserves_bytes(minio_bucket: str, 
     key = document_storage_key(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), "source.pdf")
 
     await gateway_store.upload_from(key, source, media_type="application/pdf")
-    await worker_store.download_to(key, target)
+    info = await worker_store.stat_object(key)
+    import hashlib
+
+    assert info.size_bytes == len(payload)
+    assert info.sha256 == hashlib.sha256(payload).hexdigest()
+    await worker_store.download_to(key, target, max_bytes=len(payload))
 
     assert target.read_bytes() == payload
 
@@ -538,3 +543,127 @@ def test_minio_store_never_calls_the_sync_client_on_the_event_loop() -> None:
 def test_knowledge_gateway_never_does_sync_file_io_on_the_event_loop() -> None:
     module_path = Path(knowledge_gateway_module.__file__)
     assert _direct_calls_in_async_functions(module_path, _MINIO_BLOCKING_CALLS | _FILE_BLOCKING_CALLS) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_actual_oversize_and_writes_server_sha(tmp_path, monkeypatch):
+    import hashlib
+
+    observed = []
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def bucket_exists(self, bucket):
+            return True
+
+        def get_bucket_versioning(self, bucket):
+            return SimpleNamespace(status=None)
+
+        def fput_object(self, *args, **kwargs):
+            observed.append(kwargs)
+
+    monkeypatch.setattr(minio_store_module, "Minio", Client)
+    store = MinioObjectStore(_settings("limits", endpoint="minio.invalid:9000", access_key="test", secret_key="test"))
+    path = tmp_path / "source"
+    with path.open("wb") as stream:
+        stream.truncate(50 * 1024 * 1024 + 1)
+    with pytest.raises(KnowledgeError):
+        await store.upload_from("key", path)
+    assert observed == []
+    path.write_bytes(b"verified")
+    await store.upload_from("key", path)
+    assert observed[0]["metadata"] == {"sha256": hashlib.sha256(b"verified").hexdigest()}
+
+
+@pytest.mark.asyncio
+async def test_bounded_download_checks_stat_and_reads_at_most_limit_plus_one(tmp_path, monkeypatch):
+    import io
+
+    reads = []
+
+    class Body(io.BytesIO):
+        def read(self, amount=-1):
+            reads.append(amount)
+            return super().read(amount)
+
+        def release_conn(self):
+            pass
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def stat_object(self, *args):
+            return SimpleNamespace(size=3, metadata={"x-amz-meta-sha256": "a" * 64})
+
+        def get_object(self, *args):
+            return Body(b"oversized hostile response")
+
+    monkeypatch.setattr(minio_store_module, "Minio", Client)
+    store = MinioObjectStore(_settings("limits", endpoint="minio.invalid:9000", access_key="test", secret_key="test"))
+    info = await store.stat_object("key")
+    assert info.size_bytes == 3 and info.sha256 == "a" * 64
+    with pytest.raises(KnowledgeError):
+        await store.download_to("key", tmp_path / "result", max_bytes=4)
+    assert reads == [5]
+    assert not (tmp_path / "result").exists()
+    reads.clear()
+    with pytest.raises(KnowledgeError):
+        await store.download_to("key", tmp_path / "result", max_bytes=2)
+    assert reads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["stat", "bounded_get", "get"])
+@pytest.mark.parametrize("code", ["NoSuchKey", "NoSuchObject", "NoSuchBucket", "AccessDenied", "transport"])
+async def test_only_confirmed_missing_object_has_cache_miss_type(tmp_path, monkeypatch, operation, code):
+    from minio.error import S3Error
+
+    class FailingMinio:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def stat_object(self, *args):
+            if code == "transport":
+                raise OSError("transport fixture")
+            raise S3Error(response=None, code=code, message="fixture", resource="fixture", request_id="fixture", host_id="fixture")
+
+        fget_object = stat_object
+
+    monkeypatch.setattr(minio_store_module, "Minio", FailingMinio)
+    store = MinioObjectStore(_settings("classification", endpoint="minio.invalid:9000", access_key="test", secret_key="test"))
+    with pytest.raises(KnowledgeError) as error:
+        if operation == "stat":
+            await store.stat_object("fixture")
+        else:
+            await store.download_to("fixture", tmp_path / "download", max_bytes=100 if operation == "bounded_get" else None)
+    assert error.value.code == KNOWLEDGE_STORAGE_UNAVAILABLE
+    assert isinstance(error.value, minio_store_module.ObjectMissingError) == (code in ("NoSuchKey", "NoSuchObject"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["missing", "present", "denied"])
+async def test_require_absent_accepts_only_confirmed_exact_key_absence(monkeypatch, outcome):
+    from minio.error import S3Error
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def stat_object(self, *args):
+            if outcome == "missing":
+                raise S3Error(response=None, code="NoSuchKey", message="fixture", resource="fixture", request_id="fixture", host_id="fixture")
+            if outcome == "denied":
+                raise S3Error(response=None, code="AccessDenied", message="fixture", resource="fixture", request_id="fixture", host_id="fixture")
+            return SimpleNamespace(size=1, metadata={})
+
+    monkeypatch.setattr(minio_store_module, "Minio", Client)
+    store = MinioObjectStore(_settings("absence", endpoint="minio.invalid:9000", access_key="test", secret_key="test"))
+    if outcome == "missing":
+        await store.require_absent("exact-key")
+    else:
+        with pytest.raises(KnowledgeError) as error:
+            await store.require_absent("exact-key")
+        assert error.value.code == KNOWLEDGE_STORAGE_UNAVAILABLE

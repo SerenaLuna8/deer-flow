@@ -8,6 +8,8 @@ export const adminKnowledgeAccountIdSchema = z.union([
 const positiveInteger = z.number().int().positive().safe();
 const knowledgeSettingsFields = {
   enabled: z.boolean(),
+  etl_type: z.enum(["dify", "unstructured_local"]),
+  extraction_cache_enabled: z.boolean(),
   worker_concurrency: z.number().int().min(1).max(16),
   task_timeout_seconds: z.number().int().min(30).max(7200),
   upload_max_bytes: z.number().int().min(1).max(52_428_800),
@@ -103,6 +105,8 @@ export function knowledgeSettingsDraft(
 ): AdminKnowledgeSettingsDraft {
   return {
     enabled: settings.enabled,
+    etl_type: settings.etl_type,
+    extraction_cache_enabled: settings.extraction_cache_enabled,
     worker_concurrency: settings.worker_concurrency,
     task_timeout_seconds: settings.task_timeout_seconds,
     upload_max_bytes: settings.upload_max_bytes,

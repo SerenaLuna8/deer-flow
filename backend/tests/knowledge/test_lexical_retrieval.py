@@ -396,6 +396,11 @@ async def test_unified_reranker_keeps_native_scores_while_lexical_widens_recall(
             with_reranker=True,
             segments=segments,
         )
+        async with harness.factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE knowledge_segments SET index_text = 'model:' || content WHERE project_id = :project_id"),
+                {"project_id": project_id},
+            )
         harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=index, score=0.95 if "e404" in document else 0.5) for index, document in enumerate(documents)][:top_n]
 
         result = await harness.service.search(_request(project_id, query="e404", top_k=1, debug=True))
@@ -406,7 +411,8 @@ async def test_unified_reranker_keeps_native_scores_while_lexical_widens_recall(
         assert top.citation.score_kind == "rerank"
         assert top.ranking_method == "rerank"
         [(_, _, submitted, _)] = harness.client.rerank_calls
-        assert "错误码e404排查手册" in submitted  # lexical recall reached the reranker
+        assert "model:错误码e404排查手册" in submitted
+        assert all(document.startswith("model:") for document in submitted)
         assert result.diagnostics is not None
         assert result.diagnostics.ranking_method == "rerank"
         assert result.diagnostics.retrieval_mode == "hybrid"

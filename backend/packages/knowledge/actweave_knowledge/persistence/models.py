@@ -1,4 +1,4 @@
-"""Package-owned ORM rows for the eight package ``knowledge_*`` tables.
+"""Package-owned ORM rows for the eleven package ``knowledge_*`` tables.
 
 The DDL authority is the host Schema V1 snapshot (``full_schema.sql``); these
 mappings mirror it exactly. The runtime never emits DDL from this metadata.
@@ -85,10 +85,24 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
 class KnowledgeDocumentRow(KnowledgeOrmBase):
     __tablename__ = "knowledge_documents"
     __table_args__ = (
+        UniqueConstraint("project_id", "knowledge_base_id", "id", "published_extraction_id", name="uq_knowledge_documents_published_extraction"),
+        ForeignKeyConstraint(
+            ["project_id", "knowledge_base_id", "id", "published_extraction_id"],
+            ["knowledge_extractions.project_id", "knowledge_extractions.knowledge_base_id", "knowledge_extractions.knowledge_document_id", "knowledge_extractions.id"],
+            name="fk_knowledge_documents_published_extraction",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        CheckConstraint("source_sha256 IS NULL OR source_sha256 ~ '^[0-9a-f]{64}$'", name="ck_knowledge_documents_source_sha256"),
+        CheckConstraint("parsing_profile IS NULL OR jsonb_typeof(parsing_profile) = 'object'", name="ck_knowledge_documents_parsing_profile"),
+        CheckConstraint("jsonb_typeof(parse_warnings) = 'array'", name="ck_knowledge_documents_parse_warnings"),
+        CheckConstraint("upload_state IN ('pending', 'stored', 'delete_pending', 'deleted')", name="ck_knowledge_documents_upload_state"),
+        CheckConstraint("quota_state IN ('unreserved', 'reserved', 'committed', 'released')", name="ck_knowledge_documents_quota_state"),
+        CheckConstraint("quota_state <> 'released' OR upload_state = 'deleted'", name="ck_knowledge_documents_quota_released"),
         UniqueConstraint("project_id", "knowledge_base_id", "id", name="uq_knowledge_documents_project_base_id"),
         CheckConstraint("btrim(name) <> '' AND btrim(original_name) <> ''", name="ck_knowledge_documents_name"),
         CheckConstraint("btrim(storage_key) <> ''", name="ck_knowledge_documents_storage_key"),
-        CheckConstraint("size_bytes >= 0", name="ck_knowledge_documents_size"),
+        CheckConstraint("size_bytes BETWEEN 0 AND 52428800", name="ck_knowledge_documents_size"),
         CheckConstraint(
             "status IN ('uploading', 'queued', 'processing', 'ready', 'failed', 'deleting')",
             name="ck_knowledge_documents_status",
@@ -191,6 +205,13 @@ class KnowledgeDocumentRow(KnowledgeOrmBase):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    published_extraction_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    parsing_profile: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    parse_warnings: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    capability_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    upload_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'pending'"))
+    quota_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'unreserved'"))
 
 
 class KnowledgeMetadataFieldRow(KnowledgeOrmBase):
@@ -235,6 +256,16 @@ class KnowledgeMetadataFieldRow(KnowledgeOrmBase):
 class KnowledgeSegmentRow(KnowledgeOrmBase):
     __tablename__ = "knowledge_segments"
     __table_args__ = (
+        CheckConstraint("token_count >= 0", name="ck_knowledge_segments_token_count"),
+        CheckConstraint("jsonb_typeof(source_spans) = 'array'", name="ck_knowledge_segments_source_spans"),
+        UniqueConstraint("project_id", "knowledge_base_id", "knowledge_document_id", "extraction_id", "id", name="uq_knowledge_segments_extraction_scope"),
+        ForeignKeyConstraint(
+            ["project_id", "knowledge_base_id", "knowledge_document_id", "extraction_id"],
+            ["knowledge_documents.project_id", "knowledge_documents.knowledge_base_id", "knowledge_documents.id", "knowledge_documents.published_extraction_id"],
+            name="fk_knowledge_segments_published_extraction",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
         UniqueConstraint(
             "knowledge_document_id",
             "document_version",
@@ -300,6 +331,12 @@ class KnowledgeSegmentRow(KnowledgeOrmBase):
     )
     lexical_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    # Empty index defaults preserve character-era rows only; P3 selects its
+    # explicit legacy adapter instead of treating these as parsed index text.
+    index_text: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    source_spans: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    extraction_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
 
 class KnowledgeSegmentChildRow(KnowledgeOrmBase):
@@ -313,6 +350,8 @@ class KnowledgeSegmentChildRow(KnowledgeOrmBase):
 
     __tablename__ = "knowledge_segment_children"
     __table_args__ = (
+        CheckConstraint("token_count >= 0", name="ck_knowledge_segment_children_token_count"),
+        CheckConstraint("jsonb_typeof(source_spans) = 'array'", name="ck_knowledge_segment_children_source_spans"),
         UniqueConstraint(
             "knowledge_segment_id",
             "position",
@@ -370,6 +409,11 @@ class KnowledgeSegmentChildRow(KnowledgeOrmBase):
     )
     lexical_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    # Empty index defaults preserve character-era rows only; P3 selects its
+    # explicit legacy adapter instead of treating these as parsed index text.
+    index_text: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    source_spans: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
 
 
 class KnowledgeSegmentSummaryRow(KnowledgeOrmBase):
@@ -483,8 +527,19 @@ class KnowledgeQueryRow(KnowledgeOrmBase):
 class KnowledgeTaskRow(KnowledgeOrmBase):
     __tablename__ = "knowledge_tasks"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "extraction_id"],
+            ["knowledge_extractions.project_id", "knowledge_extractions.id"],
+            name="fk_knowledge_tasks_extraction",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
-            "kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base')",
+            "extraction_id IS NULL OR (kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND status IN ('queued', 'running', 'retry_wait'))",
+            name="ck_knowledge_tasks_extraction_pin",
+        ),
+        Index("uq_knowledge_tasks_open_extraction_delete", "resource_id", unique=True, postgresql_where=text("kind = 'delete_extraction' AND status IN ('queued', 'running', 'retry_wait')")),
+        CheckConstraint(
+            "kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base', 'delete_extraction')",
             name="ck_knowledge_tasks_kind",
         ),
         # Every indexing kind binds an execution generation; other kinds never.
@@ -600,3 +655,142 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    # Active reclamation pin; unlike immutable creation evidence on Extraction,
+    # this is cleared when its claim expires or the task settles.
+    extraction_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+
+class KnowledgeExtractionRow(KnowledgeOrmBase):
+    """Document-owned complete parse cache; ready does not publish a document."""
+
+    __tablename__ = "knowledge_extractions"
+    __table_args__ = (
+        UniqueConstraint("project_id", "id", name="uq_knowledge_extractions_project_id"),
+        UniqueConstraint("project_id", "knowledge_base_id", "knowledge_document_id", "id", name="uq_knowledge_extractions_scope"),
+        UniqueConstraint("knowledge_document_id", "created_task_id", "created_attempt", "created_claim_token", name="uq_knowledge_extractions_creation_attempt"),
+        ForeignKeyConstraint(
+            ["project_id", "knowledge_base_id", "knowledge_document_id"],
+            ["knowledge_documents.project_id", "knowledge_documents.knowledge_base_id", "knowledge_documents.id"],
+            name="fk_knowledge_extractions_document",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("source_sha256 ~ '^[0-9a-f]{64}$'", name="ck_knowledge_extractions_source_sha256"),
+        CheckConstraint("parser_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_knowledge_extractions_parser_fingerprint"),
+        CheckConstraint("btrim(normalization_version) <> ''", name="ck_knowledge_extractions_normalization_version"),
+        CheckConstraint("state IN ('staging', 'ready', 'deleting')", name="ck_knowledge_extractions_state"),
+        CheckConstraint("manifest_sha256 IS NULL OR manifest_sha256 ~ '^[0-9a-f]{64}$'", name="ck_knowledge_extractions_manifest_sha256"),
+        CheckConstraint("manifest_size_bytes BETWEEN 0 AND 52428800", name="ck_knowledge_extractions_manifest_size"),
+        CheckConstraint(
+            "(manifest_storage_key IS NULL AND manifest_sha256 IS NULL AND manifest_size_bytes = 0 AND manifest_quota_state = 'unreserved') OR "
+            "(manifest_storage_key IS NOT NULL AND btrim(manifest_storage_key) <> '' AND manifest_sha256 IS NOT NULL)",
+            name="ck_knowledge_extractions_manifest_registration",
+        ),
+        CheckConstraint("manifest_upload_state IN ('pending', 'stored', 'delete_pending', 'deleted')", name="ck_knowledge_extractions_upload_state"),
+        CheckConstraint("manifest_quota_state IN ('unreserved', 'reserved', 'committed', 'released')", name="ck_knowledge_extractions_quota_state"),
+        CheckConstraint("manifest_upload_state NOT IN ('stored', 'delete_pending') OR manifest_storage_key IS NOT NULL", name="ck_knowledge_extractions_stored_manifest"),
+        CheckConstraint("manifest_quota_state <> 'released' OR manifest_upload_state = 'deleted'", name="ck_knowledge_extractions_quota_released"),
+        CheckConstraint("state <> 'ready' OR (manifest_upload_state = 'stored' AND manifest_quota_state = 'committed' AND completed_at IS NOT NULL)", name="ck_knowledge_extractions_ready"),
+        CheckConstraint("created_attempt BETWEEN 1 AND 3", name="ck_knowledge_extractions_created_attempt"),
+        CheckConstraint("target_document_version >= 1", name="ck_knowledge_extractions_target_version"),
+        Index("uq_knowledge_extractions_manifest_key", "manifest_storage_key", unique=True),
+        Index("ix_knowledge_extractions_document", "project_id", "knowledge_base_id", "knowledge_document_id", "state"),
+        Index("ix_knowledge_extractions_unpublished_expires", "unpublished_expires_at", "id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    parser_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalization_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'staging'"))
+    manifest_storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    manifest_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    manifest_upload_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'pending'"))
+    manifest_quota_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'unreserved'"))
+    # Immutable creation evidence, validated on insertion by ExtractionStore.
+    # Deliberately no task FK: settled task retention must not delete the cache.
+    created_task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    created_attempt: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    created_claim_token: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    target_document_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    unpublished_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    delete_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class KnowledgeAttachmentRow(KnowledgeOrmBase):
+    """One normalized image byte object owned by an Extraction."""
+
+    __tablename__ = "knowledge_attachments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "knowledge_base_id", "knowledge_document_id", "extraction_id"],
+            ["knowledge_extractions.project_id", "knowledge_extractions.knowledge_base_id", "knowledge_extractions.knowledge_document_id", "knowledge_extractions.id"],
+            name="fk_knowledge_attachments_extraction",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("extraction_id", "sha256", name="uq_knowledge_attachments_hash"),
+        UniqueConstraint("project_id", "knowledge_base_id", "knowledge_document_id", "extraction_id", "id", name="uq_knowledge_attachments_scope"),
+        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="ck_knowledge_attachments_sha256"),
+        CheckConstraint("media_type IN ('image/png', 'image/jpeg', 'image/webp')", name="ck_knowledge_attachments_media_type"),
+        CheckConstraint("size_bytes BETWEEN 0 AND 5242880", name="ck_knowledge_attachments_size"),
+        CheckConstraint("width > 0 AND height > 0 AND width::bigint * height::bigint <= 20000000", name="ck_knowledge_attachments_pixels"),
+        CheckConstraint("btrim(storage_key) <> ''", name="ck_knowledge_attachments_storage_key"),
+        CheckConstraint("state IN ('staging', 'ready', 'deleting')", name="ck_knowledge_attachments_state"),
+        CheckConstraint("upload_state IN ('pending', 'stored', 'delete_pending', 'deleted')", name="ck_knowledge_attachments_upload_state"),
+        CheckConstraint("quota_state IN ('unreserved', 'reserved', 'committed', 'released')", name="ck_knowledge_attachments_quota_state"),
+        CheckConstraint("quota_state <> 'released' OR upload_state = 'deleted'", name="ck_knowledge_attachments_quota_released"),
+        CheckConstraint("state <> 'ready' OR (upload_state = 'stored' AND quota_state = 'committed')", name="ck_knowledge_attachments_ready"),
+        Index("uq_knowledge_attachments_storage_key", "storage_key", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    extraction_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'staging'"))
+    upload_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'pending'"))
+    quota_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'unreserved'"))
+    delete_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class KnowledgeSegmentAttachmentRow(KnowledgeOrmBase):
+    """One ordered image occurrence; repeated bytes keep distinct positions."""
+
+    __tablename__ = "knowledge_segment_attachments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "knowledge_base_id", "knowledge_document_id", "extraction_id", "segment_id"],
+            ["knowledge_segments.project_id", "knowledge_segments.knowledge_base_id", "knowledge_segments.knowledge_document_id", "knowledge_segments.extraction_id", "knowledge_segments.id"],
+            name="fk_knowledge_segment_attachments_segment",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "knowledge_base_id", "knowledge_document_id", "extraction_id", "attachment_id"],
+            ["knowledge_attachments.project_id", "knowledge_attachments.knowledge_base_id", "knowledge_attachments.knowledge_document_id", "knowledge_attachments.extraction_id", "knowledge_attachments.id"],
+            name="fk_knowledge_segment_attachments_attachment",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("position >= 1", name="ck_knowledge_segment_attachments_position"),
+        Index("ix_knowledge_segment_attachments_attachment", "attachment_id"),
+    )
+
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    extraction_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    segment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    attachment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    alt_text: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))

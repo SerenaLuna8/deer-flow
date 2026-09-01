@@ -9,9 +9,12 @@
  * overwrite the preview the user is actually looking at.
  */
 
-import type {
-  KnowledgeChunkingMode,
-  KnowledgeChunkPreviewResponse,
+import {
+  DEFAULT_CHILD_CHUNK_SEPARATOR,
+  type KnowledgeChunkingMode,
+  type KnowledgeChunkPreviewResponse,
+  type KnowledgeHeaderRule,
+  type KnowledgeProcessingParameters,
 } from "./types";
 
 export type KnowledgePreviewParams = {
@@ -23,6 +26,10 @@ export type KnowledgePreviewParams = {
   chunking_mode: KnowledgeChunkingMode;
   child_chunk_size?: number;
   child_chunk_separator?: string;
+  unit: "character" | "token";
+  tokenizer_profile_id: string | null;
+  capability_revision: string;
+  header_rules: KnowledgeHeaderRule[];
 };
 
 export type KnowledgePreviewIdentity = {
@@ -30,6 +37,12 @@ export type KnowledgePreviewIdentity = {
   params: KnowledgePreviewParams;
   scopeKey: string;
   sequence: number;
+};
+
+export type KnowledgeSuccessfulPreview = {
+  file: File;
+  params: KnowledgePreviewParams;
+  fingerprint: string;
 };
 
 export type KnowledgePreviewState = {
@@ -64,6 +77,12 @@ export function previewParamsEqual(
   left: KnowledgePreviewParams,
   right: KnowledgePreviewParams,
 ): boolean {
+  const canonicalHeaderRules = (rules: KnowledgeHeaderRule[]) =>
+    [...rules].sort((left, right) => {
+      const leftSheet = left.sheet ?? "";
+      const rightSheet = right.sheet ?? "";
+      return leftSheet.localeCompare(rightSheet, "en");
+    });
   return (
     left.chunk_size === right.chunk_size &&
     left.chunk_overlap === right.chunk_overlap &&
@@ -72,8 +91,41 @@ export function previewParamsEqual(
     left.remove_urls_emails === right.remove_urls_emails &&
     left.chunking_mode === right.chunking_mode &&
     left.child_chunk_size === right.child_chunk_size &&
-    left.child_chunk_separator === right.child_chunk_separator
+    left.child_chunk_separator === right.child_chunk_separator &&
+    left.unit === right.unit &&
+    left.tokenizer_profile_id === right.tokenizer_profile_id &&
+    left.capability_revision === right.capability_revision &&
+    JSON.stringify(canonicalHeaderRules(left.header_rules)) ===
+      JSON.stringify(canonicalHeaderRules(right.header_rules))
   );
+}
+
+export function matchingPreviewFingerprint(
+  record: KnowledgeSuccessfulPreview | null | undefined,
+  file: File,
+  params: KnowledgePreviewParams,
+): string | null {
+  return record?.file === file && previewParamsEqual(record.params, params)
+    ? record.fingerprint
+    : null;
+}
+
+export function previewProcessingParameters(
+  params: KnowledgePreviewParams,
+): KnowledgeProcessingParameters {
+  return {
+    unit: params.unit,
+    mode: params.chunking_mode,
+    size: params.chunk_size,
+    overlap: params.chunk_overlap,
+    separator: params.chunk_separator,
+    child_size: params.child_chunk_size ?? 500,
+    child_separator:
+      params.child_chunk_separator ?? DEFAULT_CHILD_CHUNK_SEPARATOR,
+    remove_extra_spaces: params.remove_extra_spaces,
+    remove_urls_emails: params.remove_urls_emails,
+    header_rules: params.header_rules,
+  };
 }
 
 function settles(

@@ -30,6 +30,244 @@ export const DEFAULT_CHILD_CHUNK_SEPARATOR = "\\n";
 export const knowledgeChunkingModeSchema = z.enum(["general", "parent_child"]);
 export type KnowledgeChunkingMode = z.infer<typeof knowledgeChunkingModeSchema>;
 
+const knowledgeSha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
+
+const knowledgeSourcePositionValueSchema = z.union([
+  z.string(),
+  z.number().int(),
+]);
+
+const KNOWLEDGE_SOURCE_POSITION_KEYS = new Set([
+  "page",
+  "paragraph",
+  "table",
+  "row",
+  "row_end",
+  "column",
+  "sheet",
+  "slide",
+  "chapter",
+  "line",
+  "line_end",
+  "element",
+  "image_index",
+  "table_path",
+  "encoding",
+]);
+const KNOWLEDGE_NUMERIC_SOURCE_POSITION_KEYS = new Set(
+  [...KNOWLEDGE_SOURCE_POSITION_KEYS].filter(
+    (key) => !["sheet", "table_path", "encoding"].includes(key),
+  ),
+);
+
+export const knowledgeSourcePositionSchema = z
+  .record(knowledgeSourcePositionValueSchema)
+  .superRefine((position, context) => {
+    for (const [key, value] of Object.entries(position)) {
+      if (!KNOWLEDGE_SOURCE_POSITION_KEYS.has(key)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "source position contains an unsafe key",
+          path: [key],
+        });
+      } else if (
+        KNOWLEDGE_NUMERIC_SOURCE_POSITION_KEYS.has(key) &&
+        (typeof value !== "number" || value < 1)
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "numeric source positions start at one",
+          path: [key],
+        });
+      } else if (
+        key === "table_path" &&
+        (typeof value !== "string" ||
+          !/^[1-9][0-9]*(?:\.[1-9][0-9]*)*$/u.test(value))
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "table path must be a numeric hierarchy",
+          path: [key],
+        });
+      }
+    }
+  });
+
+export const knowledgeSourceSpanSchema = z
+  .object({
+    block_id: z.string().min(1),
+    start: z.number().int().nonnegative(),
+    end: z.number().int().nonnegative(),
+    location: knowledgeSourcePositionSchema,
+    role: z.enum(["source", "context_prefix"]),
+  })
+  .strict()
+  .superRefine((span, context) => {
+    if (span.end < span.start) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "source span end must not precede start",
+        path: ["end"],
+      });
+    }
+  });
+
+export const knowledgeParseWarningSchema = z
+  .object({
+    code: z.string().min(1),
+    message: z.string().min(1),
+    source_position: knowledgeSourcePositionSchema,
+  })
+  .strict();
+
+export const knowledgeHeaderRuleSchema = z
+  .object({
+    sheet: z.string().nullable(),
+    mode: z.enum(["auto", "none", "explicit"]),
+    row: z.number().int().positive().nullable(),
+  })
+  .strict()
+  .superRefine((rule, context) => {
+    if ((rule.mode === "explicit") !== (rule.row !== null)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "explicit header requires a row",
+        path: ["row"],
+      });
+    }
+  });
+export type KnowledgeHeaderRule = z.infer<typeof knowledgeHeaderRuleSchema>;
+
+export const knowledgeProcessingProfileSchema = z
+  .object({
+    parse: z
+      .object({
+        etl_type: z.enum(["dify", "unstructured_local"]),
+        extractor_id: z.string().min(1),
+        extractor_version: z.string().min(1),
+        normalization_version: z.string().min(1),
+        image_policy_version: z.string().min(1),
+        header_rules: z.array(knowledgeHeaderRuleSchema),
+      })
+      .strict(),
+    chunk: z
+      .object({
+        unit: z.enum(["character", "token"]),
+        mode: knowledgeChunkingModeSchema,
+        size: z.number().int().positive(),
+        overlap: z.number().int().nonnegative(),
+        separator: z.string(),
+        child_size: z.number().int().positive(),
+        child_separator: z.string(),
+        remove_extra_spaces: z.boolean(),
+        remove_urls_emails: z.boolean(),
+        tokenizer_profile_id: z.string().nullable(),
+        tokenizer_digest: knowledgeSha256Schema.nullable(),
+        cleaner_version: z.string().min(1),
+        splitter_version: z.string().min(1),
+      })
+      .strict()
+      .superRefine((chunk, context) => {
+        if (chunk.overlap >= chunk.size) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "chunk overlap must be smaller than size",
+            path: ["overlap"],
+          });
+        }
+      }),
+  })
+  .strict();
+export type KnowledgeProcessingProfile = z.infer<
+  typeof knowledgeProcessingProfileSchema
+>;
+
+export const knowledgeFileCapabilitiesSchema = z
+  .object({
+    effective_etl: z.enum(["dify", "unstructured_local"]),
+    capability_revision: knowledgeSha256Schema,
+    formats: z.array(
+      z
+        .object({
+          extension: z.string().regex(/^\.[a-z0-9]+$/u),
+          parser_id: z.string().min(1),
+          available: z.boolean(),
+          reason_code: z.string().min(1).nullable(),
+          embedded_images: z.boolean(),
+        })
+        .strict(),
+    ),
+    chunk_limits: z
+      .object({
+        unit: z.literal("token"),
+        tokenizer_profile_id: z.string().min(1),
+        parent_min: z.number().int().positive(),
+        parent_max: z.number().int().positive(),
+        parent_max_chars: z.number().int().positive(),
+        overlap_max: z.number().int().nonnegative(),
+        child_min: z.number().int().positive(),
+        child_max: z.number().int().positive(),
+      })
+      .strict(),
+  })
+  .strict();
+export type KnowledgeFileCapabilities = z.infer<
+  typeof knowledgeFileCapabilitiesSchema
+>;
+
+export const knowledgeProcessingParametersSchema = z
+  .object({
+    unit: z.enum(["character", "token"]),
+    mode: knowledgeChunkingModeSchema,
+    size: z.number().int().min(200).max(4000),
+    overlap: z.number().int().min(0).max(500),
+    separator: z.string().min(1).max(64),
+    child_size: z.number().int().min(100).max(2000),
+    child_separator: z.string().min(1).max(64),
+    remove_extra_spaces: z.boolean(),
+    remove_urls_emails: z.boolean(),
+    header_rules: z.array(knowledgeHeaderRuleSchema),
+  })
+  .strict()
+  .superRefine((parameters, context) => {
+    if (parameters.overlap >= parameters.size) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "chunk overlap must be smaller than size",
+        path: ["overlap"],
+      });
+    }
+    if (
+      parameters.mode === "parent_child" &&
+      parameters.child_size >= parameters.size
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "child size must be smaller than parent size",
+        path: ["child_size"],
+      });
+    }
+    const sheets = new Set<string | null>();
+    for (const [index, rule] of parameters.header_rules.entries()) {
+      if (sheets.has(rule.sheet)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "duplicate sheet header rule",
+          path: ["header_rules", index, "sheet"],
+        });
+      }
+      sheets.add(rule.sheet);
+    }
+  });
+export type KnowledgeProcessingParameters = z.infer<
+  typeof knowledgeProcessingParametersSchema
+>;
+
+const knowledgeSegmentSourcePositionSchema = z.union([
+  knowledgeSourcePositionSchema,
+  z.object({ manual: z.literal(true) }).strict(),
+]);
+
 export const knowledgeRetrievalModeSchema = z.enum(["semantic", "hybrid"]);
 export type KnowledgeRetrievalMode = z.infer<
   typeof knowledgeRetrievalModeSchema
@@ -146,6 +384,11 @@ export type KnowledgeTaskProgress = z.infer<typeof knowledgeTaskProgressSchema>;
 
 export const knowledgeDocumentItemSchema = z
   .object({
+    parsing_profile: knowledgeProcessingProfileSchema.nullable(),
+    parse_warnings: z.array(knowledgeParseWarningSchema),
+    chunk_size_unit: z.enum(["character", "token"]),
+    tokenizer_profile_id: z.string().nullable(),
+    content_initialized: z.boolean(),
     id: z.string().uuid(),
     project_id: z.string().uuid(),
     knowledge_base_id: z.string().uuid(),
@@ -197,6 +440,30 @@ export const knowledgeDocumentMutationResponseSchema = z
   })
   .strict();
 
+export const knowledgeDocumentAttachmentItemSchema = z
+  .object({
+    attachment_id: z.string().uuid(),
+    ref: knowledgeSha256Schema,
+    media_type: z.enum(["image/png", "image/jpeg", "image/webp"]),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+  })
+  .strict();
+export type KnowledgeDocumentAttachmentItem = z.infer<
+  typeof knowledgeDocumentAttachmentItemSchema
+>;
+
+export const knowledgeDocumentAttachmentListResponseSchema = z
+  .object({
+    items: z.array(knowledgeDocumentAttachmentItemSchema),
+    document_version: z.number().int().positive(),
+    request_id: z.string(),
+  })
+  .strict();
+export type KnowledgeDocumentAttachmentListResponse = z.infer<
+  typeof knowledgeDocumentAttachmentListResponseSchema
+>;
+
 export const knowledgeDocumentBatchResponseSchema = z
   .object({
     items: z.array(knowledgeDocumentItemSchema),
@@ -245,8 +512,10 @@ export const knowledgeSegmentItemSchema = z
     word_count: z.number().int(),
     enabled: z.boolean(),
     hit_count: z.number().int(),
-    source_position: z.record(z.unknown()),
+    source_position: knowledgeSegmentSourcePositionSchema,
     created_at: z.string(),
+    token_count: z.number().int().nonnegative(),
+    source_spans: z.array(knowledgeSourceSpanSchema),
   })
   .strict();
 export type KnowledgeSegmentItem = z.infer<typeof knowledgeSegmentItemSchema>;
@@ -412,6 +681,20 @@ export type KnowledgeSegmentSummary = z.infer<
   typeof knowledgeSegmentSummarySchema
 >;
 
+export const knowledgeSegmentAttachmentSchema = z
+  .object({
+    attachment_id: z.string().uuid(),
+    ref: knowledgeSha256Schema,
+    alt_text: z.string(),
+    media_type: z.enum(["image/png", "image/jpeg", "image/webp"]),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+  })
+  .strict();
+export type KnowledgeSegmentAttachment = z.infer<
+  typeof knowledgeSegmentAttachmentSchema
+>;
+
 export const knowledgeSegmentDetailResponseSchema = z
   .object({
     segment: knowledgeSegmentItemSchema,
@@ -424,6 +707,7 @@ export const knowledgeSegmentDetailResponseSchema = z
     children_total: z.number().int(),
     child_page: z.number().int(),
     children: z.array(knowledgeSegmentChildSchema),
+    attachments: z.array(knowledgeSegmentAttachmentSchema),
     summary: knowledgeSegmentSummarySchema.nullable(),
     request_id: z.string(),
   })
@@ -459,34 +743,104 @@ export type UpdateKnowledgeBaseInput = {
 export type UploadKnowledgeDocumentInput = {
   file: File;
   name?: string;
-  chunk_size?: number;
-  chunk_overlap?: number;
-  chunk_separator?: string;
-  remove_extra_spaces?: boolean;
-  remove_urls_emails?: boolean;
-  chunking_mode?: KnowledgeChunkingMode;
-  child_chunk_size?: number;
-  child_chunk_separator?: string;
+  processing_profile: KnowledgeProcessingParameters;
+  expected_preview_fingerprint?: string;
 };
 
 export const knowledgeChunkPreviewItemSchema = z
   .object({
-    position: z.number().int(),
+    position: z.number().int().nonnegative(),
     content: z.string(),
-    word_count: z.number().int(),
+    word_count: z.number().int().nonnegative(),
     child_contents: z.array(z.string()),
+    token_count: z.number().int().nonnegative(),
+    source_spans: z.array(knowledgeSourceSpanSchema),
+    attachments: z.array(
+      z
+        .object({
+          ref: knowledgeSha256Schema,
+          alt_text: z.string(),
+        })
+        .strict(),
+    ),
   })
   .strict();
 export type KnowledgeChunkPreviewItem = z.infer<
   typeof knowledgeChunkPreviewItemSchema
 >;
 
-export const knowledgeChunkPreviewResponseSchema = z
+export const knowledgePreviewAttachmentSchema = z
   .object({
-    items: z.array(knowledgeChunkPreviewItemSchema),
-    total: z.number().int(),
-    request_id: z.string(),
+    ref: knowledgeSha256Schema,
+    media_type: z.enum(["image/png", "image/jpeg", "image/webp"]),
+    data_base64: z
+      .string()
+      .min(4)
+      .max(4 * Math.ceil((128 * 1024) / 3))
+      .superRefine((value, context) => {
+        const size = decodedBase64Size(value);
+        if (size === null || size > 128 * 1024) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "invalid or oversized preview attachment",
+          });
+        }
+      }),
   })
+  .strict();
+
+export const knowledgePreviewAttachmentsSchema = z
+  .array(knowledgePreviewAttachmentSchema)
+  .max(20)
+  .superRefine((attachments, context) => {
+    const total = attachments.reduce((bytes, attachment) => {
+      return bytes + (decodedBase64Size(attachment.data_base64) ?? 0);
+    }, 0);
+    if (total > 2 * 1024 * 1024) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "preview attachment response exceeds its byte budget",
+      });
+    }
+  });
+
+const knowledgePreviewResponseShape = {
+  items: z.array(knowledgeChunkPreviewItemSchema).max(10),
+  total: z.number().int().nonnegative(),
+  preview_fingerprint: knowledgeSha256Schema,
+  source_sha256: knowledgeSha256Schema,
+  effective_profile: knowledgeProcessingProfileSchema,
+  warnings: z.array(knowledgeParseWarningSchema),
+  preview_attachments: knowledgePreviewAttachmentsSchema,
+  omitted_preview_attachment_count: z.number().int().nonnegative(),
+  table_sources: z.array(
+    z
+      .object({
+        sheet: z.string().nullable(),
+        header_mode: z.enum(["auto", "none", "explicit"]),
+        header_row: z.number().int().positive().nullable(),
+        header_cells: z.array(z.string()),
+      })
+      .strict(),
+  ),
+  request_id: z.string(),
+};
+
+function decodedBase64Size(value: string): number | null {
+  if (
+    value.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
+      value,
+    )
+  ) {
+    return null;
+  }
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return (value.length / 4) * 3 - padding;
+}
+
+export const knowledgeChunkPreviewResponseSchema = z
+  .object(knowledgePreviewResponseShape)
   .strict();
 export type KnowledgeChunkPreviewResponse = z.infer<
   typeof knowledgeChunkPreviewResponseSchema
@@ -494,15 +848,27 @@ export type KnowledgeChunkPreviewResponse = z.infer<
 
 export type PreviewKnowledgeChunksInput = {
   file: File;
-  chunk_size?: number;
-  chunk_overlap?: number;
-  chunk_separator?: string;
-  remove_extra_spaces?: boolean;
-  remove_urls_emails?: boolean;
-  chunking_mode?: KnowledgeChunkingMode;
-  child_chunk_size?: number;
-  child_chunk_separator?: string;
+  processing_profile: KnowledgeProcessingParameters;
 };
+
+type KnowledgeAttachmentReadCommon = {
+  projectId: string;
+  documentId: string;
+  segmentId: string;
+  attachmentId: string;
+  expectedDocumentVersion: number;
+  expectedContentDigest: string;
+};
+
+/**
+ * Published attachment reads keep maintenance and citation authority on their
+ * two distinct Gateway paths; neither branch accepts a storage locator.
+ */
+export type KnowledgeAttachmentRead = KnowledgeAttachmentReadCommon &
+  (
+    | { purpose: "management"; baseId?: never }
+    | { purpose: "citation"; baseId: string }
+  );
 
 /**
  * Explicit re-parse of the stored original file. `expected_version` pins the
@@ -524,9 +890,7 @@ export type KnowledgeReparseInput = {
 export const knowledgeReparsePreviewResponseSchema = z
   .object({
     document_version: z.number().int(),
-    items: z.array(knowledgeChunkPreviewItemSchema),
-    total: z.number().int(),
-    request_id: z.string(),
+    ...knowledgePreviewResponseShape,
   })
   .strict();
 export type KnowledgeReparsePreviewResponse = z.infer<

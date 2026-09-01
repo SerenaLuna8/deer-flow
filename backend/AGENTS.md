@@ -507,12 +507,99 @@ recreated explicitly, never repaired in place.
 - `actweave_knowledge` stays host-agnostic: the host supplies engine, secret
   cipher, and configuration through `app/knowledge/` adapters. Do not import
   `app.*` or `deerflow.*` from the package.
-- The eight package-owned `knowledge_*` tables plus the host settings singleton
+- Knowledge byte accounting uses the required host `KnowledgeStorageQuotaPort`.
+  Document originals, registered Attachment objects, and registered Extraction
+  manifests reserve their exact database-owned UUID and size before PUT;
+  confirmed storage moves the same bytes from reserved to used without renewed
+  admission. Only confirmed deletion releases the object's existing axis.
+  Zero-byte facts never append zero-delta ledger entries. PrivateFile and
+  Project Skill storage retain their existing reserved-axis accounting.
+  Both ordinary and operator reconciliation use the same object-fact totals;
+  operator preview is read-only, while repair settles deleted-but-unreleased
+  facts idempotently. Lock Project before owning business rows before counter;
+  object mutations preserve the caller's Project SHARE fence, and repair takes
+  the Project UPDATE fence before enumerating rows. Never hold transactions
+  during object I/O. Gateway, Worker, and disabled-feature Project retention
+  receive the existing host QuotaService, current policy reader, and audit HMAC
+  keyring; there is no separate Knowledge quota policy or production no-op port.
+- `ExtractionStore.begin/persist_attachment` commit immutable task/attempt
+  creation evidence, the Task pin, and attachment registration/reservation
+  before object PUT. Repeated occurrences reuse one stored byte object;
+  uncertain pending writes are never overwritten. Object failures retain quota
+  and admit exact-generation `delete_extraction` work only when unpublished and
+  unpinned; the cleanup handler/GC and complete-cache integration ship separately.
+  `lock_extraction_claim` requires the caller's injected Project fence first,
+  then locks Task -> Base -> Document and checks the database clock after waits.
+  Document upload also requires that host callback. Compensation takes its
+  Project fence even when inactive, without granting creation/publication rights.
+- The `actweave_knowledge.extraction` package owns local parsing for preview and
+  Worker ingestion. Its immutable Documents, parse
+  profiles, source spans and image manifest are the shared parsing contract.
+  File/ETL/extension admission and capabilities come from one registry; adapters
+  cannot fall back to another parser, OCR, a remote API or runtime downloads.
+  Build-provisioned native/NLP resources must match the reviewed platform lock.
+  An OS sandbox is mandatory: macOS uses the checked-in deny-default profile;
+  Linux uses bubblewrap with explicit read-only roots and only child output
+  writable. A missing or denied sandbox fails closed. Parser process-group
+  teardown and started parent asset I/O settlement precede caller temp cleanup.
+  Tests under `tests/knowledge/test_extraction_*`, `test_extractor_registry.py`,
+  `test_dify_*` and `test_local_unstructured.py` cover this package;
+  `scripts/check_extraction_runtime.py --matrix --output PATH` records actual
+  local format results. Unit/adaptor checks do not certify OS isolation on a
+  target Linux host, database/object storage, or model calls.
+- PostgreSQL Knowledge settings also own `etl_type` (`dify` or
+  `unstructured_local`) and `extraction_cache_enabled`; these are materialized
+  at process startup and never read from YAML. File capabilities revalidate
+  `shared_assets.read` in the serving transaction and return a process snapshot
+  of parser/resource availability, safe reason codes, and fixed Token limits.
+  Startup and admin enable run a tiny fixed local extraction to prove the
+  actual OS sandbox can launch. Failure blocks new parsing admissions while
+  preserving published reads, re-embedding, and retention; GET never starts a
+  parser. This probe does not certify the complete offline format matrix.
+- Upload admission recomputes the original-file digest before creating a row or
+  writing an object and checks any expected preview fingerprint against both
+  frozen profiles and the capability revision. Headless uploads freeze the
+  server-selected parser/resource identity and default to Knowledge Tokens.
+  User profiles contain only chunk/clean/header parameters; conflicting legacy
+  fields are rejected. Separators retain their escaped input convention.
+  Explicit reparse freezes the full profile and its matching legacy chunk
+  projection on the task; Document parameters remain unchanged until publish.
+  Retry keeps the original ETL/version and requires explicit reparse for an
+  unavailable historical identity. Historical published documents without a
+  profile remain labeled character-based. Resource verification occurs outside
+  database transactions, followed by locked authority/version revalidation.
+  Preview and Worker ingestion use the same extraction, Token splitting, and
+  index derivation path; Worker publication atomically replaces Segment,
+  Child, Attachment binding, profile, warning, and published Extraction state.
+- Published Segment and Child `content` remains the Markdown shown in details,
+  citations, digests, and Agent ToolMessages. Embedding, lexical indexing,
+  Reranker input, and new summary generation use the persisted `index_text`.
+  The sole compatibility adapter may derive model text from stored `content`
+  only for a NULL profile or an explicit historical character profile; an
+  empty `index_text` on a token profile fails closed and never reads the source.
+  Manual Segment create/edit derives index text, Token counts, child rows,
+  lexical fields, and ordered Attachment occurrences before Provider work,
+  then revalidates authority, Document generation, model binding, and the
+  current published Extraction under the write lock. Changed free text clears
+  unverifiable source spans and records the manual marker; repeated image refs
+  keep separate ordered bindings, while foreign/stale refs are rejected before
+  Provider dispatch. Enabled-only changes preserve vectors and bindings.
+  Re-embedding updates vectors in place from stored model text, including
+  existing summary text, without source/object/parser access or summary
+  regeneration. Explicit reparse remains the frozen Worker ingest path and
+  switches publication only after a successful atomic publish.
+- The eleven package-owned `knowledge_*` tables plus the host settings singleton
   are ordinary Schema V1 members: ORM,
   `full_schema.sql`, catalog digest, Chinese comments, and schema tests change
   together, and `public.vector` (pgvector) must exist before install.
   PostgreSQL owns all metadata, task, and segment authority; MinIO owns only
-  document bytes, keyed by database-issued storage keys.
+  original-file, manifest, and normalized image bytes, keyed by database-issued
+  storage keys. Knowledge Extraction is document-scoped; its ready state means
+  complete cached output, while the Document published pointer and all bound
+  Segments switch atomically through deferred composite foreign keys. Attachment
+  Occurrences preserve repeated image positions. Task extraction pins prevent
+  reclamation and must clear on settlement or claim loss; immutable creation
+  task/attempt/token evidence never substitutes for current claim authority.
 - Embedding/Reranker model configurations are PostgreSQL-administered and use
   their Model Provider's encrypted API key (shared secret-envelope
   infrastructure); the same provider row also carries the key for its bound
@@ -565,15 +652,20 @@ recreated explicitly, never repaired in place.
   removed per request) and nests child contents in parent_child mode. The
   per-document vector-entry budget also applies to manual Segment create/edit:
   general counts parent Segment rows and parent_child counts child rows, with a
-  pre-Embedding check plus a final check under the Document lock. Deletion
-  removes MinIO objects before releasing database rows and records
-  `delete_error` for operator-visible retry. A late upload put whose row was
-  already removed receives a durable `delete_document_object` task carrying the
-  exact server-issued storage key. When its Base still exists, cleanup also
-  recreates a `deleting` Document tombstone so terminal failure remains visible
-  and the normal user delete action can retry it. The exact-key handler validates
-  Project/Document scope before deleting; final Project retention still sweeps
-  the entire trusted Project prefix as a fallback. A recent `uploading` row
+  pre-Embedding check plus a final check under the Document lock. Deletion first
+  quiesces the exact Document, withdraws its published Segment relations and
+  `published_extraction_id`, then deletes every registered Attachment/manifest
+  and the original source. Each byte object must be confirmed absent before its
+  exact quota fact is released and its authority row is removed; failures retain
+  safe Task/object-fact state for retry. A late upload put receives a durable
+  `delete_document_object` task carrying the exact server-issued storage key. A
+  `pending` upload tombstone and reservation are not deleted or released by the
+  normal Document handler; upload compensation settles it to
+  `stored/delete_pending` (or removes it) before a cleanup retry proceeds. The
+  exact-key handler revalidates its live claim and Project/Document scope before
+  and after object I/O. Final Project retention remains independently composed
+  when Knowledge is disabled and sweeps the entire trusted Project prefix as a
+  fallback. A recent `uploading` row
   defers Project purge without touching storage or rows. An upload older than
   the one-day settlement grace is first converted to `deleting` plus exact-key
   cleanup and only a later retention attempt may delete it. PostgreSQL time is
@@ -653,6 +745,16 @@ recreated explicitly, never repaired in place.
   Knowledge-owned table. Health probes revalidate before and after external
   storage I/O. Document download revalidates in a fresh transaction after the
   MinIO copy and before the Gateway can return the staged file.
+- Published Segment attachments have two authenticated reads. The management
+  path `/api/projects/{project_id}/knowledge/documents/{document_id}/segments/{segment_id}/attachments/{attachment_id}`
+  may read disabled content and the retained publication after a failed
+  reprocessing attempt. The citation path under
+  `/bases/{base_id}/documents/{document_id}/segments/{segment_id}/attachments/{attachment_id}`
+  additionally requires an active Base and ready/enabled current Document and
+  Segment. Both require the published Segment version and content SHA-256,
+  validate the exact database binding before and after bounded object I/O, and
+  return only image bytes with `private, no-store` and `nosniff`; storage keys
+  and signed URLs never enter the response.
 - Retrieval recalls with pgvector exact cosine similarity, grouping bases by
   their `(embedding model, reranker model)` pair. A group with a reranker
   scores every recalled candidate and its `[0,1]` relevance score is the

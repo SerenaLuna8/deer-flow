@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
@@ -12,6 +13,8 @@ class KnowledgeSettingsFields(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, from_attributes=True)
 
     enabled: bool
+    etl_type: Literal["dify", "unstructured_local"] = "dify"
+    extraction_cache_enabled: bool = True
     worker_concurrency: int = Field(ge=1, le=16)
     task_timeout_seconds: int = Field(ge=30, le=7200)
     upload_max_bytes: int = Field(ge=1, le=52428800)

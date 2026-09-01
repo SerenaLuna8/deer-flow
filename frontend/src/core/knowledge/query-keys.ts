@@ -20,3 +20,7 @@ export function knowledgeQueryKey(
 ) {
   return [...knowledgeRoot(scope), ...segments] as const;
 }
+
+export function knowledgeFileCapabilitiesQueryKey(scope: ProjectClientScope) {
+  return knowledgeQueryKey(scope, "file-capabilities");
+}

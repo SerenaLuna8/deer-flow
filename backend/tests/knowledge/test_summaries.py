@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -10,15 +11,23 @@ import httpx
 import pytest
 import pytest_asyncio
 from actweave_knowledge import KNOWLEDGE_MODEL_UNAVAILABLE, KNOWLEDGE_TASK_FAILED, KnowledgeError
+from actweave_knowledge.extraction.contracts import ProcessingProfile
 from actweave_knowledge.ingestion.summarize import KNOWLEDGE_SUMMARY_PROMPT_V1, KnowledgeSummarizeHandler, source_content_digest
 from actweave_knowledge.models import KnowledgeModelClient
 from actweave_knowledge.persistence.models import KnowledgeBaseRow, KnowledgeDocumentRow, KnowledgeSegmentRow, KnowledgeSegmentSummaryRow, KnowledgeTaskRow
 from actweave_knowledge.persistence.tasks import claim_next_task, recover_expired_tasks, settle_task_failure
 from actweave_knowledge.tasks import KnowledgeTaskClaim
+from extraction_test_helpers import (
+    ExtractionObjectStore,
+    make_test_file_capability_provider,
+    make_test_quota_port,
+)
+from parsing_test_helpers import make_chunk_profile, make_parse_profile
 from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.knowledge.composition import is_knowledge_project_active
 from deerflow.persistence.bootstrap import _install_full_schema
 
 
@@ -78,7 +87,14 @@ class _Harness:
     def handler(self):
         return KnowledgeSummarizeHandler(session_factory=self.factory, model_client=self.client, model_port=self.port)
 
-    async def seed(self, contents, *, enabled=True):
+    async def seed(
+        self,
+        contents,
+        *,
+        enabled=True,
+        index_texts=None,
+        parsing_profile=None,
+    ):
         provider_id = await seed_provider(self.factory)
         model_id = await seed_embedding_model(self.factory, provider_id, dimension=4, max_batch=1)
         self.project_id, self.base_id, self.document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -103,6 +119,7 @@ class _Harness:
                     status="ready",
                     version=1,
                     published_version=1,
+                    parsing_profile=parsing_profile,
                     segment_count=len(contents),
                     word_count=sum(map(len, contents)),
                 )
@@ -117,6 +134,7 @@ class _Harness:
                         document_version=1,
                         position=index,
                         content=content,
+                        index_text=(index_texts[index - 1] if index_texts is not None else ""),
                         word_count=len(content),
                         embedding=[1.0] * 4,
                         enabled=index != 2,
@@ -182,6 +200,36 @@ async def test_summary_generation_batches_progress_and_exact_source_fields(harne
     assert harness.embedding_observed == [("embedding", 0, 2), ("embedding", 1, 2)]
     assert await harness.progress() == ("done", 2, 2)
     assert harness.port.calls == [("summary-model-v1", KNOWLEDGE_SUMMARY_PROMPT_V1.format(content=c)) for c in contents[:2]]
+
+
+@pytest.mark.asyncio
+async def test_summary_model_uses_index_text_while_digest_binds_display_content(
+    harness,
+):
+    ref = "a" * 64
+    content = "# 原始 Markdown\n\n" + "关键结论。" * 40 + f"\n\n![机架](knowledge-attachment:{ref})"
+    index_text = "原始 Markdown\n" + "关键结论。" * 40 + "\n机架"
+    profile = ProcessingProfile(
+        parse=make_parse_profile(".md"),
+        chunk=make_chunk_profile(),
+    ).model_dump(mode="json")
+    claim = await harness.seed(
+        [content],
+        index_texts=[index_text],
+        parsing_profile=profile,
+    )
+
+    await harness.handler()(claim)
+
+    assert harness.port.calls == [
+        (
+            harness.port.model_ref,
+            KNOWLEDGE_SUMMARY_PROMPT_V1.format(content=index_text),
+        )
+    ]
+    assert ref not in harness.port.calls[0][1]
+    [summary] = await harness.summaries()
+    assert summary.source_content_digest == source_content_digest(content)
 
 
 @pytest.mark.asyncio
@@ -467,7 +515,14 @@ async def test_summary_retry_keeps_generation_and_success_clears_failed_progress
     async with harness.factory() as session, session.begin():
         await session.execute(update(KnowledgeTaskRow).values(attempt_count=3))
         await settle_task_failure(session, claim.id, claim.claim_token, error_message="摘要失败", retry_delay_seconds=0)
-    service = KnowledgeDocumentService(session_factory=harness.factory, settings=KnowledgeSettings(enabled=False), object_store=None)
+    service = KnowledgeDocumentService(
+        project_active_check=is_knowledge_project_active,
+        quota=make_test_quota_port(harness.factory),
+        session_factory=harness.factory,
+        settings=KnowledgeSettings(enabled=False),
+        file_capabilities=make_test_file_capability_provider(),
+        object_store=None,
+    )
     result = await service.retry_document(harness.project_id, harness.document_id)
     assert result.status == "ready" and result.version == 1 and result.segment_count == 1
     assert result.task_progress.kind == "summarize_document"
@@ -529,7 +584,14 @@ async def test_open_summary_blocks_reparse_and_rebuild(harness):
 
     await harness.seed(["甲" * 200])
     bases = KnowledgeBaseService(session_factory=harness.factory, settings=KnowledgeSettings(enabled=False), model_port=harness.port)
-    docs = KnowledgeDocumentService(session_factory=harness.factory, settings=KnowledgeSettings(enabled=False), object_store=None)
+    docs = KnowledgeDocumentService(
+        project_active_check=is_knowledge_project_active,
+        quota=make_test_quota_port(harness.factory),
+        session_factory=harness.factory,
+        settings=KnowledgeSettings(enabled=False),
+        file_capabilities=make_test_file_capability_provider(),
+        object_store=None,
+    )
     async with harness.factory() as session:
         model_id = (await session.get(KnowledgeBaseRow, harness.base_id)).embedding_model_id
     with pytest.raises(KnowledgeError) as caught:
@@ -558,13 +620,32 @@ async def test_ingest_publish_admits_summary_without_compromising_ready_document
     harness.port.configured = mode != "unconfigured"
     harness.port.active = mode != "inactive"
 
-    class Store:
-        async def download_to(self, key, target_path):
-            target_path.write_text("短段" if mode == "short" else "文档内容" * 60)
-
-    store = Store()
+    payload = ("短段" if mode == "short" else "文档内容" * 60).encode()
+    profile = ProcessingProfile(
+        parse=make_parse_profile(".md"),
+        chunk=make_chunk_profile(),
+    )
+    store = ExtractionObjectStore()
+    async with harness.factory() as session, session.begin():
+        document = await session.get(KnowledgeDocumentRow, harness.document_id, with_for_update=True)
+        assert document is not None
+        document.source_sha256 = hashlib.sha256(payload).hexdigest()
+        document.parsing_profile = profile.model_dump(mode="json")
+        document.capability_revision = "a" * 64
+        document.size_bytes = len(payload)
+        document.chunk_size = profile.chunk.size
+        document.chunk_overlap = profile.chunk.overlap
+        document.chunk_separator = profile.chunk.separator
+        document.chunking_mode = profile.chunk.mode
+        document.child_chunk_size = profile.chunk.child_size
+        document.child_chunk_separator = profile.chunk.child_separator
+        document.remove_extra_spaces = profile.chunk.remove_extra_spaces
+        document.remove_urls_emails = profile.chunk.remove_urls_emails
+        store.objects[document.storage_key] = payload
     settings = KnowledgeSettings(enabled=False)
-    documents = KnowledgeDocumentService(session_factory=harness.factory, settings=settings, object_store=store)
+    documents = KnowledgeDocumentService(
+        project_active_check=is_knowledge_project_active, quota=make_test_quota_port(harness.factory), session_factory=harness.factory, settings=settings, file_capabilities=make_test_file_capability_provider(settings), object_store=store
+    )
     if mode == "reparse":
         await documents.reparse_document(harness.project_id, harness.document_id, KnowledgeReparseRequest(expected_version=1))
     else:
@@ -572,7 +653,15 @@ async def test_ingest_publish_admits_summary_without_compromising_ready_document
             await session.execute(update(KnowledgeDocumentRow).values(status="queued", published_version=None))
             session.add(KnowledgeTaskRow(id=uuid.uuid4(), project_id=harness.project_id, resource_id=harness.document_id, kind="ingest_document", target_version=1))
     ingest = await harness.claim_existing()
-    handler = KnowledgeIngestionHandler(session_factory=harness.factory, settings=settings, object_store=store, model_client=harness.client, model_port=harness.port)
+    handler = KnowledgeIngestionHandler(
+        session_factory=harness.factory,
+        settings=settings,
+        object_store=store,
+        quota=make_test_quota_port(harness.factory),
+        model_client=harness.client,
+        model_port=harness.port,
+        project_active_check=is_knowledge_project_active,
+    )
     await handler(ingest)
     async with harness.factory() as session:
         document = await session.get(KnowledgeDocumentRow, harness.document_id)

@@ -21,6 +21,7 @@ from actweave_knowledge import (
     KNOWLEDGE_CONFLICT,
     KNOWLEDGE_EMBEDDING_FAILED,
     KNOWLEDGE_INVALID_REQUEST,
+    KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeError,
     KnowledgeRebuildResult,
     KnowledgeSegmentUpdate,
@@ -29,22 +30,32 @@ from actweave_knowledge import (
 from actweave_knowledge.bases import KnowledgeBaseService
 from actweave_knowledge.contracts import KNOWLEDGE_LEXICAL_VERSION
 from actweave_knowledge.documents import KnowledgeDocumentService
+from actweave_knowledge.extraction.contracts import ProcessingProfile
 from actweave_knowledge.ingestion.reembed import KnowledgeReembedHandler
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
+    KnowledgeSegmentAttachmentRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
     KnowledgeTaskRow,
 )
-from actweave_knowledge.persistence.tasks import claim_next_task, settle_task_failure
+from actweave_knowledge.persistence.tasks import (
+    claim_next_task,
+    settle_task_failure,
+    settle_task_success,
+)
 from actweave_knowledge.retrieval import encode_lexical_token, lexical_index_input
 from actweave_knowledge.segments import KnowledgeSegmentService
 from actweave_knowledge.tasks import KnowledgeTaskClaim
+from extraction_test_helpers import make_test_file_capability_provider, make_test_quota_port
+from ingestion_test_helpers import ingestion_harness
+from parsing_test_helpers import make_chunk_profile, make_parse_profile, write_docx_with_image
 from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.knowledge.composition import is_knowledge_project_active
 from deerflow.persistence.bootstrap import _install_full_schema
 
 # ---------------------------------------------------------------------------
@@ -96,8 +107,11 @@ class _Harness:
 
     def documents(self) -> KnowledgeDocumentService:
         return KnowledgeDocumentService(
+            project_active_check=is_knowledge_project_active,
+            quota=make_test_quota_port(self.factory),
             session_factory=self.factory,
             settings=KnowledgeSettings.model_validate({"enabled": False}),
+            file_capabilities=make_test_file_capability_provider(),
             object_store=None,  # type: ignore[arg-type]
         )
 
@@ -173,6 +187,7 @@ async def _seed_document(
     version: int = 1,
     published_version: int | None = 1,
     chunking_mode: str = "general",
+    parsing_profile: dict | None = None,
     segments: tuple[dict, ...] = (),
 ) -> uuid.UUID:
     """One document plus explicit segment rows on ``published_version``."""
@@ -192,6 +207,7 @@ async def _seed_document(
                 version=version,
                 published_version=published_version,
                 chunking_mode=chunking_mode,
+                parsing_profile=parsing_profile,
                 segment_count=len(segments),
                 word_count=sum(len(seg["content"]) for seg in segments),
                 error_message="失败原因" if status == "failed" else None,
@@ -206,6 +222,9 @@ async def _seed_document(
                 document_version=published_version if published_version is not None else version,
                 position=position,
                 content=seg["content"],
+                index_text=seg.get("index_text", ""),
+                token_count=seg.get("token_count", 0),
+                source_spans=seg.get("source_spans", []),
                 word_count=len(seg["content"]),
                 enabled=seg.get("enabled", True),
                 hit_count=seg.get("hit_count", 0),
@@ -465,6 +484,190 @@ async def test_reembed_preserves_manual_content_and_identity_general(postgres_da
         await harness.engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_reembed_uses_saved_index_text_and_preserves_display_derivations(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, _ = await _seed_base(harness)
+        segment_id = uuid.uuid4()
+        content = "# 手册\n\n运行 `actweave up`。"
+        index_text = "手册\n运行 actweave up。"
+        source_spans = [
+            {
+                "block_id": "paragraph:1",
+                "start": 0,
+                "end": len(content),
+                "location": {"paragraph": 1},
+                "role": "source",
+            }
+        ]
+        profile = {
+            "parse": make_parse_profile(".md").model_dump(mode="json"),
+            "chunk": make_chunk_profile().model_dump(mode="json"),
+        }
+        document_id = await _seed_document(
+            harness,
+            project_id,
+            base_id,
+            parsing_profile=profile,
+            segments=(
+                {
+                    "id": segment_id,
+                    "content": content,
+                    "index_text": index_text,
+                    "token_count": 8,
+                    "source_spans": source_spans,
+                    "enabled": False,
+                },
+            ),
+        )
+
+        await _rebuild(harness, project_id, base_id)
+        await harness.handler(await _claim(harness))
+
+        assert harness.client.calls == [[index_text]]
+        [row] = await _segment_rows(harness, document_id)
+        assert row.id == segment_id
+        assert row.content == content
+        assert row.index_text == index_text
+        assert row.token_count == 8
+        assert row.source_spans == source_spans
+        assert row.enabled is False
+        assert (await _document_row(harness, document_id)).parsing_profile == profile
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reembed_token_profile_refuses_missing_index_text_before_provider(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, _ = await _seed_base(harness)
+        profile = {
+            "parse": make_parse_profile(".md").model_dump(mode="json"),
+            "chunk": make_chunk_profile().model_dump(mode="json"),
+        }
+        await _seed_document(
+            harness,
+            project_id,
+            base_id,
+            parsing_profile=profile,
+            segments=({"content": "非空正文但索引列缺失", "index_text": ""},),
+        )
+        await _rebuild(harness, project_id, base_id)
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.handler(await _claim(harness))
+        assert error.value.code == KNOWLEDGE_STORAGE_UNAVAILABLE
+        assert harness.client.calls == []
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reembed_reads_no_original_and_preserves_bindings_and_profile(
+    postgres_database_url: str,
+    tmp_path,
+) -> None:
+    source = tmp_path / "guide.docx"
+    write_docx_with_image(source)
+    profile = ProcessingProfile(
+        parse=make_parse_profile(".docx"),
+        chunk=make_chunk_profile(),
+    )
+    async with ingestion_harness(postgres_database_url) as harness:
+        document = await harness.upload(source, profile)
+        await harness.run_next_task()
+        before = await harness.segments(document.id)
+        await harness.module.update_segment(
+            harness.resources.project_id,
+            before[0].id,
+            KnowledgeSegmentUpdate(enabled=False),
+            authority=harness.authority,
+        )
+        before = await harness.segments(document.id)
+        async with harness.resources.session_factory() as session:
+            document_row = await session.get(KnowledgeDocumentRow, document.id)
+            assert document_row is not None
+            before_profile = document_row.parsing_profile
+            before_bindings = list(
+                (
+                    await session.execute(
+                        select(
+                            KnowledgeSegmentAttachmentRow.segment_id,
+                            KnowledgeSegmentAttachmentRow.position,
+                            KnowledgeSegmentAttachmentRow.attachment_id,
+                            KnowledgeSegmentAttachmentRow.extraction_id,
+                            KnowledgeSegmentAttachmentRow.alt_text,
+                        )
+                        .where(KnowledgeSegmentAttachmentRow.knowledge_document_id == document.id)
+                        .order_by(
+                            KnowledgeSegmentAttachmentRow.segment_id,
+                            KnowledgeSegmentAttachmentRow.position,
+                        )
+                    )
+                ).all()
+            )
+        before_gets = len([call for call in harness.resources.object_store.calls if call[0] == "get"])
+        # The shared Extraction harness owns an unrelated already-claimed
+        # bootstrap document. Terminalize that fixture so this base-level
+        # rebuild is scoped to the uploaded publication under test.
+        async with harness.resources.session_factory() as session, session.begin():
+            bootstrap = await session.get(
+                KnowledgeDocumentRow,
+                harness.resources.document_id,
+                with_for_update=True,
+            )
+            assert bootstrap is not None and bootstrap.published_version is None
+            bootstrap.status = "failed"
+            bootstrap.error_message = "test fixture is not published"
+            assert await settle_task_success(
+                session,
+                harness.resources.claim.id,
+                harness.resources.claim.claim_token,
+            )
+        harness.resources.object_store.fail_next("get")
+        harness.fake_model.calls.clear()
+
+        await harness.reembed(harness.resources.base_id)
+        await harness.run_next_task()
+
+        after = await harness.segments(document.id)
+        assert [row.id for row in after] == [row.id for row in before]
+        assert [row.content for row in after] == [row.content for row in before]
+        assert [row.index_text for row in after] == [row.index_text for row in before]
+        assert [row.source_spans for row in after] == [row.source_spans for row in before]
+        assert [row.enabled for row in after] == [row.enabled for row in before]
+        assert len([call for call in harness.resources.object_store.calls if call[0] == "get"]) == before_gets
+        async with harness.resources.session_factory() as session:
+            document_row = await session.get(KnowledgeDocumentRow, document.id)
+            assert document_row is not None
+            assert document_row.parsing_profile == before_profile
+            after_bindings = list(
+                (
+                    await session.execute(
+                        select(
+                            KnowledgeSegmentAttachmentRow.segment_id,
+                            KnowledgeSegmentAttachmentRow.position,
+                            KnowledgeSegmentAttachmentRow.attachment_id,
+                            KnowledgeSegmentAttachmentRow.extraction_id,
+                            KnowledgeSegmentAttachmentRow.alt_text,
+                        )
+                        .where(KnowledgeSegmentAttachmentRow.knowledge_document_id == document.id)
+                        .order_by(
+                            KnowledgeSegmentAttachmentRow.segment_id,
+                            KnowledgeSegmentAttachmentRow.position,
+                        )
+                    )
+                ).all()
+            )
+        assert after_bindings == before_bindings
+
+
 async def _base_row(harness: _Harness, base_id: uuid.UUID) -> KnowledgeBaseRow:
     async with harness.factory() as session:
         row = await session.get(KnowledgeBaseRow, base_id)
@@ -524,11 +727,19 @@ async def test_reembed_parent_child_embeds_children_only(postgres_database_url: 
     try:
         project_id, base_id, _ = await _seed_base(harness)
         parent_id = uuid.uuid4()
+        legacy_profile = {
+            "parse": make_parse_profile(".md").model_dump(mode="json"),
+            "chunk": make_chunk_profile(
+                unit="character",
+                mode="parent_child",
+            ).model_dump(mode="json"),
+        }
         document_id = await _seed_document(
             harness,
             project_id,
             base_id,
             chunking_mode="parent_child",
+            parsing_profile=legacy_profile,
             segments=(
                 {
                     "id": parent_id,

@@ -126,12 +126,15 @@ def main() -> int:
                 knowledge_state = None
                 knowledge_provider = None
                 knowledge_objects = None
+                knowledge_storage_control = None
                 if knowledge_enabled:
                     from replay_knowledge import (
                         KnowledgeReplayState,
                         ReplayKnowledgeProviderServer,
+                        ReplayKnowledgeStorageControl,
                         create_replay_knowledge_bucket,
                         drop_replay_knowledge_bucket,
+                        install_replay_knowledge_storage_controls,
                         list_replay_knowledge_objects,
                         prepare_pgvector_extension,
                         replay_minio_settings_from_environment,
@@ -145,6 +148,9 @@ def main() -> int:
                         base64.b64encode(os.urandom(32)).decode("ascii"),
                     )
                     os.environ["ACT_WEAVE_REPLAY_KNOWLEDGE_FAST_RETRY"] = "1"
+                    knowledge_storage_control = ReplayKnowledgeStorageControl(home / "knowledge-storage-control")
+                    os.environ["ACT_WEAVE_REPLAY_KNOWLEDGE_CONTROL_ROOT"] = str(knowledge_storage_control.root)
+                    install_replay_knowledge_storage_controls()
                     minio_settings = replay_minio_settings_from_environment()
                     knowledge_bucket = create_replay_knowledge_bucket(minio_settings)
                     knowledge_resources.callback(
@@ -222,13 +228,14 @@ def main() -> int:
                 )
                 gateway_app.dependency_overrides[get_current_user_from_request] = replay_gateway_user
                 gateway_app.include_router(replay_agent_router)
-                if knowledge_state is not None and knowledge_objects is not None:
+                if knowledge_state is not None and knowledge_objects is not None and knowledge_storage_control is not None:
                     from replay_knowledge import build_replay_knowledge_router
 
                     gateway_app.include_router(
                         build_replay_knowledge_router(
                             knowledge_state,
                             list_objects=knowledge_objects,
+                            storage_control=knowledge_storage_control,
                         )
                     )
                 if worker_mode == "delayed":

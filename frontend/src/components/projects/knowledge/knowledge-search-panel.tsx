@@ -55,10 +55,15 @@ import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
+import type { KnowledgeImageSource } from "./knowledge-image";
+import { KnowledgeMarkdown } from "./knowledge-markdown";
 import { KnowledgeSummaryBlock } from "./knowledge-summary-block";
 
 /** Matches the backend cap on metadata_filters per search. */
 const MAX_METADATA_FILTERS = 10;
+
+const EMPTY_KNOWLEDGE_IMAGE_SOURCES: ReadonlyMap<string, KnowledgeImageSource> =
+  new Map();
 
 type FilterDraft = {
   key: number;
@@ -105,6 +110,7 @@ export function KnowledgeSearchPanel({
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
+  const scopeKey = `${scope.accountId}:${scope.projectId}`;
   const search = useKnowledgeSearch(scope);
   const metadataFields = useKnowledgeMetadataFields(scope, base.id);
   const [query, setQuery] = useState("");
@@ -536,7 +542,11 @@ export function KnowledgeSearchPanel({
           ) : null}
 
           {search.data && !search.isPending ? (
-            <SearchOutcome data={search.data} onOpenHit={setOpenHit} />
+            <SearchOutcome
+              data={search.data}
+              scopeKey={scopeKey}
+              onOpenHit={setOpenHit}
+            />
           ) : null}
         </div>
       </div>
@@ -569,9 +579,11 @@ export function KnowledgeSearchPanel({
 /** Results, per-hit provenance, and the collapsed safe diagnostics. */
 function SearchOutcome({
   data,
+  scopeKey,
   onOpenHit,
 }: {
   data: KnowledgeSearchResponse;
+  scopeKey: string;
   onOpenHit: (citation: KnowledgeSearchCitation) => void;
 }) {
   const { t } = useI18n();
@@ -651,9 +663,12 @@ function SearchOutcome({
                 </span>
                 {position ? <span>· {position}</span> : null}
               </div>
-              <p className="text-foreground/85 mt-2 line-clamp-4 text-[13px] leading-6 [overflow-wrap:anywhere] whitespace-normal">
-                {citation.snippet}
-              </p>
+              <KnowledgeMarkdown
+                content={citation.snippet}
+                imageSources={EMPTY_KNOWLEDGE_IMAGE_SOURCES}
+                scopeKey={scopeKey}
+                className="text-foreground/85 mt-2 line-clamp-4 text-[13px] leading-6 [overflow-wrap:anywhere]"
+              />
               <div className="mt-2">
                 <Button
                   type="button"
@@ -816,6 +831,34 @@ function SearchHitDetailDialog({
     ]),
   );
   const data = detail.data;
+  const scopeKey = `${scope.accountId}:${scope.projectId}`;
+  let imageSources = EMPTY_KNOWLEDGE_IMAGE_SOURCES;
+  if (
+    data !== undefined &&
+    citation.document_version !== null &&
+    citation.content_digest !== null
+  ) {
+    const expectedDocumentVersion = citation.document_version;
+    const expectedContentDigest = citation.content_digest;
+    imageSources = new Map<string, KnowledgeImageSource>(
+      data.attachments.map((attachment) => [
+        attachment.ref,
+        {
+          kind: "protected",
+          request: {
+            purpose: "citation",
+            projectId: scope.projectId,
+            baseId,
+            documentId: data.document_id,
+            segmentId: data.segment.id,
+            attachmentId: attachment.attachment_id,
+            expectedDocumentVersion,
+            expectedContentDigest,
+          },
+        },
+      ]),
+    );
+  }
   const childPageCount = data
     ? Math.max(1, Math.ceil(data.children_total / SEGMENT_CHILD_PAGE_SIZE))
     : 1;
@@ -882,12 +925,17 @@ function SearchHitDetailDialog({
                 {sourcePosition ? <span>· {sourcePosition}</span> : null}
               </div>
               <KnowledgeSummaryBlock summary={data.summary} />
-              <p
-                className="border-border/60 bg-muted/15 rounded-lg border px-3 py-2.5 text-[13px] leading-6 [overflow-wrap:anywhere] break-words whitespace-pre-wrap"
+              <div
+                className="border-border/60 bg-muted/15 rounded-lg border px-3 py-2.5"
                 data-testid="knowledge-detail-content"
               >
-                {data.segment.content}
-              </p>
+                <KnowledgeMarkdown
+                  content={data.segment.content}
+                  imageSources={imageSources}
+                  scopeKey={scopeKey}
+                  className="text-[13px] leading-6 [overflow-wrap:anywhere] break-words"
+                />
+              </div>
               {hitDiagnostics && hitDiagnostics.matched_children.length > 0 ? (
                 <section
                   aria-label={detailLabels.matchedChildrenTitle}

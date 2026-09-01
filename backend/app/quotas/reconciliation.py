@@ -15,19 +15,14 @@ from app.quotas.models import (
     QuotaPolicyInvalid,
     QuotaReconciliationAuthority,
     QuotaReconciliationReport,
+    StorageUsageTotals,
     _is_issued_quota_reconciliation_authority,
 )
 from app.quotas.service import QuotaService
-from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.quotas.model import ProjectUsageLedgerRow
 from deerflow.persistence.quotas.sql import QuotaRepository
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.shared_assets import (
-    SkillRow,
-    SkillVersionFileRow,
-    SkillVersionRow,
-)
 
 
 class QuotaReconciler:
@@ -60,7 +55,7 @@ class QuotaReconciler:
         project_id: uuid.UUID,
         dimension: QuotaDimension,
         bucket: str,
-    ) -> int:
+    ) -> int | StorageUsageTotals:
         if dimension == "members":
             value = await session.scalar(
                 select(func.count())
@@ -72,26 +67,12 @@ class QuotaReconciler:
                 )
             )
         elif dimension == "storage_bytes":
-            private_file_bytes = await session.scalar(
-                select(func.coalesce(func.sum(PrivateFileRow.size), 0)).where(
-                    PrivateFileRow.project_id == project_id,
-                    PrivateFileRow.status == "ready",
-                )
-            )
-            project_skill_bytes = await session.scalar(
-                select(func.coalesce(func.sum(SkillVersionFileRow.size_bytes), 0))
-                .select_from(SkillVersionFileRow)
-                .join(
-                    SkillVersionRow,
-                    SkillVersionRow.id == SkillVersionFileRow.skill_version_id,
-                )
-                .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
-                .where(
-                    SkillRow.scope == "project",
-                    SkillRow.project_id == project_id,
-                )
-            )
-            value = int(private_file_bytes or 0) + int(project_skill_bytes or 0)
+            # Gateway startup imports quota models through audit before Private
+            # Run repositories finish loading. Load the business adapter only
+            # when reconciliation actually executes, not at package import.
+            from app.quotas.integration import ProjectQuotaEnforcer
+
+            return await ProjectQuotaEnforcer(self._service).storage_usage_totals(session, project_id)
         elif dimension == "concurrent_runs":
             value = await session.scalar(
                 select(func.count())
@@ -141,7 +122,12 @@ class QuotaReconciler:
                     bucket,
                 )
                 current = 0 if counter is None else counter.used + counter.reserved
+                storage_totals = expected if isinstance(expected, StorageUsageTotals) else None
+                if storage_totals is not None:
+                    expected = storage_totals.used + storage_totals.reserved
                 axis_valid = counter is None or ((dimension == "mcp_calls_daily" and counter.reserved == 0) or (dimension != "mcp_calls_daily" and counter.used == 0))
+                if storage_totals is not None:
+                    axis_valid = counter is None or (counter.used, counter.reserved) == (storage_totals.used, storage_totals.reserved)
                 if current != expected or not axis_valid:
                     differences.append(
                         QuotaDifference(
@@ -173,6 +159,19 @@ class QuotaReconciler:
             repository = QuotaRepository(session)
             for dimension in QUOTA_DIMENSIONS:
                 bucket = self._service.bucket_for(dimension, now=checked_at)
+                if dimension == "storage_bytes":
+                    from app.quotas.integration import ProjectQuotaEnforcer
+
+                    # Do not lock this counter before its owning business rows.
+                    counter = await repository.counter(selected_project, dimension, bucket)
+                    before = 0 if counter is None else counter.used + counter.reserved
+                    before_axes = (0, 0) if counter is None else (counter.used, counter.reserved)
+                    await ProjectQuotaEnforcer(self._service).reconcile_project_storage(session, selected_project, now=checked_at)
+                    counter = await repository.counter(selected_project, dimension, bucket)
+                    after_axes = (counter.used, counter.reserved)
+                    if before_axes != after_axes:
+                        differences.append(QuotaDifference(dimension=dimension, bucket=bucket, current=before, expected=sum(after_axes)))
+                    continue
                 counter = await repository.lock_counter(
                     selected_project,
                     dimension,

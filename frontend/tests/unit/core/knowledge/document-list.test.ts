@@ -12,6 +12,11 @@ function doc(
 ): KnowledgeDocumentItem {
   const suffix = String(index).padStart(12, "0");
   return {
+    parsing_profile: null,
+    parse_warnings: [],
+    chunk_size_unit: "character",
+    tokenizer_profile_id: null,
+    content_initialized: true,
     id: `50000000-0000-4000-8000-${suffix}`,
     project_id: "10000000-0000-4000-8000-000000000001",
     knowledge_base_id: "40000000-0000-4000-8000-000000000001",

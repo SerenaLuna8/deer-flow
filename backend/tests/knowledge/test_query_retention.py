@@ -15,10 +15,12 @@ from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
     KnowledgeQueryRow,
 )
+from extraction_test_helpers import make_test_quota_port
 from registry_helpers import seed_registry_models
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.knowledge.composition import is_knowledge_project_pending_deletion
 from app.private_work.retention_purge import (
     RetentionCandidate,
     RetentionPurgeRepository,
@@ -265,10 +267,16 @@ async def test_project_knowledge_purge_deletes_every_owners_query_history(
                 label=uuid.uuid4().hex[:8],
                 embedding_model_id=embedding_model_id,
             )
+            await session.execute(
+                text("UPDATE projects SET status = 'pending_deletion' WHERE id = :project_id"),
+                {"project_id": project_id},
+            )
 
         purger = create_knowledge_project_purger(
+            quota=make_test_quota_port(factory),
             settings=KnowledgeSettings(),
             session_factory=factory,
+            project_cleanup_check=is_knowledge_project_pending_deletion,
         )
         assert await purger.purge_project(project_id) is True
 

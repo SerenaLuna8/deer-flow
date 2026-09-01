@@ -12,6 +12,7 @@ expectations. HTTP tests pin the detail route contract over ASGI.
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -24,20 +25,25 @@ from actweave_knowledge import (
     KNOWLEDGE_NOT_FOUND,
     KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE,
     KnowledgeError,
+    KnowledgeSegmentAttachmentView,
     KnowledgeSegmentChildView,
     KnowledgeSegmentDetail,
     KnowledgeSegmentSummaryView,
     KnowledgeSegmentView,
     KnowledgeSettings,
 )
+from actweave_knowledge.extraction.contracts import SourceSpan
 from actweave_knowledge.persistence.models import (
+    KnowledgeAttachmentRow,
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
+    KnowledgeSegmentAttachmentRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
     KnowledgeSegmentSummaryRow,
 )
 from actweave_knowledge.segments import KnowledgeSegmentService
+from extraction_test_helpers import extraction_harness
 from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -205,6 +211,7 @@ async def _seed_detail_fixture(
             status=document_status,
             error_message="解析失败" if document_status == "failed" else None,
             version=document_version,
+            published_version=segment_version if segment_version is not None else document_version,
             chunk_size=1000,
             chunk_overlap=100,
             chunking_mode="parent_child",
@@ -219,6 +226,16 @@ async def _seed_detail_fixture(
             document_version=segment_version if segment_version is not None else document_version,
             position=1,
             content=content,
+            token_count=17,
+            source_spans=[
+                {
+                    "block_id": "page:3:paragraph:1",
+                    "start": 0,
+                    "end": len(content),
+                    "location": {"page": 3, "paragraph": 1},
+                    "role": "source",
+                }
+            ],
             source_position={"page": 3},
             embedding=None,
         )
@@ -260,6 +277,15 @@ async def test_detail_returns_the_current_segment_with_paged_children(postgres_d
 
         assert detail.segment.id == segment_id
         assert detail.segment.content == content
+        assert detail.segment.token_count == 17
+        assert detail.segment.source_spans == (
+            SourceSpan(
+                block_id="page:3:paragraph:1",
+                start=0,
+                end=len(content),
+                location={"page": 3, "paragraph": 1},
+            ),
+        )
         assert detail.segment.source_position == {"page": 3}
         assert detail.knowledge_base_id == base_id
         assert detail.document_id == document_id
@@ -285,6 +311,152 @@ async def test_detail_returns_the_current_segment_with_paged_children(postgres_d
         assert second.children_total == page_size + 1
     finally:
         await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_detail_projects_exact_ordered_published_attachment_bindings(
+    postgres_database_url: str,
+    tmp_path,
+) -> None:
+    async with extraction_harness(postgres_database_url) as resources:
+        segment_id, attachment_id, _digest_value, _authority = await resources.seed_attachment_read(tmp_path)
+        async with resources.session_factory() as session, session.begin():
+            first = await session.get(
+                KnowledgeSegmentAttachmentRow,
+                (segment_id, 1),
+            )
+            assert first is not None
+            first.alt_text = "第一处"
+            session.add(
+                KnowledgeSegmentAttachmentRow(
+                    project_id=resources.project_id,
+                    knowledge_base_id=resources.base_id,
+                    knowledge_document_id=resources.document_id,
+                    extraction_id=first.extraction_id,
+                    segment_id=segment_id,
+                    attachment_id=attachment_id,
+                    position=2,
+                    alt_text="重复处",
+                )
+            )
+            segment = await session.get(KnowledgeSegmentRow, segment_id)
+            assert segment is not None
+            segment.token_count = 23
+            segment.source_spans = [
+                {
+                    "block_id": "page:1",
+                    "start": 0,
+                    "end": len(segment.content),
+                    "location": {"page": 1},
+                    "role": "source",
+                }
+            ]
+        service = KnowledgeSegmentService(
+            session_factory=resources.session_factory,
+            settings=KnowledgeSettings(),
+            client=None,  # type: ignore[arg-type]
+            model_port=None,  # type: ignore[arg-type]
+        )
+
+        detail = await service.get_segment_detail(
+            resources.project_id,
+            resources.base_id,
+            resources.document_id,
+            segment_id,
+        )
+
+        assert detail.segment.token_count == 23
+        assert [item.attachment_id for item in detail.attachments] == [
+            attachment_id,
+            attachment_id,
+        ]
+        assert [item.alt_text for item in detail.attachments] == [
+            "第一处",
+            "重复处",
+        ]
+        async with resources.session_factory() as session:
+            attachment = await session.get(KnowledgeAttachmentRow, attachment_id)
+            assert attachment is not None
+        assert [
+            (
+                item.ref,
+                item.media_type,
+                item.width,
+                item.height,
+            )
+            for item in detail.attachments
+        ] == [
+            (
+                attachment.sha256,
+                attachment.media_type,
+                attachment.width,
+                attachment.height,
+            ),
+            (
+                attachment.sha256,
+                attachment.media_type,
+                attachment.width,
+                attachment.height,
+            ),
+        ]
+
+        class _ServiceBackedModule:
+            async def get_segment_detail(
+                self,
+                project_id,
+                base_id,
+                document_id,
+                requested_segment_id,
+                *,
+                expected_document_version=None,
+                expected_content_digest=None,
+                child_page=1,
+                authority,
+            ):
+                assert authority.project_id == resources.project_id
+                return await service.get_segment_detail(
+                    project_id,
+                    base_id,
+                    document_id,
+                    requested_segment_id,
+                    expected_document_version=expected_document_version,
+                    expected_content_digest=expected_content_digest,
+                    child_page=child_page,
+                )
+
+        app = FastAPI()
+        app.include_router(gateway.project_router)
+        context = ProjectContext(
+            user_id=_OWNER_USER_ID,
+            project_id=resources.project_id,
+            membership_id=uuid.uuid4(),
+            role=ProjectRole.ADMIN,
+            capabilities=frozenset(Capability),
+            membership_version=1,
+            request_id="real-segment-detail",
+        )
+        app.dependency_overrides[gateway.require_project_knowledge_read] = lambda: context
+        app.state.knowledge_module = _ServiceBackedModule()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(f"/api/projects/{resources.project_id}/knowledge/bases/{resources.base_id}/documents/{resources.document_id}/segments/{segment_id}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["segment"]["token_count"] == 23
+        assert body["segment"]["source_spans"][0]["block_id"] == "page:1"
+        assert [item["attachment_id"] for item in body["attachments"]] == [
+            str(attachment_id),
+            str(attachment_id),
+        ]
+        assert [item["alt_text"] for item in body["attachments"]] == [
+            "第一处",
+            "重复处",
+        ]
+        serialized = json.dumps(body, ensure_ascii=False)
+        for forbidden in ("index_text", "extraction_id", "storage_key", "url"):
+            assert forbidden not in serialized
 
 
 @pytest.mark.asyncio
@@ -499,6 +671,15 @@ class _FakeDetailModule:
                 hit_count=7,
                 source_position={"page": 12},
                 created_at=datetime(2026, 8, 30, 10, 0, tzinfo=UTC),
+                token_count=29,
+                source_spans=(
+                    SourceSpan(
+                        block_id="page:12:paragraph:1",
+                        start=0,
+                        end=12,
+                        location={"page": 12, "paragraph": 1},
+                    ),
+                ),
             ),
             knowledge_base_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
             document_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
@@ -514,6 +695,16 @@ class _FakeDetailModule:
                     position=1,
                     content="子块内容",
                     word_count=4,
+                ),
+            ),
+            attachments=(
+                KnowledgeSegmentAttachmentView(
+                    attachment_id=uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                    ref="b" * 64,
+                    alt_text="机架",
+                    media_type="image/png",
+                    width=640,
+                    height=480,
                 ),
             ),
         )
@@ -589,6 +780,16 @@ async def test_http_segment_detail_round_trips_the_module_view() -> None:
             "hit_count": 7,
             "source_position": {"page": 12},
             "created_at": "2026-08-30T10:00:00Z",
+            "token_count": 29,
+            "source_spans": [
+                {
+                    "block_id": "page:12:paragraph:1",
+                    "start": 0,
+                    "end": 12,
+                    "location": {"page": 12, "paragraph": 1},
+                    "role": "source",
+                }
+            ],
         },
         "knowledge_base_id": str(base_id),
         "document_id": str(document_id),
@@ -607,8 +808,21 @@ async def test_http_segment_detail_round_trips_the_module_view() -> None:
                 "word_count": 4,
             }
         ],
+        "attachments": [
+            {
+                "attachment_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "ref": "b" * 64,
+                "alt_text": "机架",
+                "media_type": "image/png",
+                "width": 640,
+                "height": 480,
+            }
+        ],
         "request_id": _REQUEST_ID,
     }
+    serialized = json.dumps(response.json(), ensure_ascii=False)
+    for forbidden in ("index_text", "extraction_id", "storage_key", "url"):
+        assert forbidden not in serialized
 
 
 @pytest.mark.asyncio
@@ -646,3 +860,74 @@ async def test_http_segment_detail_defaults_optional_expectations_and_maps_confl
     assert conflicted.json()["detail"]["code"] == KNOWLEDGE_CONFLICT
     assert missing.status_code == 404
     assert missing.json()["detail"]["code"] == KNOWLEDGE_NOT_FOUND
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disabled", ["base", "document", "segment"])
+async def test_search_detail_cannot_explain_disabled_content(postgres_database_url: str, disabled: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, document_id, segment_id, content = await _seed_detail_fixture(harness)
+        async with harness.factory() as session, session.begin():
+            if disabled == "base":
+                (await session.get(KnowledgeBaseRow, base_id)).status = "disabled"
+            elif disabled == "document":
+                (await session.get(KnowledgeDocumentRow, document_id)).enabled = False
+            else:
+                (await session.get(KnowledgeSegmentRow, segment_id)).enabled = False
+        assert (await harness.service.get_segment_detail(project_id, base_id, document_id, segment_id)).segment.content == content
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.get_segment_detail(project_id, base_id, document_id, segment_id, expected_document_version=1, expected_content_digest=_digest(content))
+        assert error.value.code == KNOWLEDGE_CONFLICT
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "queued", "processing"])
+async def test_managed_guard_binds_retained_publication_not_failed_target(postgres_database_url: str, status: str) -> None:
+    from actweave_knowledge.segments.service import load_citation_segment, load_managed_segment
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, document_id, segment_id, content = await _seed_detail_fixture(harness, document_version=2, segment_version=1, document_status=status)
+        async with harness.factory() as session, session.begin():
+            segment, document, base = await load_managed_segment(session, project_id, document_id, segment_id, expected_document_version=1, expected_content_digest=_digest(content))
+            assert (segment.document_version, document.version, base.id) == (1, 2, base_id)
+            with pytest.raises(KnowledgeError) as target_error:
+                await load_managed_segment(session, project_id, document_id, segment_id, expected_document_version=2, expected_content_digest=_digest(content))
+            assert target_error.value.code == KNOWLEDGE_CONFLICT
+            with pytest.raises(KnowledgeError) as citation_error:
+                await load_citation_segment(session, project_id, base_id, document_id, segment_id, expected_document_version=1, expected_content_digest=_digest(content))
+            assert citation_error.value.code == KNOWLEDGE_CONFLICT
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deleted", ["base", "document"])
+async def test_segment_detail_hides_deleting_scope(postgres_database_url: str, deleted: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, document_id, segment_id, content = await _seed_detail_fixture(harness)
+        async with harness.factory() as session, session.begin():
+            row = await session.get(KnowledgeBaseRow if deleted == "base" else KnowledgeDocumentRow, base_id if deleted == "base" else document_id)
+            row.status = "deleting"
+        for expected in ({}, {"expected_document_version": 1, "expected_content_digest": _digest(content)}):
+            with pytest.raises(KnowledgeError) as error:
+                await harness.service.get_segment_detail(project_id, base_id, document_id, segment_id, **expected)
+            assert error.value.code == KNOWLEDGE_NOT_FOUND
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_citation_checks_base_scope_before_content_expectations(postgres_database_url: str) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, _, document_id, segment_id, _ = await _seed_detail_fixture(harness)
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.get_segment_detail(project_id, uuid.uuid4(), document_id, segment_id, expected_document_version=99)
+        assert error.value.code == KNOWLEDGE_NOT_FOUND
+    finally:
+        await harness.engine.dispose()
