@@ -240,6 +240,37 @@ def test_agent_design_codec_is_the_owning_module() -> None:
         assert AgentDesignService.__dict__[name].__func__ is getattr(owning, name)
 
 
+def test_agent_design_validation_is_the_owning_module() -> None:
+    from app.shared_assets import agent_design_service as legacy
+    from app.shared_assets import agent_design_validation as owning
+
+    class_names = (
+        "_validate_create",
+        "_validate_turn",
+        "_validate_generation_preference",
+        "_validate_commit",
+        "_validate_cancel",
+        "_candidate_blueprint",
+        "_require_capability",
+    )
+    static_names = (
+        "_validate_blueprint",
+        "_require_context",
+        "_require_nonterminal",
+        "_require_expected_revision",
+        "_require_matching_operation",
+        "_valid_revision",
+        "_validate_uuid",
+        "_validate_idempotency_key",
+        "_bounded_text",
+    )
+    for name in (*class_names, *static_names):
+        assert legacy.AgentDesignService.__dict__[name].__func__ is getattr(owning, name)
+    assert legacy.AGENT_DESIGN_SLUG_MIN_LENGTH is owning.AGENT_DESIGN_SLUG_MIN_LENGTH
+    assert legacy.AGENT_DESIGN_SLUG_MAX_LENGTH is owning.AGENT_DESIGN_SLUG_MAX_LENGTH
+    assert legacy.AGENT_DESIGN_SLUG_PATTERN is owning.AGENT_DESIGN_SLUG_PATTERN
+
+
 def test_skill_design_codec_is_the_owning_module() -> None:
     from app.shared_assets import skill_design_codec as owning
     from app.shared_assets.skill_design_service import SkillDesignService
