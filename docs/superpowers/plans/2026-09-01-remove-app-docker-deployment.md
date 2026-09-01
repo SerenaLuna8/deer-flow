@@ -49,7 +49,7 @@
 - Consumes: the approved file ownership table in the spec.
 - Produces: `nginx/nginx.conf`, `sandbox/provisioner/`, local Make targets, and a repository regression test.
 
-- [ ] **Step 1: Write the failing repository-layout test**
+- [x] **Step 1: Write the failing repository-layout test**
 
 Create a test that resolves the repository root and asserts the exact boundary:
 
@@ -80,21 +80,21 @@ def test_local_nginx_and_optional_sandbox_assets_are_retained() -> None:
 
 Also assert that Make targets `docker-init`, `docker-start`, `docker-stop`, `docker-logs`, `docker-logs-frontend`, `docker-logs-gateway`, `up`, and `down` are absent, `setup-sandbox` remains, and both Nginx scripts contain `nginx/nginx.conf` without the old path.
 
-- [ ] **Step 2: Run the layout test and confirm it fails**
+- [x] **Step 2: Run the layout test and confirm it fails**
 
 Run: `cd backend && uv run pytest tests/test_application_runtime_layout.py -q`
 
 Expected: FAIL because the old application Docker files exist and the new owned paths do not.
 
-- [ ] **Step 3: Move retained assets and delete application deployment assets**
+- [x] **Step 3: Move retained assets and delete application deployment assets**
 
 Use `mkdir -p nginx sandbox`, `git mv` for the local Nginx and Provisioner assets, and `git rm` for the exact delete list. After the moves, the root `docker/` directory must no longer exist.
 
-- [ ] **Step 4: Remove application Docker targets and repoint local Nginx scripts**
+- [x] **Step 4: Remove application Docker targets and repoint local Nginx scripts**
 
 Delete `DOCKER`, Docker help text, and all eight application Docker/Compose targets from `Makefile`; keep `setup-sandbox`. Replace every `docker/nginx/nginx.local.conf` occurrence in `scripts/serve.sh` and `scripts/nginx.sh` with `nginx/nginx.conf`.
 
-- [ ] **Step 5: Run the layout test and commit**
+- [x] **Step 5: Run the layout test and commit**
 
 Run: `cd backend && uv run pytest tests/test_application_runtime_layout.py -q`
 

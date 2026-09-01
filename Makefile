@@ -8,8 +8,7 @@
 	setup-db reset-db check-db upgrade-system-assets prepare-run-event-partitions prune-run-events reconcile-usage import-project-skills \
 	test test-provider-integration \
 	detect-thread-boundaries detect-blocking-io \
-	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean \
-	docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway up down
+	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean
 
 BACKEND_UV_RUN = cd backend && uv run
 
@@ -25,8 +24,6 @@ else
 endif
 
 SERVE = $(RUN_WITH_GIT_BASH) ./scripts/serve.sh
-DOCKER = $(RUN_WITH_GIT_BASH) ./scripts/docker.sh
-DEPLOY = $(RUN_WITH_GIT_BASH) ./scripts/deploy.sh
 
 help:
 	@echo "ActWeave — Weave intelligence into action."
@@ -70,16 +67,6 @@ help:
 	@echo "  make test-provider-integration        运行当前真实 Sandbox Provider 验收"
 	@echo "  make detect-thread-boundaries         检查异步和线程边界"
 	@echo "  make detect-blocking-io               检查后端阻塞 IO"
-	@echo ""
-	@echo "Docker："
-	@echo "  make docker-init                      拉取 Sandbox 镜像"
-	@echo "  make docker-start                     启动 Docker 开发环境"
-	@echo "  make docker-stop                      停止 Docker 开发环境"
-	@echo "  make docker-logs                      查看 Docker 日志"
-	@echo "  make docker-logs-frontend             查看 Frontend 日志"
-	@echo "  make docker-logs-gateway              查看 Gateway 日志"
-	@echo "  make up                               构建并启动 Compose 容器"
-	@echo "  make down                             停止 Compose 容器"
 
 # Tests
 test:
@@ -192,29 +179,3 @@ clean: stop
 	@-rm -rf backend/.deer-flow 2>/dev/null || true
 	@-rm -rf logs/*.log 2>/dev/null || true
 	@echo "✓ Cleanup complete"
-
-# Docker development
-docker-init:
-	@$(DOCKER) init
-
-docker-start:
-	@$(DOCKER) start
-
-docker-stop:
-	@$(DOCKER) stop
-
-docker-logs:
-	@$(DOCKER) logs
-
-docker-logs-frontend:
-	@$(DOCKER) logs --frontend
-
-docker-logs-gateway:
-	@$(DOCKER) logs --gateway
-
-# Docker production
-up:
-	@$(DEPLOY)
-
-down:
-	@$(DEPLOY) down

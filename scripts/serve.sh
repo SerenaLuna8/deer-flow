@@ -249,7 +249,7 @@ _is_repo_nginx_pid() {
     while IFS= read -r root; do
         [ -n "$root" ] || continue
         case "$args" in
-            *"$root"/docker/nginx/nginx.local.conf*|*"$root"/*) return 0 ;;
+            *"$root"/nginx/nginx.conf*|*"$root"/*) return 0 ;;
         esac
     done <<< "$ACT_WEAVE_ROOTS"
 
@@ -310,7 +310,7 @@ stop_all() {
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
     _kill_repo_processes "next-server"
-    nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
+    nginx -c "$REPO_ROOT/nginx/nginx.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
     _kill_repo_nginx
     # Force-kill any survivors still holding the service ports. 2026 is included
@@ -755,7 +755,7 @@ run_service "Frontend" \
 
 # 5. Nginx
 run_service "Nginx" \
-    "exec nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$RUNTIME_ROOT' > '$LOG_ROOT/nginx.log' 2>&1" \
+    "exec nginx -g 'daemon off;' -c '$REPO_ROOT/nginx/nginx.conf' -p '$RUNTIME_ROOT' > '$LOG_ROOT/nginx.log' 2>&1" \
     2026 10
 
 # ── Ready ────────────────────────────────────────────────────────────────────
