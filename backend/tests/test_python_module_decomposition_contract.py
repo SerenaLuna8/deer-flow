@@ -124,3 +124,22 @@ def test_package_dependency_direction_is_one_way() -> None:
         or name.startswith("deerflow.")
     }
     assert not forbidden
+
+
+def test_skill_package_integrity_is_the_owning_module() -> None:
+    from app.shared_assets import skill_package_integrity as owning
+    from app.shared_assets import skill_service as legacy
+
+    exact_names = (
+        "SkillFileView",
+        "SkillFileContentView",
+        "SkillFileChange",
+        "SkillSecretRequirementView",
+        "SkillArchivePreview",
+        "SkillDraftSnapshot",
+        "normalize_skill_files",
+    )
+    for name in exact_names:
+        assert getattr(legacy, name) is getattr(owning, name)
+    assert legacy._analyze_skill_files is owning.analyze_skill_files
+    assert legacy.SkillService._verified_archive_files is owning.verified_archive_files
