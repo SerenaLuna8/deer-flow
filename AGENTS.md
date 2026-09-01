@@ -61,9 +61,9 @@ metadata, project/private state, jobs, streams, checkpoints, audit, and governed
 asset versions. System model, runtime, authentication, Memory-template, and
 quota policies are administered in PostgreSQL, not duplicated in YAML.
 
-Schema V1 installation is an explicit operator action for an empty database.
-The runtime never creates, stamps, or repairs the application schema;
-see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
+Schema V1 installation and future forward upgrades are explicit operator
+actions. The runtime never creates, stamps, upgrades, or repairs the application
+schema; see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
 
 ## Command boundaries
 
@@ -71,10 +71,10 @@ see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
   the current command index.
 - Run backend targets from `backend/` and frontend targets from `frontend/`, for
   example `make lint` and `pnpm check`.
-- Treat `make setup-db`, `make reset-db`, and `make upgrade-system-assets` as
-  explicit operator actions, not runtime startup steps. `make reset-db` is
-  destructive and requires exact target confirmation. Use `make check-db` for
-  read-only database readiness evidence.
+- Treat `make setup-db`, `make upgrade-db`, and `make upgrade-system-assets` as
+  explicit operator actions, not runtime startup steps. Schema upgrades are
+  forward-only maintenance-window actions; use `make check-db` for read-only
+  database readiness evidence.
 
 ## Repository-wide rules
 
@@ -95,8 +95,9 @@ see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
 - Secrets must not enter source, logs, browser storage, query caches, API
   responses, snapshots, or diagnostic bundles. Each consuming domain owns its
   encrypted values and uses the shared secret-envelope infrastructure.
-- Schema changes require ORM, the Schema V1 SQL snapshot, catalog digest, and
-  focused schema tests to change together. Never patch or stamp a database manually.
+- Schema changes require ORM, the Schema V1 structural SQL template, generated
+  comments artifact, catalog digest, and focused schema tests to change
+  together. Never patch or stamp a database manually.
 
 ### Verification and handoff
 

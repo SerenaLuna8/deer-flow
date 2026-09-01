@@ -8,6 +8,7 @@ import { invalidateModelCatalogs } from "../invalidate-model-catalogs";
 
 import {
   createAdminModel,
+  deleteAdminModel,
   fetchAdminModelCatalog,
   replaceAdminModel,
   runAbortableAdminModelMutation,
@@ -73,6 +74,18 @@ export function useReplaceAdminModel(accountId: string) {
       return result;
     },
   );
+}
+
+export function useDeleteAdminModel(accountId: string) {
+  const parsed = adminModelAccountIdSchema.parse(accountId);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (modelId: string) =>
+      runAbortableAdminModelMutation(parsed, (signal) =>
+        deleteAdminModel(parsed, modelId, signal),
+      ),
+    onSuccess: () => invalidateModelCatalogs(queryClient, parsed),
+  });
 }
 
 export function useTestAdminModelConnection(accountId: string) {

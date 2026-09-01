@@ -267,9 +267,10 @@ async def _ensure_bootstrap_principal(session: AsyncSession) -> None:
 async def _validate_existing_catalog(session: AsyncSession) -> None:
     state = (await session.execute(select(SystemModelCatalogStateRow).where(SystemModelCatalogStateRow.id == 1).with_for_update(read=True, of=SystemModelCatalogStateRow))).scalar_one_or_none()
     models = tuple((await session.execute(select(SystemModelConfigRow).order_by(SystemModelConfigRow.id).with_for_update(read=True, of=SystemModelConfigRow))).scalars().all())
-    if state is None or not models or state.default_model_config_id is None:
+    if state is None or not models:
         raise DefaultSystemModelBootstrapConflict
-    if state.default_model_config_id not in {model.id for model in models}:
+    live_model_ids = {model.id for model in models if model.deleted_at is None}
+    if state.default_model_config_id is not None and state.default_model_config_id not in live_model_ids:
         raise DefaultSystemModelBootstrapConflict
     for model in models:
         command = validate_create_system_model(
@@ -330,6 +331,7 @@ async def _bootstrap_fresh_catalog(
         await session.scalar(
             select(ModelProviderRow.id).where(
                 ModelProviderRow.name == material.provider_name,
+                ModelProviderRow.deleted_at.is_(None),
             )
         )
         is not None

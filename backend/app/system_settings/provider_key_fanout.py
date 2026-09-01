@@ -7,11 +7,13 @@ increments the catalog revision and never performs network I/O: the caller
 holds ``admin → catalog state → provider`` locks, then delegates the
 ``system_model_configs → generation`` tail of the lock protocol here.
 
-Fan-out takes every bound text model (suspended included) with
+Fan-out takes every bound text model (suspended and soft-deleted included) with
 ``FOR UPDATE NOWAIT`` in UUID order, then the current secret generations, and
-only after all locks are held re-encrypts the validated plaintext Key per
-model recipient. Any busy lock raises :class:`ProviderKeyFanoutLockBusy` so
-the caller rolls back the whole settle and answers HTTP 409.
+only after all locks are held re-encrypts the validated plaintext Key per model
+recipient. Keeping tombstones in this revocation fan-out prevents logical
+deletion from becoming a way to retain material protected by an old Provider
+Key. Any busy lock raises :class:`ProviderKeyFanoutLockBusy` so the caller rolls
+back the whole settle and answers HTTP 409.
 """
 
 from __future__ import annotations
@@ -78,12 +80,13 @@ async def count_bound_text_models(
     session: AsyncSession,
     provider_id: uuid.UUID,
 ) -> tuple[int, int]:
-    """Return ``(total, active)`` text models bound to this Provider."""
+    """Return ``(total, active)`` live text models bound to this Provider."""
 
     statuses = (
         await session.execute(
             select(SystemModelConfigRow.status).where(
                 SystemModelConfigRow.provider_id == provider_id,
+                SystemModelConfigRow.deleted_at.is_(None),
             )
         )
     ).scalars()
@@ -100,7 +103,7 @@ async def lock_bound_text_models_nowait(
     session: AsyncSession,
     provider_id: uuid.UUID,
 ) -> list[SystemModelConfigRow]:
-    """Lock every bound text model in UUID order, refusing to wait."""
+    """Lock every bound text model, including tombstones, in UUID order."""
 
     try:
         rows = (await session.scalars(select(SystemModelConfigRow).where(SystemModelConfigRow.provider_id == provider_id).order_by(SystemModelConfigRow.id).with_for_update(of=SystemModelConfigRow, nowait=True))).all()

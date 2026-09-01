@@ -263,6 +263,7 @@ class SystemRuntimePolicyService:
                             )
                             .where(
                                 SystemModelConfigRow.status == "active",
+                                SystemModelConfigRow.deleted_at.is_(None),
                                 SystemModelConfigRow.id.in_(model_ids),
                             )
                             .with_for_update(

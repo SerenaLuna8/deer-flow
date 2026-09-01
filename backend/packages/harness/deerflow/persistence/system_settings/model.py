@@ -159,6 +159,10 @@ class SystemModelConfigRow(Base):
         ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -177,6 +181,10 @@ class SystemModelConfigRow(Base):
         CheckConstraint(
             "status IN ('active', 'suspended')",
             name="ck_system_model_configs_status",
+        ),
+        CheckConstraint(
+            "deleted_at IS NULL OR status = 'suspended'",
+            name="ck_system_model_configs_deleted_state",
         ),
         CheckConstraint(
             "jsonb_typeof(settings) = 'object'",
@@ -223,6 +231,7 @@ class SystemModelConfigRow(Base):
             status,
             created_at.desc(),
             id.desc(),
+            postgresql_where=deleted_at.is_(None),
         ),
         Index(
             "ix_system_model_configs_provider",

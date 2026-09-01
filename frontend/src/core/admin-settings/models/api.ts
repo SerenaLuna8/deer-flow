@@ -8,6 +8,7 @@ import {
   adminModelCatalogSchema,
   adminModelConnectionTestResponseSchema,
   adminModelDefaultInputSchema,
+  adminModelDeleteResponseSchema,
   adminModelIdSchema,
   adminModelMutationResponseSchema,
   adminModelStatusInputSchema,
@@ -17,6 +18,7 @@ import {
   type AdminModelCatalog,
   type AdminModelConnectionTestResponse,
   type AdminModelDefaultInput,
+  type AdminModelDeleteResponse,
   type AdminModelMutationResponse,
   type AdminModelStatusInput,
   type CreateAdminModelInput,
@@ -170,6 +172,23 @@ export async function replaceAdminModel(
     jsonRequestInit("PUT", body, signal),
   );
   return readModelSettingsResponse(response, adminModelMutationResponseSchema);
+}
+
+export async function deleteAdminModel(
+  accountId: string,
+  modelId: string,
+  signal?: AbortSignal,
+): Promise<AdminModelDeleteResponse> {
+  adminModelAccountIdSchema.parse(accountId);
+  const parsedId = adminModelIdSchema.parse(modelId);
+  const response = await requestModelSettings(
+    `${modelSettingsBaseURL()}/${parsedId}`,
+    {
+      method: "DELETE",
+      ...(signal ? { signal } : {}),
+    },
+  );
+  return readModelSettingsResponse(response, adminModelDeleteResponseSchema);
 }
 
 export async function testAdminModelConnection(

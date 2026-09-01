@@ -11,6 +11,7 @@ artifact after any schema change.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import stat
@@ -22,14 +23,18 @@ from pathlib import Path
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _SCHEMA_PATH = _REPOSITORY_ROOT / "backend" / "packages" / "harness" / "deerflow" / "persistence" / "full_schema.sql"
 _OUTPUT_PATH = _SCHEMA_PATH.with_name("schema_comments.sql")
-_BLOCK_START = "-- BEGIN GENERATED SCHEMA COMMENTS"
-_BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
+_SCHEMA_COMMENTS_PLACEHOLDER = "-- INCLUDE GENERATED SCHEMA COMMENTS FROM schema_comments.sql"
+_PARTITION_CREATION = "SELECT ensure_run_events_month_partition(now());"
+_NEXT_PARTITION_CREATION = "SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');"
+_SCHEMA_MARKER_INSERT = "INSERT INTO alembic_version (version_num) VALUES ('schema_v1');"
+_SCHEMA_SHAPE_DIGEST_PREFIX = "-- Schema shape SHA-256: "
+_COMMENT_STATEMENTS_DIGEST_PREFIX = "-- Comment statements SHA-256: "
 
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
 _EXPECTED_TABLE_COUNT = 113
-_EXPECTED_COLUMN_COUNT = 1445
+_EXPECTED_COLUMN_COUNT = 1448
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -45,6 +50,26 @@ class TableDefinition:
     columns: tuple[str, ...]
 
 
+def _validate_schema_template(schema_text: str) -> None:
+    static_comments = any(line.lstrip().startswith(("COMMENT ON TABLE ", "COMMENT ON COLUMN ")) for line in schema_text.splitlines())
+    placeholder_index = schema_text.find(_SCHEMA_COMMENTS_PLACEHOLDER)
+    post_comment_lines = tuple(line for line in schema_text[placeholder_index + len(_SCHEMA_COMMENTS_PLACEHOLDER) :].splitlines() if line) if placeholder_index >= 0 else ()
+    if (
+        schema_text.startswith("\ufeff")
+        or "\x00" in schema_text
+        or schema_text.count(_SCHEMA_COMMENTS_PLACEHOLDER) != 1
+        or schema_text.count(_SCHEMA_MARKER_INSERT) != 1
+        or _PARTITION_CREATION not in schema_text
+        or schema_text.index(_SCHEMA_MARKER_INSERT) > placeholder_index
+        or schema_text.index(_SCHEMA_COMMENTS_PLACEHOLDER) > schema_text.index(_PARTITION_CREATION)
+        or post_comment_lines != (_PARTITION_CREATION, _NEXT_PARTITION_CREATION, "COMMIT;")
+        or static_comments
+    ):
+        raise SchemaCommentError(
+            "full schema must contain one external comment placeholder before partition creation",
+        )
+
+
 # The short label is reused as column-comment context.  The longer description
 # explains ownership/lifecycle at table level.  Keep every static table explicit
 # so a new table cannot silently receive a vague generated description.
@@ -52,11 +77,11 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "alembic_version": ("数据库迁移版本", "记录当前数据库采用的 Alembic 架构版本。"),
     "model_providers": (
         "模型供应商",
-        "保存宿主管理的 OpenAI 兼容检索模型端点、请求超时与当前加密 API Key。",
+        "保存宿主管理的模型端点、请求超时与当前加密 API Key；逻辑删除后仅保留历史引用。",
     ),
     "model_provider_models": (
         "供应商模型",
-        "保存供应商下的 embedding 或 rerank 具体模型及其维度、批量与状态；知识库按标识绑定。",
+        "保存供应商下的 embedding 或 rerank 具体模型及其维度、批量与状态；逻辑删除后仅保留历史引用。",
     ),
     "knowledge_extractions": ("知识提取结果", "保存同一知识文档的解析世代与完整 manifest；ready 仅表示提取完整，不等于文档已发布。"),
     "knowledge_attachments": ("知识附件", "保存提取结果拥有的规范化图片字节对象；同世代按内容摘要去重，删除字节后才释放配额。"),
@@ -212,7 +237,7 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "system_model_catalog_state": ("系统模型目录状态", "记录系统模型目录的单例修订号。"),
     "system_model_configs": (
         "系统模型配置",
-        "保存系统模型的稳定配置、能力和当前秘密 Generation 指针。",
+        "保存系统模型的稳定配置、能力和当前秘密 Generation 指针；逻辑删除后仍可解析已接纳运行。",
     ),
     "system_model_secret_generations": ("系统模型秘密 Generation", "保存模型配置拥有的加密 API Key 副本。"),
     "system_model_secret_tombstones": ("系统模型秘密墓碑", "保存已销毁模型 API Key Generation 的无密文记录。"),
@@ -645,6 +670,9 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
         "system_model_configs",
         "provider_id",
     ): "所属模型供应商标识；API Key 由供应商行统一配置",
+    ("system_model_configs", "deleted_at"): "不可逆逻辑删除时间；置值后从目录和新运行中隐藏",
+    ("model_providers", "deleted_at"): "不可逆逻辑删除时间；置值后保留历史模型关联",
+    ("model_provider_models", "deleted_at"): "不可逆逻辑删除时间；置值后从检索模型目录和新绑定中隐藏",
     ("system_asset_upgrade_audit", "before_checksum"): "升级前载荷校验和",
     ("system_asset_upgrade_audit", "after_checksum"): "升级后载荷校验和",
     ("system_asset_upgrade_audit", "package_digest"): "升级软件包目录摘要",
@@ -1156,21 +1184,38 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _lines_digest(lines: tuple[str, ...]) -> str:
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _schema_shape_digest(tables: tuple[TableDefinition, ...]) -> str:
+    lines = tuple(":".join((table.name, ",".join(table.columns))) for table in sorted(tables, key=lambda item: item.name))
+    return _lines_digest(lines)
+
+
 def _render(tables: tuple[TableDefinition, ...], *, schema_name: str) -> bytes:
+    body: list[str] = []
+    for table in tables:
+        label, description = _TABLE_METADATA[table.name]
+        body.append(f"COMMENT ON TABLE {table.name} IS {_sql_literal(description)};")
+        for column in table.columns:
+            phrase = _column_phrase(table.name, column)
+            body.append(
+                f"COMMENT ON COLUMN {table.name}.{column} IS {_sql_literal(f'{label}：{phrase}。')};",
+            )
+        body.append("")
+
+    statements = tuple(line for line in body if line)
     lines = [
         "-- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.",
         f"-- Source: {schema_name}",
+        f"{_SCHEMA_SHAPE_DIGEST_PREFIX}{_schema_shape_digest(tables)}",
+        f"{_COMMENT_STATEMENTS_DIGEST_PREFIX}{_lines_digest(statements)}",
         (f"-- Coverage: {_EXPECTED_TABLE_COUNT} static tables and {_EXPECTED_COLUMN_COUNT} columns."),
         "-- Comments describe schema purpose only; they contain no runtime or secret values.",
         "",
     ]
-    for table in tables:
-        label, description = _TABLE_METADATA[table.name]
-        lines.append(f"COMMENT ON TABLE {table.name} IS {_sql_literal(description)};")
-        for column in table.columns:
-            phrase = _column_phrase(table.name, column)
-            lines.append(f"COMMENT ON COLUMN {table.name}.{column} IS {_sql_literal(f'{label}：{phrase}。')};")
-        lines.append("")
+    lines.extend(body)
     return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
 
 
@@ -1194,24 +1239,6 @@ def _atomic_write(path: Path, content: bytes) -> None:
         os.replace(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
-
-
-def _embedded_schema(schema_text: str, comments: bytes) -> bytes:
-    """Replace the checked-in COMMENT block without touching surrounding DDL."""
-
-    start_count = schema_text.count(_BLOCK_START)
-    end_count = schema_text.count(_BLOCK_END)
-    if start_count != 1 or end_count != 1:
-        raise SchemaCommentError(
-            "full schema must contain exactly one generated-comment marker pair",
-        )
-    start = schema_text.index(_BLOCK_START)
-    end = schema_text.index(_BLOCK_END, start) + len(_BLOCK_END)
-    if schema_text.find(_BLOCK_END, 0, start) != -1:
-        raise SchemaCommentError("generated-comment markers are out of order")
-    rendered = comments.decode("utf-8").rstrip()
-    block = f"{_BLOCK_START}\n{rendered}\n{_BLOCK_END}"
-    return (schema_text[:start] + block + schema_text[end:]).encode("utf-8")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1248,9 +1275,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.schema.is_symlink():
             raise SchemaCommentError(f"refusing symbolic-link schema: {args.schema}")
         schema_text = args.schema.read_text(encoding="utf-8")
+        _validate_schema_template(schema_text)
         tables = _parse_schema(schema_text)
         expected = _render(tables, schema_name=args.schema.name)
-        expected_schema = _embedded_schema(schema_text, expected)
 
         if args.stdout:
             sys.stdout.buffer.write(expected)
@@ -1260,17 +1287,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise SchemaCommentError(f"generated artifact is missing: {args.output}")
             if args.output.read_bytes() != expected:
                 raise SchemaCommentError(f"generated artifact is stale: {args.output}; rerun without --check")
-            if args.schema.read_bytes() != expected_schema:
-                raise SchemaCommentError(
-                    f"generated comments in {args.schema} are stale; rerun without --check",
-                )
             print(f"schema comments are current: {_EXPECTED_TABLE_COUNT} tables, {_EXPECTED_COLUMN_COUNT} columns")
             return 0
 
         _atomic_write(args.output, expected)
-        _atomic_write(args.schema, expected_schema)
         print(
-            f"generated {args.output} and updated {args.schema}: {_EXPECTED_TABLE_COUNT} tables, {_EXPECTED_COLUMN_COUNT} columns",
+            f"generated {args.output}: {_EXPECTED_TABLE_COUNT} tables, {_EXPECTED_COLUMN_COUNT} columns",
         )
         return 0
     except (OSError, UnicodeError, SchemaCommentError) as exc:

@@ -171,8 +171,8 @@ export function runExecutionStatePollInterval(
 export function selectObservedRunExecutionState(
   state: RunExecutionState | undefined,
   failed: boolean,
-): RunExecutionState | "unavailable" {
-  return failed ? "unavailable" : (state ?? "unavailable");
+): RunExecutionState | "unavailable" | null {
+  return failed ? "unavailable" : (state ?? null);
 }
 
 export function shouldRetryRunExecutionState(

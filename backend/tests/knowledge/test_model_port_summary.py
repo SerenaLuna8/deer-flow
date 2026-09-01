@@ -2,7 +2,7 @@
 
 ``resolve_summary_model`` reads the host ``knowledge_system_settings``
 singleton and validates the referenced System Model against a real
-PostgreSQL catalog installed from ``full_schema.sql``; ``generate_summary``
+PostgreSQL catalog installed from the composed Schema V1 snapshot; ``generate_summary``
 stays a frozen signature that rejects unconfigured runtimes with the typed
 ``KNOWLEDGE_MODEL_UNAVAILABLE`` error until the pipeline task wires the
 ModelRuntime dispatch.

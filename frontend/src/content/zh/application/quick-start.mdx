@@ -44,7 +44,7 @@ make setup
 
 ### 初始化 PostgreSQL
 
-Fluva 只支持全新 PostgreSQL 目标库，不会在启动时建库、修复 schema 或原地升级旧数据库。目标应用 role 必须预先存在。
+全新 PostgreSQL 目标库使用 `setup-db`；运行进程不会在启动时建库、修复或升级 schema。目标应用 role 必须预先存在。
 
 ```bash
 export POSTGRES_ADMIN_URL='<连接 postgres maintenance database 的管理员 URL>'
@@ -56,6 +56,10 @@ make check-db
 <Callout type="warning">
   只把 <code>setup-db</code> 指向全新目标库。测试门禁必须使用独立、可丢弃的 PostgreSQL 实例。
 </Callout>
+
+未来版本若提供已知前驱的打包迁移，请先停服并备份，再执行 `make upgrade-db` 和
+`make check-db`。当前 head 仍是 `schema_v1`，所以 `upgrade-db` 只校验并幂等返回；
+未知版本或 Catalog 漂移不会自动修复。
 
 ### 启动并访问
 

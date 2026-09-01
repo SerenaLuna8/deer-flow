@@ -20,6 +20,12 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.knowledge_settings.bootstrap import (
+    KnowledgeSettingsBootstrapConfigurationInvalid,
+    KnowledgeSettingsBootstrapMaterial,
+    KnowledgeSettingsBootstrapStorageUnavailable,
+    prepare_knowledge_settings_bootstrap,
+)
 from app.model_registry.bootstrap import (
     ModelRegistryBootstrapConfigurationInvalid,
     ModelRegistryBootstrapConflict,
@@ -48,9 +54,11 @@ from deerflow.persistence.bootstrap import (
     CURRENT_SCHEMA_REVISION,
     SchemaRecreateRequired,
     SchemaSetupRequired,
+    SchemaUpgradeRequired,
     classify_database,
     finalize_staged_schema,
     stage_schema_for_setup,
+    validate_schema_installation_artifacts,
 )
 from deerflow.persistence.final_schema_contract import FINAL_APP_TABLES
 
@@ -486,6 +494,7 @@ async def _bootstrap_existing(
     *,
     default_model_bootstrap: (DefaultSystemModelBootstrapMaterial | None) = None,
     model_registry_bootstrap: (ModelRegistrySeed | ModelRegistryBootstrapSkipped | None) = None,
+    knowledge_settings_bootstrap: KnowledgeSettingsBootstrapMaterial | None = None,
 ) -> str:
     try:
         async with _complete_bootstrap_lock(database_url):
@@ -493,6 +502,7 @@ async def _bootstrap_existing(
                 database_url,
                 default_model_bootstrap=default_model_bootstrap,
                 model_registry_bootstrap=model_registry_bootstrap,
+                knowledge_settings_bootstrap=knowledge_settings_bootstrap,
             )
     except PostgresSetupError:
         raise
@@ -505,6 +515,7 @@ async def _bootstrap_empty_schema_under_lock(
     *,
     default_model_bootstrap: (DefaultSystemModelBootstrapMaterial | None) = None,
     model_registry_bootstrap: (ModelRegistrySeed | ModelRegistryBootstrapSkipped | None) = None,
+    knowledge_settings_bootstrap: KnowledgeSettingsBootstrapMaterial | None = None,
     force_public_schema: bool = False,
 ) -> str:
     """Initialize an empty target while the caller owns the bootstrap lock."""
@@ -530,7 +541,10 @@ async def _bootstrap_empty_schema_under_lock(
         bootstrap_stage = "runtime_policies"
         await _bootstrap_runtime_policy_schema(engine)
         bootstrap_stage = "knowledge_settings"
-        await _bootstrap_knowledge_settings_schema(engine)
+        await _bootstrap_knowledge_settings_schema(
+            engine,
+            knowledge_settings_bootstrap,
+        )
         bootstrap_stage = "model_registry"
         await _bootstrap_model_registry_schema(engine, model_registry_bootstrap)
         bootstrap_stage = "langgraph"
@@ -624,12 +638,18 @@ async def _bootstrap_runtime_policy_schema(engine: AsyncEngine) -> None:
     )
 
 
-async def _bootstrap_knowledge_settings_schema(engine: AsyncEngine) -> None:
+async def _bootstrap_knowledge_settings_schema(
+    engine: AsyncEngine,
+    material: KnowledgeSettingsBootstrapMaterial | None = None,
+) -> None:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from app.knowledge_settings.bootstrap import bootstrap_knowledge_system_settings
 
-    await bootstrap_knowledge_system_settings(async_sessionmaker(engine, expire_on_commit=False))
+    await bootstrap_knowledge_system_settings(
+        async_sessionmaker(engine, expire_on_commit=False),
+        material=material,
+    )
 
 
 async def _bootstrap_model_registry_schema(
@@ -702,6 +722,12 @@ async def setup_postgres(
         expected_database = validate_identifier(expected_database, kind="database")
         if target.database != expected_database:
             raise ValueError("DATABASE_URL database does not match --database")
+    try:
+        validate_schema_installation_artifacts()
+    except Exception:
+        raise PostgresSetupError(
+            "Schema V1 安装产物预检失败；请检查 full_schema.sql 与 schema_comments.sql",
+        ) from None
     existed = await _database_exists(admin_url, target.database)
     if existed:
         # A concurrent setup may have created the database but still be
@@ -727,6 +753,13 @@ async def setup_postgres(
         model_registry_bootstrap = prepare_model_registry_bootstrap()
     except ModelRegistryBootstrapConfigurationInvalid as exc:
         raise PostgresSetupError(str(exc)) from None
+    try:
+        knowledge_settings_bootstrap = await prepare_knowledge_settings_bootstrap()
+    except (
+        KnowledgeSettingsBootstrapConfigurationInvalid,
+        KnowledgeSettingsBootstrapStorageUnavailable,
+    ) as exc:
+        raise PostgresSetupError(str(exc)) from None
     created = await ensure_database(
         admin_url,
         target.database,
@@ -737,6 +770,7 @@ async def setup_postgres(
         database_url,
         default_model_bootstrap=default_model_bootstrap,
         model_registry_bootstrap=model_registry_bootstrap,
+        knowledge_settings_bootstrap=knowledge_settings_bootstrap,
     )
     return SetupResult(
         host=target.host,
@@ -757,6 +791,10 @@ async def _validate_existing_schema(database_url: str) -> str | None:
         return CURRENT_SCHEMA_REVISION if state == "current" else None
     except SchemaRecreateRequired:
         raise PostgresSetupError(f"SCHEMA_RECREATE_REQUIRED: 非空目标库不是完整的 {CURRENT_SCHEMA_REVISION}；请显式重建目标数据库") from None
+    except SchemaUpgradeRequired:
+        raise PostgresSetupError(
+            "SCHEMA_UPGRADE_REQUIRED: 目标库存在打包支持的前驱；请停服、备份并运行 `make upgrade-db`",
+        ) from None
     except PostgresSetupError:
         raise
     except Exception:

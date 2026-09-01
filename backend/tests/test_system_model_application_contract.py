@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import uuid
 from dataclasses import fields
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,7 +21,7 @@ from app.gateway.routers.admin_model_settings import (
 )
 from app.gateway.routers.models import ModelResponse, _public_response
 from app.model_registry.secrets import protect_provider_api_key
-from app.system_settings.errors import SystemModelInvalid
+from app.system_settings.errors import SystemModelInvalid, SystemModelNotFound
 from app.system_settings.models import (
     CreateSystemModel,
     PublicSystemModelView,
@@ -346,6 +347,96 @@ async def test_unready_active_model_is_not_auto_selected_or_accepted_as_default(
     with pytest.raises(SystemModelInvalid):
         await service.set_default(_admin_context(), model_id)
     assert state.default_model_config_id is None
+
+
+@pytest.mark.anyio
+async def test_delete_model_retains_the_row_and_clears_the_default() -> None:
+    model_id = uuid.UUID("00000000-0000-4000-8000-000000000a06")
+    generation_id = uuid.UUID("00000000-0000-4000-8000-000000000a07")
+    actor = _admin_context()
+    state = SimpleNamespace(
+        revision=8,
+        default_model_config_id=model_id,
+        updated_by_user_id=None,
+        updated_at=None,
+    )
+    model = SimpleNamespace(
+        id=model_id,
+        status="active",
+        deleted_at=None,
+        revision=3,
+        updated_by_user_id="00000000-0000-4000-8000-000000000999",
+        current_secret_generation_id=generation_id,
+        secret_revision=4,
+    )
+
+    class Repository:
+        session = _FakeSession()
+
+        async def catalog_state(self, *, for_update: bool = False):
+            assert for_update is True
+            return state
+
+        async def lock_model(self, requested_id: uuid.UUID):
+            assert requested_id == model_id
+            return model if model.deleted_at is None else None
+
+    repository = Repository()
+    started_at = datetime.now(UTC)
+
+    await _AdminOperationService(repository).delete_model(actor, model_id)
+
+    assert repository.session.deleted == []
+    assert model.status == "suspended"
+    assert isinstance(model.deleted_at, datetime)
+    assert started_at <= model.deleted_at <= datetime.now(UTC)
+    assert model.revision == 4
+    assert model.updated_by_user_id == str(actor.user_id)
+    assert model.current_secret_generation_id == generation_id
+    assert model.secret_revision == 4
+    assert state.default_model_config_id is None
+    assert state.revision == 9
+    assert state.updated_by_user_id == str(actor.user_id)
+
+
+@pytest.mark.anyio
+async def test_deleted_model_is_not_found_by_later_mutations() -> None:
+    model_id = uuid.UUID("00000000-0000-4000-8000-000000000a08")
+    actor = _admin_context()
+    state = SimpleNamespace(
+        revision=2,
+        default_model_config_id=None,
+        updated_by_user_id=None,
+        updated_at=None,
+    )
+    model = SimpleNamespace(
+        id=model_id,
+        status="active",
+        deleted_at=None,
+        revision=1,
+        updated_by_user_id=str(actor.user_id),
+        current_secret_generation_id=uuid.uuid4(),
+        secret_revision=1,
+    )
+
+    class Repository:
+        session = _FakeSession()
+
+        async def catalog_state(self, *, for_update: bool = False):
+            assert for_update is True
+            return state
+
+        async def lock_model(self, requested_id: uuid.UUID):
+            assert requested_id == model_id
+            return model if model.deleted_at is None else None
+
+    service = _AdminOperationService(Repository())
+    await service.delete_model(actor, model_id)
+
+    with pytest.raises(SystemModelNotFound):
+        await service.delete_model(actor, model_id)
+    with pytest.raises(SystemModelNotFound):
+        await service.set_status(actor, model_id, "active")
 
 
 def test_public_api_projects_the_model_uuid_without_provider_identifiers() -> None:

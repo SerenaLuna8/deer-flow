@@ -194,7 +194,10 @@ worker:
     # both Worker/Gateway NOTIFY writes and the Gateway listener, restoring polling.
     run_event_notify_enabled: true
 
-# Knowledge 由 PostgreSQL 管理，默认关闭。在「系统设置 → 知识库配置」中启用。
+# Knowledge 运行时只读取 PostgreSQL。在空库 setup-db 时，完整提供四个
+# ACT_WEAVE_KNOWLEDGE_MINIO_{ENDPOINT,BUCKET,ACCESS_KEY,SECRET_KEY} 会先探测
+# 管理员预建的非 TLS、未版本化 bucket，再加密写入并默认启用；四项全无则关闭，
+# 部分配置在 DDL 前失败。Runtime 不读取这些环境变量，也不创建或猜测 bucket。
 # 旧 YAML 配置迁移：停服 → backend/scripts/migrate_knowledge_config.py → 删除
 # knowledge 块 → 重启 Gateway/Worker。迁移前应完成 Schema V1 安装，详见 Install.md。
 # 停用后保留存储配置，直到历史文档与对象全部清理；Runtime 不创建 bucket。

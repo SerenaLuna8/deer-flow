@@ -20,9 +20,12 @@ from app.private_work.run_execution_state import (
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.reliability.jobs import automation_run_idempotency_key
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow, WorkerNodeRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.shared_assets import AgentRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user import UserRow
@@ -41,7 +44,12 @@ class _Seed:
     worker_id: uuid.UUID
 
 
-async def _seed(factory: async_sessionmaker[AsyncSession]) -> _Seed:
+async def _seed(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    job_type: str = "private_run",
+    worker_capabilities: list[str] | None = None,
+) -> _Seed:
     owner_id = uuid.uuid4()
     other_owner_id = uuid.uuid4()
     project_id = uuid.uuid4()
@@ -52,12 +60,15 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> _Seed:
     run_id = str(uuid.uuid4())
     job_id = uuid.uuid4()
     worker_id = uuid.uuid4()
+    task_id = str(uuid.uuid4())
+    occurrence_id = str(uuid.uuid4())
     trace_id = f"run-execution-state-{uuid.uuid4().hex}"
     created_at = datetime.now(UTC) - timedelta(seconds=10)
     definition = direct_agent_definition_fields(
         updated_by_user_id=str(owner_id),
         description="Execution state Agent",
     )
+    automation_occurrence: ScheduledTaskRunRow | None = None
     async with factory() as session, session.begin():
         session.add_all(
             [
@@ -155,22 +166,66 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> _Seed:
             updated_at=created_at,
         )
         await add_sealed_test_run(session, run)
+        if job_type == "automation_run":
+            session.add(
+                ScheduledTaskRow(
+                    id=task_id,
+                    project_id=project_id,
+                    owner_user_id=str(owner_id),
+                    thread_id=None,
+                    context_mode="fresh_thread_per_run",
+                    agent_asset_id=agent_id,
+                    agent_scope="project",
+                    title="Execution state automation",
+                    prompt="Check execution state",
+                    schedule_type="once",
+                    schedule_spec={},
+                    timezone="UTC",
+                    status="enabled",
+                    overlap_policy="skip",
+                    run_count=0,
+                    version=1,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            await session.flush()
+            automation_occurrence = ScheduledTaskRunRow(
+                id=occurrence_id,
+                project_id=project_id,
+                owner_user_id=str(owner_id),
+                task_id=task_id,
+                task_version=1,
+                occurrence_key=uuid.uuid4().hex * 2,
+                scheduled_for=created_at,
+                trigger="scheduled",
+                status="running",
+                thread_id=thread_id,
+                run_id=run_id,
+                job_id=None,
+                launch_attempt_count=0,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+            session.add(automation_occurrence)
+            await session.flush()
         session.add(
             JobRow(
                 id=job_id,
-                job_type="private_run",
+                job_type=job_type,
                 project_id=project_id,
                 owner_user_id=str(owner_id),
                 owner_private_generation=1,
                 run_id=run_id,
+                automation_occurrence_id=(occurrence_id if job_type == "automation_run" else None),
                 origin_trace_id=trace_id,
-                idempotency_key=uuid.uuid4().hex * 2,
+                idempotency_key=(automation_run_idempotency_key(occurrence_id) if job_type == "automation_run" else uuid.uuid4().hex * 2),
                 status="queued",
                 available_at=created_at,
                 attempt_count=0,
                 max_attempts=3,
                 retry_safety="safe",
-                execution_domain_affinity=AFFINITY,
+                execution_domain_affinity=(AFFINITY if job_type == "private_run" else None),
                 created_at=created_at,
                 updated_at=created_at,
             )
@@ -179,7 +234,7 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> _Seed:
             WorkerNodeRow(
                 id=worker_id,
                 version="test",
-                capabilities_json=["private_run"],
+                capabilities_json=(["private_run"] if worker_capabilities is None else worker_capabilities),
                 max_concurrent_jobs=1,
                 execution_domain_affinity=None,
                 draining=False,
@@ -189,6 +244,8 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> _Seed:
         )
         await session.flush()
         run.job_id = job_id
+        if automation_occurrence is not None:
+            automation_occurrence.job_id = job_id
         await session.flush()
 
     return _Seed(
@@ -235,6 +292,37 @@ async def _read(
         )
     assert type(projection) is RunExecutionState
     return projection
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_reader_accepts_automation_run_and_requires_its_worker_capability(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        seed = await _seed(
+            factory,
+            job_type="automation_run",
+            worker_capabilities=["automation_run"],
+        )
+
+        assert (await _read(factory, seed)).phase == "queued"
+
+        async with factory() as session, session.begin():
+            worker = await session.get(WorkerNodeRow, seed.worker_id)
+            assert worker is not None
+            worker.capabilities_json = {"automation_run": True}
+        assert (await _read(factory, seed)).phase == "waiting_for_worker"
+
+        async with factory() as session, session.begin():
+            worker = await session.get(WorkerNodeRow, seed.worker_id)
+            assert worker is not None
+            worker.capabilities_json = ["private_run"]
+        assert (await _read(factory, seed)).phase == "waiting_for_worker"
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.postgres

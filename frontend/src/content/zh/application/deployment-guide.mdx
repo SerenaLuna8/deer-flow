@@ -27,7 +27,9 @@ make setup-db
 make check-db
 ```
 
-运行进程只验证目标数据库，不会建库、修复 schema 或原地升级旧数据库。
+运行进程只验证目标数据库，不会建库、修复或升级 schema。全新目标使用
+`make setup-db`；未来受支持的已知前驱只在停服、备份后的维护窗口显式执行
+`make upgrade-db`。
 
 ## 本地全栈
 

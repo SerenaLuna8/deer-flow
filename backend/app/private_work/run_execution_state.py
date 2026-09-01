@@ -714,7 +714,9 @@ async def read_run_execution_state(
             sa.cast(
                 eligible_worker.capabilities_json,
                 JSONB,
-            ).contains(["private_run"]),
+            ).op("@>")(
+                sa.func.jsonb_build_array(JobRow.job_type),
+            ),
             eligible_worker.draining.is_(False),
             eligible_worker.heartbeat_at >= fresh_after,
             sa.or_(
@@ -798,7 +800,7 @@ async def read_run_execution_state(
             JobRow,
             sa.and_(
                 JobRow.id == RunRow.job_id,
-                JobRow.job_type == "private_run",
+                JobRow.job_type.in_(("private_run", "automation_run")),
                 JobRow.project_id == RunRow.project_id,
                 JobRow.owner_user_id == RunRow.owner_user_id,
                 JobRow.run_id == RunRow.run_id,

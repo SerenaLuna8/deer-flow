@@ -45,7 +45,7 @@ settings. It does not write model definitions or model API keys.
 
 ### Initialize PostgreSQL
 
-Fluva supports only a fresh PostgreSQL target. Runtime startup never creates a database, repairs its schema, or upgrades an old database in place. The application role must already exist.
+Use `setup-db` for a fresh PostgreSQL target. Runtime startup never creates a database or repairs or upgrades its schema. The application role must already exist.
 
 ```bash
 export POSTGRES_ADMIN_URL='<administrator URL for the postgres maintenance database>'
@@ -57,6 +57,12 @@ make check-db
 <Callout type="warning">
   Point <code>setup-db</code> only at a fresh target. Test gates must use a separate disposable PostgreSQL instance.
 </Callout>
+
+When a future release packages a migration from a known predecessor, stop the
+services and take a backup before running `make upgrade-db` followed by
+`make check-db`. The current head remains `schema_v1`, so today `upgrade-db`
+only validates it and returns idempotently; unknown versions or Catalog drift
+are never repaired automatically.
 
 ### Start and open the application
 

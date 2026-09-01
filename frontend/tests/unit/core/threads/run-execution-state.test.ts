@@ -208,6 +208,7 @@ describe("Run execution state", () => {
     const previouslyExecuting = runExecutionStateSchema.parse(
       state("executing", "running"),
     );
+    expect(selectObservedRunExecutionState(undefined, false)).toBeNull();
     expect(selectObservedRunExecutionState(previouslyExecuting, true)).toBe(
       "unavailable",
     );

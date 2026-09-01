@@ -27,7 +27,10 @@ make setup-db
 make check-db
 ```
 
-Runtime processes only validate the target; they never create a database, repair its schema, or upgrade an old database in place.
+Runtime processes only validate the target; they never create a database or
+repair or upgrade its schema. Use `make setup-db` for a fresh target; future
+known predecessors are upgraded only with an explicit `make upgrade-db` during
+a stopped-service, backed-up maintenance window.
 
 ## Local full stack
 

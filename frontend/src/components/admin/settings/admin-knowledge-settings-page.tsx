@@ -247,13 +247,29 @@ function KnowledgeSettingsEditor({
   const endpointChanged =
     base.secret_key_configured &&
     draft.minio_endpoint?.trim() !== base.minio_endpoint;
-  const valid =
-    writable.success &&
-    (!endpointChanged || secret.trim().length > 0) &&
-    (!draft.enabled ||
-      base.secret_key_configured ||
-      secret.trim().length > 0) &&
-    (secret.length === 0 || secret.trim().length > 0);
+  const missingRequiredFields: string[] = [];
+  if (draft.enabled) {
+    if (!draft.minio_endpoint?.trim()) {
+      missingRequiredFields.push(copy.minio_endpoint[0]);
+    }
+    if (!draft.minio_bucket?.trim()) {
+      missingRequiredFields.push(copy.minio_bucket[0]);
+    }
+    if (!draft.minio_access_key?.trim()) {
+      missingRequiredFields.push(copy.minio_access_key[0]);
+    }
+  }
+  if (
+    (endpointChanged || (draft.enabled && !base.secret_key_configured)) &&
+    !secret.trim()
+  ) {
+    missingRequiredFields.push(copy.minio_secret_key[0]);
+  }
+  const localValidationMessage = missingRequiredFields.length
+    ? labels.missingRequired(missingRequiredFields.join(", "))
+    : !writable.success || (secret.length > 0 && !secret.trim())
+      ? labels.invalid
+      : null;
 
   useEffect(() => {
     mounted.current = true;
@@ -301,7 +317,11 @@ function KnowledgeSettingsEditor({
   }
 
   async function submit() {
-    if (!valid || !dirty || pending || conflictNeedsRefresh) return;
+    if (!dirty || pending || conflictNeedsRefresh) return;
+    if (localValidationMessage) {
+      setFeedback({ error: true, message: localValidationMessage });
+      return;
+    }
     const controller = new AbortController();
     activeRequest.current = controller;
     setPending(true);
@@ -409,6 +429,7 @@ function KnowledgeSettingsEditor({
 
   return (
     <form
+      noValidate
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
@@ -444,7 +465,7 @@ function KnowledgeSettingsEditor({
               type="submit"
               size="sm"
               className="h-8 text-xs"
-              disabled={pending || !dirty || !valid || conflictNeedsRefresh}
+              disabled={pending || !dirty || conflictNeedsRefresh}
             >
               {pending && (
                 <Loader2Icon className="size-3.5 animate-spin" aria-hidden />
@@ -605,7 +626,7 @@ function AuthorizedKnowledgeSettingsPage({ accountId }: { accountId: string }) {
   const labels = t.adminKnowledgeSettings;
   const query = useAdminKnowledgeSettings(accountId);
   return (
-    <AdminPage>
+    <AdminPage className="max-w-7xl space-y-5">
       <AdminPageHeader title={labels.title} description={labels.description} />
       <div
         role="note"

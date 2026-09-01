@@ -2,9 +2,10 @@
 """Run a backend role with the repository's filtered local environment.
 
 Backend module commands are valid entry points on their own, so they cannot
-depend on the root ``serve.sh`` having sourced ``.env`` first. This launcher
-loads non-provider settings explicitly, preserves caller-supplied values, and
-removes ambient model-provider keys before replacing itself with the role.
+depend on the root ``serve.sh`` having sourced ``.env`` first. Runtime roles
+receive the existing filtered environment; the explicit database-upgrade mode
+uses a smaller allowlist containing only ``DATABASE_URL`` and safe process
+bootstrap variables.
 """
 
 from __future__ import annotations
@@ -35,11 +36,12 @@ MODEL_PROVIDER_ENV_NAMES = frozenset(
 )
 INSTALLATION_ONLY_ENV_NAMES = frozenset(
     {
-        # setup-db consumes this once to create encrypted model-owned copies.
-        # Runtime roles must never inherit the bootstrap plaintext.
+        # The public setup-db path consumes this once to create encrypted
+        # model-owned copies. The internal reset helper is the nonpublic
+        # development/test exception. Runtime roles never inherit plaintext.
         "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY",
-        # setup-db encrypts this once into the default Model Provider row;
-        # runtime roles must never inherit the plaintext.
+        # The same public setup path encrypts this into the default Model
+        # Provider row; the nonpublic reset helper may reuse that install flow.
         "ACT_WEAVE_BOOTSTRAP_MODEL_PROVIDER_API_KEY",
         # The matching install-time skip switch is equally installation-only:
         # runtime behavior is governed by config.yaml, not bootstrap decisions.
@@ -48,13 +50,44 @@ INSTALLATION_ONLY_ENV_NAMES = frozenset(
         # never reach Gateway/Worker/Scheduler, but no bootstrap reads them.
         "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_API_KEY",
         "ACT_WEAVE_BOOTSTRAP_KNOWLEDGE_SKIP",
-        # This superuser connection is admitted only by setup/upgrade entry
-        # points. Gateway, Worker, Scheduler, and maintenance runtime commands
-        # must use the application DATABASE_URL instead.
+        # The public setup path consumes this complete group to seed encrypted
+        # Knowledge storage settings; the nonpublic reset helper is the
+        # internal exception. Runtime reads PostgreSQL only.
+        "ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT",
+        "ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET",
+        "ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY",
+        "ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY",
+        # The public Make entry admitting this superuser connection is
+        # setup-db; the internal reset helper remains a nonpublic exception.
+        # Runtime and maintenance commands use the application DATABASE_URL.
         "POSTGRES_ADMIN_URL",
     }
 )
 RUNTIME_BLOCKED_ENV_NAMES = MODEL_PROVIDER_ENV_NAMES | INSTALLATION_ONLY_ENV_NAMES
+DATABASE_UPGRADE_SAFE_ENV_NAMES = frozenset(
+    {
+        "COLORTERM",
+        "COMSPEC",
+        "DATABASE_URL",
+        "FORCE_COLOR",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "NO_COLOR",
+        "PATH",
+        "PATHEXT",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "SYSTEMROOT",
+        "TEMP",
+        "TERM",
+        "TMP",
+        "TMPDIR",
+        "TZ",
+        "WINDIR",
+    }
+)
 
 
 def build_runtime_environment(
@@ -75,6 +108,25 @@ def build_runtime_environment(
     return environment
 
 
+def build_database_upgrade_environment(
+    env_file: Path,
+    *,
+    base_environment: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return the minimal environment admitted to the schema upgrade process."""
+
+    source = os.environ if base_environment is None else base_environment
+    if os.name == "nt":
+        environment = {name.upper(): value for name, value in source.items() if name.upper() in DATABASE_UPGRADE_SAFE_ENV_NAMES}
+    else:
+        environment = {name: value for name, value in source.items() if name in DATABASE_UPGRADE_SAFE_ENV_NAMES}
+    if "DATABASE_URL" not in environment and env_file.is_file():
+        database_url = dotenv_values(env_file).get("DATABASE_URL")
+        if database_url is not None:
+            environment["DATABASE_URL"] = database_url
+    return environment
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run a backend role with filtered repository environment settings.",
@@ -83,6 +135,11 @@ def main() -> int:
         "--env-file",
         type=Path,
         default=REPOSITORY_ROOT / ".env",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--database-upgrade",
+        action="store_true",
         help=argparse.SUPPRESS,
     )
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -94,11 +151,11 @@ def main() -> int:
     if not command:
         parser.error("a command is required after --")
 
-    os.execvpe(
-        command[0],
-        command,
-        build_runtime_environment(args.env_file),
-    )
+    if args.database_upgrade:
+        environment = build_database_upgrade_environment(args.env_file)
+    else:
+        environment = build_runtime_environment(args.env_file)
+    os.execvpe(command[0], command, environment)
     return 0
 
 

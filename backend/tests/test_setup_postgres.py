@@ -290,7 +290,8 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     async def runtime_policy(_engine):
         calls.append("runtime-policy")
 
-    async def knowledge_settings(_engine):
+    async def knowledge_settings(_engine, material):
+        assert material is knowledge_material
         calls.append("knowledge-settings")
 
     async def model_registry(_engine, seed):
@@ -308,6 +309,9 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     )
     registry_seed = MagicMock(
         spec=setup_postgres.ModelRegistrySeed,
+    )
+    knowledge_material = MagicMock(
+        spec=setup_postgres.KnowledgeSettingsBootstrapMaterial,
     )
     monkeypatch.setattr(setup_postgres, "stage_schema_for_setup", bootstrap)
     monkeypatch.setattr(setup_postgres, "finalize_staged_schema", finalize)
@@ -336,6 +340,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
             "postgresql://owner:private-password@localhost/deerflow_test_1_abc",
             default_model_bootstrap=bootstrap_material,
             model_registry_bootstrap=registry_seed,
+            knowledge_settings_bootstrap=knowledge_material,
         )
         == setup_postgres.CURRENT_SCHEMA_REVISION
     )
@@ -827,6 +832,80 @@ async def test_setup_preflights_default_model_before_creating_database(
 
 
 @pytest.mark.asyncio
+async def test_setup_rejects_invalid_schema_installation_artifacts_before_database_access(
+    monkeypatch,
+) -> None:
+    validate_artifacts = MagicMock(
+        side_effect=RuntimeError("schema_comments.sql is missing or corrupt"),
+    )
+    database_exists = AsyncMock()
+    ensure = AsyncMock()
+    ensure_vector = AsyncMock()
+    bootstrap = AsyncMock()
+    create_engine = MagicMock(
+        side_effect=AssertionError("database engine must not be created"),
+    )
+    monkeypatch.setattr(
+        setup_postgres,
+        "validate_schema_installation_artifacts",
+        validate_artifacts,
+        raising=False,
+    )
+    monkeypatch.setattr(setup_postgres, "_database_exists", database_exists)
+    monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
+    monkeypatch.setattr(setup_postgres, "_ensure_vector_extension", ensure_vector)
+    monkeypatch.setattr(setup_postgres, "_bootstrap_existing", bootstrap)
+    monkeypatch.setattr(setup_postgres, "create_async_engine", create_engine)
+
+    with pytest.raises(
+        setup_postgres.PostgresSetupError,
+        match="Schema V1 安装产物预检失败",
+    ):
+        await setup_postgres.setup_postgres(
+            "postgresql://admin:secret@localhost/postgres",
+            "postgresql://owner:secret@localhost/deerflow_test_1_abc",
+        )
+
+    validate_artifacts.assert_called_once_with()
+    database_exists.assert_not_awaited()
+    ensure.assert_not_awaited()
+    ensure_vector.assert_not_awaited()
+    bootstrap.assert_not_awaited()
+    create_engine.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_setup_rejects_partial_knowledge_storage_before_creating_database(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT",
+        "storage.example.test:9000",
+    )
+    monkeypatch.delenv("ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET", raising=False)
+    monkeypatch.delenv("ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY", raising=False)
+    ensure = AsyncMock()
+    monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
+    monkeypatch.setattr(
+        setup_postgres,
+        "_database_exists",
+        AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(
+        setup_postgres.PostgresSetupError,
+        match="ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET",
+    ):
+        await setup_postgres.setup_postgres(
+            "postgresql://admin:secret@localhost/postgres",
+            "postgresql://owner:secret@localhost/deerflow_test_1_abc",
+        )
+
+    ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_cleanup_failure_is_sanitized(monkeypatch) -> None:
     monkeypatch.setattr(setup_postgres, "ensure_database", AsyncMock(return_value=False))
     monkeypatch.setattr(setup_postgres, "_ensure_vector_extension", AsyncMock())
@@ -890,11 +969,13 @@ def test_makefiles_expose_database_targets() -> None:
     root_makefile = setup_postgres.BACKEND_ROOT.parent.joinpath("Makefile").read_text()
     for target in (
         "setup-db:",
+        "upgrade-db:",
         "check-db:",
     ):
         assert target in backend_makefile
         assert target in root_makefile
     for removed in (
+        "reset-db:",
         "migrate-db:",
         "--migrate-only",
         "migrate-sqlite:",
@@ -907,6 +988,8 @@ def test_makefiles_expose_database_targets() -> None:
         assert removed not in root_makefile
     assert "SETUP_ENV_FILE := $(wildcard ../.env)" in backend_makefile
     assert "uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/setup_postgres.py" in backend_makefile
+    assert "PYTHONPATH=. $(DATABASE_UPGRADE_ENV_RUNNER) python -m scripts.upgrade_postgres" in backend_makefile
+    assert "DATABASE_UPGRADE_ENV_RUNNER = uv run python scripts/run_runtime.py --database-upgrade --" in backend_makefile
 
 
 def test_backend_setup_db_only_passes_env_file_when_it_exists(

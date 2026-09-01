@@ -515,9 +515,6 @@ export const zhCN: Translations = {
       reparsePending: "提交中…",
       reparseConflict:
         "文档在本对话框之外发生了变化，已刷新最新参数与版本，请核对后重新确认。",
-      legacyProfile: "历史参数",
-      parserProfile: (etlType, extractorId, extractorVersion) =>
-        `${etlType === "builtin" ? "内置解析器" : "本地 Unstructured"} · ${extractorId} · ${extractorVersion}`,
       parsingNotices: (count) => `${count} 条解析提示`,
       imageFailures: (count) => `${count} 张图片未能保存`,
       warningMessages: {
@@ -602,9 +599,7 @@ export const zhCN: Translations = {
       baseFilterLabel: "限定知识库（可选）",
       allBases: "全部知识库",
       topKLabel: "返回条数 (top_k)",
-      topKHint: "留空使用知识库默认值。",
       thresholdLabel: "分数阈值",
-      thresholdHint: "留空使用知识库默认阈值；0 表示不过滤。",
       submit: "检索",
       searching: "检索中…",
       empty: "未找到相关内容",
@@ -1494,6 +1489,7 @@ export const zhCN: Translations = {
       "配置已被其他管理员更新。草稿已保留，请重试加载最新版本后再保存。",
     authRequired: "管理员会话已失效，请重新登录。",
     invalid: "请检查存储连接、密钥、模型与数值范围。",
+    missingRequired: (fields) => `保存前请补全以下必填配置：${fields}。`,
     unavailable: "知识库配置暂不可用，请稍后重试。",
     generic: "知识库配置保存失败，请重试。",
   },

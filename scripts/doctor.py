@@ -371,7 +371,7 @@ def check_model_catalog() -> CheckResult:
             "PostgreSQL model catalog",
             "fail",
             "catalog table missing",
-            fix=("Use a new empty PostgreSQL database and run `make setup-db`; older schemas are not upgraded in place."),
+            fix=("Run `make check-db`; use `make upgrade-db` only for a packaged predecessor, otherwise use a new empty database with `make setup-db`."),
         )
 
     active_count = readiness.get("active_count")
@@ -661,14 +661,60 @@ def check_postgres(project_root: Path) -> CheckResult:
             "PostgreSQL",
             "fail",
             "只读健康检查失败",
-            fix="运行 make check-db 查看脱敏状态；旧 revision 或未知非空库必须创建全新的空数据库",
+            fix="运行 make check-db 查看脱敏状态；检查 DATABASE_URL、数据库状态和访问权限",
         )
     if not result.get("healthy"):
+        schema_state = result.get("schema_state")
+        if schema_state == "upgrade_required":
+            return CheckResult(
+                "PostgreSQL",
+                "fail",
+                "Schema 存在已打包的前向升级路径",
+                fix="停止服务并备份数据库后运行 make upgrade-db，然后运行 make check-db",
+            )
+        if schema_state == "recreate_required":
+            return CheckResult(
+                "PostgreSQL",
+                "fail",
+                "Schema revision 未知或 catalog 发生漂移",
+                fix="切换到新的空数据库并运行 make setup-db；catalog 漂移不能通过 make upgrade-db 修复",
+            )
+        if schema_state == "uninitialized":
+            return CheckResult(
+                "PostgreSQL",
+                "fail",
+                "数据库尚未初始化",
+                fix="确认目标是新的空数据库后运行 make setup-db，然后运行 make check-db",
+            )
+        if schema_state == "unavailable":
+            return CheckResult(
+                "PostgreSQL",
+                "fail",
+                "无法连接或读取 PostgreSQL",
+                fix="检查 DATABASE_URL、数据库状态和访问权限，然后运行 make check-db",
+            )
+        if schema_state == "ready":
+            missing_extensions = [
+                extension
+                for extension, installed in (
+                    ("pg_trgm", result.get("pg_trgm_installed")),
+                    ("vector", result.get("vector_installed")),
+                )
+                if installed is not True
+            ]
+            if missing_extensions:
+                extensions = "、".join(missing_extensions)
+                return CheckResult(
+                    "PostgreSQL",
+                    "fail",
+                    f"Schema marker 已匹配，但缺少 PostgreSQL 扩展：{extensions}",
+                    fix=f"请由数据库管理员在当前数据库安装 {extensions}，然后运行 make check-db",
+                )
         return CheckResult(
             "PostgreSQL",
             "fail",
             "连接、Schema marker 或必需表检查未通过",
-            fix="运行 make check-db 查看脱敏状态；旧 revision 或未知非空库必须创建全新的空数据库并运行 make setup-db",
+            fix="运行 make check-db 查看脱敏状态；不要用 make upgrade-db 修复未分类的 catalog 问题",
         )
     detail = f"{result['host']}:{result['port']}/{result['database']}, revision {result['current_revision']}"
     return CheckResult("PostgreSQL", "ok", detail)

@@ -1,29 +1,29 @@
 "use client";
 
 import {
+  CircleCheckIcon,
+  CircleIcon,
+  MoreHorizontalIcon,
   PencilIcon,
   PlusIcon,
+  PowerIcon,
   RefreshCwIcon,
   SearchIcon,
+  StarIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import {
   ModelCreateDialog,
   ProviderEditorDialog,
-  ProviderModelList,
   registryCopy,
   registryErrorText,
 } from "@/components/admin/settings/admin-model-registry-page";
-import {
-  AdminPage,
-  AdminPageHeader,
-  AdminSection,
-} from "@/components/admin/ui/admin-page";
+import { AdminPage, AdminPageHeader } from "@/components/admin/ui/admin-page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -32,12 +32,21 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   useAdminModelProviders,
+  useAdminProviderModels,
   useDeleteAdminModelProvider,
   useDeleteAdminProviderModel,
+  useSetAdminProviderModelStatus,
+  useTestAdminProviderModel,
 } from "@/core/admin-settings/model-registry/hooks";
 import type {
   AdminModelProviderItem,
@@ -46,6 +55,7 @@ import type {
 import {
   useAdminModelCatalog,
   useCreateAdminModel,
+  useDeleteAdminModel,
   useReplaceAdminModel,
   useSetAdminModelDefault,
   useSetAdminModelStatus,
@@ -64,12 +74,34 @@ import {
 import { useAuth } from "@/core/auth/AuthProvider";
 import type { Locale } from "@/core/i18n";
 import { useI18n } from "@/core/i18n/hooks";
+import { cn } from "@/lib/utils";
 
 type EditorTarget = AdminModelItem | null;
+
+type ModelDeleteTarget =
+  | { kind: "text"; id: string; name: string }
+  | { kind: "retrieval"; id: string; name: string };
+
+const MODEL_TOAST_OPTIONS = {
+  position: "top-center",
+  richColors: true,
+} as const;
 
 const MODEL_SETTINGS_COPY = {
   "en-US": {
     pageTitle: "Model management",
+    providersTitle: "Providers {count}",
+    modelsTitle: "Models {count}",
+    modelsDescription: "All models under this provider",
+    modelList: "Models for the selected provider",
+    modelName: "Model",
+    modelType: "Type",
+    modelStatus: "Status",
+    modelCapabilities: "Capabilities",
+    modelActions: "Actions",
+    textModelType: "Text model",
+    moreActions: "More actions",
+    currentDefault: "Current default",
     searchModels: "Search models",
     searchPlaceholder: "Search by name, adapter, or model ID",
     filterStatus: "Filter models by status",
@@ -82,7 +114,7 @@ const MODEL_SETTINGS_COPY = {
     addModel: "Add text model",
     catalogLoadFailed: "The model catalog could not be loaded.",
     retry: "Retry",
-    noMatches: "No text models match the current filter.",
+    noMatches: "No models match the current filter.",
     editModel: "Edit model",
     dialogDescription:
       "A text model binds one provider; the provider owns the endpoint and the API Key, and the model stores no credential of its own. Connection tests use the provider's saved Key.",
@@ -98,7 +130,6 @@ const MODEL_SETTINGS_COPY = {
     maximumInputTokens: "Maximum input tokens",
     maximumInputTokensHint:
       "The model's maximum input context and the denominator for context-usage percentages; this is not the maximum output token limit.",
-    providerSettings: "Adapter settings",
     advancedSettings: "Advanced settings",
     providerDefault: "Provider default",
     enabledValue: "Enabled",
@@ -140,10 +171,26 @@ const MODEL_SETTINGS_COPY = {
     configurationRevision: "Configuration revision",
     edit: "Edit",
     setDefault: "Set as default",
+    deleteModelTitle: "Delete model",
+    deleteModelDescription:
+      'Delete model "{name}"? It will be removed from the current model catalog and unavailable for new use. Historical records that already reference it will be retained. If a retrieval model is referenced by a knowledge base, deletion will be rejected.',
+    deleteModelSucceeded: "Model deleted.",
     operationFailed: "Model operation failed.",
   },
   "zh-CN": {
     pageTitle: "模型管理",
+    providersTitle: "供应商 {count}",
+    modelsTitle: "模型 {count}",
+    modelsDescription: "当前供应商下的全部模型",
+    modelList: "当前供应商的模型",
+    modelName: "模型",
+    modelType: "类型",
+    modelStatus: "状态",
+    modelCapabilities: "能力",
+    modelActions: "操作",
+    textModelType: "文本模型",
+    moreActions: "更多操作",
+    currentDefault: "当前默认",
     searchModels: "搜索模型",
     searchPlaceholder: "搜索名称、适配器或模型 ID",
     filterStatus: "筛选模型状态",
@@ -156,7 +203,7 @@ const MODEL_SETTINGS_COPY = {
     addModel: "添加文本模型",
     catalogLoadFailed: "模型目录读取失败。",
     retry: "重试",
-    noMatches: "当前筛选条件下没有匹配的文本模型。",
+    noMatches: "当前筛选条件下没有匹配的模型。",
     editModel: "编辑模型",
     dialogDescription:
       "文本模型绑定一个供应商；服务地址和 API Key 由供应商统一持有，模型自身不保存任何凭据。连接测试直接使用供应商已保存的 Key。",
@@ -171,7 +218,6 @@ const MODEL_SETTINGS_COPY = {
     maximumInputTokens: "最大输入 Token",
     maximumInputTokensHint:
       "模型可接收的最大输入上下文，也是上下文用量百分比的分母；不是最大输出 Token。",
-    providerSettings: "适配器设置",
     advancedSettings: "高级设置",
     providerDefault: "Provider 默认",
     enabledValue: "启用",
@@ -211,6 +257,10 @@ const MODEL_SETTINGS_COPY = {
     configurationRevision: "配置 revision",
     edit: "编辑",
     setDefault: "设为默认",
+    deleteModelTitle: "删除模型",
+    deleteModelDescription:
+      "确定删除模型「{name}」？该模型会从当前模型目录中移除，不能再用于新的运行或配置。已经引用它的历史记录会被保留。检索模型正被知识库引用时，删除会被拒绝。",
+    deleteModelSucceeded: "模型已删除。",
     operationFailed: "模型操作失败。",
   },
 } as const satisfies Record<Locale, Record<string, string>>;
@@ -279,6 +329,24 @@ export function selectAdminModelCatalogItems(
         item.display_name.toLocaleLowerCase().includes(normalized) ||
         item.provider_model.toLocaleLowerCase().includes(normalized) ||
         item.provider_adapter.toLocaleLowerCase().includes(normalized)),
+  );
+}
+
+export function selectAdminProviderModelItems(
+  items: readonly AdminProviderModelItem[],
+  query: string,
+  status: "all" | "active" | "suspended",
+): AdminProviderModelItem[] {
+  const normalized = query.trim().toLocaleLowerCase();
+  return items.filter(
+    (item) =>
+      (status === "all" ||
+        (status === "active"
+          ? item.status === "active"
+          : item.status === "disabled")) &&
+      (!normalized ||
+        item.model_name.toLocaleLowerCase().includes(normalized) ||
+        item.model_type.toLocaleLowerCase().includes(normalized)),
   );
 }
 
@@ -492,13 +560,8 @@ function ProviderSettingsFields({
   );
 
   return (
-    <section className="space-y-3 rounded-lg border p-4">
-      <h3 className="text-sm font-medium">{copy.providerSettings}</h3>
-      {directFields.length > 0 ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          {directFields.map(renderField)}
-        </div>
-      ) : null}
+    <>
+      {directFields.map(renderField)}
       {advancedFields.length > 0 || preservedCount > 0 ? (
         <details
           key={descriptor.id}
@@ -520,7 +583,7 @@ function ProviderSettingsFields({
           ) : null}
         </details>
       ) : null}
-    </section>
+    </>
   );
 }
 
@@ -563,7 +626,10 @@ function ModelEditorDialog({
   const [pending, setPending] = useState(false);
   const [testPending, setTestPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{
+    status: "succeeded" | "failed";
+    message: string;
+  } | null>(null);
   const create = useCreateAdminModel(accountId);
   const replace = useReplaceAdminModel(accountId);
   const test = useTestAdminModelConnection(accountId);
@@ -690,10 +756,16 @@ function ModelEditorDialog({
         settings: common.settings,
         supports_vision: common.supports_vision,
       });
-      setTestResult(adminModelConnectionTestResultMessage(result.status, locale));
+      setTestResult({
+        status: result.status,
+        message: adminModelConnectionTestResultMessage(result.status, locale),
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : copy.testFailed);
-      setTestResult(adminModelConnectionTestResultMessage("failed", locale));
+      setTestResult({
+        status: "failed",
+        message: adminModelConnectionTestResultMessage("failed", locale),
+      });
     } finally {
       setTestPending(false);
     }
@@ -707,7 +779,9 @@ function ModelEditorDialog({
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>{target ? copy.editModel : copy.addModel}</DialogTitle>
-          <DialogDescription>{copy.dialogDescription}</DialogDescription>
+          <DialogDescription className="sr-only">
+            {copy.dialogDescription}
+          </DialogDescription>
         </DialogHeader>
         <form className="space-y-4" onSubmit={save}>
           <label className="grid gap-2 text-sm">
@@ -789,14 +863,7 @@ function ModelEditorDialog({
               step={1}
               required
               defaultValue={target?.max_input_tokens ?? ""}
-              aria-describedby="admin-model-max-input-tokens-hint"
             />
-            <span
-              id="admin-model-max-input-tokens-hint"
-              className="text-muted-foreground text-xs leading-5"
-            >
-              {copy.maximumInputTokensHint}
-            </span>
           </label>
           {selectedDescriptor ? (
             <ProviderSettingsFields
@@ -850,8 +917,16 @@ function ModelEditorDialog({
             </p>
           ) : null}
           {testResult ? (
-            <p role="status" className="text-sm">
-              {testResult}
+            <p
+              role="status"
+              className={cn(
+                "text-sm",
+                testResult.status === "succeeded"
+                  ? "text-success"
+                  : "text-destructive",
+              )}
+            >
+              {testResult.message}
             </p>
           ) : null}
           <p className="text-muted-foreground text-xs leading-5">
@@ -899,76 +974,186 @@ function ModelEditorDialog({
   );
 }
 
-function ModelCard({
+const MODEL_ROW_LAYOUT =
+  "grid min-w-0 items-center gap-2 xl:grid-cols-[minmax(12rem,2fr)_5.5rem_5.5rem_minmax(12rem,1.5fr)_15rem]";
+
+function TextModelCapabilities({
+  item,
+  copy,
+}: {
+  item: AdminModelItem;
+  copy: ReturnType<typeof adminModelSettingsCopy>;
+}) {
+  const capabilities = [
+    item.supports_thinking ? (
+      <Badge
+        key="thinking"
+        variant="outline"
+        className="rounded-md border-violet-200 bg-violet-50 px-2 py-1 text-[11px] font-medium text-violet-700 dark:border-violet-400/30 dark:bg-violet-500/10 dark:text-violet-300"
+      >
+        <CircleCheckIcon aria-hidden />
+        {copy.supportsThinking}
+      </Badge>
+    ) : null,
+    item.supports_reasoning_effort ? (
+      <Badge
+        key="reasoning"
+        variant="outline"
+        className="rounded-md border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 dark:border-blue-400/30 dark:bg-blue-500/10 dark:text-blue-300"
+      >
+        <CircleCheckIcon aria-hidden />
+        {copy.supportsReasoningEffort}
+      </Badge>
+    ) : null,
+    item.supports_vision ? (
+      <Badge
+        key="vision"
+        variant="outline"
+        className="rounded-md border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-300"
+      >
+        <CircleCheckIcon aria-hidden />
+        {copy.supportsVision}
+      </Badge>
+    ) : null,
+  ].filter(Boolean);
+
+  if (capabilities.length === 0) {
+    return <span className="text-muted-foreground text-xs">—</span>;
+  }
+
+  return (
+    <div
+      role="group"
+      aria-label={copy.modelCapabilities}
+      className="flex flex-wrap items-center gap-2"
+    >
+      {capabilities}
+    </div>
+  );
+}
+
+function TextModelRow({
   accountId,
+  descriptor,
   item,
   onEdit,
+  onDelete,
 }: {
   accountId: string;
+  descriptor: AdminModelProviderAdapterDescriptor | undefined;
   item: AdminModelItem;
   onEdit: () => void;
+  onDelete: () => void;
 }) {
   const { locale } = useI18n();
   const copy = adminModelSettingsCopy(locale);
+  const providerCopy = registryCopy(locale);
+  const test = useTestAdminModelConnection(accountId);
   const status = useSetAdminModelStatus(accountId);
   const makeDefault = useSetAdminModelDefault(accountId);
   const error = status.error ?? makeDefault.error;
+  const testInput = useMemo(() => {
+    if (!descriptor) return null;
+    const draft = createAdminModelProviderSettingsDraft(
+      descriptor,
+      item.settings,
+      item.provider_adapter,
+    );
+    if (draft.unknown_provider || draft.incompatible_keys.length > 0) {
+      return null;
+    }
+    try {
+      return {
+        provider_id: item.provider_id,
+        provider_adapter: item.provider_adapter,
+        provider_model: item.provider_model,
+        max_input_tokens: item.max_input_tokens,
+        settings: serializeAdminModelProviderSettingsDraft(descriptor, draft),
+        supports_vision: item.supports_vision,
+      };
+    } catch {
+      return null;
+    }
+  }, [descriptor, item]);
+
+  const runConnectionTest = () => {
+    if (!testInput) return;
+    void test.execute(testInput).then(
+      (result) => {
+        const message = adminModelConnectionTestResultMessage(
+          result.status,
+          locale,
+        );
+        if (result.status === "succeeded") {
+          toast.success(message, MODEL_TOAST_OPTIONS);
+        } else {
+          toast.error(message, MODEL_TOAST_OPTIONS);
+        }
+      },
+      (caught: unknown) =>
+        toast.error(
+          caught instanceof Error ? caught.message : copy.testFailed,
+          MODEL_TOAST_OPTIONS,
+        ),
+    );
+  };
+
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <CardTitle className="truncate">{item.display_name}</CardTitle>
-            <p className="text-muted-foreground mt-1 truncate font-mono text-xs">
-              {item.provider_adapter} / {item.provider_model}
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {item.is_default ? <Badge>{copy.default}</Badge> : null}
-            <Badge variant={item.status === "active" ? "default" : "secondary"}>
-              {item.status === "active" ? copy.active : copy.suspended}
+    <li
+      data-model-kind="text"
+      className="border-border/70 border-b px-4 py-3 last:border-b-0 sm:px-5"
+    >
+      <div className={MODEL_ROW_LAYOUT}>
+        <div
+          role="group"
+          aria-label={`${copy.modelName}: ${item.display_name}`}
+          className="flex min-w-0 items-center gap-2"
+        >
+          <span className="truncate text-sm font-medium">
+            {item.display_name}
+          </span>
+          {item.is_default ? (
+            <Badge
+              variant="outline"
+              className="border-selection/30 bg-selection-subtle text-selection rounded-md px-1.5 py-0.5 text-[11px]"
+            >
+              {copy.default}
             </Badge>
-          </div>
+          ) : null}
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <dl className="grid gap-3 text-sm sm:grid-cols-2">
-          <div>
-            <dt className="text-muted-foreground text-xs">{copy.credential}</dt>
-            <dd>
-              {item.api_key_configured ? copy.configured : copy.notConfigured}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground text-xs">
-              {copy.maximumInputTokens}
-            </dt>
-            <dd>{item.max_input_tokens.toLocaleString(locale)}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground text-xs">
-              {copy.secretRevision}
-            </dt>
-            <dd>{item.secret_revision}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground text-xs">{copy.readiness}</dt>
-            <dd>
-              {item.secret_readiness === "ready" ? copy.ready : copy.unready}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground text-xs">
-              {copy.configurationRevision}
-            </dt>
-            <dd>{item.revision}</dd>
-          </div>
-        </dl>
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" size="sm" variant="outline" onClick={onEdit}>
-            <PencilIcon aria-hidden className="size-4" />
-            {copy.edit}
-          </Button>
+        <div
+          role="group"
+          aria-label={`${copy.modelType}: ${copy.textModelType}`}
+        >
+          <Badge
+            variant="outline"
+            className="rounded-md px-2 py-0.5 text-[11px] font-normal"
+          >
+            {copy.textModelType}
+          </Badge>
+        </div>
+        <div
+          role="group"
+          aria-label={`${copy.modelStatus}: ${item.status === "active" ? copy.active : copy.suspended}`}
+          className="flex items-center gap-1.5 text-xs"
+        >
+          <CircleIcon
+            aria-hidden
+            className={cn(
+              "size-2 fill-current",
+              item.status === "active"
+                ? "text-success"
+                : "text-muted-foreground",
+            )}
+          />
+          {item.status === "active" ? copy.active : copy.suspended}
+        </div>
+        <TextModelCapabilities item={item} copy={copy} />
+        <div
+          role="group"
+          aria-label={copy.modelActions}
+          className="flex flex-wrap items-center justify-start gap-1.5 xl:flex-nowrap xl:justify-end"
+        >
           <Button
             type="button"
             size="sm"
@@ -983,33 +1168,274 @@ function ModelCard({
               })
             }
           >
+            <PowerIcon aria-hidden className="size-3.5" />
             {item.status === "active" ? copy.disable : copy.enable}
           </Button>
-          {!item.is_default ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={
-                makeDefault.isPending ||
-                item.status !== "active" ||
-                item.secret_readiness !== "ready"
-              }
-              onClick={() =>
-                makeDefault.mutate({ modelId: item.id, input: {} })
-              }
-            >
-              {copy.setDefault}
-            </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={
+              item.is_default ||
+              makeDefault.isPending ||
+              item.status !== "active" ||
+              item.secret_readiness !== "ready"
+            }
+            onClick={() => makeDefault.mutate({ modelId: item.id, input: {} })}
+          >
+            <StarIcon aria-hidden className="size-3.5" />
+            {item.is_default ? copy.default : copy.setDefault}
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                size="icon-sm"
+                variant="outline"
+                aria-label={copy.moreActions}
+              >
+                <MoreHorizontalIcon aria-hidden className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                disabled={test.isPending || testInput === null}
+                onSelect={runConnectionTest}
+              >
+                <CircleCheckIcon aria-hidden />
+                {test.isPending ? providerCopy.testing : providerCopy.test}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={onEdit}>
+                <PencilIcon aria-hidden />
+                {copy.edit}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onSelect={onDelete}
+              >
+                <Trash2Icon aria-hidden />
+                {providerCopy.delete}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+      {error ? (
+        <p role="alert" className="text-destructive mt-2 text-xs">
+          {error instanceof Error ? error.message : copy.operationFailed}
+        </p>
+      ) : null}
+    </li>
+  );
+}
+
+function RetrievalModelRow({
+  model,
+  copy,
+  settingsCopy,
+  testing,
+  statusPending,
+  onTest,
+  onToggleStatus,
+  onDelete,
+}: {
+  model: AdminProviderModelItem;
+  copy: ReturnType<typeof registryCopy>;
+  settingsCopy: ReturnType<typeof adminModelSettingsCopy>;
+  testing: boolean;
+  statusPending: boolean;
+  onTest: () => void;
+  onToggleStatus: () => void;
+  onDelete: () => void;
+}) {
+  const active = model.status === "active";
+
+  return (
+    <li
+      data-model-kind={model.model_type}
+      className="border-border/70 border-b px-4 py-3 last:border-b-0 sm:px-5"
+    >
+      <div className={MODEL_ROW_LAYOUT}>
+        <span
+          aria-label={`${settingsCopy.modelName}: ${model.model_name}`}
+          className="truncate text-sm font-medium"
+        >
+          {model.model_name}
+        </span>
+        <div
+          role="group"
+          aria-label={`${settingsCopy.modelType}: ${
+            model.model_type === "embedding"
+              ? copy.typeEmbedding
+              : copy.typeRerank
+          }`}
+        >
+          <Badge
+            variant="outline"
+            className="rounded-md px-2 py-0.5 text-[11px] font-normal"
+          >
+            {model.model_type === "embedding"
+              ? copy.typeEmbedding
+              : copy.typeRerank}
+          </Badge>
+        </div>
+        <div
+          role="group"
+          aria-label={`${settingsCopy.modelStatus}: ${active ? copy.active : copy.disabled}`}
+          className="flex flex-wrap items-center gap-1.5 text-xs"
+        >
+          <CircleIcon
+            aria-hidden
+            className={cn(
+              "size-2 fill-current",
+              active ? "text-success" : "text-muted-foreground",
+            )}
+          />
+          <span>{active ? copy.active : copy.disabled}</span>
+          {model.in_use ? (
+            <Badge variant="outline" className="rounded-md px-1.5 text-[10px]">
+              {copy.inUse}
+            </Badge>
           ) : null}
         </div>
-        {error ? (
-          <p role="alert" className="text-destructive text-sm">
-            {error instanceof Error ? error.message : copy.operationFailed}
-          </p>
-        ) : null}
-      </CardContent>
-    </Card>
+        <span
+          aria-label={`${settingsCopy.modelCapabilities}: —`}
+          className="text-muted-foreground text-xs"
+        >
+          —
+        </span>
+        <div
+          role="group"
+          aria-label={settingsCopy.modelActions}
+          className="flex flex-wrap items-center justify-start gap-1.5 xl:flex-nowrap xl:justify-end"
+        >
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={statusPending || (active && model.in_use)}
+            onClick={onToggleStatus}
+          >
+            <PowerIcon aria-hidden className="size-3.5" />
+            {active ? copy.disable : copy.enable}
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                size="icon-sm"
+                variant="outline"
+                aria-label={settingsCopy.moreActions}
+              >
+                <MoreHorizontalIcon aria-hidden className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem disabled={testing} onSelect={onTest}>
+                <CircleCheckIcon aria-hidden />
+                {testing ? copy.testing : copy.test}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                disabled={model.in_use}
+                onSelect={onDelete}
+              >
+                <Trash2Icon aria-hidden />
+                {copy.delete}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function ProviderSidebar({
+  providers,
+  selectedProviderId,
+  copy,
+  providerCopy,
+  onSelect,
+}: {
+  providers: readonly AdminModelProviderItem[];
+  selectedProviderId: string;
+  copy: ReturnType<typeof adminModelSettingsCopy>;
+  providerCopy: ReturnType<typeof registryCopy>;
+  onSelect: (providerId: string) => void;
+}) {
+  return (
+    <aside
+      aria-label={copy.providersTitle.replace(
+        "{count}",
+        String(providers.length),
+      )}
+      className="border-border/70 border-b p-4 lg:border-r lg:border-b-0"
+    >
+      <h2 className="text-xs font-semibold">
+        {copy.providersTitle.replace("{count}", String(providers.length))}
+      </h2>
+      <div
+        className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-1"
+        data-testid="admin-model-provider-cards"
+      >
+        {providers.map((provider) => {
+          const selected = provider.id === selectedProviderId;
+          return (
+            <button
+              key={provider.id}
+              type="button"
+              aria-pressed={selected}
+              data-testid="admin-model-provider-selector"
+              className={cn(
+                "hover:bg-accent/60 focus-visible:border-ring focus-visible:ring-ring/50 w-full rounded-lg border border-l-2 border-transparent px-3 py-3 text-left transition-colors outline-none focus-visible:ring-[3px]",
+                selected &&
+                  "border-l-selection bg-selection-subtle hover:bg-selection-subtle",
+              )}
+              onClick={() => onSelect(provider.id)}
+            >
+              <span className="flex min-w-0 items-center justify-between gap-3">
+                <span className="truncate text-sm font-medium">
+                  {provider.name}
+                </span>
+                <span className="text-muted-foreground flex shrink-0 items-center gap-1.5 text-xs">
+                  <CircleIcon
+                    aria-hidden
+                    className="text-success size-2 fill-current"
+                  />
+                  {provider.active_model_count} / {provider.model_count}{" "}
+                  {copy.active}
+                </span>
+              </span>
+              <span className="text-muted-foreground mt-1.5 block truncate font-mono text-[11px]">
+                {provider.base_url}
+              </span>
+              <span
+                className={cn(
+                  "mt-1.5 flex items-center gap-1.5 text-xs",
+                  provider.api_key_configured
+                    ? "text-muted-foreground"
+                    : "text-destructive",
+                )}
+              >
+                <CircleIcon
+                  aria-hidden
+                  className={cn(
+                    "size-2 fill-current",
+                    provider.api_key_configured
+                      ? "text-success"
+                      : "text-destructive",
+                  )}
+                />
+                {provider.api_key_configured
+                  ? providerCopy.keyConfigured
+                  : copy.notConfigured}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </aside>
   );
 }
 
@@ -1022,9 +1448,15 @@ export function AdminModelSettingsPage() {
   const catalog = useAdminModelCatalog(accountId);
   const providers = useAdminModelProviders(accountId, Boolean(user));
   const deleteProvider = useDeleteAdminModelProvider(accountId);
-  const deleteModel = useDeleteAdminProviderModel(accountId);
+  const deleteTextModel = useDeleteAdminModel(accountId);
+  const deleteRetrievalModel = useDeleteAdminProviderModel(accountId);
+  const setRetrievalModelStatus = useSetAdminProviderModelStatus(accountId);
+  const testRetrievalModel = useTestAdminProviderModel(accountId);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"all" | "active" | "suspended">("all");
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
+    null,
+  );
   const [editor, setEditor] = useState<{
     open: boolean;
     target: EditorTarget;
@@ -1038,34 +1470,108 @@ export function AdminModelSettingsPage() {
     useState<AdminModelProviderItem | null>(null);
   const [providerToDelete, setProviderToDelete] =
     useState<AdminModelProviderItem | null>(null);
-  const [modelToDelete, setModelToDelete] =
-    useState<AdminProviderModelItem | null>(null);
-  const textModels = useMemo(
+  const [modelToDelete, setModelToDelete] = useState<ModelDeleteTarget | null>(
+    null,
+  );
+  const modelListRef = useRef<HTMLUListElement>(null);
+  const modelDeleteInFlightRef = useRef(false);
+  const [testingIds, setTestingIds] = useState<ReadonlySet<string>>(new Set());
+
+  const providerItems = providers.data ?? [];
+  const selectedProvider =
+    providerItems.find((provider) => provider.id === selectedProviderId) ??
+    providerItems[0] ??
+    null;
+  const retrievalModels = useAdminProviderModels(
+    accountId,
+    selectedProvider?.id ?? "",
+    Boolean(user && selectedProvider),
+  );
+  const textModels = useMemo(() => {
+    if (!selectedProvider) return [];
+    return selectAdminModelCatalogItems(
+      (catalog.data?.items ?? []).filter(
+        (item) => item.provider_id === selectedProvider.id,
+      ),
+      search,
+      status,
+    );
+  }, [catalog.data?.items, search, selectedProvider, status]);
+  const providerModels = useMemo(
     () =>
-      selectAdminModelCatalogItems(catalog.data?.items ?? [], search, status),
-    [catalog.data?.items, search, status],
+      selectAdminProviderModelItems(retrievalModels.data ?? [], search, status),
+    [retrievalModels.data, search, status],
   );
   if (!user) return null;
 
-  const providerItems = providers.data ?? [];
   const loading = catalog.isLoading || providers.isLoading;
   const loadError = catalog.error ?? providers.error;
 
   const refresh = () => {
     void catalog.refetch();
     void providers.refetch();
+    if (selectedProvider) void retrievalModels.refetch();
   };
 
+  const runRetrievalModelTest = (modelId: string) => {
+    setTestingIds((current) => new Set(current).add(modelId));
+    void testRetrievalModel
+      .mutateAsync(modelId)
+      .then(
+        (result) =>
+          result.ok
+            ? toast.success(result.message, MODEL_TOAST_OPTIONS)
+            : toast.error(result.message, MODEL_TOAST_OPTIONS),
+        (error: unknown) =>
+          toast.error(
+            registryErrorText(error, providerCopy),
+            MODEL_TOAST_OPTIONS,
+          ),
+      )
+      .finally(() =>
+        setTestingIds((current) => {
+          const next = new Set(current);
+          next.delete(modelId);
+          return next;
+        }),
+      );
+  };
+
+  const modelDeletePending =
+    modelToDelete?.kind === "text"
+      ? deleteTextModel.isPending
+      : modelToDelete?.kind === "retrieval"
+        ? deleteRetrievalModel.isPending
+        : false;
+  const modelDeleteError =
+    modelToDelete?.kind === "text"
+      ? deleteTextModel.error
+      : modelToDelete?.kind === "retrieval"
+        ? deleteRetrievalModel.error
+        : null;
+  const modelDeleteErrorMessage = modelDeleteError
+    ? modelToDelete?.kind === "retrieval"
+      ? registryErrorText(modelDeleteError, providerCopy)
+      : modelDeleteError instanceof Error
+        ? modelDeleteError.message
+        : copy.operationFailed
+    : null;
+
   return (
-    <AdminPage>
+    <AdminPage className="lg:flex lg:min-h-[calc(100dvh-3.5rem)] lg:flex-col">
       <AdminPageHeader
+        className="border-b-0 pb-0 sm:items-center [&_h1]:text-xl"
         title={copy.pageTitle}
         actions={
           <>
             <Button
               type="button"
               variant="outline"
-              disabled={catalog.isFetching || providers.isFetching}
+              disabled={
+                catalog.isFetching ||
+                providers.isFetching ||
+                retrievalModels.isFetching
+              }
               onClick={refresh}
             >
               <RefreshCwIcon aria-hidden className="size-4" />
@@ -1081,97 +1587,245 @@ export function AdminModelSettingsPage() {
           </>
         }
       />
-      <AdminSection
-        title={providerCopy.sectionTitle}
-        description={providerCopy.sectionDescription}
-      >
-        <div className="mb-5 flex flex-col gap-3 sm:flex-row">
-          <label className="relative min-w-0 flex-1">
-            <SearchIcon
-              aria-hidden
-              className="text-muted-foreground absolute top-2.5 left-3 size-4"
-            />
-            <Input
-              className="pl-9"
-              value={search}
-              aria-label={copy.searchModels}
-              placeholder={copy.searchPlaceholder}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          </label>
-          <select
-            className="border-input bg-background h-9 rounded-md border px-3 text-sm"
-            aria-label={copy.filterStatus}
-            value={status}
-            onChange={(event) => setStatus(event.target.value as typeof status)}
-          >
-            <option value="all">{copy.allStatuses}</option>
-            <option value="active">{copy.active}</option>
-            <option value="suspended">{copy.suspended}</option>
-          </select>
-        </div>
-        {loading ? (
-          <div className="space-y-3">
-            <Skeleton className="h-48" />
-            <Skeleton className="h-48" />
-          </div>
-        ) : loadError ? (
-          <div className="space-y-3">
-            <p role="alert" className="text-destructive text-sm">
-              {loadError instanceof Error
-                ? loadError.message
-                : copy.catalogLoadFailed}
-            </p>
-            <Button type="button" variant="outline" onClick={refresh}>
-              {copy.retry}
-            </Button>
-          </div>
-        ) : providerItems.length === 0 ? (
-          <p className="text-muted-foreground rounded-xl border border-dashed p-8 text-center text-sm">
-            {providerCopy.empty}
+      {loading ? (
+        <Skeleton className="h-[36rem] rounded-lg" />
+      ) : loadError ? (
+        <section className="border-border/80 bg-card space-y-3 rounded-lg border p-4">
+          <p role="alert" className="text-destructive text-sm">
+            {loadError instanceof Error
+              ? loadError.message
+              : copy.catalogLoadFailed}
           </p>
-        ) : (
-          <div className="grid gap-4" data-testid="admin-model-provider-cards">
-            {providerItems.map((provider) => (
-              <ProviderCard
-                key={provider.id}
-                accountId={accountId}
-                provider={provider}
-                textModels={textModels.filter(
-                  (item) => item.provider_id === provider.id,
-                )}
-                providerCopy={providerCopy}
-                onEditProvider={() =>
-                  setProviderEditor({ open: true, target: provider })
-                }
-                onDeleteProvider={() => {
-                  deleteProvider.reset();
-                  setProviderToDelete(provider);
-                }}
-                onAddTextModel={() =>
-                  setEditor({
-                    open: true,
-                    target: null,
-                    initialProviderId: provider.id,
-                  })
-                }
-                onAddRetrievalModel={() => setModelCreateProvider(provider)}
-                onEditTextModel={(item) =>
-                  setEditor({
-                    open: true,
-                    target: item,
-                    initialProviderId: null,
-                  })
-                }
-                onDeleteRetrievalModel={(model) => {
-                  deleteModel.reset();
-                  setModelToDelete(model);
-                }}
-              />
-            ))}
-          </div>
-        )}
-      </AdminSection>
+          <Button type="button" variant="outline" onClick={refresh}>
+            {copy.retry}
+          </Button>
+        </section>
+      ) : providerItems.length === 0 || !selectedProvider ? (
+        <p className="text-muted-foreground rounded-lg border border-dashed p-8 text-center text-sm">
+          {providerCopy.empty}
+        </p>
+      ) : (
+        <section
+          className="border-border/80 bg-card grid overflow-hidden rounded-lg border lg:flex-1 lg:grid-cols-[17rem_minmax(0,1fr)]"
+          data-testid="admin-model-provider-workbench"
+        >
+          <ProviderSidebar
+            providers={providerItems}
+            selectedProviderId={selectedProvider.id}
+            copy={copy}
+            providerCopy={providerCopy}
+            onSelect={setSelectedProviderId}
+          />
+          <section
+            className="min-w-0"
+            aria-labelledby="selected-model-provider-title"
+            data-testid="admin-model-provider-card"
+          >
+            <header className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+              <h2
+                id="selected-model-provider-title"
+                className="truncate text-lg font-semibold tracking-tight"
+              >
+                {selectedProvider.name}
+              </h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    setProviderEditor({ open: true, target: selectedProvider })
+                  }
+                >
+                  <PencilIcon aria-hidden className="size-3.5" />
+                  {providerCopy.editProvider}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="text-destructive"
+                  onClick={() => {
+                    deleteProvider.reset();
+                    setProviderToDelete(selectedProvider);
+                  }}
+                >
+                  <Trash2Icon aria-hidden className="size-3.5" />
+                  {providerCopy.deleteProvider}
+                </Button>
+              </div>
+            </header>
+            <div className="px-4 pb-4 sm:px-6">
+              <div>
+                <h3 className="text-sm font-semibold">
+                  {copy.modelsTitle.replace(
+                    "{count}",
+                    String(selectedProvider.model_count),
+                  )}
+                </h3>
+                <p className="text-muted-foreground mt-1 text-xs">
+                  {copy.modelsDescription}
+                </p>
+              </div>
+              <div className="mt-3 flex flex-col gap-3 xl:flex-row xl:items-center">
+                <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row">
+                  <label className="relative min-w-0 flex-1">
+                    <SearchIcon
+                      aria-hidden
+                      className="text-muted-foreground absolute top-2 left-3 size-4"
+                    />
+                    <Input
+                      className="h-8 pl-9 text-xs"
+                      value={search}
+                      aria-label={copy.searchModels}
+                      placeholder={copy.searchPlaceholder}
+                      onChange={(event) => setSearch(event.target.value)}
+                    />
+                  </label>
+                  <select
+                    className="border-input bg-background h-8 rounded-md border px-3 text-xs"
+                    aria-label={copy.filterStatus}
+                    value={status}
+                    onChange={(event) =>
+                      setStatus(event.target.value as typeof status)
+                    }
+                  >
+                    <option value="all">{copy.allStatuses}</option>
+                    <option value="active">{copy.active}</option>
+                    <option value="suspended">{copy.suspended}</option>
+                  </select>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 xl:justify-end">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      setEditor({
+                        open: true,
+                        target: null,
+                        initialProviderId: selectedProvider.id,
+                      })
+                    }
+                  >
+                    <PlusIcon aria-hidden className="size-3.5" />
+                    {providerCopy.addTextModel}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setModelCreateProvider(selectedProvider)}
+                  >
+                    <PlusIcon aria-hidden className="size-3.5" />
+                    {providerCopy.addModel}
+                  </Button>
+                </div>
+              </div>
+            </div>
+            <div
+              aria-hidden
+              className={cn(
+                MODEL_ROW_LAYOUT,
+                "border-border/70 hidden border-y px-5 py-3 text-left text-xs font-semibold xl:grid",
+              )}
+            >
+              <span>{copy.modelName}</span>
+              <span>{copy.modelType}</span>
+              <span>{copy.modelStatus}</span>
+              <span>{copy.modelCapabilities}</span>
+              <span>{copy.modelActions}</span>
+            </div>
+            <ul
+              ref={modelListRef}
+              aria-label={copy.modelList}
+              tabIndex={-1}
+              className="focus:outline-none"
+              data-testid="admin-provider-model-list"
+            >
+              {textModels.map((item) => (
+                <TextModelRow
+                  key={`text:${item.id}`}
+                  accountId={accountId}
+                  descriptor={catalog.data?.provider_adapters.find(
+                    (descriptor) => descriptor.id === item.provider_adapter,
+                  )}
+                  item={item}
+                  onEdit={() =>
+                    setEditor({
+                      open: true,
+                      target: item,
+                      initialProviderId: null,
+                    })
+                  }
+                  onDelete={() => {
+                    deleteTextModel.reset();
+                    deleteRetrievalModel.reset();
+                    setModelToDelete({
+                      kind: "text",
+                      id: item.id,
+                      name: item.display_name,
+                    });
+                  }}
+                />
+              ))}
+              {providerModels.map((model) => (
+                <RetrievalModelRow
+                  key={`retrieval:${model.id}`}
+                  model={model}
+                  copy={providerCopy}
+                  settingsCopy={copy}
+                  testing={testingIds.has(model.id)}
+                  statusPending={setRetrievalModelStatus.isPending}
+                  onTest={() => runRetrievalModelTest(model.id)}
+                  onToggleStatus={() =>
+                    setRetrievalModelStatus.mutate(
+                      {
+                        modelId: model.id,
+                        status:
+                          model.status === "active" ? "disabled" : "active",
+                      },
+                      {
+                        onError: (error: unknown) =>
+                          toast.error(registryErrorText(error, providerCopy)),
+                      },
+                    )
+                  }
+                  onDelete={() => {
+                    deleteTextModel.reset();
+                    deleteRetrievalModel.reset();
+                    setModelToDelete({
+                      kind: "retrieval",
+                      id: model.id,
+                      name: model.model_name,
+                    });
+                  }}
+                />
+              ))}
+              {retrievalModels.isLoading ? (
+                <li className="border-border/70 border-b px-5 py-3">
+                  <Skeleton className="h-8" />
+                </li>
+              ) : null}
+              {retrievalModels.error ? (
+                <li className="border-border/70 border-b px-5 py-3">
+                  <p role="alert" className="text-destructive text-xs">
+                    {providerCopy.modelsLoadFailed}
+                  </p>
+                </li>
+              ) : null}
+              {!retrievalModels.isLoading &&
+              !retrievalModels.error &&
+              textModels.length === 0 &&
+              providerModels.length === 0 ? (
+                <li className="text-muted-foreground px-5 py-10 text-center text-xs">
+                  {copy.noMatches}
+                </li>
+              ) : null}
+            </ul>
+          </section>
+        </section>
+      )}
       {editor.open && catalog.data ? (
         <ModelEditorDialog
           key={`${editor.target?.id ?? "new"}:${editor.target?.revision ?? 0}:${editor.initialProviderId ?? ""}`}
@@ -1259,178 +1913,84 @@ export function AdminModelSettingsPage() {
       <Dialog
         open={modelToDelete !== null}
         onOpenChange={(open) => {
-          if (!open) setModelToDelete(null);
+          if (!open && !modelDeleteInFlightRef.current) {
+            setModelToDelete(null);
+          }
         }}
       >
-        <DialogContent>
+        <DialogContent
+          onEscapeKeyDown={(event) => {
+            if (modelDeleteInFlightRef.current) event.preventDefault();
+          }}
+          onInteractOutside={(event) => {
+            if (modelDeleteInFlightRef.current) event.preventDefault();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            requestAnimationFrame(() => modelListRef.current?.focus());
+          }}
+        >
           <DialogHeader>
-            <DialogTitle>{providerCopy.deleteModelTitle}</DialogTitle>
+            <DialogTitle>{copy.deleteModelTitle}</DialogTitle>
             <DialogDescription>
-              {providerCopy.deleteModelDescription(
-                modelToDelete?.model_name ?? "",
+              {copy.deleteModelDescription.replace(
+                "{name}",
+                modelToDelete?.name ?? "",
               )}
             </DialogDescription>
           </DialogHeader>
-          {deleteModel.error ? (
+          {modelDeleteErrorMessage ? (
             <p role="alert" className="text-destructive text-sm">
-              {registryErrorText(deleteModel.error, providerCopy)}
+              {modelDeleteErrorMessage}
             </p>
           ) : null}
           <DialogFooter>
             <Button
               type="button"
               variant="outline"
-              onClick={() => setModelToDelete(null)}
+              disabled={modelDeletePending}
+              onClick={() => {
+                if (!modelDeleteInFlightRef.current) setModelToDelete(null);
+              }}
             >
               {providerCopy.cancel}
             </Button>
             <Button
               type="button"
               variant="destructive"
-              disabled={deleteModel.isPending}
+              disabled={modelDeletePending}
               onClick={() => {
                 if (modelToDelete === null) return;
-                deleteModel.mutate(modelToDelete.id, {
-                  onSuccess: () => setModelToDelete(null),
-                });
+                const target = modelToDelete;
+                modelDeleteInFlightRef.current = true;
+                const options = {
+                  onSuccess: () => {
+                    setModelToDelete((current) =>
+                      current?.kind === target.kind && current.id === target.id
+                        ? null
+                        : current,
+                    );
+                    toast.success(
+                      copy.deleteModelSucceeded,
+                      MODEL_TOAST_OPTIONS,
+                    );
+                  },
+                  onSettled: () => {
+                    modelDeleteInFlightRef.current = false;
+                  },
+                };
+                if (target.kind === "text") {
+                  deleteTextModel.mutate(target.id, options);
+                } else {
+                  deleteRetrievalModel.mutate(target.id, options);
+                }
               }}
             >
-              {deleteModel.isPending
-                ? providerCopy.deleting
-                : providerCopy.delete}
+              {modelDeletePending ? providerCopy.deleting : providerCopy.delete}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </AdminPage>
-  );
-}
-
-function ProviderCard({
-  accountId,
-  provider,
-  textModels,
-  providerCopy,
-  onEditProvider,
-  onDeleteProvider,
-  onAddTextModel,
-  onAddRetrievalModel,
-  onEditTextModel,
-  onDeleteRetrievalModel,
-}: {
-  accountId: string;
-  provider: AdminModelProviderItem;
-  textModels: readonly AdminModelItem[];
-  providerCopy: ReturnType<typeof registryCopy>;
-  onEditProvider: () => void;
-  onDeleteProvider: () => void;
-  onAddTextModel: () => void;
-  onAddRetrievalModel: () => void;
-  onEditTextModel: (item: AdminModelItem) => void;
-  onDeleteRetrievalModel: (model: AdminProviderModelItem) => void;
-}) {
-  return (
-    <Card data-testid="admin-model-provider-card">
-      <CardHeader className="pb-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <CardTitle className="truncate">{provider.name}</CardTitle>
-              {provider.api_key_configured ? (
-                <Badge variant="outline">{providerCopy.keyConfigured}</Badge>
-              ) : null}
-              <Badge variant="secondary">
-                {providerCopy.modelCount(provider.model_count)} ·{" "}
-                {providerCopy.activeModelCount(provider.active_model_count)}
-              </Badge>
-            </div>
-            <p className="text-muted-foreground mt-1 truncate font-mono text-xs">
-              {provider.base_url}
-            </p>
-            <p className="text-muted-foreground mt-0.5 text-xs">
-              {providerCopy.timeout(provider.request_timeout_seconds)}
-            </p>
-            {provider.endpoint_frozen ? (
-              <p className="text-muted-foreground mt-1 text-xs leading-5">
-                {providerCopy.endpointFrozen}
-              </p>
-            ) : null}
-          </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={onAddTextModel}
-            >
-              <PlusIcon aria-hidden className="size-4" />
-              {providerCopy.addTextModel}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={onAddRetrievalModel}
-            >
-              <PlusIcon aria-hidden className="size-4" />
-              {providerCopy.addModel}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={onEditProvider}
-            >
-              <PencilIcon aria-hidden className="size-4" />
-              {providerCopy.editProvider}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="text-destructive"
-              onClick={onDeleteProvider}
-            >
-              <Trash2Icon aria-hidden className="size-4" />
-              {providerCopy.deleteProvider}
-            </Button>
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <section>
-          <h3 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-            {providerCopy.textModelsTitle}
-          </h3>
-          {textModels.length === 0 ? (
-            <p className="text-muted-foreground mt-3 rounded-lg border border-dashed px-3 py-4 text-center text-xs">
-              {providerCopy.textModelsEmpty}
-            </p>
-          ) : (
-            <div className="mt-3 grid gap-4 xl:grid-cols-2">
-              {textModels.map((item) => (
-                <ModelCard
-                  key={item.id}
-                  accountId={accountId}
-                  item={item}
-                  onEdit={() => onEditTextModel(item)}
-                />
-              ))}
-            </div>
-          )}
-        </section>
-        <section>
-          <h3 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-            {providerCopy.retrievalModelsTitle}
-          </h3>
-          <ProviderModelList
-            accountId={accountId}
-            provider={provider}
-            copy={providerCopy}
-            onDeleteModel={onDeleteRetrievalModel}
-          />
-        </section>
-      </CardContent>
-    </Card>
   );
 }

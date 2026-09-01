@@ -601,6 +601,12 @@ export const adminModelMutationResponseSchema = z
   })
   .strict();
 
+export const adminModelDeleteResponseSchema = z
+  .object({
+    request_id: z.string().min(1).max(255),
+  })
+  .strict();
+
 export const adminModelConnectionTestResponseSchema = z
   .object({
     status: z.enum(["succeeded", "failed"]),
@@ -629,6 +635,9 @@ export type AdminModelDefaultInput = z.infer<
 >;
 export type AdminModelMutationResponse = z.infer<
   typeof adminModelMutationResponseSchema
+>;
+export type AdminModelDeleteResponse = z.infer<
+  typeof adminModelDeleteResponseSchema
 >;
 export type AdminModelConnectionTestResponse = z.infer<
   typeof adminModelConnectionTestResponseSchema

@@ -180,6 +180,10 @@ class AdminModelMutationResponse(_StrictModel):
     request_id: str
 
 
+class AdminModelDeleteResponse(_StrictModel):
+    request_id: str
+
+
 class AdminModelConnectionTestResponse(_StrictModel):
     status: Literal["succeeded", "failed"]
     request_id: str
@@ -467,6 +471,28 @@ async def update_admin_model(
         raise system_model_http_exception(error) from None
 
 
+@router.delete(
+    "/{model_config_id}",
+    response_model=AdminModelDeleteResponse,
+)
+async def delete_admin_model(
+    model_config_id: uuid.UUID,
+    context: Annotated[
+        SystemAuditContext,
+        Depends(current_model_admin_context),
+    ],
+    service: Annotated[
+        SystemModelCatalogService,
+        Depends(get_system_model_catalog),
+    ],
+) -> AdminModelDeleteResponse:
+    try:
+        await service.delete_model(context, model_config_id)
+    except SystemModelError as error:
+        raise system_model_http_exception(error) from None
+    return AdminModelDeleteResponse(request_id=context.request_id)
+
+
 @router.post(
     "/{model_config_id}/status",
     response_model=AdminModelMutationResponse,
@@ -547,6 +573,7 @@ __all__ = [
     "AdminModelConnectionTestRequest",
     "AdminModelConnectionTestResponse",
     "AdminModelCreateRequest",
+    "AdminModelDeleteResponse",
     "AdminModelItemResponse",
     "AdminModelProviderAdapterResponse",
     "AdminModelProviderSettingFieldResponse",

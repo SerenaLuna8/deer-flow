@@ -286,6 +286,84 @@ async def test_explicit_setup_hook_seeds_default_singleton(settings_env):
         assert row is not None and row.revision == 1 and row.enabled is False
 
 
+async def test_explicit_setup_hook_enables_knowledge_from_complete_environment(
+    settings_env,
+    monkeypatch,
+):
+    import base64
+
+    from app.knowledge_settings import bootstrap as knowledge_bootstrap
+
+    env = settings_env
+    plaintext = "bootstrap-storage-secret"
+    monkeypatch.setenv(
+        "ACT_WEAVE_SECRET_KEY",
+        base64.b64encode(b"k" * 32).decode("ascii"),
+    )
+    monkeypatch.setenv(
+        "ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT",
+        "storage.example.test:9000",
+    )
+    monkeypatch.setenv("ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET", "knowledge")
+    monkeypatch.setenv(
+        "ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY",
+        "bootstrap-access",
+    )
+    monkeypatch.setenv("ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY", plaintext)
+    probed = []
+
+    async def probe(settings):
+        probed.append(
+            (
+                settings.endpoint,
+                settings.bucket,
+                settings.access_key,
+                settings.secret_key.get_secret_value(),
+            )
+        )
+
+    material = await knowledge_bootstrap.prepare_knowledge_settings_bootstrap(
+        storage_probe=probe,
+    )
+    rendered_material = repr(material)
+    assert all(
+        value not in rendered_material
+        for value in (
+            "storage.example.test:9000",
+            "knowledge",
+            "bootstrap-access",
+            plaintext,
+        )
+    )
+    assert probed == [
+        (
+            "storage.example.test:9000",
+            "knowledge",
+            "bootstrap-access",
+            plaintext,
+        )
+    ]
+    async with env.factory() as session, session.begin():
+        await session.execute(text("DELETE FROM knowledge_system_settings"))
+
+    await bootstrap_knowledge_system_settings(env.factory, material=material)
+
+    async with env.factory() as session:
+        row = await session.get(KnowledgeSystemSettingsRow, 1)
+        assert row is not None
+        assert row.enabled is True
+        assert row.minio_endpoint == "storage.example.test:9000"
+        assert row.minio_bucket == "knowledge"
+        assert row.minio_access_key == "bootstrap-access"
+        assert plaintext.encode("utf-8") not in row.minio_secret_ciphertext
+    loaded = await load_knowledge_settings_from_db(
+        env.factory,
+        secret_key=env.secret_key,
+    )
+    assert loaded.enabled is True
+    assert loaded.minio.secret_key.get_secret_value() == plaintext
+
+
 async def test_legacy_config_migration_is_idempotent_encrypted_and_does_not_call_runtime_loader(settings_env, tmp_path, monkeypatch):
     from deerflow.config.app_config import AppConfig
     from scripts.migrate_knowledge_config import migrate_knowledge_config, migration_report

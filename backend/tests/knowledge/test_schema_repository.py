@@ -1,6 +1,6 @@
 """M1 gates: knowledge tables in Schema V1, ORM parity, queue and bootstrap.
 
-Every test installs the real ``full_schema.sql`` snapshot into an isolated
+Every test installs the real composed Schema V1 snapshot into an isolated
 ``deerflow_test_*`` database, so the constraints exercised here are the ones
 operators actually get from ``make setup-db``.
 """
@@ -245,7 +245,7 @@ def _task(
 
 @pytest.mark.asyncio
 async def test_orm_metadata_matches_installed_catalog(postgres_database_url: str) -> None:
-    """ORM 列集合与 full_schema.sql 安装出的目录一致（Task 8 契约）。"""
+    """ORM 列集合与组合 Schema V1 快照安装出的目录一致（Task 8 契约）。"""
 
     assert set(KNOWLEDGE_TABLES) <= FINAL_APP_TABLES
     assert set(MODEL_REGISTRY_TABLES) <= FINAL_APP_TABLES

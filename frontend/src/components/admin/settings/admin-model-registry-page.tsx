@@ -97,9 +97,10 @@ const MODEL_REGISTRY_COPY = {
     apiKeyEditPlaceholder: "Leave blank to preserve the saved Key",
     baseUrlChangedNeedsKey:
       "Changing the endpoint requires entering a new API Key.",
-    fanoutWarning: (count: number) =>
-      `Saving a Key or endpoint change re-encrypts credentials for ${count} bound model(s); Runs frozen on the old material become stale.`,
-    candidateTestTitle: "Connection test (optional, may incur provider charges)",
+    fanoutWarning:
+      "Saving a Key or endpoint change re-encrypts credentials for every bound text model, including hidden deleted models; Runs frozen on the old material become stale.",
+    candidateTestTitle:
+      "Connection test (optional, may incur provider charges)",
     candidateTestDescription:
       "Tests the URL and Key above against one explicit text-model target without saving anything. One passing model does not verify every model of this provider; saving without testing is allowed.",
     candidateAdapter: "Adapter",
@@ -126,10 +127,10 @@ const MODEL_REGISTRY_COPY = {
     save: "Save",
     deleteProviderTitle: "Delete provider",
     deleteProviderDescription: (name: string) =>
-      `Delete provider "${name}"? A provider with bound text models requires rebinding them first; retrieval models must be deleted first.`,
+      `Delete provider "${name}"? It will be hidden but retained for historical references. All live text and retrieval models must be deleted first.`,
     deleteModelTitle: "Delete model",
     deleteModelDescription: (name: string) =>
-      `Delete model "${name}"? Models referenced by knowledge bases cannot be deleted.`,
+      `Delete model "${name}"? It will be hidden but retained for historical references. Models referenced by knowledge bases cannot be deleted.`,
     deleting: "Deleting…",
     invalidNumbers: "Numeric fields must be positive whole numbers.",
     dimensionRequired: "Embedding models require a vector dimension.",
@@ -176,7 +177,8 @@ const MODEL_REGISTRY_COPY = {
       "供应商持有唯一的 API Key。编辑时留空表示保留已保存的 Key；修改端点必须输入新 Key。更换 Key 或端点会同时为所有绑定的文本模型重新加密凭据。",
     providerName: "供应商名称",
     baseUrl: "Base URL",
-    baseUrlFrozenHint: "正被知识库引用，端点不可原地修改。更换端点请新建供应商。",
+    baseUrlFrozenHint:
+      "正被知识库引用，端点不可原地修改。更换端点请新建供应商。",
     timeoutSeconds: "检索请求超时（秒）",
     timeoutSecondsHint:
       "仅作用于 Embedding/Rerank 请求；文本模型请求使用各自的超时设置。",
@@ -184,8 +186,8 @@ const MODEL_REGISTRY_COPY = {
     apiKeyCreatePlaceholder: "输入 API Key",
     apiKeyEditPlaceholder: "留空则保留已保存的 Key",
     baseUrlChangedNeedsKey: "修改端点必须输入新的 API Key。",
-    fanoutWarning: (count: number) =>
-      `保存新的 Key 或端点会同时为 ${count} 个绑定模型重新加密凭据；冻结旧材料的 Run 会失效。`,
+    fanoutWarning:
+      "保存新的 Key 或端点会同时为全部绑定文本模型重新加密凭据，包括已隐藏的删除模型；冻结旧材料的 Run 会失效。",
     candidateTestTitle: "连接测试（可选，可能产生供应商计费）",
     candidateTestDescription:
       "使用上方的 URL 和 Key 对一个明确选定的文本模型目标发起测试，不保存任何配置。测试一个模型成功不代表该供应商全部模型可用；未测试也可以保存。",
@@ -211,10 +213,10 @@ const MODEL_REGISTRY_COPY = {
     save: "保存",
     deleteProviderTitle: "删除供应商",
     deleteProviderDescription: (name: string) =>
-      `确定删除供应商「${name}」？有绑定文本模型的供应商需要先将模型改绑到其他供应商；检索模型需要先删除。`,
+      `确定删除供应商「${name}」？删除后会从目录隐藏，但保留历史关联。请先删除该供应商下全部未删除的文本模型和检索模型。`,
     deleteModelTitle: "删除模型",
     deleteModelDescription: (name: string) =>
-      `确定删除模型「${name}」？被知识库引用的模型无法删除。`,
+      `确定删除模型「${name}」？删除后会从目录隐藏，但保留历史关联。被知识库引用的模型无法删除。`,
     deleting: "删除中…",
     invalidNumbers: "数字字段必须为正整数。",
     dimensionRequired: "Embedding 模型必须填写向量维度。",
@@ -259,7 +261,9 @@ type CandidateTargetDraft = {
   maxInputTokens: string;
 };
 
-function providerDraftFrom(target: AdminModelProviderItem | null): ProviderDraft {
+function providerDraftFrom(
+  target: AdminModelProviderItem | null,
+): ProviderDraft {
   return {
     name: target?.name ?? "",
     baseUrl: target?.base_url ?? "",
@@ -326,7 +330,6 @@ export function ProviderEditorDialog({
   const testPending = testState === "pending";
   const submitError = create.error ?? update.error;
   const endpointFrozen = target?.endpoint_frozen ?? false;
-  const boundModelCount = target?.model_count ?? 0;
   const baseUrlChanged =
     target !== null && draft.baseUrl.trim() !== target.base_url;
   const keyEntered = draft.apiKey.trim().length > 0;
@@ -450,12 +453,16 @@ export function ProviderEditorDialog({
         if (!nextOpen && !testPending) close();
       }}
     >
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            {target === null ? copy.createProviderTitle : copy.editProviderTitle}
+            {target === null
+              ? copy.createProviderTitle
+              : copy.editProviderTitle}
           </DialogTitle>
-          <DialogDescription>{copy.providerDialogDescription}</DialogDescription>
+          <DialogDescription className="sr-only">
+            {copy.providerDialogDescription}
+          </DialogDescription>
         </DialogHeader>
         <form
           className="grid gap-4"
@@ -517,21 +524,16 @@ export function ProviderEditorDialog({
               onChange={(event) => set({ apiKey: event.target.value })}
             />
           </label>
-          {target !== null && (keyEntered || baseUrlChanged) && boundModelCount > 0 ? (
+          {target !== null && (keyEntered || baseUrlChanged) ? (
             <p
               data-testid="admin-provider-fanout-warning"
               className="text-muted-foreground text-xs leading-5"
             >
-              {copy.fanoutWarning(boundModelCount)}
+              {copy.fanoutWarning}
             </p>
           ) : null}
           <section className="grid gap-3 rounded-lg border p-3">
-            <div>
-              <h3 className="text-sm font-medium">{copy.candidateTestTitle}</h3>
-              <p className="text-muted-foreground mt-1 text-xs leading-5">
-                {copy.candidateTestDescription}
-              </p>
-            </div>
+            <h3 className="text-sm font-medium">{copy.candidateTestTitle}</h3>
             <div className="grid gap-3 sm:grid-cols-3">
               <label className="grid gap-1.5 text-sm">
                 <span className="font-medium">{copy.candidateAdapter}</span>
@@ -540,7 +542,9 @@ export function ProviderEditorDialog({
                   aria-label={copy.candidateAdapter}
                   value={candidateTarget.adapter}
                   disabled={testPending}
-                  onChange={(event) => setTarget({ adapter: event.target.value })}
+                  onChange={(event) =>
+                    setTarget({ adapter: event.target.value })
+                  }
                 >
                   {descriptors.map((descriptor) => (
                     <option key={descriptor.id} value={descriptor.id}>
@@ -888,7 +892,9 @@ export function ProviderModelList({
                     {model.model_name}
                   </span>
                   <Badge
-                    variant={model.status === "active" ? "default" : "secondary"}
+                    variant={
+                      model.status === "active" ? "default" : "secondary"
+                    }
                   >
                     {model.status === "active" ? copy.active : copy.disabled}
                   </Badge>

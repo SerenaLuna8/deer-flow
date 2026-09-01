@@ -305,7 +305,11 @@ async def list_active_retrieval_model_options(
                 ModelProviderRow,
                 ModelProviderRow.id == ModelProviderModelRow.provider_id,
             )
-            .where(ModelProviderModelRow.status == "active")
+            .where(
+                ModelProviderModelRow.status == "active",
+                ModelProviderModelRow.deleted_at.is_(None),
+                ModelProviderRow.deleted_at.is_(None),
+            )
             .order_by(
                 ModelProviderRow.name,
                 ModelProviderModelRow.model_name,
@@ -417,10 +421,10 @@ class ModelRegistryService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued, write=False)
-                providers = (await session.scalars(select(ModelProviderRow).order_by(ModelProviderRow.created_at, ModelProviderRow.id))).all()
+                providers = (await session.scalars(select(ModelProviderRow).where(ModelProviderRow.deleted_at.is_(None)).order_by(ModelProviderRow.created_at, ModelProviderRow.id))).all()
                 views: list[ModelProviderView] = []
                 for provider in providers:
-                    models = (await session.scalars(select(ModelProviderModelRow).where(ModelProviderModelRow.provider_id == provider.id))).all()
+                    models = await self._provider_models(session, provider.id)
                     text_total, text_active = await count_bound_text_models(
                         session,
                         provider.id,
@@ -527,7 +531,7 @@ class ModelRegistryService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
-                provider = await session.get(ModelProviderRow, provider_id)
+                provider = await self._live_provider(session, provider_id)
                 if provider is None:
                     raise _not_found()
                 frozen = _freeze_provider(provider)
@@ -582,7 +586,11 @@ class ModelRegistryService:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
                 catalog_state = await SystemModelRepository(session).catalog_state(for_update=True) if touches_text_models else None
-                provider = await session.get(ModelProviderRow, provider_id, with_for_update=True)
+                provider = await self._live_provider(
+                    session,
+                    provider_id,
+                    for_update=True,
+                )
                 if provider is None:
                     raise _not_found()
                 current_models = await self._provider_models(session, provider_id, for_update=True)
@@ -674,11 +682,17 @@ class ModelRegistryService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
-                provider = await session.get(ModelProviderRow, provider_id, with_for_update=True)
+                provider = await self._live_provider(
+                    session,
+                    provider_id,
+                    for_update=True,
+                )
                 if provider is None:
                     raise _not_found()
-                # Any bound text model — suspended included — blocks deletion;
-                # rebind text models first, then remove retrieval models.
+                # Any live bound text model — suspended included — blocks
+                # deletion. Tombstoned text models remain bound so later
+                # Provider key rotation can still revoke their old material,
+                # but they are no longer part of this lifecycle gate.
                 text_total, _text_active = await count_bound_text_models(
                     session,
                     provider_id,
@@ -688,7 +702,8 @@ class ModelRegistryService:
                 models = await self._provider_models(session, provider_id, for_update=True)
                 if models:
                     raise _invalid("该供应商下仍有模型，请先删除全部模型")
-                await session.delete(provider)
+                provider.deleted_at = datetime.now(UTC)
+                provider.updated_at = provider.deleted_at
                 await session.flush()
                 await self._append_audit(
                     session,
@@ -719,13 +734,16 @@ class ModelRegistryService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued, write=False)
-                provider = await session.get(ModelProviderRow, provider_id)
+                provider = await self._live_provider(session, provider_id)
                 if provider is None:
                     raise _not_found()
                 models = (
                     await session.scalars(
                         select(ModelProviderModelRow)
-                        .where(ModelProviderModelRow.provider_id == provider_id)
+                        .where(
+                            ModelProviderModelRow.provider_id == provider_id,
+                            ModelProviderModelRow.deleted_at.is_(None),
+                        )
                         .order_by(
                             ModelProviderModelRow.created_at,
                             ModelProviderModelRow.id,
@@ -760,7 +778,7 @@ class ModelRegistryService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
-                provider = await session.get(ModelProviderRow, provider_id)
+                provider = await self._live_provider(session, provider_id)
                 if provider is None:
                     raise _not_found()
                 frozen = _freeze_provider(provider)
@@ -788,7 +806,11 @@ class ModelRegistryService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
-                provider = await session.get(ModelProviderRow, provider_id, with_for_update=True)
+                provider = await self._live_provider(
+                    session,
+                    provider_id,
+                    for_update=True,
+                )
                 if provider is None:
                     raise _not_found()
                 if not _provider_matches(provider, frozen):
@@ -889,13 +911,13 @@ class ModelRegistryService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
-                model = await session.get(ModelProviderModelRow, model_id)
+                model = await self._live_model(session, model_id)
                 if model is None:
                     raise _not_found()
                 if model.status == "active":
                     return await self._model_view(session, model)
-                provider = await session.get(ModelProviderRow, model.provider_id)
-                if provider is None:  # pragma: no cover - RESTRICT FK keeps it alive
+                provider = await self._live_provider(session, model.provider_id)
+                if provider is None:
                     raise _not_found()
                 frozen = _freeze_provider(provider)
                 frozen_model = _freeze_model(model)
@@ -917,8 +939,8 @@ class ModelRegistryService:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
                 model = await self._locked_model(session, model_id)
-                provider = await session.get(ModelProviderRow, model.provider_id)
-                if provider is None:  # pragma: no cover - RESTRICT FK keeps it alive
+                provider = await self._live_provider(session, model.provider_id)
+                if provider is None:
                     raise _not_found()
                 if not _provider_matches(provider, frozen):
                     raise _conflict()
@@ -952,7 +974,9 @@ class ModelRegistryService:
                 model = await self._locked_model(session, model_id)
                 if await self._model_in_use(session, model.id):
                     raise _invalid("该模型正被知识库引用，不能删除")
-                await session.delete(model)
+                model.status = "disabled"
+                model.deleted_at = datetime.now(UTC)
+                model.updated_at = model.deleted_at
                 await session.flush()
                 await self._append_audit(
                     session,
@@ -981,11 +1005,11 @@ class ModelRegistryService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
-                model = await session.get(ModelProviderModelRow, model_id)
+                model = await self._live_model(session, model_id)
                 if model is None:
                     raise _not_found()
-                provider = await session.get(ModelProviderRow, model.provider_id)
-                if provider is None:  # pragma: no cover - RESTRICT FK keeps it alive
+                provider = await self._live_provider(session, model.provider_id)
+                if provider is None:
                     raise _not_found()
                 frozen = _freeze_provider(provider)
                 frozen_model = _freeze_model(model)
@@ -1010,6 +1034,11 @@ class ModelRegistryService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._lock_admin(session, issued)
+                # The Provider call ran outside a transaction. Re-lock the live
+                # target before publishing its audit/result so a concurrent
+                # logical delete cannot leave a successful test for a hidden
+                # tombstone.
+                await self._locked_model(session, model_id)
                 await self._append_audit(
                     session,
                     issued,
@@ -1030,15 +1059,49 @@ class ModelRegistryService:
     # -- shared helpers ----------------------------------------------------
 
     @staticmethod
+    async def _live_model(
+        session: AsyncSession,
+        model_id: uuid.UUID,
+    ) -> ModelProviderModelRow | None:
+        return await session.scalar(
+            select(ModelProviderModelRow).where(
+                ModelProviderModelRow.id == model_id,
+                ModelProviderModelRow.deleted_at.is_(None),
+            )
+        )
+
+    @staticmethod
+    async def _live_provider(
+        session: AsyncSession,
+        provider_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> ModelProviderRow | None:
+        statement = select(ModelProviderRow).where(
+            ModelProviderRow.id == provider_id,
+            ModelProviderRow.deleted_at.is_(None),
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return await session.scalar(statement)
+
+    @staticmethod
     async def _provider_models(
         session: AsyncSession,
         provider_id: uuid.UUID,
         *,
         for_update: bool = False,
     ) -> list[ModelProviderModelRow]:
-        """Provider's models ordered by ID — the registry's lock order."""
+        """Provider's live models ordered by ID — the registry's lock order."""
 
-        statement = select(ModelProviderModelRow).where(ModelProviderModelRow.provider_id == provider_id).order_by(ModelProviderModelRow.id)
+        statement = (
+            select(ModelProviderModelRow)
+            .where(
+                ModelProviderModelRow.provider_id == provider_id,
+                ModelProviderModelRow.deleted_at.is_(None),
+            )
+            .order_by(ModelProviderModelRow.id)
+        )
         if for_update:
             statement = statement.with_for_update()
         return list((await session.scalars(statement)).all())
@@ -1050,13 +1113,32 @@ class ModelRegistryService:
     ) -> ModelProviderModelRow:
         """Lock Provider FOR UPDATE first, then the model row."""
 
-        provider_id = await session.scalar(select(ModelProviderModelRow.provider_id).where(ModelProviderModelRow.id == model_id))
+        provider_id = await session.scalar(
+            select(ModelProviderModelRow.provider_id).where(
+                ModelProviderModelRow.id == model_id,
+                ModelProviderModelRow.deleted_at.is_(None),
+            )
+        )
         if provider_id is None:
             raise _not_found()
-        locked_provider = await session.scalar(select(ModelProviderRow.id).where(ModelProviderRow.id == provider_id).with_for_update())
-        if locked_provider is None:  # pragma: no cover - RESTRICT FK keeps it alive
+        locked_provider = await session.scalar(
+            select(ModelProviderRow.id)
+            .where(
+                ModelProviderRow.id == provider_id,
+                ModelProviderRow.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if locked_provider is None:
             raise _not_found()
-        model = await session.scalar(select(ModelProviderModelRow).where(ModelProviderModelRow.id == model_id).with_for_update())
+        model = await session.scalar(
+            select(ModelProviderModelRow)
+            .where(
+                ModelProviderModelRow.id == model_id,
+                ModelProviderModelRow.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
         if model is None:
             raise _not_found()
         return model

@@ -11,6 +11,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.knowledge_settings.bootstrap import (
+    KnowledgeSettingsBootstrapConfigurationInvalid,
+    KnowledgeSettingsBootstrapStorageUnavailable,
+    prepare_knowledge_settings_bootstrap,
+)
 from app.model_registry.bootstrap import (
     ModelRegistryBootstrapConfigurationInvalid,
     prepare_model_registry_bootstrap,
@@ -20,6 +25,7 @@ from app.system_settings.bootstrap import (
     prepare_default_system_model_bootstrap,
 )
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.persistence.bootstrap import validate_schema_installation_artifacts
 from scripts.setup_postgres import (
     SetupResult,
     parse_target,
@@ -65,6 +71,13 @@ async def reset_and_initialize(
         raise PostgresResetError("数据库重置预检失败；POSTGRES_ADMIN_URL 必须指向 postgres 维护数据库") from None
 
     try:
+        validate_schema_installation_artifacts()
+    except Exception:
+        raise PostgresResetError(
+            "Schema V1 安装产物预检失败；请检查 full_schema.sql 与 schema_comments.sql",
+        ) from None
+
+    try:
         default_model_bootstrap = prepare_default_system_model_bootstrap()
     except DefaultSystemModelBootstrapConfigurationInvalid:
         raise PostgresResetError("数据库重置预检失败；请检查 bootstrap Secret 和模型 Key 配置") from None
@@ -76,6 +89,15 @@ async def reset_and_initialize(
         raise PostgresResetError("数据库重置预检失败；请检查模型供应商 bootstrap Key 和 Secret 配置") from None
     except Exception:
         raise PostgresResetError("数据库重置预检失败；请检查模型供应商 bootstrap Key 和 Secret 配置") from None
+    try:
+        knowledge_settings_bootstrap = await prepare_knowledge_settings_bootstrap()
+    except (
+        KnowledgeSettingsBootstrapConfigurationInvalid,
+        KnowledgeSettingsBootstrapStorageUnavailable,
+    ) as exc:
+        raise PostgresResetError(f"数据库重置预检失败；{exc}") from None
+    except Exception:
+        raise PostgresResetError("数据库重置预检失败；请检查知识库存储配置") from None
 
     try:
         engine = create_async_engine(
@@ -107,6 +129,7 @@ async def reset_and_initialize(
                 database_url,
                 default_model_bootstrap=default_model_bootstrap,
                 model_registry_bootstrap=model_registry_bootstrap,
+                knowledge_settings_bootstrap=knowledge_settings_bootstrap,
                 force_public_schema=True,
             )
             bootstrap_completed = True
@@ -183,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
 
     admin_url = os.getenv("POSTGRES_ADMIN_URL")
     if not admin_url:
-        print("错误: reset-db 必须显式设置 POSTGRES_ADMIN_URL（重建后需要以管理员身份准备 pgvector 扩展）", file=sys.stderr)
+        print("错误: 数据库重置必须显式设置 POSTGRES_ADMIN_URL（重建后需要以管理员身份准备 pgvector 扩展）", file=sys.stderr)
         return 2
 
     try:

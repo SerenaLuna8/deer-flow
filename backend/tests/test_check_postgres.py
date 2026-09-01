@@ -155,6 +155,38 @@ async def test_check_reports_pre_v1_schema_as_recreate_required(
 
 
 @pytest.mark.asyncio
+async def test_check_reports_packaged_predecessor_as_upgrade_required(
+    monkeypatch,
+) -> None:
+    connection = _connection(
+        revision="schema_future_predecessor",
+        present_tables=set(check_postgres.REQUIRED_TABLES),
+    )
+    monkeypatch.setattr(
+        check_postgres,
+        "create_async_engine",
+        lambda *_args, **_kwargs: _Engine(connection),
+    )
+    monkeypatch.setattr(
+        check_postgres,
+        "classify_database",
+        AsyncMock(
+            side_effect=check_postgres.SchemaUpgradeRequired(
+                "schema_future_predecessor",
+            ),
+        ),
+    )
+
+    result = await check_postgres.check_postgres(
+        "postgresql://owner:secret@localhost/deerflow_test_1_abc",
+    )
+
+    assert result.schema_state == "upgrade_required"
+    assert "make upgrade-db" in result.error
+    assert result.healthy is False
+
+
+@pytest.mark.asyncio
 async def test_check_is_unhealthy_without_the_pg_trgm_extension(monkeypatch) -> None:
     connection = _connection(pg_trgm=False)
     monkeypatch.setattr(check_postgres, "create_async_engine", lambda *_args, **_kwargs: _Engine(connection))

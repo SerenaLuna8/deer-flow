@@ -129,7 +129,12 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 可选的项目 RAG 知识库（Knowledge）：独立 `actweave-knowledge` 软件包提供文档上传、
   摄取切分、向量召回加 Reranker 精排检索和 Agent `knowledge_search` 引用；文件存储在
-  外部 MinIO，管理员在 `/admin/settings/knowledge` 的“知识库配置”页启用，默认关闭。
+  外部 MinIO。全新 `setup-db` 同时收到完整的
+  `ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT`、`ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET`、
+  `ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY` 与 `ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY`
+  时，会在建库前探测管理员预建的未版本化 bucket，并加密写入配置、默认启用；
+  四项全无则保持默认关闭，部分配置会在任何 DDL 前失败。管理员仍可在
+  `/admin/settings/knowledge` 的“知识库配置”页修改开关和配置。
   配置存入 PostgreSQL，MinIO 密钥加密且只写不回显；开启时保存必须通过存储探测，
   存储、配额与缓存设置在 Gateway/Worker 重启后生效。旧 YAML `knowledge` 块已移除，
   迁移顺序见 [Install.md](Install.md#knowledge-configuration-migration)。关闭功能会停用
@@ -295,31 +300,41 @@ make setup-db
 make check-db
 ```
 
-- `make setup-db` 只初始化空目标库，并写入完整 Schema V1 快照。
-- 开发环境需要永久清空目标库时，先停止服务再执行：
+- `make setup-db` 只初始化空目标库。安装器会先校验结构模板
+  `full_schema.sql` 与唯一的静态注释来源 `schema_comments.sql`，再在内存中
+  组合为一个 `BEGIN/COMMIT` 批次执行；两个 SQL 文件都不是可单独执行的安装入口。
+- 可选的 Knowledge 自动初始化需要在同一环境中完整提供
+  `ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT`、`ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET`、
+  `ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY` 与 `ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY`。
+  全新数据库应使用部署专属的空 bucket；该 bucket 必须由管理员预先创建、关闭
+  versioning/Object Lock，并可被当前凭据探测。初始化不会清理、自动创建或猜测
+  bucket，当前只支持非 TLS 的 bootstrap endpoint。四项全无
+  时 Knowledge 保持关闭，任一项缺失或为空都会在建库前失败。
+- Schema 升级只通过显式维护命令执行：
 
   ```bash
   make stop
-  make reset-db
+  make upgrade-db
+  make check-db
   ```
 
-  命令会显示脱敏后的数据库目标，并要求输入 `DATABASE_URL` 中的数据库名确认；
-  非交互环境使用 `make reset-db CONFIRM_DATABASE=deerflow`。它拒绝重置
-  `postgres`、`template0` 和 `template1`，也会在有效 `search_path` 不以
-  `public` 为当前 Schema 时拒绝执行。它不会自动启动服务，且删除的数据不可恢复。
+  当前 head 仍是 `schema_v1`，迁移 Registry 为空，因此该命令会校验精确 Catalog
+  后幂等返回“已是当前版本”。未来版本只有在同时提供线性、前向的打包迁移时才能提升
+  marker；未知版本或 Catalog drift 会失败关闭。命令不读取安装期模型或存储密钥，
+  也不会自动启动服务。
 
 - 空库初始化的首个 System Runtime Policy 使用 schema v6：主 Agent 每个 Run 的内部工具
   调用上限为 `200`，每个 Sub-Agent Task 为 `50`。`task` 本身计入主 Agent；并行 Task
   分别计数。重复执行初始化不会覆盖既有数据库的当前策略版本，已准入 Run 和历史 v2–v5
   策略仍保留旧的全 Run 共享计数语义。
 - 初始化会为应用表、Schema V1 标记表、LangGraph 表及每个 `run_events` 物理分区写入
-  非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
-- 非空旧库、未知 marker 或 catalog drift 都会安全失败；开发阶段请重建数据库。
+  非空的中文表注释和字段注释；结构 DDL、静态注释及初始分区在同一事务内完成，缺失或
+  漂移的注释会在建库或未来升级 DDL 前安全失败。
+- 未知 marker 或 catalog drift 都会安全失败；开发阶段请改用新的空目标库。
 - Context Evidence / Projection v2 是 Schema V1 的直接切换，没有旧 authority API、Profile
-  证明或数据库兼容 Adapter。升级该版本时必须先停止全部 Gateway、Frontend、Worker 和
-  Scheduler，确认精确 `DATABASE_URL` 后执行 `make reset-db`，再同批部署同一版本；该操作
-  会永久清空 Thread、Run、Checkpoint、Evidence 及其他应用历史，不支持新后端搭配旧前端。
-- Gateway、Worker 和 Scheduler 从不自动创建或修复 schema。
+  证明或数据库兼容 Adapter；它属于当前 Schema V1 新基线，不提供旧库迁移。未来受支持
+  的 Schema 前驱通过 `make upgrade-db` 迁移，未知旧库应改用新的空目标库。
+- Gateway、Worker 和 Scheduler 从不自动创建、升级或修复 schema。
 - 升级打包 System Agent/Skill 时，先停止运行服务，在维护窗口执行
   `make upgrade-system-assets`；该命令从标准运行环境读取 `DATABASE_URL`，以相同确定性
   UUID 原地替换唯一 v1 并保持它为 Current Version，不追加版本，可幂等重跑。System MCP
@@ -378,6 +393,11 @@ API Key 与服务地址统一由“模型供应商”持有：每个文本模型
 全部绑定文本模型重新加密凭据，已冻结旧凭据的 Run 会失效；供应商弹窗提供不落库的
 候选连接测试，文本模型的连接测试直接使用供应商已保存的 Key。管理页按供应商分组
 展示文本模型与 Embedding/Reranker 模型，但会话与 sidecar 仍按具体模型选择。
+文本模型与 Embedding/Reranker 模型的“删除”统一为不可恢复的逻辑删除：从当前目录、
+默认选择和新任务中隐藏，但保留数据库身份与历史引用。已接纳的 Run 继续使用冻结的文本
+模型配置与凭据代次；检索模型若仍被任一知识库引用，服务端会拒绝删除。供应商只有在其
+全部活动子模型都已逻辑删除后才能逻辑删除，同名供应商或同一类型的同名检索模型随后可
+作为新身份重新创建。
 
 全新数据库默认初始化两个供应商并分别沿用各自的引导 Key：DeepSeek 供应商挂
 三个 `deepseek` 文本模型配置（`deepseek-v4-flash`、`deepseek-v4-pro` 和

@@ -269,6 +269,12 @@ rename/delete controls remain sibling buttons outside the navigation link.
   `max_input_tokens` capability (`1..2,000,000`), presented as the Provider
   Model's maximum input context and context-percentage denominator, never as
   Provider output `max_tokens` or a Run token-budget setting.
+- Text and retrieval model Delete actions share one terminal soft-delete UX:
+  confirmation explains that the row leaves the current catalog and cannot be
+  used for new work, while historical references remain. Default text models
+  remain deletable because the server clears the default pointer. Retrieval
+  deletion must surface the server rejection when any Knowledge Base still
+  references the model; the client must not infer reference authority locally.
 - Render Provider settings from the backend adapter descriptor as typed form
   controls: common fields visible, `advanced=true` fields in a collapsed
   Advanced Settings section, platform defaults distinguished from an omitted
@@ -464,6 +470,8 @@ rename/delete controls remain sibling buttons outside the navigation link.
   enter mutation/query caches. GET exposes only `secret_key_configured`; blank
   secret retains the value, while changing the endpoint requires re-entry.
   Version conflicts and storage-probe failures keep the draft and a safe error.
+  A dirty draft missing enabled-storage requirements keeps Save actionable;
+  submitting it lists the exact missing fields without sending a request.
   The page distinguishes restart-required settings from the summary System
   Model reference that applies to subsequent tasks immediately. `etl_type` and
   `extraction_cache_enabled` remain fields of this PostgreSQL-owned settings

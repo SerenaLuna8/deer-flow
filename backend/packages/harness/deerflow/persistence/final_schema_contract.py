@@ -127,36 +127,37 @@ class CatalogInvariant:
     digest: str
 
 
-# The current catalog is generated from ``full_schema.sql``. Values are read
-# from PostgreSQL after installing the snapshot in an empty database.
+# The current catalog is generated from the composed structural schema and
+# comments artifacts. Values are read from PostgreSQL after installing the
+# combined snapshot in an empty database.
 FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
         count=112,
         digest="0e651994a58ab95d5d1d450688646c2b1535cd2b162be118cc5c1d1864f608ef",
     ),
     "columns": CatalogInvariant(
-        count=1444,
-        digest="739049b17052ff5605d3f963644918e357826f339c5fed41f77880256aa22342",
+        count=1447,
+        digest="c1a8a8cf842af2e55e0dd09732d8110c16828af9399cbb85c056a06a9f234d7e",
     ),
     "table_comments": CatalogInvariant(
         count=113,
-        digest="1f6bbb7dd326c254e338176a11ff8269c054ecf4615ef46ebe0828a76afb61c3",
+        digest="d4f046fefb6345bc626ab0d48dc577af8f739ff3642df1c8ae6f475980c89589",
     ),
     "column_comments": CatalogInvariant(
-        count=1445,
-        digest="a20bbbd03bfebe3ee8703455b9c58b681470c486bce2fafbf9a719c01893b7ae",
+        count=1448,
+        digest="4abf8ceb9b6f6e4f0263fe8beecf9b38d50d1132bb981d54151742c8fd19dc72",
     ),
     "sequences": CatalogInvariant(
         count=4,
         digest="73cb0d46bc3afc9585d0959b1d57d093621113408f2629dad9a6b027550af894",
     ),
     "constraints": CatalogInvariant(
-        count=1073,
-        digest="8b488e479509b7d870053351ce545baf479cd9038f1b093303386403d7a22f8e",
+        count=1074,
+        digest="4ffec715393a22004a5f1debd6a6de1b16b096f0f605fa627a8b148e07e67728",
     ),
     "indexes": CatalogInvariant(
         count=385,
-        digest="28750be2445b4430709e0969dab4f7f725a879a2a11e2e939e7d35719ea31bf9",
+        digest="6f6b4a3809fd9c543ac3a6ba55e39026f0ec719453ad88af2302c52cade642f8",
     ),
     "functions": CatalogInvariant(
         count=28,
@@ -367,7 +368,15 @@ async def verify_schema_v1_catalog(connection: AsyncConnection) -> bool:
     """Return whether all current catalog invariants match exactly."""
 
     signature = await read_schema_v1_catalog_signature(connection)
-    return signature == FINAL_SCHEMA_V1_CATALOG_SIGNATURE and await _run_event_partition_catalog_is_valid(connection) and await _langgraph_comments_are_valid(connection)
+    return signature == FINAL_SCHEMA_V1_CATALOG_SIGNATURE and await verify_schema_supporting_catalog(connection)
+
+
+async def verify_schema_supporting_catalog(connection: AsyncConnection) -> bool:
+    """Verify dynamic partitions and optional third-party schema comments."""
+
+    return await _run_event_partition_catalog_is_valid(
+        connection,
+    ) and await _langgraph_comments_are_valid(connection)
 
 
 async def _langgraph_comments_are_valid(connection: AsyncConnection) -> bool:
@@ -868,5 +877,6 @@ __all__ = [
     "inventory_is_schema_v1_allowed",
     "inventory_user_schema_objects",
     "read_schema_v1_catalog_signature",
+    "verify_schema_supporting_catalog",
     "verify_schema_v1_catalog",
 ]

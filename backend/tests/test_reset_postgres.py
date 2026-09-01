@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import io
+import re
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -154,6 +155,12 @@ def _install_successful_preflight(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         reset_postgres,
+        "prepare_knowledge_settings_bootstrap",
+        AsyncMock(return_value=None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        reset_postgres,
         "ensure_vector_extension",
         AsyncMock(),
         raising=False,
@@ -208,6 +215,39 @@ async def test_reset_rejects_invalid_bootstrap_before_ddl(
 
 
 @pytest.mark.asyncio
+async def test_reset_rejects_invalid_schema_installation_artifacts_before_ddl(
+    monkeypatch,
+) -> None:
+    _install_successful_preflight(monkeypatch)
+    validate_artifacts = MagicMock(
+        side_effect=RuntimeError("schema_comments.sql is missing or corrupt"),
+    )
+    create_engine = MagicMock(
+        side_effect=AssertionError("DDL engine must not be created"),
+    )
+    monkeypatch.setattr(
+        reset_postgres,
+        "validate_schema_installation_artifacts",
+        validate_artifacts,
+        raising=False,
+    )
+    monkeypatch.setattr(reset_postgres, "create_async_engine", create_engine)
+
+    with pytest.raises(
+        reset_postgres.PostgresResetError,
+        match="Schema V1 安装产物预检失败",
+    ):
+        await reset_postgres.reset_and_initialize(
+            "postgresql://owner:secret@127.0.0.1:9432/deerflow",
+            expected_database="deerflow",
+            admin_url=_ADMIN_URL,
+        )
+
+    validate_artifacts.assert_called_once_with()
+    create_engine.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_reset_rejects_invalid_admin_url_before_ddl(
     monkeypatch,
 ) -> None:
@@ -257,6 +297,45 @@ async def test_reset_rejects_missing_model_registry_bootstrap_before_ddl(
 
 
 @pytest.mark.asyncio
+async def test_reset_rejects_partial_knowledge_storage_before_ddl(
+    monkeypatch,
+) -> None:
+    from app.knowledge_settings.bootstrap import (
+        prepare_knowledge_settings_bootstrap,
+    )
+
+    _install_successful_preflight(monkeypatch)
+    monkeypatch.setattr(
+        reset_postgres,
+        "prepare_knowledge_settings_bootstrap",
+        prepare_knowledge_settings_bootstrap,
+    )
+    monkeypatch.setenv(
+        "ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT",
+        "storage.example.test:9000",
+    )
+    monkeypatch.delenv("ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET", raising=False)
+    monkeypatch.delenv("ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY", raising=False)
+    create_engine = MagicMock(
+        side_effect=AssertionError("DDL engine must not be created"),
+    )
+    monkeypatch.setattr(reset_postgres, "create_async_engine", create_engine)
+
+    with pytest.raises(
+        reset_postgres.PostgresResetError,
+        match="ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET",
+    ):
+        await reset_postgres.reset_and_initialize(
+            "postgresql://owner:secret@127.0.0.1:9432/deerflow",
+            expected_database="deerflow",
+            admin_url=_ADMIN_URL,
+        )
+
+    create_engine.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_reset_rebuilds_public_schema_then_runs_schema_v1_setup(
     monkeypatch,
 ) -> None:
@@ -293,6 +372,12 @@ async def test_reset_rebuilds_public_schema_then_runs_schema_v1_setup(
         "prepare_model_registry_bootstrap",
         lambda: registry_material,
     )
+    knowledge_material = object()
+    monkeypatch.setattr(
+        reset_postgres,
+        "prepare_knowledge_settings_bootstrap",
+        AsyncMock(return_value=knowledge_material),
+    )
 
     async def prepare_vector(admin_url: str, database: str) -> None:
         assert admin_url == _ADMIN_URL
@@ -311,10 +396,12 @@ async def test_reset_rebuilds_public_schema_then_runs_schema_v1_setup(
         *,
         default_model_bootstrap,
         model_registry_bootstrap,
+        knowledge_settings_bootstrap,
         force_public_schema: bool,
     ) -> str:
         assert default_model_bootstrap is bootstrap_material
         assert model_registry_bootstrap is registry_material
+        assert knowledge_settings_bootstrap is knowledge_material
         assert force_public_schema is True
         lock_events.append("bootstrap")
         return "schema_v1"
@@ -468,7 +555,7 @@ async def test_reset_sanitizes_unknown_bootstrap_outcome_without_leaking_failure
     assert "postgresql" not in rendered
 
 
-def test_root_make_reset_db_delegates_confirmation_to_backend_script() -> None:
+def test_make_reset_db_is_not_exposed() -> None:
     result = subprocess.run(
         ["make", "-n", "reset-db", "CONFIRM_DATABASE=deerflow"],
         cwd=REPOSITORY_ROOT,
@@ -477,9 +564,17 @@ def test_root_make_reset_db_delegates_confirmation_to_backend_script() -> None:
         check=False,
     )
 
-    assert result.returncode == 0
-    rendered = result.stdout + result.stderr
-    assert "python -m scripts.reset_postgres" in rendered
-    assert "PYTHONPATH=." not in rendered
-    root_makefile = REPOSITORY_ROOT.joinpath("Makefile").read_text(encoding="utf-8")
-    assert "reset-db: export CONFIRM_DATABASE := $(CONFIRM_DATABASE)" in root_makefile
+    assert result.returncode != 0
+    for makefile in (
+        REPOSITORY_ROOT / "Makefile",
+        REPOSITORY_ROOT / "backend" / "Makefile",
+    ):
+        targets = {
+            match.group(1)
+            for match in re.finditer(
+                r"^([A-Za-z0-9_.-]+):",
+                makefile.read_text(encoding="utf-8"),
+                flags=re.MULTILINE,
+            )
+        }
+        assert "reset-db" not in targets

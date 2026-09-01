@@ -56,7 +56,7 @@ class SystemModelRepository:
     ) -> tuple[SystemModelConfigRow, ...]:
         statement: Select[tuple[SystemModelConfigRow]] = select(
             SystemModelConfigRow,
-        )
+        ).where(SystemModelConfigRow.deleted_at.is_(None))
         if active_only:
             statement = statement.where(SystemModelConfigRow.status == "active")
         statement = statement.order_by(
@@ -66,7 +66,13 @@ class SystemModelRepository:
         return tuple((await self.session.execute(statement)).scalars().all())
 
     async def provider_names(self) -> dict[uuid.UUID, str]:
-        rows = (await self.session.execute(select(ModelProviderRow.id, ModelProviderRow.name))).all()
+        rows = (
+            await self.session.execute(
+                select(ModelProviderRow.id, ModelProviderRow.name).where(
+                    ModelProviderRow.deleted_at.is_(None),
+                )
+            )
+        ).all()
         return {uuid.UUID(str(row.id)): row.name for row in rows}
 
     async def lock_provider_for_share(
@@ -77,7 +83,16 @@ class SystemModelRepository:
 
         if not isinstance(provider_id, uuid.UUID):
             return None
-        return (await self.session.execute(select(ModelProviderRow).where(ModelProviderRow.id == provider_id).with_for_update(of=ModelProviderRow, read=True))).scalar_one_or_none()
+        return (
+            await self.session.execute(
+                select(ModelProviderRow)
+                .where(
+                    ModelProviderRow.id == provider_id,
+                    ModelProviderRow.deleted_at.is_(None),
+                )
+                .with_for_update(of=ModelProviderRow, read=True)
+            )
+        ).scalar_one_or_none()
 
     async def lock_providers_for_share(
         self,
@@ -99,6 +114,7 @@ class SystemModelRepository:
         value = await self.session.scalar(
             select(SystemModelConfigRow.provider_id).where(
                 SystemModelConfigRow.id == model_config_id,
+                SystemModelConfigRow.deleted_at.is_(None),
             )
         )
         return uuid.UUID(str(value)) if value is not None else None
@@ -109,7 +125,16 @@ class SystemModelRepository:
     ) -> SystemModelConfigRow | None:
         if not isinstance(model_config_id, uuid.UUID):
             return None
-        return (await self.session.execute(select(SystemModelConfigRow).where(SystemModelConfigRow.id == model_config_id).with_for_update(of=SystemModelConfigRow))).scalar_one_or_none()
+        return (
+            await self.session.execute(
+                select(SystemModelConfigRow)
+                .where(
+                    SystemModelConfigRow.id == model_config_id,
+                    SystemModelConfigRow.deleted_at.is_(None),
+                )
+                .with_for_update(of=SystemModelConfigRow)
+            )
+        ).scalar_one_or_none()
 
     async def current_secret(
         self,
@@ -157,6 +182,7 @@ class SystemModelRepository:
                 .where(
                     SystemModelConfigRow.id == model_id,
                     SystemModelConfigRow.status == "active",
+                    SystemModelConfigRow.deleted_at.is_(None),
                 )
                 .with_for_update(of=SystemModelConfigRow)
             )
@@ -257,6 +283,9 @@ class SystemModelRepository:
         ).scalar_one_or_none()
         if snapshot is None:
             return None
+        # Historical execution intentionally resolves the retained model row
+        # even after an administrator soft-deletes it. New admission uses
+        # ``resolve_active_model`` and cannot reach the tombstone.
         model = (
             await self.session.execute(
                 select(SystemModelConfigRow).where(
@@ -304,6 +333,9 @@ class SystemModelRepository:
     ) -> LockedSystemModelMaterial | None:
         if not isinstance(execution, FrozenSystemModelExecution):
             return None
+        # Frozen execution is already admitted authority. Keep soft-deleted
+        # model identities readable so their exact retained Generation can be
+        # materialized without reopening current catalog eligibility.
         model = (
             await self.session.execute(
                 select(SystemModelConfigRow).where(

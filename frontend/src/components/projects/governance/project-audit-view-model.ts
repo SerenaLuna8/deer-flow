@@ -170,6 +170,10 @@ const ACTION_LABELS: Record<AuditAction, LocalizedLabel> = {
     "zh-CN": "已更新系统设置",
     "en-US": "System setting updated",
   },
+  "knowledge_settings.update": {
+    "zh-CN": "已更新知识库配置",
+    "en-US": "Knowledge settings updated",
+  },
 };
 
 const ACTOR_LABELS: Record<ProjectAuditItem["actor"], LocalizedLabel> = {

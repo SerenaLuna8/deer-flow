@@ -20,7 +20,6 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
-    UniqueConstraint,
     Uuid,
     text,
 )
@@ -53,6 +52,10 @@ class ModelProviderRow(Base):
     )
     api_key_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     api_key_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -78,7 +81,12 @@ class ModelProviderRow(Base):
             "octet_length(api_key_nonce) = 12 AND octet_length(api_key_ciphertext) >= 16",
             name="ck_model_providers_secret",
         ),
-        Index("uq_model_providers_name", text("lower(name)"), unique=True),
+        Index(
+            "uq_model_providers_name",
+            text("lower(name)"),
+            unique=True,
+            postgresql_where=deleted_at.is_(None),
+        ),
     )
 
     def __repr__(self) -> str:
@@ -111,6 +119,10 @@ class ModelProviderModelRow(Base):
         nullable=False,
         default="active",
         server_default=text("'active'"),
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -147,11 +159,17 @@ class ModelProviderModelRow(Base):
             "status IN ('active', 'disabled')",
             name="ck_model_provider_models_status",
         ),
-        UniqueConstraint(
+        CheckConstraint(
+            "deleted_at IS NULL OR status = 'disabled'",
+            name="ck_model_provider_models_deleted_state",
+        ),
+        Index(
+            "uq_model_provider_models_identity",
             "provider_id",
             "model_type",
             "model_name",
-            name="uq_model_provider_models_identity",
+            unique=True,
+            postgresql_where=deleted_at.is_(None),
         ),
     )
 

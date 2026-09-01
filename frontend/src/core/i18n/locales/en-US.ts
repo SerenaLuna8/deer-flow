@@ -545,9 +545,6 @@ export const enUS: Translations = {
       reparsePending: "Submitting…",
       reparseConflict:
         "The document changed outside this dialog. The latest parameters and version were reloaded; review and confirm again.",
-      legacyProfile: "Historical profile",
-      parserProfile: (etlType, extractorId, extractorVersion) =>
-        `${etlType === "builtin" ? "Built-in parser" : "Local Unstructured"} · ${extractorId} · ${extractorVersion}`,
       parsingNotices: (count) =>
         `${count} parsing ${count === 1 ? "notice" : "notices"}`,
       imageFailures: (count) =>
@@ -641,10 +638,7 @@ export const enUS: Translations = {
       baseFilterLabel: "Limit to bases (optional)",
       allBases: "All bases",
       topKLabel: "Results (top_k)",
-      topKHint: "Leave empty to use the base default.",
       thresholdLabel: "Score threshold",
-      thresholdHint:
-        "Leave empty to use the base default; 0 disables filtering.",
       submit: "Search",
       searching: "Searching…",
       empty: "No matching content found",
@@ -1579,6 +1573,8 @@ export const enUS: Translations = {
       "Your administrator session is no longer available. Sign in again.",
     invalid:
       "Check the storage connection, secret key, model, and numeric limits.",
+    missingRequired: (fields) =>
+      `Complete the required configuration before saving: ${fields}.`,
     unavailable: "Knowledge settings are unavailable. Try again later.",
     generic: "Could not save knowledge settings. Try again.",
   },

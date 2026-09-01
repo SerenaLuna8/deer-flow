@@ -98,6 +98,28 @@ describe("project audit contract", () => {
     ).toEqual(recallAuditItem.metadata);
   });
 
+  test("presents Knowledge settings updates returned by platform audit", () => {
+    const item = adminAuditItemSchema.parse({
+      id: "11111111-1111-4111-8111-111111111111",
+      occurred_at: "2026-09-01T13:00:00Z",
+      actor: "system_admin",
+      actor_user_id: "22222222-2222-4222-8222-222222222222",
+      actor_email: "admin@example.com",
+      action: "knowledge_settings.update",
+      target_kind: "system_setting",
+      outcome: "success",
+      public_error_code: null,
+      metadata: {},
+      project_id: null,
+      project_slug: null,
+      project_display_name: null,
+    });
+
+    expect(describeAuditItem(item, "zh-CN").action).toBe(
+      "已更新知识库配置",
+    );
+  });
+
   test("accepts all closed host execution approval events", () => {
     const events = [
       {

@@ -113,9 +113,10 @@ async function expectSafeChannelResponse(
 }
 
 function modelCard(page: Page, displayName: string) {
-  return page.locator('[data-slot="card"]').filter({
-    has: page.getByText(displayName, { exact: true }),
-  });
+  return page
+    .getByTestId("admin-provider-model-list")
+    .getByRole("listitem")
+    .filter({ hasText: displayName });
 }
 
 test.describe("Domain-owned configuration secrets (real Gateway)", () => {
@@ -170,9 +171,13 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
       .getByTestId("admin-model-provider-card")
       .filter({ hasText: providerName })
       .first();
+    const providerSelector = page
+      .getByTestId("admin-model-provider-selector")
+      .filter({ hasText: providerName });
     await expect(
-      providerCard.getByText("Key 已配置", { exact: true }),
+      providerSelector.getByText("Key 已配置", { exact: true }),
     ).toBeVisible();
+    await providerSelector.click();
 
     // A text model binds the provider and derives credential and endpoint.
     await providerCard.getByRole("button", { name: "添加文本模型" }).click();
@@ -203,8 +208,7 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     await expect(modelDialog).toBeHidden();
 
     const card = modelCard(page, displayName);
-    await expect(card.getByText("已配置", { exact: true })).toBeVisible();
-    await expect(card.getByText("就绪", { exact: true })).toBeVisible();
+    await expect(card).toBeVisible();
 
     // A blank key on provider edit preserves the stored secret unchanged.
     await providerCard

@@ -4,7 +4,8 @@ The Knowledge package never imports host ORM tables; this adapter queries
 ``model_providers``/``model_provider_models`` with the caller's session,
 validates type and ``active`` status, decrypts the Provider API Key, and hands
 the package plain material DTOs. Every unresolvable model — missing, wrong
-type, disabled, or with undecryptable material — surfaces as one
+type, disabled, deleted, owned by a deleted Provider, or with undecryptable
+material — surfaces as one
 ``KNOWLEDGE_MODEL_UNAVAILABLE`` error so callers cannot distinguish (or leak)
 registry internals.
 """
@@ -98,13 +99,32 @@ class RegistryKnowledgeModelPort:
         the model row is still re-read under its lock before validation.
         """
 
-        provider_id = await session.scalar(select(ModelProviderModelRow.provider_id).where(ModelProviderModelRow.id == model_id))
+        provider_id = await session.scalar(
+            select(ModelProviderModelRow.provider_id).where(
+                ModelProviderModelRow.id == model_id,
+                ModelProviderModelRow.deleted_at.is_(None),
+            )
+        )
         if provider_id is None:
             raise _model_unavailable()
-        locked_provider = await session.scalar(select(ModelProviderRow.id).where(ModelProviderRow.id == provider_id).with_for_update(read=True))
-        if locked_provider is None:  # pragma: no cover - RESTRICT FK keeps it alive
+        locked_provider = await session.scalar(
+            select(ModelProviderRow.id)
+            .where(
+                ModelProviderRow.id == provider_id,
+                ModelProviderRow.deleted_at.is_(None),
+            )
+            .with_for_update(read=True)
+        )
+        if locked_provider is None:
             raise _model_unavailable()
-        model = await session.scalar(select(ModelProviderModelRow).where(ModelProviderModelRow.id == model_id).with_for_update(read=True))
+        model = await session.scalar(
+            select(ModelProviderModelRow)
+            .where(
+                ModelProviderModelRow.id == model_id,
+                ModelProviderModelRow.deleted_at.is_(None),
+            )
+            .with_for_update(read=True)
+        )
         if model is None or model.model_type != model_type or model.status != "active":
             raise _model_unavailable()
 
@@ -164,7 +184,14 @@ class RegistryKnowledgeModelPort:
             model_id = uuid.UUID(model_name)
         except ValueError:
             raise _summary_model_unavailable() from None
-        status = await session.scalar(select(SystemModelConfigRow.status).where(SystemModelConfigRow.id == model_id).with_for_update(read=True))
+        status = await session.scalar(
+            select(SystemModelConfigRow.status)
+            .where(
+                SystemModelConfigRow.id == model_id,
+                SystemModelConfigRow.deleted_at.is_(None),
+            )
+            .with_for_update(read=True)
+        )
         if status != "active":
             raise _summary_model_unavailable()
         return model_name
@@ -209,7 +236,20 @@ class RegistryKnowledgeModelPort:
         model_id: uuid.UUID,
         model_type: KnowledgeModelType,
     ) -> tuple[ModelProviderModelRow, ModelProviderRow]:
-        result = (await session.execute(select(ModelProviderModelRow, ModelProviderRow).join(ModelProviderRow, ModelProviderRow.id == ModelProviderModelRow.provider_id).where(ModelProviderModelRow.id == model_id))).one_or_none()
+        result = (
+            await session.execute(
+                select(ModelProviderModelRow, ModelProviderRow)
+                .join(
+                    ModelProviderRow,
+                    ModelProviderRow.id == ModelProviderModelRow.provider_id,
+                )
+                .where(
+                    ModelProviderModelRow.id == model_id,
+                    ModelProviderModelRow.deleted_at.is_(None),
+                    ModelProviderRow.deleted_at.is_(None),
+                )
+            )
+        ).one_or_none()
         if result is None:
             raise _model_unavailable()
         model, provider = result

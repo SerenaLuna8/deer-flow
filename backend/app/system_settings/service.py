@@ -6,6 +6,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TypeVar
 
@@ -273,6 +274,31 @@ class SystemModelCatalogService:
                 "result": "configured",
                 "reason": reason,
                 "readiness": _secret_readiness(model),
+            },
+            request_id=actor.request_id,
+        )
+
+    async def _append_delete_event(
+        self,
+        session: AsyncSession,
+        actor: SystemAuditContext,
+        model: SystemModelConfigRow,
+    ) -> None:
+        if self._audit_service is None:
+            return
+        await self._audit_service.append(
+            session,
+            AuditActor.system_admin(actor),
+            AuditAction.ASSET_DELETED,
+            AuditTarget(
+                AuditTargetKind.ASSET,
+                uuid.UUID(str(model.id)),
+                None,
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "asset_kind": "model",
+                "operation": "model.delete",
             },
             request_id=actor.request_id,
         )
@@ -696,6 +722,40 @@ class SystemModelCatalogService:
             return _model_view(model, target_provider.name)
 
         return await self._admin_operation(issued, operation)
+
+    async def delete_model(
+        self,
+        context: SystemAuditContext,
+        model_config_id: uuid.UUID,
+    ) -> None:
+        issued = self._require_admin(context)
+        if type(model_config_id) is not uuid.UUID:
+            raise SystemModelNotFound(issued.request_id)
+
+        async def operation(
+            repository: SystemModelRepository,
+            actor: SystemAuditContext,
+        ) -> None:
+            state = await repository.catalog_state(for_update=True)
+            model = await repository.lock_model(model_config_id)
+            if model is None:
+                raise SystemModelNotFound(actor.request_id)
+            model.status = "suspended"
+            model.deleted_at = datetime.now(UTC)
+            model.revision += 1
+            model.updated_by_user_id = str(actor.user_id)
+            if state.default_model_config_id == model.id:
+                state.default_model_config_id = None
+            state.revision += 1
+            state.updated_by_user_id = str(actor.user_id)
+            await repository.session.flush()
+            await self._append_delete_event(
+                repository.session,
+                actor,
+                model,
+            )
+
+        await self._admin_operation(issued, operation)
 
     async def set_status(
         self,

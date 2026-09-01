@@ -456,12 +456,6 @@ export interface Translations {
       reparseSubmit: string;
       reparsePending: string;
       reparseConflict: string;
-      legacyProfile: string;
-      parserProfile: (
-        etlType: "builtin" | "unstructured_local",
-        extractorId: string,
-        extractorVersion: string,
-      ) => string;
       parsingNotices: (count: number) => string;
       imageFailures: (count: number) => string;
       warningMessages: {
@@ -544,9 +538,7 @@ export interface Translations {
       baseFilterLabel: string;
       allBases: string;
       topKLabel: string;
-      topKHint: string;
       thresholdLabel: string;
-      thresholdHint: string;
       submit: string;
       searching: string;
       empty: string;
@@ -1622,6 +1614,7 @@ export interface Translations {
     conflictRefreshFailed: string;
     authRequired: string;
     invalid: string;
+    missingRequired: (fields: string) => string;
     unavailable: string;
     generic: string;
   };

@@ -87,10 +87,7 @@ import type {
   KnowledgeDocumentSort,
   KnowledgeNavigationState,
 } from "@/core/knowledge/navigation";
-import {
-  parseWarningSummary,
-  processingUnitLabel,
-} from "@/core/knowledge/processing-profile";
+import { parseWarningSummary } from "@/core/knowledge/processing-profile";
 import { knowledgeQueryKey } from "@/core/knowledge/query-keys";
 import { formatKnowledgeSourcePosition } from "@/core/knowledge/source-position";
 import {
@@ -229,68 +226,39 @@ function DocumentProcessingFacts({
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
-  const unit = processingUnitLabel(document.parsing_profile);
-  const unitText =
-    unit === "knowledgeTokens"
-      ? labels.wizard.knowledgeTokenShort
-      : labels.wizard.characterUnit;
   const warnings = parseWarningSummary(document.parse_warnings);
-  const chunkSize = document.parsing_profile?.chunk.size ?? document.chunk_size;
-  const tokenizerProfileId =
-    document.parsing_profile?.chunk.unit === "token"
-      ? document.parsing_profile.chunk.tokenizer_profile_id
-      : null;
   const warningText = (code: string, fallback: string): string =>
     labels.documents.warningMessages[
       code as keyof typeof labels.documents.warningMessages
     ] ?? fallback;
+  if (warnings.total === 0) return null;
   return (
     <div
       className="text-muted-foreground mt-1 space-y-0.5 text-xs leading-4"
       data-testid="knowledge-document-processing-facts"
     >
-      <p>
-        {chunkSize.toLocaleString()} {unitText}
-        {document.parsing_profile === null ? (
-          <> · {labels.documents.legacyProfile}</>
-        ) : (
-          <>
-            {document.parsing_profile.chunk.unit === "token" &&
-            tokenizerProfileId
-              ? ` · ${tokenizerProfileId}`
-              : ""}
-            {` · ${labels.documents.parserProfile(
-              document.parsing_profile.parse.etl_type,
-              document.parsing_profile.parse.extractor_id,
-              document.parsing_profile.parse.extractor_version,
-            )}`}
-          </>
-        )}
-      </p>
-      {warnings.total > 0 ? (
-        <div className="text-amber-700 dark:text-amber-300">
-          <p>
-            {labels.documents.parsingNotices(warnings.total)}
-            {warnings.imageFailures > 0
-              ? ` · ${labels.documents.imageFailures(warnings.imageFailures)}`
-              : ""}
-          </p>
-          <ul className="list-inside list-disc">
-            {document.parse_warnings.map((warning, index) => {
-              const position = formatKnowledgeSourcePosition(
-                warning.source_position,
-                labels.sourcePosition,
-              );
-              return (
-                <li key={`${warning.code}:${index}`}>
-                  {warningText(warning.code, warning.message)}
-                  {position ? ` · ${position}` : ""}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      ) : null}
+      <div className="text-amber-700 dark:text-amber-300">
+        <p>
+          {labels.documents.parsingNotices(warnings.total)}
+          {warnings.imageFailures > 0
+            ? ` · ${labels.documents.imageFailures(warnings.imageFailures)}`
+            : ""}
+        </p>
+        <ul className="list-inside list-disc">
+          {document.parse_warnings.map((warning, index) => {
+            const position = formatKnowledgeSourcePosition(
+              warning.source_position,
+              labels.sourcePosition,
+            );
+            return (
+              <li key={`${warning.code}:${index}`}>
+                {warningText(warning.code, warning.message)}
+                {position ? ` · ${position}` : ""}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
     </div>
   );
 }

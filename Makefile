@@ -5,7 +5,7 @@
 .PHONY: \
 	help \
 	setup config config-upgrade check doctor install setup-sandbox support-bundle \
-	setup-db reset-db check-db upgrade-system-assets prepare-run-event-partitions prune-run-events reconcile-usage import-project-skills \
+	setup-db upgrade-db check-db upgrade-system-assets prepare-run-event-partitions prune-run-events reconcile-usage import-project-skills \
 	test test-provider-integration \
 	detect-thread-boundaries detect-blocking-io \
 	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean
@@ -54,7 +54,7 @@ help:
 	@echo ""
 	@echo "PostgreSQL 与运维："
 	@echo "  make setup-db                         空库安装 Schema V1 并初始化"
-	@echo "  make reset-db                         永久清空目标库并重新初始化 Schema V1"
+	@echo "  make upgrade-db                       显式前向升级（当前 Schema V1 仅校验）"
 	@echo "  make check-db                         只读检查 revision 与数据库状态"
 	@echo "  make upgrade-system-assets            在维护窗口原地升级 System Agent/Skill Current v1"
 	@echo "  make prepare-run-event-partitions     幂等预创建 run_events 当前月至 N+2 月分区"
@@ -86,9 +86,8 @@ doctor:
 setup-db:
 	@$(MAKE) -C backend setup-db
 
-reset-db: export CONFIRM_DATABASE := $(CONFIRM_DATABASE)
-reset-db:
-	@$(MAKE) -C backend reset-db
+upgrade-db:
+	@$(MAKE) -C backend upgrade-db
 
 reconcile-usage:
 	@$(MAKE) -C backend reconcile-usage ARGS="$(ARGS)"

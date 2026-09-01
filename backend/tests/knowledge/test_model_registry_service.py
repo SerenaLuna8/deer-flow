@@ -298,6 +298,72 @@ def test_provider_row_repr_excludes_encrypted_key_material() -> None:
     assert "Provider" in text
 
 
+@pytest.mark.asyncio
+async def test_registry_schema_supports_terminal_soft_delete_and_live_name_reuse(
+    postgres_database_url: str,
+) -> None:
+    """Deleted registry rows remain tombstones without occupying live names."""
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await _install_full_schema(engine)
+        async with engine.connect() as connection:
+            deleted_columns = {
+                (row.table_name, row.udt_name, row.is_nullable)
+                for row in await connection.execute(
+                    text(
+                        """SELECT table_name, udt_name, is_nullable
+                           FROM information_schema.columns
+                           WHERE table_schema = current_schema()
+                             AND column_name = 'deleted_at'
+                             AND table_name IN ('model_providers', 'model_provider_models')"""
+                    )
+                )
+            }
+            deleted_state = await connection.scalar(
+                text(
+                    """SELECT pg_get_constraintdef(oid)
+                       FROM pg_constraint
+                       WHERE connamespace = current_schema()::regnamespace
+                         AND conname = 'ck_model_provider_models_deleted_state'"""
+                )
+            )
+            live_unique_indexes = {
+                (row.table_name, row.index_name): row.predicate
+                for row in await connection.execute(
+                    text(
+                        """SELECT table_relation.relname AS table_name,
+                                  index_relation.relname AS index_name,
+                                  pg_get_expr(index_catalog.indpred, index_catalog.indrelid) AS predicate
+                           FROM pg_index index_catalog
+                           JOIN pg_class table_relation ON table_relation.oid = index_catalog.indrelid
+                           JOIN pg_class index_relation ON index_relation.oid = index_catalog.indexrelid
+                           JOIN pg_namespace namespace ON namespace.oid = table_relation.relnamespace
+                           WHERE namespace.nspname = current_schema()
+                             AND index_relation.relname IN (
+                                 'uq_model_providers_name',
+                                 'uq_model_provider_models_identity'
+                             )"""
+                    )
+                )
+            }
+
+        assert deleted_columns == {
+            ("model_providers", "timestamptz", "YES"),
+            ("model_provider_models", "timestamptz", "YES"),
+        }
+        assert deleted_state is not None
+        assert "deleted_at IS NULL" in deleted_state
+        assert "status" in deleted_state and "disabled" in deleted_state
+        assert set(live_unique_indexes) == {
+            ("model_providers", "uq_model_providers_name"),
+            ("model_provider_models", "uq_model_provider_models_identity"),
+        }
+        assert all(predicate is not None and "deleted_at IS NULL" in predicate for predicate in live_unique_indexes.values())
+    finally:
+        await engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # Admin authority
 # ---------------------------------------------------------------------------
@@ -770,10 +836,13 @@ async def test_update_provider_rejects_unknown_ids_and_name_conflicts(postgres_d
 
 
 @pytest.mark.asyncio
-async def test_delete_provider_requires_an_empty_model_list(postgres_database_url: str) -> None:
+async def test_delete_provider_requires_no_live_models_and_keeps_a_hidden_tombstone(
+    postgres_database_url: str,
+) -> None:
     harness = await _harness(postgres_database_url)
     try:
-        provider_id = await _create_provider(harness)
+        provider_name = "Soft-deleted Provider"
+        provider_id = await _create_provider(harness, name=provider_name)
         model_id = await _create_embedding(harness, provider_id)
 
         with pytest.raises(KnowledgeError) as blocked:
@@ -784,11 +853,49 @@ async def test_delete_provider_requires_an_empty_model_list(postgres_database_ur
         await harness.service.delete_provider(harness.context, provider_id)
 
         async with harness.factory() as session:
-            assert await session.get(ModelProviderRow, provider_id) is None
+            provider = await session.get(ModelProviderRow, provider_id)
+            model = await session.get(ModelProviderModelRow, model_id)
+            assert provider is not None
+            assert getattr(provider, "deleted_at", None) is not None
+            assert model is not None
+            assert model.provider_id == provider_id
+            assert getattr(model, "deleted_at", None) is not None
+        assert await harness.service.list_providers(harness.context) == []
+
         with pytest.raises(KnowledgeError) as missing:
             await harness.service.delete_provider(harness.context, provider_id)
         assert missing.value.code == KNOWLEDGE_NOT_FOUND
         assert harness.audit.operations()[-2:] == ["provider_model.delete", "model_provider.delete"]
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_soft_deleted_provider_releases_its_live_name(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        provider_name = "Reusable Provider"
+        deleted_provider_id = await _create_provider(harness, name=provider_name)
+        await harness.service.delete_provider(harness.context, deleted_provider_id)
+
+        replacement_id = await _create_provider(harness, name=provider_name)
+        assert replacement_id != deleted_provider_id
+
+        async with harness.factory() as session:
+            deleted_provider = await session.get(ModelProviderRow, deleted_provider_id)
+            replacement = await session.get(ModelProviderRow, replacement_id)
+            assert deleted_provider is not None
+            assert getattr(deleted_provider, "deleted_at", None) is not None
+            assert replacement is not None
+            assert getattr(replacement, "deleted_at", None) is None
+            assert await session.scalar(select(func.count()).select_from(ModelProviderRow)) == 2
+
+        providers = await harness.service.list_providers(harness.context)
+        assert [(provider.id, provider.name) for provider in providers] == [
+            (replacement_id, provider_name),
+        ]
     finally:
         await harness.engine.dispose()
 
@@ -842,7 +949,9 @@ async def test_disable_requires_unreferenced_and_enable_reprobes(postgres_databa
 
 
 @pytest.mark.asyncio
-async def test_delete_model_requires_unreferenced(postgres_database_url: str) -> None:
+async def test_delete_model_rejects_an_in_use_model_without_tombstoning(
+    postgres_database_url: str,
+) -> None:
     harness = await _harness(postgres_database_url)
     try:
         provider_id = await _create_provider(harness)
@@ -853,13 +962,88 @@ async def test_delete_model_requires_unreferenced(postgres_database_url: str) ->
             await harness.service.delete_model(harness.context, model_id)
         assert referenced.value.code == KNOWLEDGE_INVALID_REQUEST
 
-        harness.in_use_ids.clear()
-        await harness.service.delete_model(harness.context, model_id)
         async with harness.factory() as session:
-            assert await session.get(ModelProviderModelRow, model_id) is None
+            model = await session.get(ModelProviderModelRow, model_id)
+            assert model is not None
+            assert model.status == "active"
+            assert getattr(model, "deleted_at", None) is None
+        assert "provider_model.delete" not in harness.audit.operations()
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_delete_model_keeps_a_disabled_tombstone_and_hides_it_from_catalogs(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        provider_id = await _create_provider(harness, name="Soft-delete Models")
+        model_id = await _create_rerank(
+            harness,
+            provider_id,
+            model_name="reusable-reranker",
+        )
+
+        await harness.service.delete_model(harness.context, model_id)
+
+        async with harness.factory() as session:
+            model = await session.get(ModelProviderModelRow, model_id)
+            assert model is not None
+            assert model.status == "disabled"
+            assert getattr(model, "deleted_at", None) is not None
+
+        assert await harness.service.list_models(harness.context, provider_id) == []
+        providers = await harness.service.list_providers(harness.context)
+        assert [(provider.id, provider.model_count, provider.active_model_count) for provider in providers] == [(provider_id, 0, 0)]
+        async with harness.factory() as session, session.begin():
+            embedding_options, rerank_options = await list_active_retrieval_model_options(session)
+        assert embedding_options == []
+        assert rerank_options == []
+
         with pytest.raises(KnowledgeError) as missing:
             await harness.service.delete_model(harness.context, model_id)
         assert missing.value.code == KNOWLEDGE_NOT_FOUND
+        assert harness.audit.operations().count("provider_model.delete") == 1
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_soft_deleted_model_releases_its_live_provider_type_and_name_identity(
+    postgres_database_url: str,
+) -> None:
+    harness = await _harness(postgres_database_url)
+    try:
+        provider_id = await _create_provider(harness)
+        model_name = "reusable-embedding"
+        deleted_model_id = await _create_embedding(
+            harness,
+            provider_id,
+            model_name=model_name,
+        )
+        await harness.service.delete_model(harness.context, deleted_model_id)
+
+        replacement_id = await _create_embedding(
+            harness,
+            provider_id,
+            model_name=model_name,
+        )
+        assert replacement_id != deleted_model_id
+
+        async with harness.factory() as session:
+            deleted_model = await session.get(ModelProviderModelRow, deleted_model_id)
+            replacement = await session.get(ModelProviderModelRow, replacement_id)
+            assert deleted_model is not None
+            assert getattr(deleted_model, "deleted_at", None) is not None
+            assert replacement is not None
+            assert getattr(replacement, "deleted_at", None) is None
+            assert await session.scalar(select(func.count()).select_from(ModelProviderModelRow)) == 2
+
+        models = await harness.service.list_models(harness.context, provider_id)
+        assert [(model.id, model.model_name) for model in models] == [
+            (replacement_id, model_name),
+        ]
     finally:
         await harness.engine.dispose()
 

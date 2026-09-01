@@ -112,7 +112,18 @@ async def summary_model_info(session: AsyncSession, reference: str | None) -> Su
     except (ValueError, TypeError):
         raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "摘要模型不可用，请联系管理员") from None
     model = (
-        await session.execute(select(SystemModelConfigRow.id, SystemModelConfigRow.display_name).where(SystemModelConfigRow.id == model_id, SystemModelConfigRow.status == "active").with_for_update(read=True, of=SystemModelConfigRow))
+        await session.execute(
+            select(
+                SystemModelConfigRow.id,
+                SystemModelConfigRow.display_name,
+            )
+            .where(
+                SystemModelConfigRow.id == model_id,
+                SystemModelConfigRow.status == "active",
+                SystemModelConfigRow.deleted_at.is_(None),
+            )
+            .with_for_update(read=True, of=SystemModelConfigRow)
+        )
     ).one_or_none()
     if model is None:
         raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "摘要模型不可用，请联系管理员")

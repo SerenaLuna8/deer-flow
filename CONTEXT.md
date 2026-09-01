@@ -155,11 +155,11 @@ A logged retrieval request against a Project's Knowledge Bases, recording its so
 _Avoid_: chat message, Run
 
 **Model Provider**:
-A platform-administered model vendor in the host model registry: a display name, an OpenAI-compatible endpoint, and the one write-only API key of the model domain, held as its Configuration Secret. It owns Provider Models, and every System Model Configuration binds exactly one Model Provider for its endpoint and key. It is not a System Model Configuration and carries no `provider_adapter`; those concepts belong to Agent model execution.
+A platform-administered model vendor in the host model registry: a display name, an OpenAI-compatible endpoint, and the one write-only API key of the model domain, held as its Configuration Secret. It owns Provider Models, and every System Model Configuration binds exactly one Model Provider for its endpoint and key. It is not a System Model Configuration and carries no `provider_adapter`; those concepts belong to Agent model execution. Deletion is an irreversible logical deletion allowed only after every live child model has been logically deleted; the retained row preserves historical foreign-key identity and is excluded from ordinary catalogs and new bindings.
 _Avoid_: Knowledge Model Configuration, provider adapter, System Model Configuration
 
 **Provider Model**:
-One typed retrieval model under a Model Provider: embedding (with a fixed vector dimension) or reranker. It never denotes a text model, even though the admin page groups both under the same Model Provider. An unconfigured empty Knowledge Base has no model binding. Its initial configuration binds one embedding Provider Model; after that, this binding changes only through rebuild and cannot be cleared. It may also bind at most one reranker Provider Model, effective on save. A Provider Model referenced by any Knowledge Base is in use, and neither it nor its Model Provider can be disabled or deleted.
+One typed retrieval model under a Model Provider: embedding (with a fixed vector dimension) or reranker. It never denotes a text model, even though the admin page groups both under the same Model Provider. An unconfigured empty Knowledge Base has no model binding. Its initial configuration binds one embedding Provider Model; after that, this binding changes only through rebuild and cannot be cleared. It may also bind at most one reranker Provider Model, effective on save. A Provider Model referenced by any Knowledge Base is in use and cannot be disabled or logically deleted. Deleting an unreferenced Provider Model is irreversible logical deletion: its disabled row remains for historical identity, while ordinary catalogs, new Knowledge Base bindings, tests, and status changes treat it as absent.
 _Avoid_: Knowledge Model Configuration, model configuration row, text model
 
 ## Configuration secrets
@@ -189,7 +189,7 @@ The non-secret identity and integrity metadata retained after a Configuration Se
 _Avoid_: Deleted Credential, archived secret
 
 **System Model Configuration**:
-A platform-administered text-model capability definition with a stable identity and no version history. It binds exactly one Model Provider, derives its endpoint from that provider, and holds no independently authored API Key: its per-model Configuration Secret Generation is re-encrypted from the provider's key on create, rebind, and provider key or endpoint change.
+A platform-administered text-model capability definition with a stable identity and no version history. It binds exactly one Model Provider, derives its endpoint from that provider, and holds no independently authored API Key: its per-model Configuration Secret Generation is re-encrypted from the provider's key on create, rebind, and provider key or endpoint change. Deletion is irreversible logical deletion: it suspends and hides the configuration from ordinary catalogs, defaults, new Run Admission, summaries, and runtime-policy authoring, while retaining the row and exact secret Generation so a Run admitted before deletion can continue from its frozen execution closure.
 _Avoid_: System Model Version, model Credential, model-level API Key
 
 ## Skill versions

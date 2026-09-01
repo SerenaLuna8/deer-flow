@@ -2111,6 +2111,32 @@ test("shows the Knowledge navigation entry when the module is enabled", async ({
   ).toBeVisible();
 });
 
+test("centers the wizard's step-one content on desktop", async ({ page }) => {
+  await mockKnowledgeRoutes(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/projects/alpha/knowledge");
+  await page.getByRole("button", { name: "Create from documents" }).click();
+
+  const wizard = page.getByTestId("knowledge-create-wizard");
+  const wizardBox = await wizard.boundingBox();
+  expect(wizardBox).not.toBeNull();
+  const wizardCenter = wizardBox!.x + wizardBox!.width / 2;
+  const contentBlocks = [
+    wizard.getByRole("heading", { name: "Upload text files" }).locator(".."),
+    wizard.getByRole("button", { name: "Next", exact: true }).locator(".."),
+    wizard
+      .getByRole("button", { name: "Create an empty base", exact: true })
+      .locator(".."),
+  ];
+
+  for (const block of contentBlocks) {
+    const blockBox = await block.boundingBox();
+    expect(blockBox).not.toBeNull();
+    const blockCenter = blockBox!.x + blockBox!.width / 2;
+    expect(Math.abs(blockCenter - wizardCenter)).toBeLessThanOrEqual(1);
+  }
+});
+
 test("creates a base through the wizard and watches the upload reach ready", async ({
   page,
 }) => {
@@ -4503,7 +4529,7 @@ test("retrieval test lists recent queries, refreshes after a search, and backfil
   await expect(page.getByLabel("Query")).toHaveValue("agent 侧历史查询");
 });
 
-test("base settings save retrieval defaults and empty search inputs defer to them", async ({
+test("base settings expose retrieval defaults only as placeholders and empty search inputs defer to them", async ({
   page,
 }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
@@ -4531,6 +4557,12 @@ test("base settings save retrieval defaults and empty search inputs defer to the
   await expect(page.getByLabel("Score threshold")).toHaveAttribute(
     "placeholder",
     "0",
+  );
+  await expect(page.getByLabel("Results (top_k)").locator("..")).toHaveText(
+    "Results (top_k)",
+  );
+  await expect(page.getByLabel("Score threshold").locator("..")).toHaveText(
+    "Score threshold",
   );
 
   // Saving new defaults goes through the base PATCH route.
@@ -6217,7 +6249,7 @@ test("task progress shows stages, counts, and attempts, and a new attempt restar
   ).toHaveCount(0);
 });
 
-test("document governance shows real profiles and warnings while a failed publication stays read only", async ({
+test("document governance keeps file icons visible, hides processing internals, and preserves warnings and failed publications", async ({
   page,
 }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
@@ -6361,17 +6393,26 @@ test("document governance shows real profiles and warnings while a failed public
 
   const rows = page.getByTestId("knowledge-document-rows");
   const tokenRow = rows.getByRole("row").filter({ hasText: "token.csv" });
-  await expect(tokenRow).toContainText("1,000 Knowledge Tokens");
-  await expect(tokenRow).toContainText("knowledge-cl100k-v1");
-  await expect(tokenRow).toContainText("Built-in parser · builtin.csv · 1");
+  const fileTypeIcon = tokenRow.locator('[title="CSV"]');
+  const fileGlyphBox = await fileTypeIcon.locator("svg").boundingBox();
+  const fileTypeLabelBox = await fileTypeIcon.locator("span").boundingBox();
+  expect(fileGlyphBox).not.toBeNull();
+  expect(fileTypeLabelBox).not.toBeNull();
+  expect(fileTypeLabelBox!.y).toBeGreaterThanOrEqual(
+    fileGlyphBox!.y + fileGlyphBox!.height - 0.5,
+  );
+  await expect(tokenRow).not.toContainText("1,000 Knowledge Tokens");
+  await expect(tokenRow).not.toContainText("knowledge-cl100k-v1");
+  await expect(tokenRow).not.toContainText("Built-in parser");
+  await expect(tokenRow).not.toContainText("builtin.csv");
   await expect(tokenRow).toContainText("2 parsing notices");
   await expect(tokenRow).toContainText("Header row was inferred");
   await expect(tokenRow).toContainText("1 image could not be saved");
 
   const legacyRow = rows.getByRole("row").filter({ hasText: "legacy.txt" });
-  await expect(legacyRow).toContainText("1,000 characters");
-  await expect(legacyRow).toContainText("Historical profile");
-  await expect(legacyRow).not.toContainText("builtin.text");
+  await expect(
+    legacyRow.getByTestId("knowledge-document-processing-facts"),
+  ).toHaveCount(0);
 
   const imageOnlyRow = rows.getByRole("row").filter({ hasText: "scan.pdf" });
   await expect(imageOnlyRow).toContainText("文件没有可提取的文本");

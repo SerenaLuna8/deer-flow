@@ -124,6 +124,7 @@ from deerflow.scheduler.schedules import next_scheduled_occurrence
 
 _DISPATCH_REQUEST_ID = "automation-dispatch"
 _OCCURRENCE_NAMESPACE = uuid.UUID("54f6732f-c6d5-5db6-8d4e-f166b4f3d014")
+_AUTOMATION_REQUESTED_RECURSION_LIMIT = 1_000
 
 
 class AutomationQuotaPort(Protocol):
@@ -417,7 +418,7 @@ class AutomationDispatcher:
         config = prepare_private_run_config(
             thread_id=thread_id,
             opaque_scope=context.resource_scope,
-            request_config=None,
+            request_config={"recursion_limit": _AUTOMATION_REQUESTED_RECURSION_LIMIT},
             metadata=metadata,
             body_context=None,
         )

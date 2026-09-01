@@ -67,6 +67,7 @@ export const auditActionSchema = z.enum([
   "purge.completed",
   "audit.corrected",
   "system_setting.updated",
+  "knowledge_settings.update",
 ]);
 
 type AuditAction = z.infer<typeof auditActionSchema>;
@@ -565,6 +566,7 @@ const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
   "purge.completed": purgeMetadataSchema,
   "audit.corrected": correctionMetadataSchema,
   "system_setting.updated": systemSettingMetadataSchema,
+  "knowledge_settings.update": emptyMetadataSchema,
 };
 
 export const auditItemSchema = z

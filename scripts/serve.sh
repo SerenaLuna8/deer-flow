@@ -57,10 +57,20 @@ unset "STEPFUN_API_KEY"
 unset "VLLM_API_KEY"
 unset "VOLCENGINE_API_KEY"
 
-# POSTGRES_ADMIN_URL is an installation/upgrade-only superuser credential.
+# POSTGRES_ADMIN_URL belongs to the public setup path (and the non-public
+# destructive reset test helper), never to a runtime service.
 # Runtime roles use DATABASE_URL and must never inherit the management URL from
 # either the parent shell or the repository .env loaded above.
 unset "POSTGRES_ADMIN_URL"
+
+# Knowledge storage bootstrap values are consumed by the public setup path (and
+# the non-public destructive reset test helper), never by runtime services.
+# Runtime roles read the encrypted PostgreSQL singleton and must not inherit
+# the plaintext storage secret (or the rest of its install-time group).
+unset "ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT"
+unset "ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET"
+unset "ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY"
+unset "ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY"
 
 _pick_python() {
     local candidate

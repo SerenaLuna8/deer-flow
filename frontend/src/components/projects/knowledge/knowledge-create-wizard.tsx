@@ -914,7 +914,7 @@ export function KnowledgeCreateWizard({
       </div>
 
       {step === 1 ? (
-        <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto py-10 [&>div]:max-w-[640px]">
+        <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto py-10 [&>div]:mx-auto [&>div]:max-w-[640px]">
           <div className="space-y-3">
             <h2 className="text-base font-semibold tracking-tight">
               {wizard.sourceSectionTitle}

@@ -24,19 +24,19 @@ export function KnowledgeFileTypeIcon({ fileName }: { fileName: string }) {
       aria-hidden
       title={type?.label}
       className={cn(
-        "relative inline-flex size-7 shrink-0 items-center justify-center",
+        "relative inline-flex h-9 w-7 shrink-0 items-start justify-center",
         type?.color ?? "text-muted-foreground",
       )}
     >
       {type ? (
         <>
           <FileIcon className="size-6" strokeWidth={1.5} />
-          <span className="bg-card absolute bottom-0.5 left-1/2 -translate-x-1/2 rounded-sm px-0.5 text-[8px] leading-3 font-bold tracking-tight">
+          <span className="bg-card absolute bottom-0 left-1/2 -translate-x-1/2 rounded-sm px-0.5 text-[8px] leading-3 font-bold tracking-tight">
             {type.label}
           </span>
         </>
       ) : (
-        <FileTextIcon className="size-6" strokeWidth={1.5} />
+        <FileTextIcon className="mt-1.5 size-6" strokeWidth={1.5} />
       )}
     </span>
   );

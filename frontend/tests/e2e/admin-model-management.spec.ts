@@ -1,4 +1,10 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type Route,
+} from "@playwright/test";
 
 const PROVIDER_ID = "20000000-0000-4000-8000-000000000001";
 const TEXT_MODEL_ID = "10000000-0000-4000-8000-000000000001";
@@ -30,6 +36,9 @@ type MockTextModel = {
   max_input_tokens: number;
   status: "active" | "suspended";
   is_default: boolean;
+  supports_thinking: boolean;
+  supports_reasoning_effort: boolean;
+  supports_vision: boolean;
 };
 
 type MockProviderModel = {
@@ -65,6 +74,9 @@ function textModelFixture(
     max_input_tokens: 128_000,
     status: "active",
     is_default: true,
+    supports_thinking: false,
+    supports_reasoning_effort: false,
+    supports_vision: false,
     ...overrides,
   };
 }
@@ -93,6 +105,8 @@ async function mockModelManagementRoutes(
     models?: MockProviderModel[];
     providerDeleteConflictMessage?: string;
     providerUpdateConflictsOnce?: boolean;
+    retrievalTestOk?: boolean;
+    deferTextDelete?: boolean;
   } = {},
 ) {
   const state = {
@@ -108,6 +122,8 @@ async function mockModelManagementRoutes(
     textModelCreates: [] as Array<Record<string, unknown>>,
     textModelReplacements: [] as Array<Record<string, unknown>>,
     storedKeyTests: [] as Array<Record<string, unknown>>,
+    textModelDeletes: [] as string[],
+    releaseTextDelete: null as (() => void) | null,
     modelCreates: [] as Array<Record<string, unknown>>,
     statusPatches: [] as Array<Record<string, unknown>>,
     testedIds: [] as string[],
@@ -145,9 +161,9 @@ async function mockModelManagementRoutes(
       state.providers.find((provider) => provider.id === model.provider_id)
         ?.name ?? "",
     settings: {},
-    supports_thinking: false,
-    supports_reasoning_effort: false,
-    supports_vision: false,
+    supports_thinking: model.supports_thinking,
+    supports_reasoning_effort: model.supports_reasoning_effort,
+    supports_vision: model.supports_vision,
     revision: 1,
     api_key_configured: true,
     secret_readiness: "ready",
@@ -161,7 +177,7 @@ async function mockModelManagementRoutes(
     updated_at: TIMESTAMP,
   });
 
-  await page.route("**/api/**", (route) => {
+  await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
@@ -192,7 +208,34 @@ async function mockModelManagementRoutes(
           {
             id: "deepseek",
             api_key_required: true,
-            setting_fields: [],
+            setting_fields: [
+              {
+                name: "max_tokens",
+                label: "Max tokens",
+                input_type: "integer",
+                advanced: false,
+                form_control: "input",
+                default_mode: "provider",
+                default_value: null,
+                minimum: 1,
+                maximum: 2_000_000,
+                step: 1,
+                options: [],
+              },
+              {
+                name: "reasoning_effort",
+                label: "Reasoning effort",
+                input_type: "enum",
+                advanced: true,
+                form_control: "input",
+                default_mode: "provider",
+                default_value: null,
+                minimum: null,
+                maximum: null,
+                step: null,
+                options: ["low", "high", "max"],
+              },
+            ],
           },
         ],
         catalog_revision: 1,
@@ -211,9 +254,7 @@ async function mockModelManagementRoutes(
         provider_id:
           typeof body.provider_id === "string" ? body.provider_id : "",
         max_input_tokens:
-          typeof body.max_input_tokens === "number"
-            ? body.max_input_tokens
-            : 0,
+          typeof body.max_input_tokens === "number" ? body.max_input_tokens : 0,
         is_default: false,
       });
       state.textModels.push(created);
@@ -252,6 +293,19 @@ async function mockModelManagementRoutes(
         catalog_revision: 3,
         request_id: "req-text-model-replace",
       });
+    }
+    if (textModelMatch && method === "DELETE") {
+      if (initial.deferTextDelete) {
+        await new Promise<void>((resolve) => {
+          state.releaseTextDelete = resolve;
+        });
+        state.releaseTextDelete = null;
+      }
+      state.textModelDeletes.push(textModelMatch[1]!);
+      state.textModels = state.textModels.filter(
+        (model) => model.id !== textModelMatch[1],
+      );
+      return json(route, { request_id: "req-text-model-delete" });
     }
 
     const providersBase = "/api/admin/settings/model-providers";
@@ -384,12 +438,10 @@ async function mockModelManagementRoutes(
     if (testMatch && method === "POST") {
       state.testedIds.push(testMatch[1]!);
       const target = state.models.find((model) => model.id === testMatch[1]);
+      const ok = initial.retrievalTestOk !== false;
       return json(route, {
-        ok: true,
-        message:
-          target?.model_type === "rerank"
-            ? "Rerank 连接测试通过"
-            : "Embedding 连接测试通过",
+        ok,
+        message: `${target?.model_type === "rerank" ? "Rerank" : "Embedding"} 连接测试${ok ? "通过" : "失败"}`,
         request_id: "req-model-test",
       });
     }
@@ -408,9 +460,7 @@ async function mockModelManagementRoutes(
       });
     }
     if (modelMatch && method === "DELETE") {
-      state.models = state.models.filter(
-        (model) => model.id !== modelMatch[1],
-      );
+      state.models = state.models.filter((model) => model.id !== modelMatch[1]);
       return json(route, { request_id: "req-model-delete" });
     }
 
@@ -426,6 +476,97 @@ function providerCard(page: Page, name: string) {
     .filter({ hasText: name })
     .first();
 }
+
+function modelRow(page: Page, name: string) {
+  return page
+    .getByTestId("admin-provider-model-list")
+    .getByRole("listitem")
+    .filter({ hasText: name });
+}
+
+async function expectTextModelActions(
+  row: Locator,
+  statusAction: "Disable" | "Enable",
+  defaultAction: "Default" | "Set as default",
+) {
+  const actions = row.getByRole("group", { name: "Actions" });
+  await expect(actions.getByRole("button")).toHaveCount(3);
+  await expect(
+    actions.getByRole("button", { name: statusAction, exact: true }),
+  ).toBeVisible();
+  await expect(
+    actions.getByRole("button", { name: defaultAction, exact: true }),
+  ).toBeVisible();
+  await expect(
+    actions.getByRole("button", { name: "More actions", exact: true }),
+  ).toBeVisible();
+}
+
+async function expectRetrievalModelActions(
+  row: Locator,
+  statusAction: "Disable" | "Enable",
+) {
+  const actions = row.getByRole("group", { name: "Actions" });
+  await expect(actions.getByRole("button")).toHaveCount(2);
+  await expect(
+    actions.getByRole("button", { name: statusAction, exact: true }),
+  ).toBeVisible();
+  await expect(
+    actions.getByRole("button", { name: "More actions", exact: true }),
+  ).toBeVisible();
+}
+
+async function runModelRowTest(page: Page, row: Locator) {
+  await row.getByRole("button", { name: "More actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Test", exact: true }).click();
+}
+
+test("does not overflow a desktop viewport when the model list is short", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockModelManagementRoutes(page, {
+    providers: [providerFixture()],
+    textModels: [textModelFixture()],
+  });
+  await page.goto("/admin/settings/models");
+  await expect(providerCard(page, "SiliconFlow")).toBeVisible();
+
+  const pageHeight = await page.evaluate(() => ({
+    clientHeight: document.documentElement.clientHeight,
+    scrollHeight: document.documentElement.scrollHeight,
+  }));
+  expect(pageHeight.scrollHeight).toBeLessThanOrEqual(pageHeight.clientHeight);
+});
+
+test("shows output tokens without an adapter group and keeps advanced settings collapsed", async ({
+  page,
+}) => {
+  await mockModelManagementRoutes(page, {
+    providers: [providerFixture()],
+  });
+  await page.goto("/admin/settings/models");
+
+  await providerCard(page, "SiliconFlow")
+    .getByRole("button", { name: "Add text model" })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Maximum output tokens")).toBeVisible();
+  await expect(
+    dialog.getByRole("heading", { name: "Adapter settings" }),
+  ).toHaveCount(0);
+
+  const advancedSettings = dialog
+    .locator("details")
+    .filter({ hasText: "Advanced settings" });
+  await expect(advancedSettings).toBeVisible();
+  await expect(advancedSettings).not.toHaveAttribute("open", "");
+  await expect(advancedSettings.getByLabel("Reasoning effort")).toBeHidden();
+  await advancedSettings
+    .getByText("Advanced settings", { exact: true })
+    .click();
+  await expect(advancedSettings.getByLabel("Reasoning effort")).toBeVisible();
+});
 
 test("creates a provider through the candidate connection test without persisting the key", async ({
   page,
@@ -480,7 +621,7 @@ test("adds a text model bound to a provider and tests with the stored key", asyn
 
   const card = providerCard(page, "SiliconFlow");
   await expect(
-    card.getByText("No text models bound to this provider yet."),
+    card.getByText("No models match the current filter."),
   ).toBeVisible();
 
   await card.getByRole("button", { name: "Add text model" }).click();
@@ -500,9 +641,11 @@ test("adds a text model bound to a provider and tests with the stored key", asyn
   // The connection test addresses the provider's stored key; the request
   // body carries the binding, never a key.
   await dialog.getByRole("button", { name: "Test connection" }).click();
-  await expect(
-    dialog.getByText("Connection test succeeded using the provider's saved Key."),
-  ).toBeVisible();
+  const connectionResult = dialog.getByText(
+    "Connection test succeeded using the provider's saved Key.",
+  );
+  await expect(connectionResult).toBeVisible();
+  await expect(connectionResult).toHaveClass(/text-success/u);
   expect(state.storedKeyTests).toHaveLength(1);
   expect(state.storedKeyTests[0]).toMatchObject({
     provider_id: PROVIDER_ID,
@@ -545,9 +688,11 @@ test("rebinding a text model to another provider warns about re-encryption", asy
   });
   await page.goto("/admin/settings/models");
 
-  const card = providerCard(page, "SiliconFlow");
-  // The text-model card's Edit sits after the provider header's own Edit.
-  await card.getByRole("button", { name: "Edit", exact: true }).last().click();
+  const textRow = modelRow(page, "DeepSeek Chat");
+  await textRow
+    .getByRole("button", { name: "More actions", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByLabel("Provider", { exact: true })).toHaveValue(
     PROVIDER_ID,
@@ -590,9 +735,7 @@ test("adds typed retrieval models and reports per-model probe verdicts", async (
   await expect(
     embeddingRow.getByText("Embedding", { exact: true }),
   ).toBeVisible();
-  await expect(
-    embeddingRow.getByText("Dimension 1024", { exact: false }),
-  ).toBeVisible();
+  await expect(embeddingRow).toHaveAttribute("data-model-kind", "embedding");
   expect(state.modelCreates[0]).toMatchObject({
     model_type: "embedding",
     model_name: "Qwen/Qwen3-Embedding-8B",
@@ -611,6 +754,7 @@ test("adds typed retrieval models and reports per-model probe verdicts", async (
     .getByRole("listitem")
     .filter({ hasText: "BAAI/bge-reranker-v2-m3" });
   await expect(rerankRow.getByText("Rerank", { exact: true })).toBeVisible();
+  await expect(rerankRow).toHaveAttribute("data-model-kind", "rerank");
   expect(state.modelCreates[1]).toMatchObject({
     model_type: "rerank",
     model_name: "BAAI/bge-reranker-v2-m3",
@@ -618,13 +762,265 @@ test("adds typed retrieval models and reports per-model probe verdicts", async (
   expect(state.modelCreates[1]).not.toHaveProperty("embedding_dimension");
 
   // Per-model probes report typed verdicts independently.
-  await embeddingRow
-    .getByRole("button", { name: "Test", exact: true })
-    .click();
-  await expect(embeddingRow.getByText("Embedding 连接测试通过")).toBeVisible();
-  await rerankRow.getByRole("button", { name: "Test", exact: true }).click();
-  await expect(rerankRow.getByText("Rerank 连接测试通过")).toBeVisible();
+  await runModelRowTest(page, embeddingRow);
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "Embedding 连接测试通过" }),
+  ).toBeVisible();
+  await expect(embeddingRow.getByText("Embedding 连接测试通过")).toHaveCount(0);
+  await runModelRowTest(page, rerankRow);
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "Rerank 连接测试通过" }),
+  ).toBeVisible();
+  await expect(rerankRow.getByText("Rerank 连接测试通过")).toHaveCount(0);
   expect(state.testedIds).toHaveLength(2);
+});
+
+test("uses compact primary actions for every model type across providers", async ({
+  page,
+}) => {
+  const OTHER_PROVIDER_ID = "20000000-0000-4000-8000-000000000002";
+  const state = await mockModelManagementRoutes(page, {
+    providers: [
+      providerFixture(),
+      providerFixture({
+        id: OTHER_PROVIDER_ID,
+        name: "DeepSeek",
+        base_url: "https://api.deepseek.com/v1",
+      }),
+    ],
+    textModels: [
+      textModelFixture(),
+      textModelFixture({
+        id: "10000000-0000-4000-8000-000000000002",
+        display_name: "DeepSeek V4 Pro",
+        provider_model: "deepseek-v4-pro",
+        provider_id: OTHER_PROVIDER_ID,
+        is_default: false,
+      }),
+    ],
+    models: [
+      modelFixture(),
+      modelFixture({
+        id: RERANK_MODEL_ID,
+        provider_id: OTHER_PROVIDER_ID,
+        model_type: "rerank",
+        model_name: "Qwen/Qwen3-VL-Reranker-8B",
+        embedding_dimension: null,
+        max_batch: 32,
+      }),
+    ],
+  });
+  await page.goto("/admin/settings/models");
+
+  const modelList = page.getByTestId("admin-provider-model-list");
+  const siliconTextRow = modelRow(page, "DeepSeek Chat");
+  const siliconEmbeddingRow = modelRow(page, "Qwen/Qwen3-Embedding-8B");
+  await expect(siliconTextRow).toBeVisible();
+  await expect(siliconEmbeddingRow).toBeVisible();
+  await expect(modelList.getByText("DeepSeek V4 Pro")).toHaveCount(0);
+  await expectTextModelActions(siliconTextRow, "Disable", "Default");
+  await expect(
+    siliconTextRow.getByRole("button", { name: "Default", exact: true }),
+  ).toBeDisabled();
+  await expectRetrievalModelActions(siliconEmbeddingRow, "Disable");
+
+  await runModelRowTest(page, siliconTextRow);
+  await expect.poll(() => state.storedKeyTests.length).toBe(1);
+  expect(state.storedKeyTests[0]).toEqual({
+    provider_id: PROVIDER_ID,
+    provider_adapter: "deepseek",
+    provider_model: "deepseek-chat",
+    max_input_tokens: 128_000,
+    settings: {},
+    supports_vision: false,
+  });
+
+  await siliconTextRow
+    .getByRole("button", { name: "More actions", exact: true })
+    .click();
+  let actionMenu = page.getByRole("menu");
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Edit", exact: true }),
+  ).toBeVisible();
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Test", exact: true }),
+  ).toBeVisible();
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Delete", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await siliconEmbeddingRow
+    .getByRole("button", { name: "More actions", exact: true })
+    .click();
+  actionMenu = page.getByRole("menu");
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Delete", exact: true }),
+  ).toBeVisible();
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Test", exact: true }),
+  ).toBeVisible();
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Edit", exact: true }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  await page
+    .getByTestId("admin-model-provider-selector")
+    .filter({ hasText: "DeepSeek" })
+    .click();
+
+  const deepSeekTextRow = modelRow(page, "DeepSeek V4 Pro");
+  const deepSeekRerankRow = modelRow(page, "Qwen/Qwen3-VL-Reranker-8B");
+  await expect(deepSeekTextRow).toBeVisible();
+  await expect(deepSeekRerankRow).toBeVisible();
+  await expect(modelList.getByText("DeepSeek Chat")).toHaveCount(0);
+  await expect(modelList.getByText("Qwen/Qwen3-Embedding-8B")).toHaveCount(0);
+  await expectTextModelActions(deepSeekTextRow, "Disable", "Set as default");
+  await expectRetrievalModelActions(deepSeekRerankRow, "Disable");
+
+  await deepSeekTextRow
+    .getByRole("button", { name: "More actions", exact: true })
+    .click();
+  actionMenu = page.getByRole("menu");
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Edit", exact: true }),
+  ).toBeVisible();
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Test", exact: true }),
+  ).toBeVisible();
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Delete", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await deepSeekRerankRow
+    .getByRole("button", { name: "More actions", exact: true })
+    .click();
+  actionMenu = page.getByRole("menu");
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Delete", exact: true }),
+  ).toBeVisible();
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Test", exact: true }),
+  ).toBeVisible();
+  await expect(
+    actionMenu.getByRole("menuitem", { name: "Edit", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("logically deletes the default text model while retaining historical records", async ({
+  page,
+}) => {
+  const state = await mockModelManagementRoutes(page, {
+    providers: [providerFixture()],
+    textModels: [textModelFixture({ is_default: true })],
+    deferTextDelete: true,
+  });
+  await page.goto("/admin/settings/models");
+
+  const defaultTextRow = modelRow(page, "DeepSeek Chat");
+  await expect(defaultTextRow).toBeVisible();
+  await expect(
+    defaultTextRow.getByRole("button", { name: "Default", exact: true }),
+  ).toBeDisabled();
+
+  await defaultTextRow
+    .getByRole("button", { name: "More actions", exact: true })
+    .click();
+  const deleteAction = page.getByRole("menuitem", {
+    name: "Delete",
+    exact: true,
+  });
+  await expect(deleteAction).toBeVisible();
+  await deleteAction.click();
+
+  const deleteDialog = page.getByRole("dialog");
+  await expect(
+    deleteDialog.getByRole("heading", { name: "Delete model" }),
+  ).toBeVisible();
+  await expect(deleteDialog).toContainText(
+    "It will be removed from the current model catalog and unavailable for new use.",
+  );
+  await expect(deleteDialog).toContainText(
+    "Historical records that already reference it will be retained.",
+  );
+
+  await deleteDialog
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+
+  await expect.poll(() => state.releaseTextDelete !== null).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(deleteDialog).toBeVisible();
+  await expect(
+    deleteDialog.getByRole("button", { name: "Cancel", exact: true }),
+  ).toBeDisabled();
+  state.releaseTextDelete?.();
+
+  await expect(defaultTextRow).toHaveCount(0);
+  await expect(page.getByTestId("admin-provider-model-list")).toBeFocused();
+  expect(state.textModelDeletes).toEqual([TEXT_MODEL_ID]);
+});
+
+test("centers model test notifications and colors success and failure semantically", async ({
+  page,
+}) => {
+  await mockModelManagementRoutes(page, {
+    providers: [providerFixture()],
+    textModels: [textModelFixture()],
+    models: [modelFixture()],
+    retrievalTestOk: false,
+  });
+  await page.goto("/admin/settings/models");
+
+  await runModelRowTest(page, modelRow(page, "DeepSeek Chat"));
+  const successToast = page.locator("[data-sonner-toast]").filter({
+    hasText: "Connection test succeeded using the provider's saved Key.",
+  });
+  await expect(successToast).toBeVisible();
+  await expect(successToast).toHaveAttribute("data-type", "success");
+  await expect(successToast).toHaveAttribute("data-x-position", "center");
+  await expect(successToast).toHaveAttribute("data-y-position", "top");
+  await expect(successToast).toHaveAttribute("data-rich-colors", "true");
+
+  await runModelRowTest(page, modelRow(page, "Qwen/Qwen3-Embedding-8B"));
+  const errorToast = page
+    .locator("[data-sonner-toast]")
+    .filter({ hasText: "Embedding 连接测试失败" });
+  await expect(errorToast).toBeVisible();
+  await expect(errorToast).toHaveAttribute("data-type", "error");
+  await expect(errorToast).toHaveAttribute("data-x-position", "center");
+  await expect(errorToast).toHaveAttribute("data-y-position", "top");
+  await expect(errorToast).toHaveAttribute("data-rich-colors", "true");
+});
+
+test("shows text-model capabilities as distinct tags", async ({ page }) => {
+  await mockModelManagementRoutes(page, {
+    providers: [providerFixture()],
+    textModels: [
+      textModelFixture({
+        supports_thinking: true,
+        supports_reasoning_effort: true,
+        supports_vision: true,
+      }),
+    ],
+  });
+  await page.goto("/admin/settings/models");
+
+  const row = page
+    .getByTestId("admin-provider-model-list")
+    .getByRole("listitem")
+    .filter({ hasText: "DeepSeek Chat" });
+  await expect(row.getByText("Thinking", { exact: true })).toBeVisible();
+  await expect(
+    row.getByText("Reasoning effort", { exact: true }),
+  ).toBeVisible();
+  await expect(row.getByText("Vision", { exact: true })).toBeVisible();
 });
 
 test("in-use protections freeze the endpoint and lock the referenced model", async ({
@@ -648,12 +1044,6 @@ test("in-use protections freeze the endpoint and lock the referenced model", asy
   await page.goto("/admin/settings/models");
 
   const card = providerCard(page, "SiliconFlow");
-  await expect(
-    card.getByText(
-      "The endpoint is referenced by knowledge bases. To move to a new endpoint, create a new provider and model, then rebuild each base explicitly.",
-    ),
-  ).toBeVisible();
-
   const modelList = page.getByTestId("admin-provider-model-list");
   const embeddingRow = modelList
     .getByRole("listitem")
@@ -662,9 +1052,13 @@ test("in-use protections freeze the endpoint and lock the referenced model", asy
   await expect(
     embeddingRow.getByRole("button", { name: "Disable" }),
   ).toBeDisabled();
+  await embeddingRow
+    .getByRole("button", { name: "More actions", exact: true })
+    .click();
   await expect(
-    embeddingRow.getByRole("button", { name: "Delete", exact: true }),
-  ).toBeDisabled();
+    page.getByRole("menuitem", { name: "Delete", exact: true }),
+  ).toHaveAttribute("data-disabled", "");
+  await page.keyboard.press("Escape");
 
   // The unreferenced rerank model can still be disabled.
   const rerankRow = modelList
@@ -739,9 +1133,7 @@ test("editing keeps the saved key when blank and demands a new key with a new en
   // Entering a key with bound text models surfaces the fan-out warning, and
   // the endpoint change goes through with the fresh key.
   await dialog.getByLabel("API Key").fill("sk-rotated-secret");
-  await expect(
-    page.getByTestId("admin-provider-fanout-warning"),
-  ).toBeVisible();
+  await expect(page.getByTestId("admin-provider-fanout-warning")).toBeVisible();
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(dialog).toBeHidden();
   expect(state.providerUpdates).toHaveLength(2);
@@ -749,6 +1141,25 @@ test("editing keeps the saved key when blank and demands a new key with a new en
     base_url: "https://other.example.test/v1",
     api_key: "sk-rotated-secret",
   });
+});
+
+test("warns that provider key rotation also affects hidden deleted text models", async ({
+  page,
+}) => {
+  await mockModelManagementRoutes(page, {
+    providers: [providerFixture()],
+  });
+  await page.goto("/admin/settings/models");
+
+  await providerCard(page, "SiliconFlow")
+    .getByRole("button", { name: "Edit", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("API Key").fill("sk-rotated-history");
+
+  await expect(
+    dialog.getByTestId("admin-provider-fanout-warning"),
+  ).toContainText("including hidden deleted models");
 });
 
 test("a failed save keeps the entered key so the retry still rotates it", async ({

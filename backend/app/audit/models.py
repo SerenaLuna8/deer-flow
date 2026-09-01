@@ -893,6 +893,7 @@ class AssetAuditMetadata(_AuditMetadata):
         "model.secret.configure",
         "model.secret.replace",
         "model.secret.clear",
+        "model.delete",
         "channel.secret.configure",
         "channel.secret.replace",
         "channel.secret.clear",

@@ -13,6 +13,7 @@ from support.private_thread_seed import (
 )
 
 import app.channels.manager as channel_manager_module
+from app.audit.service import AuditService
 from app.automations.dispatcher import (
     AdmittedAutomationOccurrence,
     AutomationDefinitionRef,
@@ -40,8 +41,11 @@ from app.private_work.thread_repository import (
     ThreadAgentRef,
 )
 from app.projects.context import ProjectContext
+from app.reliability.owner_refs import AuditHmacKeyring
 from app.shared_assets.agent_service import AgentService
 from app.shared_assets.models import AgentPayload
+from app.system_runtime_settings.bootstrap import bootstrap_system_runtime_policies
+from app.system_runtime_settings.service import SystemRuntimePolicyService
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -154,8 +158,22 @@ async def test_reuse_thread_automation_resolves_latest_agent_definition_at_occur
             ),
         )
         current_definition_id = await _replace_agent_definition(seed)
+        assert await bootstrap_system_runtime_policies(seed.factory) == 1
+        runtime_policy = SystemRuntimePolicyService(
+            seed.factory,
+            AuditService(
+                seed.factory,
+                AuditHmacKeyring(
+                    active_key_id="automation-admission-test",
+                    _keys={"automation-admission-test": b"a" * 32},
+                ),
+            ),
+        )
 
-        result = await AutomationDispatcher(seed.factory).admit_occurrence(
+        result = await AutomationDispatcher(
+            seed.factory,
+            runtime_policy=runtime_policy,
+        ).admit_occurrence(
             AutomationDefinitionRef(
                 project_id=seed.owner_a.project_id,
                 owner_user_id=str(seed.owner_a.user_id),
@@ -168,6 +186,7 @@ async def test_reuse_thread_automation_resolves_latest_agent_definition_at_occur
 
         assert isinstance(result, AdmittedAutomationOccurrence)
         assert result.run.thread_id == thread_id
+        assert result.run.kwargs["config"]["recursion_limit"] == 1_000
         assert (
             await _admitted_agent_definition_id(
                 seed,

@@ -7,7 +7,9 @@ import {
   consumeAdminModelEditorSubmission,
   isAdminModelEditorSaveDisabled,
   selectAdminModelCatalogItems,
+  selectAdminProviderModelItems,
 } from "@/components/admin/settings/admin-model-settings-page";
+import type { AdminProviderModelItem } from "@/core/admin-settings/model-registry/types";
 import {
   adminModelCatalogSchema,
   adminModelSettingsSchemaForProvider,
@@ -113,6 +115,42 @@ describe("admin model settings with provider-owned credentials", () => {
     expect(
       selectAdminModelCatalogItems(catalog.items, "flash", "active"),
     ).toEqual(catalog.items);
+  });
+
+  test("unified model filtering maps suspended to disabled retrieval models", () => {
+    const retrievalModels: AdminProviderModelItem[] = [
+      {
+        id: "30000000-0000-4000-8000-000000000001",
+        provider_id: PROVIDER_ID,
+        model_type: "embedding",
+        model_name: "Qwen/Qwen3-Embedding-8B",
+        embedding_dimension: 4096,
+        max_batch: 64,
+        status: "active",
+        in_use: false,
+        created_at: "2026-08-30T00:00:00Z",
+        updated_at: "2026-08-30T00:00:00Z",
+      },
+      {
+        id: "30000000-0000-4000-8000-000000000002",
+        provider_id: PROVIDER_ID,
+        model_type: "rerank",
+        model_name: "Qwen/Qwen3-VL-Reranker-8B",
+        embedding_dimension: null,
+        max_batch: 32,
+        status: "disabled",
+        in_use: false,
+        created_at: "2026-08-30T00:00:00Z",
+        updated_at: "2026-08-30T00:00:00Z",
+      },
+    ];
+
+    expect(
+      selectAdminProviderModelItems(retrievalModels, "reranker", "suspended"),
+    ).toEqual([retrievalModels[1]]);
+    expect(
+      selectAdminProviderModelItems(retrievalModels, "embedding", "active"),
+    ).toEqual([retrievalModels[0]]);
   });
 
   test("catalog items carry the provider binding and reject plaintext keys", () => {
@@ -306,7 +344,12 @@ describe("admin model settings with provider-owned credentials", () => {
       consumeAdminModelEditorSubmission(form, descriptor, invalidDraft),
     ).toThrow("Provider 设置无效。");
     expect(() =>
-      consumeAdminModelEditorSubmission(form, descriptor, invalidDraft, "en-US"),
+      consumeAdminModelEditorSubmission(
+        form,
+        descriptor,
+        invalidDraft,
+        "en-US",
+      ),
     ).toThrow("Provider settings are invalid.");
   });
 

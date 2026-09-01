@@ -270,9 +270,6 @@ export function KnowledgeSearchPanel({
                   placeholder={String(base.default_top_k)}
                   onChange={(event) => setTopK(event.target.value)}
                 />
-                <span className="text-muted-foreground text-xs">
-                  {labels.search.topKHint}
-                </span>
               </label>
               <label className="grid gap-1.5 text-[13px]">
                 <span className="font-medium">
@@ -288,9 +285,6 @@ export function KnowledgeSearchPanel({
                   placeholder={String(base.default_score_threshold)}
                   onChange={(event) => setThreshold(event.target.value)}
                 />
-                <span className="text-muted-foreground text-xs">
-                  {labels.search.thresholdHint}
-                </span>
               </label>
             </div>
             <label className="grid gap-1.5 text-[13px]">

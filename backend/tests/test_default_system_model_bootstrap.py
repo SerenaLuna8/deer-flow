@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from base64 import b64encode
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
@@ -185,6 +186,45 @@ async def test_default_model_bootstrap_persists_flash_as_default(
             )
             == "unit-bootstrap-secret"
         )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_default_model_bootstrap_accepts_an_intentionally_deleted_default(
+    migrated_postgres_database_url: str,
+    default_model_bootstrap_environment: None,
+) -> None:
+    """Repeated setup validates tombstones instead of resurrecting the seed."""
+
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    material = prepare_default_system_model_bootstrap()
+    try:
+        assert await bootstrap_default_system_model(factory, material) is True
+        async with factory() as session, session.begin():
+            state = await session.get(
+                SystemModelCatalogStateRow,
+                1,
+                with_for_update=True,
+            )
+            model = await session.get(
+                SystemModelConfigRow,
+                DEFAULT_MODEL_ID,
+                with_for_update=True,
+            )
+            assert state is not None
+            assert model is not None
+            state.default_model_config_id = None
+            model.status = "suspended"
+            model.deleted_at = datetime.now(UTC)
+
+        assert await bootstrap_default_system_model(factory, material) is False
+        async with factory() as session:
+            retained = await session.get(SystemModelConfigRow, DEFAULT_MODEL_ID)
+        assert retained is not None
+        assert retained.deleted_at is not None
     finally:
         await engine.dispose()
 

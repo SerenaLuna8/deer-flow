@@ -23,7 +23,9 @@ from support.private_thread_seed import seed_private_thread_database
 from app.audit.models import SystemAuditContext, resolve_system_audit_context
 from app.model_registry.secrets import materialize_provider_api_key
 from app.model_registry.service import ModelRegistryService
+from app.system_settings.execution_payload import freeze_system_model_material
 from app.system_settings.models import CreateSystemModel, UpdateSystemModel
+from app.system_settings.repository import SystemModelRepository
 from app.system_settings.secrets import model_secret_recipient
 from app.system_settings.service import SystemModelCatalogService
 from deerflow.persistence.model_registry import ModelProviderRow
@@ -150,6 +152,7 @@ async def _model_state(
             "payload_checksum": model.payload_checksum,
             "base_url": model.settings.get("base_url"),
             "status": model.status,
+            "deleted_at": model.deleted_at,
         }
 
 
@@ -741,5 +744,68 @@ async def test_dialog_shaped_rename_conflicts_instead_of_reverting_a_racing_endp
         assert await _provider_key(harness.factory, provider_id) == "dialog-key-two"
         assert await _model_generation_key(harness.factory, model_id) == "dialog-key-two"
         assert (await _model_state(harness.factory, model_id))["base_url"] == moved_url
+    finally:
+        await harness.seed.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_provider_key_rotation_still_revokes_a_soft_deleted_text_model_generation(
+    migrated_postgres_database_url: str,
+) -> None:
+    """A model tombstone cannot become a bypass around Provider key rotation."""
+
+    harness = await _harness(migrated_postgres_database_url)
+    try:
+        provider_id = await _create_provider(
+            harness,
+            name="Deleted Model Fanout Provider",
+            api_key="deleted-model-key-one",
+        )
+        model_id = await _create_text_model(
+            harness,
+            provider_id,
+            display_name="Deleted model fanout",
+        )
+
+        async with harness.factory() as session, session.begin():
+            admitted = await SystemModelRepository(session).resolve_active_model(
+                str(model_id),
+                load_secret=True,
+            )
+            assert admitted is not None
+            frozen_execution = freeze_system_model_material(admitted)
+
+        await harness.catalog.delete_model(harness.context_a, model_id)
+        deleted = await _model_state(harness.factory, model_id)
+        assert deleted["status"] == "suspended"
+        assert deleted["deleted_at"] is not None
+        deleted_generation = deleted["generation_id"]
+        async with harness.factory() as session, session.begin():
+            repository = SystemModelRepository(session)
+            assert (
+                await repository.resolve_active_model(
+                    str(model_id),
+                    load_secret=True,
+                )
+                is None
+            )
+            historical = await repository.lock_frozen_material(frozen_execution)
+            assert historical is not None
+            assert historical.model.deleted_at == deleted["deleted_at"]
+            assert historical.secret_generation is not None
+            assert historical.secret_generation.id == deleted_generation
+
+        await harness.registry.update_provider(
+            harness.context_b,
+            provider_id,
+            api_key="deleted-model-key-two",
+        )
+
+        rotated = await _model_state(harness.factory, model_id)
+        assert rotated["deleted_at"] == deleted["deleted_at"]
+        assert rotated["secret_revision"] == int(deleted["secret_revision"]) + 1
+        assert rotated["generation_id"] != deleted_generation
+        assert await _model_generation_key(harness.factory, model_id) == ("deleted-model-key-two")
+        assert await _tombstone_reasons(harness.factory, model_id) == ["replaced"]
     finally:
         await harness.seed.engine.dispose()

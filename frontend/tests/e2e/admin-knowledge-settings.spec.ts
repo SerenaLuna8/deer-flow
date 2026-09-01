@@ -202,6 +202,7 @@ async function mockKnowledgeSettings(
 test("knowledge settings render, track dirty drafts, reset, and save the next revision", async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 1800, height: 1000 });
   const state = await mockKnowledgeSettings(page);
   await page.goto("/admin/settings/knowledge");
   await expect(
@@ -210,6 +211,9 @@ test("knowledge settings render, track dirty drafts, reset, and save the next re
   await expect(
     page.getByTestId("knowledge-settings-restart-banner"),
   ).toContainText("Summary model changes take effect immediately");
+  const pageBounds = await page.locator("#admin-main").boundingBox();
+  expect(pageBounds).not.toBeNull();
+  expect(pageBounds!.width).toBe(1280);
   const save = page.getByRole("button", { name: "Save settings", exact: true });
   await expect(save).toBeDisabled();
   await page.getByLabel("Processing concurrency", { exact: true }).fill("5");
@@ -233,6 +237,48 @@ test("knowledge settings render, track dirty drafts, reset, and save the next re
     worker_concurrency: 4,
   });
   expect(state.writes[0]).not.toHaveProperty("minio_secret_key");
+});
+
+test("an incomplete enabled draft explains every required storage field without sending a request", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeSettings(page);
+  await page.goto("/admin/settings/knowledge");
+  await page
+    .getByRole("switch", { name: "Enable knowledge", exact: true })
+    .click();
+  const save = page.getByRole("button", {
+    name: "Save settings",
+    exact: true,
+  });
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(
+    page.getByTestId("admin-knowledge-settings-form").getByRole("alert"),
+  ).toHaveText(
+    "Complete the required configuration before saving: Storage endpoint, Storage bucket, Storage access key, Storage secret key.",
+  );
+  expect(state.writes).toHaveLength(0);
+});
+
+test("an invalid numeric draft shows generic feedback without sending a request", async ({
+  page,
+}) => {
+  const state = await mockKnowledgeSettings(page);
+  await page.goto("/admin/settings/knowledge");
+  await page.getByLabel("Processing concurrency", { exact: true }).fill("0");
+  const save = page.getByRole("button", {
+    name: "Save settings",
+    exact: true,
+  });
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(
+    page.getByTestId("admin-knowledge-settings-form").getByRole("alert"),
+  ).toHaveText(
+    "Check the storage connection, secret key, model, and numeric limits.",
+  );
+  expect(state.writes).toHaveLength(0);
 });
 
 test("an administrator enables knowledge with storage and a System Model without echoing the key", async ({
@@ -287,13 +333,21 @@ test("an administrator enables knowledge with storage and a System Model without
   await page
     .getByLabel("Storage endpoint", { exact: true })
     .fill("new-storage.example.test:9000");
+  const save = page.getByRole("button", {
+    name: "Save settings",
+    exact: true,
+  });
+  await expect(save).toBeEnabled();
+  const writesBeforeLocalValidation = state.writes.length;
+  await save.click();
   await expect(
-    page.getByRole("button", { name: "Save settings", exact: true }),
-  ).toBeDisabled();
+    page.getByTestId("admin-knowledge-settings-form").getByRole("alert"),
+  ).toHaveText(
+    "Complete the required configuration before saving: Storage secret key.",
+  );
+  expect(state.writes).toHaveLength(writesBeforeLocalValidation);
   await key.fill(SECRET);
-  await expect(
-    page.getByRole("button", { name: "Save settings", exact: true }),
-  ).toBeEnabled();
+  await expect(save).toBeEnabled();
   await page.getByRole("button", { name: "Discard changes" }).click();
   await page.reload();
   await expect(key).toHaveValue("");

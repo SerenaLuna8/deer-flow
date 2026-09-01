@@ -17,6 +17,7 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
     CURRENT_SCHEMA_REVISION,
     SchemaRecreateRequired,
+    SchemaUpgradeRequired,
     classify_database,
 )
 
@@ -162,6 +163,7 @@ class PostgresCheckResult:
     schema_state: Literal[
         "ready",
         "uninitialized",
+        "upgrade_required",
         "recreate_required",
         "unavailable",
     ] = "unavailable"
@@ -204,6 +206,9 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
             missing_tables = tuple(sorted(set(REQUIRED_TABLES) - present))
             try:
                 database_state = await classify_database(connection)
+            except SchemaUpgradeRequired:
+                schema_state = "upgrade_required"
+                error = "SCHEMA_UPGRADE_REQUIRED: 请停服并在备份后运行 `make upgrade-db`"
             except SchemaRecreateRequired:
                 schema_state = "recreate_required"
                 error = "SCHEMA_RECREATE_REQUIRED: revision 未知或 schema catalog 发生漂移，需要显式重建"

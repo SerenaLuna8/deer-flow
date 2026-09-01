@@ -178,6 +178,7 @@ async def bootstrap_default_model_registry(
             name_taken = await session.scalar(
                 select(ModelProviderRow.id).where(
                     ModelProviderRow.name == seed.provider_name,
+                    ModelProviderRow.deleted_at.is_(None),
                 )
             )
             if name_taken is not None:

@@ -4,9 +4,11 @@ import re
 import stat
 from pathlib import Path
 
+import pytest
 from actweave_knowledge.persistence.models import KnowledgeOrmBase
 
 import deerflow.persistence.models  # noqa: F401 -- populate metadata
+from deerflow.persistence import bootstrap
 from deerflow.persistence.base import Base
 from deerflow.persistence.final_schema_contract import (
     FINAL_APP_TABLES,
@@ -19,9 +21,10 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = BACKEND_ROOT / "packages" / "harness" / "deerflow" / "persistence" / "full_schema.sql"
 COMMENTS_PATH = SCHEMA_PATH.with_name("schema_comments.sql")
 CHINESE_TEXT_PATTERN = re.compile(r"[\u3400-\u9fff]")
+SCHEMA_COMMENTS_PLACEHOLDER = "-- INCLUDE GENERATED SCHEMA COMMENTS FROM schema_comments.sql"
 
 
-def test_generated_comment_artifact_and_embedded_schema_are_current() -> None:
+def test_generated_comment_artifact_is_current() -> None:
     schema_text = SCHEMA_PATH.read_text(encoding="utf-8")
     tables = generate_schema_comments._parse_schema(schema_text)
     expected = generate_schema_comments._render(
@@ -30,11 +33,261 @@ def test_generated_comment_artifact_and_embedded_schema_are_current() -> None:
     )
 
     assert COMMENTS_PATH.read_bytes() == expected
-    assert SCHEMA_PATH.read_bytes() == generate_schema_comments._embedded_schema(
-        schema_text,
-        expected,
+    assert (
+        generate_schema_comments.main(
+            [
+                "--schema",
+                str(SCHEMA_PATH),
+                "--output",
+                str(COMMENTS_PATH),
+                "--check",
+            ]
+        )
+        == 0
     )
-    assert schema_text.index(generate_schema_comments._BLOCK_END) < schema_text.index("SELECT ensure_run_events_month_partition(now());")
+
+
+def test_full_schema_uses_one_external_comment_placeholder_before_partition_creation() -> None:
+    schema_text = SCHEMA_PATH.read_text(encoding="utf-8")
+
+    assert not re.search(
+        r"^COMMENT ON TABLE [a-z][a-z0-9_]* IS ",
+        schema_text,
+        re.MULTILINE,
+    )
+    assert not re.search(
+        r"^COMMENT ON COLUMN [a-z][a-z0-9_]*\.[a-z][a-z0-9_]* IS ",
+        schema_text,
+        re.MULTILINE,
+    )
+    assert schema_text.count(SCHEMA_COMMENTS_PLACEHOLDER) == 1
+    assert schema_text.index(SCHEMA_COMMENTS_PLACEHOLDER) < schema_text.index("SELECT ensure_run_events_month_partition(now());")
+
+
+def test_bootstrap_composes_comments_into_one_transaction() -> None:
+    comments = COMMENTS_PATH.read_text(encoding="utf-8").rstrip()
+
+    payload = bootstrap._read_full_schema_sql()
+
+    assert SCHEMA_COMMENTS_PLACEHOLDER not in payload
+    assert comments in payload
+    assert payload.index(comments) < payload.index("SELECT ensure_run_events_month_partition(now());")
+    assert len(re.findall(r"^BEGIN;$", payload, re.MULTILINE)) == 1
+    assert len(re.findall(r"^COMMIT;$", payload, re.MULTILINE)) == 1
+
+
+def test_bootstrap_composes_comments_when_schema_marker_is_withheld() -> None:
+    comments = COMMENTS_PATH.read_text(encoding="utf-8").rstrip()
+
+    payload = bootstrap._read_full_schema_sql(publish_marker=False)
+
+    assert comments in payload
+    assert bootstrap._SCHEMA_MARKER_INSERT not in payload
+    assert "Schema V1 marker is published only after setup bootstrap completes." in payload
+    assert len(re.findall(r"^BEGIN;$", payload, re.MULTILINE)) == 1
+    assert len(re.findall(r"^COMMIT;$", payload, re.MULTILINE)) == 1
+
+
+@pytest.mark.parametrize("placeholder_count", [0, 2])
+def test_bootstrap_rejects_missing_or_duplicate_comment_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    placeholder_count: int,
+) -> None:
+    schema_path = tmp_path / "full_schema.sql"
+    comments_path = tmp_path / "schema_comments.sql"
+    placeholders = "\n".join(SCHEMA_COMMENTS_PLACEHOLDER for _ in range(placeholder_count))
+    schema_path.write_text(
+        "\n".join(
+            (
+                "BEGIN;",
+                bootstrap._SCHEMA_MARKER_INSERT,
+                placeholders,
+                "SELECT ensure_run_events_month_partition(now());",
+                "COMMIT;",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    comments_path.write_text("COMMENT ON TABLE example IS 'example';\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "_FULL_SCHEMA_PATH", schema_path)
+    monkeypatch.setattr(bootstrap, "_SCHEMA_COMMENTS_PATH", comments_path)
+
+    with pytest.raises(RuntimeError, match="schema comments"):
+        bootstrap._read_full_schema_sql()
+
+
+def test_bootstrap_rejects_missing_comment_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    schema_path = tmp_path / "full_schema.sql"
+    schema_path.write_text(
+        "\n".join(
+            (
+                "BEGIN;",
+                bootstrap._SCHEMA_MARKER_INSERT,
+                SCHEMA_COMMENTS_PLACEHOLDER,
+                "SELECT ensure_run_events_month_partition(now());",
+                "COMMIT;",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "_FULL_SCHEMA_PATH", schema_path)
+    monkeypatch.setattr(
+        bootstrap,
+        "_SCHEMA_COMMENTS_PATH",
+        tmp_path / "missing-schema-comments.sql",
+    )
+
+    with pytest.raises(RuntimeError, match="schema comments"):
+        bootstrap._read_full_schema_sql()
+
+
+@pytest.mark.parametrize(
+    "injected_statement",
+    [
+        pytest.param("COMMIT;", id="transaction-boundary"),
+        pytest.param("DROP TABLE users;", id="ddl"),
+        pytest.param("DELETE FROM users;", id="dml"),
+        pytest.param(bootstrap._SCHEMA_MARKER_INSERT, id="schema-marker"),
+    ],
+)
+def test_bootstrap_rejects_non_comment_statements_in_comment_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    injected_statement: str,
+) -> None:
+    comments_path = tmp_path / "schema_comments.sql"
+    comments_path.write_text(
+        f"{COMMENTS_PATH.read_text(encoding='utf-8').rstrip()}\n{injected_statement}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "_SCHEMA_COMMENTS_PATH", comments_path)
+
+    with pytest.raises(RuntimeError, match="non-COMMENT statement"):
+        bootstrap.validate_schema_installation_artifacts()
+
+
+def test_bootstrap_rejects_symbolic_link_comment_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "schema-comments-target.sql"
+    target.write_bytes(COMMENTS_PATH.read_bytes())
+    comments_path = tmp_path / "schema_comments.sql"
+    comments_path.symlink_to(target)
+    monkeypatch.setattr(bootstrap, "_SCHEMA_COMMENTS_PATH", comments_path)
+
+    with pytest.raises(RuntimeError, match="regular file"):
+        bootstrap.validate_schema_installation_artifacts()
+
+
+@pytest.mark.parametrize(
+    ("content", "error_pattern"),
+    [
+        pytest.param(b"\xff", "unavailable", id="invalid-utf8"),
+        pytest.param(
+            b"\xef\xbb\xbf" + COMMENTS_PATH.read_bytes(),
+            "invalid",
+            id="utf8-bom",
+        ),
+        pytest.param(
+            COMMENTS_PATH.read_bytes() + b"\x00",
+            "invalid",
+            id="nul-byte",
+        ),
+    ],
+)
+def test_bootstrap_rejects_invalid_comment_artifact_encoding_or_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    content: bytes,
+    error_pattern: str,
+) -> None:
+    comments_path = tmp_path / "schema_comments.sql"
+    comments_path.write_bytes(content)
+    monkeypatch.setattr(bootstrap, "_SCHEMA_COMMENTS_PATH", comments_path)
+
+    with pytest.raises(RuntimeError, match=error_pattern):
+        bootstrap.validate_schema_installation_artifacts()
+
+
+def test_bootstrap_rejects_syntactically_valid_comments_with_stale_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    comments_path = tmp_path / "schema_comments.sql"
+    original = COMMENTS_PATH.read_text(encoding="utf-8")
+    changed = original.replace(
+        "记录项目邀请码失败尝试的限流窗口。",
+        "记录项目邀请码失败尝试的另一个限流窗口。",
+        1,
+    )
+    assert changed != original
+    comments_path.write_text(changed, encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "_SCHEMA_COMMENTS_PATH", comments_path)
+
+    with pytest.raises(RuntimeError, match="stale content manifest"):
+        bootstrap.validate_schema_installation_artifacts()
+
+
+def test_bootstrap_rejects_comment_placeholder_before_schema_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    schema_path = tmp_path / "full_schema.sql"
+    schema_text = SCHEMA_PATH.read_text(encoding="utf-8")
+    schema_without_placeholder = schema_text.replace(
+        SCHEMA_COMMENTS_PLACEHOLDER,
+        "",
+    )
+    schema_path.write_text(
+        schema_without_placeholder.replace(
+            "BEGIN;\n",
+            f"BEGIN;\n{SCHEMA_COMMENTS_PLACEHOLDER}\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "_FULL_SCHEMA_PATH", schema_path)
+
+    with pytest.raises(RuntimeError, match="placeholder"):
+        bootstrap.validate_schema_installation_artifacts()
+
+
+@pytest.mark.parametrize("placeholder_count", [0, 2])
+def test_generator_check_rejects_missing_or_duplicate_placeholder(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    placeholder_count: int,
+) -> None:
+    schema_path = tmp_path / "full_schema.sql"
+    comments_path = tmp_path / "schema_comments.sql"
+    schema_text = SCHEMA_PATH.read_text(encoding="utf-8")
+    replacement = "\n".join(SCHEMA_COMMENTS_PLACEHOLDER for _ in range(placeholder_count))
+    schema_path.write_text(
+        schema_text.replace(SCHEMA_COMMENTS_PLACEHOLDER, replacement),
+        encoding="utf-8",
+    )
+    comments_path.write_bytes(COMMENTS_PATH.read_bytes())
+
+    assert (
+        generate_schema_comments.main(
+            [
+                "--schema",
+                str(schema_path),
+                "--output",
+                str(comments_path),
+                "--check",
+            ]
+        )
+        == 1
+    )
+    assert "one external comment placeholder" in capsys.readouterr().err
 
 
 def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
@@ -59,7 +312,7 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         re.MULTILINE,
     )
     assert len(table_comments) == 113
-    assert len(column_comments) == 1445
+    assert len(column_comments) == 1448
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
@@ -144,6 +397,7 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_system_settings", "extraction_cache_enabled"),
         ("system_model_configs", "max_input_tokens"),
         ("system_model_configs", "provider_id"),
+        ("system_model_configs", "deleted_at"),
         ("runs", "first_human_message"),
         ("runs", "last_ai_message"),
         ("run_events", "content"),
@@ -187,12 +441,14 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("model_providers", "request_timeout_seconds"),
         ("model_providers", "api_key_nonce"),
         ("model_providers", "api_key_ciphertext"),
+        ("model_providers", "deleted_at"),
         ("model_provider_models", "provider_id"),
         ("model_provider_models", "model_type"),
         ("model_provider_models", "model_name"),
         ("model_provider_models", "embedding_dimension"),
         ("model_provider_models", "max_batch"),
         ("model_provider_models", "status"),
+        ("model_provider_models", "deleted_at"),
         ("knowledge_bases", "name"),
         ("knowledge_bases", "description"),
         ("knowledge_bases", "embedding_model_id"),

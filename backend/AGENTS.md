@@ -120,17 +120,36 @@ and `actweave_knowledge` must never import `app.*` or `deerflow.*`.
 
 ### PostgreSQL schema and persistence
 
-`deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `schema_v1`. Fresh setup runs that schema directly and
-stamps the V1 marker. Runtime processes never create, migrate, stamp, repair,
-or downgrade an application database. Schema V1 has no migration ancestry:
-unknown markers, an unversioned nonempty schema, and catalog drift are
-recreated explicitly, never repaired in place.
+`deerflow/persistence/full_schema.sql` is the structural transaction template
+for fresh installs, while generated `schema_comments.sql` is the single source
+of static table and column comment statements. Explicit setup validates
+both files, inserts the comments at the template placeholder, and sends the
+result as one PostgreSQL simple-query transaction before later bootstrap stages
+publish the `schema_v1` marker. Neither SQL file is a standalone installation
+entry point. Runtime processes never create, migrate, stamp, repair, or
+downgrade an application database. Schema V1 remains the current baseline and
+the current marker is `schema_v1`. The forward migration registry is
+intentionally empty; `make upgrade-db` is therefore an exact no-op on a current
+Schema V1 catalog. A future schema head
+must add a linear packaged migration and bump the marker in the same change.
+Unknown markers, an unversioned nonempty schema, and catalog drift remain
+unsupported and are never repaired in place.
 
-- `make setup-db` accepts a new empty target only. `make reset-db` is an
-  explicit destructive operator action (never a runtime startup step) that
-  rebuilds only the exact `DATABASE_URL` target's `public` schema and requires
-  the exact database name as confirmation. `make check-db` is read-only
+Packaged migration SQL intentionally uses a small fail-closed subset: one
+top-level statement per line, no transaction control, marker access, static
+comments, schema/search-path control, or non-`public` qualification. Complex
+PL/pgSQL/function changes, executable block comments, and Unicode-escaped
+identifiers must be expressed through a separately reviewed extension of the
+parser and its rollback tests; do not weaken these checks in an individual
+migration file.
+
+- `make setup-db` is the supported public Make entry for installing a new empty
+  target. The repository retains `scripts.reset_postgres` only as an internal
+  destructive development/test helper; it is not exposed by Make or operator
+  documentation and is not a migration path. `make upgrade-db` takes only
+  `DATABASE_URL`, uses the schema mutation lock, and either reports the exact
+  current catalog or applies a packaged forward path transactionally; it never
+  consumes bootstrap secrets or runs at startup. `make check-db` is read-only
   readiness evidence. `make upgrade-system-assets` is an explicit idempotent
   maintenance-window action; changed System Skill behavior must ship under a
   new Skill identity. `make prepare-run-event-partitions` is an explicit,
@@ -153,11 +172,13 @@ recreated explicitly, never repaired in place.
   where the capacity guard rejects before the trigger is reachable. These
   defaults belong to `default_policy_value()` and must not rewrite already
   admitted Runs or existing immutable policy versions.
-- Every initialized application table and column has a checked-in Chinese
-  comment; `run_events` partitions copy the parent comments. Run
+- Every initialized application table and column has a generated, checked-in
+  Chinese comment in `schema_comments.sql`; `run_events` partitions copy the
+  parent comments within the same installation transaction. Run
   `uv run python scripts/generate_schema_comments.py --check` after schema edits.
-- A schema change updates the ORM registration, `full_schema.sql`, catalog
-  signature/digest, required relations, V1 marker, and schema tests together.
+- A schema change updates the ORM registration, the `full_schema.sql` structural
+  template, generated `schema_comments.sql`, catalog signature/digest, required
+  relations, V1 marker, and schema tests together.
 - Application metadata and durable state live in PostgreSQL. File/artifact bytes
   may live in configured storage, but access, identity, version, and scope remain
   database-authoritative.
@@ -481,8 +502,19 @@ recreated explicitly, never repaired in place.
 
 ### Knowledge (optional RAG module)
 
-- Knowledge is disabled by default. The host-owned `knowledge_system_settings`
-  singleton is its only configuration source; `/api/admin/settings/knowledge`
+- Knowledge remains optional. Explicit empty-schema `setup-db`
+  consumes the install-only `ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT`,
+  `ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET`, `ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY`,
+  and `ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY` as one closed group before any
+  create DDL. A complete group probes the existing unversioned bucket,
+  encrypts the secret, and seeds the singleton enabled; an entirely absent
+  group seeds it disabled; partial or blank input fails without DDL. Bootstrap
+  uses non-TLS MinIO and never guesses or creates a bucket. Runtime roles strip
+  these values and never use them as fallback. A fresh database should use a
+  deployment-dedicated empty bucket because bootstrap never deletes existing
+  objects. The host-owned
+  `knowledge_system_settings` singleton is the only runtime configuration source;
+  `/api/admin/settings/knowledge`
   requires a current `system_admin`, revision CAS, secret-envelope encryption,
   and a transaction-free MinIO probe before an enabled setting can commit.
   Changing the endpoint requires resubmitting the secret. Setup seeds the row;
@@ -608,9 +640,12 @@ recreated explicitly, never repaired in place.
   their Model Provider's encrypted API key (shared secret-envelope
   infrastructure); the same provider row also carries the key for its bound
   text models. Keys are write-only through the admin API and never appear in
-  responses, logs, or the browser; a configuration referenced by knowledge
-  bases cannot be disabled or deleted, and a provider with bound text models
-  or retrieval models cannot be deleted. Admin routes require `system_admin`; project routes
+  responses, logs, or the browser. Provider Model and System Model deletion are
+  terminal soft deletes: live catalogs and new bindings exclude tombstones,
+  while retained identities keep historical foreign keys valid. A Provider
+  Model referenced by any Knowledge Base cannot be disabled or deleted. A
+  Provider can be soft-deleted only after all live text and retrieval models
+  are deleted. Admin routes require `system_admin`; project routes
   require membership plus `shared_assets.read` for reads and
   `shared_assets.edit` for writes; the search API and Agent tool return only
   segments of the caller's project.
@@ -951,6 +986,17 @@ Runs keep freezing the exact model secret Generation, so a rotation
 invalidates Runs frozen on the old material; tombstoned Generations are never
 restored.
 
+System Model deletion suspends the row, clears it as the default when needed,
+and excludes it from lists, summaries, runtime-policy authoring, and new Run
+Admission. Do not delete or clear its current secret Generation: an already
+admitted Run must still resolve its frozen model row and exact Generation.
+Provider Model deletion first locks and rejects every Knowledge Base reference,
+then disables and hides the retained row. Provider deletion retains its row and
+encrypted Key for historical foreign-key closure and is allowed only when it
+has no live child models. Provider key and endpoint rotation must still fan out
+to soft-deleted text models so deletion cannot bypass revocation of old key
+material; UI counts and Provider deletion gates count only live children.
+
 Every System Model stores a required `max_input_tokens` capability in the
 bounded range `1..2,000,000`. It is frozen with the exact model execution
 payload and supplies the Provider Model capacity used by Context Projection,
@@ -1019,10 +1065,12 @@ policy and PostgreSQL-owned Automation policy as one baseline. Removed
 top-level policy keys remain fail-closed tombstones; use `make config-upgrade`
 rather than manually guessing a future migration.
 
-`make setup-db` and `make reset-db` are the only commands allowed to consume
+`make setup-db` is the only supported public Make command allowed to consume
 the bootstrap DeepSeek Key and persist three independently encrypted
-model-owned copies. Normal Gateway, Worker, Scheduler, doctor, and local
-startup must not broadcast provider keys as process-wide model configuration.
+model-owned copies. The internal destructive `scripts.reset_postgres` test
+helper is the sole non-public exception. Normal Gateway, Worker, Scheduler,
+doctor, upgrade, and local startup must not broadcast provider keys as
+process-wide model configuration.
 
 ## Common change paths
 
@@ -1040,12 +1088,15 @@ startup must not broadcast provider keys as process-wide model configuration.
 ### PostgreSQL table or durable Job type
 
 1. Add/import the ORM model so `Base.metadata` registers it.
-2. Update `full_schema.sql` and all database constraints.
-3. Update schema marker, catalog signature/digest, readiness relations, and the
-   closed Job/audit/API type contracts that apply.
+2. Update `full_schema.sql`, regenerate `schema_comments.sql`, and update all
+   database constraints.
+3. For the current Schema V1 baseline, update its marker-independent catalog
+   signature/digest and recreate disposable development targets. When a future
+   head is introduced, also add one linear forward migration and bump the
+   marker; `upgrade-db` must reach the same catalog as a fresh install.
 4. Prove fresh-install ORM/full-schema/catalog parity with a disposable
-   PostgreSQL target. Schema V1 has no migration ancestry; recreate a drifted
-   development database instead of stamping or hand-patching it.
+   PostgreSQL target. Unknown drift is never a migration source; replace a
+   drifted development target instead of stamping or hand-patching it.
 
 ### Agent tool or middleware
 

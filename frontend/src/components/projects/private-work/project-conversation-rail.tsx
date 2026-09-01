@@ -189,9 +189,9 @@ function ConversationRailContent({
                 <li
                   key={thread.thread_id}
                   className={cn(
-                    "group relative rounded-xl transition-colors",
+                    "group relative rounded-lg ring-1 ring-transparent transition-[background-color,box-shadow] duration-150",
                     active
-                      ? "bg-accent text-accent-foreground"
+                      ? "bg-accent text-accent-foreground ring-border/60"
                       : "hover:bg-accent/60",
                   )}
                 >
@@ -199,29 +199,27 @@ function ConversationRailContent({
                     href={`/projects/${encodeURIComponent(project.slug)}/chats/${encodeURIComponent(thread.thread_id)}`}
                     aria-label={title}
                     aria-current={active ? "page" : undefined}
-                    className="focus-visible:ring-ring/50 block min-w-0 rounded-xl p-2 outline-none focus-visible:ring-2"
+                    className={cn(
+                      "focus-visible:ring-ring/50 block min-h-14 min-w-0 rounded-lg px-3 py-2 outline-none focus-visible:ring-2",
+                      canRename && canDelete
+                        ? "pr-16"
+                        : canRename || canDelete
+                          ? "pr-10"
+                          : null,
+                    )}
                     onClick={onNavigate}
                   >
-                    <span
-                      className={cn(
-                        "block truncate text-sm font-medium",
-                        canRename && canDelete
-                          ? "group-focus-within:pr-14 group-hover:pr-14"
-                          : canRename || canDelete
-                            ? "group-focus-within:pr-7 group-hover:pr-7"
-                            : null,
-                      )}
-                    >
+                    <span className="block truncate text-sm leading-5 font-medium">
                       {title}
                     </span>
                     {thread.updated_at ? (
-                      <span className="text-muted-foreground mt-1 block text-xs">
+                      <span className="text-muted-foreground mt-0.5 block text-xs leading-4">
                         {formatTimeAgo(thread.updated_at)}
                       </span>
                     ) : null}
                   </Link>
                   {(canRename || canDelete) && (
-                    <div className="pointer-events-none absolute top-1 right-2 z-10 flex items-center opacity-0 transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
+                    <div className="pointer-events-none absolute inset-y-0 right-2 z-10 flex items-center opacity-0 transition-opacity duration-150 group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
                       {canRename && (
                         <Button
                           type="button"

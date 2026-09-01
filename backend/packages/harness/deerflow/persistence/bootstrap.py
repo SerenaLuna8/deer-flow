@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +16,7 @@ from sqlalchemy.pool import NullPool
 
 import deerflow.persistence.models  # noqa: F401 -- populate final metadata
 from deerflow.persistence.final_schema_contract import (
+    COMMENTED_ROOT_TABLES,
     FINAL_APP_TABLES,
     LANGGRAPH_TABLES,
     inventory_is_schema_v1_allowed,
@@ -21,13 +24,26 @@ from deerflow.persistence.final_schema_contract import (
     verify_schema_v1_catalog,
 )
 
-# Development reset baseline.  There is deliberately no upgrade ancestry:
-# pre-V1 databases must be recreated with the explicit setup command.
-CURRENT_SCHEMA_REVISION = "schema_v1"
-SCHEMA_V1_REVISION = CURRENT_SCHEMA_REVISION
+# Schema V1 is the current baseline. Future heads must add an explicit packaged
+# migration; pre-V1 databases remain unsupported and require a new empty target.
+SCHEMA_V1_REVISION = "schema_v1"
+CURRENT_SCHEMA_REVISION = SCHEMA_V1_REVISION
 
 _FULL_SCHEMA_PATH = Path(__file__).resolve().parent / "full_schema.sql"
+_SCHEMA_COMMENTS_PATH = _FULL_SCHEMA_PATH.with_name("schema_comments.sql")
+_SCHEMA_COMMENTS_PLACEHOLDER = "-- INCLUDE GENERATED SCHEMA COMMENTS FROM schema_comments.sql"
 _SCHEMA_MARKER_INSERT = f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');"
+_CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
+_COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
+_TABLE_COMMENT_RE = re.compile(
+    r"^COMMENT ON TABLE ([a-z][a-z0-9_]*) IS '((?:''|[^'])*)';$",
+)
+_COLUMN_COMMENT_RE = re.compile(
+    r"^COMMENT ON COLUMN ([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*) IS '((?:''|[^'])*)';$",
+)
+_SCHEMA_SHAPE_DIGEST_PREFIX = "-- Schema shape SHA-256: "
+_COMMENT_STATEMENTS_DIGEST_PREFIX = "-- Comment statements SHA-256: "
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SCHEMA_MUTATION_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
 _PG_LOCK_POLL_SECONDS = 0.1
 
@@ -43,6 +59,17 @@ class SchemaRecreateRequired(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(f"SCHEMA_RECREATE_REQUIRED: nonempty database is not the exact {CURRENT_SCHEMA_REVISION} catalog and must be recreated")
+
+
+class SchemaUpgradeRequired(RuntimeError):
+    """A packaged predecessor requires an explicit maintenance-window upgrade."""
+
+    code = "SCHEMA_UPGRADE_REQUIRED"
+
+    def __init__(self, revision: str) -> None:
+        super().__init__(
+            f"SCHEMA_UPGRADE_REQUIRED: {revision} must be upgraded to {CURRENT_SCHEMA_REVISION} with `make upgrade-db`",
+        )
 
 
 class SchemaSetupRequired(RuntimeError):
@@ -87,6 +114,13 @@ async def classify_database(
         raise SchemaRecreateRequired()
 
     markers = tuple(str(value) for value in (await connection.execute(text("SELECT version_num FROM alembic_version ORDER BY version_num"))).scalars())
+    if len(markers) == 1:
+        from deerflow.persistence.schema_upgrade import (
+            database_has_packaged_upgrade_path,
+        )
+
+        if await database_has_packaged_upgrade_path(connection, markers[0]):
+            raise SchemaUpgradeRequired(markers[0])
     if len(markers) != 1 or markers[0] != CURRENT_SCHEMA_REVISION:
         raise SchemaRecreateRequired()
     if not inventory_is_schema_v1_allowed(objects) or not await verify_schema_v1_catalog(connection):
@@ -130,16 +164,169 @@ async def _postgres_lock(engine: AsyncEngine) -> AsyncIterator[None]:
         await lock_engine.dispose()
 
 
+def _parse_static_schema_columns(schema: str) -> dict[str, tuple[str, ...]]:
+    tables: dict[str, tuple[str, ...]] = {}
+    active_table: str | None = None
+    active_columns: list[str] = []
+
+    for line in schema.splitlines():
+        if active_table is None:
+            match = _CREATE_TABLE_RE.fullmatch(line)
+            if match is not None:
+                active_table = match.group(1)
+                active_columns = []
+            continue
+
+        if line.startswith(")"):
+            if not active_columns or active_table in tables:
+                raise RuntimeError("full schema SQL snapshot has invalid table structure")
+            tables[active_table] = tuple(active_columns)
+            active_table = None
+            active_columns = []
+            continue
+
+        match = _COLUMN_RE.match(line)
+        if match is not None:
+            column = match.group(1)
+            if column in active_columns:
+                raise RuntimeError("full schema SQL snapshot has duplicate columns")
+            active_columns.append(column)
+
+    if active_table is not None or set(tables) != set(COMMENTED_ROOT_TABLES):
+        raise RuntimeError("full schema SQL snapshot has invalid comment coverage")
+    return tables
+
+
+def _lines_digest(lines: tuple[str, ...]) -> str:
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _schema_shape_digest(tables: dict[str, tuple[str, ...]]) -> str:
+    lines = tuple(":".join((table_name, ",".join(tables[table_name]))) for table_name in sorted(tables))
+    return _lines_digest(lines)
+
+
+def _manifest_digest(lines: list[str], prefix: str) -> str:
+    values = [line.removeprefix(prefix) for line in lines if line.startswith(prefix)]
+    if len(values) != 1 or _SHA256_RE.fullmatch(values[0]) is None:
+        raise RuntimeError("schema comments SQL artifact manifest is invalid")
+    return values[0]
+
+
+def _validate_schema_comments_against_schema(schema: str, comments: str) -> None:
+    tables = _parse_static_schema_columns(schema)
+    table_comments: dict[str, str] = {}
+    column_comments: dict[tuple[str, str], str] = {}
+    statement_lines: list[str] = []
+
+    for line in comments.splitlines():
+        if not line or line.startswith("--"):
+            continue
+        statement_lines.append(line)
+        table_match = _TABLE_COMMENT_RE.fullmatch(line)
+        if table_match is not None:
+            table_name, comment = table_match.groups()
+            if table_name in table_comments:
+                raise RuntimeError("schema comments SQL artifact has duplicate table comments")
+            table_comments[table_name] = comment.replace("''", "'")
+            continue
+        column_match = _COLUMN_COMMENT_RE.fullmatch(line)
+        if column_match is not None:
+            table_name, column_name, comment = column_match.groups()
+            identity = (table_name, column_name)
+            if identity in column_comments:
+                raise RuntimeError("schema comments SQL artifact has duplicate column comments")
+            column_comments[identity] = comment.replace("''", "'")
+            continue
+        raise RuntimeError("schema comments SQL artifact contains a non-COMMENT statement")
+
+    expected_columns = {(table_name, column_name) for table_name, columns in tables.items() for column_name in columns}
+    if set(table_comments) != set(tables) or set(column_comments) != expected_columns:
+        raise RuntimeError("schema comments SQL artifact does not exactly cover the schema")
+    lines = comments.splitlines()
+    if _manifest_digest(lines, _SCHEMA_SHAPE_DIGEST_PREFIX) != _schema_shape_digest(tables):
+        raise RuntimeError("schema comments SQL artifact has a stale schema manifest")
+    if _manifest_digest(lines, _COMMENT_STATEMENTS_DIGEST_PREFIX) != _lines_digest(
+        tuple(statement_lines),
+    ):
+        raise RuntimeError("schema comments SQL artifact has a stale content manifest")
+
+
+def _read_schema_comments_sql(schema: str) -> str:
+    """Read and verify the generated, transaction-free COMMENT-only artifact."""
+
+    try:
+        if _SCHEMA_COMMENTS_PATH.is_symlink() or not _SCHEMA_COMMENTS_PATH.is_file():
+            raise RuntimeError("schema comments SQL artifact must be a regular file")
+        comments = _SCHEMA_COMMENTS_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError("schema comments SQL artifact is unavailable") from exc
+
+    lines = comments.splitlines()
+    if not lines or lines[0] != "-- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT." or comments.startswith("\ufeff") or "\x00" in comments or _SCHEMA_COMMENTS_PLACEHOLDER in comments:
+        raise RuntimeError("schema comments SQL artifact is invalid")
+    _validate_schema_comments_against_schema(schema, comments)
+    return comments.rstrip()
+
+
 def _read_full_schema_sql(*, publish_marker: bool = True) -> str:
-    payload = _FULL_SCHEMA_PATH.read_text(encoding="utf-8")
-    if not payload.startswith("BEGIN;\n") or not payload.rstrip().endswith("COMMIT;") or payload.count(_SCHEMA_MARKER_INSERT) != 1 or "-- Running upgrade" in payload or "UPDATE alembic_version" in payload:
-        raise RuntimeError("full schema SQL snapshot is invalid")
+    """Compose structural DDL and generated comments into one transaction."""
+
+    try:
+        if _FULL_SCHEMA_PATH.is_symlink() or not _FULL_SCHEMA_PATH.is_file():
+            raise RuntimeError("full schema SQL snapshot must be a regular file")
+        payload = _FULL_SCHEMA_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError("full schema SQL snapshot is unavailable") from exc
+    static_comment_lines = any(line.lstrip().startswith(("COMMENT ON TABLE ", "COMMENT ON COLUMN ")) for line in payload.splitlines())
+    partition_creation = "SELECT ensure_run_events_month_partition(now());"
+    next_partition_creation = "SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');"
+    placeholder_index = payload.find(_SCHEMA_COMMENTS_PLACEHOLDER)
+    post_comment_lines = tuple(line for line in payload[placeholder_index + len(_SCHEMA_COMMENTS_PLACEHOLDER) :].splitlines() if line) if placeholder_index >= 0 else ()
+    if (
+        payload.startswith("\ufeff")
+        or "\x00" in payload
+        or not payload.startswith("BEGIN;\n")
+        or not payload.rstrip().endswith("COMMIT;")
+        or payload.splitlines().count("BEGIN;") != 1
+        or payload.splitlines().count("COMMIT;") != 1
+        or payload.count(_SCHEMA_MARKER_INSERT) != 1
+        or payload.count(_SCHEMA_COMMENTS_PLACEHOLDER) != 1
+        or partition_creation not in payload
+        or payload.index(_SCHEMA_MARKER_INSERT) > placeholder_index
+        or payload.index(_SCHEMA_COMMENTS_PLACEHOLDER) > payload.index(partition_creation)
+        or post_comment_lines != (partition_creation, next_partition_creation, "COMMIT;")
+        or static_comment_lines
+        or "-- Running upgrade" in payload
+        or "UPDATE alembic_version" in payload
+    ):
+        raise RuntimeError("full schema SQL snapshot or schema comments placeholder is invalid")
+    payload = payload.replace(
+        _SCHEMA_COMMENTS_PLACEHOLDER,
+        _read_schema_comments_sql(payload),
+    )
     if not publish_marker:
         payload = payload.replace(
             _SCHEMA_MARKER_INSERT,
             "-- Schema V1 marker is published only after setup bootstrap completes.",
         )
+    expected_marker_count = 1 if publish_marker else 0
+    if payload.count(_SCHEMA_MARKER_INSERT) != expected_marker_count:
+        raise RuntimeError("composed full schema SQL has an invalid completion marker")
     return payload
+
+
+def validate_schema_installation_artifacts() -> None:
+    """Fail closed when the two Schema V1 installation artifacts cannot compose."""
+
+    _read_full_schema_sql()
+
+
+def load_schema_comment_statements() -> tuple[str, ...]:
+    """Return the validated generated COMMENT statements in deterministic order."""
+
+    payload = _read_full_schema_sql()
+    return tuple(line for line in payload.splitlines() if line.startswith(("COMMENT ON TABLE ", "COMMENT ON COLUMN ")))
 
 
 async def _install_full_schema(
@@ -251,10 +438,13 @@ __all__ = [
     "SCHEMA_MUTATION_LOCK_KEY",
     "SchemaRecreateRequired",
     "SchemaSetupRequired",
+    "SchemaUpgradeRequired",
     "bootstrap_schema",
     "classify_database",
     "finalize_staged_schema",
     "list_user_relations",
+    "load_schema_comment_statements",
     "stage_schema_for_setup",
     "validate_schema",
+    "validate_schema_installation_artifacts",
 ]
