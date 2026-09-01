@@ -51,6 +51,13 @@ Run full-stack commands from the repository root and backend targets from
   contexts, and domain transactions.
 - `packages/harness/deerflow/<domain>/` owns reusable graph, runtime,
   persistence, sandbox, Skill, MCP, and subagent primitives.
+- Builder `*_contracts.py`, `*_codec.py`, and `*_validation.py` modules own
+  immutable payloads and pure transformations; the corresponding Service owns
+  authorization, optimistic revisions, lifecycle transitions, and transactions.
+- `skill_package_integrity.py` owns Skill package byte/path/frontmatter facts;
+  `SkillService` owns the Project Skill aggregate and Version lifecycle.
+- Provider Request ownership is split into profile, measurement, and guard;
+  `provider_request_usage.py` is a compatibility export surface only.
 - `packages/knowledge/actweave_knowledge/` owns the self-contained RAG
   Knowledge module; `app/knowledge/` owns its host adapters (config mapping,
   Gateway routers, Worker handlers, Agent tool, authority seam, model port).
