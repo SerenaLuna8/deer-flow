@@ -2,8 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: 用 superpowers:subagent-driven-development（推荐）
 > 或 superpowers:executing-plans 按任务推进本计划，步骤用 `- [ ]` 勾选跟踪。
-> 状态：T1–T10 实现与确定性验证完成（2026-09-01）；T11 首次真实尝试在摘要阶段未完成，检索对照与目标部署未放行。
-> 规范来源：[M11 设计方案](../specs/2026-08-31-rag-knowledge-m11-design.md)。
+> 状态：T1–T10 实现与此前确定性验证完成；代码已推送 `main@8dc4e766`。T11 第二轮于北京时间 2026-09-01 02:26 完成全部真实测量，52 项门禁中 46 项通过；F02 真实质量、性能复审与目标部署仍未放行。
+> 规范来源：[M11 设计方案](../../specs/backup/2026-08-31-rag-knowledge-m11-design.md)。
 > 前置：[M10 计划](2026-08-30-rag-knowledge-m10-quality-workbench.md)完整验收；基线 commit `b94d8b34`。
 
 **Goal**：交付 F01 查询向量缓存、F02 分段摘要索引、F03 知识库系统设置（配置入库 + 管理页），
@@ -18,9 +18,8 @@ admin 路由 + 启动装配），包只消费 `KnowledgeSettings` DTO。两张�
 
 ## 全局约束（每个任务隐含）
 
-- 工作树现存与知识域无关的未提交改动（README、design-qa、frontend projects/workspace、
-  harness runtime 等）：**不得触碰、staging、还原**。i18n 三文件（en-US/zh-CN/types）当前也有
-  用户改动，M11 只做增量 key 追加，提交时只暂存自己的 hunk。
+- 实施时保留与知识域无关的用户改动，不擅自覆盖或还原。后来用户明确要求提交所有变更并
+  直接推送 main，相关 UI 与 M11 变更已一并交付至 `8dc4e766`；此处原先的脏工作树记录属于历史。
 - Schema 五件套同批：ORM、`full_schema.sql`、`final_schema_contract.py`（含
   `FINAL_SCHEMA_V1_CATALOG_SIGNATURE` 计数/digest）+ `final_schema_digest.py`、
   `schema_comments.sql`（`generate_schema_comments.py` 重生成并同步 `_EXPECTED_TABLE_COUNT`/
@@ -623,14 +622,15 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
   聚合；报告写 `docs/knowledge/m11-quality-eval-report.{json,md}`。运行入口仿
   `test_m10_quality_eval.py` 的 provider_integration 机制；M11 使用独立显式开关
   `ACT_WEAVE_KNOWLEDGE_M11_QUALITY_EVAL=1`，并预检摘要模型、调用预算与 M10 基线。
-  当前已有第一次真实尝试报告；摘要生成未完整，检索指标尚未测得。
+  当前报告已更新为第二轮完整真实测量；第一次摘要未完整的尝试另行保留。
 - [x] 真实评测前提：操作者确认执行后，使用当前默认 DeepSeek V4 Flash，按24次上限完成
   第一次摘要尝试，并补跑冻结原65题的新 M10 等价基线。没有将85题结果或 replay 分数冒充基线。
-- [ ] 完整检索对照：第一次摘要生成未完整，680次检索尚未运行；下一轮调用预算待确认。
-- [ ] 性能与运行证据：非 Provider P95 对比 M10 基线（>20% 恶化须优化或记录产品复审）；
-  缓存命中率（Agent 复用场景两连搜的诊断计数）；单文档摘要 LLM 调用数与 skipped 计数
-  入报告。预算/语料不可用 → 按 M10 协议记录 `blocked_pending_operator_input`，F02 不得
-  标记完成。
+- [x] 完整检索对照：用户要求继续测试后，第二轮以36次摘要上限执行，实际24次、无重试、
+  发布24/24条；完成680次检索、零请求错误，报告含340 outcomes与340 cache_pairs。
+- [x] 性能与运行证据已入报告：同轮 summary off/on、M10 分类 P95、缓存诊断、摘要调用与
+  token 计量均已测得。测量完成不等于质量或性能放行。
+- [ ] 真实门禁放行：四项问题式 Recall 的 off/on 均100%，0pp提升未达到+5pp；14对最终身份
+  列表不一致；hybrid parent_child 对M10的P95增加27.06%，待显式复审。保留失败结果，F02不标记完成。
 - [x] 文档同批更新：README（知识配置改为管理页 + 迁移指引）、Install（迁移顺序：停服 →
   迁移脚本 → 删 YAML 块 → 启动）、`config.example.yaml`（已在 T3）、`backend/AGENTS.md`
   （F03 装配、新表、授权措辞已在 T4）、`frontend/AGENTS.md`（新管理页与知识 UI 增量）、
@@ -657,7 +657,8 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
 
 - [ ] F01–F03 逐项有实现与验收证据；M10 既有能力无重复建设或退化（基线契约测试全量不回归）。
 - [x] 没有摘要文本进入引用/工具正文、密钥泄漏、跨项目披露、迟到任务写入旧代次（已列回归覆盖）。
-- [x] 缓存开/关/冷/热结果与授权行为不可区分，仅 Provider 调用次数不同。
+- [x] 确定性回归验证缓存开/关/冷/热结果与授权行为一致，仅 Embedding 调用次数不同；
+  真实 Provider 评测另有14对最终列表不一致，原因未确认，不据此声称真实输出完全稳定。
 - [x] 设置行是知识配置唯一来源；YAML 墓碑生效；迁移脚本幂等；降级启动可观测。
 - [x] 所有确定性门通过，真实质量/性能门有有效结果或明确受阻记录。
 - [ ] Schema 五件套、DTO、装配、retention、文档一致；部署确认单独完成。
@@ -666,8 +667,9 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
 
 - 接续基线 `b9658197`：T1 Schema 与包契约已提交，T2 设置服务和管理 API 尚未存在。
   T1 定向检查 63 passed、0 skipped，目录和中文注释一致。包表计数纠正为七到八，另有一张宿主设置表。
-- 原 `main` 仍有会话列表点击区、子任务光效等未提交 UI 修改，当前运行配置含旧 YAML
-  `knowledge`。实现隔离于 detached worktree `deer-flow-m11`，没有覆盖这些修改，也没有提交或推送。
+- 当时原 `main` 有会话列表点击区、子任务光效等未提交 UI 修改，运行配置含旧 YAML
+  `knowledge`，实现曾隔离于 detached worktree `deer-flow-m11`。这些是历史状态；之后用户
+  授权所有变更直接提交并推送 main，已完成至 `8dc4e766`。
 - T0 留存的目标库 `deerflow_knowledge` 与当前环境不一致；本次只读核对实际为 `deerflow`。
   本次未操作该目标库，数据库测试仅使用随机 `deerflow_test_*`；此前 reset 授权不沿用。
 - T2/T3 设置、CAS、存储探测、密钥保护、迁移、启动降级、留存与安装定向回归：
@@ -690,8 +692,8 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
   发布前扫描剩余缺失或变化分段，覆盖生成期间新增分段的刷新需求。
 - Replay 的旧模型种子与当前 `CreateSystemModel(provider_id=...)` 不一致，已通过
   `git show b9658197` 确认为原有漂移并修复；生产 Provider 验证没有放宽。
-- T11 的模型型号、摘要调用预算及目标库处置仍待操作者明确决定。F02 真实质量和 M11
-  总交付保持未放行，不标记已完成。
+- 当时 T11 模型与摘要预算尚待确认；后续已按用户指令执行两轮，见下文。目标库处置、
+  F02 真实质量和 M11 总交付仍未放行，不标记已完成。
 
 ## 交付验证记录（2026-09-01）
 
@@ -706,15 +708,16 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
   热缓存检索期间关闭摘要索引后的策略冲突、摘要失败保留 ready 并可重试、重嵌入不新增
   chat 调用、重解析清理旧摘要。前端已有账户切换清理的非法 ID 异常按现有 abort 约定修复，
   请求参数验证未放宽。
-- T11 已备妥 85 题语料（新增 question_style dev/holdout 各 10）、四组评测轴、预算预检、
-  冻结 M10 基线校验与受阻报告；当前至少需 24 次摘要调用和 680 次检索请求，另有嵌入及
-  Rerank 费用。没有执行真实付费模型调用、没有填写虚构质量或费用。
+- 该阶段已备妥85题语料（新增 question_style dev/holdout 各10）、四组评测轴、预算预检与
+  M10基线校验；当时尚未调用真实模型。随后两次真实执行及本轮专项结果另列于下文，
+  不把此前全量回归数量当成本轮重新执行结果。
 - 全新随机库的显式安装、`make check-db`、迁移脚本两次和再次 `make check-db` 共五次
   CLI 均 exit 0；schema_v1 / ready，设置行数保持 1、revision 为 1→2→3，凭据加密
   与解密一致。独立复查随机库记录和连接数均 0，临时合成 YAML 已删除。
-- 本次仍无 commit/push，原 `deer-flow` 服务、配置与目标数据库未变更；验证用浏览器与
-  服务已关闭，临时数据库及 MinIO bucket 已清理。详细命令、范围、安全证据和剩余交付条件
-  见 [M11 验证记录](../../knowledge/m11-validation.md)。
+- 此阶段结束时尚未 commit/push，之后已按用户指令提交并直接推送 `main@8dc4e766`。
+  验证用浏览器与服务已关闭，临时数据库及 MinIO bucket 已清理；目标数据库迁移没有随
+  代码推送自动执行。详细命令、范围、安全证据和剩余交付条件见
+  [M11 验证记录](../../../knowledge/m11-validation.md)。
 
 ## 真实评测续作（2026-09-01）
 
@@ -727,5 +730,28 @@ reparse/删除级联）全部行为确定；任何路径都不出现"新参数�
   usage、模型和 outcomes 不变；没有重复模型调用。当前质量通过不等于性能已批准。
 - M11 第一次尝试达到 24 次上限，发布18/24条摘要，3个文档任务未完成；由于单文档原子
   发布，缺6条不等于6次API失败。重试最后因预算耗尽退出，首次错误原因未保留，不能猜测。
-- 生成不完整时未运行后续680次检索，不能证明或否定召回收益。此次临时库已独立复查清理。
-  下一轮摘要预算待确认（已询问36次上限），M10基线不需重跑。详见验证记录和第一次报告。
+- 第一次生成不完整，未运行后续680次检索，不能证明或否定召回收益；其临时库已清理。
+  后来用户明确要求“继续完成刚才的测试”，第二轮按36次摘要上限执行，复用M10基线。
+
+### 第二轮完整真实测量（main@8dc4e766）
+
+- 报告时间 `2026-08-31T18:26Z`，即北京时间2026-09-01 02:26。摘要实际24次、无重试，
+  发布24/24条；680次检索零请求错误，340 outcomes、340 cache_pairs。52项门禁中46项通过，
+  `quality_passed=false`、`all_passed=false`，不修改gate或标记F02放行。
+- 四项未通过的Recall提升检查：semantic/hybrid的question_style Recall@candidate与Recall@10，
+  off/on均100%，提升0pp未达到5pp；不是召回下降，但未证实规定收益。整体nDCG各轴均
+  0.8594366，无退化。
+- 同轮整体非Provider P95：semantic105.054→101.862ms、hybrid308.923→311.636ms，均通过。
+  唯一M11性能复审项为`hybrid_parent_child_m10_p95`：100.3156→127.4643ms（+27.06%），
+  超过1.2倍，待显式复审。M10自身此前的性能复审也未自动批准。
+- 340热查均hit>0/miss=0/error=null，累计348hits；326对最终身份列表一致，14对不一致，
+  其中12对首查也已是热缓存。未保留热查候选列表及Rerank分数，不能确定是换序或增删结果，
+  也不认定缓存故障或外部Rerank原因；`query_cache_pairs`保持未通过。
+- 本轮入口、诊断与语料回归89passed、0skip、2deselected；缓存专项18passed、0skip。
+  日志分别为`/tmp/actweave-m11-attempt-2/regression-tests.log`、`cache-regression.log`，
+  真实评测日志为同目录`real-eval.log`。
+- 客户端计数Embedding110/Rerank696/摘要24，不等于分批与重试后的HTTP总数。摘要响应
+  上报实际token输入7697、输出4169，与报告的本地估计字段分列；无确认价格，不估算金额。
+- `/tmp/actweave-m11-attempt-2/m11-execution.json`记录隔离测试库
+  `deerflow_test_85377_27024f72c2a64927bcb915ded40365c5`清理后库记录及session均0。
+  业务库未改，本轮没有打开浏览器。质量、稳定性解释、性能复审及目标部署仍为剩余放行项。
