@@ -209,19 +209,19 @@ Commit: `refactor(sandbox): remove compose dood attestation`
 - Consumes: host-process application topology and optional Docker/Kubernetes Sandbox topology.
 - Produces: one consistent active operating contract with no application Docker/Compose instructions.
 
-- [ ] **Step 1: Rewrite root and operator documentation**
+- [x] **Step 1: Rewrite root and operator documentation**
 
 Document local startup only. Replace the Docker/Compose section with a Sandbox-only Docker section that keeps `make setup-sandbox`. Update ownership to `nginx/` and `sandbox/`, and remove deployment examples and the P-03 attestation procedure.
 
-- [ ] **Step 2: Rewrite Provisioner documentation and comments**
+- [x] **Step 2: Rewrite Provisioner documentation and comments**
 
 Describe `sandbox/provisioner/` as a standalone optional service. Provide direct image build/run or external cluster deployment commands, remove `make docker-start`, Compose network claims, and `docker-compose-dev.yaml` references, while retaining Kubernetes RBAC, path, image, and API-key warnings.
 
-- [ ] **Step 3: Clean scripts, active guides, and comments**
+- [x] **Step 3: Clean scripts, active guides, and comments**
 
 Remove local application Docker mode suggestions from `check.py`, `doctor.py`, and support-bundle setup wording. Keep Docker version detection because it diagnoses the optional Sandbox runtime. Remove Docker-build wording from UV extra and tokenizer comments. Rewrite active frontend deployment and Sandbox guides to the same boundary. Preserve historical backup plans/specs.
 
-- [ ] **Step 4: Run scoped stale-reference checks**
+- [x] **Step 4: Run scoped stale-reference checks**
 
 Run from the repository root:
 
@@ -233,7 +233,7 @@ rg -n -i 'docker compose|docker-compose|compose_dood|p03_compose|make docker|mak
 
 Expected: no application deployment or old-path references. Legitimate generic terms such as Python object composition and Docker Sandbox commands must be assessed by context rather than removed mechanically.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit: `docs: document local application runtime`
 

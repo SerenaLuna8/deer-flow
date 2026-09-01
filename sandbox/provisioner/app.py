@@ -15,7 +15,7 @@ Endpoints:
     GET    /api/sandboxes              — List all sandboxes
     GET    /health                     — Provisioner health check
 
-Architecture (docker-compose-dev):
+Architecture:
     ┌────────────┐  HTTP  ┌─────────────┐  K8s API  ┌──────────────┐
     │ remote     │ ─────▸ │ provisioner │ ────────▸ │  host K8s    │
     │ _backend   │        │ :8002       │           │  API server  │

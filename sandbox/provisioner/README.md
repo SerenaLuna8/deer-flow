@@ -5,13 +5,13 @@ Kubernetes Sandbox provider. It creates one Pod and Service per sandbox for the
 Worker; it is not the Agent executor and is not a Kubernetes deployment target
 for the complete ActWeave stack.
 
-Docker Compose starts this service only when `config.yaml` selects
-`AioSandboxProvider` with a `provisioner_url`.
+Run this service independently, then configure `AioSandboxProvider` with a
+Worker-reachable `provisioner_url`.
 
 ```yaml
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
-  provisioner_url: http://provisioner:8002
+  provisioner_url: http://127.0.0.1:8002
   provisioner_api_key: $PROVISIONER_API_KEY
 ```
 
@@ -39,7 +39,7 @@ offloading.
 - `GET /health` is public. Every `/api/*` request requires `X-API-Key` matching
   `PROVISIONER_API_KEY`; an empty, missing, or mismatched key fails with `401`.
 - Do not expose port `8002` to browsers or the public network. Normal lifecycle
-  calls originate from Worker on the internal Compose/cluster network.
+  calls originate from Worker over a private host or cluster network.
 - The mounted kubeconfig or service account can read/create namespaces and
   create/delete Pods and Services. Give it only the required cluster
   permissions and run the service in a trusted environment.
@@ -70,9 +70,8 @@ the file is absent.
 
 ## Configuration
 
-Environment variables are set by
-[`docker-compose-dev.yaml`](../docker-compose-dev.yaml) or the deployment that
-runs the Provisioner.
+Set environment variables in the standalone process or in the external
+Kubernetes workload that runs the Provisioner.
 
 | Variable                      | Default                | Purpose                                                      |
 | ----------------------------- | ---------------------- | ------------------------------------------------------------ |
@@ -91,9 +90,9 @@ runs the Provisioner.
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty                  | Optional Skill PVC subpath using `{user_id}`/`{thread_id}`   |
 | `USERDATA_PVC_NAME`           | empty                  | PVC for user-data with scoped subpath                        |
 
-Docker Compose explicitly chooses `NodePort` because Worker runs outside the
-cluster. When Worker and Provisioner run inside the same cluster, keep the safer
-`ClusterIP` default and enforce NetworkPolicy.
+Choose `NodePort` only when a Worker outside the cluster must reach Sandbox
+services. When Worker and Provisioner run inside the same cluster, keep the
+safer `ClusterIP` default and enforce NetworkPolicy.
 
 ### Custom sandbox image
 
@@ -146,17 +145,25 @@ Create request:
 
 ## Start and smoke check
 
-Set `ACT_WEAVE_ROOT`, configure provisioner mode and its shared key, then run:
+Build and start the standalone Provisioner container, then configure the Worker
+with the same shared key:
 
 ```bash
-make docker-start
-docker inspect --format '{{.State.Health.Status}}' deer-flow-provisioner
-docker exec deer-flow-provisioner curl -fsS http://localhost:8002/health
+docker build -t actweave-sandbox-provisioner:local sandbox/provisioner
+docker run --rm --name actweave-sandbox-provisioner \
+  -p 127.0.0.1:8002:8002 \
+  -e PROVISIONER_API_KEY \
+  -e KUBECONFIG_PATH=/root/.kube/config \
+  -v "$HOME/.kube/config:/root/.kube/config:ro" \
+  actweave-sandbox-provisioner:local
+curl -fsS http://127.0.0.1:8002/health
 kubectl get pod,svc -n deer-flow -l app=deer-flow-sandbox
 ```
 
-The Compose service does not publish port `8002` to the host. Use `docker exec`,
-the internal network, or cluster-local access for diagnostics.
+For an in-cluster installation, deploy the same image with a scoped service
+account and expose it only to Worker through a private Service. A local
+kubeconfig whose server is loopback may require the trusted-local
+`K8S_API_SERVER` override described above.
 
 ## Troubleshooting
 

@@ -33,6 +33,10 @@ tests.
   imports or invokes graph execution.
 - **Provisioner** is optional and participates only for the configured
   Kubernetes Sandbox provider.
+- **Docker** is optional and belongs only to the AIO Sandbox runtime. Docker
+  Run Skill read-only mounts require Worker and daemon to resolve the same
+  absolute filesystem view; a distinct view fails closed with no operator
+  attestation override.
 
 Gateway, Worker, and Scheduler share the same PostgreSQL schema and governed
 configuration. Public readiness exposes component state only—never PIDs, lock
@@ -1017,7 +1021,7 @@ rather than manually guessing a future migration.
 
 `make setup-db` and `make reset-db` are the only commands allowed to consume
 the bootstrap DeepSeek Key and persist three independently encrypted
-model-owned copies. Normal Gateway, Worker, Scheduler, doctor, and Compose
+model-owned copies. Normal Gateway, Worker, Scheduler, doctor, and local
 startup must not broadcast provider keys as process-wide model configuration.
 
 ## Common change paths

@@ -144,7 +144,7 @@ def check_postgres_endpoint() -> PostgresEndpointResult:
         return PostgresEndpointResult(
             False,
             f"PostgreSQL TCP 端点不可达 ({safe_endpoint})",
-            "确认本地 Docker PostgreSQL 已启动并暴露 5432，再运行 make check-db",
+            "确认 PostgreSQL 已启动且该 TCP 端点可达，再运行 make check-db",
         )
     return PostgresEndpointResult(True, safe_endpoint)
 
@@ -232,7 +232,7 @@ def main() -> int:
         print("  FAIL nginx not found")
         print("    macOS:   brew install nginx")
         print("    Ubuntu:  sudo apt install nginx")
-        print("    Windows: use WSL for local mode or use Docker mode")
+        print("    Windows: use WSL and install nginx there")
         print("    Or visit: https://nginx.org/en/download.html")
         failed = True
 

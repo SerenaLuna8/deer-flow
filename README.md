@@ -422,45 +422,21 @@ durable dispatch authority；暂停模型或清除 API Key 会阻断后续调用
 在途的请求。当前架构、历史兼容和验收约束见
 [后端开发约定](./backend/AGENTS.md)。
 
-## Docker 与部署
+## 本机运行与 Sandbox
 
-Docker 开发环境：
+应用只支持本机进程运行，不提供其他整栈启动方式。
+使用前文的 `make dev`、`make start` 和 `make stop` 管理 Gateway、Worker、Scheduler、
+Frontend 与 Nginx。
 
-```bash
-make docker-init
-make docker-start
-make docker-stop
-```
-
-本地 Compose 构建与运行：
+Docker 仅作为可选 Sandbox runtime。需要 AIO Docker Sandbox 时可预拉取镜像：
 
 ```bash
-make up
-make down
+make setup-sandbox
 ```
 
-当前仓库提供本地和 Docker Compose 整栈运行，不提供 Kubernetes/Helm 整栈部署
-资源。`docker/provisioner/` 是可选的 Kubernetes Sandbox provider，不是完整应用的
-部署方案。任何生产环境都需要独立验证容量、网络、安全、存储和故障恢复。
-
-Compose Worker 使用 `AioSandboxProvider` 和宿主 Docker socket（DooD）时，v4 Run
-Skill mount 默认关闭。先让测试配置保持
-`sandbox.compose_dood_p03_v1_verified: false`，在目标 Docker 主机执行真实 P-03
-双视图、非特权 guest 读写和跨 Worker 回收探测：
-
-```bash
-cd backend
-ACTWEAVE_REQUIRE_PROVIDER_INTEGRATION=1 \
-ACT_WEAVE_CONFIG_PATH="${ACTWEAVE_COMPOSE_DOOD_TEST_CONFIG:?set a disposable Compose DooD test config}" \
-uv run pytest tests/test_aio_run_skill_mount_lease_dood.py \
-  -m 'provider_integration and p03_compose_dood' -q
-```
-
-只有该命令在当前部署坐标上退出 `0`，才可把部署 `config.yaml` 中的字段改为
-字面量 YAML boolean `true` 并重启 Worker。该字段是版本化的 operator
-attestation，不接受环境变量字符串或请求参数。Docker、双视图 mount、guest
-readback 或 exact reconcile 任一缺失时保持 `false`；Worker 不注册
-`private_run`/`automation_run`，不能用单元测试或本机直连 Docker 冒充 P-03。
+Docker Sandbox 的 Worker 与 Docker daemon 必须共享同一文件系统视图；路径视图不同
+时 Run Skill 只读挂载直接 fail closed，不提供配置绕过。可选 Kubernetes Sandbox
+Provisioner 位于 `sandbox/provisioner/`，作为独立控制服务运行，不是完整应用的部署方案。
 
 BoxLite P-04 与 E2B P-05 使用相同的版本化门禁，默认分别为
 `sandbox.boxlite_p04_v1_verified: false` 和
@@ -506,7 +482,7 @@ checkout 手工执行相关 PostgreSQL、前端、浏览器、安全、容器和
 - 对外只开放受 TLS 和网络策略保护的 Nginx；不要直接公开 Gateway、Frontend 或
   Provisioner 端口。
 - `LocalSandboxProvider` 在 Worker 的 OS namespace 执行命令，不是强隔离边界；
-  native 本机部署就是宿主账号，Compose 部署则是 Worker 容器；只用于可信环境。
+  它使用运行 Worker 的宿主账号，只用于可信环境。
 - 如确需 Local Bash，可配置逐条 `allow_once` / `deny` 审批；批准仍是宿主 RCE，
   不会变成沙箱，也没有会话级授权。配置字段见
   [配置模板](./config.example.yaml)，执行边界见 [后端开发约定](./backend/AGENTS.md)。

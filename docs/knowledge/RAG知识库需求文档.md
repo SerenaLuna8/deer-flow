@@ -487,5 +487,5 @@ KNOWLEDGE_TASK_FAILED
   versioning/Object Lock,凭据必须允许 `GetBucketVersioning`、对象读写删除和
   Knowledge Project prefix 列举;Gateway/Worker 启动及所有 MinIO-backed 删除
   路径据此失败关闭。
-- Gateway/Worker 直接运行在宿主机时可使用 `127.0.0.1:9000`;运行在 Compose
-  容器内时必须配置两个进程都可达的 S3 API 地址。
+- Gateway/Worker 位于同一宿主机时可使用 `127.0.0.1:9000`;分布在不同主机时
+  必须配置两个进程都可达的 S3 API 地址。

@@ -1,22 +1,22 @@
 ---
 title: Deployment Guide
-description: Fluva boundaries for local and Docker Compose deployments.
+description: Fluva host-process deployment boundaries.
 ---
 
 import { Callout } from "nextra/components";
 
 # Deployment Guide
 
-The Fluva topology consists of Nginx, Frontend, Gateway, Worker, an optional Scheduler, and an optional Provisioner. PostgreSQL is the only application persistence database and is not provisioned by the Fluva Compose stack.
+The Fluva topology consists of Nginx, Frontend, Gateway, Worker, an optional Scheduler, and an optional Sandbox Provisioner. PostgreSQL is the only application persistence database and must be provisioned explicitly.
 
 <Callout type="warning">
-  The repository provides local and Docker Compose launch resources, but Docker Compose, browsers, model providers, and Sandbox modes require separate capacity, security, and failure validation in the target environment. This page is not production certification.
+  The repository supports host-process application startup. Browsers, model providers, and Sandbox modes require separate capacity, security, and failure validation in the target environment. This page is not production certification.
 </Callout>
 
 ## Prepare the deployment
 
 1. Generate and validate the repository-root `config.yaml`.
-2. Inject model, authentication, and database secrets through `.env` or the deployment platform's secret store. Never bake them into an image or commit them.
+2. Inject model, authentication, and database secrets through `.env` or the process supervisor's secret store. Never commit them.
 3. Pre-create a non-superuser application role.
 4. Explicitly initialize a fresh PostgreSQL target:
 
@@ -39,24 +39,6 @@ make stop
 
 The unified entry point is `http://localhost:2026`. Local logs are under `logs/{gateway,worker,scheduler,frontend,nginx}.log`, and local runtime state defaults to `backend/.deer-flow`.
 
-## Docker development
-
-```bash
-make docker-init
-make docker-start
-make docker-logs
-make docker-stop
-```
-
-`make docker-start` resolves the configured Sandbox provider and starts Provisioner only when required. Compose still needs a reachable external PostgreSQL instance; do not point `DATABASE_URL` at an uninitialized target.
-
-## Compose build mode
-
-```bash
-make up
-make down
-```
-
 Before deployment, verify at least the following:
 
 - Expose only Nginx `2026`; keep Gateway `8001`, Frontend `3000`, and Provisioner `8002` internal.
@@ -74,6 +56,8 @@ Before deployment, verify at least the following:
 | Provisioner/Kubernetes | A separate service creates Sandbox Pods; requires cluster-level security validation |
 
 Provisioner/Kubernetes is a Sandbox provider only; this repository does not provide a Kubernetes/Helm deployment target for the complete Fluva stack.
+
+Docker is optional and is supported only as an AIO Sandbox runtime. Use `make setup-sandbox` to prepare its image. The standalone Kubernetes control service lives under `sandbox/provisioner/`.
 
 Sandbox isolation does not replace project authorization, least-privilege secret injection, or network egress control.
 

@@ -261,11 +261,10 @@ def _is_loopback_sandbox_host(host: str) -> bool:
 def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | None = None) -> str:
     """Choose the host interface for legacy Docker ``-p`` sandbox publishing.
 
-    Bare-metal/local runs talk to sandboxes through localhost and should not
-    expose the sandbox HTTP API on every host interface.  Docker-outside-of-
-    Docker deployments commonly use ``host.docker.internal`` from another
-    container; keep their legacy broad bind unless operators opt into a
-    narrower bind with ``ACT_WEAVE_SANDBOX_BIND_HOST``.  When operators choose
+    Host-process runs talk to sandboxes through localhost and should not expose
+    the sandbox HTTP API on every host interface. Non-loopback sandbox hosts
+    keep the legacy broad bind unless operators opt into a narrower bind with
+    ``ACT_WEAVE_SANDBOX_BIND_HOST``. When operators choose
     an IPv6 loopback sandbox host, bind Docker to IPv6 loopback as well so the
     advertised sandbox URL and published socket use the same address family.
     """
@@ -537,8 +536,8 @@ class LocalContainerBackend(SandboxBackend):
         else:
             raise RuntimeError("Could not start sandbox container: all candidate ports are already allocated by Docker")
 
-        # When running inside Docker (DooD), sandbox containers are reachable via
-        # host.docker.internal rather than localhost (they run on the host daemon).
+        # A non-loopback Sandbox host can expose containers through
+        # host.docker.internal rather than localhost.
         sandbox_host = os.environ.get("ACT_WEAVE_SANDBOX_HOST", "localhost")
         return SandboxInfo(
             sandbox_id=sandbox_id,

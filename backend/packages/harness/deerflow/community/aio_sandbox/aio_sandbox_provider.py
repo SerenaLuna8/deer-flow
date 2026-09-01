@@ -388,9 +388,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _get_thread_mounts(thread_id: str, *, user_id: str | None = None) -> list[tuple[str, str, bool]]:
         """Get volume mounts for a thread's data directories.
 
-        Creates directories if they don't exist (lazy initialization).
-        Mount sources use host_base_dir so that when running inside Docker with a
-        mounted Docker socket (DooD), the host Docker daemon can resolve the paths.
+        Creates directories if they don't exist (lazy initialization). Mount
+        sources use ``host_base_dir`` so the configured Sandbox runtime or
+        Provisioner can resolve the host-visible paths.
         """
         paths = get_paths()
         effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)

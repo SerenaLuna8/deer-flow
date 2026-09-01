@@ -24,7 +24,7 @@ Features and bug fixes use TDD. `make test` loads the development `DATABASE_URL`
 
 ## Configuration
 
-Update the Pydantic model, `config.example.yaml`, focused tests, Compose/runtime configuration surfaces, and current docs together. Removed keys remain only in the explicit app-config tombstone validator.
+Update the Pydantic model, `config.example.yaml`, focused tests, runtime configuration surfaces, and current docs together. Removed keys remain only in the explicit app-config tombstone validator.
 
 ## Assets
 

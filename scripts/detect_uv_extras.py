@@ -3,10 +3,7 @@
 
 Order of resolution:
 1. `UV_EXTRAS` env var. Comma- or whitespace-separated names so multiple
-   extras can be layered (e.g. ``UV_EXTRAS=ollama,discord``). The same
-   parsing semantics apply in the Docker dev container via
-   ``docker/dev-entrypoint.sh`` and in the production Docker image build via
-   ``backend/Dockerfile``.
+   extras can be layered (e.g. ``UV_EXTRAS=ollama,discord``).
 2. Auto-detection from config.yaml — currently maps:
    - channels.discord.enabled == true -> discord
 

@@ -369,7 +369,7 @@ def test_aio_typed_run_mount_derives_owner_label_and_returns_absent_proof(
         _restore_mount_source(source)
 
 
-def test_aio_dood_mount_uses_host_view_but_validates_worker_view(
+def test_aio_mount_uses_host_view_but_validates_worker_view(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -398,9 +398,9 @@ def test_aio_dood_mount_uses_host_view_but_validates_worker_view(
 
     try:
         lease = provider.prepare_run_readonly_mount(
-            "thread-dood",
+            "thread-host-view",
             scope=_scope(),
-            run_id="run-dood",
+            run_id="run-host-view",
             source=source,
         )
 

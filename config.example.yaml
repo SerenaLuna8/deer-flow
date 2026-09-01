@@ -6,7 +6,7 @@ logging:
     format: text
 auth:
   # Only these TCP peers may supply X-Real-IP. Loopback covers repository-owned
-  # local nginx; container nginx uses a separate generated proxy token.
+  # local Nginx; any other trusted proxy uses a separately managed proxy token.
   trusted_proxies:
   - 127.0.0.1/32
   - ::1/128

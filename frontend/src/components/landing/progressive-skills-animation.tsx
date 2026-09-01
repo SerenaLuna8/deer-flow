@@ -666,7 +666,7 @@ export default function ProgressiveSkillsAnimation() {
                             className="flex items-center gap-2 pl-4 text-zinc-400"
                           >
                             <Terminal size={16} />
-                            <span>Executing scripts/deploy.sh</span>
+                            <span>Executing deployment workflow</span>
                           </motion.div>
                         )}
                       </div>

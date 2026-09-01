@@ -769,7 +769,7 @@ class SandboxProvider(ABC):
         """Acquire a sandbox without blocking the event loop.
 
         Most sandbox providers expose a synchronous lifecycle API because local
-        Docker/provisioner operations are blocking. Async runtimes should call
+        Container and Provisioner operations are blocking. Async runtimes should call
         this method so those blocking operations run in a worker thread instead
         of stalling the event loop.
         """

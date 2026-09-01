@@ -242,7 +242,7 @@ def check_nginx() -> CheckResult:
     return CheckResult(
         "nginx",
         "fail",
-        fix=("macOS:   brew install nginx\nUbuntu:  sudo apt install nginx\nWindows: use WSL or Docker mode"),
+        fix=("macOS:   brew install nginx\nUbuntu:  sudo apt install nginx\nWindows: use WSL and install nginx there"),
     )
 
 

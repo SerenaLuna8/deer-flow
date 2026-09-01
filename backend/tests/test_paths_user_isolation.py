@@ -224,7 +224,7 @@ class TestRunSkillMaterializationHostView:
                 str(host_base / "outside" / owner_id / "tree"),
             )
 
-    def test_rejects_relative_or_implicit_dood_host_mapping(
+    def test_rejects_relative_or_implicit_external_host_mapping(
         self,
         monkeypatch: pytest.MonkeyPatch,
         paths: Paths,
@@ -254,7 +254,7 @@ class TestRunSkillMaterializationHostView:
 
         host_tree = paths.host_run_skill_materialization_path(tree)
         mount = RunScopedReadOnlyMount(
-            run_id="run-windows-dood",
+            run_id="run-windows-host-view",
             container_path="/mnt/skills",
             host_path=host_tree,
         )

@@ -38,6 +38,10 @@ Gateway never executes an Agent graph. Worker exposes no browser business API.
 Provisioner is a Sandbox provider, not a Kubernetes deployment target for the
 complete application.
 
+The repository does not ship an application container deployment. Docker is an
+optional Sandbox runtime only; Gateway, Worker, Scheduler, Frontend, and Nginx
+run as host processes.
+
 ## Ownership map
 
 | Path                        | Owner                                                             |
@@ -45,9 +49,10 @@ complete application.
 | `backend/app/`              | Gateway, Worker, Scheduler, and application domains               |
 | `backend/packages/harness/` | Agent harness, tools, sandbox, and persistence primitives         |
 | `frontend/`                 | Next.js application and browser tests                             |
-| `docker/`                   | Compose, Nginx, and optional Sandbox Provisioner                  |
+| `nginx/`                    | Local Nginx entry configuration                                   |
+| `sandbox/`                  | Optional Sandbox Provisioner                                      |
 | `skills/public/`            | Sole source of packaged System Skill definitions                  |
-| `scripts/`                  | Setup, diagnostics, local runtime, and Compose deployment helpers |
+| `scripts/`                  | Setup, diagnostics, local runtime, and Sandbox helpers            |
 | `config.example.yaml`       | Root runtime configuration template                               |
 
 Runtime configuration is resolved from the repository-root `config.yaml` (or an

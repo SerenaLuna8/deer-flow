@@ -1,6 +1,6 @@
 """Development-only LangGraph tooling auth — shares JWT logic with Gateway.
 
-Gateway, local launchers, Docker, and production deployments do not load this
+Gateway, local launchers, and production deployments do not load this
 module. It remains only for explicit LangGraph Studio/direct-server tooling
 through ``langgraph.json``'s ``auth.path``; it is not a project-private HTTP
 authority or a production runtime entry point.

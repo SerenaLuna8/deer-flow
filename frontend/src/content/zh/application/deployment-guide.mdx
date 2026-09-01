@@ -1,22 +1,22 @@
 ---
 title: 部署指南
-description: Fluva 本地与 Docker Compose 部署边界。
+description: Fluva 本机进程部署边界。
 ---
 
 import { Callout } from "nextra/components";
 
 # 部署指南
 
-Fluva 的运行拓扑由 Nginx、Frontend、Gateway、Worker、可选 Scheduler 和可选 Provisioner 组成。PostgreSQL 是唯一应用持久化数据库，并且不由 Fluva Compose stack 自动创建。
+Fluva 的运行拓扑由 Nginx、Frontend、Gateway、Worker、可选 Scheduler 和可选 Sandbox Provisioner 组成。PostgreSQL 是唯一应用持久化数据库，必须显式准备。
 
 <Callout type="warning">
-  仓库提供本地和 Docker Compose 启动资源，但 Docker Compose、浏览器、模型 provider 和 Sandbox 模式都需要在目标环境单独完成容量、安全和故障验收。本页不构成生产认证。
+  仓库只支持本机进程启动应用。浏览器、模型 provider 和 Sandbox 模式都需要在目标环境单独完成容量、安全和故障验收。本页不构成生产认证。
 </Callout>
 
 ## 部署前准备
 
 1. 在根目录生成并检查 `config.yaml`。
-2. 通过 `.env` 或部署平台 secret 注入模型、认证和数据库密钥；不要把 secret 写入镜像或仓库。
+2. 通过 `.env` 或进程管理器的 secret store 注入模型、认证和数据库密钥；不要提交 secret。
 3. 预先创建非 superuser 应用 role。
 4. 使用全新 PostgreSQL 目标库完成显式初始化：
 
@@ -39,24 +39,6 @@ make stop
 
 统一入口为 `http://localhost:2026`。本地日志位于 `logs/{gateway,worker,scheduler,frontend,nginx}.log`，运行状态默认位于 `backend/.deer-flow`。
 
-## Docker 开发环境
-
-```bash
-make docker-init
-make docker-start
-make docker-logs
-make docker-stop
-```
-
-`make docker-start` 会根据 `config.yaml` 的 Sandbox provider 判断是否需要 Provisioner。Compose 仍需要可访问的外部 PostgreSQL；不要把 `DATABASE_URL` 指向未初始化目标。
-
-## Compose 构建模式
-
-```bash
-make up
-make down
-```
-
 部署前至少确认：
 
 - 只公开 Nginx `2026`，Gateway `8001`、Frontend `3000` 和 Provisioner `8002` 保持内部可达。
@@ -74,6 +56,8 @@ make down
 | Provisioner/Kubernetes | 通过独立服务创建 Sandbox Pod；需要集群级安全验收 |
 
 Provisioner/Kubernetes 仅是 Sandbox provider；当前仓库不提供完整 Fluva 整栈的 Kubernetes/Helm 部署目标。
+
+Docker 仅作为可选 AIO Sandbox runtime。使用 `make setup-sandbox` 准备镜像；独立 Kubernetes 控制服务位于 `sandbox/provisioner/`。
 
 Sandbox 隔离不替代项目授权、Secret 最小权限注入或网络出口控制。
 

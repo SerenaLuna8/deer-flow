@@ -65,6 +65,12 @@ sandbox:
     API_KEY: $MY_API_KEY
 ```
 
+<Callout type="warning">
+  With the Docker runtime, Worker and the Docker daemon must resolve Run Skill
+  mount sources through the same absolute filesystem view. A distinct view
+  disables those read-only mounts and has no configuration override.
+</Callout>
+
 Install: `cd backend && uv add 'deerflow-harness[aio-sandbox]'`
 
 ### E2B Cloud Sandbox
@@ -129,10 +135,10 @@ Each sandbox gets a dedicated Pod in a Kubernetes cluster, managed by the provis
 ```yaml
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
-  provisioner_url: http://provisioner:8002
+  provisioner_url: http://127.0.0.1:8002
 ```
 
-The provisioner service is included in `docker/docker-compose-dev.yaml` and manages the Pod and Service lifecycle for each sandbox ID.
+Run the optional service independently from `sandbox/provisioner/`. It manages the Pod and Service lifecycle for each Sandbox ID and is not an application deployment target.
 
 ## Path mappings
 
@@ -163,30 +169,7 @@ sandbox:
   `/mnt/skills`, `/mnt/acp-workspace`, or `/mnt/user-data`.
 </Callout>
 
-When `LocalSandboxProvider` runs under production Docker (`make up`), the
-provider runs inside the `deer-flow-gateway` container. In that mode,
-`host_path` is resolved from the gateway container's filesystem, not directly
-from your Docker host. Bind the host directory into the gateway service first,
-then use the in-container path in `config.yaml`:
-
-```yaml
-# docker/docker-compose.yaml or an override file
-services:
-  gateway:
-    volumes:
-      - ${ACT_WEAVE_REPO_ROOT}/.deer-flow/knowledge:/app/.deer-flow/knowledge:ro
-```
-
-```yaml
-sandbox:
-  use: deerflow.sandbox.local:LocalSandboxProvider
-  mounts:
-    - host_path: /app/.deer-flow/knowledge
-      container_path: /mnt/knowledge
-      read_only: true
-```
-
-If the configured `host_path` is not visible to the gateway process, Fluva
+`LocalSandboxProvider` resolves `host_path` from the Worker host process. If the configured path is not visible to that process, Fluva
 logs an error and ignores that mount.
 
 ## Output truncation

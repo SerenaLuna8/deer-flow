@@ -127,7 +127,7 @@ backend/.deer-flow/threads/{thread_id}/user-data/
 
 This directory is mounted into the sandbox as `/mnt/user-data/` for the agent to read and write.
 
-In local and Docker development, this path may be mounted into the configured Sandbox. It contains working-file projections only; Thread metadata, messages, Run state, and asset authority remain in PostgreSQL.
+The configured Sandbox may mount this host path. It contains working-file projections only; Thread metadata, messages, Run state, and asset authority remain in PostgreSQL.
 
 <Cards num={2}>
   <Cards.Card

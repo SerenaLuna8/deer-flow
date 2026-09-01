@@ -150,7 +150,7 @@ def test_prepare_script_writes_a_path_free_canonical_manifest(tmp_path: Path) ->
 
 
 def test_prepare_script_accepts_the_packaged_resource_directory_as_output(tmp_path: Path) -> None:
-    """The Docker build's checked-in output path must not cause a same-file copy."""
+    """The checked-in resource output path must not cause a same-file copy."""
 
     backend = Path(__file__).resolve().parents[2]
     copied_backend = tmp_path / "backend"

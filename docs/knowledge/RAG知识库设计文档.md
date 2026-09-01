@@ -661,8 +661,8 @@ secure:          false
 - 目标 bucket 约定为 `actweave-knowledge`,启用前由管理员创建并验证访问;
   Runtime 不自动创建 bucket;
 - 凭据在管理员知识库配置页写入并加密存储；旧环境变量仅供显式迁移和隔离测试使用;
-- Compose 容器内不能使用容器自身的 `127.0.0.1`,必须配置两个进程都可达的
-  S3 API 地址;
+- Gateway/Worker 分布在不同主机时不能使用任一进程自身的 `127.0.0.1`,必须配置
+  两个进程都可达的 S3 API 地址;
 - `GET /minio/health/live` 成功只证明进程存活;Knowledge health 必须使用配置
   凭据验证目标 bucket 可访问,并完成上传/下载/删除同一 object key 的字节往返。
 

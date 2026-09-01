@@ -130,14 +130,11 @@ class Paths:
 
     @property
     def host_base_dir(self) -> Path:
-        """Host-visible base dir for Docker volume mount sources.
+        """Host-visible base directory for Sandbox volume mount sources.
 
-        When running inside Docker with a mounted Docker socket (DooD), the Docker
-        daemon runs on the host and resolves mount paths against the host filesystem.
-        Set ACT_WEAVE_HOST_BASE_DIR to the host-side path that corresponds to this
-        container's base_dir so that sandbox container volume mounts work correctly.
-
-        Falls back to base_dir when the env var is not set (native/local execution).
+        Set ``ACT_WEAVE_HOST_BASE_DIR`` when a Sandbox daemon or Provisioner
+        resolves a host-side path corresponding to the Worker's ``base_dir``.
+        It falls back to ``base_dir`` when no alternate view is configured.
         """
         if env := os.getenv("ACT_WEAVE_HOST_BASE_DIR"):
             return Path(env)
@@ -166,7 +163,7 @@ class Paths:
         return self.base_dir / "run-skill-materializations"
 
     def host_run_skill_materialization_root(self) -> str:
-        """Docker-daemon view of the dedicated Skill materialization root."""
+        """Sandbox-runtime view of the dedicated Skill materialization root."""
 
         root = _join_host_path(
             self._host_base_dir_str(),
