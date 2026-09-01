@@ -31,6 +31,7 @@ from deerflow.agents.middlewares.provider_request_measurement import (
 )
 from deerflow.agents.middlewares.provider_request_profile import (
     _MAX_CURRENT_UPLOAD_IMAGE_ALLOWANCE,  # noqa: F401
+    _PROVIDER_VISUAL_MAX_TOKENS_PER_IMAGE,  # noqa: F401
     PROVIDER_REQUEST_ERROR_CONTRACT,
     PROVIDER_REQUEST_ESTIMATOR_REVISION,
     ContextCapacityExceeded,
