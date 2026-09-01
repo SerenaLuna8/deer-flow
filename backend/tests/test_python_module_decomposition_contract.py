@@ -205,6 +205,41 @@ def test_agent_design_contracts_are_exact_reexports() -> None:
         assert getattr(legacy, name) is getattr(owning, name)
 
 
+def test_agent_design_codec_is_the_owning_module() -> None:
+    from app.shared_assets import agent_design_codec as owning
+    from app.shared_assets.agent_design_service import AgentDesignService
+
+    static_names = (
+        "blueprint_checksum",
+        "_agent_payload",
+        "_encode_session_cursor",
+        "_decode_session_cursor",
+        "_request_checksum",
+        "_jsonable",
+        "_message_json",
+        "_progress_json",
+        "_blueprint_json",
+        "_candidate_metadata_from_json",
+        "_remaining_conflicts_after_blueprint_update",
+        "_blueprint_from_json",
+        "_clarification_request",
+        "_clarification_json",
+        "_clarification_from_json",
+        "_clarification_answers",
+        "_clarification_history",
+        "_session_view",
+        "_session_summary",
+        "_stable_generation_error_message",
+    )
+    class_names = (
+        "_has_blocking_conflicts",
+        "_clarification_set_json",
+        "_clarifications_from_json",
+    )
+    for name in (*static_names, *class_names):
+        assert AgentDesignService.__dict__[name].__func__ is getattr(owning, name)
+
+
 def test_skill_design_codec_is_the_owning_module() -> None:
     from app.shared_assets import skill_design_codec as owning
     from app.shared_assets.skill_design_service import SkillDesignService
