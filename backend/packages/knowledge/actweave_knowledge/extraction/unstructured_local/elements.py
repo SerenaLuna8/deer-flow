@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from ..builtin.html_extractor import html_to_documents
 from ..contracts import Document, ParseWarning, SourceSpan
-from ..dify.html_extractor import html_to_documents
 
 
 def elements_to_documents(elements, *, kind: str) -> list[Document]:

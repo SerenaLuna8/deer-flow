@@ -386,7 +386,7 @@ def test_excel_corrupt_media_is_visible_and_structured_without_raw_warning(tmp_p
     import warnings
     import zipfile
 
-    from actweave_knowledge.extraction.dify import excel_extractor
+    from actweave_knowledge.extraction.builtin import excel_extractor
     from actweave_knowledge.extraction.processor import ExtractProcessor
     from openpyxl import Workbook
     from openpyxl.drawing.image import Image as SheetImage
@@ -475,7 +475,7 @@ def test_excel_sink_image_rejection_keeps_placeholder_and_cleans_tempfile(tmp_pa
 def test_excel_sink_io_failure_remains_fatal_and_closes_workbooks(tmp_path, monkeypatch):
     import io
 
-    from actweave_knowledge.extraction.dify import excel_extractor
+    from actweave_knowledge.extraction.builtin import excel_extractor
     from actweave_knowledge.extraction.processor import ExtractProcessor
     from openpyxl import Workbook
     from openpyxl.drawing.image import Image as SheetImage

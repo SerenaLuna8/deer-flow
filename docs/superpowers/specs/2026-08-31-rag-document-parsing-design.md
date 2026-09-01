@@ -82,7 +82,7 @@ Unstructured 的粗分块仍可能使用字符参数，那只是第一阶段预�
 | --- | --- |
 | `backend/packages/knowledge/actweave_knowledge/extraction/contracts.py` | 内部 Document、ExtractSetting、SourceSpan、AttachmentDraft、ParseWarning 与 Interface |
 | `.../extraction/base.py`、`processor.py`、`registry.py` | BaseExtractor、三级路由、格式能力清单 |
-| `.../extraction/dify/` | 固定版本移植的 Text/Markdown/PDF/Word/Excel/CSV/HTML 解析器 |
+| `.../extraction/builtin/` | 固定版本移植的 Text/Markdown/PDF/Word/Excel/CSV/HTML 解析器 |
 | `.../extraction/unstructured_local/` | 只含本地分支的 PPTX/EPUB/Markdown/EML/MSG/XML Adapter |
 | `.../extraction/normalizer.py`、`runtime.py` | Markdown 规范化、警告、隔离执行、资源限制 |
 | `.../extraction/UPSTREAM.md`、`patches.md` | 来源、版本、文件摘要及上游差异 |

@@ -69,7 +69,7 @@ def test_source_intersections_after_merging_and_mid_paragraph_split():
 
 
 def test_heading_prefix_has_real_origin_and_shifts_body_offsets():
-    from actweave_knowledge.extraction.dify.markdown_extractor import MarkdownExtractor
+    from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
 
     docs = MarkdownExtractor().markdown_to_tups("# 父标题\n\n介绍。\n\n## 子标题\n\n" + "正文检查。" * 250)
     drafts = split(docs, size=200, overlap=0, child_size=100)
@@ -159,7 +159,7 @@ def test_token_profile_limits_are_validated(overrides):
 
 
 def test_marked_word_table_rows_consume_header_once_and_keep_physical_cells(tmp_path):
-    from actweave_knowledge.extraction.dify.word_extractor import WordExtractor
+    from actweave_knowledge.extraction.builtin.word_extractor import WordExtractor
     from docx import Document as WordDocument
     from docx.oxml import OxmlElement
     from parsing_test_helpers import make_context
@@ -367,7 +367,7 @@ def test_marked_table_header_without_rows_preserves_source():
 
 
 def test_review_heading_only_extracted_section_keeps_physical_heading():
-    from actweave_knowledge.extraction.dify.markdown_extractor import MarkdownExtractor
+    from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
 
     documents = MarkdownExtractor().markdown_to_tups("# First\n\n# Second\n\nbody")
     assert len(documents) == 2
@@ -380,7 +380,7 @@ def test_review_heading_only_extracted_section_keeps_physical_heading():
 
 @pytest.mark.parametrize("extracted", [True, False])
 def test_review_skipped_heading_levels_keep_all_real_ancestors(extracted):
-    from actweave_knowledge.extraction.dify.markdown_extractor import MarkdownExtractor
+    from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
 
     text = "# Root\n\n### Middle\n\n#### Leaf\n\n" + "body " * 400
     documents = MarkdownExtractor().markdown_to_tups(text) if extracted else [make_document(text)]
@@ -397,7 +397,7 @@ def test_review_skipped_heading_levels_keep_all_real_ancestors(extracted):
 
 @pytest.mark.parametrize("mode", ["general", "parent_child"])
 def test_review_indented_code_followed_by_prose_keeps_markdown_semantics(mode):
-    from actweave_knowledge.extraction.dify.markdown_extractor import MarkdownExtractor
+    from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
     from markdown_it import MarkdownIt
 
     text = "    List<int> a;\n    Map<K,V> b;\n\nExplanation follows."
@@ -414,7 +414,7 @@ def test_review_indented_code_followed_by_prose_keeps_markdown_semantics(mode):
 
 @pytest.mark.parametrize("mode", ["general", "parent_child"])
 def test_review_actual_word_leading_image_retains_exact_occurrence(tmp_path, mode):
-    from actweave_knowledge.extraction.dify.word_extractor import WordExtractor
+    from actweave_knowledge.extraction.builtin.word_extractor import WordExtractor
     from docx import Document as WordDocument
     from parsing_test_helpers import make_context
     from PIL import Image
@@ -448,7 +448,7 @@ def test_review_actual_word_leading_image_retains_exact_occurrence(tmp_path, mod
 
 @pytest.mark.parametrize("extracted", [True, False])
 def test_review_skipped_level_sibling_does_not_inherit_previous_branch(extracted):
-    from actweave_knowledge.extraction.dify.markdown_extractor import MarkdownExtractor
+    from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
 
     text = "# Root\n\n### Middle\n\n#### Leaf\n\nleaf body\n\n### Sibling\n\nsibling body"
     documents = MarkdownExtractor().markdown_to_tups(text) if extracted else [make_document(text)]
@@ -489,7 +489,7 @@ def test_review_impossible_image_and_atomic_text_budget_fails_without_partial_re
 
 @pytest.mark.parametrize("mode", ["general", "parent_child"])
 def test_review2_real_markdown_placeholder_preserves_indented_code_payload_and_sources(mode):
-    from actweave_knowledge.extraction.dify.markdown_extractor import MarkdownExtractor
+    from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
     from markdown_it import MarkdownIt
 
     source = "![image](https://example.test/image.png)\n\n" + "    total += 1\n" * 33
@@ -519,7 +519,7 @@ def test_review2_real_markdown_placeholder_preserves_indented_code_payload_and_s
 @pytest.mark.parametrize("indent", ["    ", "\t", "  \t"])
 @pytest.mark.parametrize("mode", ["general", "parent_child"])
 def test_review2_code_conversion_removes_only_markdown_indent(indent, mode):
-    from actweave_knowledge.extraction.dify.markdown_extractor import MarkdownExtractor
+    from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
     from markdown_it import MarkdownIt
 
     source = (indent + "if ready:\n" + indent + "    total += 1\n") * 35

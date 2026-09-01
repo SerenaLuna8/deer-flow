@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import pytest
+from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 from actweave_knowledge.extraction.contracts import Document, SourceSpan
-from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
 from actweave_knowledge.ingestion.index_text import build_index_text, has_indexable_source_text
 
 

@@ -242,12 +242,12 @@ def test_pdf_images_keep_each_occurrence_with_page_only_sources(tmp_path):
 def test_cumulative_text_limit_is_enforced_inside_adapter(tmp_path, extension):
     path = tmp_path / ("budget" + extension)
     if extension == ".pdf":
-        from actweave_knowledge.extraction.dify.pdf_extractor import PdfExtractor
+        from actweave_knowledge.extraction.builtin.pdf_extractor import PdfExtractor
 
         adapter = PdfExtractor()
         write_pdf(path, ["123456", "abcdef"])
     else:
-        from actweave_knowledge.extraction.dify.word_extractor import WordExtractor
+        from actweave_knowledge.extraction.builtin.word_extractor import WordExtractor
 
         adapter = WordExtractor()
         word = WordFile()
@@ -335,7 +335,7 @@ def test_rejected_image_keeps_text_and_warning(tmp_path, extension):
 
 def test_pdf_native_handles_close_when_sink_fails(tmp_path, monkeypatch):
     import pypdfium2
-    from actweave_knowledge.extraction.dify.pdf_extractor import PdfExtractor
+    from actweave_knowledge.extraction.builtin.pdf_extractor import PdfExtractor
 
     path = tmp_path / "close.pdf"
     _image_pdf(path)
@@ -362,7 +362,7 @@ def test_pdf_native_handles_close_when_sink_fails(tmp_path, monkeypatch):
 
 def test_pdf_native_handles_close_on_text_budget(tmp_path, monkeypatch):
     import pypdfium2
-    from actweave_knowledge.extraction.dify.pdf_extractor import PdfExtractor
+    from actweave_knowledge.extraction.builtin.pdf_extractor import PdfExtractor
 
     path = tmp_path / "close-text.pdf"
     write_pdf(path, ["123456", "not visited"])
@@ -385,12 +385,12 @@ def test_pdf_native_handles_close_on_text_budget(tmp_path, monkeypatch):
 def test_adapter_propagates_cancellation_during_extraction(tmp_path, extension):
     path = tmp_path / ("cancel" + extension)
     if extension == ".pdf":
-        from actweave_knowledge.extraction.dify.pdf_extractor import PdfExtractor
+        from actweave_knowledge.extraction.builtin.pdf_extractor import PdfExtractor
 
         adapter = PdfExtractor()
         _image_pdf(path)
     else:
-        from actweave_knowledge.extraction.dify.word_extractor import WordExtractor
+        from actweave_knowledge.extraction.builtin.word_extractor import WordExtractor
 
         adapter = WordExtractor()
         word = WordFile()
@@ -495,12 +495,12 @@ def test_word_two_paragraphs_keep_only_their_own_source_intervals(tmp_path):
 def test_image_intermediates_respect_work_directory_limit(tmp_path, extension):
     path = tmp_path / ("work-limit" + extension)
     if extension == ".pdf":
-        from actweave_knowledge.extraction.dify.pdf_extractor import PdfExtractor
+        from actweave_knowledge.extraction.builtin.pdf_extractor import PdfExtractor
 
         adapter = PdfExtractor()
         _image_pdf(path)
     else:
-        from actweave_knowledge.extraction.dify.word_extractor import WordExtractor
+        from actweave_knowledge.extraction.builtin.word_extractor import WordExtractor
 
         adapter = WordExtractor()
         png = tmp_path / "red.png"

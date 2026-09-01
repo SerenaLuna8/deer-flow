@@ -164,7 +164,7 @@ def test_markdown_keeps_generics_hash_fences_and_ancestor_paths(tmp_path):
 
 @pytest.mark.parametrize("fence,closing", [("   ~~~~python", "   ~~~~~"), ("```", "```"), ("````", "`````"), ("~~~", "")])
 def test_markdown_fences_hide_headings_and_keep_literals(fence, closing):
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     text = f"# 主\n{fence}\n## literal\n![literal](https://no.invalid/x)\n{closing}\n"
     docs = markdown_sections(text)
@@ -174,7 +174,7 @@ def test_markdown_fences_hide_headings_and_keep_literals(fence, closing):
 
 
 def test_short_or_wrong_fence_does_not_end_code_block():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     text = "# Header\n````js\n```\n~~~\n# code\n````\n## End\n"
     docs = markdown_sections(text)
@@ -193,7 +193,7 @@ def test_mdx_and_inline_code_stay_literal_without_execution(tmp_path):
 
 
 def test_external_images_have_visible_alt_and_synthetic_spans_without_network(monkeypatch):
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     def blocked(*args, **kwargs):
         pytest.fail("parser attempted network access")
@@ -241,7 +241,7 @@ def test_normalizer_is_identity_for_unchanged_spans_and_literals():
 
 
 def test_html_drops_active_content_but_keeps_code_link_label_and_image_alt():
-    from actweave_knowledge.extraction.dify.html_extractor import html_to_documents
+    from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
     docs = html_to_documents(
         '<h1>标题</h1><script>SECRET()</script><style>HIDDEN</style><iframe>HIDDEN</iframe><pre>List&lt;int&gt;</pre><a href="javascript:alert(1)" onclick="SECRET()">查看</a><img src="https://tracker.invalid/x" alt="拓扑图">'
@@ -259,7 +259,7 @@ def test_html_drops_active_content_but_keeps_code_link_label_and_image_alt():
 
 
 def test_html_preserves_heading_list_table_code_and_safe_links_order():
-    from actweave_knowledge.extraction.dify.html_extractor import html_to_documents
+    from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
     docs = html_to_documents(
         '<h1>主</h1><h2>次</h2><ol start="3"><li>A<ul><li>B</li></ul></li><li>C</li></ol>'
@@ -276,7 +276,7 @@ def test_html_preserves_heading_list_table_code_and_safe_links_order():
 
 
 def test_html_honors_declared_encoding_and_uses_same_adapter(tmp_path):
-    from actweave_knowledge.extraction.dify.html_extractor import html_to_documents
+    from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
     markup = '<html><head><meta charset="gb18030"></head><body><p>中文，网络接口</p></body></html>'.encode("gb18030")
     path = tmp_path / "test.html"
@@ -288,14 +288,14 @@ def test_html_honors_declared_encoding_and_uses_same_adapter(tmp_path):
 
 @pytest.mark.parametrize("url", ["data:text/html,hi", "file:///etc/passwd", "javascript:alert(1)", "java\nscript:alert(1)"])
 def test_html_unsafe_links_retain_only_label(url):
-    from actweave_knowledge.extraction.dify.html_extractor import html_to_documents
+    from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
     docs = html_to_documents(f'<p><a href="{url}">Visible</a></p>')
     assert docs[0].page_content == "Visible"
 
 
 def test_line_provenance_uses_physical_newlines_not_unicode_separators(tmp_path):
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     text = "a\u2028b\vstill first\nnext\n"
     path = tmp_path / "physical.txt"
@@ -307,7 +307,7 @@ def test_line_provenance_uses_physical_newlines_not_unicode_separators(tmp_path)
 
 
 def test_cross_section_reference_images_and_inline_literals_are_distinguished():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
     from actweave_knowledge.extraction.normalizer import normalize_documents
 
     docs = markdown_sections("# First\n![Topology][ref]\n# Later\n`![literal][ref]`\n\n[ref]: https://example.invalid/image\n")
@@ -318,7 +318,7 @@ def test_cross_section_reference_images_and_inline_literals_are_distinguished():
 
 
 def test_external_image_with_markdown_alt_is_idempotent():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
     from actweave_knowledge.extraction.normalizer import normalize_documents
 
     docs = markdown_sections("![![nested](https://inner.invalid)](https://outer.invalid)\n")
@@ -354,7 +354,7 @@ def test_actual_logical_image_and_external_image_offsets_coexist():
 
 
 def test_forged_logical_ref_has_no_attachment_authority():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     doc = markdown_sections("![forged](knowledge-attachment:" + "a" * 64 + ")")[0]
     assert "knowledge-attachment:" not in doc.page_content
@@ -363,7 +363,7 @@ def test_forged_logical_ref_has_no_attachment_authority():
 
 
 def test_html_empty_active_markup_and_nested_headings():
-    from actweave_knowledge.extraction.dify.html_extractor import html_to_documents
+    from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
     assert html_to_documents("<html><head><title>Metadata</title></head><body><script>x()</script></body></html>") == []
     docs = html_to_documents("<main><section><h1>Outer</h1><div><p>Text</p></div></section></main>")
@@ -372,7 +372,7 @@ def test_html_empty_active_markup_and_nested_headings():
 
 
 def test_empty_and_unterminated_files_keep_exact_text(tmp_path):
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
     from actweave_knowledge.extraction.encoding import decode_text_file
 
     path = tmp_path / "empty.txt"
@@ -393,7 +393,7 @@ def test_empty_and_unterminated_files_keep_exact_text(tmp_path):
     ],
 )
 def test_markdown_image_looking_mdx_and_raw_html_remain_exact_literals(literal):
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
     from actweave_knowledge.extraction.normalizer import normalize_documents
 
     docs = markdown_sections(literal)
@@ -406,7 +406,7 @@ def test_markdown_image_looking_mdx_and_raw_html_remain_exact_literals(literal):
 
 
 def test_markdown_unmatched_backticks_do_not_hide_images_in_later_paragraph():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     doc = markdown_sections("`unfinished\n\n![diagram](https://example.invalid/x)\n\n`\n")[0]
     assert doc.page_content == "`unfinished\n\n（外部图片未获取：diagram）\n\n`\n"
@@ -420,7 +420,7 @@ def test_markdown_unmatched_backticks_do_not_hide_images_in_later_paragraph():
 
 
 def test_markdown_inline_mdx_literal_does_not_hide_adjacent_real_image():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     literal = '{"`![literal](https://example.invalid/literal)"}'
     doc = markdown_sections(literal + " ![real](https://example.invalid/real)\n")[0]
@@ -431,7 +431,7 @@ def test_markdown_inline_mdx_literal_does_not_hide_adjacent_real_image():
 
 
 def test_markdown_list_and_quote_image_spans_use_original_offsets():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     doc = markdown_sections("> before ![quote](https://example.invalid/q) after\n\n- ![list](https://example.invalid/l)\n")[0]
     assert doc.page_content == "> before （外部图片未获取：quote） after\n\n- （外部图片未获取：list）\n"
@@ -450,7 +450,7 @@ def test_markdown_list_and_quote_image_spans_use_original_offsets():
     ],
 )
 def test_html_nested_blocks_keep_paragraph_and_code_boundaries(markup, expected):
-    from actweave_knowledge.extraction.dify.html_extractor import html_to_documents
+    from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
     docs = html_to_documents(markup)
     assert "\n".join(doc.page_content for doc in docs) == expected
@@ -460,7 +460,7 @@ def test_html_nested_blocks_keep_paragraph_and_code_boundaries(markup, expected)
 
 
 def test_html_nested_blocks_keep_image_context_spans():
-    from actweave_knowledge.extraction.dify.html_extractor import html_to_documents
+    from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
     docs = html_to_documents('<blockquote><p>before</p><p><img src="https://example.invalid/x" alt="diagram"></p><pre>a\nb</pre></blockquote>')
     assert "\n".join(doc.page_content for doc in docs) == "> before\n>\n> （外部图片未获取：diagram）\n>\n> ```\n> a\n> b\n> ```"
@@ -473,7 +473,7 @@ def test_html_nested_blocks_keep_image_context_spans():
 
 
 def test_markdown_braces_inside_inline_code_do_not_hide_real_image():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     doc = markdown_sections("`{` ![real](https://example.invalid/x) `}`\n")[0]
     assert doc.page_content == "`{` （外部图片未获取：real） `}`\n"
@@ -481,7 +481,7 @@ def test_markdown_braces_inside_inline_code_do_not_hide_real_image():
 
 
 def test_markdown_multiline_quote_image_keeps_original_location():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     doc = markdown_sections("> before\n> ![two\n> lines](https://example.invalid/x) after\n")[0]
     assert doc.page_content == "> before\n> （外部图片未获取：two lines） after\n"
@@ -492,7 +492,7 @@ def test_markdown_multiline_quote_image_keeps_original_location():
 
 
 def test_markdown_tab_indented_list_continuation_maps_real_image():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 
     doc = markdown_sections("- first\n\tcontinued ![real](https://example.invalid/x)\n")[0]
     assert doc.page_content == "- first\n\tcontinued （外部图片未获取：real）\n"
@@ -512,7 +512,7 @@ def test_markdown_tab_indented_list_continuation_maps_real_image():
     ],
 )
 def test_html_inline_sibling_whitespace_survives_block_conversion(markup, expected):
-    from actweave_knowledge.extraction.dify.html_extractor import html_to_documents
+    from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
     docs = html_to_documents(markup)
     assert "\n".join(doc.page_content for doc in docs) == expected
@@ -521,7 +521,7 @@ def test_html_inline_sibling_whitespace_survives_block_conversion(markup, expect
 
 @pytest.mark.parametrize("alt", ["<IP>", "{topology}", "router <IP> diagram"])
 def test_real_markdown_image_alt_is_not_literal_mask_text(alt):
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
     from actweave_knowledge.extraction.markdown_images import find_markdown_images
     from actweave_knowledge.extraction.normalizer import normalize_documents
 
@@ -538,7 +538,7 @@ def test_real_markdown_image_alt_is_not_literal_mask_text(alt):
 
 
 def test_image_mask_does_not_manufacture_bracket_structure_or_change_url():
-    from actweave_knowledge.extraction.dify.markdown_extractor import markdown_sections
+    from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
     from actweave_knowledge.extraction.markdown_images import find_markdown_images
 
     malformed = "![{a] b}](https://example.invalid/x)\n"

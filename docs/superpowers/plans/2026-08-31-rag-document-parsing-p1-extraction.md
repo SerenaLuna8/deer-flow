@@ -41,7 +41,7 @@
 | --- | --- |
 | `extraction/contracts.py`、`base.py`、`manifest.py` | 共用不可变 DTO、协议、稳定序列化及缓存解析 fingerprint |
 | `extraction/registry.py`、`processor.py`、`signatures.py` | 唯一路由、准入/能力共同来源、容器签名预检 |
-| `extraction/dify/*_extractor.py` | 固定版本移植及逐格式修正 |
+| `extraction/builtin/*_extractor.py` | 固定版本移植及逐格式修正 |
 | `extraction/encoding.py`、`tabular.py`、`normalizer.py` | 有限编码探测、表头和字段绑定、位置保持规范化 |
 | `extraction/images.py`、`ipc.py` | 安全图片规范化及父进程文件接收 |
 | `extraction/unstructured_local/*_extractor.py`、`elements.py` | 本地调用及实际元素 metadata 转换 |
@@ -576,10 +576,10 @@ class ExtractorRegistry:
 **Files:**
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/encoding.py`
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/normalizer.py`
-- Create: `backend/packages/knowledge/actweave_knowledge/extraction/dify/__init__.py`
-- Create: `backend/packages/knowledge/actweave_knowledge/extraction/dify/text_extractor.py`
-- Create: `backend/packages/knowledge/actweave_knowledge/extraction/dify/markdown_extractor.py`
-- Create: `backend/packages/knowledge/actweave_knowledge/extraction/dify/html_extractor.py`
+- Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/__init__.py`
+- Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/text_extractor.py`
+- Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/markdown_extractor.py`
+- Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/html_extractor.py`
 - Create: `backend/tests/knowledge/test_dify_text_extractors.py`
 - Modify: `backend/packages/knowledge/actweave_knowledge/extraction/patches.md`
 
@@ -679,7 +679,7 @@ def parse_heading(line: str) -> tuple[int, str] | None:
 
 ```python
 # 追加到 test_dify_text_extractors.py
-from actweave_knowledge.extraction.dify.html_extractor import html_to_documents
+from actweave_knowledge.extraction.builtin.html_extractor import html_to_documents
 
 
 def test_html_drops_active_content_but_keeps_code_and_link_label():
@@ -698,8 +698,8 @@ def test_html_drops_active_content_but_keeps_code_and_link_label():
 
 **Files:**
 - Create: `backend/packages/knowledge/actweave_knowledge/extraction/tabular.py`
-- Create: `backend/packages/knowledge/actweave_knowledge/extraction/dify/csv_extractor.py`
-- Create: `backend/packages/knowledge/actweave_knowledge/extraction/dify/excel_extractor.py`
+- Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/csv_extractor.py`
+- Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/excel_extractor.py`
 - Create: `backend/tests/knowledge/test_dify_tabular_extractors.py`
 - Modify: `backend/packages/knowledge/actweave_knowledge/extraction/patches.md`
 
@@ -984,8 +984,8 @@ IPC `asset` 帧只有 LocalAttachment JSON，帧≤64 KiB；不在该帧传正�
 ## P1-T6：Word 顺序/嵌套/Run 空格与 PDF 逐页图片（A05、A07、A18、A29）
 
 **Files:**
-- Create: `backend/packages/knowledge/actweave_knowledge/extraction/dify/word_extractor.py`
-- Create: `backend/packages/knowledge/actweave_knowledge/extraction/dify/pdf_extractor.py`
+- Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/word_extractor.py`
+- Create: `backend/packages/knowledge/actweave_knowledge/extraction/builtin/pdf_extractor.py`
 - Create: `backend/tests/knowledge/test_dify_office_pdf.py`
 - Modify: `backend/tests/knowledge/parsing_test_helpers.py`
 - Modify: `backend/packages/knowledge/actweave_knowledge/extraction/patches.md`

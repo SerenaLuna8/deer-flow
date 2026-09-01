@@ -120,14 +120,14 @@ def default_registry() -> ExtractorRegistry:
     local = ("unstructured", "python-magic", "lxml", "spacy", "en-core-web-sm")
     return ExtractorRegistry(
         (
-            _registration("dify.text", "dify.text_extractor", "TextExtractor", (".txt",), _BOTH, ("charset-normalizer",), digest),
-            _registration("dify.markdown", "dify.markdown_extractor", "MarkdownExtractor", (".md", ".markdown", ".mdx"), ("dify",), ("charset-normalizer", "markdown-it-py"), digest),
-            _registration("dify.pdf", "dify.pdf_extractor", "PdfExtractor", (".pdf",), _BOTH, ("pypdfium2", "pillow"), digest, images=True),
-            _registration("dify.word", "dify.word_extractor", "WordExtractor", (".docx",), _BOTH, ("python-docx", "lxml", "pillow"), digest, images=True),
-            _registration("dify.excel", "dify.excel_extractor", "ExcelExtractor", (".xlsx",), _BOTH, ("openpyxl", "pandas", "numpy", "pillow"), digest, images=True),
-            _registration("dify.excel", "dify.excel_extractor", "ExcelExtractor", (".xls",), _BOTH, ("pandas", "numpy", "xlrd"), digest),
-            _registration("dify.csv", "dify.csv_extractor", "CSVExtractor", (".csv",), _BOTH, ("charset-normalizer",), digest),
-            _registration("dify.html", "dify.html_extractor", "HtmlExtractor", (".html", ".htm"), _BOTH, ("beautifulsoup4", "charset-normalizer"), digest),
+            _registration("dify.text", "builtin.text_extractor", "TextExtractor", (".txt",), _BOTH, ("charset-normalizer",), digest),
+            _registration("dify.markdown", "builtin.markdown_extractor", "MarkdownExtractor", (".md", ".markdown", ".mdx"), ("dify",), ("charset-normalizer", "markdown-it-py"), digest),
+            _registration("dify.pdf", "builtin.pdf_extractor", "PdfExtractor", (".pdf",), _BOTH, ("pypdfium2", "pillow"), digest, images=True),
+            _registration("dify.word", "builtin.word_extractor", "WordExtractor", (".docx",), _BOTH, ("python-docx", "lxml", "pillow"), digest, images=True),
+            _registration("dify.excel", "builtin.excel_extractor", "ExcelExtractor", (".xlsx",), _BOTH, ("openpyxl", "pandas", "numpy", "pillow"), digest, images=True),
+            _registration("dify.excel", "builtin.excel_extractor", "ExcelExtractor", (".xls",), _BOTH, ("pandas", "numpy", "xlrd"), digest),
+            _registration("dify.csv", "builtin.csv_extractor", "CSVExtractor", (".csv",), _BOTH, ("charset-normalizer",), digest),
+            _registration("dify.html", "builtin.html_extractor", "HtmlExtractor", (".html", ".htm"), _BOTH, ("beautifulsoup4", "charset-normalizer"), digest),
             _registration("unstructured.pptx", "unstructured_local.unstructured_pptx_extractor", "UnstructuredPPTXExtractor", (".pptx",), _BOTH, (*local, "python-pptx"), digest),
             _registration("unstructured.epub", "unstructured_local.unstructured_epub_extractor", "UnstructuredEpubExtractor", (".epub",), _BOTH, (*local, "pypandoc-binary"), digest),
             _registration(
