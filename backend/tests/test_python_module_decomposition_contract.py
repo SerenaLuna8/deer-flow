@@ -198,6 +198,42 @@ def test_skill_design_codec_is_the_owning_module() -> None:
         assert SkillDesignService.__dict__[name].__func__ is getattr(owning, name)
 
 
+def test_skill_design_validation_is_the_owning_module() -> None:
+    from app.shared_assets import skill_design_validation as owning
+    from app.shared_assets.skill_design_service import SkillDesignService
+
+    names = (
+        "_validate_create",
+        "_validate_create_revision",
+        "_validate_turn",
+        "_validate_execution_preference",
+        "_validate_turn_model_name",
+        "_validate_turn_reasoning_effort",
+        "_validate_turn_attachments",
+        "_validate_validation",
+        "_validate_commit",
+        "_validate_cancel",
+        "_require_context",
+        "_require_capability",
+        "_require_nonterminal",
+        "_require_revise_target_live",
+        "_require_expected_revision",
+        "_require_matching_operation",
+        "_require_message_capacity",
+        "_require_matching_clarification_response",
+        "_candidate_files",
+        "_validate_builder_files",
+        "_validate_partial_builder_files",
+        "_require_preview_name",
+        "_valid_revision",
+        "_validate_uuid",
+        "_validate_idempotency_key",
+        "_bounded_text",
+    )
+    for name in names:
+        assert SkillDesignService.__dict__[name].__func__ is getattr(owning, name)
+
+
 def test_production_consumers_use_skill_package_integrity_owner() -> None:
     paths = (
         BACKEND_ROOT / "app/shared_assets/bootstrap/service.py",
