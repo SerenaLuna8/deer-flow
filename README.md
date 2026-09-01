@@ -206,8 +206,7 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   格式解析限制为本地文件，默认 `dify`，可选 `unstructured_local`；
   不执行 OCR，不调用解析 API，也不在运行时下载 Pandoc 或 NLP 资源。
   本地环境准备需安装固定的 `extraction-local` 依赖与平台 libmagic，并生成、
-  审查解析资源锁；具体来源、许可证和命令见
-  [解析移植说明](backend/packages/knowledge/actweave_knowledge/extraction/patches.md)。
+  审查解析资源锁。
   子进程必须通过 macOS `sandbox-exec` 或 Linux bubblewrap 隔离；缺失资源或不具备
   隔离权限时明确不可用，不能退回裸进程。部署到 Linux 主机前必须在目标机验证
   bubblewrap、libmagic 和当前平台资源锁；macOS 或单格式测试不代替该验收。
