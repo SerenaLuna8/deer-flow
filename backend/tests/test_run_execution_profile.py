@@ -150,6 +150,23 @@ def test_private_run_execution_profile_is_strict_and_separate_from_generic_conte
         )
 
 
+def test_public_run_metadata_removes_nested_authority_and_secret_fields() -> None:
+    from app.gateway.routers.private_work_routes.contracts import _public_run_metadata
+
+    assert _public_run_metadata(
+        {
+            "project_id": "hidden-project",
+            "__scope": "hidden-scope",
+            "access_token": "hidden-token",
+            "safe": {"owner_user_id": "hidden-owner", "label": "visible"},
+            "items": [{"password": "hidden-password", "value": 1}, 2],
+        }
+    ) == {
+        "safe": {"label": "visible"},
+        "items": [{"value": 1}, 2],
+    }
+
+
 def test_private_run_server_context_owns_channel_identity() -> None:
     caller_kwargs = {
         "config": {

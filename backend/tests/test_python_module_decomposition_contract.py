@@ -157,6 +157,41 @@ def test_router_openapi_operations_match_the_pre_split_baseline() -> None:
     assert _openapi_route_digests(catalog_router) == EXPECTED_OPENAPI_ROUTE_DIGESTS["asset_catalog"]
 
 
+def test_private_work_contract_and_dependency_exports_are_exact() -> None:
+    from app.gateway.routers import private_work as legacy
+    from app.gateway.routers.private_work_routes import contracts, dependencies
+
+    contract_names = (
+        "_POSTGRES_BIGINT_MAX",
+        "PRIVATE_THREAD_TITLE_MAX_LENGTH",
+        "PrivateThreadCreateRequest",
+        "PrivateThreadPatchRequest",
+        "PrivateThreadBranchRequest",
+        "ExecutionApprovalEnvelopeResponse",
+        "_public_run_metadata",
+        "_run_response",
+    )
+    dependency_names = (
+        "_thread_service",
+        "_execution_approval_service",
+        "_chat_control_service",
+        "_file_service",
+        "_file_streamer",
+        "_run_service",
+        "_browser_chat_run_service",
+        "_run_event_store",
+        "_run_store",
+        "_feedback_service",
+        "_runtime_dependency",
+        "_scoped_checkpointer",
+        "_raise_http",
+    )
+    for name in contract_names:
+        assert getattr(legacy, name) is getattr(contracts, name)
+    for name in dependency_names:
+        assert getattr(legacy, name) is getattr(dependencies, name)
+
+
 @pytest.mark.parametrize(
     ("actor_dependency", "options", "expected"),
     (
