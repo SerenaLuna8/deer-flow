@@ -42,6 +42,7 @@ EXECUTION_APPROVAL_LEGACY_PATH = APP_ROOT / "private_work" / "execution_approval
 AGENT_DESIGN_LEGACY_PATH = APP_ROOT / "shared_assets" / "agent_design_service.py"
 
 EXECUTION_APPROVAL_POLICY_PATH = APP_ROOT / "private_work" / "execution_approval_policy.py"
+EXECUTION_APPROVAL_CODEC_PATH = APP_ROOT / "private_work" / "execution_approval_codec.py"
 EXECUTION_APPROVAL_LIFECYCLE_PATH = APP_ROOT / "private_work" / "execution_approval_lifecycle.py"
 EXECUTION_APPROVAL_AUDIT_PATH = APP_ROOT / "private_work" / "execution_approval_audit.py"
 
@@ -407,6 +408,29 @@ def test_execution_approval_policy_is_the_owning_module() -> None:
     assert legacy._HOST_EXECUTION_MODES is owning._HOST_EXECUTION_MODES
     assert not _imports_module(_parse(EXECUTION_APPROVAL_POLICY_PATH), EXECUTION_APPROVAL_LEGACY_MODULE)
     assert not any(module.startswith("app.private_work.execution_approval") for module in _absolute_imports(EXECUTION_APPROVAL_POLICY_PATH))
+
+
+def test_execution_approval_codec_is_the_owning_module() -> None:
+    from app.private_work import execution_approval as legacy
+    from app.private_work import execution_approval_codec as owning
+
+    for name in (
+        "_RESULT_TEXT_LIMIT",
+        "_PRIVATE_ENVELOPE_SCHEMA_VERSION",
+        "_RESULT_SCHEMA_VERSION",
+        "_bounded_text",
+        "_private_envelope",
+        "_frozen_plan_from_row",
+        "_result_payload",
+        "_outcome_from_receipt",
+    ):
+        assert getattr(legacy, name) is getattr(owning, name), name
+    codec_imports = _absolute_imports(EXECUTION_APPROVAL_CODEC_PATH)
+    assert "app.private_work.execution_approval_policy" in codec_imports
+    forbidden = {module for module in codec_imports if module.startswith("app.") and module != "app.private_work.execution_approval_policy"}
+    assert forbidden == set(), forbidden
+    assert not _imports_module(_parse(EXECUTION_APPROVAL_CODEC_PATH), EXECUTION_APPROVAL_LEGACY_MODULE)
+    assert not any(module.startswith("sqlalchemy") for module in codec_imports)
 
 
 def test_execution_approval_lifecycle_and_audit_remain_separate_owners() -> None:
