@@ -3351,7 +3351,7 @@ async def test_claim_rechecks_ttl_after_asset_closure_before_side_effect_mark(
         return frozen_closure
 
     monkeypatch.setattr(
-        "app.private_work.execution_approval._asset_closure",
+        "app.private_work.execution_approval_worker._asset_closure",
         paused_asset_closure,
     )
     monkeypatch.setattr(

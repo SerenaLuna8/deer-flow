@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.private_work.execution_approval import _asset_closure
+from app.private_work.execution_approval_worker import _asset_closure
 
 
 class _Rows:

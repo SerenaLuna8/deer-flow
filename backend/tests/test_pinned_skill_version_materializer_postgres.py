@@ -22,7 +22,7 @@ from app.private_work import asset_runtime as asset_runtime_module
 from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkUnavailable
-from app.private_work.execution_approval import _asset_closure
+from app.private_work.execution_approval_worker import _asset_closure
 from app.private_work.run_admission import (
     AdmittedPrivateRun,
     PersistedRunSnapshot,

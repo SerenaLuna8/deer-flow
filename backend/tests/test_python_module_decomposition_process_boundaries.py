@@ -44,6 +44,7 @@ AGENT_DESIGN_LEGACY_PATH = APP_ROOT / "shared_assets" / "agent_design_service.py
 EXECUTION_APPROVAL_POLICY_PATH = APP_ROOT / "private_work" / "execution_approval_policy.py"
 EXECUTION_APPROVAL_CODEC_PATH = APP_ROOT / "private_work" / "execution_approval_codec.py"
 EXECUTION_APPROVAL_RECOVERY_PATH = APP_ROOT / "private_work" / "execution_approval_recovery.py"
+EXECUTION_APPROVAL_WORKER_PATH = APP_ROOT / "private_work" / "execution_approval_worker.py"
 EXECUTION_APPROVAL_LIFECYCLE_PATH = APP_ROOT / "private_work" / "execution_approval_lifecycle.py"
 EXECUTION_APPROVAL_AUDIT_PATH = APP_ROOT / "private_work" / "execution_approval_audit.py"
 
@@ -457,6 +458,86 @@ def test_execution_approval_recovery_is_the_owning_module_and_lifecycle_owns_the
         assert not _imports_module(_parse(EXECUTION_APPROVAL_RECOVERY_PATH), forbidden), forbidden
     assert not _imports_module(_parse(EXECUTION_APPROVAL_LIFECYCLE_PATH), "app.private_work.execution_approval_recovery")
     assert not _imports_module(_parse(EXECUTION_APPROVAL_LIFECYCLE_PATH), EXECUTION_APPROVAL_LEGACY_MODULE)
+
+
+def test_execution_approval_worker_port_is_the_owning_module() -> None:
+    from app.private_work import execution_approval as legacy
+    from app.private_work import execution_approval_worker as owning
+
+    assert legacy.WorkerHostExecutionApprovalPort is owning.WorkerHostExecutionApprovalPort
+    assert legacy._asset_closure is owning._asset_closure
+    worker_tree = _parse(EXECUTION_APPROVAL_WORKER_PATH)
+    for forbidden in (
+        EXECUTION_APPROVAL_LEGACY_MODULE,
+        "app.private_work.execution_approval_service",
+        "app.private_work.execution_approval_recovery",
+    ):
+        assert not _imports_module(worker_tree, forbidden), forbidden
+    worker_imports = _absolute_imports(EXECUTION_APPROVAL_WORKER_PATH)
+    assert {
+        "app.private_work.execution_approval_policy",
+        "app.private_work.execution_approval_codec",
+        "app.private_work.execution_approval_lifecycle",
+    } <= worker_imports
+    # The lease-bound port stays one cohesive class: stage, claim, spawn authorization,
+    # completion, output delivery, and lock helpers are not split into collaborators.
+    port = next(node for node in worker_tree.body if isinstance(node, ast.ClassDef) and node.name == "WorkerHostExecutionApprovalPort")
+    methods = {node.name for node in port.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)}
+    assert {
+        "prepare_host_execution_environment",
+        "request_host_execution",
+        "_stage",
+        "claim_frozen_host_execution",
+        "authorize_claimed_host_execution_spawn",
+        "complete_host_execution",
+        "complete_host_execution_with_retry_safety_fence",
+        "_complete_host_execution",
+        "_lock_completion_lease",
+        "_lock_completion_scope_shells",
+        "_lock_thread_scope_shell",
+        "deliver_output_obligation_in_session",
+    } <= methods
+
+
+EXECUTION_APPROVAL_PRIVATE_SEAMS = (
+    "_now",
+    "_database_now",
+    "_canonical_digest",
+    "_bounded_text",
+    "_decision_digest",
+    "_idempotency_digest",
+    "_private_envelope",
+    "_frozen_plan_from_row",
+    "_result_payload",
+    "_outcome_from_receipt",
+    "_asset_closure",
+    "_staged_approval_source_job_id",
+)
+EXECUTION_APPROVAL_PRIVATE_CONSTANTS = (
+    "_RESULT_TEXT_LIMIT",
+    "_CLAIM_TTL_SECONDS",
+    "_PRIVATE_ENVELOPE_SCHEMA_VERSION",
+    "_PROVIDER_POLICY_SCHEMA_VERSION",
+    "_RESULT_SCHEMA_VERSION",
+    "_CONTINUATION_NAME",
+    "_HOST_EXECUTION_MODES",
+)
+
+
+def test_execution_approval_facade_keeps_private_compatibility_seams() -> None:
+    from app.private_work import execution_approval as legacy
+
+    for name in EXECUTION_APPROVAL_PRIVATE_SEAMS:
+        assert callable(getattr(legacy, name)), name
+    for name in EXECUTION_APPROVAL_PRIVATE_CONSTANTS:
+        assert hasattr(legacy, name), name
+    assert legacy._RESULT_TEXT_LIMIT == 20_000
+    assert legacy._CLAIM_TTL_SECONDS == 60
+    assert legacy._PRIVATE_ENVELOPE_SCHEMA_VERSION == 3
+    assert legacy._PROVIDER_POLICY_SCHEMA_VERSION == 2
+    assert legacy._RESULT_SCHEMA_VERSION == 1
+    assert legacy._CONTINUATION_NAME == "host-execution-continuation:v1"
+    assert legacy._HOST_EXECUTION_MODES == frozenset({"isolated_direct", "local_disabled", "local_approval_required", "local_legacy_allow"})
 
 
 def test_execution_approval_lifecycle_and_audit_remain_separate_owners() -> None:
