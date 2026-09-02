@@ -35,7 +35,7 @@ from deerflow.runtime.host_execution_approval import (
     HostExecutionPlan,
     HostExecutionSkillSecretSource,
 )
-from deerflow.runtime.runs.worker import _build_runtime_context
+from deerflow.runtime.runs.runtime_binding import _build_runtime_context
 from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.security import (
     HostBashExecutionMode,

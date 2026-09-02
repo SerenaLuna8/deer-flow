@@ -109,7 +109,6 @@ WORKER_COMPATIBILITY_NAMES = frozenset(
         "_settle_rollback",
         "_prepare_goal_continuation_input",
         "get_sandbox_provider",
-        "inspect",
     }
 )
 # run_agent() must keep calling these by name from worker.py globals so the
@@ -167,6 +166,19 @@ STREAM_DELIVERY_NAMES = (
     "_extract_llm_error_fallback",
     "_unpack_stream_item",
     "_normalize_stream_namespace",
+)
+RUNTIME_BINDING_NAMES = (
+    "_repository_trace_user_id",
+    "_build_runtime_context",
+    "PrivateAgentRuntime",
+    "PrivateRuntimeFactoryUnavailable",
+    "RunContext",
+    "_checkpoint_runtime_settings",
+    "_install_runtime_context",
+    "_compute_agent_factory_supports_app_config",
+    "_cached_agent_factory_supports_app_config",
+    "_agent_factory_supports_app_config",
+    "_call_agent_factory_off_loop",
 )
 EXECUTOR_CLASS_COMPATIBILITY_NAMES = frozenset(
     {
@@ -420,3 +432,12 @@ def test_stream_delivery_owner_is_the_exact_legacy_export() -> None:
         assert getattr(worker_legacy, name) is getattr(owner, name), name
     assert owner._TEXT_DELTA_FLUSH_DUE is worker_legacy._TEXT_DELTA_FLUSH_DUE
     assert "time" in vars(owner)
+
+
+def test_runtime_binding_owner_is_the_exact_legacy_export() -> None:
+    owner = importlib.import_module("deerflow.runtime.runs.runtime_binding")
+    for name in RUNTIME_BINDING_NAMES:
+        assert getattr(worker_legacy, name) is getattr(owner, name), name
+    assert owner.__all__ == ["PrivateAgentRuntime", "PrivateRuntimeFactoryUnavailable", "RunContext"]
+    assert runtime_package.RunContext is owner.RunContext
+    assert "inspect" in vars(owner)

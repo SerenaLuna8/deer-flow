@@ -35,15 +35,14 @@ from deerflow.runtime.runs.checkpoint_rollback import (
     _rollback_to_pre_run_checkpoint,
 )
 from deerflow.runtime.runs.manager import ConflictError, RunManager
-from deerflow.runtime.runs.schemas import RunStatus
-from deerflow.runtime.runs.stream_delivery import _extract_llm_error_fallback
-from deerflow.runtime.runs.worker import (
-    RunContext,
+from deerflow.runtime.runs.runtime_binding import (
     _agent_factory_supports_app_config,
     _build_runtime_context,
     _install_runtime_context,
-    run_agent,
 )
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.stream_delivery import _extract_llm_error_fallback
+from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.runtime.secret_context import _SLASH_SKILL_ACTIVATION_RUN_KEY
 from deerflow.runtime.skill_context_authority import (
     VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
@@ -2069,7 +2068,7 @@ def test_agent_factory_supports_app_config_returns_false_when_signature_lookup_f
         def __call__(self, **kwargs):
             return kwargs
 
-    monkeypatch.setattr("deerflow.runtime.runs.worker.inspect.signature", lambda _obj: (_ for _ in ()).throw(ValueError("boom")))
+    monkeypatch.setattr("deerflow.runtime.runs.runtime_binding.inspect.signature", lambda _obj: (_ for _ in ()).throw(ValueError("boom")))
 
     assert _agent_factory_supports_app_config(BrokenCallable()) is False
 

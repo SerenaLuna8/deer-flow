@@ -82,11 +82,11 @@ from deerflow.error_codes import PublicRunError, PublicRunErrorCode
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 from deerflow.runtime.journal import RunJournalToolCallControlObserver
 from deerflow.runtime.runs.manager import RunManager
-from deerflow.runtime.runs.worker import (
+from deerflow.runtime.runs.runtime_binding import (
     RunContext,
     _call_agent_factory_off_loop,
-    run_agent,
 )
+from deerflow.runtime.runs.worker import run_agent
 from deerflow.sandbox.sandbox import check_authorization_boundary
 from deerflow.skills.types import Skill, SkillCategory
 
