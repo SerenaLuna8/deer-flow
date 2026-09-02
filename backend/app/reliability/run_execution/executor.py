@@ -105,7 +105,7 @@ from app.shared_assets.skill_builder_agent_runtime import (
     SkillBuilderAgentFactory,
     WorkerSkillBuilderAuthoringCatalog,
 )
-from app.shared_assets.skill_design_service import SkillDesignService
+from app.shared_assets.skill_builder_draft_sink import SkillDesignDraftSink
 from app.system_runtime_settings.models import auxiliary_model_snapshot_ref
 from app.system_settings.execution_payload import model_execution_provenance
 from app.system_settings.model_refs import resolve_model_ref
@@ -599,9 +599,8 @@ class RunAgentPrivateExecutor:
                     self._factory,
                     execution.context,
                 ),
-                draft_sink=SkillDesignService(
+                draft_sink=SkillDesignDraftSink(
                     self._factory,
-                ).terminal_sink(
                     execution.context,
                     claim,
                 ),

@@ -851,20 +851,23 @@ class TestExecutorFactoryResolution:
             lambda _factory, _context: object(),
         )
 
-        class _DesignService:
-            def __init__(self, _factory) -> None:  # noqa: ANN001
-                pass
+        fake_sink = object()
+        sink_constructions: list[tuple[object, object, object]] = []
 
-            def terminal_sink(self, _context, _claim):  # noqa: ANN001
-                return object()
+        def _draft_sink(factory, context, claim):  # noqa: ANN001
+            sink_constructions.append((factory, context, claim))
+            return fake_sink
 
-        monkeypatch.setattr(executor_module, "SkillDesignService", _DesignService)
+        monkeypatch.setattr(executor_module, "SkillDesignDraftSink", _draft_sink)
         # Knowledge module present: the skill_builder branch must still win.
         executor = _executor_with(_FakeKnowledgeModule())
+        execution = _execution("skill_builder")
+        claim = object()
 
-        resolved = executor._resolve_agent_factory(_execution("skill_builder"), object(), object())
+        resolved = executor._resolve_agent_factory(execution, claim, object())
 
         assert resolved is sentinel
+        assert sink_constructions == [(executor._factory, execution.context, claim)]
 
     def test_chat_run_without_module_returns_the_base_factory_unchanged(self) -> None:
         executor = _executor_with(None)

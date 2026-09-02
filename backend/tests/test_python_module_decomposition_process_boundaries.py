@@ -49,7 +49,8 @@ PRIVATE_WORK_DEPENDENCIES_PATH = APP_ROOT / "gateway" / "routers" / "private_wor
 PROJECT_AGENT_BUILDER_PATH = APP_ROOT / "gateway" / "routers" / "project_agent_builder.py"
 
 # The Worker executor constructs exactly one Skill Builder draft sink owner.
-EXECUTOR_SKILL_BUILDER_CONSTRUCTOR = "SkillDesignService"
+EXECUTOR_SKILL_BUILDER_CONSTRUCTOR = "SkillDesignDraftSink"
+SKILL_BUILDER_DRAFT_SINK_MODULE = "app.shared_assets.skill_builder_draft_sink"
 
 EXPECTED_EXPORT_DIGESTS = {
     SKILL_DESIGN_LEGACY_MODULE: (22, "b9e7397e798f62e2ba3c2c2e58f48939c661c7e937a2c3d687ad321035affed6"),
@@ -288,6 +289,10 @@ def test_batch3_legacy_import_inventories_match_the_audited_baseline() -> None:
 
 def test_worker_executor_constructs_one_skill_builder_sink_without_agent_design() -> None:
     assert _construction_count(EXECUTOR_PATH, EXECUTOR_SKILL_BUILDER_CONSTRUCTOR) == 1
+    assert _construction_count(EXECUTOR_PATH, "SkillDesignService") == 0
+    executor_tree = _parse(EXECUTOR_PATH)
+    assert _imports_module(executor_tree, SKILL_BUILDER_DRAFT_SINK_MODULE)
+    assert not _imports_module(executor_tree, SKILL_DESIGN_LEGACY_MODULE)
     for root in (WORKER_ROOT, RUN_EXECUTION_ROOT, HARNESS_ROOT):
         for module_name in (AGENT_DESIGN_LEGACY_MODULE, AGENT_DESIGN_GENERATION_LIFECYCLE_MODULE):
             assert _module_consumers(module_name, AGENT_DESIGN_LEGACY_PATH, root) == set(), (root, module_name)
