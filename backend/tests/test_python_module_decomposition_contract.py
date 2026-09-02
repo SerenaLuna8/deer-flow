@@ -386,6 +386,13 @@ def test_project_asset_contract_and_common_exports_are_exact() -> None:
     assert legacy._mcp_definition is mcp._mcp_definition
 
 
+def test_register_asset_routes_is_an_exact_facade_export() -> None:
+    from app.gateway.routers import project_assets as legacy
+    from app.gateway.routers.project_asset_routes import router as owning
+
+    assert legacy.register_asset_routes is owning.register_asset_routes
+
+
 def test_private_work_context_file_and_approval_exports_are_exact() -> None:
     from app.gateway.routers import private_work as legacy
     from app.gateway.routers.private_work_routes import context_controls, contracts, streaming
