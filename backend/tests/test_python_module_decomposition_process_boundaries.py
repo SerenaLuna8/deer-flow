@@ -45,6 +45,7 @@ EXECUTION_APPROVAL_POLICY_PATH = APP_ROOT / "private_work" / "execution_approval
 EXECUTION_APPROVAL_CODEC_PATH = APP_ROOT / "private_work" / "execution_approval_codec.py"
 EXECUTION_APPROVAL_RECOVERY_PATH = APP_ROOT / "private_work" / "execution_approval_recovery.py"
 EXECUTION_APPROVAL_WORKER_PATH = APP_ROOT / "private_work" / "execution_approval_worker.py"
+EXECUTION_APPROVAL_SERVICE_PATH = APP_ROOT / "private_work" / "execution_approval_service.py"
 EXECUTION_APPROVAL_LIFECYCLE_PATH = APP_ROOT / "private_work" / "execution_approval_lifecycle.py"
 EXECUTION_APPROVAL_AUDIT_PATH = APP_ROOT / "private_work" / "execution_approval_audit.py"
 
@@ -497,6 +498,48 @@ def test_execution_approval_worker_port_is_the_owning_module() -> None:
         "_lock_thread_scope_shell",
         "deliver_output_obligation_in_session",
     } <= methods
+
+
+def test_execution_approval_service_owns_gateway_reads_behind_an_imports_only_facade() -> None:
+    from app.private_work import execution_approval as legacy
+    from app.private_work import execution_approval_service as owning
+
+    assert legacy.ExecutionApprovalService is owning.ExecutionApprovalService
+    assert legacy.ExecutionApprovalProjection is owning.ExecutionApprovalProjection
+    for name in ("_CLAIM_TTL_SECONDS", "_CONTINUATION_NAME", "_decision_digest", "_idempotency_digest"):
+        assert getattr(legacy, name) is getattr(owning, name), name
+    assert _export_digest(legacy) == EXPECTED_EXPORT_DIGESTS[EXECUTION_APPROVAL_LEGACY_MODULE]
+    assert list(legacy.__all__) == [
+        "ExecutionApprovalProjection",
+        "ExecutionApprovalService",
+        "HostExecutionProviderPolicySnapshot",
+        "WorkerHostExecutionApprovalPort",
+        "recover_staged_execution_approval_id",
+        "settle_staged_execution_approvals",
+    ]
+    _assert_imports_only_facade(EXECUTION_APPROVAL_LEGACY_PATH)
+
+    service_tree = _parse(EXECUTION_APPROVAL_SERVICE_PATH)
+    for forbidden in (
+        EXECUTION_APPROVAL_LEGACY_MODULE,
+        "app.private_work.execution_approval_worker",
+        "app.private_work.execution_approval_recovery",
+    ):
+        assert not _imports_module(service_tree, forbidden), forbidden
+    assert {
+        "app.private_work.execution_approval_policy",
+        "app.private_work.execution_approval_codec",
+        "app.private_work.execution_approval_lifecycle",
+    } <= _absolute_imports(EXECUTION_APPROVAL_SERVICE_PATH)
+    # decide() stays one orchestration unit on the Service.
+    service = next(node for node in service_tree.body if isinstance(node, ast.ClassDef) and node.name == "ExecutionApprovalService")
+    assert {"active", "get", "decide"} <= {node.name for node in service.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)}
+
+    _assert_fresh_import_orders(
+        "app.private_work.execution_approval_service",
+        EXECUTION_APPROVAL_LEGACY_MODULE,
+        identity="legacy.ExecutionApprovalService is owner.ExecutionApprovalService and legacy.WorkerHostExecutionApprovalPort is not None",
+    )
 
 
 EXECUTION_APPROVAL_PRIVATE_SEAMS = (
