@@ -400,6 +400,18 @@ def test_asset_catalog_router_facade_is_exact() -> None:
     assert legacy.catalog_router is catalog.catalog_router
 
 
+def test_project_asset_router_facade_is_exact() -> None:
+    from app.gateway.routers import project_assets as legacy
+    from app.gateway.routers.project_asset_routes import bindings, catalog, mcp
+    from app.gateway.routers.project_asset_routes import router as owning
+
+    assert legacy.project_router is owning.project_router
+    assert legacy.catalog_router is catalog.catalog_router
+    assert legacy.register_asset_routes is owning.register_asset_routes
+    assert legacy._mcp_secret_response is mcp._mcp_secret_response
+    assert legacy._binding_response is bindings._binding_response
+
+
 def test_private_work_context_file_and_approval_exports_are_exact() -> None:
     from app.gateway.routers import private_work as legacy
     from app.gateway.routers.private_work_routes import context_controls, contracts, streaming
@@ -550,6 +562,43 @@ def test_private_work_facade_does_not_construct_router() -> None:
     tree = ast.parse(facade_path.read_text(encoding="utf-8"), filename=str(facade_path))
     constructor_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and ((isinstance(node.func, ast.Name) and node.func.id == "APIRouter") or (isinstance(node.func, ast.Attribute) and node.func.attr == "APIRouter"))]
     assert not constructor_calls
+
+
+def test_project_asset_route_leaves_do_not_import_legacy_facade() -> None:
+    imports = _absolute_imports(BACKEND_ROOT / "app" / "gateway" / "routers" / "project_asset_routes")
+    assert "app.gateway.routers.project_assets" not in imports
+
+
+def test_project_asset_owner_and_facade_import_cleanly_in_both_orders() -> None:
+    for statements in (
+        "from app.gateway.routers.project_asset_routes import catalog, router as owner\nfrom app.gateway.routers import project_assets as legacy",
+        "from app.gateway.routers import project_assets as legacy\nfrom app.gateway.routers.project_asset_routes import catalog, router as owner",
+    ):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (f"{statements}\nassert legacy.project_router is owner.project_router\nassert legacy.catalog_router is catalog.catalog_router\nassert legacy.register_asset_routes is owner.register_asset_routes"),
+            ],
+            cwd=BACKEND_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_project_asset_facade_only_imports_router_objects() -> None:
+    facade_path = BACKEND_ROOT / "app" / "gateway" / "routers" / "project_assets.py"
+    tree = ast.parse(facade_path.read_text(encoding="utf-8"), filename=str(facade_path))
+    router_constructors = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and ((isinstance(node.func, ast.Name) and node.func.id == "APIRouter") or (isinstance(node.func, ast.Attribute) and node.func.attr == "APIRouter"))]
+    registration_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and ((isinstance(node.func, ast.Name) and node.func.id == "register_asset_routes") or (isinstance(node.func, ast.Attribute) and node.func.attr == "register_asset_routes"))
+    ]
+    assert not router_constructors
+    assert not registration_calls
 
 
 def test_private_context_projection_polling_default_uses_shared_timing() -> None:

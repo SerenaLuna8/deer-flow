@@ -6,8 +6,10 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Response, status
 
+from app.gateway.routers.project_asset_routes import agents, bindings, mcp, skills
 from app.gateway.routers.project_asset_routes.common import (
     ASSET_ERRORS,
+    AssetRoute,
     _agent_asset_item,
     _agent_definition_call,
     _agent_definition_response,
@@ -19,6 +21,7 @@ from app.gateway.routers.project_asset_routes.common import (
     get_agent_service,
     get_mcp_service,
     get_skill_service,
+    project_asset_context,
     raise_asset_domain,
 )
 from app.gateway.routers.project_asset_routes.contracts import (
@@ -356,3 +359,21 @@ def register_asset_routes(
         add_status_route("mcp-servers", "suspend", get_mcp_service)
         add_status_route("skills", "enable", get_skill_service)
         add_status_route("skills", "suspend", get_skill_service)
+
+
+project_router = APIRouter(
+    prefix="/api/projects/{project_id}",
+    tags=["project-assets"],
+    route_class=AssetRoute,
+)
+project_router.include_router(skills.primary_router)
+project_router.include_router(agents.router)
+project_router.include_router(skills.listing_router)
+project_router.include_router(mcp.configuration_router)
+bindings.register_binding_routes(project_router)
+register_asset_routes(
+    project_router,
+    project_asset_context,
+    include_project_asset_delete=True,
+)
+project_router.include_router(mcp.discovery_router)
