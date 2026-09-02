@@ -41,6 +41,7 @@ SKILL_DESIGN_LIFECYCLE_PATH = APP_ROOT / "shared_assets" / "skill_design_lifecyc
 EXECUTION_APPROVAL_LEGACY_PATH = APP_ROOT / "private_work" / "execution_approval.py"
 AGENT_DESIGN_LEGACY_PATH = APP_ROOT / "shared_assets" / "agent_design_service.py"
 
+EXECUTION_APPROVAL_POLICY_PATH = APP_ROOT / "private_work" / "execution_approval_policy.py"
 EXECUTION_APPROVAL_LIFECYCLE_PATH = APP_ROOT / "private_work" / "execution_approval_lifecycle.py"
 EXECUTION_APPROVAL_AUDIT_PATH = APP_ROOT / "private_work" / "execution_approval_audit.py"
 
@@ -394,6 +395,18 @@ def test_skill_design_lifecycle_owns_the_service_behind_an_imports_only_facade()
         SKILL_DESIGN_LEGACY_MODULE,
         identity="legacy.SkillDesignService is owner.SkillDesignService",
     )
+
+
+def test_execution_approval_policy_is_the_owning_module() -> None:
+    from app.private_work import execution_approval as legacy
+    from app.private_work import execution_approval_policy as owning
+
+    assert legacy.HostExecutionProviderPolicySnapshot is owning.HostExecutionProviderPolicySnapshot
+    assert legacy._canonical_digest is owning._canonical_digest
+    assert legacy._PROVIDER_POLICY_SCHEMA_VERSION is owning._PROVIDER_POLICY_SCHEMA_VERSION
+    assert legacy._HOST_EXECUTION_MODES is owning._HOST_EXECUTION_MODES
+    assert not _imports_module(_parse(EXECUTION_APPROVAL_POLICY_PATH), EXECUTION_APPROVAL_LEGACY_MODULE)
+    assert not any(module.startswith("app.private_work.execution_approval") for module in _absolute_imports(EXECUTION_APPROVAL_POLICY_PATH))
 
 
 def test_execution_approval_lifecycle_and_audit_remain_separate_owners() -> None:

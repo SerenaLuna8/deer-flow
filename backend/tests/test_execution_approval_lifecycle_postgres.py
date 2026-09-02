@@ -43,7 +43,6 @@ from app.private_work.errors import (
 )
 from app.private_work.execution_approval import (
     ExecutionApprovalService,
-    HostExecutionProviderPolicySnapshot,
     WorkerHostExecutionApprovalPort,
     recover_staged_execution_approval_id,
     settle_staged_execution_approvals,
@@ -56,6 +55,9 @@ from app.private_work.execution_approval_lifecycle import (
     claimed_execution_absolute_deadline,
     lock_and_reconcile_active_execution_approval,
     reconcile_locked_execution_approval,
+)
+from app.private_work.execution_approval_policy import (
+    HostExecutionProviderPolicySnapshot,
 )
 from app.private_work.file_finalizer import (
     PrivateFileFinalizer,
