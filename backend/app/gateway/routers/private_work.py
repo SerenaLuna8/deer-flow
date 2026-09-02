@@ -80,6 +80,51 @@ from app.gateway.routers.private_work_routes.contracts import (
     _thread_response,
     _timestamp,
 )
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalApprovedResponse as ExecutionApprovalApprovedResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalBaseResponse as ExecutionApprovalBaseResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalClaimedResponse as ExecutionApprovalClaimedResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalClosedResponse as ExecutionApprovalClosedResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalContinuationRunResponse as ExecutionApprovalContinuationRunResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalDeniedResponse as ExecutionApprovalDeniedResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalDomainResponse as ExecutionApprovalDomainResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalFinishedResponse as ExecutionApprovalFinishedResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalLaunchFailedResponse as ExecutionApprovalLaunchFailedResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalPendingResponse as ExecutionApprovalPendingResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalResponse as ExecutionApprovalResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalSourceAgentResponse as ExecutionApprovalSourceAgentResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalUnknownResponse as ExecutionApprovalUnknownResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateCompactKeep as PrivateCompactKeep,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateRunExecutionProfileResponse as PrivateRunExecutionProfileResponse,
+)
 from app.gateway.routers.private_work_routes.dependencies import (
     _browser_chat_run_service,
     _chat_control_service,
