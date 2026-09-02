@@ -192,8 +192,12 @@ def _legacy_test_consumers(module_name: str) -> frozenset[str]:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 aliases.update(alias.asname or alias.name for alias in node.names if alias.name == module_name)
-            elif isinstance(node, ast.ImportFrom) and node.module == module_name:
-                observed.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                if node.module == module_name:
+                    observed.update(alias.name for alias in node.names)
+                else:
+                    # ``from <package> import <module>`` binds the module itself under a local name.
+                    aliases.update(alias.asname or alias.name for alias in node.names if f"{node.module}.{alias.name}" == module_name)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -256,20 +260,24 @@ def _outer_except_ladder(path: Path, function_name: str) -> tuple[tuple[str, ...
 
 
 def _module_imports(path: Path) -> set[str]:
-    """Absolute imports plus relative imports rendered as ``.module`` / ``.name``."""
+    """Absolute imports plus relative imports rendered as ``.module`` / ``.name``.
+
+    Every ``from X import Y`` also records ``X.Y`` (with the relative prefix kept)
+    so ``from <package> import <module>`` is visible as an import of ``<module>``.
+    """
 
     imports: set[str] = set()
     for node in ast.walk(_parse(path)):
         if isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            if node.level == 0 and node.module:
-                imports.add(node.module)
+            prefix = "." * node.level
+            if node.module:
+                imports.add(f"{prefix}{node.module}")
+                imports.update(f"{prefix}{node.module}.{alias.name}" for alias in node.names)
             elif node.level > 0:
-                prefix = "." * node.level
-                imports.add(f"{prefix}{node.module or ''}")
-                if not node.module:
-                    imports.update(f"{prefix}{alias.name}" for alias in node.names)
+                imports.add(prefix)
+                imports.update(f"{prefix}{alias.name}" for alias in node.names)
     return imports
 
 
@@ -320,13 +328,28 @@ def test_batch5_terminal_exception_ladders_are_frozen() -> None:
     assert _outer_except_ladder(EXECUTOR_PATH, "_execute_with_trace") == EXPECTED_EXECUTOR_EXCEPT_LADDER
 
 
+def test_module_imports_helper_sees_every_import_form(tmp_path: Path) -> None:
+    probe = tmp_path / "probe.py"
+    probe_lines = (
+        "from deerflow.runtime.runs import worker",
+        "from ..runs import worker as w2",
+        "from ..runs.worker import x",
+        "from . import worker as w3",
+        "from .worker import run_agent",
+    )
+    probe.write_text("\n".join(probe_lines) + "\n", encoding="utf-8")
+    imports = _module_imports(probe)
+    assert {"deerflow.runtime.runs.worker", "..runs.worker", "..runs.worker.x", ".worker", ".worker.run_agent"} <= imports, imports
+
+
 def test_batch5_owner_modules_never_import_facades_or_forbidden_packages() -> None:
     for name in WORKER_OWNER_MODULES:
         path = RUNS_ROOT / f"{name}.py"
         if not path.exists():
             continue
         imports = _module_imports(path)
-        assert not imports & {WORKER_MODULE, ".worker"}, (name, imports & {WORKER_MODULE, ".worker"})
+        facade_imports = {module for module in imports if module == WORKER_MODULE or module.endswith(".worker")}
+        assert facade_imports == set(), (name, facade_imports)
         forbidden = {module for module in imports if module == "app" or module.startswith("app.") or module == "sqlalchemy" or module.startswith("sqlalchemy.")}
         assert forbidden == set(), (name, forbidden)
     for name in EXECUTOR_OWNER_MODULES:
@@ -334,4 +357,5 @@ def test_batch5_owner_modules_never_import_facades_or_forbidden_packages() -> No
         if not path.exists():
             continue
         imports = _module_imports(path)
-        assert not imports & {EXECUTOR_MODULE, ".executor"}, (name, imports & {EXECUTOR_MODULE, ".executor"})
+        facade_imports = {module for module in imports if module == EXECUTOR_MODULE or module.endswith(".executor")}
+        assert facade_imports == set(), (name, facade_imports)
