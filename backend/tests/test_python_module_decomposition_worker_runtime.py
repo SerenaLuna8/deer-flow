@@ -180,6 +180,18 @@ RUNTIME_BINDING_NAMES = (
     "_agent_factory_supports_app_config",
     "_call_agent_factory_off_loop",
 )
+GOAL_CONTINUATION_NAMES = (
+    "_goal_instance_matches",
+    "_materialized_checkpoint_goal",
+    "_build_run_local_mutation_accessor",
+    "_write_materialized_goal",
+    "_read_checkpoint_goal",
+    "_has_durable_goal_turn_receipt",
+    "_stand_down_reason",
+    "_persist_goal_evaluation",
+    "_reread_goal_and_checkpoint",
+    "_prepare_goal_continuation_input",
+)
 EXECUTOR_CLASS_COMPATIBILITY_NAMES = frozenset(
     {
         "execute",
@@ -441,3 +453,13 @@ def test_runtime_binding_owner_is_the_exact_legacy_export() -> None:
     assert owner.__all__ == ["PrivateAgentRuntime", "PrivateRuntimeFactoryUnavailable", "RunContext"]
     assert runtime_package.RunContext is owner.RunContext
     assert "inspect" in vars(owner)
+
+
+def test_goal_continuation_owner_is_the_exact_legacy_export() -> None:
+    owner = importlib.import_module("deerflow.runtime.runs.goal_continuation")
+    for name in GOAL_CONTINUATION_NAMES:
+        assert getattr(worker_legacy, name) is getattr(owner, name), name
+    assert not hasattr(owner, "__all__")
+    owner_imports = _module_imports(RUNS_ROOT / "goal_continuation.py")
+    assert ".checkpoint_rollback" in owner_imports
+    assert not owner_imports & {WORKER_MODULE, ".worker", ".stream_delivery", ".runtime_binding"}
