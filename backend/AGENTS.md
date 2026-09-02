@@ -64,6 +64,17 @@ Run full-stack commands from the repository root and backend targets from
   `SkillService` owns the Project Skill aggregate and Version lifecycle.
 - Provider Request ownership is split into profile, measurement, and guard;
   `provider_request_usage.py` is a compatibility export surface only.
+- Skill Builder Gateway lifecycle is owned by
+  `app/shared_assets/skill_design_lifecycle.py`; its Run-bound Worker draft and
+  terminal operations are owned by `skill_builder_draft_sink.py`;
+  `skill_design_service.py` is a compatibility façade. Execution Approval
+  policy, codec, Worker port, recovery, and Gateway service are owned by their
+  `execution_approval_*.py` modules while `execution_approval_lifecycle.py`
+  retains shared transactional convergence and `execution_approval.py` is a
+  compatibility façade. Agent Design model-turn execution, generated-default
+  preparation, stop coordination, and stale recovery are owned by
+  `agent_design_generation_lifecycle.py`; `AgentDesignService` retains session
+  admission, manual Blueprint updates, Commit, and Cancel ownership.
 - `packages/knowledge/actweave_knowledge/` owns the self-contained RAG
   Knowledge module; `app/knowledge/` owns its host adapters (config mapping,
   Gateway routers, Worker handlers, Agent tool, authority seam, model port).
