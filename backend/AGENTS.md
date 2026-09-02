@@ -64,6 +64,23 @@ Run full-stack commands from the repository root and backend targets from
   Tool configuration paths, while `deerflow.sandbox.security` remains the Host
   Bash policy authority. Internal Harness code imports the owning module; each
   LangChain Tool is decorated exactly once.
+- Harness Worker execution is owned by
+  `packages/harness/deerflow/runtime/runs/`: `worker.py` keeps `run_agent()`
+  (preparation orchestration, graph streaming, business terminal priority, and
+  cleanup order) and re-exports legacy private names; `checkpoint_rollback.py`
+  owns checkpoint reads, the pre-run message boundary, rollback capture/restore,
+  and pre-run captures; `stream_delivery.py` owns frame batching, publishing,
+  stream modes, and root-lane fallback/approval markers; `runtime_binding.py`
+  owns `RunContext`, runtime-context binding, and Agent factory invocation;
+  `goal_continuation.py` owns hidden goal continuation. Tests patch
+  `_prepare_goal_continuation_input`, `_rollback_to_pre_run_checkpoint`,
+  `_settle_rollback`, and `get_sandbox_provider` on `worker`, and patch every
+  other moved helper on its owner. The private Run executor keeps lease
+  boundary, record registration, the runner call, exception priority, and
+  cleanup in `app/reliability/run_execution/executor.py`; `preparation.py` owns
+  frozen policy/models, materialization, authorities, checkpointer, and
+  `RunContext` construction behind frozen dataclasses; `outcome_mapping.py` owns
+  pure usage and outcome mapping.
 - Builder `*_contracts.py`, `*_codec.py`, and `*_validation.py` modules own
   immutable payloads and pure transformations; the corresponding Service owns
   authorization, optimistic revisions, lifecycle transitions, and transactions.

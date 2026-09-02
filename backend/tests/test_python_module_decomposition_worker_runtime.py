@@ -328,6 +328,16 @@ def _called_names(function: ast.AST) -> frozenset[str]:
     return frozenset(names)
 
 
+def _attribute_call_names(function: ast.AST) -> frozenset[str]:
+    """Attribute names invoked as ``<expr>.<attr>(...)`` anywhere inside ``function``."""
+
+    names: set[str] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            names.add(node.func.attr)
+    return frozenset(names)
+
+
 def _dotted(node: ast.expr) -> str:
     if isinstance(node, ast.Name):
         return node.id
@@ -774,6 +784,7 @@ def test_executor_owns_boundary_record_runner_and_cleanup_while_preparation_owns
         "push_current_app_config",
         "pop_current_app_config",
     } <= executor_calls
+    assert "_memory_archive_context" in _attribute_call_names(_function_node(EXECUTOR_PATH, "_execute_with_trace"))
     assert "load_memory_archive_context" in _called_names(_function_node(EXECUTOR_PATH, "_memory_archive_context"))
     assert not executor_calls & {"WorkerHostExecutionApprovalPort", "PrivateRunFileAuthority", "PrivateRunContextEvidenceObserver", "PrivateRunMemoryAuthority", "RunContext", "LeaseAuthorizedRunEventStore"}
     preparation_path = RUN_EXECUTION_ROOT / "preparation.py"
@@ -784,3 +795,16 @@ def test_executor_owns_boundary_record_runner_and_cleanup_while_preparation_owns
     context_calls = _called_names(_function_node(preparation_path, "build_run_context"))
     assert {"RunContext", "PrivateRunMemoryAuthority", "LeaseAuthorizedRunEventStore", "_PrivateRunThreadMetadataStore"} <= context_calls
     assert {"LeaseAuthorizedStreamBridge", "SkillBuilderActivityStreamBridge"} <= executor_calls
+
+
+def test_batch5_all_owner_modules_exist_and_executor_is_not_a_facade() -> None:
+    for name in WORKER_OWNER_MODULES:
+        assert (RUNS_ROOT / f"{name}.py").is_file(), name
+    for name in EXECUTOR_OWNER_MODULES:
+        assert (RUN_EXECUTION_ROOT / f"{name}.py").is_file(), name
+    executor_tree = _parse(EXECUTOR_PATH)
+    classes = {node.name for node in executor_tree.body if isinstance(node, ast.ClassDef)}
+    assert classes == {"RunAgentPrivateExecutor"}
+    assert executor_legacy.__all__ == ["RunAgentPrivateExecutor"]
+    worker_functions = {node.name for node in _parse(WORKER_PATH).body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert worker_functions == {"run_agent"}
