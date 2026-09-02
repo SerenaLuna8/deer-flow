@@ -147,9 +147,13 @@ def _absolute_imports(root: Path) -> set[str]:
 
 def _legacy_gateway_router_imports(root: Path) -> list[tuple[Path, str]]:
     legacy_names = {"private_work", "project_assets"}
+    legacy_facade_paths = {
+        root / "gateway" / "routers" / "private_work.py",
+        root / "gateway" / "routers" / "project_assets.py",
+    }
     findings: list[tuple[Path, str]] = []
     for path in root.rglob("*.py"):
-        if path.name in {"private_work.py", "project_assets.py"}:
+        if path in legacy_facade_paths:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -175,6 +179,34 @@ def _legacy_gateway_router_imports(root: Path) -> list[tuple[Path, str]]:
 
 def test_gateway_production_imports_use_owner_modules() -> None:
     assert _legacy_gateway_router_imports(BACKEND_ROOT / "app") == []
+
+
+@pytest.mark.parametrize(
+    ("facade_name", "legacy_name"),
+    (("private_work.py", "private_work"), ("project_assets.py", "project_assets")),
+)
+def test_gateway_production_import_scan_excludes_only_exact_facades(
+    tmp_path: Path,
+    facade_name: str,
+    legacy_name: str,
+) -> None:
+    app_root = tmp_path / "app"
+    facade_path = app_root / "gateway" / "routers" / facade_name
+    facade_path.parent.mkdir(parents=True)
+    facade_path.write_text(
+        f"from app.gateway.routers import {legacy_name}\n",
+        encoding="utf-8",
+    )
+    unrelated_path = app_root / "unrelated" / facade_name
+    unrelated_path.parent.mkdir()
+    unrelated_path.write_text(
+        f"from app.gateway.routers import {legacy_name}\n",
+        encoding="utf-8",
+    )
+
+    assert _legacy_gateway_router_imports(app_root) == [
+        (unrelated_path, legacy_name),
+    ]
 
 
 def test_router_manifests_match_the_pre_split_baseline() -> None:
