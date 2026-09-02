@@ -125,7 +125,7 @@ async def test_compensated_create_purges_context_before_thread_row(
 
 
 def test_frontend_has_no_single_run_delete_call_or_ui_mutation_path() -> None:
-    router_source = (_REPOSITORY_ROOT / "backend/app/gateway/routers/private_work.py").read_text(encoding="utf-8")
+    router_source = (_REPOSITORY_ROOT / "backend/app/gateway/routers/private_work_routes/runs.py").read_text(encoding="utf-8")
     assert "async def delete_private_run(" in router_source
 
     sdk_run_delete = re.compile(

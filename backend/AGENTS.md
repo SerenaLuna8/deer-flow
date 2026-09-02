@@ -49,6 +49,12 @@ Run full-stack commands from the repository root and backend targets from
 
 - `app/<domain>/` owns application composition, HTTP admission, server-issued
   contexts, and domain transactions.
+- Private Work and Project Assets Gateway handlers are owned by
+  `app/gateway/routers/private_work_routes/` and
+  `app/gateway/routers/project_asset_routes/`. Their sibling `.py` modules are
+  compatibility façades only. Add handlers to the owning resource module,
+  compose them once in `router.py`, preserve registration order, and patch the
+  owning module in focused tests.
 - `packages/harness/deerflow/<domain>/` owns reusable graph, runtime,
   persistence, sandbox, Skill, MCP, and subagent primitives.
 - Builder `*_contracts.py`, `*_codec.py`, and `*_validation.py` modules own

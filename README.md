@@ -264,6 +264,11 @@ Nginx :2026 ----> Frontend :3000
 Gateway 不执行 Agent graph；Worker 不提供浏览器业务 API。私有资源按账户、项目和
 owner 作用域隔离，浏览器状态和请求字段都不是授权依据。
 
+Gateway 的 Private Work 与 Project Assets HTTP 路由按资源族组织在
+`private_work_routes/` 与 `project_asset_routes/`；旧的 `private_work.py`、
+`project_assets.py` 仅保留兼容导入。该组织方式不改变 Gateway、Worker、Scheduler
+的运行职责。
+
 后端内部继续保持 HTTP Adapter、应用域事务与 Harness Runtime 的单向依赖。
 为兼容既有调用保留的 Python 入口只转发 owning module 的同一对象，不维护第二套业务实现。
 
