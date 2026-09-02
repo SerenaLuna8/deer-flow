@@ -13,6 +13,8 @@ import importlib
 import inspect
 from pathlib import Path
 
+import pytest
+
 import deerflow.runtime as runtime_package
 from app.reliability.run_execution import executor as executor_legacy
 from deerflow.runtime.runs import worker as worker_legacy
@@ -398,6 +400,18 @@ def test_batch5_terminal_exception_ladders_are_frozen() -> None:
     assert _outer_except_ladder(EXECUTOR_PATH, "_execute_with_trace") == EXPECTED_EXECUTOR_EXCEPT_LADDER
 
 
+def test_batch5_worker_still_defines_run_agent_and_only_reexports_moved_helpers() -> None:
+    tree = _parse(WORKER_PATH)
+    top_level_functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    top_level_classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    assert top_level_functions == {"run_agent"}
+    assert top_level_classes == set()
+    worker_imports = _module_imports(WORKER_PATH)
+    assert {".checkpoint_rollback", ".stream_delivery", ".runtime_binding", ".goal_continuation"} <= worker_imports
+    for name in WORKER_OWNER_MODULES:
+        assert (RUNS_ROOT / f"{name}.py").is_file(), name
+
+
 def test_module_imports_helper_sees_every_import_form(tmp_path: Path) -> None:
     probe = tmp_path / "probe.py"
     probe_lines = (
@@ -435,7 +449,7 @@ def test_checkpoint_rollback_owner_is_the_exact_legacy_export() -> None:
     owner = importlib.import_module("deerflow.runtime.runs.checkpoint_rollback")
     for name in CHECKPOINT_ROLLBACK_NAMES:
         assert getattr(worker_legacy, name) is getattr(owner, name), name
-    assert owner.__all__ == ["RollbackPoint"]
+    assert owner.__all__ == ["PreRunCheckpointBaseline", "PreRunRollbackCapture", "RollbackPoint", "capture_legacy_pre_run_baseline", "capture_pre_run_rollback_point"]
 
 
 def test_stream_delivery_owner_is_the_exact_legacy_export() -> None:
@@ -522,3 +536,67 @@ def test_bind_run_runtime_context_installs_context_runtime_and_model_name() -> N
     assert runtime.context is bound.runtime_context
     assert runtime.store == "store-sentinel"
     assert RuntimeContextKeys.MODEL_NAME not in config["configurable"]
+
+
+@pytest.mark.anyio
+async def test_capture_legacy_pre_run_baseline_maps_raw_capture_failure_by_run_kind() -> None:
+    from deerflow.error_codes import PublicRunError, PublicRunErrorCode
+    from deerflow.runtime.runs.checkpoint_rollback import PreRunCheckpointBaseline, capture_legacy_pre_run_baseline
+
+    class Checkpointer:
+        """Head is full-mode compatible; the raw pre-run capture then fails."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def aget_tuple(self, _config):
+            self.calls += 1
+            if self.calls == 1:
+                return None
+            raise RuntimeError("raw capture unavailable")
+
+    checkpoint_config = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    public_checkpointer = Checkpointer()
+    public = await capture_legacy_pre_run_baseline(
+        checkpointer=public_checkpointer,
+        checkpoint_config=dict(checkpoint_config),
+        configurable={"thread_id": "thread-1", "checkpoint_ns": ""},
+        checkpoint_mode="full",
+        thread_id="thread-1",
+        run_id="run-1",
+        private_message_boundary_required=False,
+    )
+    assert isinstance(public, PreRunCheckpointBaseline)
+    assert public_checkpointer.calls == 2
+    assert public.snapshot_capture_failed is True
+    assert public.pre_run_checkpoint_id is None
+    assert public.legacy_pre_run_snapshot is None
+    assert public.pre_existing_message_ids == set()
+
+    with pytest.raises(PublicRunError) as raised:
+        await capture_legacy_pre_run_baseline(
+            checkpointer=Checkpointer(),
+            checkpoint_config=dict(checkpoint_config),
+            configurable={"thread_id": "thread-1", "checkpoint_ns": ""},
+            checkpoint_mode="full",
+            thread_id="thread-1",
+            run_id="run-1",
+            private_message_boundary_required=True,
+        )
+    assert raised.value.code is PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE
+
+    with pytest.raises(RuntimeError, match="head unavailable"):
+
+        class BrokenHead:
+            async def aget_tuple(self, _config):
+                raise RuntimeError("head unavailable")
+
+        await capture_legacy_pre_run_baseline(
+            checkpointer=BrokenHead(),
+            checkpoint_config=dict(checkpoint_config),
+            configurable={"thread_id": "thread-1", "checkpoint_ns": ""},
+            checkpoint_mode="full",
+            thread_id="thread-1",
+            run_id="run-1",
+            private_message_boundary_required=False,
+        )

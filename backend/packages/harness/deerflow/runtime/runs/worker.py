@@ -16,7 +16,6 @@ internal checkpoint callbacks that are not exposed in the Python public API.
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 import os
 import sys
@@ -40,11 +39,7 @@ from deerflow.error_codes import (
     PublicRunErrorCode,
 )
 from deerflow.public_error_codes import llm_error_code_for_reason
-from deerflow.runtime.checkpoint_mode import (
-    CheckpointModeMismatchError,
-    aensure_checkpoint_mode_compatible,
-    inject_checkpoint_mode,
-)
+from deerflow.runtime.checkpoint_mode import inject_checkpoint_mode
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_carrier import RuntimeContextCarrier
 from deerflow.runtime.context_keys import RuntimeContextKeys
@@ -99,6 +94,8 @@ from .checkpoint_rollback import (  # noqa: F401 - compatibility exports
     _rollback_to_pre_run_checkpoint,
     _settle_rollback,
     _snapshot_values,
+    capture_legacy_pre_run_baseline,
+    capture_pre_run_rollback_point,
 )
 from .execution_contracts import (
     RunAgentOutcome,
@@ -341,79 +338,19 @@ async def run_agent(
         }
         inject_checkpoint_mode(checkpoint_config, checkpoint_mode)
         if checkpointer is not None:
-            try:
-                await aensure_checkpoint_mode_compatible(
-                    checkpointer,
-                    checkpoint_config,
-                    checkpoint_mode,
-                )
-                selected_configurable: dict[str, Any] = {
-                    "thread_id": thread_id,
-                    "checkpoint_ns": configurable.get("checkpoint_ns", ""),
-                }
-                for selector_key in ("checkpoint_id", "checkpoint_map"):
-                    if selector_key in configurable:
-                        selected_configurable[selector_key] = configurable[selector_key]
-                selected_checkpoint_config: dict[str, Any] = {"configurable": selected_configurable}
-                inject_checkpoint_mode(
-                    selected_checkpoint_config,
-                    checkpoint_mode,
-                )
-                has_historical_selector = bool(selected_configurable.get("checkpoint_ns")) or any(selector_key in configurable for selector_key in ("checkpoint_id", "checkpoint_map"))
-                if has_historical_selector:
-                    await aensure_checkpoint_mode_compatible(
-                        checkpointer,
-                        selected_checkpoint_config,
-                        checkpoint_mode,
-                    )
-            except CheckpointModeMismatchError:
-                raise
-            except Exception:
-                if private_message_boundary_required:
-                    logger.warning(
-                        "Private Run pre-run message boundary is unavailable for run %s",
-                        run_id,
-                    )
-                    raise PublicRunError(PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE) from None
-                raise
-
-            # Full-mode compatibility stubs and legacy tests may not expose a
-            # compiled graph state API. Preserve a raw fallback for those
-            # callers, while production graphs replace it below with an exact
-            # materialized RollbackPoint. Delta never trusts raw channel_values.
-            if checkpoint_mode == "full":
-                try:
-                    ckpt_tuple = await checkpointer.aget_tuple(checkpoint_config)
-                    if ckpt_tuple is not None:
-                        ckpt_config = getattr(ckpt_tuple, "config", {}).get(
-                            "configurable",
-                            {},
-                        )
-                        pre_run_checkpoint_id = ckpt_config.get("checkpoint_id")
-                        legacy_pre_run_snapshot = {
-                            "checkpoint_ns": ckpt_config.get(
-                                "checkpoint_ns",
-                                "",
-                            ),
-                            "checkpoint": copy.deepcopy(getattr(ckpt_tuple, "checkpoint", {})),
-                            "metadata": copy.deepcopy(getattr(ckpt_tuple, "metadata", {})),
-                            "pending_writes": copy.deepcopy(getattr(ckpt_tuple, "pending_writes", []) or []),
-                        }
-                        if private_message_boundary_required:
-                            pre_existing_message_ids = _collect_private_pre_existing_message_ids(legacy_pre_run_snapshot)
-                except Exception:
-                    snapshot_capture_failed = True
-                    if private_message_boundary_required:
-                        logger.warning(
-                            "Private Run pre-run message boundary is unavailable for run %s",
-                            run_id,
-                        )
-                        raise PublicRunError(PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE) from None
-                    logger.warning(
-                        "Could not capture pre-run checkpoint snapshot for run %s",
-                        run_id,
-                        exc_info=True,
-                    )
+            baseline = await capture_legacy_pre_run_baseline(
+                checkpointer=checkpointer,
+                checkpoint_config=checkpoint_config,
+                configurable=configurable,
+                checkpoint_mode=checkpoint_mode,
+                thread_id=thread_id,
+                run_id=run_id,
+                private_message_boundary_required=private_message_boundary_required,
+            )
+            pre_run_checkpoint_id = baseline.pre_run_checkpoint_id
+            legacy_pre_run_snapshot = baseline.legacy_pre_run_snapshot
+            snapshot_capture_failed = baseline.snapshot_capture_failed
+            pre_existing_message_ids = baseline.pre_existing_message_ids
 
         await private_files.restore()
 
@@ -558,43 +495,24 @@ async def run_agent(
         # channels must come from graph-materialized state. The raw saver is
         # consulted only for exact pending writes.
         if checkpointer is not None:
-            can_materialize_state = callable(getattr(agent, "aget_state", None))
-            try:
-                if can_materialize_state:
-                    rollback_point = await _capture_rollback_point(
-                        accessor,
-                        checkpointer,
-                        checkpoint_config,
-                    )
-                    snapshot_capture_failed = False
-                elif checkpoint_mode == "full":
-                    rollback_point = _rollback_point_from_legacy_snapshot(
-                        thread_id=thread_id,
-                        checkpoint_id=pre_run_checkpoint_id,
-                        snapshot=legacy_pre_run_snapshot,
-                    )
-                else:
-                    raise RuntimeError("Delta checkpoint state materialization is unavailable")
-
-                if rollback_point is not None:
-                    pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
-                    materialized_values = {"messages": list(rollback_point.messages)}
-                    pre_existing_message_ids = _collect_private_pre_existing_message_ids(materialized_values) if private_message_boundary_required else _collect_pre_existing_message_ids(materialized_values)
-                else:
-                    pre_existing_message_ids = set()
-            except Exception:
-                snapshot_capture_failed = True
-                if private_message_boundary_required:
-                    logger.warning(
-                        "Private Run pre-run message boundary is unavailable for run %s",
-                        run_id,
-                    )
-                    raise PublicRunError(PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE) from None
-                logger.warning(
-                    "Could not materialize pre-run checkpoint for run %s",
-                    run_id,
-                    exc_info=True,
-                )
+            capture = await capture_pre_run_rollback_point(
+                agent=agent,
+                accessor=accessor,
+                checkpointer=checkpointer,
+                checkpoint_config=checkpoint_config,
+                checkpoint_mode=checkpoint_mode,
+                thread_id=thread_id,
+                run_id=run_id,
+                pre_run_checkpoint_id=pre_run_checkpoint_id,
+                legacy_pre_run_snapshot=legacy_pre_run_snapshot,
+                snapshot_capture_failed=snapshot_capture_failed,
+                pre_existing_message_ids=pre_existing_message_ids,
+                private_message_boundary_required=private_message_boundary_required,
+            )
+            rollback_point = capture.rollback_point
+            snapshot_capture_failed = capture.snapshot_capture_failed
+            pre_run_checkpoint_id = capture.pre_run_checkpoint_id
+            pre_existing_message_ids = capture.pre_existing_message_ids
 
             # A historical root selector is a fork. Delta history cannot
             # distinguish writes owned by an abandoned sibling, so express

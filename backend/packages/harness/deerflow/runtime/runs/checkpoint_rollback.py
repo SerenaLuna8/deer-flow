@@ -12,7 +12,13 @@ from typing import Any
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
-from deerflow.error_codes import ROLLBACK_FAILED_ERROR_CODE
+from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.error_codes import ROLLBACK_FAILED_ERROR_CODE, PublicRunError, PublicRunErrorCode
+from deerflow.runtime.checkpoint_mode import (
+    CheckpointModeMismatchError,
+    aensure_checkpoint_mode_compatible,
+    inject_checkpoint_mode,
+)
 from deerflow.runtime.checkpoint_state import (
     CheckpointStateAccessor,
     build_state_mutation_graph,
@@ -25,7 +31,7 @@ from .manager import RunManager
 from .private_file_lifecycle import await_despite_cancellation
 from .schemas import RunStatus
 
-__all__ = ["RollbackPoint"]
+__all__ = ["PreRunCheckpointBaseline", "PreRunRollbackCapture", "RollbackPoint", "capture_legacy_pre_run_baseline", "capture_pre_run_rollback_point"]
 
 logger = logging.getLogger(__name__)
 
@@ -610,3 +616,197 @@ async def _rollback_to_pre_run_checkpoint(
 def _new_checkpoint_marker() -> dict[str, str]:
     marker = empty_checkpoint()
     return {"id": marker["id"], "ts": marker["ts"]}
+
+
+@dataclass(frozen=True, slots=True)
+class PreRunCheckpointBaseline:
+    """Checkpoint facts captured before the run-local Agent graph exists."""
+
+    pre_run_checkpoint_id: str | None
+    legacy_pre_run_snapshot: dict[str, Any] | None
+    snapshot_capture_failed: bool
+    pre_existing_message_ids: set[str]
+
+
+async def capture_legacy_pre_run_baseline(
+    *,
+    checkpointer: Any,
+    checkpoint_config: dict[str, Any],
+    configurable: dict[str, Any],
+    checkpoint_mode: CheckpointChannelMode,
+    thread_id: str,
+    run_id: str,
+    private_message_boundary_required: bool,
+) -> PreRunCheckpointBaseline:
+    """Validate checkpoint-mode compatibility, then capture the full-mode raw baseline.
+
+    ``CheckpointModeMismatchError`` propagates unchanged. Any other head or
+    historical-selector read failure becomes
+    ``PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE`` for private Runs and re-raises
+    for public Runs. Full-mode raw capture failures set
+    ``snapshot_capture_failed`` for public Runs instead of raising. Delta mode
+    never trusts raw ``channel_values``; the caller replaces this baseline with
+    an exact materialized ``RollbackPoint`` after graph construction.
+    """
+    pre_run_checkpoint_id: str | None = None
+    legacy_pre_run_snapshot: dict[str, Any] | None = None
+    snapshot_capture_failed = False
+    pre_existing_message_ids: set[str] = set()
+    try:
+        await aensure_checkpoint_mode_compatible(
+            checkpointer,
+            checkpoint_config,
+            checkpoint_mode,
+        )
+        selected_configurable: dict[str, Any] = {
+            "thread_id": thread_id,
+            "checkpoint_ns": configurable.get("checkpoint_ns", ""),
+        }
+        for selector_key in ("checkpoint_id", "checkpoint_map"):
+            if selector_key in configurable:
+                selected_configurable[selector_key] = configurable[selector_key]
+        selected_checkpoint_config: dict[str, Any] = {"configurable": selected_configurable}
+        inject_checkpoint_mode(
+            selected_checkpoint_config,
+            checkpoint_mode,
+        )
+        has_historical_selector = bool(selected_configurable.get("checkpoint_ns")) or any(selector_key in configurable for selector_key in ("checkpoint_id", "checkpoint_map"))
+        if has_historical_selector:
+            await aensure_checkpoint_mode_compatible(
+                checkpointer,
+                selected_checkpoint_config,
+                checkpoint_mode,
+            )
+    except CheckpointModeMismatchError:
+        raise
+    except Exception:
+        if private_message_boundary_required:
+            logger.warning(
+                "Private Run pre-run message boundary is unavailable for run %s",
+                run_id,
+            )
+            raise PublicRunError(PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE) from None
+        raise
+
+    # Full-mode compatibility stubs and legacy tests may not expose a
+    # compiled graph state API. Preserve a raw fallback for those
+    # callers, while production graphs replace it below with an exact
+    # materialized RollbackPoint. Delta never trusts raw channel_values.
+    if checkpoint_mode == "full":
+        try:
+            ckpt_tuple = await checkpointer.aget_tuple(checkpoint_config)
+            if ckpt_tuple is not None:
+                ckpt_config = getattr(ckpt_tuple, "config", {}).get(
+                    "configurable",
+                    {},
+                )
+                pre_run_checkpoint_id = ckpt_config.get("checkpoint_id")
+                legacy_pre_run_snapshot = {
+                    "checkpoint_ns": ckpt_config.get(
+                        "checkpoint_ns",
+                        "",
+                    ),
+                    "checkpoint": copy.deepcopy(getattr(ckpt_tuple, "checkpoint", {})),
+                    "metadata": copy.deepcopy(getattr(ckpt_tuple, "metadata", {})),
+                    "pending_writes": copy.deepcopy(getattr(ckpt_tuple, "pending_writes", []) or []),
+                }
+                if private_message_boundary_required:
+                    pre_existing_message_ids = _collect_private_pre_existing_message_ids(legacy_pre_run_snapshot)
+        except Exception:
+            snapshot_capture_failed = True
+            if private_message_boundary_required:
+                logger.warning(
+                    "Private Run pre-run message boundary is unavailable for run %s",
+                    run_id,
+                )
+                raise PublicRunError(PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE) from None
+            logger.warning(
+                "Could not capture pre-run checkpoint snapshot for run %s",
+                run_id,
+                exc_info=True,
+            )
+    return PreRunCheckpointBaseline(
+        pre_run_checkpoint_id=pre_run_checkpoint_id,
+        legacy_pre_run_snapshot=legacy_pre_run_snapshot,
+        snapshot_capture_failed=snapshot_capture_failed,
+        pre_existing_message_ids=pre_existing_message_ids,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PreRunRollbackCapture:
+    """Exact materialized rollback point plus the trusted message boundary."""
+
+    rollback_point: RollbackPoint | None
+    snapshot_capture_failed: bool
+    pre_run_checkpoint_id: str | None
+    pre_existing_message_ids: set[str]
+
+
+async def capture_pre_run_rollback_point(
+    *,
+    agent: Any,
+    accessor: CheckpointStateAccessor,
+    checkpointer: Any,
+    checkpoint_config: dict[str, Any],
+    checkpoint_mode: CheckpointChannelMode,
+    thread_id: str,
+    run_id: str,
+    pre_run_checkpoint_id: str | None,
+    legacy_pre_run_snapshot: dict[str, Any] | None,
+    snapshot_capture_failed: bool,
+    pre_existing_message_ids: set[str],
+    private_message_boundary_required: bool,
+) -> PreRunRollbackCapture:
+    """Materialize the pre-run RollbackPoint through the compiled graph.
+
+    Delta checkpoints do not contain complete raw ``channel_values``, so
+    messages and restorable channels come from graph-materialized state and
+    the raw saver is consulted only for exact pending writes. Inputs carry the
+    legacy baseline so the full-mode compatibility adapter and the
+    ``snapshot_capture_failed`` flag keep their inline semantics.
+    """
+    rollback_point: RollbackPoint | None = None
+    can_materialize_state = callable(getattr(agent, "aget_state", None))
+    try:
+        if can_materialize_state:
+            rollback_point = await _capture_rollback_point(
+                accessor,
+                checkpointer,
+                checkpoint_config,
+            )
+            snapshot_capture_failed = False
+        elif checkpoint_mode == "full":
+            rollback_point = _rollback_point_from_legacy_snapshot(
+                thread_id=thread_id,
+                checkpoint_id=pre_run_checkpoint_id,
+                snapshot=legacy_pre_run_snapshot,
+            )
+        else:
+            raise RuntimeError("Delta checkpoint state materialization is unavailable")
+
+        if rollback_point is not None:
+            pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
+            materialized_values = {"messages": list(rollback_point.messages)}
+            pre_existing_message_ids = _collect_private_pre_existing_message_ids(materialized_values) if private_message_boundary_required else _collect_pre_existing_message_ids(materialized_values)
+        else:
+            pre_existing_message_ids = set()
+    except Exception:
+        snapshot_capture_failed = True
+        if private_message_boundary_required:
+            logger.warning(
+                "Private Run pre-run message boundary is unavailable for run %s",
+                run_id,
+            )
+            raise PublicRunError(PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE) from None
+        logger.warning(
+            "Could not materialize pre-run checkpoint for run %s",
+            run_id,
+            exc_info=True,
+        )
+    return PreRunRollbackCapture(
+        rollback_point=rollback_point,
+        snapshot_capture_failed=snapshot_capture_failed,
+        pre_run_checkpoint_id=pre_run_checkpoint_id,
+        pre_existing_message_ids=pre_existing_message_ids,
+    )
