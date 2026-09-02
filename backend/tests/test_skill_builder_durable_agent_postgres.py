@@ -15,7 +15,7 @@ from sqlalchemy import text
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
 from support.system_model_seed import seed_system_model_config
 
-from app.gateway.routers.private_work import reconnect_private_run_stream
+from app.gateway.routers.private_work_routes.runs import reconnect_private_run_stream
 from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkRunQuotaExceeded,

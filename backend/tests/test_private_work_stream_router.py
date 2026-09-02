@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.routers import private_work as private_work_router
+from app.gateway.routers.private_work_routes import dependencies, runs, streaming
 from app.private_work.errors import PrivateWorkNotFound
 from deerflow.runtime import DisconnectMode
 from deerflow.runtime.events.models import StoredStreamFrame
@@ -141,12 +142,12 @@ async def test_workspace_changes_route_scopes_run_and_event_lookup(
     event_store = _EventStore()
     browser_service = AsyncMock(return_value=service)
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_browser_chat_run_service",
         browser_service,
     )
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_run_event_store",
         lambda _request, _request_id: event_store,
     )
@@ -198,12 +199,12 @@ async def test_workspace_changes_route_does_not_query_events_for_hidden_run(
     )
     event_store = SimpleNamespace(list_events=AsyncMock())
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_browser_chat_run_service",
         AsyncMock(return_value=service),
     )
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_run_event_store",
         lambda _request, _request_id: event_store,
     )
@@ -255,20 +256,20 @@ async def test_stream_run_uses_private_launcher_and_durable_sse_consumer_once(
         consumer_calls.append(kwargs)
         yield "event: end\ndata: null\n\n"
 
-    monkeypatch.setattr(private_work_router, "start_private_run", launcher)
+    monkeypatch.setattr(runs, "start_private_run", launcher)
     monkeypatch.setattr(
-        private_work_router,
+        streaming,
         "_private_stream_bridge",
         lambda _request, _request_id: bridge,
     )
     monkeypatch.setattr(
-        private_work_router,
+        dependencies,
         "_run_service",
         lambda _request, _request_id: service,
     )
     read_page = AsyncMock(return_value=())
-    monkeypatch.setattr(private_work_router, "_read_private_stream_page", read_page)
-    monkeypatch.setattr(private_work_router, "_durable_private_sse_consumer", consumer)
+    monkeypatch.setattr(streaming, "_read_private_stream_page", read_page)
+    monkeypatch.setattr(runs, "_durable_private_sse_consumer", consumer)
 
     response = await _request(
         app,
@@ -417,7 +418,7 @@ async def test_durable_consumer_drains_next_page_before_terminal_fallback() -> N
 
     chunks = [
         chunk
-        async for chunk in private_work_router._durable_private_sse_consumer(
+        async for chunk in streaming._durable_private_sse_consumer(
             bridge=bridge,
             service=service,
             context=context,
@@ -473,7 +474,7 @@ async def test_durable_consumer_preserves_model_output_limit_terminal_code() -> 
 
     chunks = [
         chunk
-        async for chunk in private_work_router._durable_private_sse_consumer(
+        async for chunk in streaming._durable_private_sse_consumer(
             bridge=bridge,
             service=service,
             context=context,
@@ -526,7 +527,7 @@ async def test_durable_consumer_preserves_first_persisted_terminal() -> None:
 
     chunks = [
         chunk
-        async for chunk in private_work_router._durable_private_sse_consumer(
+        async for chunk in streaming._durable_private_sse_consumer(
             bridge=bridge,
             service=service,
             context=context,
@@ -576,7 +577,7 @@ async def test_durable_consumer_does_not_reemit_terminal_at_or_before_cursor(
 
     chunks = [
         chunk
-        async for chunk in private_work_router._durable_private_sse_consumer(
+        async for chunk in streaming._durable_private_sse_consumer(
             bridge=bridge,
             service=service,
             context=context,
@@ -611,8 +612,8 @@ async def test_durable_consumer_emits_heartbeat_while_run_is_silent(
     )
     context = SimpleNamespace(request_id="heartbeat", resource_scope=object())
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-    monkeypatch.setattr(private_work_router, "_PRIVATE_STREAM_HEARTBEAT_SECONDS", 0)
-    stream = private_work_router._durable_private_sse_consumer(
+    monkeypatch.setattr(streaming, "_PRIVATE_STREAM_HEARTBEAT_SECONDS", 0)
+    stream = streaming._durable_private_sse_consumer(
         bridge=bridge,
         service=service,
         context=context,
@@ -662,7 +663,7 @@ async def test_durable_consumer_waits_for_database_owner_before_propagating_canc
     )
     context = SimpleNamespace(request_id="cancel-db", resource_scope=object())
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-    stream = private_work_router._durable_private_sse_consumer(
+    stream = streaming._durable_private_sse_consumer(
         bridge=bridge,
         service=service,
         context=context,
@@ -703,22 +704,22 @@ async def test_reconnect_waits_for_initial_database_owner_before_propagating_can
     )
     request = SimpleNamespace()
     monkeypatch.setattr(
-        private_work_router,
+        streaming,
         "_private_stream_bridge",
         lambda _request, _request_id: bridge,
     )
     monkeypatch.setattr(
-        private_work_router,
+        dependencies,
         "_run_service",
         lambda _request, _request_id: service,
     )
     monkeypatch.setattr(
-        private_work_router,
+        streaming,
         "_private_stream_cursor",
         lambda _request, _request_id: 0,
     )
     pending = asyncio.create_task(
-        private_work_router.reconnect_private_run_stream(
+        runs.reconnect_private_run_stream(
             thread_id,
             run_id,
             request,
@@ -752,7 +753,7 @@ async def test_durable_consumer_cancellation_returns_real_postgres_connection_to
     )
     context = SimpleNamespace(request_id="cancel-real-db", resource_scope=object())
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-    stream = private_work_router._durable_private_sse_consumer(
+    stream = streaming._durable_private_sse_consumer(
         bridge=bridge,
         service=service,
         context=context,
@@ -794,7 +795,7 @@ async def test_durable_consumer_persists_cancel_when_stream_task_is_cancelled() 
     )
     context = SimpleNamespace(request_id="cancel", resource_scope=object())
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-    stream = private_work_router._durable_private_sse_consumer(
+    stream = streaming._durable_private_sse_consumer(
         bridge=bridge,
         service=service,
         context=context,
@@ -831,9 +832,9 @@ async def test_durable_wait_persists_cancel_when_request_task_is_cancelled(
     service = SimpleNamespace(get=running, cancel=AsyncMock())
     context = SimpleNamespace(request_id="wait-cancel")
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-    monkeypatch.setattr(private_work_router, "_PRIVATE_STREAM_POLL_SECONDS", 60)
+    monkeypatch.setattr(streaming, "_PRIVATE_STREAM_POLL_SECONDS", 60)
     pending = asyncio.create_task(
-        private_work_router._wait_for_durable_private_run(
+        streaming._wait_for_durable_private_run(
             service=service,
             context=context,
             thread_id="thread-1",

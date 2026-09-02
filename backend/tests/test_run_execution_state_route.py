@@ -14,7 +14,7 @@ from app.gateway.deps import (
     project_session,
     require_project_private_open,
 )
-from app.gateway.routers import private_work
+from app.gateway.routers import private_work as legacy
 from app.private_work.context import PrivateWorkContext
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
@@ -137,7 +137,7 @@ class _Session:
 
 def _client(session: _Session) -> TestClient:
     app = FastAPI()
-    app.include_router(private_work.router)
+    app.include_router(legacy.router)
     context = _context()
     app.dependency_overrides[private_work_context] = lambda: context
     app.dependency_overrides[require_project_private_open] = lambda: None
@@ -157,7 +157,7 @@ def _url() -> str:
 
 
 def test_execution_state_route_is_registered_at_exact_scoped_path() -> None:
-    paths = {route.path for route in private_work.router.routes if "execution-state" in route.path}
+    paths = {route.path for route in legacy.router.routes if "execution-state" in route.path}
 
     assert paths == {
         "/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}/execution-state",

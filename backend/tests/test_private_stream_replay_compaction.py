@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock
 import pytest
 from support.private_thread_seed import seed_private_thread_database
 
-from app.gateway.routers import private_work as private_work_router
+from app.gateway.routers.private_work_routes import dependencies, runs, streaming
 from app.private_work.run_repository import (
     PrivateRunCreate,
     PrivateRunRepository,
@@ -195,7 +195,7 @@ async def test_durable_consumer_forwards_full_state_horizon_to_follow_up_pages()
 
     chunks = [
         chunk
-        async for chunk in private_work_router._durable_private_sse_consumer(
+        async for chunk in streaming._durable_private_sse_consumer(
             bridge=bridge,
             service=service,
             context=context,
@@ -253,27 +253,27 @@ async def test_reconnect_route_computes_horizon_and_applies_it_to_replay(
         return _body()
 
     monkeypatch.setattr(
-        private_work_router,
+        streaming,
         "_private_stream_bridge",
         lambda _request, _request_id: bridge,
     )
     monkeypatch.setattr(
-        private_work_router,
+        dependencies,
         "_run_service",
         lambda _request, _request_id: service,
     )
     monkeypatch.setattr(
-        private_work_router,
+        streaming,
         "_private_stream_cursor",
         lambda _request, _request_id: 0,
     )
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_durable_private_sse_consumer",
         consumer,
     )
 
-    response = await private_work_router.reconnect_private_run_stream(
+    response = await runs.reconnect_private_run_stream(
         thread_id,
         run_id,
         request,

@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage
 
 from app.gateway.private_work_schemas import PrivateRunCreateRequest
 from app.gateway.routers import private_work as private_work_router
+from app.gateway.routers.private_work_routes import runs
 from deerflow.runtime import DisconnectMode
 
 
@@ -169,22 +170,22 @@ async def test_run_messages_hide_usage_for_disabled_frozen_policy(
         return records
 
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_browser_chat_run_service",
         browser_service,
     )
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_run_event_store",
         lambda *_args: _EventStore(),
     )
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_project_scoped_event_durations",
         durations,
     )
 
-    response = await private_work_router.list_private_run_messages(
+    response = await runs.list_private_run_messages(
         thread_id,
         run_id,
         request,
@@ -272,22 +273,22 @@ async def test_thread_messages_batch_project_each_runs_frozen_policy(
         return values
 
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_browser_chat_run_service",
         browser_service,
     )
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_run_event_store",
         lambda *_args: _EventStore(),
     )
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_project_scoped_event_durations",
         durations,
     )
 
-    response = await private_work_router.list_private_thread_messages(
+    response = await runs.list_private_thread_messages(
         thread_id,
         request,
         limit=50,
@@ -383,17 +384,17 @@ async def test_run_events_hide_only_recognized_usage_for_disabled_policy(
         return _RunService()
 
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_browser_chat_run_service",
         browser_service,
     )
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_run_event_store",
         lambda *_args: _EventStore(),
     )
 
-    response = await private_work_router.list_private_run_events(
+    response = await runs.list_private_run_events(
         thread_id,
         run_id,
         request,
@@ -479,17 +480,17 @@ async def test_thread_token_usage_counts_only_verified_tracking_runs(
         return _RunService()
 
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_browser_chat_run_service",
         browser_service,
     )
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_run_store",
         lambda *_args: _RunStore(),
     )
 
-    response = await private_work_router.private_thread_token_usage(
+    response = await runs.private_thread_token_usage(
         thread_id,
         request,
         include_active=False,
@@ -555,7 +556,7 @@ async def test_checkpoint_projection_uses_each_turns_frozen_tracking_policy_and_
     }
     original = copy.deepcopy(values)
 
-    projected = await private_work_router._project_scoped_checkpoint_token_usage(
+    projected = await runs._project_scoped_checkpoint_token_usage(
         request,  # type: ignore[arg-type]
         SimpleNamespace(project_id=project_id, user_id=user_id),  # type: ignore[arg-type]
         values,
@@ -685,21 +686,48 @@ async def test_wait_and_state_routes_project_checkpoint_tokens_after_serializati
         return values
 
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_browser_chat_run_service",
         browser_service,
     )
-    monkeypatch.setattr(private_work_router, "_require_run_runtime", lambda *_args: None)
+    monkeypatch.setattr(runs, "_require_run_runtime", lambda *_args: None)
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_normalize_prepared_edit_replay",
         normalize,
     )
-    monkeypatch.setattr(private_work_router, "start_private_run", launch)
+    monkeypatch.setattr(runs, "start_private_run", launch)
     monkeypatch.setattr(
-        private_work_router,
+        runs,
         "_wait_for_durable_private_run",
         wait_for_run,
+    )
+    monkeypatch.setattr(
+        runs,
+        "_scoped_checkpointer",
+        lambda *_args: object(),
+    )
+    monkeypatch.setattr(
+        runs,
+        "bind_scoped_checkpoint_state",
+        lambda *_args, **_kwargs: accessor,
+    )
+    monkeypatch.setattr(
+        runs,
+        "_project_scoped_checkpoint_token_usage",
+        project,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runs,
+        "_project_scoped_checkpoint_durations",
+        durations,
+    )
+
+    monkeypatch.setattr(
+        private_work_router,
+        "_browser_chat_run_service",
+        browser_service,
     )
     monkeypatch.setattr(
         private_work_router,
@@ -715,7 +743,6 @@ async def test_wait_and_state_routes_project_checkpoint_tokens_after_serializati
         private_work_router,
         "_project_scoped_checkpoint_token_usage",
         project,
-        raising=False,
     )
     monkeypatch.setattr(
         private_work_router,
@@ -723,7 +750,7 @@ async def test_wait_and_state_routes_project_checkpoint_tokens_after_serializati
         durations,
     )
 
-    wait_values = await private_work_router.wait_private_run(
+    wait_values = await runs.wait_private_run(
         thread_id,
         PrivateRunCreateRequest(input={}),
         request,

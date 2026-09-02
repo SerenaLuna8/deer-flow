@@ -18,6 +18,7 @@ from app.gateway.deps import (
     require_project_private_open,
 )
 from app.gateway.routers import private_work as private_work_router
+from app.gateway.routers.private_work_routes import runs
 from app.private_work.run_repository import (
     PrivateRunCreate,
     PrivateRunRepository,
@@ -407,14 +408,14 @@ async def test_generic_browser_run_controls_reject_skill_builder_threads_before_
         async def wait_for_run(**_kwargs: object) -> tuple[bool, SimpleNamespace]:
             return False, SimpleNamespace(status="success", error=None)
 
-        monkeypatch.setattr(private_work_router, "start_private_run", launcher)
+        monkeypatch.setattr(runs, "start_private_run", launcher)
         monkeypatch.setattr(
-            private_work_router,
+            runs,
             "_durable_private_sse_consumer",
             consumer,
         )
         monkeypatch.setattr(
-            private_work_router,
+            runs,
             "_wait_for_durable_private_run",
             wait_for_run,
         )

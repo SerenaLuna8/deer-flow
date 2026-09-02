@@ -251,6 +251,14 @@ def test_private_work_context_file_and_approval_exports_are_exact() -> None:
     assert legacy._PRIVATE_STREAM_POLL_SECONDS is streaming._PRIVATE_STREAM_POLL_SECONDS
 
 
+def test_private_work_run_exports_are_exact() -> None:
+    from app.gateway.routers import private_work as legacy
+    from app.gateway.routers.private_work_routes import runs
+
+    assert legacy._prepend_admitted_human_input_response is runs._prepend_admitted_human_input_response
+    assert legacy.reconnect_private_run_stream is runs.reconnect_private_run_stream
+
+
 def test_private_context_projection_polling_default_uses_shared_timing() -> None:
     import inspect
 

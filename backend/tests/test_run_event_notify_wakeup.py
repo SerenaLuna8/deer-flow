@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.gateway.deps import _install_run_event_wakeup
-from app.gateway.routers import private_work as private_work_router
+from app.gateway.routers.private_work_routes import streaming
 from app.gateway.run_event_wakeup import RunEventWakeup
 from deerflow.config.worker_config import WorkerStreamConfig
 from deerflow.runtime.events.models import StoredStreamFrame
@@ -152,7 +152,7 @@ async def test_gateway_does_not_start_listener_when_notify_is_disabled() -> None
     assert wakeup is None
     assert app.state.run_event_wakeup is None
     request = SimpleNamespace(app=app)
-    assert private_work_router._run_event_wakeup(request) is None
+    assert streaming._run_event_wakeup(request) is None
     wakeup_factory.assert_not_called()
     stack.push_async_callback.assert_not_called()
 
@@ -364,7 +364,7 @@ async def _collect_consumer(
     context = SimpleNamespace(request_id="wakeup", resource_scope=object())
     return [
         chunk
-        async for chunk in private_work_router._durable_private_sse_consumer(
+        async for chunk in streaming._durable_private_sse_consumer(
             bridge=bridge,
             service=service,
             context=context,
@@ -388,7 +388,7 @@ async def test_idle_consumer_wakes_on_notify_instead_of_polling(
     # A lost wakeup would stall the consumer for the full idle wait, so a fast
     # finish proves the NOTIFY path (not the timeout) drove the read.
     monkeypatch.setattr(
-        private_work_router,
+        streaming,
         "_PRIVATE_STREAM_WAKEUP_WAIT_SECONDS",
         30.0,
     )
@@ -452,11 +452,11 @@ async def test_healthy_listener_parks_an_idle_stream_without_repeated_db_reads(
     thread_id = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
     monkeypatch.setattr(
-        private_work_router,
+        streaming,
         "_PRIVATE_STREAM_WAKEUP_WAIT_SECONDS",
         30.0,
     )
-    monkeypatch.setattr(private_work_router, "_PRIVATE_STREAM_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(streaming, "_PRIVATE_STREAM_POLL_SECONDS", 0.01)
     wakeup = RunEventWakeup("postgresql://unused/db", connect=_FakeConnector())
     wakeup._listening = True
     first_read = asyncio.Event()
@@ -595,11 +595,11 @@ async def test_degraded_listener_falls_back_to_the_poll_cadence(
     thread_id = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
     monkeypatch.setattr(
-        private_work_router,
+        streaming,
         "_PRIVATE_STREAM_WAKEUP_WAIT_SECONDS",
         30.0,
     )
-    monkeypatch.setattr(private_work_router, "_PRIVATE_STREAM_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(streaming, "_PRIVATE_STREAM_POLL_SECONDS", 0.01)
     wakeup = RunEventWakeup("postgresql://unused/db", connect=_FakeConnector())
     assert not wakeup.listening
 

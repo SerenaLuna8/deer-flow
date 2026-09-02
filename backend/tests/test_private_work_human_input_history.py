@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from app.gateway.routers.private_work import (
+from app.gateway.routers.private_work_routes.runs import (
     _prepend_admitted_human_input_response,
 )
 
