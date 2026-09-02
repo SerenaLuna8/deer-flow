@@ -315,9 +315,22 @@ def test_gateway_owns_agent_builder_construction() -> None:
     assert _construction_count(EXECUTOR_PATH, "AgentDesignService") == 0
 
 
-def test_execution_approval_production_consumers_are_exact() -> None:
+def test_execution_approval_production_consumers_use_owner_modules() -> None:
+    # The five former consumers must now import policy/service/worker/recovery owners;
+    # the façade keeps its exports for compatibility but has zero internal production importers.
     consumers = _module_consumers(EXECUTION_APPROVAL_LEGACY_MODULE, EXECUTION_APPROVAL_LEGACY_PATH, APP_ROOT)
-    assert consumers == EXECUTION_APPROVAL_PRODUCTION_CONSUMERS, _relative(consumers ^ EXECUTION_APPROVAL_PRODUCTION_CONSUMERS)
+    assert consumers == set(), _relative(consumers)
+    for path in EXECUTION_APPROVAL_PRODUCTION_CONSUMERS:
+        assert path.is_file(), path
+    expected_owner_imports = {
+        GATEWAY_DEPS_PATH: {"app.private_work.execution_approval_policy", "app.private_work.execution_approval_service"},
+        PRIVATE_WORK_CONTRACTS_PATH: {"app.private_work.execution_approval_service"},
+        PRIVATE_WORK_DEPENDENCIES_PATH: {"app.private_work.execution_approval_service"},
+        EXECUTOR_PATH: {"app.private_work.execution_approval_policy", "app.private_work.execution_approval_worker"},
+        HANDLER_PATH: {"app.private_work.execution_approval_recovery"},
+    }
+    for path, owners in expected_owner_imports.items():
+        assert owners <= _absolute_imports(path), (path.name, owners - _absolute_imports(path))
 
 
 def test_harness_never_imports_the_application() -> None:

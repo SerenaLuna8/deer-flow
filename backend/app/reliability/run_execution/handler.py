@@ -18,15 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import PrivateWorkMcpQuotaExceeded
-from app.private_work.execution_approval import (
-    recover_staged_execution_approval_id,
-    settle_staged_execution_approvals,
-)
 from app.private_work.execution_approval_audit import (
     NoopHostExecutionApprovalAudit,
 )
 from app.private_work.execution_approval_lifecycle import (
     ExecutionApprovalPrivateLifecycleConflict,
+)
+from app.private_work.execution_approval_recovery import (
+    recover_staged_execution_approval_id,
+    settle_staged_execution_approvals,
 )
 from app.private_work.output_delivery_obligation import (
     OutputDeliveryObligationConflict,

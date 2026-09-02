@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from app.gateway.private_work_schemas import StrictPrivateWorkRequest, StrictPrivateWorkResponse
-from app.private_work.execution_approval import ExecutionApprovalProjection
+from app.private_work.execution_approval_service import ExecutionApprovalProjection
 from app.private_work.execution_profile import (
     RunExecutionProfileUnsupported,
     effective_run_execution_profile_from_kwargs,

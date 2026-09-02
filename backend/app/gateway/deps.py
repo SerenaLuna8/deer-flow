@@ -307,9 +307,11 @@ async def gateway_platform_runtime(
 
         stack.push_async_callback(clear_checkpoint_delete_reconciler_state)
         from app.private_work.connection_service import ProjectConnectionService
-        from app.private_work.execution_approval import (
-            ExecutionApprovalService,
+        from app.private_work.execution_approval_policy import (
             HostExecutionProviderPolicySnapshot,
+        )
+        from app.private_work.execution_approval_service import (
+            ExecutionApprovalService,
         )
         from app.private_work.file_service import PrivateFileService
         from app.private_work.file_streaming import PrivateFileStreamer

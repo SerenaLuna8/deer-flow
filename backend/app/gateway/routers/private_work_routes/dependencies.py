@@ -7,7 +7,7 @@ from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import PrivateWorkError, PrivateWorkUnavailable
-from app.private_work.execution_approval import ExecutionApprovalService
+from app.private_work.execution_approval_service import ExecutionApprovalService
 from app.private_work.feedback_service import PrivateFeedbackService
 from app.private_work.file_service import PrivateFileService
 from app.private_work.file_streaming import PrivateFileStreamer

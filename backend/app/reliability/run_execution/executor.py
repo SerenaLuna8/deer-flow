@@ -22,12 +22,14 @@ from app.private_work.context_evidence_observer import (
     PrivateRunContextEvidenceObserver,
 )
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkMcpQuotaExceeded
-from app.private_work.execution_approval import (
-    HostExecutionProviderPolicySnapshot,
-    WorkerHostExecutionApprovalPort,
-)
 from app.private_work.execution_approval_audit import (
     NoopHostExecutionApprovalAudit,
+)
+from app.private_work.execution_approval_policy import (
+    HostExecutionProviderPolicySnapshot,
+)
+from app.private_work.execution_approval_worker import (
+    WorkerHostExecutionApprovalPort,
 )
 from app.private_work.execution_profile import (
     RUN_EXECUTION_PROFILE_KWARG,
