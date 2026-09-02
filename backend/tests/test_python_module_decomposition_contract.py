@@ -5,10 +5,19 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 
+from app.gateway.routers.admin_assets import _admin_actor, _admin_project_actor, admin_project_router, admin_router
 from app.gateway.routers.private_work import router as private_work_router
-from app.gateway.routers.project_assets import catalog_router, project_router
+from app.gateway.routers.project_assets import (
+    AssetRoute,
+    catalog_router,
+    project_asset_context,
+    project_router,
+    register_asset_routes,
+)
 from app.shared_assets import agent_design_service, skill_design_service
 from deerflow.agents.middlewares import provider_request_usage
 from deerflow.sandbox import tools as sandbox_tools
@@ -16,10 +25,32 @@ from deerflow.sandbox import tools as sandbox_tools
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED_ROUTE_DIGESTS = {
-    "private_work": (45, "a81e85093f732414a5ce8edc38040dc6783e85e4d8316c5eb08c2362850ae2e2"),
-    "project_assets": (58, "66a88150e12038d66e561a1577456ddb3630e1f3263b31ab77a43f5aaf4d28b6"),
-    "asset_catalog": (5, "2bf16801b2f52d284dee015b4b2ade6d15df02ad695816766c94e4cc3fb12a8d"),
+    "private_work": (45, "9bdab5e8c3ae4d160dcba02823991083075004e8462d747ab05505d58b025071"),
+    "project_assets": (58, "4540acd74ce953a8754c5aae9c119e245f28fbf1986b145763e0fda238adb6ab"),
+    "asset_catalog": (5, "fe91c789905280f2b3d6f575409f4e8be5edff59a60796a40c105648971459ac"),
+    "admin_assets": (10, "fecb2764121b4f4968784d662225050fd9b5b213baf8fa7f6b9dd348eb3eb27b"),
+    "admin_project_assets": (32, "582a191b683382b1d2a22b84d2fd0a605806fabea2f1ee2862b521b25dad5c69"),
 }
+
+EXPECTED_OPENAPI_ROUTE_DIGESTS = {
+    "private_work": (
+        45,
+        "b45ecf771a9bf0008cb11a251f55a5a119dd6e5ecd9772bf121c3f5757ba4860",
+        "afd277aa4ce3f9a7e3a5ff7bdb7c9be8e661ed461bd2ef0dcf9e20f470ba72cc",
+    ),
+    "project_assets": (
+        58,
+        "4318232d5564dabf7b7ae9c20fafe8dbec53ee5a11ad3577412f7b0d02105e03",
+        "43a82d9b5d4990b11fee50b4171e9cc3f437b81a862f801ca103f3be6b17237e",
+    ),
+    "asset_catalog": (
+        5,
+        "bcddb97ab067006f1dba0b6653fb12099828c8dc203c17bf8e04347e9afda70a",
+        "85811994377d69210d9ad7be76f192396ac5daf5cd1647d5f8b5854d23f4f4ee",
+    ),
+}
+
+_OPENAPI_HTTP_METHODS = frozenset({"delete", "get", "head", "options", "patch", "post", "put", "trace"})
 
 EXPECTED_EXPORT_DIGESTS = {
     "skill_design": (22, "b9e7397e798f62e2ba3c2c2e58f48939c661c7e937a2c3d687ad321035affed6"),
@@ -28,16 +59,14 @@ EXPECTED_EXPORT_DIGESTS = {
 }
 
 
-def _callable_name(value: object) -> str:
-    module = getattr(value, "__module__", "")
-    name = getattr(value, "__qualname__", getattr(value, "__name__", type(value).__name__))
-    return f"{module}:{name}"
-
-
-def _response_name(value: object) -> str | None:
+def _logical_name(value: object) -> str | None:
     if value is None:
         return None
-    return _callable_name(value)
+    return getattr(
+        value,
+        "__qualname__",
+        getattr(value, "__name__", type(value).__name__),
+    )
 
 
 def _route_digest(router) -> tuple[int, str]:
@@ -51,13 +80,49 @@ def _route_digest(router) -> tuple[int, str]:
                 "path": route.path,
                 "name": route.name,
                 "status_code": route.status_code,
-                "response_model": _response_name(route.response_model),
-                "route_class": _callable_name(type(route)),
-                "dependencies": sorted(_callable_name(getattr(dependency, "call", None)) for dependency in route.dependant.dependencies),
+                "response_model": _logical_name(route.response_model),
+                "route_class": _logical_name(type(route)),
+                "dependencies": sorted(_logical_name(getattr(dependency, "call", None)) for dependency in route.dependant.dependencies),
             }
         )
     encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return len(rows), hashlib.sha256(encoded).hexdigest()
+
+
+def _sha256_json(rows: list[dict[str, str | None]]) -> str:
+    encoded = json.dumps(
+        rows,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _openapi_route_digests(router) -> tuple[int, str, str]:
+    application = FastAPI()
+    application.include_router(router)
+    schema = application.openapi()
+    operations: list[dict[str, str | None]] = []
+    for path, path_item in sorted(schema["paths"].items()):
+        for method, operation in sorted(path_item.items()):
+            if method not in _OPENAPI_HTTP_METHODS:
+                continue
+            operations.append(
+                {
+                    "method": method.upper(),
+                    "path": path,
+                    "operationId": operation.get("operationId"),
+                }
+            )
+    path_methods = [{"method": row["method"], "path": row["path"]} for row in operations]
+    operation_ids = [row["operationId"] for row in operations]
+    assert all(operation_ids)
+    assert len(operation_ids) == len(set(operation_ids))
+    return (
+        len(operations),
+        _sha256_json(operations),
+        _sha256_json(path_methods),
+    )
 
 
 def _export_digest(module) -> tuple[int, str]:
@@ -82,6 +147,44 @@ def test_router_manifests_match_the_pre_split_baseline() -> None:
     assert _route_digest(private_work_router) == EXPECTED_ROUTE_DIGESTS["private_work"]
     assert _route_digest(project_router) == EXPECTED_ROUTE_DIGESTS["project_assets"]
     assert _route_digest(catalog_router) == EXPECTED_ROUTE_DIGESTS["asset_catalog"]
+    assert _route_digest(admin_router) == EXPECTED_ROUTE_DIGESTS["admin_assets"]
+    assert _route_digest(admin_project_router) == EXPECTED_ROUTE_DIGESTS["admin_project_assets"]
+
+
+def test_router_openapi_operations_match_the_pre_split_baseline() -> None:
+    assert _openapi_route_digests(private_work_router) == EXPECTED_OPENAPI_ROUTE_DIGESTS["private_work"]
+    assert _openapi_route_digests(project_router) == EXPECTED_OPENAPI_ROUTE_DIGESTS["project_assets"]
+    assert _openapi_route_digests(catalog_router) == EXPECTED_OPENAPI_ROUTE_DIGESTS["asset_catalog"]
+
+
+@pytest.mark.parametrize(
+    ("actor_dependency", "options", "expected"),
+    (
+        (
+            project_asset_context,
+            {"include_project_asset_delete": True},
+            (25, "5dfe344883f740a2b08b71c72a29fd720fe844412f9dc4cdbdb463537350494f"),
+        ),
+        (
+            _admin_actor,
+            {"include_shared_asset_mutations": False},
+            (6, "41a3a13101a7fef013dbb0d72f741003c9f304a4c379cd1a8b2263bf800cfe24"),
+        ),
+        (
+            _admin_project_actor,
+            {"include_skill_export": False},
+            (21, "82e37848b996116c677dd46d8a718d178996f8920007505d40957d65af11ba8b"),
+        ),
+    ),
+)
+def test_register_asset_routes_switch_manifests(
+    actor_dependency,
+    options: dict[str, bool],
+    expected: tuple[int, str],
+) -> None:
+    isolated_router = APIRouter(route_class=AssetRoute)
+    register_asset_routes(isolated_router, actor_dependency, **options)
+    assert _route_digest(isolated_router) == expected
 
 
 def test_public_export_inventories_match_the_pre_split_baseline() -> None:
