@@ -14,6 +14,8 @@ import hashlib
 import importlib
 import inspect
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from app.private_work import execution_approval as execution_approval_legacy
@@ -35,6 +37,7 @@ AGENT_DESIGN_GENERATION_LIFECYCLE_MODULE = "app.shared_assets.agent_design_gener
 
 SKILL_DESIGN_LEGACY_PATH = APP_ROOT / "shared_assets" / "skill_design_service.py"
 SKILL_BUILDER_DRAFT_SINK_PATH = APP_ROOT / "shared_assets" / "skill_builder_draft_sink.py"
+SKILL_DESIGN_LIFECYCLE_PATH = APP_ROOT / "shared_assets" / "skill_design_lifecycle.py"
 EXECUTION_APPROVAL_LEGACY_PATH = APP_ROOT / "private_work" / "execution_approval.py"
 AGENT_DESIGN_LEGACY_PATH = APP_ROOT / "shared_assets" / "agent_design_service.py"
 
@@ -279,12 +282,14 @@ def test_batch3_service_signatures_are_frozen() -> None:
     )
 
 
-def test_batch3_legacy_import_inventories_match_the_audited_baseline() -> None:
+def test_batch3_legacy_import_inventories_stay_within_the_audited_baseline() -> None:
+    # Every audited legacy name must remain importable from its compatibility
+    # module; consumers may migrate to owners but may not add new legacy imports.
     for module_name, defining_path, module, expected_names in LEGACY_INVENTORIES:
         for name in sorted(expected_names):
             assert hasattr(module, name), (module_name, name)
         observed = _legacy_name_imports(module_name, defining_path, APP_ROOT, TESTS_ROOT)
-        assert observed == expected_names, module_name
+        assert observed <= expected_names, (module_name, observed - expected_names)
 
 
 def test_worker_executor_constructs_one_skill_builder_sink_without_agent_design() -> None:
@@ -349,6 +354,46 @@ def test_skill_design_draft_sink_is_the_run_bound_owner() -> None:
     assert SKILL_DESIGN_LIFECYCLE_MODULE not in owner_imports
     assert not _imports_module(_parse(SKILL_BUILDER_DRAFT_SINK_PATH), SKILL_DESIGN_LEGACY_MODULE)
     assert not _imports_module(_parse(SKILL_BUILDER_DRAFT_SINK_PATH), SKILL_DESIGN_LIFECYCLE_MODULE)
+
+
+def _assert_imports_only_facade(path: Path) -> None:
+    tree = _parse(path)
+    assert set(_top_level_runtime_nodes(path)) <= {"Import", "ImportFrom", "Assign"}, _top_level_runtime_nodes(path)
+    assignments = [node for node in tree.body if isinstance(node, ast.Assign)]
+    assert [[target.id for target in node.targets if isinstance(target, ast.Name)] for node in assignments] == [["__all__"]]
+    assert not any(isinstance(node, ast.Call) for node in ast.walk(tree))
+
+
+def _assert_fresh_import_orders(owner_module: str, legacy_module: str, *, identity: str) -> None:
+    for statements in (
+        f"import {owner_module} as owner\nimport {legacy_module} as legacy",
+        f"import {legacy_module} as legacy\nimport {owner_module} as owner",
+    ):
+        completed = subprocess.run(
+            [sys.executable, "-c", f"{statements}\nassert {identity}"],
+            cwd=BACKEND_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_skill_design_lifecycle_owns_the_service_behind_an_imports_only_facade() -> None:
+    from app.shared_assets import skill_design_lifecycle as owning
+    from app.shared_assets import skill_design_service as legacy
+
+    assert legacy.SkillDesignService is owning.SkillDesignService
+    assert legacy.MAX_INCOMPLETE_SKILL_DESIGN_SESSIONS_PER_OWNER_PROJECT is owning.MAX_INCOMPLETE_SKILL_DESIGN_SESSIONS_PER_OWNER_PROJECT
+    assert _export_digest(legacy) == EXPECTED_EXPORT_DIGESTS[SKILL_DESIGN_LEGACY_MODULE]
+    _assert_imports_only_facade(SKILL_DESIGN_LEGACY_PATH)
+    assert not _imports_module(_parse(SKILL_DESIGN_LIFECYCLE_PATH), SKILL_DESIGN_LEGACY_MODULE)
+    assert _imports_module(_parse(SKILL_DESIGN_LIFECYCLE_PATH), SKILL_BUILDER_DRAFT_SINK_MODULE)
+    _assert_fresh_import_orders(
+        SKILL_DESIGN_LIFECYCLE_MODULE,
+        SKILL_DESIGN_LEGACY_MODULE,
+        identity="legacy.SkillDesignService is owner.SkillDesignService",
+    )
 
 
 def test_execution_approval_lifecycle_and_audit_remain_separate_owners() -> None:

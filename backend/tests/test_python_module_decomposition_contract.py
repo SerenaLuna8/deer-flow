@@ -958,6 +958,8 @@ def test_production_consumers_use_skill_package_integrity_owner() -> None:
         BACKEND_ROOT / "app/shared_assets/catalog_provider.py",
         BACKEND_ROOT / "app/shared_assets/resolver.py",
         BACKEND_ROOT / "app/shared_assets/skill_design_service.py",
+        BACKEND_ROOT / "app/shared_assets/skill_design_lifecycle.py",
+        BACKEND_ROOT / "app/shared_assets/skill_builder_draft_sink.py",
         BACKEND_ROOT / "app/private_work/legacy_run_skill_snapshot_writer.py",
         BACKEND_ROOT / "scripts/generate_public_system_skill_catalog.py",
     )

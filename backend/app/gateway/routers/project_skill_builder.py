@@ -48,28 +48,28 @@ from app.shared_assets.errors import AssetStorageUnavailable, AssetValidationFai
 from app.shared_assets.skill_builder_admission_contract import (
     SkillBuilderRunAdmission,
 )
-from app.shared_assets.skill_design_generation import (
-    MAX_SKILL_DESIGN_ATTACHMENTS,
-)
-from app.shared_assets.skill_design_service import (
+from app.shared_assets.skill_design_activity import SkillDesignActivity
+from app.shared_assets.skill_design_contracts import (
     CancelSkillDesignSession,
     CommitSkillDesignSession,
     CreateSkillDesignRevisionSession,
     CreateSkillDesignSession,
     SetSkillDesignExecutionPreference,
-    SkillDesignActivity,
     SkillDesignClarificationResponse,
     SkillDesignClarificationTurn,
     SkillDesignCommitResult,
     SkillDesignDraftUpdateTurn,
     SkillDesignMessageTurn,
-    SkillDesignService,
     SkillDesignSessionSummary,
     SkillDesignSessionView,
     SkillDesignTurnAttachment,
     SubmitSkillDesignTurn,
     ValidateSkillDesignSession,
 )
+from app.shared_assets.skill_design_generation import (
+    MAX_SKILL_DESIGN_ATTACHMENTS,
+)
+from app.shared_assets.skill_design_lifecycle import SkillDesignService
 from app.shared_assets.skill_service import SkillFileChange, SkillService
 from app.system_settings import (
     PublicSystemModelView,

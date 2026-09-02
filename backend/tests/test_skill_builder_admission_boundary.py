@@ -18,7 +18,7 @@ def test_skill_builder_admission_contract_has_no_private_work_dependency() -> No
         "app.shared_assets.skill_builder_admission_contract",
     )
     concrete = import_module("app.private_work.skill_builder_run_admission")
-    design_service = import_module("app.shared_assets.skill_design_service")
+    design_service = import_module("app.shared_assets.skill_design_lifecycle")
 
     assert not any((origin or "").startswith("app.private_work.") for origin in (_module_origin(value) for value in vars(contract).values()))
     assert concrete.__name__ not in {_module_origin(value) for value in vars(design_service).values()}
