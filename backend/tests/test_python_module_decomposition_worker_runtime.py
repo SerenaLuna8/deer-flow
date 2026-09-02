@@ -600,3 +600,101 @@ async def test_capture_legacy_pre_run_baseline_maps_raw_capture_failure_by_run_k
             run_id="run-1",
             private_message_boundary_required=False,
         )
+
+
+def _usage(**overrides):
+    from app.private_work.run_repository import PrivateRunUsageSnapshot
+
+    values = {
+        "total_input_tokens": 10,
+        "total_output_tokens": 5,
+        "total_tokens": 15,
+        "llm_call_count": 2,
+        "lead_agent_tokens": 15,
+        "subagent_tokens": 0,
+        "middleware_tokens": 0,
+        "token_usage_by_model": {},
+        "token_budget_usage": None,
+    }
+    values.update(overrides)
+    return PrivateRunUsageSnapshot(**values)
+
+
+def test_map_run_agent_outcome_keeps_the_inline_priority_order() -> None:
+    from app.reliability.run_execution.errors import AmbiguousExternalSideEffect
+    from app.reliability.run_execution.outcome_mapping import map_run_agent_outcome
+    from deerflow.runtime.runs.execution_contracts import RunAgentOutcome, RunAgentUsageSnapshot
+
+    usage = RunAgentUsageSnapshot(
+        total_input_tokens=10,
+        total_output_tokens=5,
+        total_tokens=15,
+        llm_call_count=2,
+        lead_agent_tokens=15,
+        subagent_tokens=0,
+        middleware_tokens=0,
+        token_usage_by_model={},
+        token_budget_usage=None,
+    )
+    attempt = _usage()
+
+    revoked = map_run_agent_outcome(
+        RunAgentOutcome.succeeded(usage, suspended_approval_id="approval-1"),
+        attempt_usage=attempt,
+        authorization_revoked=True,
+        cancel_requested=False,
+        ambiguous_side_effect=False,
+    )
+    assert revoked.status == "cancelled"
+
+    durable = map_run_agent_outcome(
+        RunAgentOutcome.failed(usage, public_error_code="MODEL_OUTPUT_LIMIT"),
+        attempt_usage=attempt,
+        authorization_revoked=False,
+        cancel_requested=True,
+        ambiguous_side_effect=True,
+    )
+    assert durable.status == "failed"
+    assert durable.public_error_code == "MODEL_OUTPUT_LIMIT"
+    assert durable.retryable is False
+    assert durable.durable_terminal is True
+
+    with pytest.raises(AmbiguousExternalSideEffect):
+        map_run_agent_outcome(
+            RunAgentOutcome.failed(usage, public_error_code="AGENT_EXECUTION_FAILED"),
+            attempt_usage=attempt,
+            authorization_revoked=False,
+            cancel_requested=False,
+            ambiguous_side_effect=True,
+        )
+
+    cancelled = map_run_agent_outcome(
+        RunAgentOutcome.succeeded(usage),
+        attempt_usage=attempt,
+        authorization_revoked=False,
+        cancel_requested=True,
+        ambiguous_side_effect=False,
+    )
+    assert cancelled.status == "cancelled"
+
+    succeeded = map_run_agent_outcome(
+        RunAgentOutcome.succeeded(usage, suspended_approval_id="approval-1"),
+        attempt_usage=attempt,
+        authorization_revoked=False,
+        cancel_requested=False,
+        ambiguous_side_effect=False,
+    )
+    assert succeeded.status == "succeeded"
+    assert succeeded.suspended_approval_id == "approval-1"
+    assert succeeded.attempt_usage == attempt
+
+
+def test_executor_outcome_helpers_are_exact_owner_functions() -> None:
+    from app.reliability.run_execution import outcome_mapping as owner
+
+    executor_class = executor_legacy.RunAgentPrivateExecutor
+    assert executor_class._usage_snapshot is owner.usage_snapshot
+    assert executor_class._outcome_usage_snapshot is owner.outcome_usage_snapshot
+    assert executor_class._terminal_failure_result is owner.terminal_failure_result
+    assert executor_class._output_limit_error is owner.output_limit_error
+    assert owner.__all__ == ["map_run_agent_outcome", "outcome_usage_snapshot", "output_limit_error", "terminal_failure_result", "usage_snapshot"]
