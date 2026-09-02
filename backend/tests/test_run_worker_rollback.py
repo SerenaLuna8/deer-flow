@@ -28,18 +28,20 @@ from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.recovered_llm_failures import (
     RunRecoveredLLMFailureRecorder,
 )
+from deerflow.runtime.runs.checkpoint_rollback import (
+    RollbackPoint,
+    _collect_pre_existing_message_ids,
+    _linearize_delta_checkpoint_resume,
+    _rollback_to_pre_run_checkpoint,
+)
 from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
-    RollbackPoint,
     RunContext,
     _agent_factory_supports_app_config,
     _build_runtime_context,
-    _collect_pre_existing_message_ids,
     _extract_llm_error_fallback,
     _install_runtime_context,
-    _linearize_delta_checkpoint_resume,
-    _rollback_to_pre_run_checkpoint,
     run_agent,
 )
 from deerflow.runtime.secret_context import _SLASH_SKILL_ACTIVATION_RUN_KEY

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import deerflow.runtime.runs.checkpoint_rollback as checkpoint_rollback
 import deerflow.runtime.runs.worker as run_worker
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
@@ -115,7 +116,7 @@ async def test_rollback_settlement_defers_cancellation_until_terminal_is_recorde
         return False
 
     settlement = asyncio.create_task(
-        run_worker._settle_rollback(
+        checkpoint_rollback._settle_rollback(
             run_manager=run_manager,
             run_id=record.run_id,
             rollback=rollback,

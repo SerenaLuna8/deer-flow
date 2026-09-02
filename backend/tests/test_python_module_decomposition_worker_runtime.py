@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import importlib
 import inspect
 from pathlib import Path
 
@@ -121,6 +122,27 @@ RUN_AGENT_MODULE_SEAMS = frozenset(
         "_settle_rollback",
         "get_sandbox_provider",
     }
+)
+CHECKPOINT_ROLLBACK_NAMES = (
+    "_ROLLBACK_SUCCEEDED_ERROR",
+    "_checkpoint_id",
+    "_snapshot_values",
+    "_materialized_checkpoint_snapshot",
+    "_materialized_checkpoint_messages",
+    "_read_checkpoint_messages",
+    "_message_id",
+    "_checkpoint_messages_from_values_or_snapshot",
+    "_collect_pre_existing_message_ids",
+    "_collect_private_pre_existing_message_ids",
+    "RollbackPoint",
+    "_settle_rollback",
+    "_capture_rollback_point",
+    "_rollback_point_from_legacy_snapshot",
+    "_linearize_delta_checkpoint_resume",
+    "_restore_pending_writes",
+    "_rollback_legacy_full_checkpoint",
+    "_rollback_to_pre_run_checkpoint",
+    "_new_checkpoint_marker",
 )
 EXECUTOR_CLASS_COMPATIBILITY_NAMES = frozenset(
     {
@@ -359,3 +381,10 @@ def test_batch5_owner_modules_never_import_facades_or_forbidden_packages() -> No
         imports = _module_imports(path)
         facade_imports = {module for module in imports if module == EXECUTOR_MODULE or module.endswith(".executor")}
         assert facade_imports == set(), (name, facade_imports)
+
+
+def test_checkpoint_rollback_owner_is_the_exact_legacy_export() -> None:
+    owner = importlib.import_module("deerflow.runtime.runs.checkpoint_rollback")
+    for name in CHECKPOINT_ROLLBACK_NAMES:
+        assert getattr(worker_legacy, name) is getattr(owner, name), name
+    assert owner.__all__ == ["RollbackPoint"]
