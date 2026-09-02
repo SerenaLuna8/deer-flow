@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -257,6 +259,140 @@ def test_private_work_run_exports_are_exact() -> None:
 
     assert legacy._prepend_admitted_human_input_response is runs._prepend_admitted_human_input_response
     assert legacy.reconnect_private_run_stream is runs.reconnect_private_run_stream
+
+
+def test_private_work_router_facade_is_exact() -> None:
+    from app.gateway import private_work_schemas
+    from app.gateway.routers import private_work as legacy
+    from app.gateway.routers.private_work_routes import (
+        context_controls,
+        contracts,
+        dependencies,
+        runs,
+        streaming,
+        threads,
+    )
+    from app.gateway.routers.private_work_routes import router as owner
+
+    assert legacy.router is owner.router
+    exact_exports = (
+        (
+            private_work_schemas,
+            (
+                "PrivateRunCreateRequest",
+                "PrivateThreadTokenUsageResponse",
+            ),
+        ),
+        (
+            contracts,
+            (
+                "_POSTGRES_BIGINT_MAX",
+                "PRIVATE_THREAD_TITLE_MAX_LENGTH",
+                "ExecutionApprovalEnvelopeResponse",
+                "PrivateThreadBranchRequest",
+                "PrivateThreadCreateRequest",
+                "PrivateThreadPatchRequest",
+                "_public_run_metadata",
+                "_run_response",
+            ),
+        ),
+        (
+            dependencies,
+            (
+                "_browser_chat_run_service",
+                "_chat_control_service",
+                "_execution_approval_service",
+                "_feedback_service",
+                "_file_service",
+                "_file_streamer",
+                "_raise_http",
+                "_run_event_store",
+                "_run_service",
+                "_run_store",
+                "_runtime_dependency",
+                "_scoped_checkpointer",
+                "_thread_service",
+            ),
+        ),
+        (
+            context_controls,
+            (
+                "_context_projection_sse_consumer",
+                "_normalize_prepared_edit_replay",
+                "_prepared_history_replay_kind",
+                "stream_private_thread_context_usage",
+            ),
+        ),
+        (
+            runs,
+            (
+                "_project_scoped_checkpoint_durations",
+                "_project_scoped_checkpoint_token_usage",
+                "_project_scoped_event_durations",
+                "_project_scoped_event_token_usage",
+                "_prepend_admitted_human_input_response",
+                "bind_scoped_checkpoint_state",
+                "list_private_run_events",
+                "list_private_run_messages",
+                "list_private_thread_messages",
+                "private_thread_token_usage",
+                "reconnect_private_run_stream",
+                "start_private_run",
+                "wait_private_run",
+            ),
+        ),
+        (
+            streaming,
+            (
+                "_PRIVATE_STREAM_HEARTBEAT_SECONDS",
+                "_PRIVATE_STREAM_POLL_SECONDS",
+                "_PRIVATE_STREAM_WAKEUP_WAIT_SECONDS",
+                "_durable_private_sse_consumer",
+                "_private_stream_bridge",
+                "_private_stream_cursor",
+                "_read_private_stream_page",
+                "_require_run_runtime",
+                "_run_event_wakeup",
+                "_wait_for_durable_private_run",
+            ),
+        ),
+        (threads, ("get_thread_state",)),
+    )
+    for owner_module, names in exact_exports:
+        for name in names:
+            assert getattr(legacy, name) is getattr(owner_module, name)
+    assert legacy.__all__ == ["router"]
+
+
+def test_private_work_route_leaves_do_not_import_legacy_facade() -> None:
+    imports = _absolute_imports(BACKEND_ROOT / "app" / "gateway" / "routers" / "private_work_routes")
+    assert "app.gateway.routers.private_work" not in imports
+
+
+def test_private_work_owner_and_facade_import_cleanly_in_both_orders() -> None:
+    for statements in (
+        ("from app.gateway.routers.private_work_routes import router as owner\nfrom app.gateway.routers import private_work as legacy"),
+        ("from app.gateway.routers import private_work as legacy\nfrom app.gateway.routers.private_work_routes import router as owner"),
+    ):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                f"{statements}\nassert legacy.router is owner.router",
+            ],
+            cwd=BACKEND_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_private_work_facade_does_not_construct_router() -> None:
+    facade_path = BACKEND_ROOT / "app" / "gateway" / "routers" / "private_work.py"
+    tree = ast.parse(facade_path.read_text(encoding="utf-8"), filename=str(facade_path))
+    constructor_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and ((isinstance(node.func, ast.Name) and node.func.id == "APIRouter") or (isinstance(node.func, ast.Attribute) and node.func.attr == "APIRouter"))]
+    assert not constructor_calls
 
 
 def test_private_context_projection_polling_default_uses_shared_timing() -> None:

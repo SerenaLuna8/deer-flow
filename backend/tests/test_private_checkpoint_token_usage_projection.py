@@ -10,8 +10,7 @@ from fastapi import FastAPI, Request
 from langchain_core.messages import AIMessage
 
 from app.gateway.private_work_schemas import PrivateRunCreateRequest
-from app.gateway.routers import private_work as private_work_router
-from app.gateway.routers.private_work_routes import runs
+from app.gateway.routers.private_work_routes import runs, threads
 from deerflow.runtime import DisconnectMode
 
 
@@ -725,27 +724,27 @@ async def test_wait_and_state_routes_project_checkpoint_tokens_after_serializati
     )
 
     monkeypatch.setattr(
-        private_work_router,
+        threads,
         "_browser_chat_run_service",
         browser_service,
     )
     monkeypatch.setattr(
-        private_work_router,
+        threads,
         "_scoped_checkpointer",
         lambda *_args: object(),
     )
     monkeypatch.setattr(
-        private_work_router,
+        threads,
         "bind_scoped_checkpoint_state",
         lambda *_args, **_kwargs: accessor,
     )
     monkeypatch.setattr(
-        private_work_router,
+        threads,
         "_project_scoped_checkpoint_token_usage",
         project,
     )
     monkeypatch.setattr(
-        private_work_router,
+        threads,
         "_project_scoped_checkpoint_durations",
         durations,
     )
@@ -757,7 +756,7 @@ async def test_wait_and_state_routes_project_checkpoint_tokens_after_serializati
         context,  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
     )
-    state = await private_work_router.get_thread_state(
+    state = await threads.get_thread_state(
         thread_id,
         request,
         context,  # type: ignore[arg-type]
