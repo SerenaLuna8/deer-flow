@@ -7,12 +7,25 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import Field, StrictInt
 
 from app.gateway.deps import get_current_user_from_request, require_admin_user
-from app.gateway.routers.project_assets import (
+from app.gateway.routers.project_asset_routes.bindings import _binding_response
+from app.gateway.routers.project_asset_routes.common import (
     ASSET_ERRORS,
+    AssetRoute,
+    _agent_asset_item,
+    _asset_item,
+    _binding_item_response,
+    _current_version_asset_item,
+    _version_call,
+    get_agent_service,
+    get_binding_service,
+    get_mcp_service,
+    get_skill_service,
+    raise_asset_domain,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
     AgentAssetItemResponse,
     AgentBindingResponse,
     AssetItemResponse,
-    AssetRoute,
     BindingResponse,
     CurrentBindingResponse,
     CurrentSystemBindingRequest,
@@ -27,18 +40,9 @@ from app.gateway.routers.project_assets import (
     ScopedCurrentVersionSkillAssetListResponse,
     SkillVersionResponse,
     SystemBindingRequest,
-    _agent_asset_item,
-    _asset_item,
-    _binding_item_response,
-    _binding_response,
-    _current_version_asset_item,
     _StrictModel,
-    _version_call,
-    get_agent_service,
-    get_binding_service,
-    get_mcp_service,
-    get_skill_service,
-    raise_asset_domain,
+)
+from app.gateway.routers.project_asset_routes.router import (
     register_asset_routes,
 )
 from app.projects.capabilities import Capability

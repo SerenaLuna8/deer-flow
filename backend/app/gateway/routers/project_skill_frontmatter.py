@@ -5,7 +5,7 @@ from typing import Annotated, Literal, NoReturn
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from app.gateway.routers.project_assets import (
+from app.gateway.routers.project_asset_routes.common import (
     ASSET_ERRORS,
     AssetRoute,
     project_asset_context,

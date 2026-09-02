@@ -145,6 +145,38 @@ def _absolute_imports(root: Path) -> set[str]:
     return imports
 
 
+def _legacy_gateway_router_imports(root: Path) -> list[tuple[Path, str]]:
+    legacy_names = {"private_work", "project_assets"}
+    findings: list[tuple[Path, str]] = []
+    for path in root.rglob("*.py"):
+        if path.name in {"private_work.py", "project_assets.py"}:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in {
+                        "app.gateway.routers.private_work",
+                        "app.gateway.routers.project_assets",
+                    }:
+                        findings.append((path, alias.name))
+            elif isinstance(node, ast.ImportFrom):
+                if node.module in {
+                    "app.gateway.routers.private_work",
+                    "app.gateway.routers.project_assets",
+                }:
+                    findings.append((path, node.module))
+                elif node.module == "app.gateway.routers":
+                    for alias in node.names:
+                        if alias.name in legacy_names:
+                            findings.append((path, alias.name))
+    return findings
+
+
+def test_gateway_production_imports_use_owner_modules() -> None:
+    assert _legacy_gateway_router_imports(BACKEND_ROOT / "app") == []
+
+
 def test_router_manifests_match_the_pre_split_baseline() -> None:
     assert _route_digest(private_work_router) == EXPECTED_ROUTE_DIGESTS["private_work"]
     assert _route_digest(project_router) == EXPECTED_ROUTE_DIGESTS["project_assets"]

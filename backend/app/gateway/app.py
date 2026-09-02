@@ -26,9 +26,7 @@ from app.gateway.routers import (
     models,
     notifications,
     privacy_center,
-    private_work,
     project_agent_builder,
-    project_assets,
     project_audit,
     project_automations,
     project_channel_group_bindings,
@@ -44,6 +42,9 @@ from app.gateway.routers import (
     project_usage,
     projects,
 )
+from app.gateway.routers.private_work_routes import router as private_work_routes
+from app.gateway.routers.project_asset_routes import catalog as project_asset_catalog
+from app.gateway.routers.project_asset_routes import router as project_asset_routes
 from app.gateway.skill_version_body_limit import SkillVersionRequestBodyLimitMiddleware
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from app.knowledge import gateway as knowledge_gateway
@@ -363,15 +364,15 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(project_lifecycle.router)
     app.include_router(project_usage.router)
     app.include_router(project_audit.router)
-    app.include_router(project_assets.catalog_router)
-    app.include_router(project_assets.project_router)
+    app.include_router(project_asset_catalog.catalog_router)
+    app.include_router(project_asset_routes.project_router)
     app.include_router(project_agent_builder.router)
     app.include_router(project_skill_builder.router)
     app.include_router(project_skill_frontmatter.router)
     # Readiness must precede the dynamic /{task_id} project Automation route.
     app.include_router(project_automations.readiness_router)
     app.include_router(project_automations.router)
-    app.include_router(private_work.router)
+    app.include_router(private_work_routes.router)
     app.include_router(privacy_center.router)
     app.include_router(project_memory.router)
     app.include_router(project_connections.router)

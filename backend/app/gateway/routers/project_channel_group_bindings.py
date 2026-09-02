@@ -22,7 +22,7 @@ from app.channel_group_bindings.models import (
     CreateGroupBindingChallenge,
     UpdateGroupBinding,
 )
-from app.gateway.routers.project_assets import project_asset_context
+from app.gateway.routers.project_asset_routes.common import project_asset_context
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from deerflow.persistence.engine import get_session_factory

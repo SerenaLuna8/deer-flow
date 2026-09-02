@@ -14,13 +14,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.gateway.deps import get_config
-from app.gateway.routers.project_assets import (
+from app.gateway.routers.project_asset_routes.common import (
     ASSET_ERRORS,
-    AgentAssetItemResponse,
     AssetRoute,
-    SkillAssetRefRequest,
     project_asset_context,
     raise_asset_domain,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentAssetItemResponse,
+    SkillAssetRefRequest,
 )
 from app.projects.context import ProjectContext
 from app.shared_assets.agent_catalog import (

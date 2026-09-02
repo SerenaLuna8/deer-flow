@@ -29,13 +29,15 @@ from pydantic import (
 )
 
 from app.gateway.deps import get_system_model_catalog
-from app.gateway.routers.project_assets import (
+from app.gateway.routers.project_asset_routes.common import (
     ASSET_ERRORS,
     AssetRoute,
-    CurrentVersionAssetItemResponse,
-    SkillVersionItemResponse,
     project_asset_context,
     raise_asset_domain,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    CurrentVersionAssetItemResponse,
+    SkillVersionItemResponse,
 )
 from app.private_work.skill_builder_run_admission import (
     SkillBuilderRunAdmissionService,
