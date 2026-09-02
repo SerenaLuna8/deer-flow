@@ -144,6 +144,31 @@ CHECKPOINT_ROLLBACK_NAMES = (
     "_rollback_to_pre_run_checkpoint",
     "_new_checkpoint_marker",
 )
+STREAM_DELIVERY_NAMES = (
+    "_VALID_LG_MODES",
+    "_LLM_ERROR_FALLBACK_AUTHORITY_MODES",
+    "_TOOL_CALL_CHUNK_BATCH_SIZE",
+    "_MESSAGE_TRANSPORT_METADATA_KEYS",
+    "_PublicTokenUsageBridge",
+    "_ToolCallChunkBatcher",
+    "_TEXT_DELTA_FLUSH_BYTES",
+    "_TEXT_DELTA_FINISH_KEYS",
+    "_TEXT_DELTA_FLUSH_DUE",
+    "_TextDeltaCoalescer",
+    "_iter_with_text_delta_deadline",
+    "_SubagentEventBuffer",
+    "_lg_mode_to_sse_event",
+    "_namespaced_sse_event",
+    "_publish_stream_item",
+    "_LLMErrorFallback",
+    "_error_fallback_from_metadata",
+    "_current_run_host_execution_approval_id",
+    "_contains_current_run_host_execution_approval",
+    "_try_extract_llm_error_fallback",
+    "_extract_llm_error_fallback",
+    "_unpack_stream_item",
+    "_normalize_stream_namespace",
+)
 EXECUTOR_CLASS_COMPATIBILITY_NAMES = frozenset(
     {
         "execute",
@@ -388,3 +413,11 @@ def test_checkpoint_rollback_owner_is_the_exact_legacy_export() -> None:
     for name in CHECKPOINT_ROLLBACK_NAMES:
         assert getattr(worker_legacy, name) is getattr(owner, name), name
     assert owner.__all__ == ["RollbackPoint"]
+
+
+def test_stream_delivery_owner_is_the_exact_legacy_export() -> None:
+    owner = importlib.import_module("deerflow.runtime.runs.stream_delivery")
+    for name in STREAM_DELIVERY_NAMES:
+        assert getattr(worker_legacy, name) is getattr(owner, name), name
+    assert owner._TEXT_DELTA_FLUSH_DUE is worker_legacy._TEXT_DELTA_FLUSH_DUE
+    assert "time" in vars(owner)

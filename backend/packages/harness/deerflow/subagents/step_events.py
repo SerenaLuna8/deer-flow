@@ -10,7 +10,7 @@ text + tool-call requests) or a ``ToolMessage`` (a tool's output) — into the
 small, JSON-serializable ``step`` payload that is:
 
 - streamed live inside the ``task_running`` custom event (``task_tool.py``), and
-- persisted as a ``subagent.step`` run event (``runtime/runs/worker.py``).
+- persisted as a ``subagent.step`` run event (``runtime/runs/stream_delivery.py``).
 
 Keeping it pure means it is unit-tested without spinning up a graph, and both
 the streaming and persistence call sites share one definition of a "step".

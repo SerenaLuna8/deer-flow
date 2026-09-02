@@ -24,9 +24,9 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessageChunk, ToolMessage
 
-import deerflow.runtime.runs.worker as worker_module
+import deerflow.runtime.runs.stream_delivery as stream_module
 from deerflow.config.worker_config import DEFAULT_TEXT_DELTA_FLUSH_MS, WorkerStreamConfig
-from deerflow.runtime.runs.worker import (
+from deerflow.runtime.runs.stream_delivery import (
     _TEXT_DELTA_FLUSH_DUE,
     _iter_with_text_delta_deadline,
     _publish_stream_item,
@@ -51,7 +51,7 @@ class _Clock:
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
     fake = _Clock()
-    monkeypatch.setattr(worker_module, "time", SimpleNamespace(monotonic=fake.monotonic))
+    monkeypatch.setattr(stream_module, "time", SimpleNamespace(monotonic=fake.monotonic))
     return fake
 
 

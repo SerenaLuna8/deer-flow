@@ -36,11 +36,11 @@ from deerflow.runtime.runs.checkpoint_rollback import (
 )
 from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.stream_delivery import _extract_llm_error_fallback
 from deerflow.runtime.runs.worker import (
     RunContext,
     _agent_factory_supports_app_config,
     _build_runtime_context,
-    _extract_llm_error_fallback,
     _install_runtime_context,
     run_agent,
 )
