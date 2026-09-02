@@ -22,7 +22,7 @@ import os
 import sys
 from collections.abc import Mapping
 from functools import partial
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from langgraph.errors import GraphRecursionError
 
@@ -68,8 +68,6 @@ from deerflow.sandbox.security import (
     HostBashExecutionMode,
     resolve_host_bash_execution_mode,
 )
-from deerflow.subagents.runtime_catalog import trusted_runtime_agent_catalog
-from deerflow.trace_context import get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.workspace_changes import (
     WORKSPACE_CHANGES_EVENT_TYPE,
@@ -134,6 +132,7 @@ from .runtime_binding import (  # noqa: F401 - compatibility exports
     _compute_agent_factory_supports_app_config,
     _install_runtime_context,
     _repository_trace_user_id,
+    bind_run_runtime_context,
 )
 from .schemas import RunStatus
 from .stream_delivery import (  # noqa: F401 - compatibility exports
@@ -160,6 +159,7 @@ from .stream_delivery import (  # noqa: F401 - compatibility exports
     _ToolCallChunkBatcher,
     _try_extract_llm_error_fallback,
     _unpack_stream_item,
+    resolve_stream_modes,
 )
 
 logger = logging.getLogger(__name__)
@@ -439,108 +439,22 @@ async def run_agent(
 
         # 3. Build the agent
         from langchain_core.runnables import RunnableConfig
-        from langgraph.runtime import Runtime
 
-        # Inject runtime context so middlewares and tools (via ToolRuntime.context) can
-        # access thread-level data. langgraph-cli does this automatically; we must do it
-        # manually here because we drive the graph through ``agent.astream(config=...)``
-        # without passing the official ``context=`` parameter.
-        runtime_ctx = _build_runtime_context(
-            thread_id,
-            run_id,
-            config.get("context"),
-            ctx.app_config,
-            private_scope=ctx.private_scope,
-            authorization_checker=ctx.authorization_checker,
-            authorization_boundary=ctx.authorization_boundary,
+        bound_runtime = bind_run_runtime_context(
+            ctx=ctx,
+            record=record,
+            config=config,
+            private_owner_user_id=private_owner_user_id,
             file_authority=private_files.authority,
-            memory_authority=ctx.memory_authority,
-            guardrail_attribution=ctx.guardrail_attribution,
-            run_read_only_mounts=(
-                (
-                    RunScopedReadOnlyMount(
-                        run_id=run_id,
-                        container_path=ctx.app_config.skills.container_path,
-                        host_path=str(ctx.private_agent_runtime.skill_root),
-                    ),
-                )
-                if (not private_files.enabled and ctx.private_agent_runtime is not None and ctx.app_config is not None)
-                else ()
-            ),
-            runtime_owner_user_id=private_owner_user_id,
-            memory_archive_context=ctx.memory_archive_context,
-            host_execution_approval_port=ctx.host_execution_approval_port,
-            channel_user_id=ctx.channel_user_id,
-            server_abort_event=record.abort_event,
-            vision_dispatch_authority=ctx.vision_dispatch_authority,
-            run_semantic_stop_recorder=semantic_stop_recorder,
-            token_budget_usage_recorder=ctx.token_budget_usage_recorder,
-        )
-        runtime_model_name = None
-        prompt_bundle = None
-        runtime_skills = None
-        runtime_mcp_tools = None
-        runtime_agent_catalog = None
-        skill_secret_provider = None
-        if ctx.private_agent_runtime is not None:
-            # Context is merged after configurable by the Agent factory. Keep
-            # both channels pinned to the same persisted private-Run model.
-            runtime_model_name = record.model_name
-            prompt_bundle = getattr(ctx.private_agent_runtime, "prompt_bundle", None)
-            runtime_skills = tuple(
-                getattr(ctx.private_agent_runtime, "skills", ()),
-            )
-            runtime_mcp_tools = tuple(
-                getattr(ctx.private_agent_runtime, "mcp_tools", ()),
-            )
-            runtime_agent_catalog = trusted_runtime_agent_catalog(getattr(ctx.private_agent_runtime, "agent_catalog", None))
-            raw_skill_secret_provider = getattr(
-                ctx.private_agent_runtime,
-                "materialize_skill_scoped_secrets",
-                None,
-            )
-            skill_container_path = getattr(ctx.app_config.skills, "container_path", None) if ctx.app_config is not None else None
-            if callable(raw_skill_secret_provider) and isinstance(skill_container_path, str):
-                skill_secret_provider = partial(
-                    raw_skill_secret_provider,
-                    skill_container_path,
-                )
-        incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
-        deerflow_trace_id = (
-            normalize_trace_id(
-                incoming_metadata.get(RuntimeContextKeys.TRACE_ID),
-            )
-            or get_current_trace_id()
-        )
-        # Expose the run-scoped journal under a sentinel key so middleware can
-        # write audit events (e.g. SafetyFinishReasonMiddleware recording
-        # suppressed tool calls). Double-underscore prefix marks it as a
-        # runtime-internal channel; user code must not depend on the key name.
-        RuntimeContextCarrier(
-            model_name=runtime_model_name,
-            agent_prompt_bundle=prompt_bundle,
-            runtime_skills=runtime_skills,
-            runtime_mcp_tools=runtime_mcp_tools,
-            runtime_agent_catalog=runtime_agent_catalog,
-            skill_secret_provider=skill_secret_provider,
-            current_run_pre_existing_message_ids=frozenset(
-                pre_existing_message_ids,
-            ),
-            trace_id=deerflow_trace_id,
-            run_journal=journal,
+            private_files_enabled=private_files.enabled,
+            journal=journal,
             token_usage_tracking_enabled=token_usage_tracking_enabled,
-            recovered_llm_failure_recorder=(recovered_llm_failure_recorder),
-        ).install_into(runtime_ctx)
-        _install_runtime_context(config, runtime_ctx)
-        runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
-        configurable = config.setdefault("configurable", {})
-        configurable["__pregel_runtime"] = runtime
-        if ctx.private_agent_runtime is not None:
-            # Private admission persists the exact configured model UUID on
-            # the Run.  Reassert that authoritative value at the Worker boundary
-            # so absent or forged caller config cannot influence the private
-            # runtime factory.  ``None`` remains a fail-closed value.
-            configurable[RuntimeContextKeys.MODEL_NAME] = record.model_name
+            recovered_llm_failure_recorder=recovered_llm_failure_recorder,
+            semantic_stop_recorder=semantic_stop_recorder,
+            pre_existing_message_ids=pre_existing_message_ids,
+        )
+        runtime_ctx = bound_runtime.runtime_context
+        deerflow_trace_id = bound_runtime.trace_id
 
         run_mounts = runtime_ctx.get(
             RuntimeContextKeys.RUN_READ_ONLY_MOUNTS,
@@ -730,33 +644,9 @@ async def run_agent(
             agent.interrupt_after_nodes = interrupt_after
 
         # 6. Build LangGraph stream_mode list
-        #    "events" is NOT a valid astream mode — skip it
-        #    "messages-tuple" maps to LangGraph's "messages" mode
-        lg_modes: list[str] = []
-        for m in requested_modes:
-            if m == "messages-tuple":
-                lg_modes.append("messages")
-            elif m == "events":
-                # Skipped — see log above
-                continue
-            elif m in _VALID_LG_MODES:
-                lg_modes.append(m)
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for m in lg_modes:
-            if m not in seen:
-                seen.add(m)
-                deduped.append(m)
-        published_lg_modes = frozenset(deduped)
-        lg_modes = deduped or ["values"]
-
-        # Semantic outcome cannot depend on which observational lanes the
-        # caller chose to receive. Always consume the parent graph's ``values``
-        # authority lane; when it was not requested, keep it hidden from the
-        # caller's StreamBridge.
-        if "values" not in lg_modes:
-            lg_modes.append("values")
+        resolved_modes = resolve_stream_modes(requested_modes)
+        lg_modes = resolved_modes.lg_modes
+        published_lg_modes = resolved_modes.published_lg_modes
 
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 

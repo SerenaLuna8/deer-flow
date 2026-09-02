@@ -450,7 +450,7 @@ def test_runtime_binding_owner_is_the_exact_legacy_export() -> None:
     owner = importlib.import_module("deerflow.runtime.runs.runtime_binding")
     for name in RUNTIME_BINDING_NAMES:
         assert getattr(worker_legacy, name) is getattr(owner, name), name
-    assert owner.__all__ == ["PrivateAgentRuntime", "PrivateRuntimeFactoryUnavailable", "RunContext"]
+    assert owner.__all__ == ["BoundRunRuntime", "PrivateAgentRuntime", "PrivateRuntimeFactoryUnavailable", "RunContext", "bind_run_runtime_context"]
     assert runtime_package.RunContext is owner.RunContext
     assert "inspect" in vars(owner)
 
@@ -463,3 +463,62 @@ def test_goal_continuation_owner_is_the_exact_legacy_export() -> None:
     owner_imports = _module_imports(RUNS_ROOT / "goal_continuation.py")
     assert ".checkpoint_rollback" in owner_imports
     assert not owner_imports & {WORKER_MODULE, ".worker", ".stream_delivery", ".runtime_binding"}
+
+
+def test_resolve_stream_modes_always_consumes_values_and_records_published_subset() -> None:
+    from deerflow.runtime.runs.stream_delivery import ResolvedStreamModes, resolve_stream_modes
+
+    resolved = resolve_stream_modes({"messages-tuple", "events", "updates", "bogus"})
+    assert isinstance(resolved, ResolvedStreamModes)
+    assert isinstance(resolved.lg_modes, list)
+    assert set(resolved.lg_modes) == {"messages", "updates", "values"}
+    assert resolved.lg_modes[-1] == "values"
+    assert resolved.published_lg_modes == frozenset({"messages", "updates"})
+
+    only_values = resolve_stream_modes({"values"})
+    assert only_values.lg_modes == ["values"]
+    assert only_values.published_lg_modes == frozenset({"values"})
+
+    nothing_valid = resolve_stream_modes({"events"})
+    assert nothing_valid.lg_modes == ["values"]
+    assert nothing_valid.published_lg_modes == frozenset()
+
+
+def test_bind_run_runtime_context_installs_context_runtime_and_model_name() -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from deerflow.runtime.context_keys import RuntimeContextKeys
+    from deerflow.runtime.recovered_llm_failures import RunRecoveredLLMFailureRecorder
+    from deerflow.runtime.runs.execution_contracts import RunSemanticStopRecorder
+    from deerflow.runtime.runs.runtime_binding import BoundRunRuntime, RunContext, bind_run_runtime_context
+
+    record = SimpleNamespace(
+        run_id="run-1",
+        thread_id="thread-1",
+        model_name=None,
+        abort_event=asyncio.Event(),
+    )
+    config: dict[str, object] = {"context": {"agent_name": "ok"}, "metadata": {}}
+    bound = bind_run_runtime_context(
+        ctx=RunContext(checkpointer=None, store="store-sentinel"),
+        record=record,
+        config=config,
+        private_owner_user_id=None,
+        file_authority=None,
+        private_files_enabled=False,
+        journal=None,
+        token_usage_tracking_enabled=True,
+        recovered_llm_failure_recorder=RunRecoveredLLMFailureRecorder(),
+        semantic_stop_recorder=RunSemanticStopRecorder(),
+        pre_existing_message_ids={"m-1"},
+    )
+    assert isinstance(bound, BoundRunRuntime)
+    assert bound.runtime_context[RuntimeContextKeys.THREAD_ID] == "thread-1"
+    assert bound.runtime_context[RuntimeContextKeys.RUN_ID] == "run-1"
+    assert bound.runtime_context["agent_name"] == "ok"
+    assert config["context"]["agent_name"] == "ok"
+    runtime = config["configurable"]["__pregel_runtime"]
+    assert runtime.context is bound.runtime_context
+    assert runtime.store == "store-sentinel"
+    assert RuntimeContextKeys.MODEL_NAME not in config["configurable"]

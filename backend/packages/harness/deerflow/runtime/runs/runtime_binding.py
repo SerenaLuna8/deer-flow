@@ -6,7 +6,7 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, Protocol, cast
 
 from deerflow.agents.middlewares.tool_call_control import (
@@ -17,14 +17,17 @@ from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.file_authority import RunFileAuthority
 from deerflow.runtime.context_carrier import RuntimeContextCarrier
 from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.runtime.recovered_llm_failures import RunRecoveredLLMFailureRecorder
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.subagents.runtime_catalog import trusted_runtime_agent_catalog
 from deerflow.token_budget_usage import TokenBudgetUsageRecorder
+from deerflow.trace_context import get_current_trace_id, normalize_trace_id
 
 from .execution_contracts import RunAgentResourceOwnership, RunSemanticStopRecorder
 from .manager import RunRecord
 
-__all__ = ["PrivateAgentRuntime", "PrivateRuntimeFactoryUnavailable", "RunContext"]
+__all__ = ["BoundRunRuntime", "PrivateAgentRuntime", "PrivateRuntimeFactoryUnavailable", "RunContext", "bind_run_runtime_context"]
 
 
 def _repository_trace_user_id(record: RunRecord) -> str:
@@ -338,3 +341,140 @@ async def _call_agent_factory_off_loop(
         return agent_factory(**kwargs)
 
     return await asyncio.to_thread(_build)
+
+
+@dataclass(frozen=True, slots=True)
+class BoundRunRuntime:
+    """Runtime context installed into one Run's config before graph construction."""
+
+    runtime_context: dict[str, Any]
+    trace_id: str | None
+
+
+def bind_run_runtime_context(
+    *,
+    ctx: RunContext,
+    record: RunRecord,
+    config: dict[str, Any],
+    private_owner_user_id: str | None,
+    file_authority: object | None,
+    private_files_enabled: bool,
+    journal: Any | None,
+    token_usage_tracking_enabled: bool,
+    recovered_llm_failure_recorder: RunRecoveredLLMFailureRecorder,
+    semantic_stop_recorder: RunSemanticStopRecorder,
+    pre_existing_message_ids: set[str],
+) -> BoundRunRuntime:
+    """Build and install ``ToolRuntime.context`` and the parent ``Runtime`` for one Run.
+
+    Mutates ``config`` exactly as the inline phase did: installs the sanitized
+    runtime context, stores the parent runtime under
+    ``configurable["__pregel_runtime"]``, and re-asserts the persisted private
+    model name so absent or forged caller config cannot influence the private
+    runtime factory.
+    """
+    from langgraph.runtime import Runtime
+
+    run_id = record.run_id
+    thread_id = record.thread_id
+    # Inject runtime context so middlewares and tools (via ToolRuntime.context) can
+    # access thread-level data. langgraph-cli does this automatically; we must do it
+    # manually here because we drive the graph through ``agent.astream(config=...)``
+    # without passing the official ``context=`` parameter.
+    runtime_ctx = _build_runtime_context(
+        thread_id,
+        run_id,
+        config.get("context"),
+        ctx.app_config,
+        private_scope=ctx.private_scope,
+        authorization_checker=ctx.authorization_checker,
+        authorization_boundary=ctx.authorization_boundary,
+        file_authority=file_authority,
+        memory_authority=ctx.memory_authority,
+        guardrail_attribution=ctx.guardrail_attribution,
+        run_read_only_mounts=(
+            (
+                RunScopedReadOnlyMount(
+                    run_id=run_id,
+                    container_path=ctx.app_config.skills.container_path,
+                    host_path=str(ctx.private_agent_runtime.skill_root),
+                ),
+            )
+            if (not private_files_enabled and ctx.private_agent_runtime is not None and ctx.app_config is not None)
+            else ()
+        ),
+        runtime_owner_user_id=private_owner_user_id,
+        memory_archive_context=ctx.memory_archive_context,
+        host_execution_approval_port=ctx.host_execution_approval_port,
+        channel_user_id=ctx.channel_user_id,
+        server_abort_event=record.abort_event,
+        vision_dispatch_authority=ctx.vision_dispatch_authority,
+        run_semantic_stop_recorder=semantic_stop_recorder,
+        token_budget_usage_recorder=ctx.token_budget_usage_recorder,
+    )
+    runtime_model_name = None
+    prompt_bundle = None
+    runtime_skills = None
+    runtime_mcp_tools = None
+    runtime_agent_catalog = None
+    skill_secret_provider = None
+    if ctx.private_agent_runtime is not None:
+        # Context is merged after configurable by the Agent factory. Keep
+        # both channels pinned to the same persisted private-Run model.
+        runtime_model_name = record.model_name
+        prompt_bundle = getattr(ctx.private_agent_runtime, "prompt_bundle", None)
+        runtime_skills = tuple(
+            getattr(ctx.private_agent_runtime, "skills", ()),
+        )
+        runtime_mcp_tools = tuple(
+            getattr(ctx.private_agent_runtime, "mcp_tools", ()),
+        )
+        runtime_agent_catalog = trusted_runtime_agent_catalog(getattr(ctx.private_agent_runtime, "agent_catalog", None))
+        raw_skill_secret_provider = getattr(
+            ctx.private_agent_runtime,
+            "materialize_skill_scoped_secrets",
+            None,
+        )
+        skill_container_path = getattr(ctx.app_config.skills, "container_path", None) if ctx.app_config is not None else None
+        if callable(raw_skill_secret_provider) and isinstance(skill_container_path, str):
+            skill_secret_provider = partial(
+                raw_skill_secret_provider,
+                skill_container_path,
+            )
+    incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
+    deerflow_trace_id = (
+        normalize_trace_id(
+            incoming_metadata.get(RuntimeContextKeys.TRACE_ID),
+        )
+        or get_current_trace_id()
+    )
+    # Expose the run-scoped journal under a sentinel key so middleware can
+    # write audit events (e.g. SafetyFinishReasonMiddleware recording
+    # suppressed tool calls). Double-underscore prefix marks it as a
+    # runtime-internal channel; user code must not depend on the key name.
+    RuntimeContextCarrier(
+        model_name=runtime_model_name,
+        agent_prompt_bundle=prompt_bundle,
+        runtime_skills=runtime_skills,
+        runtime_mcp_tools=runtime_mcp_tools,
+        runtime_agent_catalog=runtime_agent_catalog,
+        skill_secret_provider=skill_secret_provider,
+        current_run_pre_existing_message_ids=frozenset(
+            pre_existing_message_ids,
+        ),
+        trace_id=deerflow_trace_id,
+        run_journal=journal,
+        token_usage_tracking_enabled=token_usage_tracking_enabled,
+        recovered_llm_failure_recorder=(recovered_llm_failure_recorder),
+    ).install_into(runtime_ctx)
+    _install_runtime_context(config, runtime_ctx)
+    runtime = Runtime(context=cast(Any, runtime_ctx), store=ctx.store)
+    configurable = config.setdefault("configurable", {})
+    configurable["__pregel_runtime"] = runtime
+    if ctx.private_agent_runtime is not None:
+        # Private admission persists the exact configured model UUID on
+        # the Run.  Reassert that authoritative value at the Worker boundary
+        # so absent or forged caller config cannot influence the private
+        # runtime factory.  ``None`` remains a fail-closed value.
+        configurable[RuntimeContextKeys.MODEL_NAME] = record.model_name
+    return BoundRunRuntime(runtime_context=runtime_ctx, trace_id=deerflow_trace_id)

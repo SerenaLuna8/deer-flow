@@ -771,3 +771,44 @@ def _normalize_stream_namespace(namespace: Any) -> tuple[str, ...]:
     if isinstance(namespace, (list, tuple)):
         return tuple(str(segment) for segment in namespace if str(segment))
     return ()
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedStreamModes:
+    """LangGraph modes the Worker consumes and the subset the caller receives."""
+
+    lg_modes: list[str]
+    published_lg_modes: frozenset[str]
+
+
+def resolve_stream_modes(requested_modes: set[str]) -> ResolvedStreamModes:
+    """Map requested SSE modes onto LangGraph modes and always consume ``values``.
+
+    ``events`` is not a valid ``astream`` mode and is skipped; ``messages-tuple``
+    maps to LangGraph ``messages``. Order is preserved and duplicates removed.
+    The parent graph's ``values`` lane is always consumed for semantic
+    authority even when the caller did not request it; ``published_lg_modes``
+    records the caller-visible subset.
+    """
+    lg_modes: list[str] = []
+    for m in requested_modes:
+        if m == "messages-tuple":
+            lg_modes.append("messages")
+        elif m == "events":
+            continue
+        elif m in _VALID_LG_MODES:
+            lg_modes.append(m)
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for m in lg_modes:
+        if m not in seen:
+            seen.add(m)
+            deduped.append(m)
+    published_lg_modes = frozenset(deduped)
+    lg_modes = deduped or ["values"]
+    if "values" not in lg_modes:
+        lg_modes.append("values")
+    return ResolvedStreamModes(lg_modes=lg_modes, published_lg_modes=published_lg_modes)
+
+
+__all__ = ["ResolvedStreamModes", "resolve_stream_modes"]
