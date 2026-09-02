@@ -8,8 +8,8 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from app.gateway.routers import private_work as private_work_router
-from app.gateway.routers.private_work import _context_projection_sse_consumer
+from app.gateway.routers.private_work_routes import context_controls
+from app.gateway.routers.private_work_routes.context_controls import _context_projection_sse_consumer
 from deerflow.runtime.context_evidence import ContextProjectionHead
 
 
@@ -176,12 +176,12 @@ async def test_context_projection_stream_resumes_from_the_greater_valid_cursor(
 ) -> None:
     service = _ProjectionRouteService()
     monkeypatch.setattr(
-        private_work_router,
+        context_controls,
         "_chat_control_service",
         lambda _request, _request_id: service,
     )
 
-    response = await private_work_router.stream_private_thread_context_usage(
+    response = await context_controls.stream_private_thread_context_usage(
         uuid.UUID("11111111-1111-4111-8111-111111111111"),
         _route_request(last_event_id=header_cursor),
         after_seq=query_cursor,
@@ -210,13 +210,13 @@ async def test_context_projection_stream_rejects_each_noncanonical_or_oversized_
 ) -> None:
     service = _ProjectionRouteService()
     monkeypatch.setattr(
-        private_work_router,
+        context_controls,
         "_chat_control_service",
         lambda _request, _request_id: service,
     )
 
     with pytest.raises(HTTPException) as raised:
-        await private_work_router.stream_private_thread_context_usage(
+        await context_controls.stream_private_thread_context_usage(
             uuid.UUID("11111111-1111-4111-8111-111111111111"),
             _route_request(last_event_id=header_cursor),
             after_seq=query_cursor,

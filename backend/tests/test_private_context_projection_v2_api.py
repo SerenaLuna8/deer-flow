@@ -12,6 +12,7 @@ from app.gateway.deps import (
     require_project_private_open,
 )
 from app.gateway.routers import private_work as private_work_router
+from app.gateway.routers.private_work_routes import context_controls
 
 THREAD_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 EXECUTION_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -112,7 +113,7 @@ def _app(
     app.dependency_overrides[private_work_context] = lambda: context
     app.dependency_overrides[require_project_private_open] = lambda: None
     monkeypatch.setattr(
-        private_work_router,
+        context_controls,
         "_chat_control_service",
         lambda _request, _request_id: service,
     )

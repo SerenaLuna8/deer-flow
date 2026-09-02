@@ -5,16 +5,14 @@ import contextlib
 import copy
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Mapping
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from fastapi import (
     APIRouter,
     Depends,
-    File,
     Query,
     Request,
     Response,
-    UploadFile,
     status,
 )
 from sqlalchemy.exc import DBAPIError
@@ -23,7 +21,6 @@ from starlette.responses import StreamingResponse
 
 from app.gateway.deps import (
     get_config,
-    get_current_agent_runtime_config,
     private_work_context,
     project_session,
     require_project_private_open,
@@ -31,50 +28,39 @@ from app.gateway.deps import (
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.private_work_schemas import (
     PrivateRunCreateRequest,
-    PrivateThreadContextUsageQuery,
     PrivateThreadTokenUsageResponse,
     PrivateWorkRoute,
-    public_run_input_projection,
+)
+from app.gateway.routers.private_work_routes import approvals, context_controls, files
+from app.gateway.routers.private_work_routes.context_controls import (
+    _context_projection_sse_consumer as _context_projection_sse_consumer,
+)
+from app.gateway.routers.private_work_routes.context_controls import (
+    _normalize_prepared_edit_replay,
+    _prepared_history_replay_kind,
+)
+from app.gateway.routers.private_work_routes.context_controls import (
+    stream_private_thread_context_usage as stream_private_thread_context_usage,
 )
 from app.gateway.routers.private_work_routes.contracts import (
     _POSTGRES_BIGINT_MAX,
     PRIVATE_THREAD_TITLE_MAX_LENGTH,  # noqa: F401
-    ExecutionApprovalDecisionRequest,
-    ExecutionApprovalEnvelopeResponse,
-    PrivateEditRegeneratePrepareRequest,
-    PrivateEditRegeneratePrepareResponse,
     PrivateFeedbackCreateRequest,
     PrivateFeedbackResponse,
-    PrivateFileDeleteResponse,
-    PrivateFileResponse,
-    PrivateRegeneratePrepareRequest,
-    PrivateRegeneratePrepareResponse,
     PrivateRunDeleteResponse,
     PrivateRunExecutionStateResponse,
     PrivateRunMessageResponse,
     PrivateRunMessagesPageResponse,
     PrivateRunResponse,
-    PrivateSuggestionsRequest,
-    PrivateSuggestionsResponse,
-    PrivateThreadBranchRequest,
-    PrivateThreadBranchResponse,
-    PrivateThreadCompactRequest,
-    PrivateThreadCompactResponse,
     PrivateThreadCreateRequest,
     PrivateThreadDeleteResponse,
-    PrivateThreadGoalRequest,
-    PrivateThreadGoalResponse,
     PrivateThreadPatchRequest,
     PrivateThreadResponse,
     PrivateThreadSearchRequest,
     PrivateThreadSearchResponse,
     PrivateThreadStateResponse,
-    PrivateUploadLimitsResponse,
-    PrivateUploadProjectStorageResponse,
     PrivateWorkReadinessResponse,
-    _execution_approval_response,
     _feedback_response,
-    _file_response,
     _public_run_metadata,
     _run_response,
     _thread_response,
@@ -96,10 +82,16 @@ from app.gateway.routers.private_work_routes.contracts import (
     ExecutionApprovalContinuationRunResponse as ExecutionApprovalContinuationRunResponse,
 )
 from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalDecisionRequest as ExecutionApprovalDecisionRequest,
+)
+from app.gateway.routers.private_work_routes.contracts import (
     ExecutionApprovalDeniedResponse as ExecutionApprovalDeniedResponse,
 )
 from app.gateway.routers.private_work_routes.contracts import (
     ExecutionApprovalDomainResponse as ExecutionApprovalDomainResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    ExecutionApprovalEnvelopeResponse as ExecutionApprovalEnvelopeResponse,
 )
 from app.gateway.routers.private_work_routes.contracts import (
     ExecutionApprovalFinishedResponse as ExecutionApprovalFinishedResponse,
@@ -123,15 +115,66 @@ from app.gateway.routers.private_work_routes.contracts import (
     PrivateCompactKeep as PrivateCompactKeep,
 )
 from app.gateway.routers.private_work_routes.contracts import (
+    PrivateEditRegeneratePrepareRequest as PrivateEditRegeneratePrepareRequest,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateEditRegeneratePrepareResponse as PrivateEditRegeneratePrepareResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateFileDeleteResponse as PrivateFileDeleteResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateFileResponse as PrivateFileResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateRegeneratePrepareRequest as PrivateRegeneratePrepareRequest,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateRegeneratePrepareResponse as PrivateRegeneratePrepareResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
     PrivateRunExecutionProfileResponse as PrivateRunExecutionProfileResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateSuggestionsRequest as PrivateSuggestionsRequest,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateSuggestionsResponse as PrivateSuggestionsResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateThreadBranchRequest as PrivateThreadBranchRequest,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateThreadBranchResponse as PrivateThreadBranchResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateThreadCompactRequest as PrivateThreadCompactRequest,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateThreadCompactResponse as PrivateThreadCompactResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateThreadGoalRequest as PrivateThreadGoalRequest,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateThreadGoalResponse as PrivateThreadGoalResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateUploadLimitsResponse as PrivateUploadLimitsResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    PrivateUploadProjectStorageResponse as PrivateUploadProjectStorageResponse,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    _execution_approval_response as _execution_approval_response,
+)
+from app.gateway.routers.private_work_routes.contracts import (
+    _file_response as _file_response,
 )
 from app.gateway.routers.private_work_routes.dependencies import (
     _browser_chat_run_service,
     _chat_control_service,
-    _execution_approval_service,
     _feedback_service,
-    _file_service,
-    _file_streamer,
     _raise_http,
     _run_event_store,
     _run_service,
@@ -140,8 +183,17 @@ from app.gateway.routers.private_work_routes.dependencies import (
     _scoped_checkpointer,
     _thread_service,
 )
+from app.gateway.routers.private_work_routes.dependencies import (
+    _execution_approval_service as _execution_approval_service,
+)
+from app.gateway.routers.private_work_routes.dependencies import (
+    _file_service as _file_service,
+)
+from app.gateway.routers.private_work_routes.dependencies import (
+    _file_streamer as _file_streamer,
+)
+from app.gateway.routers.private_work_routes.streaming import _PRIVATE_STREAM_POLL_SECONDS
 from app.gateway.run_event_wakeup import RunEventWakeup
-from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.checkpoint_state import (
     bind_scoped_checkpoint_state,
     checkpoint_config,
@@ -158,10 +210,6 @@ from app.private_work.errors import (
     PrivateWorkInvalid,
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
-)
-from app.private_work.file_service import PrivateUploadLimits
-from app.private_work.file_streaming import (
-    private_streaming_response,
 )
 from app.private_work.http_runtime import format_sse, start_private_run
 from app.private_work.message_projection import (
@@ -191,11 +239,7 @@ from app.reliability.errors import (
 )
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.config.app_config import AppConfig
-from deerflow.persistence.private_work.file_repository import (
-    PRIVATE_FILE_CHUNK_SIZE,
-)
 from deerflow.runtime import DisconnectMode, serialize_channel_values_for_api
-from deerflow.runtime.context_evidence import ContextProjectionHead
 from deerflow.runtime.events.models import (
     STREAM_TERMINAL_ERROR_CODES,
     StoredStreamFrame,
@@ -212,7 +256,6 @@ from deerflow.runtime.public_token_usage import (
 )
 from deerflow.runtime.runs.private_file_lifecycle import await_despite_cancellation
 from deerflow.runtime.runs.schemas import RunStatus
-from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import coerce_iso
 from deerflow.workspace_changes import get_workspace_changes_response
 
@@ -235,11 +278,6 @@ async def get_private_work_readiness(
         code=result.code,
         request_id=result.request_id,
     )
-
-
-async def _upload_chunks(file: UploadFile) -> AsyncIterator[bytes]:
-    while chunk := await file.read(PRIVATE_FILE_CHUNK_SIZE):
-        yield chunk
 
 
 def _public_event(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -609,104 +647,9 @@ def _require_run_runtime(request: Request, request_id: str) -> PostgresStreamBri
     return _private_stream_bridge(request, request_id)
 
 
-_PRIVATE_STREAM_POLL_SECONDS = 0.25
 _PRIVATE_STREAM_WAKEUP_WAIT_SECONDS = 2.5
 _PRIVATE_STREAM_HEARTBEAT_SECONDS = 15.0
 _PRIVATE_RUN_TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
-
-
-def _prepared_history_replay_kind(
-    metadata: Mapping[str, object],
-) -> Literal["regeneration", "message_edit"] | None:
-    if metadata.get("replay_kind") == "edit":
-        return "message_edit"
-    regeneration_keys = {
-        "regenerate_from_message_id",
-        "regenerate_from_run_id",
-        "regenerate_checkpoint_id",
-    }
-    if regeneration_keys.intersection(metadata):
-        return "regeneration"
-    return None
-
-
-async def _normalize_prepared_edit_replay(
-    body: PrivateRunCreateRequest,
-    *,
-    thread_id: str,
-    context: PrivateWorkContext,
-    service: ProjectChatControlService | None,
-    app_config: AppConfig,
-) -> PrivateRunCreateRequest:
-    """Rebuild one server-validated regeneration or edited replay."""
-
-    replay_kind = _prepared_history_replay_kind(body.metadata)
-    if replay_kind is None:
-        return body
-    if service is None:
-        raise PrivateWorkUnavailable(context.request_id)
-    if replay_kind == "regeneration":
-        if body.metadata.get("replay_kind") is not None:
-            raise PrivateWorkConflict(context.request_id)
-        message_id = body.metadata.get("regenerate_from_message_id")
-        if not isinstance(message_id, str) or not message_id:
-            raise PrivateWorkConflict(context.request_id)
-        prepared = await service.prepare_regenerate(
-            context,
-            thread_id,
-            message_id=message_id,
-            app_config=app_config,
-        )
-        checkpoint = body.checkpoint
-        prepared_checkpoint = prepared.get("checkpoint")
-        prepared_input = prepared.get("input")
-        if (
-            checkpoint is None
-            or not isinstance(prepared_checkpoint, Mapping)
-            or not isinstance(prepared_input, Mapping)
-            or checkpoint.checkpoint_id != prepared_checkpoint.get("checkpoint_id")
-            or dict(body.metadata) != prepared.get("metadata")
-            or body.input != public_run_input_projection(prepared_input)
-        ):
-            raise PrivateWorkConflict(context.request_id)
-        return body.model_copy(
-            update={
-                "input": copy.deepcopy(prepared["input"]),
-                "metadata": copy.deepcopy(prepared["metadata"]),
-            }
-        )
-
-    graph_input = body.input
-    messages = graph_input.get("messages") if isinstance(graph_input, Mapping) else None
-    if not isinstance(messages, list) or len(messages) != 1:
-        raise PrivateWorkConflict(context.request_id)
-    replacement = messages[0]
-    if not isinstance(replacement, Mapping):
-        raise PrivateWorkConflict(context.request_id)
-    replacement_base_id = replacement.get("id")
-    source_message_id = body.metadata.get("edit_from_message_id")
-    replacement_text = message_to_text(replacement).strip()
-    if not isinstance(replacement_base_id, str) or not replacement_base_id or not isinstance(source_message_id, str) or not source_message_id or not replacement_text:
-        raise PrivateWorkConflict(context.request_id)
-
-    prepared = await service.prepare_edit_regenerate(
-        context,
-        thread_id,
-        human_message_id=source_message_id,
-        replacement_text=replacement_text,
-        replacement_base_id=replacement_base_id,
-        app_config=app_config,
-    )
-    checkpoint = body.checkpoint
-    prepared_checkpoint = prepared.get("checkpoint")
-    if checkpoint is None or not isinstance(prepared_checkpoint, Mapping) or checkpoint.checkpoint_id != prepared_checkpoint.get("checkpoint_id") or dict(body.metadata) != prepared.get("metadata"):
-        raise PrivateWorkConflict(context.request_id)
-    return body.model_copy(
-        update={
-            "input": copy.deepcopy(prepared["input"]),
-            "metadata": copy.deepcopy(prepared["metadata"]),
-        }
-    )
 
 
 def _run_event_wakeup(request: Request) -> RunEventWakeup | None:
@@ -997,581 +940,9 @@ async def _wait_for_durable_private_run(
         raise
 
 
-@router.get(
-    "/threads/{thread_id}/goal",
-    response_model=PrivateThreadGoalResponse,
-)
-async def get_private_thread_goal(
-    thread_id: uuid.UUID,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_config),
-) -> PrivateThreadGoalResponse:
-    try:
-        goal = await _chat_control_service(
-            request,
-            context.request_id,
-        ).get_goal(
-            context,
-            str(thread_id),
-            app_config=config,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return PrivateThreadGoalResponse(goal=goal)
-
-
-@router.put(
-    "/threads/{thread_id}/goal",
-    response_model=PrivateThreadGoalResponse,
-)
-async def set_private_thread_goal(
-    thread_id: uuid.UUID,
-    body: PrivateThreadGoalRequest,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_config),
-) -> PrivateThreadGoalResponse:
-    try:
-        goal = await _chat_control_service(
-            request,
-            context.request_id,
-        ).set_goal(
-            context,
-            str(thread_id),
-            objective=body.objective,
-            max_continuations=body.max_continuations,
-            app_config=config,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return PrivateThreadGoalResponse(goal=goal)
-
-
-@router.delete(
-    "/threads/{thread_id}/goal",
-    response_model=PrivateThreadGoalResponse,
-)
-async def clear_private_thread_goal(
-    thread_id: uuid.UUID,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_config),
-) -> PrivateThreadGoalResponse:
-    try:
-        await _chat_control_service(
-            request,
-            context.request_id,
-        ).clear_goal(
-            context,
-            str(thread_id),
-            app_config=config,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return PrivateThreadGoalResponse(goal=None)
-
-
-@router.post(
-    "/threads/{thread_id}/compact",
-    response_model=PrivateThreadCompactResponse,
-)
-async def compact_private_thread(
-    thread_id: uuid.UUID,
-    body: PrivateThreadCompactRequest,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_current_agent_runtime_config),
-) -> PrivateThreadCompactResponse:
-    try:
-        result = await _chat_control_service(
-            request,
-            context.request_id,
-        ).compact(
-            context,
-            str(thread_id),
-            force=body.force,
-            keep=None if body.keep is None else body.keep.to_tuple(),
-            app_config=config,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return PrivateThreadCompactResponse(
-        thread_id=result.thread_id,
-        compacted=result.compacted,
-        reason=result.reason,
-        removed_message_count=result.removed_message_count,
-        preserved_message_count=result.preserved_message_count,
-        summary_updated=result.summary_updated,
-        checkpoint_id=result.checkpoint_id,
-        total_tokens=result.total_tokens,
-    )
-
-
-@router.get(
-    "/threads/{thread_id}/context-usage",
-    response_model=ContextProjectionHead,
-)
-async def private_thread_context_usage(
-    thread_id: uuid.UUID,
-    request: Request,
-    query: Annotated[PrivateThreadContextUsageQuery, Query()],
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> ContextProjectionHead:
-    try:
-        projection = await _chat_control_service(
-            request,
-            context.request_id,
-        ).context_projection(
-            context,
-            str(thread_id),
-            subject_kind=query.subject_kind,
-            execution_id=(str(query.subject_id) if query.subject_kind == "subagent_task" else None),
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    if isinstance(projection, ContextProjectionHead):
-        return projection
-    return ContextProjectionHead.from_safe_mapping(projection)
-
-
-async def _context_projection_sse_consumer(
-    *,
-    service: ProjectChatControlService,
-    context: PrivateWorkContext,
-    thread_id: str,
-    request: Request,
-    cursor: int,
-    poll_seconds: float = _PRIVATE_STREAM_POLL_SECONDS,
-) -> AsyncIterator[str]:
-    """Poll rebuildable Heads and monotonically converge every Context Subject."""
-
-    while True:
-        updates = await service.context_projection_updates(
-            context,
-            thread_id,
-            after_projection_seq=cursor,
-        )
-        for projection in updates:
-            next_cursor = int(projection.projection_seq)
-            if next_cursor <= cursor:
-                continue
-            cursor = next_cursor
-            yield format_sse(
-                "context.projection.updated.v2",
-                projection.to_safe_mapping(),
-                event_id=projection.projection_seq,
-            )
-        if await request.is_disconnected():
-            return
-        await asyncio.sleep(max(0, poll_seconds))
-
-
-def _context_projection_stream_cursor(
-    request: Request,
-    *,
-    after_seq: str,
-    request_id: str,
-) -> int:
-    """Resume after every cursor the browser or query has already observed."""
-
-    try:
-        query_cursor = parse_stream_cursor(after_seq)
-        raw_last_event_id = request.headers.get("Last-Event-ID")
-        header_cursor = 0 if raw_last_event_id in {None, ""} else parse_stream_cursor(raw_last_event_id)
-    except ValueError:
-        raise PrivateWorkInvalid(request_id) from None
-    return max(query_cursor, header_cursor)
-
-
-@router.get("/threads/{thread_id}/context-usage/stream")
-async def stream_private_thread_context_usage(
-    thread_id: uuid.UUID,
-    request: Request,
-    after_seq: Annotated[str, Query(pattern=r"^(0|[1-9][0-9]*)$")] = "0",
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> StreamingResponse:
-    try:
-        cursor = _context_projection_stream_cursor(
-            request,
-            after_seq=after_seq,
-            request_id=context.request_id,
-        )
-        service = _chat_control_service(request, context.request_id)
-        # Preflight authorization and storage before committing HTTP 200.
-        await service.context_projection_updates(
-            context,
-            str(thread_id),
-            after_projection_seq=cursor,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return StreamingResponse(
-        _context_projection_sse_consumer(
-            service=service,
-            context=context,
-            thread_id=str(thread_id),
-            request=request,
-            cursor=cursor,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@router.post(
-    "/threads/{thread_id}/branches",
-    response_model=PrivateThreadBranchResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def branch_private_thread(
-    thread_id: uuid.UUID,
-    body: PrivateThreadBranchRequest,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_config),
-) -> PrivateThreadBranchResponse:
-    try:
-        record, checkpoint_id = await _chat_control_service(
-            request,
-            context.request_id,
-        ).branch(
-            context,
-            str(thread_id),
-            message_id=body.message_id,
-            message_ids=body.message_ids,
-            title=body.title,
-            app_config=config,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return PrivateThreadBranchResponse(
-        thread_id=record.thread_id,
-        parent_thread_id=str(thread_id),
-        parent_checkpoint_id=checkpoint_id,
-        branched_from_message_id=body.message_id,
-        workspace_clone_mode=str(record.metadata.get("workspace_clone_mode", "historical_skip")),
-    )
-
-
-@router.post(
-    "/threads/{thread_id}/runs/regenerate/prepare",
-    response_model=PrivateRegeneratePrepareResponse,
-)
-async def prepare_private_regenerate_run(
-    thread_id: uuid.UUID,
-    body: PrivateRegeneratePrepareRequest,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_config),
-) -> PrivateRegeneratePrepareResponse:
-    try:
-        payload = await _chat_control_service(
-            request,
-            context.request_id,
-        ).prepare_regenerate(
-            context,
-            str(thread_id),
-            message_id=body.message_id,
-            app_config=config,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return PrivateRegeneratePrepareResponse.model_validate(payload)
-
-
-@router.post(
-    "/threads/{thread_id}/runs/edit-regenerate/prepare",
-    response_model=PrivateEditRegeneratePrepareResponse,
-)
-async def prepare_private_edit_regenerate_run(
-    thread_id: uuid.UUID,
-    body: PrivateEditRegeneratePrepareRequest,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_config),
-) -> PrivateEditRegeneratePrepareResponse:
-    try:
-        payload = await _chat_control_service(
-            request,
-            context.request_id,
-        ).prepare_edit_regenerate(
-            context,
-            str(thread_id),
-            human_message_id=body.human_message_id,
-            replacement_text=body.replacement_text,
-            app_config=config,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return PrivateEditRegeneratePrepareResponse.model_validate(payload)
-
-
-@router.post(
-    "/threads/{thread_id}/suggestions",
-    response_model=PrivateSuggestionsResponse,
-)
-async def generate_private_suggestions(
-    thread_id: uuid.UUID,
-    body: PrivateSuggestionsRequest,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_current_agent_runtime_config),
-) -> PrivateSuggestionsResponse:
-    try:
-        suggestions = await _chat_control_service(
-            request,
-            context.request_id,
-        ).suggest(
-            context,
-            str(thread_id),
-            n=body.n,
-            app_config=config,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return PrivateSuggestionsResponse(suggestions=suggestions)
-
-
-@router.post(
-    "/threads/{thread_id}/uploads",
-    response_model=PrivateFileResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def upload_private_file(
-    thread_id: uuid.UUID,
-    request: Request,
-    file: UploadFile = File(...),
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> PrivateFileResponse:
-    try:
-        await _browser_chat_run_service(request, context, str(thread_id))
-        record = await _file_service(request, context.request_id).upload(
-            context,
-            thread_id=str(thread_id),
-            logical_path=f"uploads/{file.filename or ''}",
-            media_type=file.content_type or "application/octet-stream",
-            chunks=_upload_chunks(file),
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return _file_response(record)
-
-
-def _upload_limits_response(
-    limits: PrivateUploadLimits,
-    *,
-    request_id: str,
-) -> PrivateUploadLimitsResponse:
-    storage = limits.project_storage
-    return PrivateUploadLimitsResponse(
-        max_files=limits.max_files,
-        max_file_size=limits.max_file_size,
-        max_total_size=limits.max_total_size,
-        project_storage=PrivateUploadProjectStorageResponse(
-            policy=storage.policy,
-            remaining_bytes=storage.remaining_bytes,
-        ),
-        request_id=request_id,
-    )
-
-
-@router.get(
-    "/threads/{thread_id}/uploads/limits",
-    response_model=PrivateUploadLimitsResponse,
-)
-async def get_private_upload_limits(
-    thread_id: uuid.UUID,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> PrivateUploadLimitsResponse:
-    try:
-        await _browser_chat_run_service(request, context, str(thread_id))
-        limits = await _file_service(
-            request,
-            context.request_id,
-        ).read_upload_limits(
-            context,
-            thread_id=str(thread_id),
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return _upload_limits_response(limits, request_id=context.request_id)
-
-
-@router.get(
-    "/threads/{thread_id}/uploads",
-    response_model=list[PrivateFileResponse],
-)
-async def list_private_files(
-    thread_id: uuid.UUID,
-    request: Request,
-    response: Response,
-    limit: int = Query(default=100, ge=1, le=100),
-    offset: int = Query(
-        default=0,
-        ge=0,
-        le=_POSTGRES_BIGINT_MAX,
-        json_schema_extra={
-            "format": "int64",
-            "x-postgres-bigint-maximum": str(_POSTGRES_BIGINT_MAX),
-        },
-    ),
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> list[PrivateFileResponse]:
-    try:
-        await _browser_chat_run_service(request, context, str(thread_id))
-        records = await _file_service(request, context.request_id).list_ready(
-            context,
-            thread_id=str(thread_id),
-            limit=limit,
-            offset=offset,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    if len(records) == limit and offset <= _POSTGRES_BIGINT_MAX - limit:
-        response.headers["X-Next-Offset"] = str(offset + limit)
-    return [_file_response(record) for record in records]
-
-
-@router.delete(
-    "/threads/{thread_id}/uploads",
-    response_model=PrivateFileDeleteResponse,
-)
-async def delete_private_file(
-    thread_id: uuid.UUID,
-    request: Request,
-    file_id: uuid.UUID = Query(),
-    only_if_unreferenced: bool = Query(default=False),
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> PrivateFileDeleteResponse:
-    try:
-        await _browser_chat_run_service(request, context, str(thread_id))
-        deleted = await _file_service(request, context.request_id).delete_ready(
-            context,
-            thread_id=str(thread_id),
-            file_id=file_id,
-            only_if_unreferenced=only_if_unreferenced,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return PrivateFileDeleteResponse(success=True, deleted=deleted is not None)
-
-
-@router.get("/threads/{thread_id}/files/{file_id}")
-async def download_private_file(
-    thread_id: uuid.UUID,
-    file_id: uuid.UUID,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> StreamingResponse:
-    try:
-        await _browser_chat_run_service(request, context, str(thread_id))
-        stream = await _file_streamer(
-            request,
-            context.request_id,
-        ).stream_file(
-            context,
-            thread_id=str(thread_id),
-            file_id=file_id,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return private_streaming_response(stream)
-
-
-@router.get("/artifacts/{artifact_id}")
-async def download_private_artifact(
-    artifact_id: uuid.UUID,
-    request: Request,
-    thread_id: uuid.UUID = Query(),
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> StreamingResponse:
-    try:
-        await _browser_chat_run_service(request, context, str(thread_id))
-        stream = await _file_streamer(
-            request,
-            context.request_id,
-        ).stream_artifact(
-            context,
-            thread_id=str(thread_id),
-            artifact_id=artifact_id,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return private_streaming_response(stream)
-
-
-@router.get(
-    "/threads/{thread_id}/execution-approvals/active",
-    response_model=ExecutionApprovalEnvelopeResponse,
-)
-async def get_active_execution_approval(
-    thread_id: uuid.UUID,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> ExecutionApprovalEnvelopeResponse:
-    try:
-        projection = await _execution_approval_service(
-            request,
-            context.request_id,
-        ).active(context, str(thread_id))
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return _execution_approval_response(projection)
-
-
-@router.get(
-    "/threads/{thread_id}/execution-approvals/{approval_id}",
-    response_model=ExecutionApprovalEnvelopeResponse,
-)
-async def get_execution_approval(
-    thread_id: uuid.UUID,
-    approval_id: uuid.UUID,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> ExecutionApprovalEnvelopeResponse:
-    try:
-        projection = await _execution_approval_service(
-            request,
-            context.request_id,
-        ).get(context, str(thread_id), approval_id)
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return _execution_approval_response(projection)
-
-
-@router.post(
-    "/threads/{thread_id}/runs/{source_run_id}/execution-approvals/{approval_id}/decision",
-    response_model=ExecutionApprovalEnvelopeResponse,
-)
-async def decide_execution_approval(
-    thread_id: uuid.UUID,
-    source_run_id: uuid.UUID,
-    approval_id: uuid.UUID,
-    body: ExecutionApprovalDecisionRequest,
-    request: Request,
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> ExecutionApprovalEnvelopeResponse:
-    try:
-        projection = await _execution_approval_service(
-            request,
-            context.request_id,
-        ).decide(
-            context,
-            thread_id=str(thread_id),
-            source_run_id=str(source_run_id),
-            approval_id=approval_id,
-            decision=body.decision,
-            expected_version=int(body.expected_version),
-            idempotency_key=body.idempotency_key,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    return _execution_approval_response(projection)
+router.include_router(context_controls.router)
+router.include_router(files.router)
+router.include_router(approvals.router)
 
 
 @router.post(

@@ -13,6 +13,7 @@ from app.gateway.deps import (
     require_project_private_open,
 )
 from app.gateway.routers import private_work as private_work_router
+from app.gateway.routers.private_work_routes import context_controls
 from app.private_work.errors import (
     PrivateWorkCompactionDisabled,
     PrivateWorkThreadBusy,
@@ -55,7 +56,7 @@ def compact_app(
     app.dependency_overrides[require_project_private_open] = lambda: None
     app.dependency_overrides[get_current_agent_runtime_config] = lambda: runtime_config
     monkeypatch.setattr(
-        private_work_router,
+        context_controls,
         "_chat_control_service",
         lambda _request, _request_id: service,
     )

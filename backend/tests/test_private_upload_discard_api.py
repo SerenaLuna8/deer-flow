@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.routers import private_work as private_work_router
+from app.gateway.routers.private_work_routes import dependencies, files
 
 
 class _FileService:
@@ -40,12 +41,12 @@ async def test_delete_upload_reports_conditional_discard_outcome(
     app.dependency_overrides[private_work_context] = lambda: context
     app.dependency_overrides[require_project_private_open] = lambda: None
     monkeypatch.setattr(
-        private_work_router,
+        files,
         "_file_service",
         lambda _request, _request_id: service,
     )
     monkeypatch.setattr(
-        private_work_router,
+        dependencies,
         "_run_service",
         lambda _request, _request_id: run_service,
     )

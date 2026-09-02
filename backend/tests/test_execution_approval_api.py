@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.routers import private_work as private_work_router
+from app.gateway.routers.private_work_routes import approvals, contracts
 from app.private_work.context import strip_private_client_fields
 from app.private_work.execution_approval import ExecutionApprovalProjection
 
@@ -81,7 +82,7 @@ async def test_execution_approval_routes_are_owner_scoped_and_strict(
     approval_id = uuid.uuid4()
     service = _ExecutionApprovalService(approval_id)
     monkeypatch.setattr(
-        private_work_router,
+        approvals,
         "_execution_approval_service",
         lambda _request, _request_id: service,
     )
@@ -219,7 +220,7 @@ def test_execution_approval_response_union_is_strict(
         **specific,
     }
 
-    parsed = private_work_router.ExecutionApprovalEnvelopeResponse.model_validate(
+    parsed = contracts.ExecutionApprovalEnvelopeResponse.model_validate(
         {
             "schema_version": 1,
             "server_time": "2026-08-14T08:00:00+00:00",
@@ -231,7 +232,7 @@ def test_execution_approval_response_union_is_strict(
     assert parsed.approval.status == status
 
     with pytest.raises(ValidationError):
-        private_work_router.ExecutionApprovalEnvelopeResponse.model_validate(
+        contracts.ExecutionApprovalEnvelopeResponse.model_validate(
             {
                 "schema_version": 1,
                 "server_time": "2026-08-14T08:00:00+00:00",
@@ -242,7 +243,7 @@ def test_execution_approval_response_union_is_strict(
 
 def test_finished_execution_approval_requires_a_durable_result() -> None:
     with pytest.raises(ValidationError):
-        private_work_router.ExecutionApprovalEnvelopeResponse.model_validate(
+        contracts.ExecutionApprovalEnvelopeResponse.model_validate(
             {
                 "schema_version": 1,
                 "server_time": "2026-08-14T08:00:00+00:00",
@@ -257,7 +258,7 @@ def test_finished_execution_approval_requires_a_durable_result() -> None:
 
 
 def test_execution_approval_envelope_hides_internal_staged_state() -> None:
-    parsed = private_work_router.ExecutionApprovalEnvelopeResponse.model_validate(
+    parsed = contracts.ExecutionApprovalEnvelopeResponse.model_validate(
         {
             "schema_version": 1,
             "server_time": "2026-08-14T08:00:00+00:00",

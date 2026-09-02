@@ -241,6 +241,25 @@ def test_private_work_contract_and_dependency_exports_are_exact() -> None:
         assert getattr(legacy, name) is getattr(dependencies, name)
 
 
+def test_private_work_context_file_and_approval_exports_are_exact() -> None:
+    from app.gateway.routers import private_work as legacy
+    from app.gateway.routers.private_work_routes import context_controls, contracts, streaming
+
+    assert legacy._normalize_prepared_edit_replay is context_controls._normalize_prepared_edit_replay
+    assert legacy._context_projection_sse_consumer is context_controls._context_projection_sse_consumer
+    assert legacy.ExecutionApprovalEnvelopeResponse is contracts.ExecutionApprovalEnvelopeResponse
+    assert legacy._PRIVATE_STREAM_POLL_SECONDS is streaming._PRIVATE_STREAM_POLL_SECONDS
+
+
+def test_private_context_projection_polling_default_uses_shared_timing() -> None:
+    import inspect
+
+    from app.gateway.routers.private_work_routes import context_controls, streaming
+
+    poll_default = inspect.signature(context_controls._context_projection_sse_consumer).parameters["poll_seconds"].default
+    assert poll_default == streaming._PRIVATE_STREAM_POLL_SECONDS
+
+
 @pytest.mark.parametrize(
     ("actor_dependency", "options", "expected"),
     (

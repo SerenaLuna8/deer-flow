@@ -7,10 +7,15 @@ import pytest
 from langchain_core.messages import HumanMessage, RemoveMessage
 
 from app.gateway.private_work_schemas import PrivateRunCreateRequest
-from app.gateway.routers.private_work import _normalize_prepared_edit_replay
+from app.gateway.routers import private_work as legacy_private_work
+from app.gateway.routers.private_work_routes.context_controls import _normalize_prepared_edit_replay
 from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.errors import PrivateWorkConflict
 from app.reliability.run_execution.executor import RunAgentPrivateExecutor
+
+
+def test_replay_normalizer_legacy_export_is_exact() -> None:
+    assert legacy_private_work._normalize_prepared_edit_replay is _normalize_prepared_edit_replay
 
 
 def test_replay_reuses_pre_injection_message_identity_from_checkpoint() -> None:
