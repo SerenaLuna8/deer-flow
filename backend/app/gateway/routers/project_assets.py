@@ -1,125 +1,429 @@
 from __future__ import annotations
 
-import base64
-import binascii
 import re
 import uuid
-from collections.abc import Callable, Mapping
-from dataclasses import fields as dataclass_fields
-from dataclasses import is_dataclass
-from datetime import datetime
-from ipaddress import ip_address
-from typing import Annotated, Any, Literal, NoReturn
-from urllib.parse import urlsplit
+from collections.abc import Callable
+from typing import Annotated, Literal
 
 from fastapi import (
     APIRouter,
     Depends,
     File,
-    HTTPException,
     Query,
-    Request,
     Response,
     UploadFile,
     status,
 )
-from fastapi.exceptions import RequestValidationError
-from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.deps import get_config, get_current_user_from_request
+from app.gateway.routers.project_asset_routes.common import (
+    ASSET_ERRORS as ASSET_ERRORS,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    MAX_SKILL_ARCHIVE_UPLOAD_BYTES as MAX_SKILL_ARCHIVE_UPLOAD_BYTES,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    AssetRoute as AssetRoute,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _agent_asset_item as _agent_asset_item,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _agent_definition_call as _agent_definition_call,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _agent_definition_response as _agent_definition_response,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _agent_tool_group_catalog as _agent_tool_group_catalog,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _asset_call as _asset_call,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _asset_item as _asset_item,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _asset_item_capabilities as _asset_item_capabilities,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _binding_item_response as _binding_item_response,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _current_version_asset_call as _current_version_asset_call,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _current_version_asset_item as _current_version_asset_item,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _decode_skill_files as _decode_skill_files,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _editable_project_mcp_url as _editable_project_mcp_url,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _factory as _factory,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _governance_sink as _governance_sink,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _is_project_asset_actor as _is_project_asset_actor,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _list_assets as _list_assets,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _read_skill_archive_upload as _read_skill_archive_upload,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _redacted_project_mcp_url as _redacted_project_mcp_url,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _response_data as _response_data,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _scoped_assets as _scoped_assets,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _version_call as _version_call,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    _version_history as _version_history,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    asset_session as asset_session,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    authenticated_asset_identity as authenticated_asset_identity,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    get_agent_runtime_assessment_service as get_agent_runtime_assessment_service,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    get_agent_service as get_agent_service,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    get_binding_service as get_binding_service,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    get_mcp_secret_service as get_mcp_secret_service,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    get_mcp_service as get_mcp_service,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    get_project_default_agent_service as get_project_default_agent_service,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    get_skill_secret_service as get_skill_secret_service,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    get_skill_service as get_skill_service,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    project_asset_context as project_asset_context,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    raise_asset_domain as raise_asset_domain,
+)
+from app.gateway.routers.project_asset_routes.common import (
+    system_asset_catalog_actor as system_asset_catalog_actor,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    MAX_SKILL_ARCHIVE_BASE64_CHARS as MAX_SKILL_ARCHIVE_BASE64_CHARS,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    MAX_SKILL_BASE64_FILE_CHARS as MAX_SKILL_BASE64_FILE_CHARS,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentAssetItemResponse as AgentAssetItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentAssetMutationResponse as AgentAssetMutationResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentBindingItemResponse as AgentBindingItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentBindingResponse as AgentBindingResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentCapabilityBindingsRequest as AgentCapabilityBindingsRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentCreateRequest as AgentCreateRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentDefinitionItemResponse as AgentDefinitionItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentDefinitionResponse as AgentDefinitionResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentInstructionsRequest as AgentInstructionsRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentRuntimeAssessmentItemResponse as AgentRuntimeAssessmentItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentRuntimeAssessmentsRequest as AgentRuntimeAssessmentsRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AgentRuntimeAssessmentsResponse as AgentRuntimeAssessmentsResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AssetItemResponse as AssetItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    AssetMutationResponse as AssetMutationResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    BindingItemResponse as BindingItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    BindingResponse as BindingResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    CreateAssetRequest as CreateAssetRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    CurrentBindingItemResponse as CurrentBindingItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    CurrentBindingResponse as CurrentBindingResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    CurrentSystemBindingRequest as CurrentSystemBindingRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    CurrentVersionAssetItemResponse as CurrentVersionAssetItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    CurrentVersionAssetMutationResponse as CurrentVersionAssetMutationResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    DisableSystemBindingRequest as DisableSystemBindingRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ExpectedAssetVersionRequest as ExpectedAssetVersionRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ExpectedRevisionRequest as ExpectedRevisionRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpConfiguredRequest as McpConfiguredRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpConfiguredResponse as McpConfiguredResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpDefinitionResponse as McpDefinitionResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpDefinitionSlotResponse as McpDefinitionSlotResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpSecretClearRequest as McpSecretClearRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpSecretReplaceRequest as McpSecretReplaceRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpSecretSetResponse as McpSecretSetResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpSecretSlotResponse as McpSecretSlotResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpSecretSlotStatusResponse as McpSecretSlotStatusResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpSlotRequest as McpSlotRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpToolDiscoveryAttemptItemResponse as McpToolDiscoveryAttemptItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpToolDiscoveryAttemptResponse as McpToolDiscoveryAttemptResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpToolInventoryItemResponse as McpToolInventoryItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpToolInventoryResponse as McpToolInventoryResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpToolResponse as McpToolResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpVersionHistoryResponse as McpVersionHistoryResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpVersionItemResponse as McpVersionItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpVersionRequest as McpVersionRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    McpVersionResponse as McpVersionResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    MoveSystemBindingRequest as MoveSystemBindingRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ProjectAgentItemResponse as ProjectAgentItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ProjectAssetItemResponse as ProjectAssetItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ProjectCurrentVersionAssetItemResponse as ProjectCurrentVersionAssetItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ProjectCurrentVersionSkillItemResponse as ProjectCurrentVersionSkillItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ProjectDefaultAgentRequest as ProjectDefaultAgentRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ProjectDefaultAgentResponse as ProjectDefaultAgentResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ProjectSkillItemResponse as ProjectSkillItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ScopedAgentAssetListResponse as ScopedAgentAssetListResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ScopedAssetListResponse as ScopedAssetListResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ScopedCurrentVersionAssetListResponse as ScopedCurrentVersionAssetListResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ScopedCurrentVersionSkillAssetListResponse as ScopedCurrentVersionSkillAssetListResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    ScopedSkillAssetListResponse as ScopedSkillAssetListResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillActivationReadinessResponse as SkillActivationReadinessResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillActivationRequest as SkillActivationRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillArchiveImportResponse as SkillArchiveImportResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillAssetRefRequest as SkillAssetRefRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillDeleteResponse as SkillDeleteResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillFileChangeRequest as SkillFileChangeRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillFileContentItemResponse as SkillFileContentItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillFileContentResponse as SkillFileContentResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillFileCreateChangeRequest as SkillFileCreateChangeRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillFileDeleteChangeRequest as SkillFileDeleteChangeRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillFileReplaceChangeRequest as SkillFileReplaceChangeRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillFileRequest as SkillFileRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillFileResponse as SkillFileResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillForkRequest as SkillForkRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillSecretClearRequest as SkillSecretClearRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillSecretExactReplaceRequest as SkillSecretExactReplaceRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillSecretReadinessRequirementResponse as SkillSecretReadinessRequirementResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillSecretReplaceRequest as SkillSecretReplaceRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillSecretRequirementResponse as SkillSecretRequirementResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillSecretSetResponse as SkillSecretSetResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillSecretStatusResponse as SkillSecretStatusResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillVersionHistoryResponse as SkillVersionHistoryResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillVersionItemResponse as SkillVersionItemResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillVersionRequest as SkillVersionRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SkillVersionResponse as SkillVersionResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SyncCurrentSystemMcpBindingRequest as SyncCurrentSystemMcpBindingRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SystemAgentCatalogResponse as SystemAgentCatalogResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SystemAssetCatalogResponse as SystemAssetCatalogResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SystemBindingRequest as SystemBindingRequest,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    SystemCurrentVersionCatalogResponse as SystemCurrentVersionCatalogResponse,
+)
+from app.gateway.routers.project_asset_routes.contracts import (
+    _StrictModel as _StrictModel,
+)
+from app.gateway.routers.project_asset_routes.mcp import _mcp_definition as _mcp_definition
 from app.private_work.agent_runtime_assessment import (
-    MAX_AGENT_RUNTIME_ASSESSMENTS,
     AgentRuntimeAssessmentService,
 )
-from app.projects.capabilities import Capability
-from app.projects.context import ProjectContext, resolve_project_context
-from app.projects.errors import (
-    ProjectDatabaseUnavailable,
-    ProjectForbidden,
-    ProjectNotFound,
-)
+from app.projects.context import ProjectContext
 from app.shared_assets import (
-    MAX_AGENT_INSTRUCTION_FIELD_BYTES,
     AgentCapabilityBindings,
-    AgentDesignConflictUnresolved,
-    AgentDesignGenerationProfileStale,
-    AgentDesignSessionLimitExceeded,
-    AgentDesignSlugConflict,
     AgentInstructions,
-    AgentModelSettings,
     AgentPayload,
     AgentService,
-    AssetConflict,
-    AssetForbidden,
-    AssetInUse,
     AssetKind,
-    AssetNotFound,
-    AssetRunAdmissionBusy,
-    AssetRunPayloadTooLarge,
-    AssetRunQuotaExceeded,
-    AssetScope,
     AssetSelection,
-    AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
-    AssetValidationFailed,
     BindingService,
     CreateAgent,
     CreateMcpServer,
-    McpDefinition,
-    McpSecretSlot,
     McpService,
     ProjectDefaultAgentService,
-    SharedAssetError,
-    SkillArchiveFile,
-    SkillArchiveLimitExceeded,
     SkillAssetRef,
-    SkillDesignNoChanges,
-    SkillDesignTargetDeleted,
-    SkillDesignTargetSessionExists,
-    SkillDesignTargetUnsupported,
     SkillFileChange,
-    SkillRuntimeNameConflict,
-    SkillSecretConfigurationInvalid,
-    SkillSecretRevisionStale,
-    SkillSecretsIncomplete,
     SkillService,
-    VersionRelation,
-    WorkflowStatus,
 )
-from app.shared_assets.agent_catalog import (
-    AgentCatalogValidator,
-    StaticToolGroupCatalog,
-)
-from app.shared_assets.contexts import SystemAssetReadContext, resolve_asset_reader
+from app.shared_assets.contexts import SystemAssetReadContext
 from app.shared_assets.mcp_secret_service import McpSecretService, McpSecretSetView
-from app.shared_assets.skill_archive import MAX_SKILL_ARCHIVE_UPLOAD_BYTES
 from app.shared_assets.skill_secret_service import SkillSecretService
-from app.shared_assets.skill_service import (
-    MAX_SKILL_ARCHIVE_BYTES,
-    MAX_SKILL_ARCHIVE_FILES,
-)
-from deerflow.config.app_config import AppConfig
-from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
-from deerflow.mcp_endpoint_policy import validate_remote_mcp_endpoint_syntax
-from deerflow.persistence.engine import get_session_factory
-from deerflow.trace_context import generate_trace_id, get_current_trace_id
-
-
-class AssetRoute(APIRoute):
-    def get_route_handler(self):
-        original = super().get_route_handler()
-
-        async def handler(request: Request):
-            try:
-                return await original(request)
-            except RequestValidationError:
-                request_id = get_current_trace_id() or generate_trace_id()
-                raise_asset_domain(AssetValidationFailed(request_id), request_id)
-
-        return handler
-
 
 project_router = APIRouter(
     prefix="/api/projects/{project_id}",
@@ -131,1016 +435,6 @@ catalog_router = APIRouter(
     tags=["asset-catalog"],
     route_class=AssetRoute,
 )
-
-
-class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class AssetItemResponse(_StrictModel):
-    id: uuid.UUID
-    scope: AssetScope
-    project_id: uuid.UUID | None
-    slug: str
-    display_name: str
-    status: str
-    current_published_version_id: uuid.UUID | None
-    version: int
-    created_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class CurrentVersionAssetItemResponse(_StrictModel):
-    """Public Skill aggregate contract.
-
-    MCP intentionally retains ``AssetItemResponse`` and its established
-    release workflow; Current Version unification does not change MCP.
-    """
-
-    id: uuid.UUID
-    scope: AssetScope
-    project_id: uuid.UUID | None
-    slug: str
-    display_name: str
-    status: str
-    current_version_id: uuid.UUID | None
-    revision: int
-    created_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class AgentAssetItemResponse(_StrictModel):
-    id: uuid.UUID
-    scope: AssetScope
-    project_id: uuid.UUID | None
-    slug: str
-    display_name: str
-    status: str
-    definition_id: uuid.UUID
-    revision: int
-    created_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class BindingItemResponse(_StrictModel):
-    project_id: uuid.UUID
-    kind: AssetKind
-    asset_id: uuid.UUID
-    version_id: uuid.UUID
-    enabled: bool
-    version: int
-    created_by_user_id: str
-    updated_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class CurrentBindingItemResponse(_StrictModel):
-    project_id: uuid.UUID
-    kind: AssetKind
-    asset_id: uuid.UUID
-    current_version_id: uuid.UUID
-    enabled: bool
-    version: int
-    created_by_user_id: str
-    updated_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class AgentBindingItemResponse(_StrictModel):
-    project_id: uuid.UUID
-    kind: Literal[AssetKind.AGENT]
-    asset_id: uuid.UUID
-    definition_id: uuid.UUID
-    enabled: bool
-    version: int
-    created_by_user_id: str
-    updated_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class ProjectAssetItemResponse(AssetItemResponse):
-    capabilities: list[Capability]
-    binding: BindingItemResponse | None
-    description: str = ""
-
-
-class ProjectSkillItemResponse(ProjectAssetItemResponse):
-    description: str
-
-
-class ProjectCurrentVersionAssetItemResponse(CurrentVersionAssetItemResponse):
-    capabilities: list[Capability]
-    binding: CurrentBindingItemResponse | None
-    description: str = ""
-
-
-class ProjectAgentItemResponse(AgentAssetItemResponse):
-    capabilities: list[Capability]
-    binding: AgentBindingItemResponse | None
-    description: str = ""
-
-
-class ProjectCurrentVersionSkillItemResponse(
-    ProjectCurrentVersionAssetItemResponse,
-):
-    description: str
-
-
-class ScopedAssetListResponse(_StrictModel):
-    system_items: list[ProjectAssetItemResponse]
-    project_items: list[ProjectAssetItemResponse]
-    request_id: str
-
-
-class ScopedSkillAssetListResponse(_StrictModel):
-    system_items: list[ProjectSkillItemResponse]
-    project_items: list[ProjectSkillItemResponse]
-    request_id: str
-
-
-class ScopedCurrentVersionAssetListResponse(_StrictModel):
-    system_items: list[ProjectCurrentVersionAssetItemResponse]
-    project_items: list[ProjectCurrentVersionAssetItemResponse]
-    request_id: str
-
-
-class ScopedAgentAssetListResponse(_StrictModel):
-    system_items: list[ProjectAgentItemResponse]
-    project_items: list[ProjectAgentItemResponse]
-    request_id: str
-
-
-class ScopedCurrentVersionSkillAssetListResponse(_StrictModel):
-    system_items: list[ProjectCurrentVersionSkillItemResponse]
-    project_items: list[ProjectCurrentVersionSkillItemResponse]
-    request_id: str
-
-
-def _binding_item_response(
-    view,
-) -> BindingItemResponse | CurrentBindingItemResponse | AgentBindingItemResponse:
-    values = vars(view)
-    if view.kind is AssetKind.MCP:
-        return BindingItemResponse(**values)
-    if view.kind is AssetKind.AGENT:
-        return AgentBindingItemResponse(
-            **{key: value for key, value in values.items() if key != "version_id"},
-            definition_id=view.version_id,
-        )
-    return CurrentBindingItemResponse(
-        **{key: value for key, value in values.items() if key != "version_id"},
-        current_version_id=view.version_id,
-    )
-
-
-class SystemAssetCatalogResponse(_StrictModel):
-    items: list[AssetItemResponse]
-    request_id: str
-
-
-class SystemCurrentVersionCatalogResponse(_StrictModel):
-    items: list[CurrentVersionAssetItemResponse]
-    request_id: str
-
-
-class SystemAgentCatalogResponse(_StrictModel):
-    items: list[AgentAssetItemResponse]
-    request_id: str
-
-
-class AssetMutationResponse(_StrictModel):
-    item: AssetItemResponse
-    request_id: str
-
-
-class CurrentVersionAssetMutationResponse(_StrictModel):
-    item: CurrentVersionAssetItemResponse
-    request_id: str
-
-
-class AgentAssetMutationResponse(_StrictModel):
-    item: AgentAssetItemResponse
-    request_id: str
-
-
-class SkillDeleteResponse(_StrictModel):
-    skill_id: uuid.UUID
-    affected_agent_count: int = Field(ge=0)
-    request_id: str
-
-
-class ProjectDefaultAgentResponse(_StrictModel):
-    agent_asset_id: uuid.UUID | None
-    revision: int = Field(ge=0, le=9_223_372_036_854_775_807)
-    request_id: str
-
-
-class CreateAssetRequest(_StrictModel):
-    slug: str
-    display_name: str
-
-
-class SkillAssetRefRequest(_StrictModel):
-    scope: AssetScope
-    asset_id: uuid.UUID
-
-
-class AgentCreateRequest(_StrictModel):
-    slug: str
-    display_name: str
-    description: str
-    agents_instructions: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    soul: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    identity: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    user_context: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    model_ref: str = Field(
-        min_length=7,
-        max_length=36,
-        pattern=(
-            r"^(?:default|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-            r"[0-9a-f]{4}-[0-9a-f]{12})$"
-        ),
-    )
-    model_settings: AgentModelSettings
-    tool_groups: list[str]
-    skill_refs: list[SkillAssetRefRequest]
-    mcp_version_ids: list[uuid.UUID]
-
-
-class ExpectedAssetVersionRequest(_StrictModel):
-    expected_asset_version: int = Field(ge=1)
-
-
-class ExpectedRevisionRequest(_StrictModel):
-    expected_revision: int = Field(ge=1)
-
-
-class SkillActivationRequest(ExpectedRevisionRequest):
-    expected_payload_checksum: str = Field(
-        pattern=r"^[0-9a-f]{64}$",
-    )
-    expected_secret_revision: int = Field(ge=0)
-
-
-class ProjectDefaultAgentRequest(_StrictModel):
-    agent_asset_id: uuid.UUID | None
-    expected_revision: int = Field(
-        ge=0,
-        le=9_223_372_036_854_775_807,
-    )
-
-
-class SystemBindingRequest(_StrictModel):
-    asset_id: uuid.UUID
-    version_id: uuid.UUID
-    expected_binding_version: int | None = Field(default=None, ge=1)
-
-
-class CurrentSystemBindingRequest(_StrictModel):
-    asset_id: uuid.UUID
-    expected_binding_version: int | None = Field(default=None, ge=1)
-
-
-class MoveSystemBindingRequest(_StrictModel):
-    version_id: uuid.UUID
-    expected_binding_version: int = Field(ge=1)
-
-
-class DisableSystemBindingRequest(_StrictModel):
-    expected_binding_version: int = Field(ge=1)
-
-
-class SyncCurrentSystemMcpBindingRequest(_StrictModel):
-    expected_binding_version: int | None = Field(
-        default=None,
-        ge=1,
-        strict=True,
-    )
-
-
-class BindingResponse(_StrictModel):
-    project_id: uuid.UUID
-    kind: AssetKind
-    asset_id: uuid.UUID
-    version_id: uuid.UUID
-    enabled: bool
-    version: int
-    created_by_user_id: str
-    updated_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-    request_id: str
-
-
-class CurrentBindingResponse(_StrictModel):
-    project_id: uuid.UUID
-    kind: AssetKind
-    asset_id: uuid.UUID
-    current_version_id: uuid.UUID
-    enabled: bool
-    version: int
-    created_by_user_id: str
-    updated_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-    request_id: str
-
-
-class AgentBindingResponse(_StrictModel):
-    project_id: uuid.UUID
-    kind: Literal[AssetKind.AGENT]
-    asset_id: uuid.UUID
-    definition_id: uuid.UUID
-    enabled: bool
-    version: int
-    created_by_user_id: str
-    updated_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-    request_id: str
-
-
-class AgentInstructionsRequest(_StrictModel):
-    agents_instructions: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    soul: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    identity: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    user_context: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    expected_revision: int = Field(ge=1)
-
-
-class AgentCapabilityBindingsRequest(_StrictModel):
-    skill_refs: list[SkillAssetRefRequest]
-    mcp_version_ids: list[uuid.UUID]
-    expected_revision: int = Field(ge=1)
-
-
-class AgentRuntimeAssessmentsRequest(_StrictModel):
-    agent_ids: tuple[uuid.UUID, ...] = Field(
-        min_length=1,
-        max_length=MAX_AGENT_RUNTIME_ASSESSMENTS,
-    )
-
-    @model_validator(mode="after")
-    def validate_unique_agent_ids(self) -> AgentRuntimeAssessmentsRequest:
-        if len(set(self.agent_ids)) != len(self.agent_ids):
-            raise ValueError("Agent runtime assessment IDs must be unique")
-        return self
-
-
-class AgentRuntimeAssessmentItemResponse(_StrictModel):
-    agent_asset_id: uuid.UUID
-    selected_definition_id: uuid.UUID | None
-    status: Literal["ready", "blocked"]
-    reason_code: (
-        Literal[
-            "agent_unavailable",
-            "runtime_dependency_unavailable",
-            "model_unavailable",
-        ]
-        | None
-    )
-
-    @model_validator(mode="after")
-    def validate_runtime_assessment(self) -> AgentRuntimeAssessmentItemResponse:
-        if self.status == "ready":
-            if self.selected_definition_id is None or self.reason_code is not None:
-                raise ValueError("ready Agent runtime assessment is invalid")
-        elif self.reason_code == "agent_unavailable":
-            if self.selected_definition_id is not None:
-                raise ValueError("unavailable Agent runtime assessment is invalid")
-        elif self.reason_code in {
-            "runtime_dependency_unavailable",
-            "model_unavailable",
-        }:
-            if self.selected_definition_id is None:
-                raise ValueError("blocked Agent runtime assessment is invalid")
-        else:
-            raise ValueError("blocked Agent runtime assessment reason is invalid")
-        return self
-
-
-class AgentRuntimeAssessmentsResponse(_StrictModel):
-    items: list[AgentRuntimeAssessmentItemResponse]
-    request_id: str
-
-
-MAX_SKILL_BASE64_FILE_CHARS = 4 * ((MAX_SKILL_ARCHIVE_BYTES + 2) // 3)
-MAX_SKILL_ARCHIVE_BASE64_CHARS = MAX_SKILL_BASE64_FILE_CHARS + 4 * MAX_SKILL_ARCHIVE_FILES
-
-
-class SkillFileRequest(_StrictModel):
-    path: str = Field(min_length=1, max_length=1024)
-    content_base64: str = Field(max_length=MAX_SKILL_BASE64_FILE_CHARS)
-    media_type: str = Field(default="application/octet-stream", min_length=1, max_length=255)
-
-
-class SkillVersionRequest(_StrictModel):
-    files: list[SkillFileRequest] = Field(
-        min_length=1,
-        max_length=MAX_SKILL_ARCHIVE_FILES,
-    )
-    expected_revision: int = Field(ge=1)
-
-
-class SkillFileCreateChangeRequest(_StrictModel):
-    op: Literal["create"]
-    path: str = Field(min_length=1, max_length=1024)
-    content: str = Field(max_length=1048576)
-    media_type: str = Field(min_length=1, max_length=255)
-
-
-class SkillFileReplaceChangeRequest(_StrictModel):
-    op: Literal["replace"]
-    path: str = Field(min_length=1, max_length=1024)
-    content: str = Field(max_length=1048576)
-    media_type: str | None = Field(default=None, min_length=1, max_length=255)
-
-
-class SkillFileDeleteChangeRequest(_StrictModel):
-    op: Literal["delete"]
-    path: str = Field(min_length=1, max_length=1024)
-
-
-SkillFileChangeRequest = Annotated[
-    SkillFileCreateChangeRequest | SkillFileReplaceChangeRequest | SkillFileDeleteChangeRequest,
-    Field(discriminator="op"),
-]
-
-
-class SkillForkRequest(_StrictModel):
-    expected_revision: int = Field(ge=1)
-    expected_source_payload_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
-    changes: list[SkillFileChangeRequest] = Field(min_length=1, max_length=256)
-
-
-class McpSlotRequest(_StrictModel):
-    name: str
-    purpose: str = ""
-    payload_schema: dict[str, list[str]]
-    required: bool = True
-
-
-class McpVersionRequest(_StrictModel):
-    description: str = ""
-    transport: Literal["sse", "http"] = "http"
-    command: str | None = None
-    args: list[str] = Field(default_factory=list)
-    url: str | None = None
-    env: dict[str, str] = Field(default_factory=dict)
-    headers: dict[str, str] = Field(default_factory=dict)
-    oauth: dict[str, Any] = Field(default_factory=dict)
-    routing: dict[str, Any] = Field(default_factory=dict)
-    tool_overrides: dict[str, Any] = Field(default_factory=dict)
-    timeout_seconds: int = 30
-    secret_slots: list[McpSlotRequest] = Field(default_factory=list)
-    expected_asset_version: int = Field(ge=1)
-
-
-class McpConfiguredRequest(_StrictModel):
-    slug: str
-    display_name: str
-    description: str = ""
-    transport: Literal["sse", "http"] = "http"
-    command: str | None = None
-    args: list[str] = Field(default_factory=list)
-    url: str | None = None
-    env: dict[str, str] = Field(default_factory=dict)
-    headers: dict[str, str] = Field(default_factory=dict)
-    oauth: dict[str, Any] = Field(default_factory=dict)
-    routing: dict[str, Any] = Field(default_factory=dict)
-    tool_overrides: dict[str, Any] = Field(default_factory=dict)
-    timeout_seconds: int = 30
-    secret_slots: list[McpSlotRequest] = Field(default_factory=list)
-
-
-class McpSecretReplaceRequest(_StrictModel):
-    payload: dict[str, dict[str, str]] = Field(repr=False)
-
-
-class McpSecretClearRequest(_StrictModel):
-    confirmed: Literal[True]
-
-
-class AgentDefinitionItemResponse(_StrictModel):
-    definition_id: uuid.UUID
-    agent_id: uuid.UUID
-    description: str
-    agents_instructions: str
-    soul: str
-    identity: str
-    user_context: str
-    model_ref: str
-    model_settings: AgentModelSettings
-    tool_groups: list[str]
-    skill_refs: list[SkillAssetRefRequest]
-    mcp_version_ids: list[uuid.UUID]
-    payload_schema_version: int
-    payload_checksum: str
-    updated_by_user_id: str
-    updated_at: datetime
-
-
-class SkillSecretRequirementResponse(_StrictModel):
-    name: str
-    target_env: str
-    optional: bool
-
-
-class SkillSecretStatusResponse(_StrictModel):
-    name: str
-    target_env: str
-    optional: bool
-    configured: bool
-    revision: int = Field(ge=0)
-
-
-class SkillSecretSetResponse(_StrictModel):
-    skill_id: uuid.UUID
-    skill_version_id: uuid.UUID
-    revision: int = Field(ge=0)
-    readiness: Literal["ready", "unready"]
-    requirements: list[SkillSecretStatusResponse]
-    request_id: str
-
-
-class SkillSecretReadinessRequirementResponse(_StrictModel):
-    name: str
-    target_env: str
-    optional: bool
-    configured: bool
-
-
-class SkillActivationReadinessResponse(_StrictModel):
-    skill_id: uuid.UUID
-    skill_version_id: uuid.UUID
-    revision: int = Field(ge=1)
-    payload_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
-    secret_revision: int = Field(ge=0)
-    secrets_autonomous: bool
-    ready: bool
-    required_count: int = Field(ge=0)
-    configured_required_count: int = Field(ge=0)
-    requirements: list[SkillSecretReadinessRequirementResponse]
-    request_id: str
-
-
-class SkillSecretReplaceRequest(_StrictModel):
-    expected_skill_version_id: uuid.UUID
-    secrets: dict[str, str] = Field(max_length=256, repr=False)
-
-
-class SkillSecretExactReplaceRequest(_StrictModel):
-    secrets: dict[str, str] = Field(max_length=256, repr=False)
-
-
-class SkillSecretClearRequest(_StrictModel):
-    confirmed: Literal[True]
-
-
-class SkillFileResponse(_StrictModel):
-    path: str
-    media_type: str
-    size_bytes: int
-    sha256: str
-
-
-class SkillFileContentItemResponse(_StrictModel):
-    path: str
-    media_type: str
-    size_bytes: int
-    sha256: str
-    preview_status: Literal["ready", "binary", "too_large"]
-    encoding: Literal["utf-8"] | None
-    content: str | None
-    source_payload_checksum: str
-    asset_revision: int
-
-
-class SkillVersionItemResponse(_StrictModel):
-    id: uuid.UUID
-    skill_id: uuid.UUID
-    version_number: int
-    relation: VersionRelation
-    description: str
-    frontmatter: dict[str, Any]
-    compatibility: str | None
-    secret_requirements: list[SkillSecretRequirementResponse]
-    file_views: list[SkillFileResponse]
-    supersedes_version_id: uuid.UUID | None
-    payload_checksum: str
-    revoked_at: datetime | None
-    revoked_by_user_id: str | None
-    revocation_reason_code: Literal["security", "policy", "integrity"] | None
-    governance_status: Literal["active", "revoked"]
-    binding_eligible: bool
-    created_by_user_id: str
-    created_at: datetime
-
-
-class McpDefinitionSlotResponse(_StrictModel):
-    name: str
-    purpose: str
-    payload_schema: dict[str, list[str]]
-    required: bool
-
-
-class McpDefinitionResponse(_StrictModel):
-    description: str
-    transport: Literal["stdio", "sse", "http", "streamable_http"]
-    command: str | None
-    args: list[str]
-    url: str | None
-    env: dict[str, str]
-    headers: dict[str, str]
-    oauth: dict[str, Any]
-    routing: dict[str, Any]
-    tool_overrides: dict[str, Any]
-    timeout_seconds: int
-    secret_slots: list[McpDefinitionSlotResponse]
-
-
-class McpSecretSlotResponse(_StrictModel):
-    id: uuid.UUID
-    name: str
-    purpose: str
-    payload_schema: dict[str, list[str]]
-    required: bool
-
-
-class McpSecretSlotStatusResponse(McpSecretSlotResponse):
-    configured: bool
-    revision: int = Field(ge=0)
-
-
-class McpSecretSetResponse(_StrictModel):
-    mcp_server_id: uuid.UUID
-    mcp_server_version_id: uuid.UUID
-    revision: int = Field(ge=0)
-    readiness: Literal["ready", "unready"]
-    slots: list[McpSecretSlotStatusResponse]
-    request_id: str
-
-
-class McpVersionItemResponse(_StrictModel):
-    id: uuid.UUID
-    mcp_server_id: uuid.UUID
-    version_number: int
-    workflow_status: WorkflowStatus
-    definition: McpDefinitionResponse
-    secret_slots: list[McpSecretSlotResponse]
-    supersedes_version_id: uuid.UUID | None
-    payload_checksum: str
-    submitted_at: datetime | None
-    reviewed_at: datetime | None
-    reviewed_by_user_id: str | None
-    created_by_user_id: str
-    created_at: datetime
-
-
-class AgentDefinitionResponse(_StrictModel):
-    item: AgentAssetItemResponse
-    definition: AgentDefinitionItemResponse
-    request_id: str
-
-
-class SkillVersionResponse(_StrictModel):
-    data: SkillVersionItemResponse
-    request_id: str
-
-
-class SkillArchiveImportResponse(_StrictModel):
-    item: CurrentVersionAssetItemResponse
-    version: SkillVersionItemResponse
-    request_id: str
-
-
-class SkillFileContentResponse(_StrictModel):
-    data: SkillFileContentItemResponse
-    request_id: str
-
-
-class McpVersionResponse(_StrictModel):
-    data: McpVersionItemResponse
-    request_id: str
-
-
-class McpConfiguredResponse(_StrictModel):
-    item: AssetItemResponse
-    version: McpVersionItemResponse
-    request_id: str
-
-
-class SkillVersionHistoryResponse(_StrictModel):
-    data: list[SkillVersionItemResponse]
-    request_id: str
-
-
-class McpVersionHistoryResponse(_StrictModel):
-    data: list[McpVersionItemResponse]
-    request_id: str
-
-
-class McpToolResponse(_StrictModel):
-    name: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9_-]+$")
-    description: str = Field(max_length=4096)
-
-
-class McpToolInventoryItemResponse(_StrictModel):
-    status: Literal[
-        "never_discovered",
-        "testing",
-        "ready",
-        "degraded",
-        "failed",
-        "stale",
-    ]
-    tools: list[McpToolResponse] = Field(max_length=128)
-    last_attempt_at: datetime | None
-    last_success_at: datetime | None
-    error_code: (
-        Literal[
-            "mcp_discovery_unavailable",
-            "mcp_catalog_invalid",
-        ]
-        | None
-    )
-
-
-class McpToolInventoryResponse(_StrictModel):
-    data: McpToolInventoryItemResponse
-    request_id: str
-
-
-class McpToolDiscoveryAttemptItemResponse(_StrictModel):
-    id: uuid.UUID
-    mcp_server_id: uuid.UUID
-    mcp_server_version_id: uuid.UUID
-    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
-    requested_at: datetime
-    started_at: datetime | None
-    completed_at: datetime | None
-    error_code: (
-        Literal[
-            "mcp_discovery_unavailable",
-            "mcp_catalog_invalid",
-        ]
-        | None
-    )
-
-
-class McpToolDiscoveryAttemptResponse(_StrictModel):
-    data: McpToolDiscoveryAttemptItemResponse
-    request_id: str
-
-
-ASSET_ERRORS = (
-    AssetNotFound,
-    AssetForbidden,
-    AssetInUse,
-    AssetConflict,
-    AssetValidationFailed,
-    AssetStorageUnavailable,
-    AssetStorageQuotaExceeded,
-    AssetRunQuotaExceeded,
-    AssetRunAdmissionBusy,
-    AssetRunPayloadTooLarge,
-    SkillDesignTargetUnsupported,
-    SkillDesignTargetSessionExists,
-    SkillDesignTargetDeleted,
-    SkillDesignNoChanges,
-    SkillSecretConfigurationInvalid,
-    SkillSecretRevisionStale,
-    SkillSecretsIncomplete,
-    SkillRuntimeNameConflict,
-    AgentDesignSessionLimitExceeded,
-    AgentDesignSlugConflict,
-    AgentDesignConflictUnresolved,
-    AgentDesignGenerationProfileStale,
-    SkillArchiveLimitExceeded,
-)
-
-
-def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> NoReturn:
-    known = {
-        AssetNotFound: 404,
-        AssetForbidden: 403,
-        AssetInUse: 409,
-        AssetConflict: 409,
-        AssetValidationFailed: 422,
-        AssetStorageQuotaExceeded: 429,
-        AssetRunQuotaExceeded: 429,
-        AssetRunAdmissionBusy: 503,
-        AssetRunPayloadTooLarge: 413,
-        AssetStorageUnavailable: 503,
-        SkillDesignTargetUnsupported: 422,
-        SkillDesignTargetSessionExists: 409,
-        SkillDesignTargetDeleted: 409,
-        SkillDesignNoChanges: 409,
-        SkillSecretConfigurationInvalid: 422,
-        SkillSecretsIncomplete: 422,
-        SkillSecretRevisionStale: 409,
-        SkillRuntimeNameConflict: 409,
-        AgentDesignSessionLimitExceeded: 429,
-        AgentDesignSlugConflict: 409,
-        AgentDesignConflictUnresolved: 409,
-        AgentDesignGenerationProfileStale: 409,
-        SkillArchiveLimitExceeded: 413,
-    }
-    status_code = known.get(type(exc))
-    if status_code is None:
-        raise exc
-    raise HTTPException(
-        status_code,
-        detail={
-            "code": exc.code,
-            "message": exc.public_message,
-            "request_id": request_id or exc.request_id,
-        },
-        headers={"Retry-After": "1"} if type(exc) in {AssetStorageQuotaExceeded, AssetRunQuotaExceeded, AssetRunAdmissionBusy} else None,
-    ) from None
-
-
-async def authenticated_asset_identity(
-    user=Depends(get_current_user_from_request),
-) -> tuple[uuid.UUID, str]:
-    return uuid.UUID(str(user.id)), get_current_trace_id() or generate_trace_id()
-
-
-async def system_asset_catalog_actor(
-    user=Depends(get_current_user_from_request),
-) -> SystemAssetReadContext:
-    request_id = get_current_trace_id() or generate_trace_id()
-    try:
-        return resolve_asset_reader(user, request_id=request_id)
-    except AssetForbidden as exc:
-        raise_asset_domain(exc)
-
-
-async def asset_session():
-    from deerflow.persistence.engine import get_session_factory as resolve_session_factory
-
-    request_id = get_current_trace_id() or generate_trace_id()
-    try:
-        factory = resolve_session_factory()
-    except RuntimeError:
-        raise_asset_domain(AssetStorageUnavailable(request_id))
-    async with factory() as session:
-        yield session
-
-
-async def project_asset_context(
-    project_id: uuid.UUID,
-    identity: Annotated[tuple[uuid.UUID, str], Depends(authenticated_asset_identity)],
-    session: Annotated[AsyncSession, Depends(asset_session)],
-) -> ProjectContext:
-    user_id, request_id = identity
-    try:
-        return await resolve_project_context(session, user_id, project_id, request_id)
-    except ProjectNotFound:
-        raise_asset_domain(AssetNotFound(request_id))
-    except ProjectForbidden:
-        raise_asset_domain(AssetForbidden(request_id))
-    except ProjectDatabaseUnavailable:
-        raise_asset_domain(AssetStorageUnavailable(request_id))
-
-
-def _factory():
-    try:
-        return get_session_factory()
-    except RuntimeError:
-        raise HTTPException(
-            503,
-            detail={
-                "code": AssetStorageUnavailable.code,
-                "message": AssetStorageUnavailable.public_message,
-                "request_id": get_current_trace_id() or generate_trace_id(),
-            },
-        ) from None
-
-
-def _governance_sink(request: Request):
-    value = getattr(request.app.state, "shared_asset_audit_sink", None)
-    if value is None:
-        request_id = get_current_trace_id() or generate_trace_id()
-        raise_asset_domain(AssetStorageUnavailable(request_id))
-    return value
-
-
-def _agent_tool_group_catalog(config: AppConfig) -> StaticToolGroupCatalog:
-    return StaticToolGroupCatalog(
-        (
-            *(group.name for group in config.tool_groups),
-            *(tool.group for tool in config.tools),
-            "task",
-        )
-    )
-
-
-def get_agent_service(
-    request: Request,
-    config: AppConfig = Depends(get_config),
-) -> AgentService:
-    return AgentService(
-        _factory(),
-        governance_sink=_governance_sink(request),
-        catalog_validator=AgentCatalogValidator(
-            _agent_tool_group_catalog(config),
-        ),
-    )
-
-
-def get_agent_runtime_assessment_service(
-    request: Request,
-) -> AgentRuntimeAssessmentService:
-    endpoint_policy = getattr(request.app.state, "mcp_endpoint_policy", None)
-    if not isinstance(endpoint_policy, NetworkMcpEndpointPolicy):
-        request_id = get_current_trace_id() or generate_trace_id()
-        raise_asset_domain(AssetStorageUnavailable(request_id))
-    return AgentRuntimeAssessmentService(
-        _factory(),
-        endpoint_policy=endpoint_policy,
-    )
-
-
-def get_skill_service(request: Request) -> SkillService:
-    quota = getattr(request.app.state, "project_quota_enforcer", None)
-    return SkillService(
-        _factory(),
-        governance_sink=_governance_sink(request),
-        quota=quota,
-    )
-
-
-def get_mcp_service(request: Request) -> McpService:
-    endpoint_policy = getattr(request.app.state, "mcp_endpoint_policy", None)
-    if not isinstance(endpoint_policy, NetworkMcpEndpointPolicy):
-        request_id = get_current_trace_id() or generate_trace_id()
-        raise_asset_domain(AssetStorageUnavailable(request_id))
-    return McpService(
-        _factory(),
-        governance_sink=_governance_sink(request),
-        endpoint_policy=endpoint_policy,
-    )
-
-
-def get_mcp_secret_service(request: Request) -> McpSecretService:
-    return McpSecretService(
-        _factory(),
-        governance_sink=_governance_sink(request),
-    )
-
-
-def get_binding_service(request: Request) -> BindingService:
-    return BindingService(_factory(), governance_sink=_governance_sink(request))
-
-
-def get_project_default_agent_service(
-    request: Request,
-) -> ProjectDefaultAgentService:
-    return ProjectDefaultAgentService(
-        _factory(),
-        governance_sink=_governance_sink(request),
-    )
-
-
-def get_skill_secret_service(
-    request: Request,
-) -> SkillSecretService:
-    return SkillSecretService(
-        _factory(),
-        governance_sink=_governance_sink(request),
-    )
-
-
-def _asset_item(view) -> AssetItemResponse:
-    return AssetItemResponse.model_validate(view, from_attributes=True)
-
-
-def _current_version_asset_item(view) -> CurrentVersionAssetItemResponse:
-    return CurrentVersionAssetItemResponse.model_validate(
-        view,
-        from_attributes=True,
-    )
-
-
-def _agent_asset_item(view) -> AgentAssetItemResponse:
-    return AgentAssetItemResponse.model_validate(view, from_attributes=True)
-
-
-def _agent_definition_response(result, request_id: str) -> AgentDefinitionResponse:
-    return AgentDefinitionResponse(
-        item=_agent_asset_item(result.asset),
-        definition=AgentDefinitionItemResponse.model_validate(
-            _response_data(result.definition),
-        ),
-        request_id=request_id,
-    )
 
 
 async def _list_system_catalog(
@@ -1248,106 +542,6 @@ async def list_system_catalog_mcp_servers(
     return await _list_system_catalog(actor, service)
 
 
-def _asset_item_capabilities(
-    context: ProjectContext,
-    scope: AssetScope,
-    kind: AssetKind,
-) -> list[Capability]:
-    allowed = {
-        Capability.SHARED_ASSETS_READ,
-        Capability.SHARED_ASSETS_EXECUTE,
-        Capability.SHARED_ASSETS_MANAGE_BINDINGS,
-    }
-    if scope is AssetScope.PROJECT:
-        allowed.add(Capability.SHARED_ASSETS_EDIT)
-    return sorted(context.capabilities & allowed, key=str)
-
-
-def _scoped_assets(
-    views,
-    bindings,
-    context: ProjectContext,
-    kind: AssetKind,
-) -> ScopedAssetListResponse | ScopedAgentAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
-    by_asset_id = {binding.asset_id: binding for binding in bindings}
-    if kind is AssetKind.SKILL:
-        item_model = ProjectCurrentVersionSkillItemResponse
-        response_model = ScopedCurrentVersionSkillAssetListResponse
-    elif kind is AssetKind.AGENT:
-        item_model = ProjectAgentItemResponse
-        response_model = ScopedAgentAssetListResponse
-    else:
-        item_model = ProjectAssetItemResponse
-        response_model = ScopedAssetListResponse
-    items = [
-        item_model(
-            **vars(view),
-            capabilities=_asset_item_capabilities(context, view.scope, kind),
-            binding=(_binding_item_response(by_asset_id[view.id]) if view.scope is AssetScope.SYSTEM and view.id in by_asset_id else None),
-        )
-        for view in views
-    ]
-    return response_model(
-        system_items=[item for item in items if item.scope is AssetScope.SYSTEM],
-        project_items=[item for item in items if item.scope is AssetScope.PROJECT],
-        request_id=context.request_id,
-    )
-
-
-async def _list_assets(
-    context: ProjectContext,
-    kind: AssetKind,
-    service,
-    binding_service: BindingService,
-) -> ScopedAssetListResponse | ScopedAgentAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
-    try:
-        views = await service.list_visible(context)
-        bindings = await binding_service.list_visible(context, kind)
-        return _scoped_assets(views, bindings, context, kind)
-    except ASSET_ERRORS as exc:
-        raise_asset_domain(exc)
-
-
-async def _asset_call(actor, operation):
-    try:
-        result = await operation()
-        return AssetMutationResponse(item=_asset_item(result), request_id=actor.request_id)
-    except ASSET_ERRORS as exc:
-        raise_asset_domain(exc)
-
-
-async def _current_version_asset_call(actor, operation):
-    try:
-        result = await operation()
-        return CurrentVersionAssetMutationResponse(
-            item=_current_version_asset_item(result),
-            request_id=actor.request_id,
-        )
-    except ASSET_ERRORS as exc:
-        raise_asset_domain(exc)
-
-
-async def _agent_definition_call(actor, operation):
-    try:
-        return _agent_definition_response(await operation(), actor.request_id)
-    except ASSET_ERRORS as exc:
-        raise_asset_domain(exc)
-
-
-async def _version_call(actor, operation, response_model: type[_StrictModel]):
-    try:
-        result = await operation()
-        return response_model(
-            data=_response_data(
-                result,
-                redact_project_mcp=_is_project_asset_actor(actor),
-            ),
-            request_id=actor.request_id,
-        )
-    except ASSET_ERRORS as exc:
-        raise_asset_domain(exc)
-
-
 def _configured_mcp_response(result, request_id: str) -> McpConfiguredResponse:
     return McpConfiguredResponse(
         item=_asset_item(result.asset),
@@ -1359,205 +553,6 @@ def _configured_mcp_response(result, request_id: str) -> McpConfiguredResponse:
             )
         ),
         request_id=request_id,
-    )
-
-
-async def _version_history(actor, operation, response_model: type[_StrictModel]):
-    try:
-        versions = await operation()
-        return response_model(
-            data=[
-                _response_data(
-                    version,
-                    redact_project_mcp=_is_project_asset_actor(actor),
-                )
-                for version in versions
-            ],
-            request_id=actor.request_id,
-        )
-    except ASSET_ERRORS as exc:
-        raise_asset_domain(exc)
-
-
-def _is_project_asset_actor(actor: object) -> bool:
-    return (
-        isinstance(actor, ProjectContext)
-        or getattr(
-            actor,
-            "project_id",
-            None,
-        )
-        is not None
-    )
-
-
-def _redacted_project_mcp_url(value: object) -> str | None:
-    """Expose only a non-secret HTTP(S) origin from historical Project rows."""
-
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = urlsplit(value)
-        hostname = parsed.hostname
-        port = parsed.port
-    except ValueError:
-        return None
-    scheme = parsed.scheme.casefold()
-    if scheme not in {"http", "https"} or not hostname or "*" in hostname or parsed.username is not None or parsed.password is not None or "#" in value or parsed.netloc.endswith(":") or (port is not None and not 1 <= port <= 65535):
-        return None
-    authority = f"[{hostname}]" if ":" in hostname else hostname
-    if port is not None:
-        authority = f"{authority}:{port}"
-    return f"{scheme}://{authority}"
-
-
-def _editable_project_mcp_url(value: object) -> str | None:
-    """Expose a path only for a structurally safe IP-literal endpoint.
-
-    The service revalidates the selected current definition against the
-    process-frozen CIDR policy before this response projection is reached.
-    Unsafe or non-current-compatible values fall back to the historical
-    origin-only representation.
-    """
-
-    origin = _redacted_project_mcp_url(value)
-    if origin is None or not isinstance(value, str):
-        return origin
-    try:
-        endpoint = validate_remote_mcp_endpoint_syntax(value)
-        hostname = urlsplit(endpoint).hostname
-        if hostname is None:
-            return origin
-        ip_address(hostname)
-    except ValueError:
-        return origin
-    return endpoint
-
-
-def _response_data(
-    value: object,
-    *,
-    redact_project_mcp: bool = False,
-    editable_project_mcp: bool = False,
-) -> object:
-    """Copy immutable domain views into ordinary response-safe containers."""
-    if is_dataclass(value) and not isinstance(value, type):
-        response = {
-            field.name: _response_data(
-                getattr(value, field.name),
-                redact_project_mcp=redact_project_mcp,
-                editable_project_mcp=editable_project_mcp,
-            )
-            for field in dataclass_fields(value)
-        }
-        if isinstance(value, McpDefinition):
-            # Historical versions may contain values that were labelled
-            # "non-secret" at authoring time. Arbitrary values cannot be
-            # classified reliably, so public API responses expose only the
-            # Secret-slot schema and never replay persisted env/header values.
-            response["env"] = {}
-            response["headers"] = {}
-            if redact_project_mcp:
-                response["command"] = None
-                response["args"] = []
-                project_url = getattr(value, "url", None)
-                response["url"] = _editable_project_mcp_url(project_url) if editable_project_mcp else _redacted_project_mcp_url(project_url)
-                response["oauth"] = {}
-                response["routing"] = {}
-                response["tool_overrides"] = {}
-        return response
-    if isinstance(value, Mapping):
-        return {
-            str(key): _response_data(
-                item,
-                redact_project_mcp=redact_project_mcp,
-                editable_project_mcp=editable_project_mcp,
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [
-            _response_data(
-                item,
-                redact_project_mcp=redact_project_mcp,
-                editable_project_mcp=editable_project_mcp,
-            )
-            for item in value
-        ]
-    return value
-
-
-def _decode_skill_files(body: SkillVersionRequest, request_id: str) -> tuple[SkillArchiveFile, ...]:
-    try:
-        if sum(len(item.content_base64) for item in body.files) > MAX_SKILL_ARCHIVE_BASE64_CHARS:
-            raise AssetValidationFailed(request_id)
-        files: list[SkillArchiveFile] = []
-        total_decoded_bytes = 0
-        for item in body.files:
-            content = base64.b64decode(item.content_base64, validate=True)
-            total_decoded_bytes += len(content)
-            if total_decoded_bytes > MAX_SKILL_ARCHIVE_BYTES:
-                raise AssetValidationFailed(request_id)
-            files.append(
-                SkillArchiveFile(
-                    path=item.path,
-                    content=content,
-                    media_type=item.media_type,
-                )
-            )
-        return tuple(files)
-    except AssetValidationFailed as exc:
-        raise_asset_domain(exc)
-    except (binascii.Error, ValueError):
-        raise_asset_domain(AssetValidationFailed(request_id))
-
-
-async def _read_skill_archive_upload(
-    archive: UploadFile,
-    request_id: str,
-) -> tuple[bytes, str]:
-    filename = archive.filename
-    if not isinstance(filename, str) or not filename.strip():
-        raise AssetValidationFailed(request_id)
-    payload = bytearray()
-    try:
-        while True:
-            remaining = MAX_SKILL_ARCHIVE_UPLOAD_BYTES - len(payload)
-            chunk = await archive.read(min(1024 * 1024, remaining + 1))
-            if not chunk:
-                break
-            payload.extend(chunk)
-            if len(payload) > MAX_SKILL_ARCHIVE_UPLOAD_BYTES:
-                raise SkillArchiveLimitExceeded(request_id)
-    finally:
-        await archive.close()
-    if not payload:
-        raise AssetValidationFailed(request_id)
-    return bytes(payload), filename
-
-
-def _mcp_definition(body: McpVersionRequest | McpConfiguredRequest) -> McpDefinition:
-    return McpDefinition(
-        description=body.description,
-        transport=body.transport,
-        command=body.command,
-        args=tuple(body.args),
-        url=body.url,
-        env=dict(body.env),
-        headers=dict(body.headers),
-        oauth=dict(body.oauth),
-        routing=dict(body.routing),
-        tool_overrides=dict(body.tool_overrides),
-        timeout_seconds=body.timeout_seconds,
-        secret_slots=tuple(
-            McpSecretSlot(
-                name=slot.name,
-                purpose=slot.purpose,
-                payload_schema={key: tuple(values) for key, values in slot.payload_schema.items()},
-                required=slot.required,
-            )
-            for slot in body.secret_slots
-        ),
     )
 
 

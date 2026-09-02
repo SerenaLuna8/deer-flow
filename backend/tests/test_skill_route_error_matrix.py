@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from starlette.datastructures import UploadFile
 
 from app.gateway.routers import project_assets
+from app.gateway.routers.project_asset_routes import common
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
@@ -165,11 +166,11 @@ async def test_project_skill_route_maps_request_validation_to_asset_contract() -
 async def test_archive_stream_limit_uses_dedicated_413_domain_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(project_assets, "MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 3)
+    monkeypatch.setattr(common, "MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 3)
     upload = UploadFile(BytesIO(b"four"), filename="example.zip")
 
     with pytest.raises(SkillArchiveLimitExceeded):
-        await project_assets._read_skill_archive_upload(  # noqa: SLF001 - route boundary contract
+        await common._read_skill_archive_upload(  # noqa: SLF001 - route boundary contract
             upload,
             _REQUEST_ID,
         )
