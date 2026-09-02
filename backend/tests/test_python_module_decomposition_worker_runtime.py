@@ -109,7 +109,6 @@ WORKER_COMPATIBILITY_NAMES = frozenset(
         "_settle_rollback",
         "_prepare_goal_continuation_input",
         "get_sandbox_provider",
-        "time",
         "inspect",
     }
 )

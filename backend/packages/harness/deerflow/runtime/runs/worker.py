@@ -21,7 +21,6 @@ import inspect
 import logging
 import os
 import sys
-import time  # noqa: F401 - compatibility export
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
