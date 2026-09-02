@@ -9,7 +9,7 @@ from app.gateway.routers.project_agent_builder import _all_internal_tool_groups
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from app.shared_assets import agent_design_service as agent_design_service_module
+from app.shared_assets import agent_design_generation_lifecycle as agent_design_generation_lifecycle_module
 from app.shared_assets.agent_design_service import AgentDesignService
 from app.shared_assets.agent_repository import AgentRepository
 from app.shared_assets.models import AssetScope, SkillAssetRef
@@ -61,7 +61,7 @@ async def test_default_blueprint_freezes_all_enabled_system_dependencies(
     fake_session = object()
     context = object()
     monkeypatch.setattr(
-        agent_design_service_module,
+        agent_design_generation_lifecycle_module,
         "AgentRepository",
         _AgentRepository,
     )

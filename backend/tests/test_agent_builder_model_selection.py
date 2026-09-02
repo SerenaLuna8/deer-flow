@@ -356,7 +356,7 @@ async def test_builder_settlement_does_not_recheck_the_current_model(
             raise AssertionError("settlement must not read the mutable model row")
 
     monkeypatch.setattr(
-        "app.shared_assets.agent_design_service.SystemModelRepository",
+        "app.shared_assets.agent_design_generation_lifecycle.SystemModelRepository",
         _Repository,
     )
     operation = SimpleNamespace(

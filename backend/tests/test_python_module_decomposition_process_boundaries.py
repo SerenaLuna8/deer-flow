@@ -40,6 +40,7 @@ SKILL_BUILDER_DRAFT_SINK_PATH = APP_ROOT / "shared_assets" / "skill_builder_draf
 SKILL_DESIGN_LIFECYCLE_PATH = APP_ROOT / "shared_assets" / "skill_design_lifecycle.py"
 EXECUTION_APPROVAL_LEGACY_PATH = APP_ROOT / "private_work" / "execution_approval.py"
 AGENT_DESIGN_LEGACY_PATH = APP_ROOT / "shared_assets" / "agent_design_service.py"
+AGENT_DESIGN_GENERATION_LIFECYCLE_PATH = APP_ROOT / "shared_assets" / "agent_design_generation_lifecycle.py"
 
 EXECUTION_APPROVAL_POLICY_PATH = APP_ROOT / "private_work" / "execution_approval_policy.py"
 EXECUTION_APPROVAL_CODEC_PATH = APP_ROOT / "private_work" / "execution_approval_codec.py"
@@ -303,9 +304,13 @@ def test_worker_executor_constructs_one_skill_builder_sink_without_agent_design(
     executor_tree = _parse(EXECUTOR_PATH)
     assert _imports_module(executor_tree, SKILL_BUILDER_DRAFT_SINK_MODULE)
     assert not _imports_module(executor_tree, SKILL_DESIGN_LEGACY_MODULE)
+    agent_design_modules = {
+        AGENT_DESIGN_LEGACY_MODULE: AGENT_DESIGN_LEGACY_PATH,
+        AGENT_DESIGN_GENERATION_LIFECYCLE_MODULE: AGENT_DESIGN_GENERATION_LIFECYCLE_PATH,
+    }
     for root in (WORKER_ROOT, RUN_EXECUTION_ROOT, HARNESS_ROOT):
-        for module_name in (AGENT_DESIGN_LEGACY_MODULE, AGENT_DESIGN_GENERATION_LIFECYCLE_MODULE):
-            assert _module_consumers(module_name, AGENT_DESIGN_LEGACY_PATH, root) == set(), (root, module_name)
+        for module_name, defining_path in agent_design_modules.items():
+            assert _module_consumers(module_name, defining_path, root) == set(), (root, module_name)
 
 
 def test_gateway_owns_agent_builder_construction() -> None:
@@ -553,6 +558,86 @@ def test_execution_approval_service_owns_gateway_reads_behind_an_imports_only_fa
         EXECUTION_APPROVAL_LEGACY_MODULE,
         identity="legacy.ExecutionApprovalService is owner.ExecutionApprovalService and legacy.WorkerHostExecutionApprovalPort is not None",
     )
+
+
+def test_agent_design_generation_lifecycle_is_a_service_composed_collaborator() -> None:
+    from app.shared_assets import agent_design_generation_lifecycle as owning
+    from app.shared_assets import agent_design_service as legacy
+    from app.shared_assets.agent_design_generation_lifecycle import (
+        AgentDesignGenerationLifecycle,
+        _reset_operation,
+    )
+    from app.shared_assets.agent_design_service import AgentDesignService
+
+    assert _export_digest(legacy) == EXPECTED_EXPORT_DIGESTS[AGENT_DESIGN_LEGACY_MODULE]
+    assert "AgentDesignGenerationLifecycle" not in legacy.__all__
+    assert tuple(inspect.signature(AgentDesignGenerationLifecycle.__init__).parameters) == (
+        "self",
+        "session_factory",
+        "generator",
+        "repository_factory",
+        "default_tool_groups_provider",
+        "stale_after",
+        "generation_control",
+        "clock",
+    )
+    expected = {
+        "prepare_generation_in_transaction": ("self", "session", "repository", "context", "row", "operation", "command"),
+        "run_prepared_turn": (
+            "self",
+            "context",
+            "session_id",
+            "operation_hash",
+            "generation_revision",
+            "request",
+            "generation_context",
+            "operation_id",
+            "generation_profile",
+            "requested_model_ref",
+            "started_at",
+            "activity_callback",
+        ),
+        "stop_turn": ("self", "context", "session_id", "refresh"),
+        "request_stop_and_wait": ("self", "context", "session_id", "operation_id"),
+        "resolve_generation_profile_values": ("self", "session", "context", "requested_model_ref", "requested_mode", "thinking_enabled", "reasoning_effort"),
+        "recover_stale_generating": ("self", "repository", "context", "row", "now", "active_operations"),
+        "is_stale_generating": ("self", "row", "now"),
+    }
+    for name, parameters in expected.items():
+        assert tuple(inspect.signature(getattr(AgentDesignGenerationLifecycle, name)).parameters) == parameters, name
+
+    # Stateless helpers keep exact descriptor identity on the Service.
+    for name in ("_generation_request", "_generation_profile_is_valid", "_first_user_message", "_require_matching_clarification_response"):
+        assert AgentDesignService.__dict__[name].__func__ is AgentDesignGenerationLifecycle.__dict__[name].__func__, name
+    assert isinstance(AgentDesignService.__dict__["_generation_request"], classmethod)
+    assert AgentDesignService.__dict__["_reset_operation"].__func__ is _reset_operation
+    assert legacy._constraint_name is owning._constraint_name
+    assert legacy._CONFLICT_CONSTRAINTS is owning._CONFLICT_CONSTRAINTS
+    # Instance-state helpers stay thin Service delegates with unchanged signatures.
+    for name, parameters in {
+        "_append_turn_input": ("self", "context", "row", "turn", "operation_id"),
+        "_default_blueprint": ("self", "description"),
+        "_default_blueprint_with_system_dependencies": ("self", "session", "context", "description"),
+    }.items():
+        assert tuple(inspect.signature(getattr(AgentDesignService, name)).parameters) == parameters, name
+        assert tuple(inspect.signature(getattr(AgentDesignGenerationLifecycle, name)).parameters) == parameters, name
+    assert "_prepare_turn" in AgentDesignService.__dict__
+
+    owner_tree = _parse(AGENT_DESIGN_GENERATION_LIFECYCLE_PATH)
+    assert not _imports_module(owner_tree, AGENT_DESIGN_LEGACY_MODULE)
+    assert _imports_module(_parse(AGENT_DESIGN_LEGACY_PATH), AGENT_DESIGN_GENERATION_LIFECYCLE_MODULE)
+    owner_imports = _absolute_imports(AGENT_DESIGN_GENERATION_LIFECYCLE_PATH)
+    assert {
+        "app.shared_assets.agent_design_codec",
+        "app.shared_assets.agent_design_validation",
+        "app.shared_assets.agent_design_profile",
+        "app.system_settings.execution_payload",
+        "app.system_settings.repository",
+    } <= owner_imports
+    for root in (WORKER_ROOT, RUN_EXECUTION_ROOT, HARNESS_ROOT):
+        tree_imports = _tree_imports(root)
+        assert AGENT_DESIGN_LEGACY_MODULE not in tree_imports, root
+        assert AGENT_DESIGN_GENERATION_LIFECYCLE_MODULE not in tree_imports, root
 
 
 EXECUTION_APPROVAL_PRIVATE_SEAMS = (
