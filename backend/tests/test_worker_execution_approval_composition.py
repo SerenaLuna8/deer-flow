@@ -5,7 +5,7 @@ import inspect
 import textwrap
 
 from app.gateway.deps import gateway_platform_runtime
-from app.reliability.run_execution.executor import RunAgentPrivateExecutor
+from app.reliability.run_execution.preparation import build_run_authorities
 from app.worker.app import run_worker
 
 
@@ -30,7 +30,7 @@ def test_worker_routes_execution_approval_ttl_to_job_handler() -> None:
 
 def test_worker_and_gateway_compose_the_provider_policy_snapshot() -> None:
     port_keywords = _call_keywords(
-        RunAgentPrivateExecutor._execute_with_trace,
+        build_run_authorities,
         "WorkerHostExecutionApprovalPort",
     )
     service_keywords = _call_keywords(

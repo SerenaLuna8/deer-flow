@@ -722,7 +722,7 @@ async def test_skill_builder_provider_acquisition_failure_precedes_agent_model_b
         )
 
     monkeypatch.setattr(
-        "app.reliability.run_execution.executor.PrivateRunFileAuthority",
+        "app.reliability.run_execution.preparation.PrivateRunFileAuthority",
         FailingAuthority,
     )
     monkeypatch.setattr(
@@ -766,7 +766,7 @@ async def test_executor_releases_private_authority_before_removing_pinned_skills
         raise RuntimeError("runner failed")
 
     monkeypatch.setattr(
-        "app.reliability.run_execution.executor.PrivateRunFileAuthority",
+        "app.reliability.run_execution.preparation.PrivateRunFileAuthority",
         RecordingAuthority,
     )
     executor, execution, authority, _runtime = _execution_bundle(

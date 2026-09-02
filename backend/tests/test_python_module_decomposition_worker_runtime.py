@@ -199,6 +199,7 @@ EXECUTOR_CLASS_COMPATIBILITY_NAMES = frozenset(
         "execute",
         "_execute_with_trace",
         "_default_agent_factory",
+        "_memory_archive_context",
         "_admitted",
         "_resolve_agent_factory",
         "_graph_input",
@@ -215,12 +216,30 @@ EXECUTOR_MODULE_COMPATIBILITY_NAMES = frozenset(
         "RunAgentPrivateExecutor",
         "_context_compaction_threshold_tokens",
         "PrivateRunExecutionBoundary",
-        "PrivateRunContextEvidenceObserver",
-        "PrivateRunFileAuthority",
         "SkillBuilderAgentFactory",
         "WorkerSkillBuilderAuthoringCatalog",
         "SkillDesignDraftSink",
     }
+)
+
+PREPARATION_NAMES = (
+    "RunPreparationDependencies",
+    "FrozenRunPolicy",
+    "MaterializedRunAuthorities",
+    "BoundRunCheckpointer",
+    "required_current_upload_snapshot",
+    "freeze_run_policy",
+    "load_memory_archive_context",
+    "materialize_private_runtime",
+    "build_run_authorities",
+    "bind_run_checkpointer",
+    "build_run_context",
+    "runner_config",
+    "graph_input",
+    "_context_compaction_threshold_tokens",
+    "_persisted_channel_user_id",
+    "_persisted_context_rebase_reason",
+    "_PrivateRunThreadMetadataStore",
 )
 
 EXPECTED_RUN_AGENT_EXCEPT_LADDER = (
@@ -698,3 +717,70 @@ def test_executor_outcome_helpers_are_exact_owner_functions() -> None:
     assert executor_class._terminal_failure_result is owner.terminal_failure_result
     assert executor_class._output_limit_error is owner.output_limit_error
     assert owner.__all__ == ["map_run_agent_outcome", "outcome_usage_snapshot", "output_limit_error", "terminal_failure_result", "usage_snapshot"]
+
+
+def test_preparation_owner_is_exact_and_executor_keeps_compat_aliases() -> None:
+    import dataclasses as dc
+
+    from app.reliability.run_execution import preparation as owner
+
+    for name in PREPARATION_NAMES:
+        assert hasattr(owner, name), name
+    executor_class = executor_legacy.RunAgentPrivateExecutor
+    assert executor_class._graph_input is owner.graph_input
+    assert executor_class._runner_config is owner.runner_config
+    assert executor_class._required_current_upload_snapshot is owner.required_current_upload_snapshot
+    assert executor_legacy._context_compaction_threshold_tokens is owner._context_compaction_threshold_tokens
+    for frozen in (owner.RunPreparationDependencies, owner.FrozenRunPolicy, owner.MaterializedRunAuthorities, owner.BoundRunCheckpointer):
+        assert dc.is_dataclass(frozen) and frozen.__dataclass_params__.frozen, frozen
+    assert tuple(field.name for field in dc.fields(owner.FrozenRunPolicy)) == (
+        "exact_model_name",
+        "current_upload_snapshot",
+        "runtime_app_config",
+        "tool_call_control_policy",
+        "vision_model",
+        "delegate_model_names",
+        "token_budget_usage_recorder",
+    )
+    assert owner.__all__ == [
+        "BoundRunCheckpointer",
+        "FrozenRunPolicy",
+        "MaterializedRunAuthorities",
+        "RunPreparationDependencies",
+        "bind_run_checkpointer",
+        "build_run_authorities",
+        "build_run_context",
+        "freeze_run_policy",
+        "graph_input",
+        "load_memory_archive_context",
+        "materialize_private_runtime",
+        "required_current_upload_snapshot",
+        "runner_config",
+    ]
+
+
+def test_executor_owns_boundary_record_runner_and_cleanup_while_preparation_owns_construction() -> None:
+    executor_source = _function_node(EXECUTOR_PATH, "_execute_with_trace")
+    executor_calls = _called_names(executor_source)
+    assert {
+        "PrivateRunExecutionBoundary",
+        "RunManager",
+        "freeze_run_policy",
+        "materialize_private_runtime",
+        "build_run_authorities",
+        "bind_run_checkpointer",
+        "build_run_context",
+        "map_run_agent_outcome",
+        "push_current_app_config",
+        "pop_current_app_config",
+    } <= executor_calls
+    assert "load_memory_archive_context" in _called_names(_function_node(EXECUTOR_PATH, "_memory_archive_context"))
+    assert not executor_calls & {"WorkerHostExecutionApprovalPort", "PrivateRunFileAuthority", "PrivateRunContextEvidenceObserver", "PrivateRunMemoryAuthority", "RunContext", "LeaseAuthorizedRunEventStore"}
+    preparation_path = RUN_EXECUTION_ROOT / "preparation.py"
+    authorities_calls = _called_names(_function_node(preparation_path, "build_run_authorities"))
+    assert {"WorkerHostExecutionApprovalPort", "PrivateRunFileAuthority", "PrivateFileFinalizer", "resolve_model_ref"} <= authorities_calls
+    checkpointer_calls = _called_names(_function_node(preparation_path, "bind_run_checkpointer"))
+    assert "PrivateRunContextEvidenceObserver" in checkpointer_calls
+    context_calls = _called_names(_function_node(preparation_path, "build_run_context"))
+    assert {"RunContext", "PrivateRunMemoryAuthority", "LeaseAuthorizedRunEventStore", "_PrivateRunThreadMetadataStore"} <= context_calls
+    assert {"LeaseAuthorizedStreamBridge", "SkillBuilderActivityStreamBridge"} <= executor_calls

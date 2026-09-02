@@ -258,7 +258,7 @@ async def test_provider_ambiguity_settles_lead_context_before_terminal_error(
         )
 
     monkeypatch.setattr(
-        "app.reliability.run_execution.executor.PrivateRunContextEvidenceObserver",
+        "app.reliability.run_execution.preparation.PrivateRunContextEvidenceObserver",
         ContextEvidenceObserver,
     )
     monkeypatch.setattr(

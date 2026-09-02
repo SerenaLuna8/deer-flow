@@ -19,7 +19,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import Field
 
-from app.reliability.run_execution.executor import (
+from app.reliability.run_execution.preparation import (
     _context_compaction_threshold_tokens,
 )
 from deerflow.agents.middlewares import summarization_middleware as summarization_module

@@ -785,7 +785,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
             observed["context_settled"] = True
 
     monkeypatch.setattr(
-        "app.reliability.run_execution.executor.PrivateRunContextEvidenceObserver",
+        "app.reliability.run_execution.preparation.PrivateRunContextEvidenceObserver",
         ContextEvidenceObserver,
     )
 

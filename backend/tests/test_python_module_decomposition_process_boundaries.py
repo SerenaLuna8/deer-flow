@@ -51,6 +51,7 @@ EXECUTION_APPROVAL_LIFECYCLE_PATH = APP_ROOT / "private_work" / "execution_appro
 EXECUTION_APPROVAL_AUDIT_PATH = APP_ROOT / "private_work" / "execution_approval_audit.py"
 
 EXECUTOR_PATH = RUN_EXECUTION_ROOT / "executor.py"
+PREPARATION_PATH = RUN_EXECUTION_ROOT / "preparation.py"
 HANDLER_PATH = RUN_EXECUTION_ROOT / "handler.py"
 GATEWAY_DEPS_PATH = APP_ROOT / "gateway" / "deps.py"
 PRIVATE_WORK_CONTRACTS_PATH = APP_ROOT / "gateway" / "routers" / "private_work_routes" / "contracts.py"
@@ -138,7 +139,7 @@ EXECUTION_APPROVAL_PRODUCTION_CONSUMERS = frozenset(
         GATEWAY_DEPS_PATH,
         PRIVATE_WORK_CONTRACTS_PATH,
         PRIVATE_WORK_DEPENDENCIES_PATH,
-        EXECUTOR_PATH,
+        PREPARATION_PATH,
         HANDLER_PATH,
     }
 )
@@ -331,7 +332,7 @@ def test_execution_approval_production_consumers_use_owner_modules() -> None:
         GATEWAY_DEPS_PATH: {"app.private_work.execution_approval_policy", "app.private_work.execution_approval_service"},
         PRIVATE_WORK_CONTRACTS_PATH: {"app.private_work.execution_approval_service"},
         PRIVATE_WORK_DEPENDENCIES_PATH: {"app.private_work.execution_approval_service"},
-        EXECUTOR_PATH: {"app.private_work.execution_approval_policy", "app.private_work.execution_approval_worker"},
+        PREPARATION_PATH: {"app.private_work.execution_approval_policy", "app.private_work.execution_approval_worker"},
         HANDLER_PATH: {"app.private_work.execution_approval_recovery"},
     }
     for path, owners in expected_owner_imports.items():
