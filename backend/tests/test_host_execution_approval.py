@@ -43,11 +43,12 @@ from deerflow.sandbox.security import (
     is_host_bash_available,
     resolve_host_bash_execution_mode,
 )
-from deerflow.sandbox.tools import (
+from deerflow.sandbox.tooling.host_execution import (
     _host_execution_skill_secret_sources,
-    _prepare_local_host_execution,
-    bash_tool,
+    mask_secret_values,
+    prepare_local_host_execution,
 )
+from deerflow.sandbox.tools import bash_tool
 from deerflow.subagents.binding import (
     AgentGraphExecutionInputs,
     ConfiguredLeadParentExecutionProfile,
@@ -77,6 +78,19 @@ def _sandbox_config(
             "mode": approval_mode,
             "execution_domain_id": ("test-worker" if approval_mode == "approval_required" else None),
         },
+    )
+
+
+def test_host_execution_masks_overlapping_secrets_longest_first() -> None:
+    assert (
+        mask_secret_values(
+            "token-long token",
+            {
+                "short": "token",
+                "long": "token-long",
+            },
+        )
+        == "[redacted] [redacted]"
     )
 
 
@@ -573,14 +587,14 @@ def test_plan_rejects_bidirectional_command_controls_before_staging() -> None:
             raise AssertionError("oversized command must fail before path mapping")
 
     with pytest.raises(SandboxRuntimeError, match="approval limit"):
-        _prepare_local_host_execution(
+        prepare_local_host_execution(
             SimpleNamespace(context={}, state={}, tool_call_id="call-1"),
             MustNotResolveSandbox(),
             description="oversized",
             requested_command="界" * 21_846,
         )
     with pytest.raises(SandboxRuntimeError, match="tool call id exceeds"):
-        _prepare_local_host_execution(
+        prepare_local_host_execution(
             SimpleNamespace(context={}, state={}, tool_call_id="x" * 129),
             MustNotResolveSandbox(),
             description="oversized id",
@@ -929,11 +943,11 @@ async def test_local_bash_pending_approval_stops_before_spawn(
         return sandbox
 
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        "deerflow.sandbox.tooling.host_execution.ensure_sandbox_initialized_async",
         initialized,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        "deerflow.sandbox.tooling.host_execution.ensure_thread_directories_exist",
         lambda _runtime: None,
     )
 
@@ -978,11 +992,11 @@ async def test_local_bash_plan_freezes_trusted_channel_identity(
         return sandbox
 
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        "deerflow.sandbox.tooling.host_execution.ensure_sandbox_initialized_async",
         initialized,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        "deerflow.sandbox.tooling.host_execution.ensure_thread_directories_exist",
         lambda _runtime: None,
     )
 
@@ -1044,11 +1058,11 @@ async def test_local_bash_plan_freezes_secret_free_exact_skill_sources(
         return sandbox
 
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        "deerflow.sandbox.tooling.host_execution.ensure_sandbox_initialized_async",
         initialized,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        "deerflow.sandbox.tooling.host_execution.ensure_thread_directories_exist",
         lambda _runtime: None,
     )
 
@@ -1116,15 +1130,11 @@ async def test_local_bash_rejects_forged_inline_approval_without_execution(
         return sandbox
 
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        "deerflow.sandbox.tooling.host_execution.ensure_sandbox_initialized_async",
         initialized,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized",
-        lambda _runtime: sandbox,
-    )
-    monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        "deerflow.sandbox.tooling.host_execution.ensure_thread_directories_exist",
         lambda _runtime: None,
     )
 
@@ -1154,11 +1164,11 @@ async def test_local_bash_approval_mode_without_trusted_port_fails_closed(
         return sandbox
 
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        "deerflow.sandbox.tooling.host_execution.ensure_sandbox_initialized_async",
         initialized,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        "deerflow.sandbox.tooling.host_execution.ensure_thread_directories_exist",
         lambda _runtime: None,
     )
 
@@ -1230,15 +1240,15 @@ async def test_isolated_bash_executes_directly_without_approval_port(
         return sandbox
 
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        "deerflow.sandbox.tooling.runtime.ensure_sandbox_initialized_async",
         initialized,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        "deerflow.sandbox.tooling.bash.ensure_sandbox_initialized",
         lambda _runtime: sandbox,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        "deerflow.sandbox.tooling.bash.ensure_thread_directories_exist",
         lambda _runtime: None,
     )
 
@@ -1318,15 +1328,15 @@ async def test_aio_async_bash_materializes_exact_skill_secret_per_command(
         return sandbox
 
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        "deerflow.sandbox.tooling.runtime.ensure_sandbox_initialized_async",
         initialized,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        "deerflow.sandbox.tooling.bash.ensure_sandbox_initialized",
         lambda _runtime: sandbox,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        "deerflow.sandbox.tooling.bash.ensure_thread_directories_exist",
         lambda _runtime: None,
     )
 
@@ -1413,15 +1423,15 @@ async def test_aio_bash_refreshes_skill_secret_after_executor_queue(
         return sandbox
 
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        "deerflow.sandbox.tooling.runtime.ensure_sandbox_initialized_async",
         initialized,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        "deerflow.sandbox.tooling.bash.ensure_sandbox_initialized",
         lambda _runtime: sandbox,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        "deerflow.sandbox.tooling.bash.ensure_thread_directories_exist",
         lambda _runtime: None,
     )
 
@@ -1483,11 +1493,11 @@ async def test_local_bash_rejects_secret_plaintext_before_staging(
         return sandbox
 
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        "deerflow.sandbox.tooling.host_execution.ensure_sandbox_initialized_async",
         initialized,
     )
     monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        "deerflow.sandbox.tooling.host_execution.ensure_thread_directories_exist",
         lambda _runtime: None,
     )
 

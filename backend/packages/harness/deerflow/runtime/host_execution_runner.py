@@ -50,12 +50,12 @@ from deerflow.sandbox.security import (
     HostBashExecutionMode,
     resolve_host_bash_execution_mode,
 )
-from deerflow.sandbox.tools import (
-    _prepare_local_host_execution,
-    _truncate_bash_output,
-    mask_local_paths_in_output,
+from deerflow.sandbox.tooling.host_execution import (
     mask_secret_values,
+    prepare_local_host_execution,
+    truncate_bash_output,
 )
+from deerflow.sandbox.tooling.path_mapping import mask_local_paths_in_output
 
 
 class HostExecutionContinuationError(RuntimeError):
@@ -394,7 +394,7 @@ def _structured_execute(
             raise RuntimeError("Local command returned invalid structured output")
 
         def bounded(value: str) -> str:
-            return _truncate_bash_output(
+            return truncate_bash_output(
                 mask_secret_values(
                     mask_local_paths_in_output(value, thread_data),
                     injected_env,
@@ -667,7 +667,7 @@ async def execute_frozen_host_execution_continuation(
         tool_call_id=frozen.source_tool_call_id,
     )
     try:
-        rebound, max_chars = _prepare_local_host_execution(
+        rebound, max_chars = prepare_local_host_execution(
             synthetic_runtime,
             sandbox,
             description=frozen.description,

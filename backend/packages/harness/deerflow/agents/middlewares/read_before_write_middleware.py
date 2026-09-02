@@ -40,7 +40,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result
-from deerflow.sandbox.tools import read_current_file_content
+from deerflow.sandbox.tooling.files import read_current_file_content
 
 logger = logging.getLogger(__name__)
 

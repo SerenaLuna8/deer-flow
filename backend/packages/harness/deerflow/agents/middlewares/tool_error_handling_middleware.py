@@ -112,7 +112,7 @@ def mark_deferred_external_dispatch_tool(tool: object) -> object:
 def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
     """Recognize only canonical code-registered read-only tool objects."""
 
-    from deerflow.sandbox.tools import read_file_tool
+    from deerflow.sandbox.tooling.files import read_file_tool
     from deerflow.tools.builtins.list_uploaded_files_tool import (
         list_uploaded_files_tool,
     )
@@ -181,7 +181,7 @@ def _is_local_approval_staging_call(request: ToolCallRequest) -> bool:
     """
 
     from deerflow.sandbox.security import requires_host_bash_approval
-    from deerflow.sandbox.tools import bash_tool
+    from deerflow.sandbox.tooling.bash import bash_tool
 
     if getattr(request, "tool", None) is not bash_tool:
         return False

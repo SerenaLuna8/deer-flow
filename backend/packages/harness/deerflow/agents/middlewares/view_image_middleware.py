@@ -39,7 +39,7 @@ from deerflow.file_authority import (
 )
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.sandbox.exceptions import SandboxError
-from deerflow.sandbox.tools import sandbox_from_runtime
+from deerflow.sandbox.tooling.runtime import sandbox_from_runtime
 from deerflow.vision.image_input import (
     EXTENSION_TO_MIME,
     MAX_IMAGE_BYTES,
@@ -295,7 +295,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             return None
 
         try:
-            from deerflow.sandbox.tools import resolve_delegated_tool_path
+            from deerflow.sandbox.tooling.path_mapping import resolve_delegated_tool_path
 
             sandbox = sandbox_from_runtime(runtime, state=state)
             if sandbox.id != file_ref.get("sandbox_id"):

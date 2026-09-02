@@ -68,7 +68,7 @@ class NormalizedImage:
 def ensure_sandbox_initialized(runtime: Runtime) -> Sandbox:
     """Lazy import avoids the sandbox-tools and builtin-tools package cycle."""
 
-    from deerflow.sandbox.tools import ensure_sandbox_initialized as initialize
+    from deerflow.sandbox.tooling.runtime import ensure_sandbox_initialized as initialize
 
     return initialize(runtime)
 
@@ -76,7 +76,7 @@ def ensure_sandbox_initialized(runtime: Runtime) -> Sandbox:
 def sandbox_from_runtime(runtime: Runtime) -> Sandbox:
     """Lazy import avoids the sandbox-tools and builtin-tools package cycle."""
 
-    from deerflow.sandbox.tools import sandbox_from_runtime as resolve
+    from deerflow.sandbox.tooling.runtime import sandbox_from_runtime as resolve
 
     return resolve(runtime)
 
@@ -143,7 +143,7 @@ def sanitize_image_error(
     error: Exception,
     thread_data: ThreadDataState | None,
 ) -> str:
-    from deerflow.sandbox.tools import mask_local_paths_in_output
+    from deerflow.sandbox.tooling.path_mapping import mask_local_paths_in_output
 
     return mask_local_paths_in_output(
         f"{type(error).__name__}: {error}",

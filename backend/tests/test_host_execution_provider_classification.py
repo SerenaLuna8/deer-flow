@@ -7,7 +7,6 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from deerflow.sandbox import tools as sandbox_tools
 from deerflow.sandbox.local import LocalSandboxProvider
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.sandbox.security import (
@@ -15,6 +14,7 @@ from deerflow.sandbox.security import (
     resolve_host_bash_execution_mode,
     uses_local_sandbox_provider_use,
 )
+from deerflow.sandbox.tooling import bash as bash_owner
 
 
 def _config(
@@ -149,17 +149,17 @@ async def test_actual_local_runtime_overrides_isolated_config_before_dispatch(
         return "direct"
 
     monkeypatch.setattr(
-        sandbox_tools,
+        bash_owner,
         "_approval_required_bash",
         approval_required,
     )
     monkeypatch.setattr(
-        sandbox_tools,
+        bash_owner,
         "_run_sync_tool_after_async_sandbox_init",
         direct,
     )
 
-    result = await sandbox_tools._bash_tool_async(
+    result = await bash_owner._bash_tool_async(
         runtime,
         "verify provider classification",
         "python script.py",
@@ -186,17 +186,17 @@ async def test_actual_local_runtime_with_disabled_policy_never_dispatches_direct
         return "direct"
 
     monkeypatch.setattr(
-        sandbox_tools,
+        bash_owner,
         "_approval_required_bash",
         approval_required,
     )
     monkeypatch.setattr(
-        sandbox_tools,
+        bash_owner,
         "_run_sync_tool_after_async_sandbox_init",
         direct,
     )
 
-    result = await sandbox_tools._bash_tool_async(
+    result = await bash_owner._bash_tool_async(
         runtime,
         "verify provider classification",
         "python script.py",
@@ -223,17 +223,17 @@ async def test_actual_isolated_runtime_keeps_direct_dispatch(
         return "direct"
 
     monkeypatch.setattr(
-        sandbox_tools,
+        bash_owner,
         "_approval_required_bash",
         approval_required,
     )
     monkeypatch.setattr(
-        sandbox_tools,
+        bash_owner,
         "_run_sync_tool_after_async_sandbox_init",
         direct,
     )
 
-    result = await sandbox_tools._bash_tool_async(
+    result = await bash_owner._bash_tool_async(
         runtime,
         "verify provider classification",
         "python script.py",

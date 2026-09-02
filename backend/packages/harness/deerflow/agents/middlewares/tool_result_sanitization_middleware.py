@@ -65,7 +65,7 @@ _VISION_SANITIZATION_TRUNCATION = "Some image evidence was truncated after safet
 def _is_registered_upload_read(request: ToolCallRequest) -> bool:
     """Trust only the canonical read tool plus a canonical uploads path."""
 
-    from deerflow.sandbox.tools import read_file_tool
+    from deerflow.sandbox.tooling.files import read_file_tool
 
     if getattr(request, "tool", None) is not read_file_tool:
         return False

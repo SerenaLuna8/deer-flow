@@ -38,8 +38,8 @@ from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.file_authority import AuthorityManifest, AuthorityManifestEntry
 from deerflow.runtime.private_scope import PrivateResourceScope
-from deerflow.sandbox import tools as sandbox_tools
 from deerflow.sandbox.sandbox_provider import PrivateSandboxLease
+from deerflow.sandbox.tooling import runtime as sandbox_runtime
 
 _PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8Dwn4GBgYEJRIAwAB8XAgICR7MUAAAAAElFTkSuQmCC")
 
@@ -768,7 +768,7 @@ def test_current_private_image_is_injected_only_into_ephemeral_model_request(
     original_messages = list(request.messages)
     original_state = request.state.copy()
     monkeypatch.setattr(
-        sandbox_tools,
+        sandbox_runtime,
         "get_sandbox_provider",
         lambda: _Provider(sandbox),
     )

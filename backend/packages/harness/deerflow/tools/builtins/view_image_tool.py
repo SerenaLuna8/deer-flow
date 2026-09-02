@@ -87,10 +87,8 @@ def view_image_tool(
         image_path: Absolute /mnt/user-data virtual path to the image file. Common formats supported: jpg, jpeg, png, webp.
     """
     from deerflow.sandbox.exceptions import SandboxError
-    from deerflow.sandbox.tools import (
-        get_thread_data,
-        resolve_delegated_tool_path,
-    )
+    from deerflow.sandbox.tooling.path_mapping import resolve_delegated_tool_path
+    from deerflow.sandbox.tooling.runtime import get_thread_data
 
     thread_data = get_thread_data(runtime)
 

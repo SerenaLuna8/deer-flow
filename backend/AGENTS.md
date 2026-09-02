@@ -57,6 +57,13 @@ Run full-stack commands from the repository root and backend targets from
   owning module in focused tests.
 - `packages/harness/deerflow/<domain>/` owns reusable graph, runtime,
   persistence, sandbox, Skill, MCP, and subagent primitives.
+- Sandbox virtual-path mapping, Local Bash path policy, Sandbox initialization,
+  Host Execution planning/redaction, and concrete file/search/Bash Tool objects
+  are owned by `packages/harness/deerflow/sandbox/tooling/`.
+  `deerflow.sandbox.tools` is a long-lived compatibility façade for published
+  Tool configuration paths, while `deerflow.sandbox.security` remains the Host
+  Bash policy authority. Internal Harness code imports the owning module; each
+  LangChain Tool is decorated exactly once.
 - Builder `*_contracts.py`, `*_codec.py`, and `*_validation.py` modules own
   immutable payloads and pure transformations; the corresponding Service owns
   authorization, optimistic revisions, lifecycle transitions, and transactions.
