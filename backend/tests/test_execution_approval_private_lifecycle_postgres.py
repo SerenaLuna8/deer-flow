@@ -793,7 +793,7 @@ async def test_unknown_completion_uses_database_clock_before_releasing_claim_gat
             approval.spawn_authorized_at = approval.claimed_at
 
         monkeypatch.setattr(
-            "app.private_work.execution_approval._now",
+            "app.private_work.execution_approval_lifecycle._now",
             lambda: datetime.now(UTC) + timedelta(days=1),
         )
         completion_port = _claimed_execution_port(
@@ -3098,7 +3098,7 @@ async def test_final_spawn_authorization_rejects_expired_preparation_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "app.private_work.execution_approval._now",
+        "app.private_work.execution_approval_lifecycle._now",
         lambda: datetime(2000, 1, 1, tzinfo=UTC),
     )
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -3355,7 +3355,7 @@ async def test_claim_rechecks_ttl_after_asset_closure_before_side_effect_mark(
         paused_asset_closure,
     )
     monkeypatch.setattr(
-        "app.private_work.execution_approval._now",
+        "app.private_work.execution_approval_lifecycle._now",
         lambda: datetime(2000, 1, 1, tzinfo=UTC),
     )
     try:

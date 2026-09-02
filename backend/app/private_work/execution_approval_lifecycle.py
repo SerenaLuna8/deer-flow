@@ -25,6 +25,7 @@ from app.private_work.run_metadata import (
     RunHostExecutionSuspensionInvalid,
     run_host_execution_suspension,
 )
+from app.private_work.run_repository import PrivateRunExecutionLeaseLost
 from deerflow.persistence.execution_approvals import (
     EXECUTION_APPROVAL_ACTIVE_STATUSES,
     ExecutionApprovalRequestRow,
@@ -36,6 +37,17 @@ from deerflow.runtime.private_scope import PrivateResourceScope
 
 _ACTIVE_STATUSES = tuple(sorted(EXECUTION_APPROVAL_ACTIVE_STATUSES))
 CLAIMED_EXECUTION_SETTLEMENT_GRACE_SECONDS = 30
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+async def _database_now(session: AsyncSession) -> datetime:
+    value = await session.scalar(sa.select(sa.func.clock_timestamp()))
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise PrivateRunExecutionLeaseLost
+    return value.astimezone(UTC)
 
 
 class ExecutionApprovalPrivateLifecycleConflict(RuntimeError):

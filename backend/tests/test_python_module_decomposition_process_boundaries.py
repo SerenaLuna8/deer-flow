@@ -43,6 +43,7 @@ AGENT_DESIGN_LEGACY_PATH = APP_ROOT / "shared_assets" / "agent_design_service.py
 
 EXECUTION_APPROVAL_POLICY_PATH = APP_ROOT / "private_work" / "execution_approval_policy.py"
 EXECUTION_APPROVAL_CODEC_PATH = APP_ROOT / "private_work" / "execution_approval_codec.py"
+EXECUTION_APPROVAL_RECOVERY_PATH = APP_ROOT / "private_work" / "execution_approval_recovery.py"
 EXECUTION_APPROVAL_LIFECYCLE_PATH = APP_ROOT / "private_work" / "execution_approval_lifecycle.py"
 EXECUTION_APPROVAL_AUDIT_PATH = APP_ROOT / "private_work" / "execution_approval_audit.py"
 
@@ -431,6 +432,31 @@ def test_execution_approval_codec_is_the_owning_module() -> None:
     assert forbidden == set(), forbidden
     assert not _imports_module(_parse(EXECUTION_APPROVAL_CODEC_PATH), EXECUTION_APPROVAL_LEGACY_MODULE)
     assert not any(module.startswith("sqlalchemy") for module in codec_imports)
+
+
+def test_execution_approval_recovery_is_the_owning_module_and_lifecycle_owns_the_clocks() -> None:
+    from app.private_work import execution_approval as legacy
+    from app.private_work import execution_approval_lifecycle as lifecycle
+    from app.private_work import execution_approval_recovery as owning
+
+    for name in ("_staged_approval_source_job_id", "settle_staged_execution_approvals", "recover_staged_execution_approval_id"):
+        assert getattr(legacy, name) is getattr(owning, name), name
+        parameters = inspect.signature(getattr(owning, name)).parameters
+        assert next(iter(parameters)) == "session", name
+        assert "session_factory" not in parameters, name
+    assert legacy._now is lifecycle._now
+    assert legacy._database_now is lifecycle._database_now
+
+    recovery_imports = _absolute_imports(EXECUTION_APPROVAL_RECOVERY_PATH)
+    assert "app.private_work.execution_approval_lifecycle" in recovery_imports
+    for forbidden in (
+        EXECUTION_APPROVAL_LEGACY_MODULE,
+        "app.private_work.execution_approval_service",
+        "app.private_work.execution_approval_worker",
+    ):
+        assert not _imports_module(_parse(EXECUTION_APPROVAL_RECOVERY_PATH), forbidden), forbidden
+    assert not _imports_module(_parse(EXECUTION_APPROVAL_LIFECYCLE_PATH), "app.private_work.execution_approval_recovery")
+    assert not _imports_module(_parse(EXECUTION_APPROVAL_LIFECYCLE_PATH), EXECUTION_APPROVAL_LEGACY_MODULE)
 
 
 def test_execution_approval_lifecycle_and_audit_remain_separate_owners() -> None:
