@@ -28,11 +28,13 @@ WORKER_ROOT = APP_ROOT / "worker"
 RUN_EXECUTION_ROOT = APP_ROOT / "reliability" / "run_execution"
 
 SKILL_DESIGN_LEGACY_MODULE = "app.shared_assets.skill_design_service"
+SKILL_DESIGN_LIFECYCLE_MODULE = "app.shared_assets.skill_design_lifecycle"
 EXECUTION_APPROVAL_LEGACY_MODULE = "app.private_work.execution_approval"
 AGENT_DESIGN_LEGACY_MODULE = "app.shared_assets.agent_design_service"
 AGENT_DESIGN_GENERATION_LIFECYCLE_MODULE = "app.shared_assets.agent_design_generation_lifecycle"
 
 SKILL_DESIGN_LEGACY_PATH = APP_ROOT / "shared_assets" / "skill_design_service.py"
+SKILL_BUILDER_DRAFT_SINK_PATH = APP_ROOT / "shared_assets" / "skill_builder_draft_sink.py"
 EXECUTION_APPROVAL_LEGACY_PATH = APP_ROOT / "private_work" / "execution_approval.py"
 AGENT_DESIGN_LEGACY_PATH = APP_ROOT / "shared_assets" / "agent_design_service.py"
 
@@ -306,6 +308,42 @@ def test_execution_approval_production_consumers_are_exact() -> None:
 def test_harness_never_imports_the_application() -> None:
     offenders = sorted(module for module in _tree_imports(HARNESS_ROOT) if module == "app" or module.startswith("app."))
     assert offenders == []
+
+
+def test_skill_design_draft_sink_is_the_run_bound_owner() -> None:
+    from app.shared_assets import skill_builder_draft_sink as draft_sink_owner
+    from app.shared_assets.skill_builder_draft_sink import (
+        SkillDesignDraftSink,
+        _draft_snapshot,
+    )
+    from app.shared_assets.skill_design_service import SkillDesignService
+
+    assert SkillDesignService.__dict__["_draft_snapshot"].__func__ is _draft_snapshot
+    assert SkillDesignService.__dict__["_append_row_message"].__func__ is draft_sink_owner._append_row_message
+    expected = {
+        "list_candidate_files": ("self", "request"),
+        "read_candidate_file": ("self", "request"),
+        "upsert_candidate_file": ("self", "request"),
+        "delete_candidate_file": ("self", "request"),
+        "request_clarification": ("self", "result"),
+        "finalize_candidate": ("self", "request", "dependencies"),
+    }
+    for name, parameters in expected.items():
+        assert tuple(inspect.signature(getattr(SkillDesignDraftSink, name)).parameters) == parameters, name
+    assert tuple(inspect.signature(SkillDesignDraftSink.__init__).parameters) == (
+        "self",
+        "session_factory",
+        "context",
+        "claim",
+        "skill_service",
+        "repository_factory",
+    )
+
+    owner_imports = _absolute_imports(SKILL_BUILDER_DRAFT_SINK_PATH)
+    assert SKILL_DESIGN_LEGACY_MODULE not in owner_imports
+    assert SKILL_DESIGN_LIFECYCLE_MODULE not in owner_imports
+    assert not _imports_module(_parse(SKILL_BUILDER_DRAFT_SINK_PATH), SKILL_DESIGN_LEGACY_MODULE)
+    assert not _imports_module(_parse(SKILL_BUILDER_DRAFT_SINK_PATH), SKILL_DESIGN_LIFECYCLE_MODULE)
 
 
 def test_execution_approval_lifecycle_and_audit_remain_separate_owners() -> None:

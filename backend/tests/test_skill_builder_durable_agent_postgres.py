@@ -47,6 +47,7 @@ from app.shared_assets.skill_builder_contract import (
     SkillBuilderCandidateFileUpsert,
     SkillBuilderCandidateFinalize,
 )
+from app.shared_assets.skill_builder_draft_sink import SkillDesignDraftSink
 from app.shared_assets.skill_design_activity import (
     MAX_SKILL_DESIGN_ACTIVITY_BYTES_PER_OPERATION,
     SkillDesignActivityKind,
@@ -488,7 +489,9 @@ async def test_durable_builder_run_replay_retry_delta_cancel_and_delete_link(
         ]
         assert retry_activities[-2].attempt == 2
         assert retry_activities[-1].attempt == 2
-        draft_sink = service.terminal_sink(seed.owner_a, second_claim)
+        # The Worker owner constructs the Run-bound sink directly; the
+        # compatibility entry below must replay against the same state.
+        draft_sink = SkillDesignDraftSink(seed.factory, seed.owner_a, second_claim)
         empty_draft = await draft_sink.list_candidate_files(
             SkillBuilderCandidateFileList(),
         )
@@ -532,27 +535,60 @@ async def test_durable_builder_run_replay_retry_delta_cancel_and_delete_link(
             dependencies,
         )
         assert receipt.terminal == "candidate"
+
+        async def _terminal_state() -> tuple[object, ...]:
+            async with seed.factory() as session:
+                operation_row = await session.get(
+                    SkillDesignOperationRow,
+                    first_operation_id,
+                )
+                design_row = await session.get(SkillDesignSessionRow, design.id)
+                baseline_rows = await session.scalar(
+                    sa.select(sa.func.count())
+                    .select_from(SkillDesignOperationBaselineFileRow)
+                    .where(
+                        SkillDesignOperationBaselineFileRow.operation_id == first_operation_id,
+                    )
+                )
+                assert operation_row is not None
+                assert design_row is not None
+                return (
+                    operation_row.status,
+                    operation_row.terminal_kind,
+                    operation_row.terminal_request_checksum,
+                    operation_row.result_revision,
+                    design_row.status,
+                    design_row.draft_checksum,
+                    design_row.revision,
+                    design_row.messages_json,
+                    baseline_rows,
+                )
+
+        first_terminal_state = await _terminal_state()
+        first_terminal_activities = await service.list_activities(context, design.id)
+        assert first_terminal_state[0] == "completed"
+        assert first_terminal_state[1] == "candidate"
+        assert first_terminal_state[4] == "draft_ready"
+        assert first_terminal_state[5] == final_mutation.draft_checksum
+        assert first_terminal_state[8] == 0
         async with seed.factory() as session:
-            crash_window_operation = await session.get(
-                SkillDesignOperationRow,
-                first_operation_id,
-            )
             crash_window_run = (
                 await session.execute(
                     sa.select(RunRow).where(RunRow.run_id == first.run_id),
                 )
             ).scalar_one()
-            assert crash_window_operation is not None
-            assert crash_window_operation.status == "completed"
             assert crash_window_run.status == "running"
 
         replay_sink = service.terminal_sink(seed.owner_a, second_claim)
-        assert (
-            await replay_sink.finalize_candidate(
-                candidate_request,
-                dependencies,
-            )
-        ).terminal == "candidate"
+        assert isinstance(replay_sink, SkillDesignDraftSink)
+        replay_receipt = await replay_sink.finalize_candidate(
+            candidate_request,
+            dependencies,
+        )
+        assert replay_receipt.terminal == "candidate"
+        assert replay_receipt == receipt
+        assert await _terminal_state() == first_terminal_state
+        assert await service.list_activities(context, design.id) == first_terminal_activities
         with pytest.raises((AuthorizationRevoked, AssetConflict)):
             await replay_sink.finalize_candidate(
                 candidate_request.model_copy(
