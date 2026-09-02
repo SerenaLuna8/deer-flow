@@ -393,6 +393,13 @@ def test_register_asset_routes_is_an_exact_facade_export() -> None:
     assert legacy.register_asset_routes is owning.register_asset_routes
 
 
+def test_asset_catalog_router_facade_is_exact() -> None:
+    from app.gateway.routers import project_assets as legacy
+    from app.gateway.routers.project_asset_routes import catalog
+
+    assert legacy.catalog_router is catalog.catalog_router
+
+
 def test_private_work_context_file_and_approval_exports_are_exact() -> None:
     from app.gateway.routers import private_work as legacy
     from app.gateway.routers.private_work_routes import context_controls, contracts, streaming
