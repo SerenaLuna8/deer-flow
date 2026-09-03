@@ -692,3 +692,25 @@ def test_snapshot_owners_are_the_exact_legacy_exports() -> None:
     assert "app.private_work.snapshot_contracts" in rules_imports
     assert not {SNAPSHOT_MODULE, ".snapshot_repository"} & rules_imports
     assert not {SNAPSHOT_MODULE, ".snapshot_repository", "app.private_work.snapshot_admission_rules"} & _module_imports(PRIVATE_WORK_ROOT / "snapshot_contracts.py")
+
+
+def test_snapshot_asset_row_planning_is_owned_by_the_rules_module() -> None:
+    rules = importlib.import_module("app.private_work.snapshot_admission_rules")
+    assert tuple(field.name for field in dataclasses.fields(rules.PlannedRunAssetRows)) == ("asset_rows", "skill_ref_rows")
+    assert tuple(inspect.signature(rules.plan_run_asset_rows).parameters) == (
+        "context",
+        "thread_id",
+        "run",
+        "lead_agent",
+        "resolved_closure",
+        "skills",
+        "skill_snapshots",
+        "mcps",
+        "mcp_snapshots",
+        "prepared_legacy_skills",
+    )
+    function = _function_node(SNAPSHOT_PATH, "create_run_with_snapshot_in_session", class_name="RunSnapshotRepository")
+    assert _await_callee_names(function) == EXPECTED_SNAPSHOT_ADMISSION_AWAITS
+    called = {node.func.id for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+    assert "plan_run_asset_rows" in called
+    assert "_RunAssetSnapshotAdmissionEncoder" not in called

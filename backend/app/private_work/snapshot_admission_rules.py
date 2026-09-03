@@ -6,15 +6,19 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
+from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import PrivateWorkConflict, PrivateWorkTooLarge
-from app.private_work.run_repository import PrivateRunCreate
+from app.private_work.legacy_run_skill_snapshot_writer import PreparedLegacyRunSkillSnapshots
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRecord
 from app.private_work.snapshot_contracts import RunSnapshotAssetStale
 from app.shared_assets.errors import SharedAssetError
 from app.shared_assets.mcp_secret_closure import McpSecretClosure
 from app.shared_assets.models import (
     AssetKind,
     AssetScope,
+    ResolvedAgentSnapshot,
     ResolvedAssetSnapshot,
+    ResolvedMcpSnapshot,
     ResolvedRunAssetClosure,
     ResolvedSkillVersionSnapshot,
 )
@@ -22,6 +26,7 @@ from app.shared_assets.run_snapshot_codec import (
     MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES,
     MAX_RUN_SKILL_REFERENCE_MANIFEST_JSON_BYTES,
     RUN_ASSET_SNAPSHOT_SCHEMA_VERSION,
+    RUN_SKILL_VERSION_REFERENCE_SCHEMA_VERSION,
     RunAssetSnapshotTooLarge,
     encode_run_asset_snapshot,
     encode_run_skill_version_manifest,
@@ -30,7 +35,9 @@ from app.shared_assets.run_snapshot_codec import (
 from app.shared_assets.skill_secret_policy import parse_skill_secret_declarations
 from app.system_runtime_settings.models import LockedAgentRuntimePolicy
 from deerflow.mcp_definition_policy import McpDefinitionPolicyError, McpEndpointPolicy, validate_project_mcp_definition
+from deerflow.persistence.private_work.model import RunAssetVersionRow, RunSkillVersionRefRow
 from deerflow.persistence.shared_assets.mcp_model import McpServerRow, McpServerVersionRow
+from deerflow.persistence.shared_assets.skill_model import SkillRow, SkillVersionRow
 
 _FORBIDDEN_PERSISTED_KEY_PARTS = (
     "secret",
@@ -276,3 +283,151 @@ def validate_main_dependency_boundary(
                 seen_mcp_ids.add(version_id)
     if skill_ids != tuple(expected_skill_ids) or mcp_ids != tuple(expected_mcp_ids):
         raise RunSnapshotAssetStale
+
+
+@dataclass(frozen=True)
+class PlannedRunAssetRows:
+    asset_rows: list[RunAssetVersionRow]
+    skill_ref_rows: list[RunSkillVersionRefRow]
+
+
+def plan_run_asset_rows(
+    *,
+    context: PrivateWorkContext,
+    thread_id: str,
+    run: PrivateRunRecord,
+    lead_agent: ResolvedAgentSnapshot,
+    resolved_closure: ResolvedRunAssetClosure | None,
+    skills: list[tuple[SkillRow, SkillVersionRow]],
+    skill_snapshots: tuple[ResolvedSkillVersionSnapshot, ...],
+    mcps: list[tuple[McpServerRow, McpServerVersionRow]],
+    mcp_snapshots: tuple[ResolvedMcpSnapshot, ...],
+    prepared_legacy_skills: PreparedLegacyRunSkillSnapshots | None,
+) -> PlannedRunAssetRows:
+    """Build the Run asset and Skill reference rows in dependency order under one encoder budget."""
+
+    asset_snapshot_encoder = _RunAssetSnapshotAdmissionEncoder(
+        request_id=context.request_id,
+    )
+    lead_agent_snapshot_json = asset_snapshot_encoder.encode(lead_agent)
+    asset_rows = [
+        RunAssetVersionRow(
+            project_id=context.project_id,
+            owner_user_id=str(context.user_id),
+            thread_id=thread_id,
+            run_id=run.run_id,
+            asset_kind=AssetKind.AGENT.value,
+            dependency_order=0,
+            asset_scope=lead_agent.scope.value,
+            asset_id=lead_agent.asset_id,
+            version_id=lead_agent.version_id,
+            payload_checksum=lead_agent.checksum,
+            catalog_generation=lead_agent.catalog_generation,
+            snapshot_schema_version=_r1_snapshot_schema_version(lead_agent_snapshot_json),
+            snapshot_json=lead_agent_snapshot_json,
+        )
+    ]
+    dependency_order = 1
+    if resolved_closure is not None:
+        for delegated_agent in resolved_closure.delegated_agents:
+            delegated_snapshot_json = asset_snapshot_encoder.encode(delegated_agent)
+            asset_rows.append(
+                RunAssetVersionRow(
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    thread_id=thread_id,
+                    run_id=run.run_id,
+                    asset_kind=AssetKind.AGENT.value,
+                    dependency_order=dependency_order,
+                    asset_scope=delegated_agent.scope.value,
+                    asset_id=delegated_agent.asset_id,
+                    version_id=delegated_agent.version_id,
+                    payload_checksum=delegated_agent.checksum,
+                    catalog_generation=lead_agent.catalog_generation,
+                    snapshot_schema_version=_r1_snapshot_schema_version(delegated_snapshot_json),
+                    snapshot_json=delegated_snapshot_json,
+                )
+            )
+            dependency_order += 1
+    skill_ref_rows: list[RunSkillVersionRefRow] = []
+    for skill_index, ((asset, version), skill_snapshot) in enumerate(
+        zip(
+            skills,
+            skill_snapshots,
+            strict=True,
+        )
+    ):
+        if type(skill_snapshot) is not ResolvedSkillVersionSnapshot:
+            raise RunSnapshotAssetStale
+        if prepared_legacy_skills is None:
+            skill_snapshot_json = asset_snapshot_encoder.encode_skill_version(
+                skill_snapshot,
+            )
+            skill_snapshot_schema_version = RUN_SKILL_VERSION_REFERENCE_SCHEMA_VERSION
+        else:
+            skill_snapshot_json = asset_snapshot_encoder.include_legacy_skill(
+                prepared_legacy_skills.snapshot_jsons[skill_index],
+            )
+            skill_snapshot_schema_version = RUN_ASSET_SNAPSHOT_SCHEMA_VERSION
+        asset_rows.append(
+            RunAssetVersionRow(
+                project_id=context.project_id,
+                owner_user_id=str(context.user_id),
+                thread_id=thread_id,
+                run_id=run.run_id,
+                asset_kind=AssetKind.SKILL.value,
+                dependency_order=dependency_order,
+                asset_scope=asset.scope,
+                asset_id=asset.id,
+                version_id=version.id,
+                payload_checksum=version.payload_checksum,
+                catalog_generation=lead_agent.catalog_generation,
+                snapshot_schema_version=skill_snapshot_schema_version,
+                snapshot_json=skill_snapshot_json,
+            )
+        )
+        if prepared_legacy_skills is None:
+            skill_ref_rows.append(
+                RunSkillVersionRefRow(
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    thread_id=thread_id,
+                    run_id=run.run_id,
+                    asset_kind=AssetKind.SKILL.value,
+                    dependency_order=dependency_order,
+                    asset_scope=asset.scope,
+                    snapshot_schema_version=(RUN_SKILL_VERSION_REFERENCE_SCHEMA_VERSION),
+                    skill_project_id=(None if asset.scope == AssetScope.SYSTEM.value else asset.project_id),
+                    skill_id=asset.id,
+                    skill_version_id=version.id,
+                    payload_checksum=version.payload_checksum,
+                    file_count=version.file_count,
+                    content_size_bytes=version.content_size_bytes,
+                )
+            )
+        dependency_order += 1
+    for (asset, version), mcp_snapshot in zip(
+        mcps,
+        mcp_snapshots,
+        strict=True,
+    ):
+        mcp_snapshot_json = asset_snapshot_encoder.encode(mcp_snapshot)
+        asset_rows.append(
+            RunAssetVersionRow(
+                project_id=context.project_id,
+                owner_user_id=str(context.user_id),
+                thread_id=thread_id,
+                run_id=run.run_id,
+                asset_kind=AssetKind.MCP.value,
+                dependency_order=dependency_order,
+                asset_scope=asset.scope,
+                asset_id=asset.id,
+                version_id=version.id,
+                payload_checksum=version.payload_checksum,
+                catalog_generation=lead_agent.catalog_generation,
+                snapshot_schema_version=_r1_snapshot_schema_version(mcp_snapshot_json),
+                snapshot_json=mcp_snapshot_json,
+            )
+        )
+        dependency_order += 1
+    return PlannedRunAssetRows(asset_rows=asset_rows, skill_ref_rows=skill_ref_rows)
