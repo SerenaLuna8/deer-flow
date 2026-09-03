@@ -81,6 +81,31 @@ Run full-stack commands from the repository root and backend targets from
   frozen policy/models, materialization, authorities, checkpointer, and
   `RunContext` construction behind frozen dataclasses; `outcome_mapping.py` owns
   pure usage and outcome mapping.
+- Secondary hotspot ownership:
+  `packages/harness/deerflow/persistence/jobs/contracts.py` owns Job scopes,
+  requests, claims, terminal events, ports, errors, and
+  `retry_backoff_seconds`, while `jobs/sql.py` keeps `JobRepository`, lease
+  hashing, the requeue-event registry, and `__all__`;
+  `app/private_work/snapshot_contracts.py` owns `RunSnapshotAssetStale`, secret
+  DTOs, and admission ports, `snapshot_admission_rules.py` owns the admission
+  encoder budget, secret-key rejection, recursion clamp, closure validators,
+  and `plan_run_asset_rows()`, and `snapshot_repository.py` keeps the atomic
+  admission transaction with every `await` in place;
+  `app/private_work/checkpoint_receipt_repair.py` owns checkpoint config
+  readers and Memory/Context/Provider receipt repair while `checkpointer.py`
+  keeps every write, lease, read-repair, and Approval-deletion transaction and
+  calls the repair functions on the same session;
+  `packages/harness/deerflow/agents/middlewares/snip_planner.py` owns snip
+  exceptions, constants, and `SnipPromptBudget`-parameterised prompt planning,
+  `turn_compaction.py` owns complete-turn boundaries and trigger-count helpers,
+  `compaction_receipts.py` owns receipts, estimator preconditions, and
+  compaction state updates, and `summarization_middleware.py` keeps the
+  LangChain hooks, model invocation, `_prepare_compaction`, retention
+  predicates, factories, and re-exports every legacy name. Tests patch
+  `_ensure_snip_summary_output_budget` on the middleware,
+  `encode_run_asset_snapshot` on `snapshot_admission_rules`, and
+  `ContextEvidenceRepository`/`ContextProjectionTransaction` on
+  `checkpoint_receipt_repair`.
 - Builder `*_contracts.py`, `*_codec.py`, and `*_validation.py` modules own
   immutable payloads and pure transformations; the corresponding Service owns
   authorization, optimistic revisions, lifecycle transitions, and transactions.

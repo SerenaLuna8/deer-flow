@@ -841,3 +841,27 @@ def test_compaction_receipts_owner_is_the_exact_legacy_export() -> None:
     owner_imports = _module_imports(MIDDLEWARES_ROOT / "compaction_receipts.py")
     assert {"deerflow.agents.middlewares.snip_planner", "deerflow.agents.middlewares.turn_compaction"} <= owner_imports or {".snip_planner", ".turn_compaction"} <= owner_imports
     _assert_owner_imports_are_clean(MIDDLEWARES_ROOT / "compaction_receipts.py", forbidden_modules=(SUMMARIZATION_MODULE, ".summarization_middleware"), forbidden_prefixes=("app", "sqlalchemy"))
+
+
+def test_batch6_all_owner_modules_exist_and_facades_keep_their_owners() -> None:
+    for name in JOBS_OWNER_MODULES:
+        assert (JOBS_ROOT / f"{name}.py").is_file(), name
+    for name in SNAPSHOT_OWNER_MODULES + CHECKPOINTER_OWNER_MODULES:
+        assert (PRIVATE_WORK_ROOT / f"{name}.py").is_file(), name
+    for name in SUMMARIZATION_OWNER_MODULES:
+        assert (MIDDLEWARES_ROOT / f"{name}.py").is_file(), name
+    sql_names = {node.name for node in _parse(JOBS_SQL_PATH).body if isinstance(node, ast.ClassDef)}
+    assert sql_names == {"_DeadTerminalReconciliationCursor", "JobRepository"}
+    snapshot_classes = {node.name for node in _parse(SNAPSHOT_PATH).body if isinstance(node, ast.ClassDef)}
+    assert snapshot_classes == {"RunSnapshotRepository"}
+    checkpointer_classes = {node.name for node in _parse(CHECKPOINTER_PATH).body if isinstance(node, ast.ClassDef)}
+    assert checkpointer_classes == {
+        "PrivateCheckpointQuotaPort",
+        "PrivateCheckpointAuditPort",
+        "_NoopPrivateCheckpointQuota",
+        "ProjectScopedCheckpointer",
+        "_ScopedCheckpointSaver",
+        "_AlreadyAuthorizedCheckpointSaver",
+    }
+    summarization_classes = {node.name for node in _parse(SUMMARIZATION_PATH).body if isinstance(node, ast.ClassDef)}
+    assert summarization_classes == {"ContextTriggerUsage", "ContextUsageMeasurement", "DeerFlowSummarizationMiddleware"}
