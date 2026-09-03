@@ -13,12 +13,9 @@ from typing import Any, Literal, NotRequired, TypedDict, cast, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import (
-    AIMessage,
     AnyMessage,
     HumanMessage,
     RemoveMessage,
-    SystemMessage,
-    ToolMessage,
     message_to_dict,
 )
 from langchain_core.messages.utils import count_tokens_approximately
@@ -35,7 +32,6 @@ from deerflow.agents.context_compaction_warning import (
     clear_context_compaction_warning,
     context_compaction_warning_update,
 )
-from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.memory.snip import (
     MEMORY_ARCHIVE_CONTEXT_KEY,
     SNIP_ARCHIVE_PROMPT,
@@ -47,7 +43,6 @@ from deerflow.agents.memory.snip import (
     parse_snip_dual_output,
     validate_snip_output,
 )
-from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.provider_request_measurement import (
     measure_profile_snapshot_context,
 )
@@ -76,6 +71,17 @@ from deerflow.agents.middlewares.snip_planner import (  # noqa: F401 - compatibi
     build_summary_prompt,
     plan_reduction_step,
 )
+from deerflow.agents.middlewares.turn_compaction import (  # noqa: F401 - compatibility exports
+    _ASK_CLARIFICATION_TOOL_NAME,
+    _SUMMARY_TRIGGER_MESSAGE_NAME,
+    _PreparedCompaction,
+    candidate_cutoffs,
+    complete_turn_ranges,
+    context_progress,
+    messages_for_trigger_count,
+    snip_messages,
+    summary_count_message,
+)
 from deerflow.agents.provider_request_contract import (
     CONTEXT_COMPACTION_RECEIPT_STATE_KEY,
     CONTEXT_PROJECTION_SNAPSHOT_STATE_KEY,
@@ -99,11 +105,8 @@ from deerflow.runtime.context_evidence import (
 )
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
-from deerflow.utils.messages import SUMMARY_MESSAGE_NAME, is_real_user_message
 
 logger = logging.getLogger(__name__)
-_SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
-_ASK_CLARIFICATION_TOOL_NAME = "ask_clarification"
 
 
 def _context_model_token_counter(model: Any) -> Any:
@@ -167,15 +170,6 @@ class ContextUsageMeasurement:
     context_window_tokens: int | None
     triggers: tuple[ContextTriggerUsage, ...]
     primary_trigger: ContextTriggerUsage | None
-
-
-@dataclass(frozen=True)
-class _PreparedCompaction:
-    source_messages: tuple[AnyMessage, ...]
-    snip_messages: tuple[AnyMessage, ...]
-    preserved_messages: tuple[AnyMessage, ...]
-    previous_summary: str | None
-    total_tokens: int
 
 
 def _resolve_thread_id(runtime: Runtime) -> str | None:
@@ -526,20 +520,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             call_budget=call_budget,
         )
 
-    @staticmethod
-    def _summary_count_message(summary_text: str) -> HumanMessage:
-        return HumanMessage(content=summary_text, name=_SUMMARY_TRIGGER_MESSAGE_NAME)
-
-    def _messages_for_trigger_count(self, messages: list[AnyMessage], summary_text: str | None) -> list[AnyMessage]:
-        if not summary_text:
-            return messages
-        return [*messages, self._summary_count_message(summary_text)]
-
-    @staticmethod
-    def _context_progress(current: int | float, threshold: int | float) -> float:
-        if threshold <= 0:
-            raise ValueError("Context trigger threshold must be positive")
-        return round(min(100.0, max(0.0, float(current) / float(threshold) * 100.0)), 2)
+    _summary_count_message = staticmethod(summary_count_message)
+    _messages_for_trigger_count = staticmethod(messages_for_trigger_count)
+    _context_progress = staticmethod(context_progress)
+    _complete_turn_ranges = staticmethod(complete_turn_ranges)
+    _candidate_cutoffs = staticmethod(candidate_cutoffs)
+    _snip_messages = staticmethod(snip_messages)
 
     def measure_context_usage(
         self,
@@ -651,178 +637,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return await self._amaybe_summarize(state, runtime)
 
-    @staticmethod
-    def _is_turn_user(message: AnyMessage) -> bool:
-        if is_real_user_message(message):
-            return True
-        return (
-            isinstance(message, HumanMessage)
-            and message.name != SUMMARY_MESSAGE_NAME
-            and not is_dynamic_context_reminder(message)
-            and isinstance(
-                message.additional_kwargs.get("human_input_response"),
-                dict,
-            )
-        )
-
-    @classmethod
-    def _turn_prefix_start(
-        cls,
-        messages: list[AnyMessage],
-        user_index: int,
-    ) -> int:
-        index = user_index
-        while index > 0:
-            candidate = messages[index - 1]
-            hidden_prefix = isinstance(candidate, (HumanMessage, SystemMessage)) and bool(candidate.additional_kwargs.get("hide_from_ui")) and not cls._is_turn_user(candidate)
-            if not is_dynamic_context_reminder(candidate) and not hidden_prefix:
-                break
-            index -= 1
-        return index
-
-    @staticmethod
-    def _clarification_request_tool_call_id(
-        message: AnyMessage,
-        request_id: str,
-    ) -> str | None:
-        if not isinstance(message, ToolMessage) or message.name != _ASK_CLARIFICATION_TOOL_NAME or message.id != request_id:
-            return None
-        tool_call_id = message.tool_call_id
-        if not isinstance(tool_call_id, str) or not tool_call_id:
-            return None
-        artifact = message.artifact
-        if not isinstance(artifact, Mapping):
-            return None
-        payload = artifact.get("human_input")
-        if not isinstance(payload, Mapping):
-            return None
-        version = payload.get("version")
-        if (
-            type(version) is not int
-            or version not in (1, 2)
-            or payload.get("kind") != "human_input_request"
-            or payload.get("source") != _ASK_CLARIFICATION_TOOL_NAME
-            or payload.get("request_id") != request_id
-            or payload.get("tool_call_id") != tool_call_id
-        ):
-            return None
-        return tool_call_id
-
-    @classmethod
-    def _is_clarification_continuation(
-        cls,
-        messages: list[AnyMessage],
-        *,
-        turn_start: int,
-        response_index: int,
-    ) -> bool:
-        """Match one server-hidden reply to its exact request ToolMessage and tool call."""
-
-        response_message = messages[response_index]
-        if not isinstance(response_message, HumanMessage) or response_message.additional_kwargs.get("hide_from_ui") is not True:
-            return False
-        response = read_human_input_response(response_message.additional_kwargs)
-        if response is None or response["source"] != _ASK_CLARIFICATION_TOOL_NAME:
-            return False
-
-        request_index = next(
-            (index for index in range(response_index - 1, turn_start - 1, -1) if isinstance(messages[index], ToolMessage) and messages[index].name == _ASK_CLARIFICATION_TOOL_NAME),
-            None,
-        )
-        if request_index is None:
-            return False
-        tool_call_id = cls._clarification_request_tool_call_id(
-            messages[request_index],
-            response["request_id"],
-        )
-        if tool_call_id is None:
-            return False
-        matching_tool_calls = 0
-        for message in messages[turn_start:request_index]:
-            if not isinstance(message, AIMessage):
-                continue
-            matching_tool_calls += sum(1 for tool_call in message.tool_calls if isinstance(tool_call, Mapping) and tool_call.get("id") == tool_call_id and tool_call.get("name") == _ASK_CLARIFICATION_TOOL_NAME)
-        return matching_tool_calls == 1
-
-    @classmethod
-    def _complete_turn_ranges(
-        cls,
-        messages: list[AnyMessage],
-    ) -> tuple[tuple[int, int], ...]:
-        """Return contiguous complete user turns from the state head."""
-
-        user_indexes = [index for index, message in enumerate(messages) if cls._is_turn_user(message)]
-        if not user_indexes:
-            return ()
-
-        starts = [0]
-        seen_assistant = False
-        for index in range(user_indexes[0] + 1, len(messages)):
-            message = messages[index]
-            if isinstance(message, AIMessage):
-                seen_assistant = True
-                continue
-            if cls._is_turn_user(message) and seen_assistant:
-                if cls._is_clarification_continuation(
-                    messages,
-                    turn_start=starts[-1],
-                    response_index=index,
-                ):
-                    continue
-                starts.append(cls._turn_prefix_start(messages, index))
-                seen_assistant = False
-
-        ranges: list[tuple[int, int]] = []
-        for position, start in enumerate(starts):
-            end = starts[position + 1] if position + 1 < len(starts) else len(messages)
-            turn = messages[start:end]
-            first_user = next(
-                (index for index, message in enumerate(turn) if cls._is_turn_user(message)),
-                None,
-            )
-            if first_user is None:
-                break
-            assistant_messages = [message for message in turn[first_user + 1 :] if isinstance(message, AIMessage)]
-            if not assistant_messages:
-                break
-            tool_calls = [tool_call for message in assistant_messages for tool_call in message.tool_calls]
-            if any(not isinstance(tool_call, dict) or not isinstance(tool_call.get("id"), str) or not tool_call.get("id") for tool_call in tool_calls):
-                break
-            expected_tool_calls = {tool_call["id"] for tool_call in tool_calls}
-            completed_tool_calls = {message.tool_call_id for message in turn[first_user + 1 :] if isinstance(message, ToolMessage) and isinstance(message.tool_call_id, str) and message.tool_call_id}
-            response_tail = next(
-                (message for message in reversed(turn[first_user + 1 :]) if isinstance(message, (AIMessage, ToolMessage))),
-                None,
-            )
-            if expected_tool_calls != completed_tool_calls or not isinstance(response_tail, AIMessage):
-                break
-            ranges.append((start, end))
-        return tuple(ranges)
-
     def _requested_cutoff(self, messages: list[AnyMessage]) -> int:
         if self._compact_all_complete_turns:
             return len(messages)
         return self._determine_cutoff_index(messages)
-
-    def _candidate_cutoffs(
-        self,
-        messages: list[AnyMessage],
-        requested_cutoff: int,
-        *,
-        protect_latest_complete_turn: bool = False,
-    ) -> tuple[int, ...]:
-        cutoffs: list[int] = []
-        expected_start = 0
-        complete_turns = self._complete_turn_ranges(messages)
-        if protect_latest_complete_turn and complete_turns:
-            complete_turns = complete_turns[:-1]
-        for start, end in complete_turns:
-            if start != expected_start:
-                break
-            expected_start = end
-            if end <= requested_cutoff:
-                cutoffs.append(end)
-        return tuple(reversed(cutoffs))
 
     def _provider_safe_retention_cutoff(
         self,
@@ -942,10 +760,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 return candidate
             previous_fitting_cutoff = cutoff_index
         return None
-
-    @staticmethod
-    def _snip_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
-        return [message for message in messages if not is_dynamic_context_reminder(message)]
 
     def _profile_trigger_reached(
         self,

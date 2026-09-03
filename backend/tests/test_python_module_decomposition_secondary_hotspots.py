@@ -458,6 +458,18 @@ SNIP_PLANNER_MOVED_INTERNALS = (
     "_fit_projection_prefix",
     "_build_projection_prompts",
 )
+TURN_COMPACTION_FUNCTIONS = (
+    "is_turn_user",
+    "turn_prefix_start",
+    "clarification_request_tool_call_id",
+    "is_clarification_continuation",
+    "complete_turn_ranges",
+    "candidate_cutoffs",
+    "snip_messages",
+    "summary_count_message",
+    "messages_for_trigger_count",
+    "context_progress",
+)
 
 
 def _parse(path: Path) -> ast.Module:
@@ -783,3 +795,21 @@ def test_snip_planner_owner_is_the_exact_legacy_export() -> None:
         assert name in class_names, name
     assert issubclass(owner.SnipModelOutputInvalid, owner.SnipCompactionFailed)
     _assert_owner_imports_are_clean(MIDDLEWARES_ROOT / "snip_planner.py", forbidden_modules=(SUMMARIZATION_MODULE, ".summarization_middleware", ".turn_compaction", ".compaction_receipts"), forbidden_prefixes=("app", "sqlalchemy"))
+
+
+def test_turn_compaction_owner_is_the_exact_legacy_export() -> None:
+    owner = importlib.import_module("deerflow.agents.middlewares.turn_compaction")
+    for name in TURN_COMPACTION_NAMES:
+        assert getattr(summarization_legacy, name) is getattr(owner, name), name
+    for name in TURN_COMPACTION_FUNCTIONS:
+        assert callable(getattr(owner, name)), name
+    middleware = summarization_legacy.DeerFlowSummarizationMiddleware
+    for legacy_name, (module_name, owner_name) in SUMMARIZATION_STATICMETHOD_ALIASES.items():
+        assert module_name == "turn_compaction"
+        descriptor = middleware.__dict__[legacy_name]
+        assert isinstance(descriptor, staticmethod), legacy_name
+        assert descriptor.__func__ is getattr(owner, owner_name), legacy_name
+    class_names = _class_defined_names(SUMMARIZATION_PATH, "DeerFlowSummarizationMiddleware")
+    assert not {"_is_turn_user", "_turn_prefix_start", "_clarification_request_tool_call_id", "_is_clarification_continuation"} & class_names
+    assert middleware._complete_turn_ranges([]) == ()
+    _assert_owner_imports_are_clean(MIDDLEWARES_ROOT / "turn_compaction.py", forbidden_modules=(SUMMARIZATION_MODULE, ".summarization_middleware", ".snip_planner", ".compaction_receipts"), forbidden_prefixes=("app", "sqlalchemy"))
