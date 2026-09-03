@@ -714,3 +714,21 @@ def test_snapshot_asset_row_planning_is_owned_by_the_rules_module() -> None:
     called = {node.func.id for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
     assert "plan_run_asset_rows" in called
     assert "_RunAssetSnapshotAdmissionEncoder" not in called
+
+
+def test_checkpoint_receipt_repair_owner_is_the_exact_legacy_export() -> None:
+    owner = importlib.import_module("app.private_work.checkpoint_receipt_repair")
+    for name in CHECKPOINT_REPAIR_OWNER_NAMES:
+        assert hasattr(owner, name), name
+    saver = checkpointer_legacy._ScopedCheckpointSaver
+    for legacy_name, owner_name in CHECKPOINT_REPAIR_STATICMETHODS.items():
+        descriptor = saver.__dict__[legacy_name]
+        assert isinstance(descriptor, staticmethod), legacy_name
+        assert descriptor.__func__ is getattr(owner, owner_name), legacy_name
+    for name in CHECKPOINT_REPAIR_DELEGATING_METHODS:
+        assert callable(saver.__dict__[name]), name
+    assert not hasattr(checkpointer_legacy, "_MEMORY_ARCHIVE_RECEIPT_FIELDS")
+    owner_imports = _module_imports(PRIVATE_WORK_ROOT / "checkpoint_receipt_repair.py")
+    assert not {CHECKPOINTER_MODULE, ".checkpointer"} & owner_imports
+    for name in ("ContextEvidenceRepository", "ContextProjectionTransaction"):
+        assert hasattr(owner, name), name

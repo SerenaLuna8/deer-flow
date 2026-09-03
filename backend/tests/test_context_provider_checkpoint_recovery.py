@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.private_work import checkpointer as checkpointer_module
+from app.private_work import checkpoint_receipt_repair as repair_module
 from app.private_work.checkpointer import _ScopedCheckpointSaver
 from app.private_work.context import PrivateWorkContext
 from app.projects.capabilities import capabilities_for
@@ -245,12 +245,12 @@ async def test_checkpoint_response_proof_repairs_provider_link_and_head_together
     saver._context = _context()
     _ProjectionTransaction.calls.clear()
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextEvidenceRepository",
         lambda _session: repository,
     )
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextProjectionTransaction",
         _ProjectionTransaction,
     )
@@ -293,12 +293,12 @@ async def test_checkpoint_without_the_bound_provider_response_is_terminal_ambigu
     saver._context = _context()
     _ProjectionTransaction.calls.clear()
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextEvidenceRepository",
         lambda _session: repository,
     )
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextProjectionTransaction",
         _ProjectionTransaction,
     )
@@ -348,12 +348,12 @@ async def test_unlinked_provider_snapshot_rejects_local_message_metadata_updates
     saver._context = _context()
     _ProjectionTransaction.calls.clear()
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextEvidenceRepository",
         lambda _session: repository,
     )
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextProjectionTransaction",
         _ProjectionTransaction,
     )
@@ -392,12 +392,12 @@ async def test_already_linked_provider_snapshot_repair_is_idempotent(
     saver._context = _context()
     _ProjectionTransaction.calls.clear()
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextEvidenceRepository",
         lambda _session: repository,
     )
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextProjectionTransaction",
         _ProjectionTransaction,
     )
@@ -442,12 +442,12 @@ async def test_already_linked_provider_snapshot_allows_local_message_metadata_up
     saver._context = _context()
     _ProjectionTransaction.calls.clear()
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextEvidenceRepository",
         lambda _session: repository,
     )
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextProjectionTransaction",
         _ProjectionTransaction,
     )
@@ -486,12 +486,12 @@ async def test_already_linked_provider_snapshot_still_requires_frozen_identity(
     saver._context = _context()
     _ProjectionTransaction.calls.clear()
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextEvidenceRepository",
         lambda _session: repository,
     )
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextProjectionTransaction",
         _ProjectionTransaction,
     )

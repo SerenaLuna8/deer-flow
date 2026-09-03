@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.private_work import checkpointer as checkpointer_module
+from app.private_work import checkpoint_receipt_repair as repair_module
 from app.private_work.checkpointer import _ScopedCheckpointSaver
 from app.private_work.context import PrivateWorkContext
 from app.projects.capabilities import capabilities_for
@@ -150,12 +150,12 @@ async def test_checkpoint_compaction_receipt_repairs_evidence_and_head_together(
     saver = object.__new__(_ScopedCheckpointSaver)
     saver._context = _context()
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextEvidenceRepository",
         lambda _session: _Repository(),
     )
     monkeypatch.setattr(
-        checkpointer_module,
+        repair_module,
         "ContextProjectionTransaction",
         _ProjectionTransaction,
     )
