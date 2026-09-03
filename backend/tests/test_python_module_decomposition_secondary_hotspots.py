@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import importlib
 import inspect
 from pathlib import Path
+
+import pytest
 
 import deerflow.persistence.jobs as jobs_package
 from app.private_work import checkpointer as checkpointer_legacy
@@ -639,3 +642,35 @@ def test_batch6_owner_modules_never_import_facades_or_forbidden_packages() -> No
         path = PRIVATE_WORK_ROOT / f"{name}.py"
         if path.exists():
             _assert_owner_imports_are_clean(path, forbidden_modules=(CHECKPOINTER_MODULE, ".checkpointer"), forbidden_prefixes=())
+
+
+def test_jobs_contracts_owner_is_the_exact_legacy_export() -> None:
+    owner = importlib.import_module("deerflow.persistence.jobs.contracts")
+    for name in JOBS_CONTRACT_NAMES:
+        assert getattr(jobs_sql_legacy, name) is getattr(owner, name), name
+    for name in JOBS_SQL_RETAINED_NAMES:
+        assert hasattr(jobs_sql_legacy, name), name
+        assert not hasattr(owner, name), name
+    assert jobs_sql_legacy.__all__ == EXPECTED_JOBS_SQL_ALL
+    for name in jobs_package.__all__:
+        if name.endswith("Row"):
+            continue
+        assert getattr(jobs_package, name) is getattr(jobs_sql_legacy, name), name
+
+
+def test_jobs_contracts_requeue_event_registry_stays_with_the_repository() -> None:
+    owner = importlib.import_module("deerflow.persistence.jobs.contracts")
+    event = object.__new__(owner.DeadJobRequeuedEvent)
+    assert jobs_sql_legacy.consume_issued_dead_job_requeued_event(event) is False
+    assert jobs_sql_legacy.consume_issued_dead_job_requeued_event(object()) is False
+    assert jobs_sql_legacy.DeadJobRequeuedEvent is owner.DeadJobRequeuedEvent
+
+
+def test_jobs_contracts_retry_backoff_characterization() -> None:
+    owner = importlib.import_module("deerflow.persistence.jobs.contracts")
+    assert owner.retry_backoff_seconds is jobs_sql_legacy.retry_backoff_seconds
+    assert owner.retry_backoff_seconds(attempt_count=1, initial_seconds=5, max_seconds=60) == 5
+    assert owner.retry_backoff_seconds(attempt_count=3, initial_seconds=5, max_seconds=60) == 20
+    assert owner.retry_backoff_seconds(attempt_count=10, initial_seconds=5, max_seconds=60) == 60
+    with pytest.raises(ValueError, match="invalid retry backoff inputs"):
+        owner.retry_backoff_seconds(attempt_count=0, initial_seconds=5, max_seconds=60)
