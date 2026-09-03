@@ -427,6 +427,37 @@ SUMMARIZATION_MOVED_INTERNALS = (
     "_resolve_compaction_estimator",
     "_context_state_digest",
 )
+SNIP_PLANNER_FUNCTIONS = (
+    "intermediate_summary_text",
+    "assemble_summary_input_text",
+    "build_summary_input_text",
+    "projection_text",
+    "quoted_projection_value",
+    "projection_material",
+    "render_projection",
+    "reduction_prompt",
+    "plan_reduction_step",
+    "build_summary_prompt_from_formatted",
+    "projection_prompt",
+    "fit_projection_prefix",
+    "build_projection_prompts",
+    "build_snip_prompt_plan",
+    "build_summary_prompt",
+)
+SNIP_PLANNER_MOVED_INTERNALS = (
+    "_intermediate_summary_text",
+    "_reduction_prompt",
+    "_assemble_summary_input_text",
+    "_build_summary_input_text",
+    "_build_summary_prompt_from_formatted",
+    "_projection_text",
+    "_quoted_projection_value",
+    "_projection_material",
+    "_render_projection",
+    "_projection_prompt",
+    "_fit_projection_prefix",
+    "_build_projection_prompts",
+)
 
 
 def _parse(path: Path) -> ast.Module:
@@ -732,3 +763,23 @@ def test_checkpoint_receipt_repair_owner_is_the_exact_legacy_export() -> None:
     assert not {CHECKPOINTER_MODULE, ".checkpointer"} & owner_imports
     for name in ("ContextEvidenceRepository", "ContextProjectionTransaction"):
         assert hasattr(owner, name), name
+
+
+def test_snip_planner_owner_is_the_exact_legacy_export() -> None:
+    owner = importlib.import_module("deerflow.agents.middlewares.snip_planner")
+    for name in SNIP_PLANNER_NAMES:
+        assert getattr(summarization_legacy, name) is getattr(owner, name), name
+    for name in SNIP_PLANNER_FUNCTIONS:
+        assert callable(getattr(owner, name)), name
+    assert tuple(field.name for field in dataclasses.fields(owner.SnipPromptBudget)) == (
+        "summary_prompt",
+        "dual_output_contract",
+        "prompt_within_budget",
+        "prompt_with_repair_within_budget",
+    )
+    class_names = _class_defined_names(SUMMARIZATION_PATH, "DeerFlowSummarizationMiddleware")
+    assert not set(SNIP_PLANNER_MOVED_INTERNALS) & class_names, set(SNIP_PLANNER_MOVED_INTERNALS) & class_names
+    for name in ("_plan_reduction_step", "_build_snip_prompt_plan", "_build_summary_prompt", "_snip_prompt_budget"):
+        assert name in class_names, name
+    assert issubclass(owner.SnipModelOutputInvalid, owner.SnipCompactionFailed)
+    _assert_owner_imports_are_clean(MIDDLEWARES_ROOT / "snip_planner.py", forbidden_modules=(SUMMARIZATION_MODULE, ".summarization_middleware", ".turn_compaction", ".compaction_receipts"), forbidden_prefixes=("app", "sqlalchemy"))
