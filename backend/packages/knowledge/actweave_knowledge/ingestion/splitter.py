@@ -15,11 +15,12 @@ from itertools import chain
 from ..contracts import (
     KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR,
     KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR,
+    KNOWLEDGE_MAX_SEGMENT_CHARS,
     KNOWLEDGE_MAX_SEGMENTS_PER_DOCUMENT,
     KNOWLEDGE_QUOTA_EXCEEDED,
     KnowledgeError,
 )
-from ..extraction.contracts import AttachmentOccurrence, ChunkProfile, Document, ExtractionError, SourceSpan
+from ..extraction.contracts import AttachmentOccurrence, ChunkProfile, Document, ExtractionError, ParseWarning, SourceSpan
 from .extractor import ExtractedBlock
 from .index_text import build_index_text, has_indexable_source_text
 from .source_mapping import clip_source_spans
@@ -29,10 +30,24 @@ from .tokenizer import TOKENIZER_PROFILE_ID, count_knowledge_tokens, tokenizer_f
 _LINE_BREAKS = re.compile(r"\r\n?")
 _EXCESS_BLANK_LINES = re.compile(r"\n{3,}")
 
-# Fallback boundaries tried in order when a piece is still oversized; the
-# empty string means character-level packing and always terminates. Mirrors
-# upstream's FixedRecursiveCharacterTextSplitter fallback sequence.
+# Fallback boundaries of the frozen character profile, tried in order when a
+# piece is still oversized; the empty string means character-level packing
+# and always terminates. Mirrors upstream's FixedRecursiveCharacterTextSplitter
+# fallback sequence and must not change: historical rows depend on it.
 _FALLBACK_SEPARATORS: tuple[str, ...] = ("\n\n", "\n", "。", ". ", " ", "")
+
+# Token-profile fallback (splitter-v2): paragraph, line, then sentence-final
+# punctuation in both scripts, then clause punctuation, then words, then
+# characters. Chinese text that ends sentences with ！/？/； no longer drops
+# straight to space- or character-level cuts.
+_TOKEN_FALLBACK_SEPARATORS: tuple[str, ...] = ("\n\n", "\n", "。", "！", "？", ". ", "! ", "? ", "；", "; ", "，", ", ", " ", "")
+
+WarningSink = Callable[[ParseWarning], None]
+
+
+def _ignore_warning(_: ParseWarning) -> None:
+    return None
+
 
 _SEPARATOR_ESCAPES = {"\\n": "\n", "\\t": "\t", "\\r": "\r"}
 _SEPARATOR_ESCAPE_RE = re.compile(r"\\[ntr]")
@@ -236,12 +251,102 @@ def _pack_pieces(pieces: list[str], *, chunk_size: int, chunk_overlap: int) -> l
 
 
 def fits_chunk(markdown: str, token_limit: int) -> bool:
-    """Both display and actual index input must fit; characters remain capped."""
-    return len(markdown) <= 4000 and count_knowledge_tokens(markdown) <= token_limit and count_knowledge_tokens(build_index_text(markdown)) <= token_limit
+    """Both display and actual index input must fit; characters remain capped.
+
+    The cheap character bound runs first so oversized candidates never reach
+    the tokenizer; ``KNOWLEDGE_MAX_SEGMENT_CHARS`` exists for the tool-message
+    and editor budgets, not as a second chunk-size knob.
+    """
+    return len(markdown) <= KNOWLEDGE_MAX_SEGMENT_CHARS and count_knowledge_tokens(markdown) <= token_limit and count_knowledge_tokens(build_index_text(markdown)) <= token_limit
 
 
 def _prefix_error() -> ExtractionError:
     return ExtractionError("CONTEXT_PREFIX_EXCEEDS_BUDGET", "标题或表头超过分段预算，请增大预算或调整来源内容")
+
+
+def _first_location(unit: StructureUnit) -> dict[str, str | int]:
+    return dict(unit.source_spans[0].location) if unit.source_spans else {}
+
+
+def _truncate_to_fit(unit: StructureUnit, fits: Callable[[StructureUnit], bool]) -> StructureUnit:
+    """Longest fitting prefix of ``unit`` on a boundary outside inline atoms."""
+
+    atoms = inline_atoms(unit.content)
+    boundaries = [end for end in range(1, len(unit.content) + 1) if not any(a < end < b for a, b in atoms)]
+    if not boundaries or not fits(slice_unit(unit, 0, boundaries[0])):
+        raise _prefix_error()
+    low, high = 0, len(boundaries) - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(slice_unit(unit, 0, boundaries[middle])):
+            low = middle
+        else:
+            high = middle - 1
+    return trim_unit(slice_unit(unit, 0, boundaries[low]))
+
+
+def _prefix_parts(prefix: StructureUnit) -> list[StructureUnit]:
+    """Heading levels (and a trailing table header) as blank-line separated parts."""
+
+    parts: list[StructureUnit] = []
+    cursor = 0
+    while (found := prefix.content.find("\n\n", cursor)) >= 0:
+        parts.append(slice_unit(prefix, cursor, found))
+        cursor = found + 2
+    parts.append(slice_unit(prefix, cursor, len(prefix.content)))
+    return parts
+
+
+def _has_source_span(unit: StructureUnit) -> bool:
+    return any(span.role == "source" for span in unit.source_spans)
+
+
+def _degrade_prefix(prefix: StructureUnit, fits: Callable[[StructureUnit], bool], warn: WarningSink) -> StructureUnit:
+    """Shrink an over-budget context prefix instead of failing the document.
+
+    Heading paths are joined by blank lines with the most specific heading
+    last, so outer levels are dropped first; the surviving line (or a table
+    header) is truncated to the longest fitting boundary as a last resort.
+    Every degradation is reported once as ``CONTEXT_PREFIX_TRUNCATED``.
+    """
+
+    parts = _prefix_parts(prefix)
+    while len(parts) > 1 and not fits(join_units(parts, "\n\n")):
+        parts.pop(0)
+    candidate = join_units(parts, "\n\n")
+    if not fits(candidate):
+        candidate = _truncate_to_fit(candidate, fits)
+    warn(ParseWarning(code="CONTEXT_PREFIX_TRUNCATED", message="标题或表头超过分段预算，已截短上下文前缀", source_position=_first_location(prefix)))
+    return candidate
+
+
+def _emit_oversized_source_prefix(prefix: StructureUnit, separators: list[str], separator: str, limit: int, prefix_limit: int, warn: WarningSink) -> tuple[list[StructureUnit], StructureUnit]:
+    """Keep the text of a heading/header that cannot serve as context.
+
+    The first chunk of a section carries its heading (or table header) as
+    real source text. When that text does not fit the context budget it is
+    emitted in full as ordinary chunks first and demoted to context inside
+    the prefix, so truncating the prefix afterwards never loses indexed text.
+    Source parts that do fit keep their source role. Returns the chunks to
+    emit and the adjusted prefix.
+    """
+
+    def fits_alone(value: StructureUnit) -> bool:
+        return fits_chunk(_render(StructureUnit(""), [value], separator).content, limit)
+
+    def fits_context(value: StructureUnit) -> bool:
+        return fits_chunk(_render(value, [StructureUnit("x")], separator).content, prefix_limit)
+
+    emitted: list[StructureUnit] = []
+    parts: list[StructureUnit] = []
+    for part in _prefix_parts(prefix):
+        if not _has_source_span(part) or fits_context(part):
+            parts.append(part)
+            continue
+        warn(ParseWarning(code="OVERSIZED_PREFIX_SPLIT", message="标题或表头超过分段预算，其原文已单独切分为普通分段", source_position=_first_location(part)))
+        emitted.extend(trim_unit(piece) for piece in _split_ranges(replace(part, kind="paragraph"), separators, fits_alone))
+        parts.append(context_unit(part))
+    return emitted, join_units(parts, "\n\n")
 
 
 def _render(prefix: StructureUnit, units: list[StructureUnit], separator: str) -> StructureUnit:
@@ -378,16 +483,21 @@ def _field_pieces(unit: StructureUnit, prefix: StructureUnit, limit: int, separa
             label_end = label.end() if label else 0
             fields.append((context_unit(slice_unit(field, 0, label_end)), slice_unit(field, label_end, len(line))))
             offset += len(line)
-    for label, value in fields:
+    for index, (field_label, value) in enumerate(fields, start=1):
+        current_label = [field_label]
 
-        def render(value: StructureUnit) -> StructureUnit:
-            return join_units([label, value], "")
+        def render(value: StructureUnit, current_label: list[StructureUnit] = current_label) -> StructureUnit:
+            return join_units([current_label[0], value], "")
 
-        def fits(value: StructureUnit) -> bool:
+        def fits(value: StructureUnit, render: Callable[[StructureUnit], StructureUnit] = render) -> bool:
             return fits_chunk(_render(prefix, [render(value)], separator).content, limit)
 
         if not fits(StructureUnit("x")):
-            raise _prefix_error()
+            # A header cell wider than the budget cannot label its values;
+            # fall back to the positional label rather than failing the row.
+            current_label[0] = StructureUnit(f"- 列{index}: ")
+            if not fits(StructureUnit("x")):
+                raise _prefix_error()
         pending: list[StructureUnit] = []
         for piece in _split_ranges(value, separators, fits):
             if pending and not fits(join_units([*pending, piece], "")):
@@ -404,14 +514,32 @@ def _append_piece(pending: list[StructureUnit] | tuple[StructureUnit, ...], piec
     return [*pending, piece]
 
 
-def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: str, *, limit: int, overlap: int, user_separator: str) -> Iterator[StructureUnit]:
-    if prefix.content and not fits_chunk(_render(prefix, [StructureUnit("x")], separator).content, limit):
-        raise _prefix_error()
+def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: str, *, limit: int, overlap: int, user_separator: str, warn: WarningSink = _ignore_warning) -> Iterator[StructureUnit]:
+    separators = [user_separator] + [candidate for candidate in _TOKEN_FALLBACK_SEPARATORS if candidate != user_separator]
+    # A context prefix may take at most half the budget; the body must keep
+    # the other half. Over-budget prefixes degrade (outer heading levels first,
+    # then truncation) instead of failing the document, after any source text
+    # they carry has been emitted in full.
+    prefix_limit = max(limit // 2, 1)
+
+    def fits_prefix(value: StructureUnit) -> bool:
+        return fits_chunk(_render(value, [StructureUnit("x")], separator).content, prefix_limit)
+
+    if prefix.content and units and not fits_prefix(prefix):
+        emitted, prefix = _emit_oversized_source_prefix(prefix, separators, separator, limit, prefix_limit, warn)
+        yield from emitted
+        prefix = _degrade_prefix(prefix, fits_prefix, warn)
     if not units:
         if prefix.content:
-            yield trim_unit(prefix)
+            if fits_chunk(_render(prefix, [StructureUnit("x")], separator).content, limit):
+                yield trim_unit(prefix)
+            else:
+                # A heading-only section wider than the budget is a paragraph
+                # marked as a heading; keep all of its text as ordinary chunks.
+                warn(ParseWarning(code="OVERSIZED_PREFIX_SPLIT", message="标题或表头超过分段预算，其原文已单独切分为普通分段", source_position=_first_location(prefix)))
+                for piece in _split_ranges(replace(prefix, kind="paragraph"), separators, lambda value: fits_chunk(_render(StructureUnit(""), [value], separator).content, limit)):
+                    yield trim_unit(piece)
         return
-    separators = [user_separator] + [candidate for candidate in _FALLBACK_SEPARATORS if candidate != user_separator]
     pending: list[StructureUnit] = []
     fresh = False
     for unit in units:
@@ -423,7 +551,10 @@ def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: st
         if not fragmented:
             pieces = [unit]
         elif unit.kind == "heading":
-            raise _prefix_error()
+            # A heading-only section wider than the budget is a paragraph
+            # marked as a heading; keep all of its text as ordinary chunks.
+            warn(ParseWarning(code="OVERSIZED_PREFIX_SPLIT", message="标题或表头超过分段预算，其原文已单独切分为普通分段", source_position=_first_location(unit)))
+            pieces = _split_ranges(replace(unit, kind="paragraph"), separators, fits)
         elif unit.kind in {"code", "indented_code"}:
             pieces = _code_pieces(unit, prefix, limit, separator)
         elif unit.kind in {"table_row", "fields"}:
@@ -516,9 +647,9 @@ def _has_source_text(unit: StructureUnit) -> bool:
     return has_indexable_source_text((Document(page_content=unit.content, source_spans=unit.source_spans),))
 
 
-def _split_token_units(documents: tuple[Document, ...], *, limit: int, overlap: int, separator: str) -> Iterator[StructureUnit]:
+def _split_token_units(documents: tuple[Document, ...], *, limit: int, overlap: int, separator: str, warn: WarningSink = _ignore_warning) -> Iterator[StructureUnit]:
     for prefix, units, joiner in structure_groups(documents):
-        yield from _pack_group(prefix, units, joiner, limit=limit, overlap=overlap, user_separator=decode_separator(separator))
+        yield from _pack_group(prefix, units, joiner, limit=limit, overlap=overlap, user_separator=decode_separator(separator), warn=warn)
 
 
 def _check_hard_limit(count: int) -> None:
@@ -526,8 +657,29 @@ def _check_hard_limit(count: int) -> None:
         raise KnowledgeError(KNOWLEDGE_QUOTA_EXCEEDED, "分段或向量条目超过知识库固定上限")
 
 
-def split_documents(documents: tuple[Document, ...], *, profile: ChunkProfile) -> list[SegmentDraft]:
-    """Derive immutable display/index drafts without extraction, I/O or fallback."""
+def _deduplicating_sink(warnings: list[ParseWarning] | None) -> WarningSink:
+    """Append each distinct warning once; ``None`` discards them."""
+
+    if warnings is None:
+        return _ignore_warning
+    seen = {warning.model_dump_json() for warning in warnings}
+
+    def warn(warning: ParseWarning) -> None:
+        identity = warning.model_dump_json()
+        if identity not in seen:
+            seen.add(identity)
+            warnings.append(warning)
+
+    return warn
+
+
+def split_documents(documents: tuple[Document, ...], *, profile: ChunkProfile, warnings: list[ParseWarning] | None = None) -> list[SegmentDraft]:
+    """Derive immutable display/index drafts without extraction, I/O or fallback.
+
+    ``warnings`` receives the splitting degradations (truncated context
+    prefixes, oversized headings split as text) so preview and publication can
+    surface them next to the parser's own warnings.
+    """
     from .cleaner import clean_documents
 
     if profile.unit == "character":
@@ -536,10 +688,11 @@ def split_documents(documents: tuple[Document, ...], *, profile: ChunkProfile) -
         raise ValueError("invalid Knowledge token chunk limits")
     if profile.tokenizer_profile_id != TOKENIZER_PROFILE_ID or profile.tokenizer_digest != tokenizer_fingerprint():
         raise ExtractionError("TOKENIZER_UNAVAILABLE", "知识库 Tokenizer 配置不可用")
+    warn = _deduplicating_sink(warnings)
     cleaned = clean_documents(documents, remove_extra_spaces=profile.remove_extra_spaces, remove_urls_emails=profile.remove_urls_emails)
     result = []
     vector_count = 0
-    for unit in _split_token_units(cleaned, limit=profile.size, overlap=profile.overlap, separator=profile.separator):
+    for unit in _split_token_units(cleaned, limit=profile.size, overlap=profile.overlap, separator=profile.separator, warn=warn):
         document = Document(page_content=unit.content, source_spans=unit.source_spans, attachments=unit.attachments)
         if not has_indexable_source_text((document,)):
             continue
@@ -547,7 +700,7 @@ def split_documents(documents: tuple[Document, ...], *, profile: ChunkProfile) -
         index_text = build_index_text(unit.content)
         children = []
         if profile.mode == "parent_child":
-            for child in _split_token_units((document,), limit=profile.child_size, overlap=0, separator=profile.child_separator):
+            for child in _split_token_units((document,), limit=profile.child_size, overlap=0, separator=profile.child_separator, warn=warn):
                 if not has_indexable_source_text((Document(page_content=child.content, source_spans=child.source_spans),)):
                     continue
                 vector_count += 1

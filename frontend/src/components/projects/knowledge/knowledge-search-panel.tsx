@@ -739,6 +739,12 @@ function SearchDiagnosticsDisclosure({
       String(diagnostics.counts.parents_deduplicated),
     ],
     [labels.thresholdFiltered, String(diagnostics.counts.threshold_filtered)],
+    [labels.relativeFiltered, String(diagnostics.counts.relative_filtered)],
+    [
+      labels.lexicalThresholdExempt,
+      String(diagnostics.counts.lexical_threshold_exempt),
+    ],
+    [labels.lexicalQueryTokens, String(diagnostics.lexical_query_token_count)],
     [labels.staleFiltered, String(diagnostics.counts.stale_filtered)],
     [labels.returned, String(diagnostics.counts.returned)],
     [
@@ -766,6 +772,16 @@ function SearchDiagnosticsDisclosure({
           className="mt-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-300/30 dark:bg-amber-950/40 dark:text-amber-200"
         >
           {labels.heterogeneousWarning}
+        </p>
+      ) : null}
+      {diagnostics.lexical_query_truncated ? (
+        <p
+          role="note"
+          className="mt-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-300/30 dark:bg-amber-950/40 dark:text-amber-200"
+        >
+          {labels.lexicalQueryTruncatedWarning(
+            diagnostics.lexical_query_token_count,
+          )}
         </p>
       ) : null}
       <dl className="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">

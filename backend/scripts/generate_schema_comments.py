@@ -34,7 +34,7 @@ _COMMENT_STATEMENTS_DIGEST_PREFIX = "-- Comment statements SHA-256: "
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
 _EXPECTED_TABLE_COUNT = 113
-_EXPECTED_COLUMN_COUNT = 1448
+_EXPECTED_COLUMN_COUNT = 1449
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -563,6 +563,7 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_bases", "retrieval_mode"): "检索模式（semantic 仅向量或 hybrid 增加词法召回路）；检索测试可单次覆盖不落库",
     ("knowledge_bases", "default_top_k"): "检索未显式传参时使用的默认返回条数",
     ("knowledge_bases", "default_score_threshold"): "检索未显式传参时使用的默认相关性分数阈值（0 表示不过滤）",
+    ("knowledge_bases", "default_relative_cutoff"): "可选的相对分数截断：低于本库最高原生分数该比例的候选被淘汰；空表示不启用",
     ("knowledge_bases", "summary_index_enabled"): "是否启用片段摘要索引；开启为已发布文档排队摘要回填，关闭仅将摘要移出召回而不删除已生成行",
     ("knowledge_documents", "knowledge_base_id"): "所属知识库标识",
     ("knowledge_documents", "name"): "用户看到的文档名称",
@@ -628,8 +629,8 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_queries", "top_score_kind"): "top_score 的分数来源（cosine、rerank 或 rank_fusion）；M10 前历史行为空表示未知",
     ("knowledge_queries", "strategy_version"): "产生本行的检索策略版本标签；历史行为空",
     ("knowledge_tasks", "resource_id"): "按任务类型指向知识文档、提取结果或知识库的业务标识",
-    ("knowledge_tasks", "kind"): "任务类型（摄取文档、重嵌入文档、生成片段摘要、删除文档、清理晚到文档对象、删除提取结果或删除知识库）",
-    ("knowledge_tasks", "target_version"): "ingest_document、reembed_document 与 summarize_document 任务允许发布的文档版本号",
+    ("knowledge_tasks", "kind"): "任务类型（摄取文档、重嵌入文档、生成片段摘要、重建词法索引、删除文档、清理晚到文档对象、删除提取结果或删除知识库）",
+    ("knowledge_tasks", "target_version"): "ingest_document、reembed_document、summarize_document 与 relex_document 任务允许发布的文档版本号",
     ("knowledge_tasks", "storage_key"): "仅 delete_document_object 使用的精确 MinIO object key；属于受保护存储定位符",
     ("knowledge_tasks", "reparse_settings"): "显式重新解析时固化的完整切分/清洗参数 JSON；重试继承，其余任务为空",
     ("knowledge_tasks", "status"): "任务状态（queued、running、retry_wait、succeeded 或 failed）",

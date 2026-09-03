@@ -100,10 +100,15 @@ class KnowledgeTaskProgressReporter:
         """Enter ``embedding`` with a verifiable total and zero verified units."""
         await self.begin_stage("embedding", total_units)
 
-    async def begin_stage(self, stage: str, total_units: int) -> None:
-        """Begin a measured stage, resetting counters for this stage only."""
+    async def begin_stage(self, stage: str, total_units: int, *, completed_units: int = 0) -> None:
+        """Begin (or re-enter) a measured stage.
+
+        ``completed_units`` lets a handler that alternates stages per batch
+        (summarize, embed, publish, repeat) resume the stage's cumulative
+        count instead of showing it reset to zero.
+        """
         self._stage = stage
-        self._completed_units = 0
+        self._completed_units = completed_units
         self._total_units = total_units
         await self._write()
 

@@ -35,6 +35,29 @@ class KnowledgeOrmBase(DeclarativeBase):
     """Isolated metadata; never merged into the host declarative Base."""
 
 
+# Embedding dimensions that receive a partial HNSW index on every vector table.
+# The columns stay dimension-free, so pgvector cannot index them directly; the
+# recall SQL orders by ``embedding::vector(D) <=> query`` under
+# ``vector_dims(embedding) = D`` to match these expressions. HNSW on ``vector``
+# is limited to 2000 dimensions; other dimensions run as sorted scans.
+KNOWLEDGE_HNSW_INDEXED_DIMENSIONS: tuple[int, ...] = (384, 512, 768, 1024, 1536)
+
+
+def _hnsw_indexes(table: str) -> tuple[Index, ...]:
+    """Mirror of the per-dimension HNSW indexes declared in ``full_schema.sql``."""
+
+    return tuple(
+        Index(
+            f"ix_{table}_embedding_hnsw_{dimension}",
+            text(f"(embedding::public.vector({dimension}))"),
+            postgresql_using="hnsw",
+            postgresql_ops={f"(embedding::public.vector({dimension}))": "public.vector_cosine_ops"},
+            postgresql_where=text(f"public.vector_dims(embedding) = {dimension}"),
+        )
+        for dimension in KNOWLEDGE_HNSW_INDEXED_DIMENSIONS
+    )
+
+
 class KnowledgeBaseRow(KnowledgeOrmBase):
     __tablename__ = "knowledge_bases"
     __table_args__ = (
@@ -49,6 +72,10 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
         CheckConstraint(
             "default_score_threshold >= 0 AND default_score_threshold <= 1",
             name="ck_knowledge_bases_default_score_threshold",
+        ),
+        CheckConstraint(
+            "default_relative_cutoff IS NULL OR (default_relative_cutoff > 0 AND default_relative_cutoff <= 1)",
+            name="ck_knowledge_bases_default_relative_cutoff",
         ),
         Index("uq_knowledge_bases_project_name", "project_id", text("lower(name)"), unique=True),
         Index("ix_knowledge_bases_project_status", "project_id", "status", text("updated_at DESC"), "id"),
@@ -80,6 +107,10 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
     summary_index_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    # Optional relative cutoff: candidates below this fraction of the base's
+    # best native score drop. Adapts to the embedding model's own cosine
+    # distribution where one absolute threshold cannot; NULL disables it.
+    default_relative_cutoff: Mapped[float | None] = mapped_column(Double, nullable=True)
 
 
 class KnowledgeDocumentRow(KnowledgeOrmBase):
@@ -304,6 +335,7 @@ class KnowledgeSegmentRow(KnowledgeOrmBase):
             "position",
         ),
         Index("ix_knowledge_segments_lexical", "lexical_tsv", postgresql_using="gin"),
+        *_hnsw_indexes("knowledge_segments"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -388,6 +420,7 @@ class KnowledgeSegmentChildRow(KnowledgeOrmBase):
             "lexical_tsv",
             postgresql_using="gin",
         ),
+        *_hnsw_indexes("knowledge_segment_children"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -447,6 +480,7 @@ class KnowledgeSegmentSummaryRow(KnowledgeOrmBase):
         ),
         Index("ix_knowledge_segment_summaries_scope", "project_id", "knowledge_base_id"),
         Index("ix_knowledge_segment_summaries_document", "knowledge_document_id"),
+        *_hnsw_indexes("knowledge_segment_summaries"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -539,13 +573,13 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
         ),
         Index("uq_knowledge_tasks_open_extraction_delete", "resource_id", unique=True, postgresql_where=text("kind = 'delete_extraction' AND status IN ('queued', 'running', 'retry_wait')")),
         CheckConstraint(
-            "kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base', 'delete_extraction')",
+            "kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'relex_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base', 'delete_extraction')",
             name="ck_knowledge_tasks_kind",
         ),
         # Every indexing kind binds an execution generation; other kinds never.
         CheckConstraint(
-            "(kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND target_version IS NOT NULL AND target_version >= 1)"
-            " OR (kind NOT IN ('ingest_document', 'reembed_document', 'summarize_document') AND target_version IS NULL)",
+            "(kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'relex_document') AND target_version IS NOT NULL AND target_version >= 1)"
+            " OR (kind NOT IN ('ingest_document', 'reembed_document', 'summarize_document', 'relex_document') AND target_version IS NULL)",
             name="ck_knowledge_tasks_target_version",
         ),
         CheckConstraint(
@@ -596,14 +630,15 @@ class KnowledgeTaskRow(KnowledgeOrmBase):
             postgresql_where=text("status = 'running'"),
         ),
         # One open indexing operation per document/version regardless of
-        # kind: ingest, reembed and summarize share the guard, so none can
-        # bypass the slot another holds (M10 design §5; M11 adds summarize).
+        # kind: ingest, reembed, summarize and relex share the guard, so none
+        # can bypass the slot another holds (M10 design §5; M11 adds
+        # summarize; lexical re-derivation joins it).
         Index(
             "uq_knowledge_tasks_open_indexing",
             "resource_id",
             "target_version",
             unique=True,
-            postgresql_where=text("kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND status IN ('queued', 'running', 'retry_wait')"),
+            postgresql_where=text("kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'relex_document') AND status IN ('queued', 'running', 'retry_wait')"),
         ),
         Index(
             "uq_knowledge_tasks_open_document_delete",

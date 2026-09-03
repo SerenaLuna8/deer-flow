@@ -736,6 +736,115 @@ async def test_embed_guard_failure_before_the_retry_prevents_the_second_attempt(
 
 
 @pytest.mark.asyncio
+async def test_retry_backs_off_and_honors_retry_after() -> None:
+    """The single in-client retry waits before re-dispatching: the Provider's
+    ``Retry-After`` (capped) when present, otherwise a jittered base delay."""
+
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"Retry-After": "2"})
+        if attempts == 3:
+            raise httpx.ConnectError("drop")
+        return _embedding_response([(0, [1.0, 0.0, 0.0])])
+
+    client = KnowledgeModelClient(http=httpx.AsyncClient(transport=httpx.MockTransport(handler)), sleep=fake_sleep)
+    try:
+        await client.embed(_embedding_material(), ["a"])
+        await client.embed(_embedding_material(), ["b"])
+    finally:
+        await client.aclose()
+
+    assert attempts == 4
+    assert delays[0] == 2.0  # Retry-After wins
+    assert 0.5 <= delays[1] <= 1.5  # jittered default base delay
+    # A hostile Retry-After never pins the caller for minutes.
+    huge = 0
+
+    def slow_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal huge
+        huge += 1
+        return httpx.Response(503, headers={"Retry-After": "3600"}) if huge == 1 else _embedding_response([(0, [1.0, 0.0, 0.0])])
+
+    delays.clear()
+    client = KnowledgeModelClient(http=httpx.AsyncClient(transport=httpx.MockTransport(slow_handler)), sleep=fake_sleep)
+    try:
+        await client.embed(_embedding_material(), ["c"])
+    finally:
+        await client.aclose()
+    assert delays == [30.0]
+
+
+@pytest.mark.asyncio
+async def test_embed_applies_the_material_prefix_for_the_requested_side() -> None:
+    """Asymmetric models: queries and passages carry their own prefixes on the
+    wire while the caller's texts stay untouched; no prefix means no change."""
+
+    recorder = _Recorder()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.record(request)
+        batch = json.loads(request.content)["input"]
+        return _embedding_response([(index, [1.0, 0.0, 0.0]) for index in range(len(batch))])
+
+    material = _embedding_material(query_prefix="query: ", passage_prefix="passage: ")
+    client = _client(handler)
+    try:
+        await client.embed(material, ["问题"], kind="query")
+        await client.embed(material, ["正文"], kind="passage")
+        await client.embed(material, ["默认"])
+        await client.embed(_embedding_material(), ["无前缀"], kind="query")
+    finally:
+        await client.aclose()
+
+    inputs = [body["input"] for _, body in recorder.requests]
+    assert inputs == [["query: 问题"], ["passage: 正文"], ["passage: 默认"], ["无前缀"]]
+
+
+@pytest.mark.asyncio
+async def test_embed_dispatches_batches_concurrently_and_keeps_input_order() -> None:
+    """With ``embed_concurrency`` above one, batches overlap up to that bound,
+    vectors still come back in input order, and the verified hook is
+    serialized so progress stays monotonic."""
+
+    import asyncio
+
+    in_flight = 0
+    peak = 0
+    verified: list[int] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        batch = json.loads(request.content)["input"]
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return _embedding_response([(0, [float(batch[0][-1]) + 1.0, 0.0, 0.0])])
+
+    async def on_verified(count: int) -> None:
+        verified.append(count)
+
+    client = KnowledgeModelClient(http=httpx.AsyncClient(transport=httpx.MockTransport(handler)), embed_concurrency=3)
+    try:
+        vectors = await client.embed(_embedding_material(max_batch=1), [f"t{index}" for index in range(6)], on_batch_verified=on_verified)
+    finally:
+        await client.aclose()
+
+    assert vectors == [[float(index) + 1.0, 0.0, 0.0] for index in range(6)]
+    assert peak == 3
+    assert verified == [1] * 6
+
+
+@pytest.mark.asyncio
 async def test_rerank_runs_the_batch_guard_and_stops_undispatched_batches() -> None:
     """The reranker path takes the same guard: batch one runs guarded, and a
     guard failure before batch two keeps that request undispatched."""

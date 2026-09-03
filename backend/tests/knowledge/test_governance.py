@@ -73,7 +73,7 @@ class _ScriptedEmbedClient:
         self.embed_calls: list[list[str]] = []
         self.before_embed = None
 
-    async def embed(self, material, texts: list[str], *, batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
+    async def embed(self, material, texts: list[str], *, kind="passage", batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
         if batch_guard is not None:
             await batch_guard()
         self.embed_calls.append(list(texts))

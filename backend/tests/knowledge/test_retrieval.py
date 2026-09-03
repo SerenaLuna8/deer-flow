@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import uuid
 from base64 import b64encode
@@ -28,6 +29,7 @@ from actweave_knowledge import (
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_NOT_FOUND,
+    KNOWLEDGE_RERANK_CANDIDATE_BUDGET,
     KNOWLEDGE_RERANK_FAILED,
     KNOWLEDGE_SEARCH_FAILED,
     KNOWLEDGE_STRATEGY_VERSION,
@@ -101,7 +103,7 @@ class _ScriptedClient:
         self.embed_error: KnowledgeError | None = None
         self.rerank_error: KnowledgeError | None = None
 
-    async def embed(self, material, texts: list[str], *, batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
+    async def embed(self, material, texts: list[str], *, kind="passage", batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
         # The real client runs the guard before dispatching; a guard failure
         # therefore means the call never reached the provider.
         if batch_guard is not None:
@@ -548,6 +550,9 @@ async def test_reranker_uses_index_text_but_hit_and_digest_keep_markdown(
         assert harness.client.embed_calls == [(embedding_id, ["如何安装产品"])]
         assert harness.client.rerank_calls[0][2] == ["安装\n运行 actweave up。\n机架"]
         assert result.hits[0].passage == content
+        # The model-facing text is the persisted index_text the reranker saw,
+        # never the Markdown with its image ref.
+        assert result.hits[0].model_text == "安装\n运行 actweave up。\n机架"
         assert result.citations[0].content_digest == hashlib.sha256(content.encode("utf-8")).hexdigest()
     finally:
         await harness.engine.dispose()
@@ -1055,6 +1060,53 @@ async def test_score_threshold_default_override_zero_and_all_below(postgres_data
 
 
 @pytest.mark.asyncio
+async def test_relative_cutoff_keeps_candidates_near_the_bases_best_native_score(postgres_database_url: str) -> None:
+    """A relative cutoff (fraction of the base's top native score) adapts to
+    the embedding model's cosine distribution where one absolute number
+    cannot; the request override wins over the base default, ``None``
+    disables it, and non-positive tops never apply it."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, base_id, _, _ = await _seed_single_base(
+            harness,
+            segments=[
+                ("最佳段落", [1.0, 0.0, 0.0]),
+                ("接近段落", [0.9, math.sqrt(1 - 0.81), 0.0]),
+                ("一般段落", [0.3, math.sqrt(1 - 0.09), 0.0]),
+                ("弱相关段落", [0.2, math.sqrt(1 - 0.04), 0.0]),
+            ],
+            with_reranker=False,
+        )
+
+        # No cutoff anywhere: the absolute threshold alone decides.
+        baseline = await harness.service.search(_request(project_id, score_threshold=0.0, top_k=10))
+        assert [hit.citation.snippet for hit in baseline.hits] == ["最佳段落", "接近段落", "一般段落", "弱相关段落"]
+
+        # Request-level: keep scores >= 0.5 * 1.0.
+        result = await harness.service.search(_request(project_id, score_threshold=0.0, top_k=10, relative_score_cutoff=0.5, debug=True))
+        assert [hit.citation.snippet for hit in result.hits] == ["最佳段落", "接近段落"]
+        assert result.diagnostics is not None
+        assert result.diagnostics.counts.relative_filtered == 2
+
+        # Base default applies when the request omits it; the override wins.
+        async with harness.factory() as session, session.begin():
+            row = await session.get(KnowledgeBaseRow, base_id)
+            assert row is not None
+            row.default_relative_cutoff = 0.95
+        by_default = await harness.service.search(_request(project_id, score_threshold=0.0, top_k=10))
+        assert [hit.citation.snippet for hit in by_default.hits] == ["最佳段落"]
+        overridden = await harness.service.search(_request(project_id, score_threshold=0.0, top_k=10, relative_score_cutoff=0.25))
+        assert [hit.citation.snippet for hit in overridden.hits] == ["最佳段落", "接近段落", "一般段落"]
+
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.search(_request(project_id, relative_score_cutoff=1.5))
+        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_equal_rerank_scores_order_by_vector_score_then_position(postgres_database_url: str) -> None:
     harness = await _harness(postgres_database_url)
     try:
@@ -1202,10 +1254,13 @@ async def test_database_failure_maps_to_search_failed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pre_embedding_authority_database_failure_maps_to_search_failed(
+async def test_recall_database_failure_maps_to_search_failed(
     postgres_database_url: str,
 ) -> None:
-    """A short-guard DB fault fails closed before Provider query spend."""
+    """A DB fault in the single recall transaction fails closed before any
+    Segment text can reach a Reranker; the query embedding already ran on
+    the group-load authority (a search is three transactions, not one per
+    Provider batch)."""
 
     harness = await _harness(postgres_database_url)
     try:
@@ -1222,7 +1277,7 @@ async def test_pre_embedding_authority_database_failure_maps_to_search_failed(
             def __call__(self):  # noqa: ANN204
                 self._calls += 1
                 if self._calls > 1:
-                    raise SQLAlchemyError("pool shut down before embedding")
+                    raise SQLAlchemyError("pool shut down before recall")
                 return self._inner()
 
         service = KnowledgeSearchService(
@@ -1234,21 +1289,22 @@ async def test_pre_embedding_authority_database_failure_maps_to_search_failed(
         with pytest.raises(KnowledgeError) as error:
             await service.search(_request(project_id))
         assert error.value.code == KNOWLEDGE_SEARCH_FAILED
-        assert harness.client.embed_calls == []
+        assert len(harness.client.embed_calls) == 1
         assert harness.client.rerank_calls == []
     finally:
         await harness.engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_cosine_recall_database_failure_maps_to_search_failed(postgres_database_url: str) -> None:
-    """A factory that dies after the groups query covers the recall-stage branch."""
+async def test_pre_rerank_guard_database_failure_maps_to_search_failed(postgres_database_url: str) -> None:
+    """A factory that dies after recall covers the pre-rerank guard branch:
+    no Segment text is dispatched without a successful revalidation."""
 
     harness = await _harness(postgres_database_url)
     try:
         project_id, _, _, _ = await _seed_single_base(harness, segments=[("段落", [1.0, 0.0, 0.0])])
 
-        class _DiesAfterFirstUse:
+        class _DiesAfterRecall:
             def __init__(self, inner) -> None:  # noqa: ANN001
                 self._inner = inner
                 self._calls = 0
@@ -1260,7 +1316,7 @@ async def test_cosine_recall_database_failure_maps_to_search_failed(postgres_dat
                 return self._inner()
 
         service = KnowledgeSearchService(
-            session_factory=_DiesAfterFirstUse(harness.factory),  # type: ignore[arg-type]
+            session_factory=_DiesAfterRecall(harness.factory),  # type: ignore[arg-type]
             client=harness.client,  # type: ignore[arg-type]
             model_port=registry_model_port(),
         )
@@ -1268,7 +1324,8 @@ async def test_cosine_recall_database_failure_maps_to_search_failed(postgres_dat
         with pytest.raises(KnowledgeError) as error:
             await service.search(_request(project_id))
         assert error.value.code == KNOWLEDGE_SEARCH_FAILED
-        # The failure hit recall, after the embed but before any rerank spend.
+        # The failure hit the pre-rerank guard, after the embed and recall
+        # but before any rerank spend.
         assert len(harness.client.embed_calls) == 1
         assert harness.client.rerank_calls == []
     finally:
@@ -1295,7 +1352,8 @@ async def test_final_authority_database_failure_suppresses_provider_results(
 
             def __call__(self):  # noqa: ANN204
                 self._calls += 1
-                if self._calls > 4:
+                # Groups, recall, pre-rerank guard, then the final review.
+                if self._calls > 3:
                     raise SQLAlchemyError("pool failed before final authority guard")
                 return self._inner()
 
@@ -1341,6 +1399,29 @@ async def test_cosine_recall_is_limited_to_candidate_k(postgres_database_url: st
         [(_, _, reranked_documents, _)] = harness.client.rerank_calls
         assert reranked_documents == [f"段落{index:02d}" for index in range(1, 21)]
         assert len(result.citations) == DEFAULT_TOP_K
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rerank_input_is_capped_by_the_rerank_candidate_budget(postgres_database_url: str) -> None:
+    """Recall may keep ``C`` parents per base, but the reranker only sees the
+    best ``max(top_k, budget / bases)`` of each base in recall order: a small
+    top_k no longer ships 400 passages to the Provider."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        segments = [(f"段落{index:02d}", [1.0, index * 0.1, 0.0]) for index in range(1, 26)]
+        project_id, _, _, _ = await _seed_single_base(harness, segments=segments)
+
+        assert KNOWLEDGE_RERANK_CANDIDATE_BUDGET == 100
+        result = await harness.service.search(_request(project_id, top_k=1))
+
+        [(_, _, reranked_documents, top_n)] = harness.client.rerank_calls
+        # top_k=1 -> budget min(100, 10 * 1) = 10 passages for the single base.
+        assert reranked_documents == [f"段落{index:02d}" for index in range(1, 11)]
+        assert top_n == 10
+        assert [citation.snippet for citation in result.citations] == ["段落01"]
     finally:
         await harness.engine.dispose()
 
@@ -1760,7 +1841,9 @@ async def test_search_revalidates_authority_after_provider_work_before_returning
             )
 
         assert error.value.code == KNOWLEDGE_NOT_FOUND
-        assert authority.calls == 5
+        # Group load, the single recall transaction, the pre-rerank guard,
+        # and the final review: four authority checks, none per batch.
+        assert authority.calls == 4
         assert await _query_rows(harness, project_id) == []
         async with harness.factory() as session:
             segment = await session.scalar(select(KnowledgeSegmentRow))
@@ -1824,10 +1907,14 @@ async def test_search_revalidates_after_embedding_before_segment_text_reaches_re
 
 
 @pytest.mark.asyncio
-async def test_search_revalidates_before_each_model_group_embedding(
+async def test_search_revalidates_before_each_reranked_group(
     postgres_database_url: str,
 ) -> None:
-    """Revocation in group one prevents query spend against group two."""
+    """Revocation after group one's rerank prevents group two's rerank spend.
+
+    Query embeddings are computed up front on the group-load authority (one
+    per embedding model, so both happen before any rerank); every reranked
+    group then revalidates immediately before its Segment text is sent."""
 
     harness = await _harness(postgres_database_url)
 
@@ -1867,7 +1954,7 @@ async def test_search_revalidates_before_each_model_group_embedding(
             )
 
         assert error.value.code == KNOWLEDGE_NOT_FOUND
-        assert len(harness.client.embed_calls) == 1
+        assert len(harness.client.embed_calls) == 2
         assert len(harness.client.rerank_calls) == 1
         assert await _query_rows(harness, project_id) == []
         async with harness.factory() as session:

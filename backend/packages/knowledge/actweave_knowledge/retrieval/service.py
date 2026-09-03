@@ -16,15 +16,19 @@ group the native score is the raw cosine similarity (``[-1,1]``).
 
 A base in ``retrieval_mode='hybrid'`` (or a one-call request override, never
 persisted) adds the lexical route: a parameterized OR tsquery of the query's
-lexical_v1 tokens (at most 128 deduplicated tokens with a hybrid target;
-none at all without one), scored by ``ts_rank_cd(..., 2)`` — general mode on
-segment rows, parent_child on child rows rolled up to their parent's best
+lexical tokens (the first 128 deduplicated tokens with a hybrid target — a
+longer query is truncated and reported in ``debug``, never rejected; none at
+all without a hybrid target), scored by ``ts_rank_cd(..., 2)`` — general mode
+on segment rows, parent_child on child rows rolled up to their parent's best
 score. The two routes merge per base by ``Σ 1/(60+rank)`` before the cap
 ``C``, and every lexical-only candidate still gets its real cosine
-(parent_child: the max over all current children), because per-base
-thresholds act on native scores only. Rows whose ``lexical_version`` does
-not match the fixed derivation version fail the search loudly — the lexical
-route never silently skips or backfills them.
+(parent_child: the max over all current children). Per-base thresholds act
+on native scores only; in a rerank-free group a candidate the lexical route
+recalled is exempt from the cosine threshold, because an exact token match is
+evidence cosine cannot see. Rows whose ``lexical_version`` does not match the
+fixed derivation version fail the search loudly — the lexical route never
+silently skips or backfills them at read time (``relex_document`` is the
+explicit repair).
 
 The final ordering then branches on the strategy the targeted bases bind
 (design §8.3): one shared non-null reranker keeps native rerank ordering
@@ -63,29 +67,26 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Numeric, case, cast, func, literal, null, select, update
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import cast, func, literal, select, text, true, update
+from sqlalchemy.dialects.postgresql import ARRAY, array
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..authority import KnowledgeProjectAuthority, revalidate_project_authority
 from ..contracts import (
-    KNOWLEDGE_BUILTIN_FILTER_FIELD_TYPES,
     KNOWLEDGE_CONFLICT,
-    KNOWLEDGE_FILTER_OPERATORS_BY_TYPE,
     KNOWLEDGE_GLOBAL_PARENT_CANDIDATE_BUDGET,
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_LEXICAL_VERSION,
     KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS,
     KNOWLEDGE_MAX_MATCHED_CHILDREN,
-    KNOWLEDGE_MAX_METADATA_FILTERS,
-    KNOWLEDGE_MAX_METADATA_NAME_LENGTH,
-    KNOWLEDGE_MAX_METADATA_STRING_LENGTH,
     KNOWLEDGE_MAX_TOP_K,
     KNOWLEDGE_NOT_FOUND,
     KNOWLEDGE_SEARCH_FAILED,
@@ -94,14 +95,13 @@ from ..contracts import (
     KnowledgeEmbeddingMaterial,
     KnowledgeError,
     KnowledgeHitDiagnostics,
-    KnowledgeLocalScoreKind,
     KnowledgeMatchedChild,
     KnowledgeMatchedVia,
     KnowledgeMetadataFilter,
     KnowledgeModelPort,
     KnowledgeQueryView,
+    KnowledgeRecallRoute,
     KnowledgeRerankMaterial,
-    KnowledgeRetrievalMode,
     KnowledgeRouteCounts,
     KnowledgeScoreKind,
     KnowledgeSearchDiagnostics,
@@ -120,6 +120,29 @@ from ..persistence.models import (
     KnowledgeSegmentRow,
     KnowledgeSegmentSummaryRow,
 )
+from .candidates import (
+    BaseDefaults,
+    Candidate,
+    RankedCandidate,
+    RecallOutcome,
+    SearchGroup,
+    SearchSnapshot,
+    ValidatedSearch,
+    effective_defaults,
+)
+from .filters import current_scope_filters, validated_metadata_filters
+from .fusion import (
+    apply_relative_cutoffs,
+    calculate_candidate_k,
+    calculate_per_base_budget,
+    candidate_sort_key,
+    merge_recall_routes,
+    rank_fused,
+    rerank_input,
+    rerank_input_cap,
+    shared_place_ranks,
+    stable_sort_key,
+)
 from .lexical import lexical_query_input
 from .query_cache import KnowledgeQueryEmbeddingCache
 
@@ -136,45 +159,55 @@ SNIPPET_MAX_CHARS = 320
 
 MAX_QUERY_PAGE_SIZE = 100
 
-_CANDIDATE_K_FLOOR = 20
-_CANDIDATE_K_CEILING = 100
+_LEXICAL_ROUTE: frozenset[KnowledgeRecallRoute] = frozenset({"lexical"})
+
+# parent_child recall takes this many nearest children per base for every
+# parent slot before rolling them up to parents (see _parent_child_candidates).
+PARENT_CHILD_WINDOW_FACTOR = 8
 
 
-def calculate_candidate_k(top_k: int) -> int:
-    """Recall scale ``B = min(100, max(20, top_k * 5))`` (design §8.2)."""
+def _base_targets(base_ids: list[UUID]) -> Any:
+    """``unnest(:base_ids) AS targets(base_id)`` — one lateral branch per base."""
 
-    return min(_CANDIDATE_K_CEILING, max(_CANDIDATE_K_FLOOR, top_k * 5))
+    return select(func.unnest(cast(array(base_ids), ARRAY(PG_UUID(as_uuid=True)))).label("base_id")).subquery("targets")
 
 
-def calculate_per_base_budget(top_k: int, target_base_count: int) -> int:
-    """Per-base per-route budget ``C = min(B, floor(G/N))`` (design §8.2).
+def _typed_distance(column: Any, dimension: int, query_vector: list[float]) -> Any:
+    """``column::vector(D) <=> :query`` — the exact expression the per-dimension
+    HNSW partial indexes are built on; a dimension without an index runs the
+    same expression as a plain sort."""
 
-    ``0`` (more target bases than the global parent budget) means the search
-    must be rejected with an explicit narrowing hint, never silently truncated.
+    return cast(column, Vector(dimension)).cosine_distance(query_vector)
+
+
+async def _prepare_vector_scan(session: AsyncSession) -> None:
+    """Let filtered HNSW scans keep walking until each branch's LIMIT is met.
+
+    Without the iterative scan a heavily filtered branch returns fewer rows
+    than its budget (the default 40 candidates minus filtered-out rows). The
+    setting is transaction-local; pgvector < 0.8 lacks it, so the failure is
+    contained in a savepoint and the scan falls back to the classic behavior.
     """
 
-    return min(
-        calculate_candidate_k(top_k),
-        KNOWLEDGE_GLOBAL_PARENT_CANDIDATE_BUDGET // target_base_count,
-    )
+    try:
+        async with session.begin_nested():
+            await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+    except SQLAlchemyError:
+        logger.warning("pgvector iterative scan unavailable; filtered HNSW branches may under-fill")
 
 
-def _rank_fusion_score(domain_rank: int, lexical_rank: int | None = None) -> float:
-    """Design §8.3: ``61/2 * (1/(60+domain_rank) + 1/(60+lexical_rank))``.
-
-    A candidate without a positive lexical score has no lexical rank and its
-    second term is 0, capping the fused score at 0.5; both ranks at 1 give
-    exactly 1.0.
-    """
-
-    lexical_term = 1.0 / (60.0 + lexical_rank) if lexical_rank is not None else 0.0
-    return 61.0 / 2.0 * (1.0 / (60.0 + domain_rank) + lexical_term)
-
-
-def _route_rrf_value(rank: int) -> float:
-    """One route's contribution to the per-base recall merge (design §8.2)."""
-
-    return 1.0 / (60.0 + rank)
+__all__ = [
+    "DEFAULT_SCORE_THRESHOLD",
+    "DEFAULT_TOP_K",
+    "MAX_QUERY_CHARS",
+    "MAX_QUERY_PAGE_SIZE",
+    "MAX_TOP_K",
+    "SNIPPET_MAX_CHARS",
+    "KnowledgeSearchService",
+    "calculate_candidate_k",
+    "calculate_per_base_budget",
+    "rerank_input_cap",
+]
 
 
 def _invalid(message: str) -> KnowledgeError:
@@ -193,144 +226,11 @@ def _lexical_stale_conflict() -> KnowledgeError:
 
     return KnowledgeError(
         KNOWLEDGE_CONFLICT,
-        "检索范围内存在词法索引版本不一致的内容，请重新解析相关文档后重试，或改用 semantic 检索",
+        "检索范围内存在词法索引版本不一致的内容，请对相关知识库执行「重建词法索引」（relex）后重试，或改用 semantic 检索",
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _ValidatedSearch:
-    """Range-checked request values; ``None`` means "use the base defaults"."""
-
-    query: str
-    top_k: int | None
-    score_threshold: float | None
-    metadata_filters: tuple[KnowledgeMetadataFilter, ...]
-    retrieval_mode: KnowledgeRetrievalMode | None
-
-
-def _validated_metadata_filters(
-    filters: tuple[KnowledgeMetadataFilter, ...] | None,
-) -> tuple[KnowledgeMetadataFilter, ...]:
-    """Bound and type-check manual metadata conditions (AND semantics).
-
-    Field names are not resolved against definitions here: a condition on a
-    name no targeted base defines simply matches no document of that base,
-    mirroring the "missing key never matches" rule.
-    """
-
-    if filters is None:
-        return ()
-    if not isinstance(filters, (tuple, list)):
-        raise _invalid("metadata_filters 必须是条件数组")
-    if len(filters) > KNOWLEDGE_MAX_METADATA_FILTERS:
-        raise _invalid(f"metadata_filters 最多 {KNOWLEDGE_MAX_METADATA_FILTERS} 个条件")
-    validated: list[KnowledgeMetadataFilter] = []
-    for item in filters:
-        name = item.name.strip() if isinstance(item.name, str) else ""
-        if not name or len(name) > KNOWLEDGE_MAX_METADATA_NAME_LENGTH:
-            raise _invalid(f"过滤条件的 name 必须是 1-{KNOWLEDGE_MAX_METADATA_NAME_LENGTH} 个字符的非空文本")
-        if item.field_kind not in ("custom", "builtin"):
-            raise _invalid("过滤条件的 field_kind 只能是 custom 或 builtin")
-        if item.operator not in ("eq", "contains", "gte", "lte"):
-            raise _invalid("过滤条件的 operator 只能是 eq、contains、gte 或 lte")
-        value = item.value
-        if item.field_kind == "builtin":
-            # Builtin fields are a frozen vocabulary with known types, so a
-            # condition that could never match is a client error, not a
-            # silent non-match.
-            field_type = KNOWLEDGE_BUILTIN_FILTER_FIELD_TYPES.get(name)
-            if field_type is None:
-                raise _invalid(f"未知的内建过滤字段 {name}")
-            if item.operator not in KNOWLEDGE_FILTER_OPERATORS_BY_TYPE[field_type]:
-                raise _invalid(f"内建字段 {name} 不支持 {item.operator} 条件")
-            if field_type == "string":
-                if not isinstance(value, str) or not 1 <= len(value) <= KNOWLEDGE_MAX_METADATA_STRING_LENGTH:
-                    raise _invalid(f"内建字段 {name} 的 value 必须是字符串")
-            elif type(value) not in (int, float) or (isinstance(value, float) and not math.isfinite(value)):
-                raise _invalid(f"内建字段 {name} 的 value 必须是有限数字（epoch 秒）")
-        elif item.operator == "contains":
-            if not isinstance(value, str) or not 1 <= len(value) <= KNOWLEDGE_MAX_METADATA_STRING_LENGTH:
-                raise _invalid("contains 条件的 value 必须是非空字符串")
-        elif item.operator in ("gte", "lte"):
-            if type(value) not in (int, float) or (isinstance(value, float) and not math.isfinite(value)):
-                raise _invalid(f"{item.operator} 条件的 value 必须是有限数字")
-        elif isinstance(value, str):
-            if len(value) > KNOWLEDGE_MAX_METADATA_STRING_LENGTH:
-                raise _invalid(f"eq 条件的字符串 value 最多 {KNOWLEDGE_MAX_METADATA_STRING_LENGTH} 个字符")
-        elif type(value) not in (int, float) or (isinstance(value, float) and not math.isfinite(value)):
-            raise _invalid("eq 条件的 value 必须是字符串或有限数字")
-        validated.append(KnowledgeMetadataFilter(name=name, operator=item.operator, value=value, field_kind=item.field_kind))
-    return tuple(validated)
-
-
-def _builtin_filter_conditions(item: KnowledgeMetadataFilter) -> tuple[Any, ...]:
-    """One builtin condition against the live document authority columns.
-
-    ``document_name`` reads the display name, ``uploaded_at`` compares
-    ``created_at`` as epoch seconds, ``file_type`` derives the lowercased
-    original-file extension (no extension never matches), and
-    ``source_type`` is the fixed ingestion channel ``file_upload``.
-    """
-
-    if item.name == "document_name":
-        if item.operator == "eq":
-            return (KnowledgeDocumentRow.name == item.value,)
-        return (func.strpos(KnowledgeDocumentRow.name, item.value) > 0,)
-    if item.name == "uploaded_at":
-        epoch = func.extract("epoch", KnowledgeDocumentRow.created_at)
-        if item.operator == "eq":
-            return (epoch == item.value,)
-        if item.operator == "gte":
-            return (epoch >= item.value,)
-        return (epoch <= item.value,)
-    if item.name == "file_type":
-        extension = func.lower(func.substring(KnowledgeDocumentRow.original_name, r"\.([^.]+)$"))
-        needle = str(item.value).lower()
-        if item.operator == "eq":
-            return (extension == needle,)
-        return (func.strpos(extension, needle) > 0,)
-    # source_type: every stored document came through file upload.
-    if item.operator == "eq":
-        return (literal("file_upload") == item.value,)
-    return (func.strpos(literal("file_upload"), item.value) > 0,)
-
-
-def _metadata_filter_conditions(filters: tuple[KnowledgeMetadataFilter, ...]) -> tuple[Any, ...]:
-    """Translate validated conditions into document-row SQL predicates.
-
-    Custom ``eq`` uses GIN-indexable JSONB containment (type-exact);
-    ``contains`` and the range operators guard on ``jsonb_typeof`` first —
-    inside CASE so a string value can never reach the numeric cast — making
-    a mismatched type a non-match instead of a query error. Builtin
-    conditions read authority columns instead of ``doc_metadata``. Both
-    recall and the final review build their predicates through here, so a
-    scope change mid-search can never leak past the review.
-    """
-
-    conditions: list[Any] = []
-    for item in filters:
-        if item.field_kind == "builtin":
-            conditions.extend(_builtin_filter_conditions(item))
-            continue
-        value_json = KnowledgeDocumentRow.doc_metadata[item.name]
-        if item.operator == "eq":
-            conditions.append(KnowledgeDocumentRow.doc_metadata.contains(func.jsonb_build_object(item.name, item.value)))
-        elif item.operator == "contains":
-            conditions.append(func.jsonb_typeof(value_json) == "string")
-            conditions.append(func.strpos(value_json.astext, item.value) > 0)
-        else:
-            numeric_value = case(
-                (func.jsonb_typeof(value_json) == "number", cast(value_json.astext, Numeric)),
-                else_=null(),
-            )
-            if item.operator == "gte":
-                conditions.append(numeric_value >= item.value)
-            else:
-                conditions.append(numeric_value <= item.value)
-    return tuple(conditions)
-
-
-def _validated_search(request: KnowledgeSearchRequest) -> _ValidatedSearch:
+def _validated_search(request: KnowledgeSearchRequest) -> ValidatedSearch:
     query = request.query.strip()
     if not query:
         raise _invalid("query 不能为空")
@@ -349,146 +249,25 @@ def _validated_search(request: KnowledgeSearchRequest) -> _ValidatedSearch:
         raise _invalid("source 只能是 agent 或 retrieval_test")
     if request.retrieval_mode not in (None, "semantic", "hybrid"):
         raise _invalid("retrieval_mode 只能是 semantic 或 hybrid")
-    return _ValidatedSearch(
+    relative = request.relative_score_cutoff
+    if relative is not None:
+        if type(relative) not in (int, float) or not 0 < float(relative) <= 1:
+            raise _invalid("relative_score_cutoff 必须在 (0, 1] 之间")
+        relative = float(relative)
+    return ValidatedSearch(
         query=query,
         top_k=top_k,
         score_threshold=threshold,
-        metadata_filters=_validated_metadata_filters(request.metadata_filters),
+        metadata_filters=validated_metadata_filters(request.metadata_filters),
         retrieval_mode=request.retrieval_mode,
+        relative_score_cutoff=relative,
     )
-
-
-@dataclass(frozen=True, slots=True)
-class _BaseDefaults:
-    top_k: int
-    score_threshold: float
-    retrieval_mode: KnowledgeRetrievalMode
-    summary_index_enabled: bool
-
-
-def _effective_defaults(defaults: _BaseDefaults, overrides: _ValidatedSearch) -> _BaseDefaults:
-    return _BaseDefaults(
-        top_k=overrides.top_k if overrides.top_k is not None else defaults.top_k,
-        score_threshold=overrides.score_threshold if overrides.score_threshold is not None else defaults.score_threshold,
-        retrieval_mode=overrides.retrieval_mode if overrides.retrieval_mode is not None else defaults.retrieval_mode,
-        summary_index_enabled=defaults.summary_index_enabled,
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class _SearchSnapshot:
-    model_bindings: dict[UUID, tuple[UUID, UUID | None]]
-    effective_defaults: dict[UUID, _BaseDefaults]
-    overrides: _ValidatedSearch
-
-
-@dataclass(frozen=True, slots=True)
-class _SearchGroup:
-    """Bases sharing one ``(embedding model, reranker model)`` pair.
-
-    ``rerank`` is ``None`` for the NULL-reranker group: its candidates keep
-    their cosine similarity as the final score.
-    """
-
-    embedding: KnowledgeEmbeddingMaterial
-    rerank: KnowledgeRerankMaterial | None
-    base_ids: list[UUID]
-
-
-@dataclass(frozen=True, slots=True)
-class _Candidate:
-    """One recalled segment with its display fields and recall-stage score.
-
-    ``vector_score`` is the maximum Segment/Child/Summary source cosine;
-    ``matched_via`` identifies its source. ``content`` is the complete parent
-    text frozen by the recall snapshot; ``index_text`` is the corresponding
-    persisted model input used only by the reranker. Hits carry ``content`` as
-    the passage while citations only quote its head. ``matched_children``
-    are the really-recalled child chunks, carried by the recall transaction
-    itself (empty for general-mode segments).
-    """
-
-    segment_id: UUID
-    position: int
-    content: str
-    index_text: str
-    source_position: dict[str, Any]
-    document_id: UUID
-    document_name: str
-    document_version: int
-    knowledge_base_id: UUID
-    knowledge_base_name: str
-    vector_score: float
-    matched_children: tuple[KnowledgeMatchedChild, ...] = ()
-    matched_via: KnowledgeMatchedVia = "segment"
-
-
-@dataclass(frozen=True, slots=True)
-class _Ranked:
-    """One candidate with its native score and score-domain provenance."""
-
-    final_score: float
-    local_score_kind: KnowledgeLocalScoreKind
-    score_domain: str
-    candidate: _Candidate
-
-
-def _stable_sort_key(item: _Ranked) -> tuple[float, float, UUID, UUID, int, UUID]:
-    candidate = item.candidate
-    return (
-        -item.final_score,
-        -candidate.vector_score,
-        candidate.knowledge_base_id,
-        candidate.document_id,
-        candidate.position,
-        candidate.segment_id,
-    )
-
-
-def _rank_fused(ranked: list[_Ranked], lexical_ranks: dict[UUID, int]) -> list[tuple[_Ranked, float]]:
-    """Fusion branch: RANK inside each domain, plus the global lexical rank.
-
-    Equal native scores share a place (``1, 1, 3`` — never row_number), so
-    equal evidence keeps an equal fused score; resource identity only orders
-    fused ties, it never manufactures a difference. The vector score is
-    deliberately absent from the final key: comparing raw scores across
-    domains is exactly what fusion avoids. ``lexical_ranks`` carries the
-    shared-place rank of every shortlisted parent with a positive lexical
-    score (empty without lexical evidence, making the second term 0).
-    """
-
-    by_domain: dict[str, list[_Ranked]] = {}
-    for item in ranked:
-        by_domain.setdefault(item.score_domain, []).append(item)
-    fused: list[tuple[_Ranked, float]] = []
-    for items in by_domain.values():
-        items.sort(key=_stable_sort_key)
-        rank = 0
-        previous_score: float | None = None
-        for index, item in enumerate(items, start=1):
-            if previous_score is None or item.final_score != previous_score:
-                rank = index
-                previous_score = item.final_score
-            fused.append((item, _rank_fusion_score(rank, lexical_ranks.get(item.candidate.segment_id))))
-
-    def _fused_key(entry: tuple[_Ranked, float]) -> tuple[float, UUID, UUID, int, UUID]:
-        candidate = entry[0].candidate
-        return (
-            -entry[1],
-            candidate.knowledge_base_id,
-            candidate.document_id,
-            candidate.position,
-            candidate.segment_id,
-        )
-
-    fused.sort(key=_fused_key)
-    return fused
 
 
 async def _assert_snapshot_strategy(
     session: AsyncSession,
     project_id: UUID,
-    snapshot: _SearchSnapshot,
+    snapshot: SearchSnapshot,
 ) -> None:
     """Every targeted base still has the effective search strategy, or conflict.
 
@@ -507,17 +286,19 @@ async def _assert_snapshot_strategy(
                 KnowledgeBaseRow.default_score_threshold,
                 KnowledgeBaseRow.retrieval_mode,
                 KnowledgeBaseRow.summary_index_enabled,
+                KnowledgeBaseRow.default_relative_cutoff,
             ).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id.in_(snapshot.model_bindings))
         )
     ).all()
     current_defaults = dict(snapshot.effective_defaults)
     for row in rows:
-        actual = _effective_defaults(
-            _BaseDefaults(
+        actual = effective_defaults(
+            BaseDefaults(
                 top_k=row.default_top_k,
                 score_threshold=float(row.default_score_threshold),
                 retrieval_mode=row.retrieval_mode,
                 summary_index_enabled=row.summary_index_enabled,
+                relative_cutoff=None if row.default_relative_cutoff is None else float(row.default_relative_cutoff),
             ),
             snapshot.overrides,
         )
@@ -527,6 +308,7 @@ async def _assert_snapshot_strategy(
             or expected.score_threshold != actual.score_threshold
             or expected.retrieval_mode != actual.retrieval_mode
             or expected.summary_index_enabled != actual.summary_index_enabled
+            or expected.relative_cutoff != actual.relative_cutoff
         ):
             raise KnowledgeError(KNOWLEDGE_CONFLICT, "检索策略已变更，请重新检索")
         current_defaults[row.id] = actual
@@ -537,59 +319,7 @@ async def _assert_snapshot_strategy(
         raise KnowledgeError(KNOWLEDGE_CONFLICT, "检索策略已变更，请重新检索")
 
 
-def _candidate_sort_key(candidate: _Candidate) -> tuple[float, UUID, UUID, int, UUID]:
-    return (
-        -candidate.vector_score,
-        candidate.knowledge_base_id,
-        candidate.document_id,
-        candidate.position,
-        candidate.segment_id,
-    )
-
-
-def _identity_key(candidate: _Candidate) -> tuple[UUID, UUID, int, UUID]:
-    return (
-        candidate.knowledge_base_id,
-        candidate.document_id,
-        candidate.position,
-        candidate.segment_id,
-    )
-
-
-def _merge_recall_routes(
-    semantic_pool: list[_Candidate],
-    lexical_pool: list[tuple[_Candidate, float]],
-    cap: int,
-) -> list[_Candidate]:
-    """One hybrid base's recall merge: ``Σ 1/(60+rank)``, then keep ``C``.
-
-    Each route ranks with shared places (``RANK``: equal scores share, never
-    row_number) — semantic by cosine, lexical by ``ts_rank_cd`` — and a parent
-    missing from a route simply contributes 0 for it. Identity only breaks
-    ties in the final merged order.
-    """
-
-    rrf: dict[UUID, float] = {}
-    candidates: dict[UUID, _Candidate] = {}
-
-    def _accumulate(entries: list[tuple[float, _Candidate]]) -> None:
-        rank = 0
-        previous: float | None = None
-        for index, (score, candidate) in enumerate(entries, start=1):
-            if previous is None or score != previous:
-                rank = index
-                previous = score
-            rrf[candidate.segment_id] = rrf.get(candidate.segment_id, 0.0) + _route_rrf_value(rank)
-            candidates.setdefault(candidate.segment_id, candidate)
-
-    _accumulate(sorted(((candidate.vector_score, candidate) for candidate in semantic_pool), key=lambda entry: (-entry[0], *_identity_key(entry[1]))))
-    _accumulate(sorted(((score, candidate) for candidate, score in lexical_pool), key=lambda entry: (-entry[0], *_identity_key(entry[1]))))
-
-    ordered = sorted(candidates.values(), key=lambda candidate: (-rrf[candidate.segment_id], *_identity_key(candidate)))
-    return ordered[:cap]
-
-
-def _empty_scope_diagnostics(validated: _ValidatedSearch) -> KnowledgeSearchDiagnostics:
+def _empty_scope_diagnostics(validated: ValidatedSearch) -> KnowledgeSearchDiagnostics:
     """Debug shape when nothing is searchable: zero targets, ``not_ready``."""
 
     return KnowledgeSearchDiagnostics(
@@ -602,29 +332,6 @@ def _empty_scope_diagnostics(validated: _ValidatedSearch) -> KnowledgeSearchDiag
         counts=KnowledgeRouteCounts(),
         timings=KnowledgeSearchTimings(),
         empty_reason="not_ready",
-    )
-
-
-def _current_scope_filters(
-    project_id: UUID,
-    metadata_filters: tuple[KnowledgeMetadataFilter, ...],
-) -> tuple[Any, ...]:
-    """Rows currently inside retrieval scope; recall and the final review share it.
-
-    Governance switches: a disabled document or segment keeps its vectors but
-    never enters recall (nor Agent citations). Manual metadata conditions AND
-    onto every path, so a non-matching document neither reaches the reranker
-    nor survives the final review.
-    """
-
-    return (
-        KnowledgeBaseRow.project_id == project_id,
-        KnowledgeBaseRow.status == "active",
-        KnowledgeDocumentRow.status == "ready",
-        KnowledgeDocumentRow.enabled.is_(True),
-        KnowledgeSegmentRow.enabled.is_(True),
-        KnowledgeSegmentRow.document_version == KnowledgeDocumentRow.version,
-        *_metadata_filter_conditions(metadata_filters),
     )
 
 
@@ -662,7 +369,7 @@ class KnowledgeSearchService:
             # N = 0 searches nothing (§8.2); with debug the shape still says so.
             return KnowledgeSearchResult(diagnostics=_empty_scope_diagnostics(validated) if request.debug else None)
 
-        defaults = {base_id: _effective_defaults(base_defaults, validated) for base_id, base_defaults in defaults.items()}
+        defaults = {base_id: effective_defaults(base_defaults, validated) for base_id, base_defaults in defaults.items()}
         # An omitted top_k widens to the largest per-base default among the
         # targeted bases, so no base's configured expectation is truncated.
         top_k = max(item.top_k for item in defaults.values())
@@ -675,16 +382,23 @@ class KnowledgeSearchService:
         # target no lexical query exists and no token cap applies.
         hybrid_base_ids = frozenset(base_id for base_id, base_defaults in defaults.items() if base_defaults.retrieval_mode == "hybrid")
         lexical_query: str | None = None
+        lexical_query_token_count = 0
+        lexical_query_truncated = False
         if hybrid_base_ids:
             query_tokens = lexical_query_input(validated.query)
             if len(query_tokens) > KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS:
-                raise _invalid(f"检索文本包含 {len(query_tokens)} 个去重词元，超过 hybrid 检索上限 {KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS}；请缩短检索文本，或改用 semantic 检索")
+                # A long natural-language question must not fail the search:
+                # keep the leading tokens (scan order), leave the vector route
+                # untouched, and say so in the diagnostics.
+                query_tokens = query_tokens[:KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS]
+                lexical_query_truncated = True
+            lexical_query_token_count = len(query_tokens)
             # Zero tokens leave the lexical route empty; the vector route
             # still runs.
             lexical_query = " | ".join(query_tokens) if query_tokens else None
         # The effective strategy snapshot of this search: every targeted
         # base's model bindings and resolved settings, frozen by group load.
-        snapshot = _SearchSnapshot(
+        snapshot = SearchSnapshot(
             model_bindings={base_id: (group.embedding.model_id, group.rerank.model_id if group.rerank is not None else None) for group in groups for base_id in group.base_ids},
             effective_defaults=defaults,
             overrides=validated,
@@ -693,79 +407,79 @@ class KnowledgeSearchService:
         # Groups sharing an embedding model reuse one query embedding per
         # search while keeping their own per-base recall budgets.
         query_vectors: dict[UUID, list[float]] = {}
-        ranked: list[_Ranked] = []
+        ranked: list[RankedCandidate] = []
         semantic_candidates = 0
         lexical_candidates = 0
         summary_candidates = 0
         threshold_filtered = 0
+        relative_filtered = 0
+        lexical_threshold_exempt = 0
         query_embedding_cache_hits = 0
         query_embedding_cache_misses = 0
         timings = {"query_embedding_ms": 0.0, "recall_ms": 0.0, "rerank_ms": 0.0, "final_validation_ms": 0.0}
 
-        # Every provider dispatch — each batch and the client's internal
-        # retry — re-checks authority and the strategy snapshot first, so a
-        # revocation or rebinding between batches stops the undispatched
-        # remainder instead of causing later spend under a stale strategy.
-        async def _dispatch_guard() -> None:
-            await self._revalidate_dispatch(
-                project_id=request.project_id,
-                authority=authority,
-                snapshot=snapshot,
-            )
-
+        # Stage 1 — query vectors. Group loading has just revalidated the
+        # caller inside its own transaction, so the query embedding dispatches
+        # on that authority; one vector per distinct embedding model.
         for group in groups:
             embedding = group.embedding
-            if embedding.model_id not in query_vectors:
-                started = time.monotonic()
-                cached = self._query_cache.get(embedding.model_id, validated.query) if self._query_cache is not None else None
-                if cached is not None:
-                    query_embedding_cache_hits += 1
-                    query_vectors[embedding.model_id] = list(cached)
-                else:
-                    query_embedding_cache_misses += 1
-                    # Provider failures surface as bare KnowledgeError to
-                    # callers. Log only the stage/code, never cached content,
-                    # query text or the Provider response body.
-                    try:
-                        vector = (
-                            await self._client.embed(
-                                embedding,
-                                [validated.query],
-                                batch_guard=_dispatch_guard,
-                            )
-                        )[0]
-                    except KnowledgeError as error:
-                        logger.warning(
-                            "knowledge search embed failed for model %s: %s",
-                            embedding.model_id,
-                            error.code,
-                        )
-                        raise
-                    query_vectors[embedding.model_id] = vector
-                    if self._query_cache is not None:
-                        self._query_cache.put(embedding.model_id, validated.query, vector)
-                timings["query_embedding_ms"] += (time.monotonic() - started) * 1000.0
-            # Cache hits skip Provider dispatch only. Recall and final review
-            # retain their transaction-bound live authorization checks.
+            if embedding.model_id in query_vectors:
+                continue
             started = time.monotonic()
-            candidates, group_semantic, group_lexical, group_summary = await self._recalled_candidates(
-                project_id=request.project_id,
-                embedding_model_id=embedding.model_id,
-                base_ids=group.base_ids,
-                hybrid_base_ids=hybrid_base_ids,
-                query_vector=query_vectors[embedding.model_id],
-                lexical_query=lexical_query,
-                per_base_budget=per_base_budget,
-                metadata_filters=validated.metadata_filters,
-                authority=authority,
-            )
-            timings["recall_ms"] += (time.monotonic() - started) * 1000.0
-            semantic_candidates += group_semantic
-            lexical_candidates += group_lexical
-            summary_candidates += group_summary
+            cached = self._query_cache.get(embedding.model_id, validated.query) if self._query_cache is not None else None
+            if cached is not None:
+                query_embedding_cache_hits += 1
+                query_vectors[embedding.model_id] = list(cached)
+            else:
+                query_embedding_cache_misses += 1
+                # Provider failures surface as bare KnowledgeError to
+                # callers. Log only the stage/code, never cached content,
+                # query text or the Provider response body.
+                try:
+                    vector = (await self._client.embed(embedding, [validated.query], kind="query"))[0]
+                except KnowledgeError as error:
+                    logger.warning(
+                        "knowledge search embed failed for model %s: %s",
+                        embedding.model_id,
+                        error.code,
+                    )
+                    raise
+                query_vectors[embedding.model_id] = vector
+                if self._query_cache is not None:
+                    self._query_cache.put(embedding.model_id, validated.query, vector)
+            timings["query_embedding_ms"] += (time.monotonic() - started) * 1000.0
+
+        # Stage 2 — one recall transaction for every group: authority and the
+        # strategy snapshot are revalidated once, every group's routes run
+        # under the same database snapshot, and the lexical evidence fusion
+        # may need later is scored here too. Cache hits skip Provider
+        # dispatch only; this transaction-bound check always runs.
+        started = time.monotonic()
+        recall = await self._recall_all_groups(
+            project_id=request.project_id,
+            groups=groups,
+            hybrid_base_ids=hybrid_base_ids,
+            query_vectors=query_vectors,
+            lexical_query=lexical_query,
+            per_base_budget=per_base_budget,
+            metadata_filters=validated.metadata_filters,
+            snapshot=snapshot,
+            authority=authority,
+        )
+        timings["recall_ms"] += (time.monotonic() - started) * 1000.0
+        semantic_candidates = recall.semantic_count
+        lexical_candidates = recall.lexical_count
+        summary_candidates = recall.summary_count
+
+        # Stage 3 — native scoring per group. A reranked group revalidates
+        # authority and the strategy once, immediately before Segment text
+        # leaves for the Provider; batches inside one call share that check.
+        for group in groups:
+            embedding = group.embedding
+            candidates = recall.candidates_by_group.get(id(group), [])
             if not candidates:
                 continue
-            group_ranked: list[_Ranked] = []
+            group_ranked: list[RankedCandidate] = []
             if group.rerank is None:
                 # Rerank-free group: the native score stays the raw cosine
                 # similarity in [-1,1]; a 0 threshold filters nothing. The
@@ -773,7 +487,7 @@ class KnowledgeSearchService:
                 cosine_domain = f"cosine:{embedding.model_id}"
                 for candidate in candidates:
                     group_ranked.append(
-                        _Ranked(
+                        RankedCandidate(
                             final_score=candidate.vector_score,
                             local_score_kind="cosine",
                             score_domain=cosine_domain,
@@ -781,23 +495,24 @@ class KnowledgeSearchService:
                         )
                     )
             else:
-                # Recall freezes the exact Segment text under one
-                # authority-checked database snapshot. The per-batch guard
-                # re-runs immediately before every Reranker dispatch, so a
-                # revocation between candidate batches stops the remaining
-                # batches without holding a database transaction across
-                # Provider I/O.
+                await self._revalidate_dispatch(
+                    project_id=request.project_id,
+                    authority=authority,
+                    snapshot=snapshot,
+                )
                 started = time.monotonic()
+                # Recall may keep C parents per base; the reranker sees only
+                # the best places of each base's own recall order, within the
+                # group budget, and never fewer than top_k per base. Every
+                # candidate that is sent gets scored, so per-base thresholds
+                # still act before any top_k truncation.
+                candidates = rerank_input(candidates, top_k=top_k)
                 try:
-                    # Score every candidate: per-base thresholds must filter
-                    # before any top_k truncation, or a qualified candidate of
-                    # a stricter base could be cut by a laxer base's hits.
                     scores = await self._client.rerank(
                         group.rerank,
                         validated.query,
                         [candidate.index_text for candidate in candidates],
                         top_n=len(candidates),
-                        batch_guard=_dispatch_guard,
                     )
                 except KnowledgeError as error:
                     logger.warning(
@@ -810,7 +525,7 @@ class KnowledgeSearchService:
                 rerank_domain = f"rerank:{group.rerank.model_id}"
                 for score in scores:
                     group_ranked.append(
-                        _Ranked(
+                        RankedCandidate(
                             final_score=score.score,
                             local_score_kind="rerank",
                             score_domain=rerank_domain,
@@ -818,13 +533,26 @@ class KnowledgeSearchService:
                         )
                     )
             # Per-base thresholds act on native scores only — never on the
-            # fused ranking score (§8.3).
+            # fused ranking score (§8.3). In a rerank-free group the native
+            # score is cosine, which says nothing about an exact token match:
+            # a candidate the lexical route recalled keeps its place so hybrid
+            # can do the one thing it exists for. A reranker has already judged
+            # the text, so its threshold applies to every candidate.
+            surviving: list[RankedCandidate] = []
             for item in group_ranked:
                 threshold = defaults[item.candidate.knowledge_base_id].score_threshold
                 if threshold > 0 and item.final_score < threshold:
-                    threshold_filtered += 1
-                    continue
-                ranked.append(item)
+                    if item.local_score_kind == "cosine" and "lexical" in item.candidate.recall_routes:
+                        lexical_threshold_exempt += 1
+                    else:
+                        threshold_filtered += 1
+                        continue
+                surviving.append(item)
+            # The relative cutoff follows each base's own best native score,
+            # so it is applied per base after the absolute threshold.
+            surviving, relative_dropped = apply_relative_cutoffs(surviving, defaults)
+            relative_filtered += relative_dropped
+            ranked.extend(surviving)
 
         # §8.3 branches on the strategy the targeted bases bind — not on which
         # candidates happened to survive — so the ranking method is stable for
@@ -837,19 +565,15 @@ class KnowledgeSearchService:
         lexical_ranks: dict[UUID, int] = {}
         if fusion:
             if lexical_query is not None and ranked:
-                # Every shortlisted parent — semantic bases included — is
-                # scored by the same lexical query; positive scores build one
-                # global shared-place ranking (§8.3 branch 3).
-                started = time.monotonic()
-                lexical_ranks = await self._final_lexical_ranks(
-                    project_id=request.project_id,
-                    segment_ids=[item.candidate.segment_id for item in ranked],
-                    lexical_query=lexical_query,
-                )
-                timings["recall_ms"] += (time.monotonic() - started) * 1000.0
-            ordered = _rank_fused(ranked, lexical_ranks)
+                # Every shortlisted parent — semantic bases included — was
+                # scored by the same lexical query inside the recall
+                # transaction; positive scores build one global shared-place
+                # ranking over the parents that survived the thresholds
+                # (§8.3 branch 3).
+                lexical_ranks = shared_place_ranks({item.candidate.segment_id: recall.lexical_scores[item.candidate.segment_id] for item in ranked if recall.lexical_scores.get(item.candidate.segment_id, 0.0) > 0})
+            ordered = rank_fused(ranked, lexical_ranks)
         else:
-            ranked.sort(key=_stable_sort_key)
+            ranked.sort(key=stable_sort_key)
             ordered = [(item, item.final_score) for item in ranked]
         ranking_method: KnowledgeScoreKind = "rank_fusion" if fusion else next(iter(domains))[0]  # type: ignore[assignment]
 
@@ -885,6 +609,7 @@ class KnowledgeSearchService:
                 KnowledgeSearchHit(
                     citation=citation,
                     passage=candidate.content,
+                    model_text=candidate.index_text,
                     document_version=candidate.document_version,
                     content_digest=content_digest,
                     local_score=item.final_score,
@@ -939,6 +664,8 @@ class KnowledgeSearchService:
                     summary_candidates=summary_candidates,
                     parents_deduplicated=parents_deduplicated,
                     threshold_filtered=threshold_filtered,
+                    relative_filtered=relative_filtered,
+                    lexical_threshold_exempt=lexical_threshold_exempt,
                     stale_filtered=len(pending) - len(hits),
                     returned=len(hits),
                     query_embedding_cache_hits=query_embedding_cache_hits,
@@ -957,6 +684,8 @@ class KnowledgeSearchService:
                 # documented fairness compromise (§8.3): only in-domain places
                 # order the result, and the UI must say so.
                 heterogeneous_without_lexical_evidence=fusion and not lexical_ranks,
+                lexical_query_token_count=lexical_query_token_count,
+                lexical_query_truncated=lexical_query_truncated,
                 hit_diagnostics=tuple(
                     KnowledgeHitDiagnostics(
                         segment_id=hit.citation.segment_id,
@@ -1035,7 +764,7 @@ class KnowledgeSearchService:
         *,
         project_id: UUID,
         owner_user_id: UUID,
-        snapshot: _SearchSnapshot,
+        snapshot: SearchSnapshot,
         query: str,
         source: str,
         pending: list[KnowledgeSearchHit],
@@ -1147,7 +876,7 @@ class KnowledgeSearchService:
                     .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
                     .where(
                         KnowledgeSegmentRow.id.in_(segment_ids),
-                        *_current_scope_filters(project_id, metadata_filters),
+                        *current_scope_filters(project_id, metadata_filters),
                     )
                 )
             ).all()
@@ -1191,7 +920,7 @@ class KnowledgeSearchService:
         base_ids: tuple[UUID, ...] | None,
         *,
         authority: KnowledgeProjectAuthority | None = None,
-    ) -> tuple[list[_SearchGroup], dict[UUID, _BaseDefaults]]:
+    ) -> tuple[list[SearchGroup], dict[UUID, BaseDefaults]]:
         """Group the project's searchable bases by (embedding, reranker) pair.
 
         Explicit base ids narrow to their active, configured subset; an
@@ -1216,6 +945,7 @@ class KnowledgeSearchService:
             KnowledgeBaseRow.default_score_threshold,
             KnowledgeBaseRow.retrieval_mode,
             KnowledgeBaseRow.summary_index_enabled,
+            KnowledgeBaseRow.default_relative_cutoff,
         ).where(
             KnowledgeBaseRow.project_id == project_id,
             KnowledgeBaseRow.status == "active",
@@ -1234,14 +964,15 @@ class KnowledgeSearchService:
                 if not rows:
                     return [], {}
                 bases_by_pair: dict[tuple[UUID, UUID | None], list[UUID]] = {}
-                defaults: dict[UUID, _BaseDefaults] = {}
-                for base_id, embedding_model_id, reranker_model_id, default_top_k, default_score_threshold, retrieval_mode, summary_index_enabled in rows:
+                defaults: dict[UUID, BaseDefaults] = {}
+                for base_id, embedding_model_id, reranker_model_id, default_top_k, default_score_threshold, retrieval_mode, summary_index_enabled, default_relative_cutoff in rows:
                     bases_by_pair.setdefault((embedding_model_id, reranker_model_id), []).append(base_id)
-                    defaults[base_id] = _BaseDefaults(
+                    defaults[base_id] = BaseDefaults(
                         top_k=default_top_k,
                         score_threshold=float(default_score_threshold),
                         retrieval_mode=retrieval_mode,
                         summary_index_enabled=summary_index_enabled,
+                        relative_cutoff=None if default_relative_cutoff is None else float(default_relative_cutoff),
                     )
                 # Materialize each distinct model once through the host port,
                 # inside this authority-checked transaction. The port owns
@@ -1260,7 +991,7 @@ class KnowledgeSearchService:
             logger.warning("knowledge search failed to load searchable bases", exc_info=True)
             raise _search_failed() from None
         groups = [
-            _SearchGroup(
+            SearchGroup(
                 embedding=embedding_materials[embedding_model_id],
                 rerank=rerank_materials[reranker_model_id] if reranker_model_id is not None else None,
                 base_ids=pair_base_ids,
@@ -1272,19 +1003,89 @@ class KnowledgeSearchService:
         ]
         return groups, defaults
 
-    async def _recalled_candidates(
+    async def _recall_all_groups(
         self,
         *,
         project_id: UUID,
+        groups: list[SearchGroup],
+        hybrid_base_ids: frozenset[UUID],
+        query_vectors: dict[UUID, list[float]],
+        lexical_query: str | None,
+        per_base_budget: int,
+        metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+        snapshot: SearchSnapshot,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> RecallOutcome:
+        """The single recall transaction of a search.
+
+        Authority is revalidated and the strategy snapshot re-checked once,
+        before any query can load Segment content — so a revocation or
+        rebinding during query embedding stops the search before text
+        reaches the Reranker. Every group's routes then run under this one
+        database snapshot, and the lexical evidence fusion may need is scored
+        here for every recalled parent (a stale ``lexical_version`` anywhere
+        in that set is a conflict, never a silent zero).
+        """
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                await _assert_snapshot_strategy(session, project_id, snapshot)
+                await _prepare_vector_scan(session)
+                candidates_by_group: dict[int, list[Candidate]] = {}
+                semantic_count = lexical_count = summary_count = 0
+                for group in groups:
+                    candidates, group_semantic, group_lexical, group_summary = await self._recall_group(
+                        session,
+                        project_id=project_id,
+                        embedding_model_id=group.embedding.model_id,
+                        dimension=group.embedding.dimension,
+                        base_ids=group.base_ids,
+                        hybrid_base_ids=hybrid_base_ids,
+                        query_vector=query_vectors[group.embedding.model_id],
+                        lexical_query=lexical_query,
+                        per_base_budget=per_base_budget,
+                        metadata_filters=metadata_filters,
+                    )
+                    candidates_by_group[id(group)] = candidates
+                    semantic_count += group_semantic
+                    lexical_count += group_lexical
+                    summary_count += group_summary
+                lexical_scores: dict[UUID, float] = {}
+                recalled_ids = [candidate.segment_id for candidates in candidates_by_group.values() for candidate in candidates]
+                if lexical_query is not None and recalled_ids:
+                    lexical_scores = await self._lexical_scores(session, project_id=project_id, segment_ids=recalled_ids, lexical_query=lexical_query)
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            logger.warning("knowledge recall failed", exc_info=True)
+            raise _search_failed() from None
+        return RecallOutcome(
+            candidates_by_group=candidates_by_group,
+            lexical_scores=lexical_scores,
+            semantic_count=semantic_count,
+            lexical_count=lexical_count,
+            summary_count=summary_count,
+        )
+
+    async def _recall_group(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: UUID,
         embedding_model_id: UUID,
+        dimension: int,
         base_ids: list[UUID],
         hybrid_base_ids: frozenset[UUID],
         query_vector: list[float],
         lexical_query: str | None,
         per_base_budget: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
-        authority: KnowledgeProjectAuthority | None = None,
-    ) -> tuple[list[_Candidate], int, int, int]:
+    ) -> tuple[list[Candidate], int, int, int]:
         """Per-base recall: the semantic route, the lexical route, their merge.
 
         Each route caps at ``per_base_budget`` parents per base (Segment,
@@ -1293,151 +1094,141 @@ class KnowledgeSearchService:
         keeps ``C`` parents; a semantic base keeps its semantic route as-is,
         so no base can consume another base's slots (§8.2). Returns the
         merged candidates plus the per-route counts (after the per-route
-        caps) for diagnostics.
+        caps) for diagnostics. Matched children are read under the caller's
+        snapshot: they are recall evidence, never reconstructed by scanning
+        children after the fact.
         """
 
-        # All recall queries share the same short transaction. Authority is
-        # revalidated before any query can load Segment content, so a
-        # revocation during query embedding prevents that content from being
-        # handed to the external Reranker. Matched children are read under
-        # the same snapshot: they are recall evidence, never reconstructed
-        # by scanning children after the fact.
         group_hybrid_ids = [base_id for base_id in base_ids if base_id in hybrid_base_ids]
-        try:
-            async with self._session_factory() as session, session.begin():
-                await revalidate_project_authority(
-                    authority,
+        general = await self._general_candidates(
+            project_id=project_id,
+            embedding_model_id=embedding_model_id,
+            dimension=dimension,
+            base_ids=base_ids,
+            query_vector=query_vector,
+            per_base_budget=per_base_budget,
+            metadata_filters=metadata_filters,
+            session=session,
+        )
+        parents = await self._parent_child_candidates(
+            project_id=project_id,
+            embedding_model_id=embedding_model_id,
+            dimension=dimension,
+            base_ids=base_ids,
+            query_vector=query_vector,
+            per_base_budget=per_base_budget,
+            metadata_filters=metadata_filters,
+            session=session,
+        )
+        summaries = await self._summary_candidates(
+            project_id=project_id,
+            embedding_model_id=embedding_model_id,
+            dimension=dimension,
+            base_ids=base_ids,
+            query_vector=query_vector,
+            per_base_budget=per_base_budget,
+            metadata_filters=metadata_filters,
+            session=session,
+        )
+        semantic_by_segment: dict[UUID, Candidate] = {}
+        for candidate in [*general, *parents, *summaries]:
+            previous = semantic_by_segment.get(candidate.segment_id)
+            if previous is None or candidate.vector_score > previous.vector_score:
+                semantic_by_segment[candidate.segment_id] = candidate
+        semantic_by_base: dict[UUID, list[Candidate]] = {}
+        for candidate in semantic_by_segment.values():
+            semantic_by_base.setdefault(candidate.knowledge_base_id, []).append(candidate)
+        for pool in semantic_by_base.values():
+            pool.sort(key=candidate_sort_key)
+            del pool[per_base_budget:]
+
+        lexical_by_base: dict[UUID, list[tuple[Candidate, float]]] = {}
+        lexical_rollup_ids: set[UUID] = set()
+        if group_hybrid_ids and lexical_query is not None:
+            # The lexical route reads only current-version rows; any
+            # in-scope row still on another lexical_version makes the
+            # route lie by omission, so it fails loudly instead.
+            await self._assert_lexical_current(session, project_id, group_hybrid_ids, metadata_filters)
+            lexical_general = await self._lexical_general_candidates(
+                project_id=project_id,
+                embedding_model_id=embedding_model_id,
+                base_ids=group_hybrid_ids,
+                query_vector=query_vector,
+                lexical_query=lexical_query,
+                per_base_budget=per_base_budget,
+                metadata_filters=metadata_filters,
+                session=session,
+            )
+            lexical_parents = await self._lexical_parent_candidates(
+                project_id=project_id,
+                embedding_model_id=embedding_model_id,
+                base_ids=group_hybrid_ids,
+                query_vector=query_vector,
+                lexical_query=lexical_query,
+                per_base_budget=per_base_budget,
+                metadata_filters=metadata_filters,
+                session=session,
+            )
+            lexical_rollup_ids = {candidate.segment_id for candidate, _ in lexical_parents}
+            for candidate, lexical_score in [*lexical_general, *lexical_parents]:
+                lexical_by_base.setdefault(candidate.knowledge_base_id, []).append((candidate, lexical_score))
+            for lexical_pool in lexical_by_base.values():
+                lexical_pool.sort(key=lambda entry: (-entry[1], *candidate_sort_key(entry[0])))
+                del lexical_pool[per_base_budget:]
+            lexical_ids = [candidate.segment_id for pool in lexical_by_base.values() for candidate, _ in pool]
+            if lexical_ids:
+                # Lexical-only parents may sit below every semantic
+                # source's cap. Their threshold still needs the real
+                # maximum cosine, including an enabled summary.
+                lexical_summaries = await self._summary_candidates(
+                    project_id=project_id,
+                    embedding_model_id=embedding_model_id,
+                    dimension=dimension,
+                    base_ids=group_hybrid_ids,
+                    query_vector=query_vector,
+                    per_base_budget=per_base_budget,
+                    metadata_filters=metadata_filters,
+                    session=session,
+                    segment_ids=lexical_ids,
+                )
+                summaries_by_segment = {candidate.segment_id: candidate for candidate in lexical_summaries}
+                for base_id, pool in lexical_by_base.items():
+                    lexical_by_base[base_id] = [
+                        (replace(summaries_by_segment[candidate.segment_id], recall_routes=candidate.recall_routes), score)
+                        if candidate.segment_id in summaries_by_segment and summaries_by_segment[candidate.segment_id].vector_score > candidate.vector_score
+                        else (candidate, score)
+                        for candidate, score in pool
+                    ]
+
+        merged: list[Candidate] = []
+        for base_id in {*semantic_by_base, *lexical_by_base}:
+            semantic_pool = semantic_by_base.get(base_id, [])
+            lexical_pool = lexical_by_base.get(base_id, [])
+            ordered = semantic_pool if not lexical_pool else merge_recall_routes(semantic_pool, lexical_pool, per_base_budget)
+            # Remember each parent's place in its base's recall order
+            # before the global cosine sort erases it.
+            merged.extend(replace(candidate, recall_rank=rank) for rank, candidate in enumerate(ordered, start=1))
+        merged.sort(key=candidate_sort_key)
+
+        rollup_parent_ids = {candidate.segment_id for candidate in parents} | lexical_rollup_ids
+        surviving_parent_ids = [candidate.segment_id for candidate in merged if candidate.segment_id in rollup_parent_ids]
+        if surviving_parent_ids:
+            children_by_parent = await self._matched_children_by_parent(
+                session,
+                parent_ids=surviving_parent_ids,
+                query_vector=query_vector,
+            )
+            if lexical_rollup_ids and lexical_query is not None:
+                lexical_children = await self._lexical_matched_children(
                     session,
-                    project_id=project_id,
+                    parent_ids=[parent_id for parent_id in surviving_parent_ids if parent_id in lexical_rollup_ids],
+                    lexical_query=lexical_query,
                 )
-                general = await self._general_candidates(
-                    project_id=project_id,
-                    embedding_model_id=embedding_model_id,
-                    base_ids=base_ids,
-                    query_vector=query_vector,
-                    per_base_budget=per_base_budget,
-                    metadata_filters=metadata_filters,
-                    session=session,
-                )
-                parents = await self._parent_child_candidates(
-                    project_id=project_id,
-                    embedding_model_id=embedding_model_id,
-                    base_ids=base_ids,
-                    query_vector=query_vector,
-                    per_base_budget=per_base_budget,
-                    metadata_filters=metadata_filters,
-                    session=session,
-                )
-                summaries = await self._summary_candidates(
-                    project_id=project_id,
-                    embedding_model_id=embedding_model_id,
-                    base_ids=base_ids,
-                    query_vector=query_vector,
-                    per_base_budget=per_base_budget,
-                    metadata_filters=metadata_filters,
-                    session=session,
-                )
-                semantic_by_segment: dict[UUID, _Candidate] = {}
-                for candidate in [*general, *parents, *summaries]:
-                    previous = semantic_by_segment.get(candidate.segment_id)
-                    if previous is None or candidate.vector_score > previous.vector_score:
-                        semantic_by_segment[candidate.segment_id] = candidate
-                semantic_by_base: dict[UUID, list[_Candidate]] = {}
-                for candidate in semantic_by_segment.values():
-                    semantic_by_base.setdefault(candidate.knowledge_base_id, []).append(candidate)
-                for pool in semantic_by_base.values():
-                    pool.sort(key=_candidate_sort_key)
-                    del pool[per_base_budget:]
-
-                lexical_by_base: dict[UUID, list[tuple[_Candidate, float]]] = {}
-                lexical_rollup_ids: set[UUID] = set()
-                if group_hybrid_ids and lexical_query is not None:
-                    # The lexical route reads only current-version rows; any
-                    # in-scope row still on another lexical_version makes the
-                    # route lie by omission, so it fails loudly instead.
-                    await self._assert_lexical_current(session, project_id, group_hybrid_ids, metadata_filters)
-                    lexical_general = await self._lexical_general_candidates(
-                        project_id=project_id,
-                        embedding_model_id=embedding_model_id,
-                        base_ids=group_hybrid_ids,
-                        query_vector=query_vector,
-                        lexical_query=lexical_query,
-                        per_base_budget=per_base_budget,
-                        metadata_filters=metadata_filters,
-                        session=session,
-                    )
-                    lexical_parents = await self._lexical_parent_candidates(
-                        project_id=project_id,
-                        embedding_model_id=embedding_model_id,
-                        base_ids=group_hybrid_ids,
-                        query_vector=query_vector,
-                        lexical_query=lexical_query,
-                        per_base_budget=per_base_budget,
-                        metadata_filters=metadata_filters,
-                        session=session,
-                    )
-                    lexical_rollup_ids = {candidate.segment_id for candidate, _ in lexical_parents}
-                    for candidate, lexical_score in [*lexical_general, *lexical_parents]:
-                        lexical_by_base.setdefault(candidate.knowledge_base_id, []).append((candidate, lexical_score))
-                    for lexical_pool in lexical_by_base.values():
-                        lexical_pool.sort(key=lambda entry: (-entry[1], *_candidate_sort_key(entry[0])))
-                        del lexical_pool[per_base_budget:]
-                    lexical_ids = [candidate.segment_id for pool in lexical_by_base.values() for candidate, _ in pool]
-                    if lexical_ids:
-                        # Lexical-only parents may sit below every semantic
-                        # source's cap. Their threshold still needs the real
-                        # maximum cosine, including an enabled summary.
-                        lexical_summaries = await self._summary_candidates(
-                            project_id=project_id,
-                            embedding_model_id=embedding_model_id,
-                            base_ids=group_hybrid_ids,
-                            query_vector=query_vector,
-                            per_base_budget=per_base_budget,
-                            metadata_filters=metadata_filters,
-                            session=session,
-                            segment_ids=lexical_ids,
-                        )
-                        summaries_by_segment = {candidate.segment_id: candidate for candidate in lexical_summaries}
-                        for base_id, pool in lexical_by_base.items():
-                            lexical_by_base[base_id] = [
-                                (summaries_by_segment[candidate.segment_id], score) if candidate.segment_id in summaries_by_segment and summaries_by_segment[candidate.segment_id].vector_score > candidate.vector_score else (candidate, score)
-                                for candidate, score in pool
-                            ]
-
-                merged: list[_Candidate] = []
-                for base_id in {*semantic_by_base, *lexical_by_base}:
-                    semantic_pool = semantic_by_base.get(base_id, [])
-                    lexical_pool = lexical_by_base.get(base_id, [])
-                    if not lexical_pool:
-                        merged.extend(semantic_pool)
-                        continue
-                    merged.extend(_merge_recall_routes(semantic_pool, lexical_pool, per_base_budget))
-                merged.sort(key=_candidate_sort_key)
-
-                rollup_parent_ids = {candidate.segment_id for candidate in parents} | lexical_rollup_ids
-                surviving_parent_ids = [candidate.segment_id for candidate in merged if candidate.segment_id in rollup_parent_ids]
-                if surviving_parent_ids:
-                    children_by_parent = await self._matched_children_by_parent(
-                        session,
-                        parent_ids=surviving_parent_ids,
-                        query_vector=query_vector,
-                    )
-                    if lexical_rollup_ids and lexical_query is not None:
-                        lexical_children = await self._lexical_matched_children(
-                            session,
-                            parent_ids=[parent_id for parent_id in surviving_parent_ids if parent_id in lexical_rollup_ids],
-                            lexical_query=lexical_query,
-                        )
-                        # Lexical match evidence first — it is the scarcer,
-                        # more explanatory signal — then the semantic top,
-                        # inside the same per-hit projection cap.
-                        children_by_parent = {parent_id: (*lexical_children.get(parent_id, ()), *children_by_parent.get(parent_id, ()))[:KNOWLEDGE_MAX_MATCHED_CHILDREN] for parent_id in {*children_by_parent, *lexical_children}}
-                    merged = [replace(candidate, matched_children=children_by_parent.get(candidate.segment_id, ())) if candidate.segment_id in rollup_parent_ids else candidate for candidate in merged]
-        except KnowledgeError:
-            raise
-        except SQLAlchemyError:
-            logger.warning("knowledge recall failed", exc_info=True)
-            raise _search_failed() from None
+                # Lexical match evidence first — it is the scarcer,
+                # more explanatory signal — then the semantic top,
+                # inside the same per-hit projection cap.
+                children_by_parent = {parent_id: (*lexical_children.get(parent_id, ()), *children_by_parent.get(parent_id, ()))[:KNOWLEDGE_MAX_MATCHED_CHILDREN] for parent_id in {*children_by_parent, *lexical_children}}
+            merged = [replace(candidate, matched_children=children_by_parent.get(candidate.segment_id, ())) if candidate.segment_id in rollup_parent_ids else candidate for candidate in merged]
         semantic_count = sum(len(pool) for pool in semantic_by_base.values())
         lexical_count = sum(len(pool) for pool in lexical_by_base.values())
         return merged, semantic_count, lexical_count, len(summaries)
@@ -1509,7 +1300,7 @@ class KnowledgeSearchService:
 
         scope = (
             KnowledgeBaseRow.id.in_(hybrid_base_ids),
-            *_current_scope_filters(project_id, metadata_filters),
+            *current_scope_filters(project_id, metadata_filters),
         )
         stale_segment = (
             select(literal(1))
@@ -1542,7 +1333,7 @@ class KnowledgeSearchService:
         per_base_budget: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
         session: AsyncSession,
-    ) -> list[tuple[_Candidate, float]]:
+    ) -> list[tuple[Candidate, float]]:
         """Lexical recall over general-mode segments, capped per base.
 
         The row's real cosine travels along (``vector_score``), because the
@@ -1604,7 +1395,7 @@ class KnowledgeSearchService:
             )
         )
         rows = (await session.execute(statement)).all()
-        return [(self._candidate_from_row(row), float(row.lexical_score)) for row in rows]
+        return [(self._candidate_from_row(row, recall_routes=_LEXICAL_ROUTE), float(row.lexical_score)) for row in rows]
 
     async def _lexical_parent_candidates(
         self,
@@ -1617,7 +1408,7 @@ class KnowledgeSearchService:
         per_base_budget: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
         session: AsyncSession,
-    ) -> list[tuple[_Candidate, float]]:
+    ) -> list[tuple[Candidate, float]]:
         """parent_child lexical recall: child hits roll up to their parent.
 
         The parent's lexical score is its best child ``ts_rank_cd``; its
@@ -1695,10 +1486,16 @@ class KnowledgeSearchService:
             )
         )
         rows = (await session.execute(statement)).all()
-        return [(self._candidate_from_row(row, matched_via="child"), float(row.lexical_score)) for row in rows]
+        return [(self._candidate_from_row(row, matched_via="child", recall_routes=_LEXICAL_ROUTE), float(row.lexical_score)) for row in rows]
 
-    def _candidate_from_row(self, row: Any, *, matched_via: KnowledgeMatchedVia = "segment") -> _Candidate:
-        return _Candidate(
+    def _candidate_from_row(
+        self,
+        row: Any,
+        *,
+        matched_via: KnowledgeMatchedVia = "segment",
+        recall_routes: frozenset[KnowledgeRecallRoute] = frozenset({"semantic"}),
+    ) -> Candidate:
+        return Candidate(
             segment_id=row.id,
             position=row.position,
             content=row.content,
@@ -1715,6 +1512,7 @@ class KnowledgeSearchService:
             knowledge_base_name=row.knowledge_base_name,
             vector_score=float(row.vector_score),
             matched_via=matched_via,
+            recall_routes=recall_routes,
         )
 
     async def _lexical_matched_children(
@@ -1766,19 +1564,19 @@ class KnowledgeSearchService:
             )
         return {parent_id: tuple(items) for parent_id, items in children.items()}
 
-    async def _final_lexical_ranks(
+    async def _lexical_scores(
         self,
+        session: AsyncSession,
         *,
         project_id: UUID,
         segment_ids: list[UUID],
         lexical_query: str,
-    ) -> dict[UUID, int]:
-        """Global shared-place lexical ranking of every shortlisted parent.
+    ) -> dict[UUID, float]:
+        """Lexical evidence for fusion: ``ts_rank_cd`` of every recalled parent.
 
-        All shortlisted parents — semantic bases included — score against the
-        same query; only positive scores rank. A row on another
-        lexical_version fails loudly; a row deleted meanwhile simply has no
-        lexical evidence (the final review will drop its hit anyway).
+        All recalled parents — semantic bases included — score against the
+        same query inside the recall transaction. A row on another
+        lexical_version fails loudly instead of contributing a silent zero.
         """
 
         tsquery = func.to_tsquery("simple", lexical_query)
@@ -1787,29 +1585,13 @@ class KnowledgeSearchService:
             KnowledgeSegmentRow.lexical_version,
             func.ts_rank_cd(KnowledgeSegmentRow.lexical_tsv, tsquery, 2).label("lexical_score"),
         ).where(KnowledgeSegmentRow.project_id == project_id, KnowledgeSegmentRow.id.in_(segment_ids))
-        try:
-            async with self._session_factory() as session:
-                rows = (await session.execute(statement)).all()
-        except SQLAlchemyError:
-            logger.warning("knowledge lexical scoring failed", exc_info=True)
-            raise _search_failed() from None
-        positive: list[tuple[float, UUID]] = []
+        rows = (await session.execute(statement)).all()
+        scores: dict[UUID, float] = {}
         for row in rows:
             if row.lexical_version != KNOWLEDGE_LEXICAL_VERSION:
                 raise _lexical_stale_conflict()
-            score = float(row.lexical_score)
-            if score > 0:
-                positive.append((score, row.id))
-        positive.sort(key=lambda entry: (-entry[0], entry[1]))
-        ranks: dict[UUID, int] = {}
-        rank = 0
-        previous: float | None = None
-        for index, (score, segment_id) in enumerate(positive, start=1):
-            if previous is None or score != previous:
-                rank = index
-                previous = score
-            ranks[segment_id] = rank
-        return ranks
+            scores[row.id] = float(row.lexical_score)
+        return scores
 
     async def _revalidate_authority(
         self,
@@ -1835,7 +1617,7 @@ class KnowledgeSearchService:
         *,
         project_id: UUID,
         authority: KnowledgeProjectAuthority | None,
-        snapshot: _SearchSnapshot,
+        snapshot: SearchSnapshot,
     ) -> None:
         """Pre-dispatch guard: authority plus the strategy snapshot.
 
@@ -1871,7 +1653,25 @@ class KnowledgeSearchService:
             # recall drops out here: its vectors no longer match this query
             # embedding's dimension/space.
             KnowledgeBaseRow.embedding_model_id == embedding_model_id,
-            *_current_scope_filters(project_id, metadata_filters),
+            *current_scope_filters(project_id, metadata_filters),
+        )
+
+    def _lateral_scope(
+        self,
+        project_id: UUID,
+        embedding_model_id: UUID,
+        targets: Any,
+        metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+    ) -> tuple[Any, ...]:
+        """Scope of one per-base lateral branch (``targets`` = unnested base ids)."""
+
+        return (
+            KnowledgeBaseRow.id == targets.c.base_id,
+            # A base rebound to another embedding model between group load and
+            # recall drops out here: its vectors no longer match this query
+            # embedding's dimension/space.
+            KnowledgeBaseRow.embedding_model_id == embedding_model_id,
+            *current_scope_filters(project_id, metadata_filters),
         )
 
     async def _general_candidates(
@@ -1879,35 +1679,49 @@ class KnowledgeSearchService:
         *,
         project_id: UUID,
         embedding_model_id: UUID,
+        dimension: int,
         base_ids: list[UUID],
         query_vector: list[float],
         per_base_budget: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
         session: AsyncSession | None = None,
-    ) -> list[_Candidate]:
-        """Exact cosine recall over segments that carry their own vectors.
+    ) -> list[Candidate]:
+        """Cosine recall over segments that carry their own vectors.
 
-        A window ranked per base (score, then stable identity) caps every
-        base at ``per_base_budget`` rows inside SQL, so one base's rows can
-        never crowd another base out of the recall result.
+        One ``LATERAL`` branch per targeted base orders by the dimension-typed
+        cosine distance and stops at ``per_base_budget`` rows, so one base's
+        rows can never crowd another base out of the recall result and the
+        branch is eligible for the per-dimension HNSW partial index (an
+        unindexed dimension runs the same statement as a sorted scan).
         """
 
-        distance = KnowledgeSegmentRow.embedding.cosine_distance(query_vector)
-        vector_score = (1 - distance).label("vector_score")
-        per_base_rank = (
-            func.row_number()
-            .over(
-                partition_by=KnowledgeBaseRow.id,
-                order_by=(
-                    (1 - distance).desc(),
-                    KnowledgeDocumentRow.id.asc(),
-                    KnowledgeSegmentRow.position.asc(),
-                    KnowledgeSegmentRow.id.asc(),
-                ),
-            )
-            .label("per_base_rank")
+        statement = self._general_statement(
+            project_id=project_id,
+            embedding_model_id=embedding_model_id,
+            dimension=dimension,
+            base_ids=base_ids,
+            query_vector=query_vector,
+            per_base_budget=per_base_budget,
+            metadata_filters=metadata_filters,
         )
-        inner = (
+        return await self._execute_recall(statement, session=session)
+
+    def _general_statement(
+        self,
+        *,
+        project_id: UUID,
+        embedding_model_id: UUID,
+        dimension: int,
+        base_ids: list[UUID],
+        query_vector: list[float],
+        per_base_budget: int,
+        metadata_filters: tuple[KnowledgeMetadataFilter, ...],
+    ) -> Any:
+        """The general-route recall statement (exposed for plan inspection)."""
+
+        targets = _base_targets(base_ids)
+        distance = _typed_distance(KnowledgeSegmentRow.embedding, dimension, query_vector)
+        branch = (
             select(
                 KnowledgeSegmentRow.id,
                 KnowledgeSegmentRow.position,
@@ -1920,48 +1734,41 @@ class KnowledgeSearchService:
                 KnowledgeDocumentRow.parsing_profile,
                 KnowledgeBaseRow.id.label("knowledge_base_id"),
                 KnowledgeBaseRow.name.label("knowledge_base_name"),
-                vector_score,
-                per_base_rank,
+                (1 - distance).label("vector_score"),
             )
             .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
             .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
             .where(
-                *self._candidate_filters(project_id, embedding_model_id, base_ids, metadata_filters),
+                *self._lateral_scope(project_id, embedding_model_id, targets, metadata_filters),
                 # parent_child parents store NULL embeddings and are recalled
                 # through their children instead.
                 KnowledgeSegmentRow.embedding.is_not(None),
+                func.vector_dims(KnowledgeSegmentRow.embedding) == dimension,
             )
-            .subquery()
+            .order_by(distance.asc())
+            .limit(per_base_budget)
+            .lateral("hits")
         )
-        statement = (
-            select(inner)
-            .where(inner.c.per_base_rank <= per_base_budget)
-            .order_by(
-                inner.c.vector_score.desc(),
-                inner.c.knowledge_base_id.asc(),
-                inner.c.document_id.asc(),
-                inner.c.position.asc(),
-                inner.c.id.asc(),
-            )
-        )
-        return await self._execute_recall(statement, session=session)
+        return select(branch).select_from(targets.join(branch, true()))
 
     async def _summary_candidates(
         self,
         *,
         project_id: UUID,
         embedding_model_id: UUID,
+        dimension: int,
         base_ids: list[UUID],
         query_vector: list[float],
         per_base_budget: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
         session: AsyncSession,
         segment_ids: list[UUID] | None = None,
-    ) -> list[_Candidate]:
+    ) -> list[Candidate]:
         """Summary vectors recall real Segments under the same scope and cap."""
 
-        vector_score = 1 - KnowledgeSegmentSummaryRow.embedding.cosine_distance(query_vector)
-        inner = (
+        targets = _base_targets(base_ids)
+        distance = _typed_distance(KnowledgeSegmentSummaryRow.embedding, dimension, query_vector)
+        branch = (
             select(
                 KnowledgeSegmentRow.id,
                 KnowledgeSegmentRow.position,
@@ -1974,30 +1781,27 @@ class KnowledgeSearchService:
                 KnowledgeDocumentRow.parsing_profile,
                 KnowledgeBaseRow.id.label("knowledge_base_id"),
                 KnowledgeBaseRow.name.label("knowledge_base_name"),
-                vector_score.label("vector_score"),
-                func.row_number()
-                .over(
-                    partition_by=KnowledgeBaseRow.id,
-                    order_by=(vector_score.desc(), KnowledgeDocumentRow.id.asc(), KnowledgeSegmentRow.position.asc(), KnowledgeSegmentRow.id.asc()),
-                )
-                .label("per_base_rank"),
+                (1 - distance).label("vector_score"),
             )
             .select_from(KnowledgeSegmentSummaryRow)
             .join(KnowledgeSegmentRow, KnowledgeSegmentRow.id == KnowledgeSegmentSummaryRow.knowledge_segment_id)
             .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
             .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
             .where(
-                *self._candidate_filters(project_id, embedding_model_id, base_ids, metadata_filters),
+                *self._lateral_scope(project_id, embedding_model_id, targets, metadata_filters),
                 KnowledgeBaseRow.summary_index_enabled.is_(True),
                 KnowledgeSegmentSummaryRow.project_id == project_id,
                 KnowledgeSegmentSummaryRow.knowledge_base_id == KnowledgeBaseRow.id,
                 KnowledgeSegmentSummaryRow.knowledge_document_id == KnowledgeDocumentRow.id,
                 KnowledgeSegmentSummaryRow.document_version == KnowledgeSegmentRow.document_version,
+                func.vector_dims(KnowledgeSegmentSummaryRow.embedding) == dimension,
                 *(() if segment_ids is None else (KnowledgeSegmentRow.id.in_(segment_ids),)),
             )
-            .subquery()
+            .order_by(distance.asc())
+            .limit(per_base_budget)
+            .lateral("hits")
         )
-        statement = select(inner).where(inner.c.per_base_rank <= per_base_budget).order_by(inner.c.vector_score.desc(), inner.c.knowledge_base_id.asc(), inner.c.document_id.asc(), inner.c.position.asc(), inner.c.id.asc())
+        statement = select(branch).select_from(targets.join(branch, true()))
         return await self._execute_recall(statement, session=session, matched_via="summary")
 
     async def _parent_child_candidates(
@@ -2005,36 +1809,46 @@ class KnowledgeSearchService:
         *,
         project_id: UUID,
         embedding_model_id: UUID,
+        dimension: int,
         base_ids: list[UUID],
         query_vector: list[float],
         per_base_budget: int,
         metadata_filters: tuple[KnowledgeMetadataFilter, ...],
         session: AsyncSession | None = None,
-    ) -> list[_Candidate]:
+    ) -> list[Candidate]:
         """Child-chunk recall rolled up to parents before the reranker.
 
-        The best child score inside each parent becomes the parent's recall
-        score (the plan's 回卷 rule) before any budget applies, so a parent
-        never appears twice and a parent's many children can never consume
-        the base's ``per_base_budget`` parent slots.
+        Each base's lateral branch takes its ``per_base_budget ×
+        PARENT_CHILD_WINDOW_FACTOR`` nearest children through the same
+        index-eligible ordering; the best child score inside each parent then
+        becomes the parent's recall score (the plan's 回卷 rule) before the
+        per-base cap, so a parent never appears twice. Every parent that
+        surfaces is a true top parent (any parent outside the window scores
+        below the window's weakest child); a base whose leading parents own
+        many near-identical children may surface fewer than ``C`` parents.
         """
 
-        child_distance = KnowledgeSegmentChildRow.embedding.cosine_distance(query_vector)
-        vector_score = func.max(1 - child_distance).label("vector_score")
-        per_base_rank = (
-            func.row_number()
-            .over(
-                partition_by=KnowledgeBaseRow.id,
-                order_by=(
-                    func.max(1 - child_distance).desc(),
-                    KnowledgeDocumentRow.id.asc(),
-                    KnowledgeSegmentRow.position.asc(),
-                    KnowledgeSegmentRow.id.asc(),
-                ),
+        targets = _base_targets(base_ids)
+        distance = _typed_distance(KnowledgeSegmentChildRow.embedding, dimension, query_vector)
+        children = (
+            select(
+                KnowledgeSegmentChildRow.knowledge_segment_id.label("segment_id"),
+                (1 - distance).label("child_score"),
             )
-            .label("per_base_rank")
+            .select_from(KnowledgeSegmentChildRow)
+            .join(KnowledgeSegmentRow, KnowledgeSegmentRow.id == KnowledgeSegmentChildRow.knowledge_segment_id)
+            .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
+            .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
+            .where(
+                *self._lateral_scope(project_id, embedding_model_id, targets, metadata_filters),
+                func.vector_dims(KnowledgeSegmentChildRow.embedding) == dimension,
+            )
+            .order_by(distance.asc())
+            .limit(per_base_budget * PARENT_CHILD_WINDOW_FACTOR)
+            .lateral("children")
         )
-        inner = (
+        rollup = select(children.c.segment_id, func.max(children.c.child_score).label("vector_score")).select_from(targets.join(children, true())).group_by(children.c.segment_id).subquery("rollup")
+        statement = (
             select(
                 KnowledgeSegmentRow.id,
                 KnowledgeSegmentRow.position,
@@ -2047,31 +1861,12 @@ class KnowledgeSearchService:
                 KnowledgeDocumentRow.parsing_profile,
                 KnowledgeBaseRow.id.label("knowledge_base_id"),
                 KnowledgeBaseRow.name.label("knowledge_base_name"),
-                vector_score,
-                per_base_rank,
+                rollup.c.vector_score,
             )
-            .select_from(KnowledgeSegmentChildRow)
-            .join(KnowledgeSegmentRow, KnowledgeSegmentRow.id == KnowledgeSegmentChildRow.knowledge_segment_id)
+            .select_from(rollup)
+            .join(KnowledgeSegmentRow, KnowledgeSegmentRow.id == rollup.c.segment_id)
             .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
             .join(KnowledgeBaseRow, KnowledgeBaseRow.id == KnowledgeDocumentRow.knowledge_base_id)
-            .where(*self._candidate_filters(project_id, embedding_model_id, base_ids, metadata_filters))
-            .group_by(
-                KnowledgeSegmentRow.id,
-                KnowledgeDocumentRow.id,
-                KnowledgeBaseRow.id,
-            )
-            .subquery()
-        )
-        statement = (
-            select(inner)
-            .where(inner.c.per_base_rank <= per_base_budget)
-            .order_by(
-                inner.c.vector_score.desc(),
-                inner.c.knowledge_base_id.asc(),
-                inner.c.document_id.asc(),
-                inner.c.position.asc(),
-                inner.c.id.asc(),
-            )
         )
         return await self._execute_recall(statement, session=session, matched_via="child")
 
@@ -2081,7 +1876,7 @@ class KnowledgeSearchService:
         *,
         session: AsyncSession | None = None,
         matched_via: KnowledgeMatchedVia = "segment",
-    ) -> list[_Candidate]:
+    ) -> list[Candidate]:
         try:
             if session is None:
                 async with self._session_factory() as owned_session:
@@ -2092,7 +1887,7 @@ class KnowledgeSearchService:
             logger.warning("knowledge cosine recall failed", exc_info=True)
             raise _search_failed() from None
         return [
-            _Candidate(
+            Candidate(
                 segment_id=row.id,
                 position=row.position,
                 content=row.content,

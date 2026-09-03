@@ -243,24 +243,40 @@ async def test_hybrid_forced_semantic_override_skips_the_lexical_route(postgres_
 
 
 @pytest.mark.asyncio
-async def test_hybrid_query_over_128_tokens_is_rejected_with_a_narrowing_hint(postgres_database_url: str) -> None:
+async def test_hybrid_query_over_the_token_cap_is_truncated_not_rejected(postgres_database_url: str) -> None:
+    """A long natural-language question keeps working on a hybrid target: the
+    lexical query keeps the first ``KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS`` tokens
+    in scan order, the vector route is untouched, and debug reports the cut."""
+
     harness = await _harness(postgres_database_url)
     try:
         project_id, _, _, _ = await _seed_hybrid_general_base(
             harness,
-            segments=[("普通安装说明", _unit_vector(0.9))],
+            segments=[
+                ("错误码e404排查手册", _unit_vector(0.2)),
+                ("普通安装说明", _unit_vector(0.9)),
+            ],
         )
 
-        long_query = " ".join(f"tok{index}" for index in range(KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS + 1))
-        with pytest.raises(KnowledgeError) as error:
-            await harness.service.search(_request(project_id, query=long_query))
+        filler = " ".join(f"tok{index}" for index in range(KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS))
+        # The exact token sits beyond the cap, so it is cut from the lexical
+        # query; the segment still returns through the vector route.
+        result = await harness.service.search(_request(project_id, query=f"{filler} e404", score_threshold=0.0, debug=True))
 
-        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
-        assert str(KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS) in error.value.message
-        assert "semantic" in error.value.message
-        # Rejected before any provider call or query-log row.
-        assert harness.client.embed_calls == []
-        assert await _query_rows(harness, project_id) == []
+        assert [hit.citation.snippet for hit in result.hits] == ["普通安装说明", "错误码e404排查手册"]
+        assert result.diagnostics is not None
+        assert result.diagnostics.lexical_query_truncated is True
+        assert result.diagnostics.lexical_query_token_count == KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS
+        assert result.diagnostics.counts.lexical_candidates == 0
+        assert len(harness.client.embed_calls) == 1
+        assert len(await _query_rows(harness, project_id)) == 1
+
+        # Inside the cap the exact token still drives the lexical route.
+        short = await harness.service.search(_request(project_id, query="e404 " + " ".join(f"tok{index}" for index in range(10)), score_threshold=0.0, debug=True))
+        assert short.diagnostics is not None
+        assert short.diagnostics.lexical_query_truncated is False
+        assert short.diagnostics.lexical_query_token_count == 11
+        assert short.diagnostics.counts.lexical_candidates == 1
     finally:
         await harness.engine.dispose()
 
@@ -361,20 +377,56 @@ async def test_mixed_search_conflicts_when_a_semantic_bases_shortlisted_row_is_u
 
 
 @pytest.mark.asyncio
-async def test_lexical_only_hit_still_obeys_the_cosine_threshold(postgres_database_url: str) -> None:
+async def test_lexical_evidence_exempts_a_hit_from_the_cosine_threshold(postgres_database_url: str) -> None:
+    """An exact identifier match is what hybrid exists for: in a rerank-free
+    group its low cosine must not filter it, while a purely semantic candidate
+    below the threshold still drops."""
+
     harness = await _harness(postgres_database_url)
     try:
         project_id, _, _, _ = await _seed_hybrid_general_base(
             harness,
+            segments=[
+                ("错误码e404排查手册", _unit_vector(0.1)),
+                ("普通安装说明", _unit_vector(0.3)),
+            ],
+        )
+
+        result = await harness.service.search(_request(project_id, query="e404", score_threshold=0.5, debug=True))
+
+        assert [hit.citation.snippet for hit in result.hits] == ["错误码e404排查手册"]
+        [hit] = result.hits
+        assert hit.local_score_kind == "cosine"
+        assert hit.local_score == pytest.approx(0.1, abs=1e-6)
+        assert result.diagnostics is not None
+        assert result.diagnostics.counts.lexical_candidates == 1
+        assert result.diagnostics.counts.threshold_filtered == 1
+        assert result.diagnostics.counts.lexical_threshold_exempt == 1
+        assert result.diagnostics.empty_reason is None
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reranked_hybrid_group_keeps_the_threshold_on_the_rerank_score(postgres_database_url: str) -> None:
+    """With a reranker the native score already judged the text, so lexical
+    evidence grants no exemption from the rerank threshold."""
+
+    harness = await _harness(postgres_database_url)
+    try:
+        project_id, _, _, rerank_id = await _seed_hybrid_general_base(
+            harness,
+            with_reranker=True,
             segments=[("错误码e404排查手册", _unit_vector(0.1))],
         )
+        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=index, score=0.2) for index in range(len(documents))][:top_n]
 
         result = await harness.service.search(_request(project_id, query="e404", score_threshold=0.5, debug=True))
 
         assert result.hits == ()
         assert result.diagnostics is not None
-        assert result.diagnostics.counts.lexical_candidates == 1
         assert result.diagnostics.counts.threshold_filtered == 1
+        assert result.diagnostics.counts.lexical_threshold_exempt == 0
         assert result.diagnostics.empty_reason == "filtered_out"
     finally:
         await harness.engine.dispose()

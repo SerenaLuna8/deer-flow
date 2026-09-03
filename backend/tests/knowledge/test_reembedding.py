@@ -74,7 +74,7 @@ class _FakeModelClient:
         self.started = asyncio.Event()
         self.blocker: asyncio.Event | None = None
 
-    async def embed(self, material, texts: list[str], *, batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
+    async def embed(self, material, texts: list[str], *, kind="passage", batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
         # Batch hooks are exercised with the real client in
         # test_task_progress.py; this double stands for one successful batch.
         del batch_guard, on_batch_verified

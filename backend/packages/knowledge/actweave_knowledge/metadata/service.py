@@ -222,7 +222,7 @@ class KnowledgeMetadataService:
                     session,
                     project_id=project_id,
                 )
-                statement = select(KnowledgeBaseRow.id).where(
+                statement = select(KnowledgeBaseRow.id, KnowledgeBaseRow.name, KnowledgeBaseRow.description).where(
                     KnowledgeBaseRow.project_id == project_id,
                     KnowledgeBaseRow.status == "active",
                 )
@@ -230,7 +230,9 @@ class KnowledgeMetadataService:
                     statement = statement.where(KnowledgeBaseRow.id.in_(requested))
                 else:
                     statement = statement.order_by(KnowledgeBaseRow.created_at, KnowledgeBaseRow.id)
-                found = list((await session.scalars(statement)).all())
+                found_rows = (await session.execute(statement)).all()
+                names = {row.id: (row.name, row.description) for row in found_rows}
+                found = [row.id for row in found_rows]
                 if requested is not None:
                     if set(found) != set(requested):
                         raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
@@ -247,6 +249,8 @@ class KnowledgeMetadataService:
                 return [
                     KnowledgeBaseFilterFields(
                         knowledge_base_id=base_id,
+                        knowledge_base_name=names[base_id][0],
+                        description=names[base_id][1],
                         fields=_BUILTIN_FILTER_FIELD_VIEWS + tuple(custom_by_base[base_id]),
                     )
                     for base_id in ordered

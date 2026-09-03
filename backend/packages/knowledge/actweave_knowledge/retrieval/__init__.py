@@ -6,6 +6,7 @@ from .lexical import (
     encode_lexical_token,
     lexical_index_input,
     lexical_query_input,
+    lexical_query_tokens,
     lexical_v1_tokens,
 )
 from .service import (
@@ -33,5 +34,6 @@ __all__ = [
     "encode_lexical_token",
     "lexical_index_input",
     "lexical_query_input",
+    "lexical_query_tokens",
     "lexical_v1_tokens",
 ]

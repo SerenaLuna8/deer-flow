@@ -237,7 +237,9 @@ async def test_summary_and_content_sources_deduplicate_before_each_base_budget(p
         assert result.diagnostics.counts.semantic_candidates == 21
         assert result.diagnostics.counts.summary_candidates == 21
         sent_documents = harness.client.rerank_calls[0][2]
-        assert len(sent_documents) == len(set(sent_documents)) == 21
+        # Deduplicated before the per-base cap; the reranker input budget for
+        # top_k=1 then keeps 5 places of the large base plus the small base's.
+        assert len(sent_documents) == len(set(sent_documents)) == 6
         assert "小库候选" in sent_documents
         assert all("SUMMARY_ONLY_MARKER" not in document for document in sent_documents)
     finally:

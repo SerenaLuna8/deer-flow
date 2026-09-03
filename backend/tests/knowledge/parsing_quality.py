@@ -445,7 +445,7 @@ class _ReplayClient:
         length = math.sqrt(sum(value * value for value in vector)) or 1.0
         return [value / length for value in vector]
 
-    async def embed(self, material, texts, *, batch_guard=None, on_batch_verified=None):  # noqa: ANN001
+    async def embed(self, material, texts, *, kind="passage", batch_guard=None, on_batch_verified=None):  # noqa: ANN001
         if batch_guard is not None:
             await batch_guard()
         vectors = [self._vector(text) for text in texts]

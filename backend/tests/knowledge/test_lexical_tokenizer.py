@@ -20,12 +20,14 @@ from ipaddress import ip_address
 
 import pytest
 from actweave_knowledge import KNOWLEDGE_INVALID_REQUEST, KnowledgeError
+from actweave_knowledge.contracts import KNOWLEDGE_MAX_SEGMENT_CHARS
 from actweave_knowledge.retrieval import (
     LEXICAL_INDEX_INPUT_MAX_BYTES,
     LEXICAL_TOKEN_ENCODED_MAX_BYTES,
     encode_lexical_token,
     lexical_index_input,
     lexical_query_input,
+    lexical_query_tokens,
     lexical_v1_tokens,
 )
 
@@ -115,11 +117,47 @@ def test_punctuation_is_a_boundary_and_never_reaches_tsquery_syntax() -> None:
 
 def test_document_positions_keep_repeats_while_the_query_dedupes() -> None:
     assert lexical_v1_tokens("重启 重启") == ["重", "重启", "启", "重", "重启", "启"]
-    assert lexical_query_input("重启 重启") == [
-        _hex_token("重"),
-        _hex_token("重启"),
-        _hex_token("启"),
-    ]
+    # The query side keeps only the bigram: index-side singles remain
+    # matchable but never drive ranking through the OR query.
+    assert lexical_query_input("重启 重启") == [_hex_token("重启")]
+
+
+# ---------------------------------------------------------------------------
+# Query-side rules: bigrams only, stop tokens dropped, single runs kept
+# ---------------------------------------------------------------------------
+
+
+def test_query_drops_han_singles_except_a_lone_character_run() -> None:
+    """Han singles are index-only noise for ranking; a one-character run is
+    the only single the query keeps, so ``锌`` still finds ``锌``."""
+
+    assert lexical_query_tokens("网络故障") == ["网络", "络故", "故障"]
+    assert lexical_query_tokens("锌") == ["锌"]
+    assert lexical_query_tokens("查询HTTP 404状态") == ["查询", "http", "404", "状态"]
+    # The index side is unchanged: existing lexical_version=1 rows stay valid.
+    assert lexical_v1_tokens("网络故障") == ["网", "网络", "络", "络故", "故", "故障", "障"]
+
+
+def test_query_drops_function_word_bigrams_and_english_stopwords() -> None:
+    """A Han bigram made only of function characters (的/了/是/在/和/…) and
+    common English stopwords carry no matching signal; identifiers, numbers
+    and IPs are never filtered."""
+
+    assert lexical_query_tokens("这是的了") == []
+    assert lexical_query_tokens("路由器的配置") == ["路由", "由器", "器的", "的配", "配置"]
+    assert lexical_query_tokens("what is the error code of E-1042") == ["error", "code", "e-1042", "e", "1042"]
+    assert lexical_query_tokens("the 10.0.0.1 and a") == ["10.0.0.1"]
+
+
+def test_long_chinese_questions_now_fit_the_query_token_cap() -> None:
+    """The measured failure: a 49-character question produced 95 tokens
+    under singles+bigrams; bigrams only keep even 120 characters under 128."""
+
+    question = "网络故障排查手册中关于路由器无法连接互联网时应该如何处理的详细步骤以及常见的错误代码说明和解决方案"
+    assert len(question) == 49
+    assert len(lexical_query_input(question)) <= len(question)
+    longer = "".join(chr(0x4E00 + index) for index in range(120))
+    assert len(lexical_query_input(longer)) == 119
 
 
 def test_zero_token_inputs_produce_an_empty_stream() -> None:
@@ -160,12 +198,13 @@ def test_derived_input_over_256kib_fails_loudly_instead_of_dropping_text() -> No
     assert "256" in error.value.message
 
 
-def test_the_documented_4000_char_content_bound_fits_the_limit() -> None:
-    # The densest legal segment (4000 Han chars, 12 KB UTF-8) stays far below
-    # the 256 KiB derived-input bound and produces singles plus bigrams.
-    content = "installation安装指南" * 250
-    assert len(content) == 4000
+def test_the_documented_segment_char_bound_fits_the_limit() -> None:
+    # The densest legal segment (KNOWLEDGE_MAX_SEGMENT_CHARS Han chars, 48 KB
+    # UTF-8) stays far below the 256 KiB derived-input bound and produces
+    # singles plus bigrams.
+    content = "installation安装指南" * 1000
+    assert len(content) == KNOWLEDGE_MAX_SEGMENT_CHARS
     tokens = lexical_v1_tokens(content)
-    # 250 repeats of one word, four Han singles, and three bigrams.
-    assert len(tokens) == 250 * 8
+    # 1000 repeats of one word, four Han singles, and three bigrams.
+    assert len(tokens) == 1000 * 8
     assert lexical_index_input(content) != ""

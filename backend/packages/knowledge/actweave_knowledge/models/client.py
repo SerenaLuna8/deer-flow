@@ -12,7 +12,9 @@ malformed payloads become ``KNOWLEDGE_EMBEDDING_FAILED`` or
 
 from __future__ import annotations
 
+import asyncio
 import math
+import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -23,6 +25,7 @@ from ..contracts import (
     KNOWLEDGE_EMBEDDING_FAILED,
     KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_RERANK_FAILED,
+    KnowledgeEmbeddingKind,
     KnowledgeEmbeddingMaterial,
     KnowledgeError,
     KnowledgeRerankMaterial,
@@ -38,6 +41,14 @@ RERANK_PROBE_DOCUMENTS = (
 # Connection probes run inside admin requests (and while the update flow holds
 # a row lock), so they never use the full production timeout of up to 300s.
 PROBE_TIMEOUT_SECONDS_CAP = 30
+
+# Backoff before the single in-client retry: a Provider ``Retry-After`` (in
+# seconds, capped) wins; otherwise the base delay with ±50% jitter so parallel
+# batches do not retry in lockstep against a rate-limited endpoint.
+RETRY_BASE_DELAY_SECONDS = 1.0
+RETRY_AFTER_CAP_SECONDS = 30.0
+
+Sleep = Callable[[float], Awaitable[None]]
 
 # Runs before every provider dispatch — including the client's single internal
 # retry — so callers revalidate authority or a task lease at real batch
@@ -62,13 +73,28 @@ def _is_finite_number(value: object) -> bool:
 
 
 class KnowledgeModelClient:
-    """Batched, validated access to SiliconFlow-compatible endpoints."""
+    """Batched, validated access to SiliconFlow-compatible endpoints.
 
-    def __init__(self, http: httpx.AsyncClient | None = None) -> None:
+    ``embed_concurrency`` bounds how many embedding batches of one call may be
+    in flight at once (1 keeps the strictly sequential order some callers
+    assert on); ``sleep`` is the retry backoff primitive, injectable for tests.
+    """
+
+    def __init__(
+        self,
+        http: httpx.AsyncClient | None = None,
+        *,
+        embed_concurrency: int = 1,
+        sleep: Sleep | None = None,
+    ) -> None:
+        if isinstance(embed_concurrency, bool) or not isinstance(embed_concurrency, int) or embed_concurrency < 1:
+            raise ValueError("embed_concurrency must be a positive integer")
         # trust_env=False: ambient HTTP(S)_PROXY must never reroute requests
         # carrying the Bearer API key. follow_redirects=False is the httpx
         # default, made explicit: a 3xx can never re-send the key elsewhere.
         self._http = http or httpx.AsyncClient(trust_env=False, follow_redirects=False)
+        self._embed_concurrency = embed_concurrency
+        self._sleep: Sleep = sleep or asyncio.sleep
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -78,21 +104,33 @@ class KnowledgeModelClient:
         material: KnowledgeEmbeddingMaterial,
         texts: list[str],
         *,
+        kind: KnowledgeEmbeddingKind = "passage",
         batch_guard: BatchGuard | None = None,
         on_batch_verified: BatchVerified | None = None,
     ) -> list[list[float]]:
         """Embed ``texts`` in input order, batching by ``max_batch``.
 
-        ``batch_guard`` runs before every dispatch attempt (a guard failure
-        leaves the remaining batches undispatched); ``on_batch_verified``
-        receives each batch size after its response validated.
+        ``kind`` selects the material's query or passage prefix for asymmetric
+        models (an empty prefix leaves the text unchanged). ``batch_guard``
+        runs before every dispatch attempt (a guard failure leaves the
+        remaining batches undispatched); ``on_batch_verified`` receives each
+        batch size after its response validated. Up to ``embed_concurrency``
+        batches overlap; the hooks are serialized so a caller's progress
+        counter stays monotonic, and the first failure cancels the batches
+        still waiting.
         """
 
         if not texts:
             return []
-        vectors: list[list[float]] = []
-        for start in range(0, len(texts), material.max_batch):
-            batch = texts[start : start + material.max_batch]
+        prefix = material.query_prefix if kind == "query" else material.passage_prefix
+        prefixed = [prefix + item for item in texts] if prefix else list(texts)
+        batches = [prefixed[start : start + material.max_batch] for start in range(0, len(prefixed), material.max_batch)]
+        results: list[list[list[float]] | None] = [None] * len(batches)
+        # The verified hook drives the caller's progress counter; serializing
+        # it keeps that counter monotonic when batches finish out of order.
+        hook_lock = asyncio.Lock()
+
+        async def dispatch(index: int, batch: list[str]) -> None:
             payload = await self._post_with_retry(
                 base_url=material.base_url,
                 api_key=material.api_key,
@@ -107,16 +145,60 @@ class KnowledgeModelClient:
                 failure_code=KNOWLEDGE_EMBEDDING_FAILED,
                 batch_guard=batch_guard,
             )
-            vectors.extend(
-                _validated_embedding_batch(
-                    payload,
-                    batch_size=len(batch),
-                    dimension=material.dimension,
-                )
+            results[index] = _validated_embedding_batch(
+                payload,
+                batch_size=len(batch),
+                dimension=material.dimension,
             )
             if on_batch_verified is not None:
-                await on_batch_verified(len(batch))
+                async with hook_lock:
+                    await on_batch_verified(len(batch))
+
+        if self._embed_concurrency == 1 or len(batches) == 1:
+            for index, batch in enumerate(batches):
+                await dispatch(index, batch)
+        else:
+            await self._dispatch_bounded(dispatch, batches)
+        vectors: list[list[float]] = []
+        for result in results:
+            assert result is not None  # every batch either validated or raised
+            vectors.extend(result)
         return vectors
+
+    async def _dispatch_bounded(
+        self,
+        dispatch: Callable[[int, list[str]], Awaitable[None]],
+        batches: list[list[str]],
+    ) -> None:
+        """Run ``dispatch`` for every batch under the concurrency bound.
+
+        Batches start in input order. The first failure cancels every batch
+        that has not finished and re-raises after they settle, so a revoked
+        guard or Provider error never leaves detached requests behind.
+        """
+
+        semaphore = asyncio.Semaphore(self._embed_concurrency)
+
+        async def guarded(index: int, batch: list[str]) -> None:
+            async with semaphore:
+                await dispatch(index, batch)
+
+        tasks = [asyncio.create_task(guarded(index, batch)) for index, batch in enumerate(batches)]
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            failed = next((task for task in done if not task.cancelled() and task.exception() is not None), None)
+            if failed is not None:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                failed.result()
+            if pending:
+                await asyncio.gather(*pending)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def rerank(
         self,
@@ -220,7 +302,9 @@ class KnowledgeModelClient:
 
         ``batch_guard`` runs before each attempt — the initial dispatch and
         the internal retry — so a revoked authority or lost lease stops the
-        request instead of spending another provider call.
+        request instead of spending another provider call. The retry waits
+        first (``Retry-After`` when the Provider sent one, otherwise a
+        jittered base delay) instead of hammering a rate-limited endpoint.
         """
 
         url = base_url.rstrip("/") + path
@@ -233,10 +317,12 @@ class KnowledgeModelClient:
                 response = await self._http.post(url, json=body, headers=headers, timeout=timeout)
             except httpx.HTTPError:
                 if attempt == 1:
+                    await self._sleep(_retry_delay(None))
                     continue
                 raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "无法连接模型服务或请求超时") from None
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt == 1:
+                    await self._sleep(_retry_delay(response.headers.get("Retry-After")))
                     continue
                 raise KnowledgeError(failure_code, f"模型服务返回 HTTP {response.status_code}")
             if response.status_code >= 400:
@@ -246,6 +332,19 @@ class KnowledgeModelClient:
             except ValueError:
                 raise KnowledgeError(failure_code, "模型服务返回了无法解析的响应") from None
         raise KnowledgeError(failure_code, "模型服务请求未完成")
+
+
+def _retry_delay(retry_after: str | None) -> float:
+    """Seconds to wait before the retry: a sane ``Retry-After`` or jittered base."""
+
+    if retry_after is not None:
+        try:
+            seconds = float(retry_after.strip())
+        except ValueError:
+            seconds = math.nan
+        if math.isfinite(seconds) and seconds >= 0:
+            return min(seconds, RETRY_AFTER_CAP_SECONDS)
+    return RETRY_BASE_DELAY_SECONDS * random.uniform(0.5, 1.5)  # noqa: S311 - jitter, not security
 
 
 def _validated_embedding_batch(

@@ -35,6 +35,7 @@ from .contracts import (
     KnowledgeModelPort,
     KnowledgeQueryView,
     KnowledgeRebuildResult,
+    KnowledgeRelexResult,
     KnowledgeReparsePreview,
     KnowledgeReparseRequest,
     KnowledgeSearchRequest,
@@ -54,6 +55,7 @@ from .ingestion import (
     preview_document_chunks,
 )
 from .ingestion.profiles import FileCapabilities, required_file_formats_ready
+from .ingestion.relex import KnowledgeRelexHandler
 from .ingestion.summarize import KnowledgeSummarizeHandler
 from .metadata import KnowledgeMetadataService
 from .models import KnowledgeModelClient
@@ -76,6 +78,10 @@ from .tasks import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Embedding batches of one indexing call in flight at once (per call, not per
+# process). Each batch still runs its own claim/authority guard first.
+EMBEDDING_BATCH_CONCURRENCY = 4
 
 
 def create_knowledge_module(
@@ -131,7 +137,10 @@ class KnowledgeModule:
         self._preview_parser_slots = ParserSlots(1)
         # Injectable for integration tests (e.g. an httpx.MockTransport-backed
         # client); production hosts leave it None and the module owns one.
-        self._model_client = model_client or KnowledgeModelClient()
+        # Ingest/re-embed calls carry many batches; overlapping a bounded
+        # number of them keeps a 5000-entry document from serializing 150+
+        # Provider round-trips.
+        self._model_client = model_client or KnowledgeModelClient(embed_concurrency=EMBEDDING_BATCH_CONCURRENCY)
         self._base_service = KnowledgeBaseService(
             session_factory=session_factory,
             settings=settings,
@@ -309,6 +318,19 @@ class KnowledgeModule:
             project_id,
             base_id,
             embedding_model_id=embedding_model_id,
+            authority=authority,
+        )
+
+    async def relex_knowledge_base(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority,
+    ) -> KnowledgeRelexResult:
+        return await self._base_service.relex_knowledge_base(
+            project_id,
+            base_id,
             authority=authority,
         )
 
@@ -833,6 +855,12 @@ class KnowledgeModule:
                 session_factory=self._session_factory,
                 model_client=self._model_client,
                 model_port=self._model_port,
+                project_active_check=project_active_check,
+            ),
+            # Lexical re-derivation reads stored model text only: no object
+            # store, parser, or Provider access by construction.
+            "relex_document": KnowledgeRelexHandler(
+                session_factory=self._session_factory,
                 project_active_check=project_active_check,
             ),
             "delete_document": KnowledgeDocumentDeletionHandler(

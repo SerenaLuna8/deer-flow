@@ -29,6 +29,7 @@ function baseItem(index: number) {
     document_count: 0,
     default_top_k: 4,
     default_score_threshold: 0.2,
+    default_relative_cutoff: null,
     delete_error: null,
     created_at: "2026-08-30T00:00:00Z",
     updated_at: "2026-08-30T00:00:00Z",

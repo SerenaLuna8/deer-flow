@@ -18,6 +18,8 @@ whole segments only, an unfittable item is skipped and counted in
 ``omitted_count`` while later items still try. This is a byte budget, not a
 token estimate — the final LLM request stays metered by the host's frozen
 Provider profile and capacity guard, and no second tokenizer is introduced.
+Passages are the persisted ``index_text`` (the text the retrieval models
+scored), not the escaped display Markdown.
 """
 
 from __future__ import annotations
@@ -46,7 +48,8 @@ KNOWLEDGE_METADATA_FIELDS_TOOL_NAME = "knowledge_metadata_fields"
 KNOWLEDGE_CITATIONS_KEY = "knowledge_citations"
 
 # Hard ceiling for the ToolMessage content (UTF-8 JSON bytes), passages and
-# structural overhead included. A legal 4000-character segment always fits.
+# structural overhead included. A legal segment (KNOWLEDGE_MAX_SEGMENT_CHARS =
+# 16000 characters, at most 48 KiB of UTF-8) always fits on its own.
 KNOWLEDGE_TOOL_MESSAGE_BYTE_BUDGET = 64 * 1024
 
 
@@ -90,13 +93,19 @@ def _citation_payload(citation: KnowledgeCitation) -> dict[str, Any]:
 
 
 def _item_payload(hit: KnowledgeSearchHit) -> dict[str, Any]:
-    """Model-readable item: the complete passage, never the 320-char quote."""
+    """Model-readable item: the complete passage, never the 320-char quote.
+
+    The passage is the segment's persisted ``index_text`` — the visible text
+    embedding and reranking scored, free of Markdown escapes and attachment
+    refs — so the model never sees ``user\\_id`` or ``knowledge-attachment:``
+    URIs. The Markdown ``content`` stays with the UI through the citation.
+    """
 
     citation = hit.citation
     return {
         "knowledge_base_name": citation.knowledge_base_name,
         "document_name": citation.document_name,
-        "passage": hit.passage,
+        "passage": hit.model_text or hit.passage,
         "score": citation.score,
         "source_position": dict(citation.source_position),
     }
@@ -152,6 +161,7 @@ def create_knowledge_search_tool(
         tool_call_id: Annotated[str, InjectedToolCallId],
         top_k: int | None = None,
         metadata_filters: list[dict[str, Any]] | None = None,
+        knowledge_base_ids: list[str] | None = None,
     ) -> Command:
         """Search this project's knowledge bases and return the best matching passages.
 
@@ -177,14 +187,36 @@ def create_knowledge_search_tool(
                 the knowledge_metadata_fields tool; builtin read-only fields
                 are document_name, uploaded_at, file_type and source_type.
                 Time fields compare as epoch seconds.
+            knowledge_base_ids: Optional knowledge base UUIDs to search
+                instead of every base of the project. Use it when the
+                project has several bases on different topics; discover
+                their ids, names and descriptions with the
+                knowledge_metadata_fields tool. Omit to search all bases.
         """
 
+        base_ids: tuple[UUID, ...] | None = None
+        if knowledge_base_ids is not None:
+            try:
+                base_ids = tuple(UUID(str(item)) for item in knowledge_base_ids)
+            except (ValueError, TypeError):
+                return Command(
+                    update={
+                        "messages": [
+                            ToolMessage(
+                                f"Error: {KNOWLEDGE_INVALID_REQUEST}: knowledge_base_ids 必须是有效的 UUID 列表",
+                                tool_call_id=tool_call_id,
+                                status="error",
+                            )
+                        ]
+                    },
+                )
         try:
             result = await module.search(
                 KnowledgeSearchRequest(
                     project_id=project_id,
                     owner_user_id=owner_user_id,
                     query=query,
+                    knowledge_base_ids=base_ids,
                     top_k=top_k,
                     source="agent",
                     metadata_filters=_parsed_metadata_filters(metadata_filters),
@@ -246,6 +278,8 @@ def _filter_fields_payload(bases: list[KnowledgeBaseFilterFields]) -> str:
             "bases": [
                 {
                     "knowledge_base_id": str(entry.knowledge_base_id),
+                    "name": entry.knowledge_base_name,
+                    "description": entry.description,
                     "fields": [
                         {
                             "kind": field.kind,
@@ -283,11 +317,13 @@ def create_knowledge_metadata_fields_tool(
         tool_call_id: Annotated[str, InjectedToolCallId],
         knowledge_base_ids: list[str] | None = None,
     ) -> Command:
-        """List the metadata fields usable in knowledge_search metadata_filters.
+        """List this project's knowledge bases and the metadata fields usable in knowledge_search.
 
-        Returns each knowledge base's filterable field definitions: builtin
-        read-only fields (document_name, uploaded_at, file_type, source_type)
-        plus the project-defined custom fields, with their types and allowed
+        Returns each active knowledge base's id, name and description (use
+        them to choose knowledge_base_ids for a scoped knowledge_search) plus
+        its filterable field definitions: builtin read-only fields
+        (document_name, uploaded_at, file_type, source_type) and the
+        project-defined custom fields, with their types and allowed
         operators. Field values are never included. If the project has too
         many bases for one call, the error asks you to narrow the scope —
         pass knowledge_base_ids to do so.

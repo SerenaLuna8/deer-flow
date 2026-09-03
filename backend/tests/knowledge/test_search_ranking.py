@@ -146,7 +146,9 @@ async def test_a_large_base_cannot_starve_a_small_base_out_of_recall(postgres_da
         assert diagnostics.counts.semantic_candidates == 21  # 20 capped + 1
         assert diagnostics.counts.returned == 1
         [(_, _, submitted, _)] = harness.client.rerank_calls
-        assert len(submitted) == 21
+        # Recall keeps 20 + 1 parents, but the reranker input budget for
+        # top_k=1 is min(100, 10) split across two bases: 5 + 1 passages.
+        assert len(submitted) == 6
         assert "小库黑马段落" in submitted
     finally:
         await harness.engine.dispose()
@@ -431,9 +433,10 @@ async def test_rebinding_an_unmatched_target_base_mid_search_still_conflicts(pos
 
 
 @pytest.mark.asyncio
-async def test_rebinding_between_rerank_batches_stops_undispatched_batches(postgres_database_url: str) -> None:
-    """The pre-dispatch guard re-checks the strategy snapshot: a rebinding
-    after batch one conflicts before batch two ever reaches the provider."""
+async def test_rebinding_between_rerank_batches_conflicts_at_the_final_review(postgres_database_url: str) -> None:
+    """One rerank call shares a single pre-dispatch strategy check; a
+    rebinding that lands between its batches is caught by the final review
+    and the search fails with a conflict instead of mixing two strategies."""
 
     engine = create_async_engine(postgres_database_url)
     client: KnowledgeModelClient | None = None
@@ -463,8 +466,8 @@ async def test_rebinding_between_rerank_batches_stops_undispatched_batches(postg
                     json={"data": [{"index": index, "embedding": [1.0, 0.0, 0.0]} for index in range(len(payload["input"]))]},
                 )
             rerank_requests.append(payload)
-            # Rebind after serving this batch; the next batch's guard must
-            # conflict before dispatching.
+            # Rebind after serving this batch; the final review must refuse
+            # to return scores computed under the replaced strategy.
             async with factory() as session, session.begin():
                 _, other_rerank = await _seed_models(session)
                 row = await session.get(KnowledgeBaseRow, base_id)
@@ -482,7 +485,7 @@ async def test_rebinding_between_rerank_batches_stops_undispatched_batches(postg
             await service.search(_request(project_id, top_k=2))
 
         assert error.value.code == KNOWLEDGE_CONFLICT
-        assert len(rerank_requests) == 1  # batch two was never dispatched
+        assert len(rerank_requests) == 2  # both batches ran under one pre-dispatch check
     finally:
         if client is not None:
             await client.aclose()

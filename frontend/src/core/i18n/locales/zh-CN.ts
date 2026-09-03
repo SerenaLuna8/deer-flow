@@ -474,6 +474,7 @@ export const zhCN: Translations = {
           ingest_document: "摄取",
           reembed_document: "重嵌入",
           summarize_document: "生成摘要",
+          relex_document: "重建词法索引",
         },
         stages: {
           queued: "排队中",
@@ -667,6 +668,9 @@ export const zhCN: Translations = {
         lexicalCandidates: "词法候选",
         parentsDeduplicated: "父段去重后",
         thresholdFiltered: "阈值淘汰",
+        relativeFiltered: "相对截断淘汰",
+        lexicalThresholdExempt: "词法证据免除阈值",
+        lexicalQueryTokens: "词法查询词元",
         staleFiltered: "过期剔除",
         returned: "最终返回",
         embeddingMs: "查询向量化",
@@ -675,6 +679,8 @@ export const zhCN: Translations = {
         finalValidationMs: "最终复核",
         heterogeneousWarning:
           "异构分数域且无词法证据：仅按各域内名次融合排序。",
+        lexicalQueryTruncatedWarning: (kept) =>
+          `检索文本过长，词法路只使用了前 ${kept} 个去重词元；向量路不受影响。`,
       },
       hitDiagnosticsSummary: "命中诊断",
       matchedVia: { segment: "原文分段", child: "子块", summary: "摘要" },

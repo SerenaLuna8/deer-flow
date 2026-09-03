@@ -287,6 +287,8 @@ export const knowledgeBaseItemSchema = z
     document_count: z.number().int(),
     default_top_k: z.number().int(),
     default_score_threshold: z.number(),
+    /** Fraction (0, 1] of the base's best native score; null disables the cut. */
+    default_relative_cutoff: z.number().nullable(),
     delete_error: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),
@@ -369,7 +371,12 @@ export type KnowledgeTaskStage = z.infer<typeof knowledgeTaskStageSchema>;
  */
 export const knowledgeTaskProgressSchema = z
   .object({
-    kind: z.enum(["ingest_document", "reembed_document", "summarize_document"]),
+    kind: z.enum([
+      "ingest_document",
+      "reembed_document",
+      "summarize_document",
+      "relex_document",
+    ]),
     status: z.enum(["queued", "running", "retry_wait", "failed"]),
     stage: knowledgeTaskStageSchema,
     completed_units: z.number().int().nonnegative(),
@@ -625,6 +632,8 @@ export const knowledgeSearchDiagnosticsSchema = z
         query_embedding_cache_misses: z.number().int(),
         parents_deduplicated: z.number().int(),
         threshold_filtered: z.number().int(),
+        relative_filtered: z.number().int(),
+        lexical_threshold_exempt: z.number().int(),
         stale_filtered: z.number().int(),
         returned: z.number().int(),
       })
@@ -643,6 +652,8 @@ export const knowledgeSearchDiagnosticsSchema = z
       .enum(["not_ready", "no_candidates", "filtered_out", "stale_candidates"])
       .nullable(),
     heterogeneous_without_lexical_evidence: z.boolean(),
+    lexical_query_token_count: z.number().int(),
+    lexical_query_truncated: z.boolean(),
     hit_diagnostics: z.array(knowledgeHitDiagnosticsSchema),
   })
   .strict();
@@ -733,6 +744,9 @@ export type UpdateKnowledgeBaseInput = {
   status?: "active" | "disabled";
   default_top_k?: number;
   default_score_threshold?: number;
+  /** Relative cutoff in (0, 1], or clear it to switch the cut off. */
+  default_relative_cutoff?: number;
+  clear_relative_cutoff?: boolean;
   /** Rebind the optional reranker, or clear the binding entirely. */
   reranker_model_id?: string;
   clear_reranker_model?: boolean;

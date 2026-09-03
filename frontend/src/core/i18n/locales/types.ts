@@ -421,6 +421,7 @@ export interface Translations {
           ingest_document: string;
           reembed_document: string;
           summarize_document: string;
+          relex_document: string;
         };
         stages: {
           queued: string;
@@ -606,6 +607,9 @@ export interface Translations {
         queryCacheMisses: string;
         parentsDeduplicated: string;
         thresholdFiltered: string;
+        relativeFiltered: string;
+        lexicalThresholdExempt: string;
+        lexicalQueryTokens: string;
         staleFiltered: string;
         returned: string;
         embeddingMs: string;
@@ -613,6 +617,7 @@ export interface Translations {
         rerankMs: string;
         finalValidationMs: string;
         heterogeneousWarning: string;
+        lexicalQueryTruncatedWarning: (kept: number) => string;
       };
       hitDiagnosticsSummary: string;
       matchedVia: { segment: string; child: string; summary: string };

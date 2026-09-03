@@ -143,8 +143,12 @@ A Knowledge Base–scoped custom field definition typed as string, number, or ti
 _Avoid_: tag, label, free-form attribute
 
 **Knowledge Task**:
-A durable background work item for document ingestion, re-embedding, Segment Summary generation, or deletion.
+A durable background work item for document ingestion, re-embedding, Segment Summary generation, lexical re-derivation, or deletion.
 _Avoid_: Run, Job, fire-and-forget background task
+
+**Lexical Re-derivation**:
+The `relex_document` Knowledge Task that recomputes a published Document's lexical index (`lexical_tsv`, `lexical_version`) from its stored index text without reading the original file, re-parsing, or re-embedding. The Document stays ready and keeps its version.
+_Avoid_: reindex, reparse, rebuild
 
 **Knowledge Citation**:
 A reference to the Knowledge Base, Knowledge Document, and Knowledge Segment that supplied one search result.

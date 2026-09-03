@@ -227,7 +227,8 @@ async def preview_document_chunks(
                 guard=guard,
             )
         await guard()
-        drafts = await run_sync_to_completion(split_documents, result.documents, profile=profile.chunk)
+        split_warnings: list[ParseWarning] = []
+        drafts = await run_sync_to_completion(split_documents, result.documents, profile=profile.chunk, warnings=split_warnings)
         if not drafts:
             raise KnowledgeError(KNOWLEDGE_PARSE_FAILED, "文件没有可提取的文本")
         visible = drafts[:PREVIEW_CHUNK_LIMIT]
@@ -261,7 +262,7 @@ async def preview_document_chunks(
             ),
             source_sha256=result.source_sha256,
             effective_profile=profile,
-            warnings=_warnings(result.documents, result.warnings),
+            warnings=_warnings(result.documents, (*result.warnings, *split_warnings)),
             preview_attachments=tuple(KnowledgePreviewAttachment(**item) for item in projected),
             omitted_preview_attachment_count=omitted,
             table_sources=_table_sources(result.documents, profile.parse.header_rules, extension),

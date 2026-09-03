@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import pytest
+from actweave_knowledge.contracts import KNOWLEDGE_MAX_SEGMENT_CHARS
 from actweave_knowledge.extraction.contracts import AttachmentOccurrence, Document, ExtractionError, SourceSpan
 from actweave_knowledge.ingestion import splitter
 from actweave_knowledge.ingestion.tokenizer import count_knowledge_tokens
 from parsing_test_helpers import make_chunk_profile, make_document
 
 
-def split(documents, **overrides):
+def split(documents, warnings=None, **overrides):
     assert hasattr(splitter, "split_documents"), "structured splitting entry point is missing"
-    return splitter.split_documents(tuple(documents), profile=make_chunk_profile(**overrides))
+    return splitter.split_documents(tuple(documents), profile=make_chunk_profile(**overrides), warnings=warnings)
 
 
 def assert_budgets(drafts, size=200, child_size=100):
@@ -19,7 +20,7 @@ def assert_budgets(drafts, size=200, child_size=100):
     assert [d.position for d in drafts] == list(range(1, len(drafts) + 1))
     for draft in drafts:
         for value, limit in [(draft, size), *((child, child_size) for child in draft.children)]:
-            assert len(value.content) <= 4000
+            assert len(value.content) <= KNOWLEDGE_MAX_SEGMENT_CHARS
             assert count_knowledge_tokens(value.content) <= limit
             assert count_knowledge_tokens(value.index_text) <= limit
             assert value.token_count == count_knowledge_tokens(value.index_text)
@@ -84,11 +85,54 @@ def test_heading_prefix_has_real_origin_and_shifts_body_offsets():
 
 
 @pytest.mark.parametrize("kind", ["heading", "table"])
-def test_required_prefix_cannot_fit_fails_finitely(kind):
+def test_required_prefix_over_budget_degrades_with_a_warning_instead_of_failing(kind):
+    """A heading path or table header wider than the chunk budget used to fail
+    the whole document. It now truncates the context prefix, keeps every body
+    row/paragraph, and reports one safe warning."""
+
     text = "# " + "标题" * 500 + "\n\n正文。" if kind == "heading" else "| " + "列名" * 500 + " |\n| --- |\n| 数据 |"
-    with pytest.raises(ExtractionError) as caught:
-        split([make_document(text)], size=200, overlap=0, child_size=100)
-    assert caught.value.reason_code == "CONTEXT_PREFIX_EXCEEDS_BUDGET"
+    warnings: list = []
+    drafts = split([make_document(text)], warnings, size=200, overlap=0, child_size=100)
+    assert_budgets(drafts)
+    body = [d for d in drafts if ("正文" if kind == "heading" else "数据") in d.content]
+    assert len(body) == 1
+    # The body chunk keeps a shortened context prefix and at least half the
+    # budget for its own text; the heading/header text itself is not lost —
+    # it was emitted in full as ordinary chunks before the body.
+    assert count_knowledge_tokens(body[0].content) <= 200
+    marker = "标题" if kind == "heading" else "列名"
+    assert sum(d.content.count(marker) for d in drafts if d is not body[0]) == 500
+    assert [warning.code for warning in warnings] == ["OVERSIZED_PREFIX_SPLIT", "CONTEXT_PREFIX_TRUNCATED"]
+    assert warnings[0].source_position == {"paragraph": 1}
+
+
+def test_deep_heading_path_drops_top_levels_before_truncating():
+    """The leaf heading is the most specific context: outer levels go first
+    and the leaf survives intact when that alone fits."""
+
+    text = "# " + "总纲" * 120 + "\n\n## " + "章节" * 120 + "\n\n### 叶子标题\n\n" + "正文内容。" * 20
+    warnings: list = []
+    drafts = split([make_document(text)], warnings, size=200, overlap=0, child_size=100)
+    assert_budgets(drafts)
+    body = [d for d in drafts if "正文内容" in d.content]
+    assert body and all(d.content.startswith("### 叶子标题") for d in body)
+    assert all("总纲" not in d.content and "章节" not in d.content for d in body)
+    # Every heading's own text survives somewhere as source text.
+    source = "".join(d.content[s.start : s.end] for d in drafts for s in d.source_spans if s.role == "source")
+    assert source.count("总纲") == 120 and source.count("章节") == 120 and "叶子标题" in source
+    assert "CONTEXT_PREFIX_TRUNCATED" in [warning.code for warning in warnings]
+
+
+def test_prefix_warnings_reach_the_pipeline_sink_once_per_truncation():
+    text = "# " + "标题" * 500 + "\n\n" + "正文。" * 300
+    warnings: list = []
+    drafts = split([make_document(text)], warnings, size=200, overlap=0, child_size=100, mode="parent_child")
+    assert_budgets(drafts)
+    # Parents and their children share the degraded prefix; the sink dedupes
+    # identical warnings so the document reports each degradation once.
+    assert [warning.code for warning in warnings] == ["OVERSIZED_PREFIX_SPLIT", "CONTEXT_PREFIX_TRUNCATED"]
+    assert all(child.content for draft in drafts for child in draft.children)
+    assert sum(d.content.count("正文。") for d in drafts) == 300
 
 
 def test_display_budget_and_character_cap_are_independent_of_index_budget():
@@ -96,6 +140,33 @@ def test_display_budget_and_character_cap_are_independent_of_index_budget():
     drafts = split([make_document(text)], size=4000, overlap=0, child_size=500)
     assert_budgets(drafts, size=4000, child_size=500)
     assert sum(d.content.count("https://example.test/") for d in drafts) == 1
+
+
+def test_large_token_budgets_are_reachable_for_english_text():
+    """4000 tokens of English is ~16000 characters: the old 4000-character
+    ceiling silently capped every English chunk near 1000 tokens."""
+
+    text = "word " * 3000  # ~3000 tokens, 15000 characters
+    drafts = split([make_document(text.strip())], size=4000, overlap=0, child_size=500)
+    assert_budgets(drafts, size=4000, child_size=500)
+    assert len(drafts) == 1
+    assert len(drafts[0].content) > 4000
+
+
+def test_chinese_sentence_punctuation_is_a_split_boundary():
+    """Sentences ending in ！/？/； no longer fall through to space or
+    character cuts: every chunk ends on a sentence boundary."""
+
+    sentences = [f"第{i}句提醒请检查设备状态是否正常！" for i in range(40)]
+    text = "".join(sentences)
+    drafts = split([make_document(text)], size=200, overlap=0, child_size=100)
+    assert_budgets(drafts)
+    assert len(drafts) > 1
+    assert all(d.content.endswith("！") for d in drafts)
+    assert "".join(d.content for d in drafts) == text
+    questions = "".join(f"第{i}个问题是什么？" for i in range(60))
+    question_drafts = split([make_document(questions)], size=200, overlap=0, child_size=100)
+    assert len(question_drafts) > 1 and all(d.content.endswith("？") for d in question_drafts)
 
 
 def test_pdf_pages_and_tabular_data_rows_do_not_merge_or_overlap():
@@ -353,10 +424,24 @@ def test_vector_hard_limit_counts_children_separately_from_parents():
     assert caught.value.code == "KNOWLEDGE_QUOTA_EXCEEDED"
 
 
-def test_heading_without_body_cannot_be_truncated_into_plain_chunks():
+def test_heading_without_body_is_split_as_text_with_a_warning():
+    """A heading-only section wider than the budget is really a paragraph
+    marked as a heading: its text is kept in full across ordinary chunks."""
+
+    warnings: list = []
+    drafts = split([make_document("# " + "title " * 1000)], warnings, size=200, overlap=0, child_size=100)
+    assert_budgets(drafts)
+    assert sum(d.content.count("title") for d in drafts) == 1000
+    assert [warning.code for warning in warnings] == ["OVERSIZED_PREFIX_SPLIT"]
+
+
+def test_tiny_child_budget_still_fails_closed_when_nothing_fits():
+    """Degradation stops at the budget floor: an inline atom that cannot fit
+    on its own is still an explicit failure, never dropped text."""
+
     with pytest.raises(ExtractionError) as caught:
-        split([make_document("# " + "title " * 1000)], size=200, overlap=0, child_size=100)
-    assert caught.value.reason_code == "CONTEXT_PREFIX_EXCEEDS_BUDGET"
+        split([make_document("[label](https://example.test/" + "y" * 3000 + ")")], size=200, overlap=0, child_size=100)
+    assert caught.value.reason_code == "ATOMIC_CONTENT_EXCEEDS_BUDGET"
 
 
 def test_marked_table_header_without_rows_preserves_source():

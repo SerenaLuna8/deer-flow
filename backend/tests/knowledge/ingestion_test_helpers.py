@@ -46,7 +46,7 @@ class FakeModelClient:
         self.blocker: asyncio.Event | None = None
         self.fail = False
 
-    async def embed(self, material, texts: list[str], *, batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
+    async def embed(self, material, texts: list[str], *, kind="passage", batch_guard=None, on_batch_verified=None) -> list[list[float]]:  # noqa: ANN001
         del material
         if batch_guard is not None:
             await batch_guard()

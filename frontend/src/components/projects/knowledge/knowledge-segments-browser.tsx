@@ -63,8 +63,8 @@ import type { KnowledgeImageSource } from "./knowledge-image";
 import { KnowledgeMarkdown } from "./knowledge-markdown";
 import { KnowledgeSummaryBlock } from "./knowledge-summary-block";
 
-/** Mirrors the backend's segment content ceiling (splitter's largest chunk). */
-const MAX_SEGMENT_CONTENT_CHARS = 4000;
+/** Mirrors the backend's `KNOWLEDGE_MAX_SEGMENT_CHARS` segment content ceiling. */
+const MAX_SEGMENT_CONTENT_CHARS = 16000;
 
 const EMPTY_KNOWLEDGE_IMAGE_SOURCES: ReadonlyMap<string, KnowledgeImageSource> =
   new Map();

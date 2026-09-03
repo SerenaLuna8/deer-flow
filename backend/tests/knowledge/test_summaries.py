@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 from actweave_knowledge import KNOWLEDGE_MODEL_UNAVAILABLE, KNOWLEDGE_TASK_FAILED, KnowledgeError
 from actweave_knowledge.extraction.contracts import ProcessingProfile
-from actweave_knowledge.ingestion.summarize import KNOWLEDGE_SUMMARY_PROMPT_V1, KnowledgeSummarizeHandler, source_content_digest
+from actweave_knowledge.ingestion.summarize import KNOWLEDGE_SUMMARY_PROMPT_V1, SUMMARY_PUBLISH_BATCH, KnowledgeSummarizeHandler, source_content_digest
 from actweave_knowledge.models import KnowledgeModelClient
 from actweave_knowledge.persistence.models import KnowledgeBaseRow, KnowledgeDocumentRow, KnowledgeSegmentRow, KnowledgeSegmentSummaryRow, KnowledgeTaskRow
 from actweave_knowledge.persistence.tasks import claim_next_task, recover_expired_tasks, settle_task_failure
@@ -350,6 +350,38 @@ async def test_expired_lease_stops_remaining_llm_calls_and_recovers_without_docu
         assert await recover_expired_tasks(session) == 1
     async with harness.factory() as session:
         assert (await session.get(KnowledgeDocumentRow, harness.document_id)).status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_summaries_publish_in_batches_so_a_late_failure_keeps_finished_work(harness):
+    """A long document no longer holds every generated summary until the end:
+    each ``SUMMARY_PUBLISH_BATCH`` block is embedded and published under the
+    lease, so a Provider failure at summary 23 leaves the first 20 durable and
+    the retry only generates the remaining 5."""
+
+    assert SUMMARY_PUBLISH_BATCH == 20
+    contents = [f"{index:02d}" + "段" * 210 for index in range(25)]
+    claim = await harness.seed(contents)
+
+    async def fail_late(count):
+        if count == 23:
+            raise KnowledgeError(KNOWLEDGE_TASK_FAILED, "摘要生成失败")
+
+    harness.port.on_call = fail_late
+    with pytest.raises(KnowledgeError):
+        await harness.handler()(claim)
+    assert len(await harness.summaries()) == 20
+    assert len(harness.port.calls) == 23
+    # Progress showed the cumulative count across batches, never reset to 0.
+    assert harness.port.observed[20] == ("summarizing", 20, 25)
+
+    harness.port.on_call = None
+    async with harness.factory() as session, session.begin():
+        await session.execute(update(KnowledgeTaskRow).values(status="queued", claim_token=None, lease_until=None))
+    await harness.handler()(await harness.claim_existing())
+    assert len(await harness.summaries()) == 25
+    assert len(harness.port.calls) == 28  # 23 + the 5 still missing
+    assert (await harness.progress())[0] == "done"
 
 
 @pytest.mark.asyncio

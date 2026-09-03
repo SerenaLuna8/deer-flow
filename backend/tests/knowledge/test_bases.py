@@ -680,6 +680,37 @@ async def test_update_retrieval_defaults_round_trip_and_validate(postgres_databa
 
 
 @pytest.mark.asyncio
+async def test_update_relative_cutoff_is_tri_state_and_bounded(postgres_database_url: str) -> None:
+    """The relative cutoff defaults off (NULL), sets in (0, 1], clears
+    explicitly, and rejects a set-and-clear request."""
+
+    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
+    try:
+        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="相对阈值库", embedding_model_id=embedding_model_id))
+        assert created.default_relative_cutoff is None
+
+        updated = await harness.service.update_knowledge_base(project_id, created.id, KnowledgeBaseUpdate(default_relative_cutoff=0.6))
+        assert updated.base.default_relative_cutoff == 0.6
+        edge = await harness.service.update_knowledge_base(project_id, created.id, KnowledgeBaseUpdate(default_relative_cutoff=1))
+        assert edge.base.default_relative_cutoff == 1.0
+
+        for update in (
+            KnowledgeBaseUpdate(default_relative_cutoff=0.0),
+            KnowledgeBaseUpdate(default_relative_cutoff=1.01),
+            KnowledgeBaseUpdate(default_relative_cutoff=0.5, clear_relative_cutoff=True),
+        ):
+            with pytest.raises(KnowledgeError) as error:
+                await harness.service.update_knowledge_base(project_id, created.id, update)
+            assert error.value.code == KNOWLEDGE_INVALID_REQUEST
+        assert (await harness.service.get_knowledge_base(project_id, created.id)).default_relative_cutoff == 1.0
+
+        cleared = await harness.service.update_knowledge_base(project_id, created.id, KnowledgeBaseUpdate(clear_relative_cutoff=True))
+        assert cleared.base.default_relative_cutoff is None
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_update_rejects_name_conflicts_missing_bases_and_bad_status(postgres_database_url: str) -> None:
     harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
     try:

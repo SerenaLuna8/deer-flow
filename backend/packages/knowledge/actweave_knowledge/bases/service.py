@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..authority import KnowledgeProjectAuthority, revalidate_project_authority
 from ..contracts import (
     KNOWLEDGE_INVALID_REQUEST,
+    KNOWLEDGE_LEXICAL_VERSION,
     KNOWLEDGE_MAX_TOP_K,
     KNOWLEDGE_MODEL_UNAVAILABLE,
     KNOWLEDGE_NAME_CONFLICT,
@@ -32,6 +33,7 @@ from ..contracts import (
     KnowledgeError,
     KnowledgeModelPort,
     KnowledgeRebuildResult,
+    KnowledgeRelexResult,
     KnowledgeSettings,
     KnowledgeSummaryBackfill,
 )
@@ -39,6 +41,8 @@ from ..persistence.derivations import delete_error_expression, document_count_ex
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
+    KnowledgeSegmentChildRow,
+    KnowledgeSegmentRow,
     KnowledgeTaskRow,
 )
 from ..persistence.tasks import TASK_OPEN_STATUSES, VERSIONED_TASK_KINDS
@@ -107,6 +111,7 @@ def _view(row: KnowledgeBaseRow, *, document_count: int, delete_error: str | Non
         delete_error=delete_error,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        default_relative_cutoff=row.default_relative_cutoff,
     )
 
 
@@ -279,6 +284,15 @@ class KnowledgeBaseService:
             if type(threshold) not in (int, float) or not 0 <= float(threshold) <= 1:
                 raise _invalid("default_score_threshold 必须在 0..1 之间")
             changes["default_score_threshold"] = float(threshold)
+        if update.default_relative_cutoff is not None and update.clear_relative_cutoff:
+            raise _invalid("default_relative_cutoff 与 clear_relative_cutoff 不能同时设置")
+        if update.default_relative_cutoff is not None:
+            cutoff = update.default_relative_cutoff
+            if type(cutoff) not in (int, float) or not 0 < float(cutoff) <= 1:
+                raise _invalid("default_relative_cutoff 必须在 (0, 1] 之间")
+            changes["default_relative_cutoff"] = float(cutoff)
+        elif update.clear_relative_cutoff:
+            changes["default_relative_cutoff"] = None
         if update.retrieval_mode is not None:
             if update.retrieval_mode not in ("semantic", "hybrid"):
                 raise _invalid("retrieval_mode 只能是 semantic 或 hybrid")
@@ -473,6 +487,105 @@ class KnowledgeBaseService:
             # The RESTRICT foreign key caught a model deleted between the
             # binding lock and the commit.
             raise KnowledgeError(KNOWLEDGE_MODEL_UNAVAILABLE, "检索模型不存在或已停用") from None
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            raise _storage_unavailable() from None
+
+    async def relex_knowledge_base(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> KnowledgeRelexResult:
+        """Queue lexical re-derivation for every stale published document.
+
+        Unlike rebuild, this touches neither models nor vectors and never
+        takes a document out of ``ready``: the Worker's ``relex_document``
+        handler rewrites ``lexical_tsv``/``lexical_version`` from the stored
+        model text under the document's current version. Documents already on
+        the current derivation are counted, not queued; documents that are not
+        ready/published or already hold an open indexing task are skipped and
+        reported so the caller can re-run later.
+        """
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(
+                    authority,
+                    session,
+                    project_id=project_id,
+                )
+                row = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id).with_for_update(read=True))
+                if row is None:
+                    raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
+                if row.status == "deleting":
+                    raise _invalid("Knowledge Base 正在删除，不能重建词法索引")
+                documents = (await session.scalars(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == base_id).order_by(KnowledgeDocumentRow.id).with_for_update())).all()
+                document_ids = [document.id for document in documents]
+                busy: set[UUID] = set()
+                stale: set[UUID] = set()
+                if document_ids:
+                    busy = set(
+                        (
+                            await session.scalars(
+                                select(KnowledgeTaskRow.resource_id).where(
+                                    KnowledgeTaskRow.resource_id.in_(document_ids),
+                                    KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS),
+                                    KnowledgeTaskRow.status.in_(TASK_OPEN_STATUSES),
+                                )
+                            )
+                        ).all()
+                    )
+                    # Only current-generation rows matter: older generations
+                    # are maintenance evidence and never enter recall.
+                    stale_segments = (
+                        select(KnowledgeSegmentRow.knowledge_document_id)
+                        .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentRow.knowledge_document_id)
+                        .where(
+                            KnowledgeSegmentRow.knowledge_document_id.in_(document_ids),
+                            KnowledgeSegmentRow.document_version == KnowledgeDocumentRow.version,
+                            KnowledgeSegmentRow.lexical_version != KNOWLEDGE_LEXICAL_VERSION,
+                        )
+                    )
+                    stale_children = (
+                        select(KnowledgeSegmentChildRow.knowledge_document_id)
+                        .join(KnowledgeDocumentRow, KnowledgeDocumentRow.id == KnowledgeSegmentChildRow.knowledge_document_id)
+                        .where(
+                            KnowledgeSegmentChildRow.knowledge_document_id.in_(document_ids),
+                            KnowledgeSegmentChildRow.document_version == KnowledgeDocumentRow.version,
+                            KnowledgeSegmentChildRow.lexical_version != KNOWLEDGE_LEXICAL_VERSION,
+                        )
+                    )
+                    stale = set((await session.scalars(stale_segments.union(stale_children))).all())
+                accepted = 0
+                up_to_date = 0
+                skipped: list[UUID] = []
+                for document in documents:
+                    if document.status != "ready" or document.published_version != document.version or document.id in busy:
+                        skipped.append(document.id)
+                        continue
+                    if document.id not in stale:
+                        up_to_date += 1
+                        continue
+                    session.add(
+                        KnowledgeTaskRow(
+                            id=uuid4(),
+                            project_id=project_id,
+                            resource_id=document.id,
+                            kind="relex_document",
+                            target_version=document.version,
+                            status="queued",
+                        )
+                    )
+                    accepted += 1
+                await session.flush()
+                return KnowledgeRelexResult(
+                    accepted_document_count=accepted,
+                    up_to_date_document_count=up_to_date,
+                    skipped_document_ids=tuple(skipped),
+                )
         except KnowledgeError:
             raise
         except SQLAlchemyError:

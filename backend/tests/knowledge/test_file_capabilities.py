@@ -20,7 +20,7 @@ def test_capabilities_report_registered_optional_dependencies_without_fallback()
     assert msg.available is False and msg.parser_id == "unstructured.msg"
     assert msg.reason_code == "PARSER_DEPENDENCY_UNAVAILABLE"
     assert next(item for item in capability.formats if item.extension == ".pdf").available is True
-    assert capability.chunk_limits.parent_max_chars == 4000
+    assert capability.chunk_limits.parent_max_chars == 16000
     assert len(capability.capability_revision) == 64
 
 

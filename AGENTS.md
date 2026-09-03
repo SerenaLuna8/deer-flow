@@ -44,16 +44,17 @@ run as host processes.
 
 ## Ownership map
 
-| Path                        | Owner                                                             |
-| --------------------------- | ----------------------------------------------------------------- |
-| `backend/app/`              | Gateway, Worker, Scheduler, and application domains               |
-| `backend/packages/harness/` | Agent harness, tools, sandbox, and persistence primitives         |
-| `frontend/`                 | Next.js application and browser tests                             |
-| `nginx/`                    | Local Nginx entry configuration                                   |
-| `sandbox/`                  | Optional Sandbox Provisioner                                      |
-| `skills/public/`            | Sole source of packaged System Skill definitions                  |
-| `scripts/`                  | Setup, diagnostics, local runtime, and Sandbox helpers            |
-| `config.example.yaml`       | Root runtime configuration template                               |
+| Path                          | Owner                                                     |
+| ----------------------------- | --------------------------------------------------------- |
+| `backend/app/`                | Gateway, Worker, Scheduler, and application domains       |
+| `backend/packages/harness/`   | Agent harness, tools, sandbox, and persistence primitives |
+| `backend/packages/knowledge/` | Optional host-agnostic RAG Knowledge module               |
+| `frontend/`                   | Next.js application and browser tests                     |
+| `nginx/`                      | Local Nginx entry configuration                           |
+| `sandbox/`                    | Optional Sandbox Provisioner                              |
+| `skills/public/`              | Sole source of packaged System Skill definitions          |
+| `scripts/`                    | Setup, diagnostics, local runtime, and Sandbox helpers    |
+| `config.example.yaml`         | Root runtime configuration template                       |
 
 Runtime configuration is resolved from the repository-root `config.yaml` (or an
 explicit `ACT_WEAVE_CONFIG_PATH`). PostgreSQL is the authority for application
@@ -61,20 +62,18 @@ metadata, project/private state, jobs, streams, checkpoints, audit, and governed
 asset versions. System model, runtime, authentication, Memory-template, and
 quota policies are administered in PostgreSQL, not duplicated in YAML.
 
-Schema V1 installation and future forward upgrades are explicit operator
-actions. The runtime never creates, stamps, upgrades, or repairs the application
-schema; see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
-
 ## Command boundaries
 
 - Run whole-application commands from the repository root; use `make help` as
   the current command index.
 - Run backend targets from `backend/` and frontend targets from `frontend/`, for
   example `make lint` and `pnpm check`.
-- Treat `make setup-db`, `make upgrade-db`, and `make upgrade-system-assets` as
-  explicit operator actions, not runtime startup steps. Schema upgrades are
-  forward-only maintenance-window actions; use `make check-db` for read-only
-  database readiness evidence.
+- `make setup-db`, `make upgrade-db`, and `make upgrade-system-assets` are
+  explicit operator actions, never runtime startup steps. The runtime never
+  creates, stamps, upgrades, or repairs the application schema; schema upgrades
+  are forward-only maintenance-window actions, and `make check-db` is read-only
+  readiness evidence. See [backend/AGENTS.md](backend/AGENTS.md) before
+  changing persistence.
 
 ## Repository-wide rules
 
@@ -83,7 +82,8 @@ schema; see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
 - Preserve unrelated user changes in a dirty worktree. Never reset, restore,
   stage, commit, or push them without explicit authorization.
 - Update the user-facing `README.md` and the owning module guide when behavior or
-  architecture changes. Do not turn the root guide into a feature changelog.
+  architecture changes. Do not turn any guide into a feature changelog; feature
+  behavior is authoritative in code and focused tests.
 - Features and bug fixes require focused tests. Backend tests live under
   `backend/tests/`; frontend tests live under `frontend/tests/`.
 

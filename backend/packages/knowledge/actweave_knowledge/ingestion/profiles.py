@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..asyncio_utils import run_sync_to_completion
-from ..contracts import KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR, KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR, KnowledgeSettings
+from ..contracts import KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR, KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR, KNOWLEDGE_MAX_SEGMENT_CHARS, KnowledgeSettings
 from ..extraction.contracts import ChunkProfile, ExtractionError, ExtractionLimits, ExtractSetting, HeaderRule, LocalAttachment, ParseProfile, ProcessingProfile
 from ..extraction.registry import ExtractorRegistry, default_registry
 from ..extraction.runtime import run_extraction
@@ -22,7 +22,9 @@ from .tokenizer import TOKENIZER_PROFILE_ID, count_knowledge_tokens, tokenizer_f
 NORMALIZATION_VERSION = "md-v1"
 IMAGE_POLICY_VERSION = "raster-v1"
 CLEANER_VERSION = "cleaner-v1"
-SPLITTER_VERSION = "splitter-v1"
+# v2: 16000-character ceiling, sentence-final ！？ and clause ；， fallback
+# boundaries, degraded (never failing) over-budget context prefixes.
+SPLITTER_VERSION = "splitter-v2"
 
 
 class ProcessingParameters(BaseModel):
@@ -111,7 +113,7 @@ class FileChunkLimits(BaseModel):
     tokenizer_profile_id: str = TOKENIZER_PROFILE_ID
     parent_min: int = 200
     parent_max: int = 4000
-    parent_max_chars: int = 4000
+    parent_max_chars: int = KNOWLEDGE_MAX_SEGMENT_CHARS
     overlap_max: int = 500
     child_min: int = 100
     child_max: int = 2000

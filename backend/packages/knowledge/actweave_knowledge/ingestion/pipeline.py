@@ -121,14 +121,15 @@ def _source_sha256(path: Path, *, max_bytes: int) -> str:
     return digest.hexdigest()
 
 
-def _warnings(stored: StoredExtraction) -> list[dict[str, object]]:
-    """Project Extraction and per-Document warnings with preview ordering."""
+def _warnings(stored: StoredExtraction, split_warnings: tuple[ParseWarning, ...] = ()) -> list[dict[str, object]]:
+    """Project Extraction, per-Document, and splitting warnings with preview ordering."""
 
     result: list[dict[str, object]] = []
     seen: set[str] = set()
     candidates: tuple[ParseWarning, ...] = (
         *stored.result.warnings,
         *(warning for document in stored.result.documents for warning in document.warnings),
+        *split_warnings,
     )
     for warning in candidates:
         identity = warning.model_dump_json()
@@ -213,10 +214,12 @@ class KnowledgeIngestionHandler:
                 guard=progress.ensure_claim_alive,
             )
         await progress.ensure_claim_alive()
+        split_warnings: list[ParseWarning] = []
         drafts = await run_sync_to_completion(
             split_documents,
             stored.result.documents,
             profile=prepared.profile.chunk,
+            warnings=split_warnings,
         )
         if not drafts:
             raise ExtractionError("NO_INDEXABLE_TEXT", "文件没有可提取的文本")
@@ -255,6 +258,7 @@ class KnowledgeIngestionHandler:
                 drafts,
                 parent_vectors=None,
                 child_vectors=vectors,
+                split_warnings=tuple(split_warnings),
             )
             return
 
@@ -279,6 +283,7 @@ class KnowledgeIngestionHandler:
             drafts,
             parent_vectors=vectors,
             child_vectors=None,
+            split_warnings=tuple(split_warnings),
         )
 
     async def _extract_to_store(
@@ -452,6 +457,7 @@ class KnowledgeIngestionHandler:
         *,
         parent_vectors: list[list[float]] | None,
         child_vectors: list[list[float]] | None,
+        split_warnings: tuple[ParseWarning, ...] = (),
     ) -> None:
         """Atomically replace content, bindings, publication pointer and Task."""
 
@@ -645,7 +651,7 @@ class KnowledgeIngestionHandler:
                 document.remove_urls_emails = chunk.remove_urls_emails
                 document.parsing_profile = prepared.profile.model_dump(mode="json")
                 document.capability_revision = prepared.capability_revision
-                document.parse_warnings = _warnings(stored)
+                document.parse_warnings = _warnings(stored, split_warnings)
                 document.published_extraction_id = stored.extraction_id
                 document.status = "ready"
                 document.segment_count = len(drafts)

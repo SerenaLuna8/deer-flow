@@ -91,12 +91,13 @@ def _citation(*, position: int = 1, score: float = 0.91) -> KnowledgeCitation:
     )
 
 
-def _hit(citation: KnowledgeCitation, passage: str | None = None) -> KnowledgeSearchHit:
+def _hit(citation: KnowledgeCitation, passage: str | None = None, *, model_text: str | None = None) -> KnowledgeSearchHit:
     """Wrap a citation the way the retrieval service does since T1."""
     full_passage = passage if passage is not None else citation.snippet
     return KnowledgeSearchHit(
         citation=citation,
         passage=full_passage,
+        model_text=model_text if model_text is not None else full_passage,
         document_version=1,
         content_digest=hashlib.sha256(full_passage.encode("utf-8")).hexdigest(),
         local_score=citation.score,
@@ -144,6 +145,7 @@ async def _invoke(
     query: str,
     top_k: int | None = None,
     metadata_filters: list[object] | None = None,
+    knowledge_base_ids: list[object] | None = None,
     call_id: str = "call-1",
 ):
     """Invoke through the ToolCall form so InjectedToolCallId is exercised."""
@@ -152,6 +154,8 @@ async def _invoke(
         args["top_k"] = top_k
     if metadata_filters is not None:
         args["metadata_filters"] = metadata_filters
+    if knowledge_base_ids is not None:
+        args["knowledge_base_ids"] = knowledge_base_ids
     return await tool_obj.ainvoke(
         {
             "type": "tool_call",
@@ -192,8 +196,27 @@ class TestKnowledgeSearchTool:
         tool_obj = _search_tool(_FakeKnowledgeModule())
 
         assert tool_obj.name == KNOWLEDGE_SEARCH_TOOL_NAME
-        assert set(tool_obj.tool_call_schema.model_fields) == {"query", "top_k", "metadata_filters"}
+        assert set(tool_obj.tool_call_schema.model_fields) == {"query", "top_k", "metadata_filters", "knowledge_base_ids"}
         assert "project_id" not in json.dumps(tool_obj.args)
+
+    @pytest.mark.asyncio
+    async def test_knowledge_base_ids_scope_the_search_and_reject_bad_uuids(self) -> None:
+        """The model may narrow a search to bases it discovered; scope stays a
+        subset of the project the closure bound, never a project switch."""
+
+        module = _FakeKnowledgeModule(result=KnowledgeSearchResult(hits=(_hit(_citation()),)))
+        tool_obj = _search_tool(module)
+        base_id = uuid.UUID("bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb")
+
+        message = _tool_message(await _invoke(tool_obj, query="安装", knowledge_base_ids=[str(base_id)]))
+        assert message.status != "error"
+        assert module.requests[0].knowledge_base_ids == (base_id,)
+        assert module.requests[0].project_id == PROJECT_ID
+
+        error = _tool_message(await _invoke(tool_obj, query="安装", knowledge_base_ids=["不是UUID"]))
+        assert error.status == "error"
+        assert KNOWLEDGE_INVALID_REQUEST in error.content
+        assert len(module.requests) == 1
 
     @pytest.mark.asyncio
     async def test_success_returns_items_json_and_full_citations(self) -> None:
@@ -369,6 +392,30 @@ class TestKnowledgeSearchTool:
         assert payload["snippet"] == citation.snippet
 
     @pytest.mark.asyncio
+    async def test_items_send_the_model_text_not_the_escaped_markdown(self) -> None:
+        """PDF/Word text reaches the model without Markdown escapes or image
+        refs: the item passage is the persisted ``index_text``, while the
+        citation digest and snippet keep describing the stored Markdown."""
+
+        markdown = "字段 user\\_id 与 \\[1\\] 说明 ![图](knowledge-attachment:" + "a" * 64 + ")"
+        model_text = "字段 user_id 与 [1] 说明 图"
+        citation = _citation(position=1, score=0.9)
+        module = _FakeKnowledgeModule(result=KnowledgeSearchResult(hits=(_hit(citation, passage=markdown, model_text=model_text),)))
+        tool_obj = _search_tool(module)
+
+        message = _tool_message(await _invoke(tool_obj, query="user_id"))
+
+        body = json.loads(message.content)
+        [item] = body["items"]
+        assert item["passage"] == model_text
+        assert "\\_" not in item["passage"]
+        assert "knowledge-attachment:" not in item["passage"]
+        # The UI-facing citation is untouched: same short quote and digest.
+        [payload] = message.additional_kwargs[KNOWLEDGE_CITATIONS_KEY]
+        assert payload["snippet"] == citation.snippet
+        assert payload["content_digest"] == citation.content_digest
+
+    @pytest.mark.asyncio
     async def test_budget_skips_oversized_passages_and_reports_omissions(self) -> None:
         """Whole-passage packing: an unfittable item is skipped, later ones still try."""
 
@@ -462,6 +509,8 @@ def _filter_fields_fixture() -> list[KnowledgeBaseFilterFields]:
     return [
         KnowledgeBaseFilterFields(
             knowledge_base_id=_BASE_ID,
+            knowledge_base_name="产品手册",
+            description="面向客户的产品与安装文档",
             fields=(
                 KnowledgeFilterFieldView(kind="builtin", name="document_name", field_type="string", operators=("eq", "contains"), writable=False),
                 KnowledgeFilterFieldView(kind="custom", name="部门", field_type="string", operators=("eq", "contains"), writable=True),
@@ -523,6 +572,10 @@ class TestKnowledgeMetadataFieldsTool:
             "bases": [
                 {
                     "knowledge_base_id": str(_BASE_ID),
+                    # Name and description let the model pick knowledge_base_ids
+                    # for a scoped knowledge_search; still definitions only.
+                    "name": "产品手册",
+                    "description": "面向客户的产品与安装文档",
                     "fields": [
                         {"kind": "builtin", "name": "document_name", "field_type": "string", "operators": ["eq", "contains"], "writable": False},
                         {"kind": "custom", "name": "部门", "field_type": "string", "operators": ["eq", "contains"], "writable": True},

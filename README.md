@@ -174,9 +174,15 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   未配置空库在第二步设置 Embedding、检索方式及可选 Reranker，或提前在设置页配置；
   已配置知识库沿用现有模型与检索设置，多文件上传失败时仅重试失败文件；未配置的空库不参与检索。文档创建向导及设置页可保存检索模式，
   设置页可配置检索默认参数
-  （top_k 与分数阈值，检索测试与 Agent 工具未显式传参时生效）与检索模式
+  （top_k、分数阈值与可选的相对截断比例——低于本库最高原生分该比例的候选被淘汰，
+  检索测试与 Agent 工具未显式传参时生效）与检索模式
   （向量检索 `semantic` 或混合检索 `hybrid`：词法 `lexical_v1` 分词走 PostgreSQL tsvector/GIN 与
-  向量路 RRF 合并，检索测试可单次覆盖模式），检索自动记录
+  向量路 RRF 合并，检索测试可单次覆盖模式；查询侧只使用汉字二元组并过滤虚词/停用词，
+  过长查询截取前 128 个词元而不再报错；无 Reranker 时词法路命中不受 cosine 阈值淘汰，
+  精确编号/IP 等匹配得以返回；词法索引版本落后时可在设置页“重建词法索引”，
+  只从已存索引文本重算，不重新解析也不重嵌入），向量召回按维度使用 pgvector HNSW
+  部分索引并逐库取 top-C（常见维度 384/512/768/1024/1536 已建索引，其余维度顺序扫描），
+  Reranker 只接收各库召回顺序中预算内的候选，检索自动记录
   查询日志（含来源、命中数与最高分，检索测试页展示最近查询并可点击回填）
   并累计分段/文档命中次数；统计写入失败不影响已通过最终权限及内容验证的检索，
   检索期间实际使用的库级参数变化则返回冲突，要求重新检索。检索测试结果标注最终排名与分数来源
@@ -196,7 +202,9 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   确认后替换全部分段、覆盖人工编辑与启停），并可按库选配或解绑 Reranker
   模型（保存即生效，无需重建）；创建向导也可直接选择可选的 Reranker 模型，
   向量检索与混合检索均支持，不选择则沿用无重排序的流程。Agent `knowledge_search` 引用返回 64KiB
-  预算内的完整原文正文（超出以 `omitted_count` 记数），会话中的
+  预算内的完整索引文本正文（与 Embedding/Reranker 所见一致，不含 Markdown 转义与图片引用；
+  超出以 `omitted_count` 记数），可通过 `knowledge_base_ids` 限定库范围，
+  `knowledge_metadata_fields` 工具同时返回库的名称与描述供模型选库；会话中的
   最终回答下方展示知识库引用；管理员在 `/admin/settings/models` 的统一
   “模型供应商”页面维护供应商及其文本模型与 Embedding/Reranker 模型并做连接测试。
   知识库还可启用“摘要索引”：系统配置的文本 System Model 为长分段生成检索摘要，
@@ -208,6 +216,12 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   不跳过召回与终审的权限检查，诊断面板显示缓存命中、摘要候选和命中来源。
   RAG 文件解析的预览与 Worker 摄取共用本地 `extraction`、Knowledge Token
   分段和原子发布路径；处理结果保留来源位置、解析警告和受权图片绑定。
+  分段器 `splitter-v2`：父段字符上限 16000（Token 参数对英文/代码真正生效）、
+  回退边界补齐中英文句末与子句标点、超预算的标题路径/表头降级为截短的上下文前缀并给出
+  `CONTEXT_PREFIX_TRUNCATED` / `OVERSIZED_PREFIX_SPLIT` 警告而不再让整篇文档失败；
+  历史文档保持原参数，重试若遇到不可用的历史版本需显式重新解析。
+  Embedding 批次以有界并发派发并带退避重试，摘要任务分批生成并发布，
+  超时或失败只重做未完成的分段。
   格式解析限制为本地文件，默认 `builtin`，可选 `unstructured_local`；
   不执行 OCR，不调用解析 API，也不在运行时下载 Pandoc 或 NLP 资源。
   本地环境准备需安装固定的 `extraction-local` 依赖与平台 libmagic，并生成、

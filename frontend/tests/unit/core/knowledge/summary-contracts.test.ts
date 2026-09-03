@@ -32,6 +32,7 @@ const base = {
   document_count: 2,
   default_top_k: 4,
   default_score_threshold: 0.2,
+  default_relative_cutoff: null,
   delete_error: null,
   created_at: "2026-08-31T00:00:00Z",
   updated_at: "2026-08-31T00:00:00Z",
@@ -167,6 +168,8 @@ test("diagnostics carry bounded source attribution and cache counts", () => {
       query_embedding_cache_misses: 0,
       parents_deduplicated: 0,
       threshold_filtered: 0,
+      relative_filtered: 0,
+      lexical_threshold_exempt: 0,
       stale_filtered: 0,
       returned: 1,
     },
@@ -180,6 +183,8 @@ test("diagnostics carry bounded source attribution and cache counts", () => {
     ranking_method: "cosine",
     empty_reason: null,
     heterogeneous_without_lexical_evidence: false,
+    lexical_query_token_count: 0,
+    lexical_query_truncated: false,
     hit_diagnostics: [
       {
         segment_id: base.id,

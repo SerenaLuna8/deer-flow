@@ -79,6 +79,12 @@ class KnowledgeMinioSettings(BaseModel):
 
 KNOWLEDGE_MAX_SEGMENTS_PER_DOCUMENT = 5000
 
+# Hard character ceiling of one published Segment (display Markdown). The
+# chunk budget is expressed in Knowledge Tokens; this cap only protects the
+# Agent tool's 64 KiB ToolMessage budget (16000 CJK characters are 48 KiB of
+# UTF-8) and manual editing, so a 4000-token English chunk stays reachable.
+KNOWLEDGE_MAX_SEGMENT_CHARS = 16000
+
 
 class KnowledgeSettings(BaseModel):
     """Startup configuration for the Knowledge feature.
@@ -138,6 +144,16 @@ class KnowledgeEmbeddingMaterial:
     max_batch: int
     request_timeout_seconds: int
     api_key: str = field(repr=False)
+    # Asymmetric models (BGE, E5, Qwen3-Embedding instruct templates) expect a
+    # different prefix on the query side than on the passage side. Empty
+    # strings keep today's symmetric behavior; the host registry supplies the
+    # values once it administers them per model.
+    query_prefix: str = ""
+    passage_prefix: str = ""
+
+
+# Which side of an asymmetric embedding model a text belongs to.
+KnowledgeEmbeddingKind = Literal["query", "passage"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +261,10 @@ class KnowledgeBaseUpdate:
     status: Literal["active", "disabled"] | None = None
     default_top_k: int | None = None
     default_score_threshold: float | None = None
+    # Tri-state like the reranker: a value sets the fraction, ``None`` keeps
+    # the stored value, ``clear_relative_cutoff=True`` switches it off.
+    default_relative_cutoff: float | None = None
+    clear_relative_cutoff: bool = False
     embedding_model_id: UUID | None = None
     reranker_model_id: UUID | None = None
     clear_reranker_model: bool = False
@@ -269,6 +289,9 @@ class KnowledgeBaseView:
     delete_error: str | None
     created_at: datetime
     updated_at: datetime
+    # Fraction (0, 1] of the base's best native score below which candidates
+    # drop when a search omits ``relative_score_cutoff``; ``None`` disables.
+    default_relative_cutoff: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +305,23 @@ class KnowledgeRebuildResult:
 
     base: KnowledgeBaseView
     accepted_document_count: int
+    skipped_document_ids: tuple[UUID, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeRelexResult:
+    """Admission outcome of a base-level lexical re-derivation.
+
+    One ``relex_document`` task is queued per published ``ready`` document
+    whose current-generation rows carry a stale ``lexical_version``; the
+    documents stay ``ready`` and keep their version. ``up_to_date_document_count``
+    counts published documents already on the current derivation, and
+    ``skipped_document_ids`` lists documents that could not be admitted now
+    (never published, not ready, or holding an open indexing task).
+    """
+
+    accepted_document_count: int
+    up_to_date_document_count: int
     skipped_document_ids: tuple[UUID, ...] = ()
 
 
@@ -329,7 +369,7 @@ KnowledgeTaskStage = Literal[
 
 KnowledgeTaskProgressStatus = Literal["queued", "running", "retry_wait", "failed"]
 
-KnowledgeIndexingTaskKind = Literal["ingest_document", "reembed_document", "summarize_document"]
+KnowledgeIndexingTaskKind = Literal["ingest_document", "reembed_document", "summarize_document", "relex_document"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -626,10 +666,17 @@ class KnowledgeFilterFieldView:
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeBaseFilterFields:
-    """Discovered filter fields of one base (builtin plus custom)."""
+    """Discovered filter fields of one base (builtin plus custom).
+
+    ``knowledge_base_name`` and ``description`` are the base's own safe
+    metadata so a discovery caller (the Agent tool) can choose which bases to
+    scope a later search to; still definitions only, never document values.
+    """
 
     knowledge_base_id: UUID
     fields: tuple[KnowledgeFilterFieldView, ...]
+    knowledge_base_name: str = ""
+    description: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -800,12 +847,15 @@ class KnowledgeMetadataFilter:
 class KnowledgeSearchRequest:
     """Search input; scope identities come from host context, never request bodies.
 
-    ``top_k``/``score_threshold`` left as ``None`` resolve to the per-base
-    defaults stored on the targeted knowledge bases. ``source`` labels the
-    query-log row; it never changes ranking. ``metadata_filters`` restrict
-    recall to documents matching every condition. ``retrieval_mode`` set
-    overrides the per-base mode for this one call (retrieval test only) and
-    is never persisted; ``debug`` adds the bounded safe diagnostics.
+    ``top_k``/``score_threshold``/``relative_score_cutoff`` left as ``None``
+    resolve to the per-base defaults stored on the targeted knowledge bases.
+    ``relative_score_cutoff`` drops candidates whose native score is below
+    that fraction of their base's best native score (an absolute threshold
+    cannot follow each embedding model's cosine distribution). ``source``
+    labels the query-log row; it never changes ranking. ``metadata_filters``
+    restrict recall to documents matching every condition. ``retrieval_mode``
+    set overrides the per-base mode for this one call (retrieval test only)
+    and is never persisted; ``debug`` adds the bounded safe diagnostics.
     """
 
     project_id: UUID
@@ -818,6 +868,7 @@ class KnowledgeSearchRequest:
     metadata_filters: tuple[KnowledgeMetadataFilter, ...] | None = None
     retrieval_mode: KnowledgeRetrievalMode | None = None
     debug: bool = False
+    relative_score_cutoff: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -844,13 +895,21 @@ KNOWLEDGE_STRATEGY_VERSION = "m10.1"
 # requires re-running the quality evaluation.
 KNOWLEDGE_LEXICAL_VERSION = 1
 
-# With a hybrid target, the query may carry at most this many deduplicated
-# lexical tokens; longer queries must shorten or switch to semantic. A pure
-# semantic search never builds a lexical query and never hits this cap.
+# With a hybrid target, the lexical query keeps at most this many deduplicated
+# tokens in scan order; a longer query is truncated (reported through the
+# ``debug`` diagnostics), never rejected, and its vector route is untouched. A
+# pure semantic search never builds a lexical query and never reaches the cap.
 KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS = 128
 
 # Global parent-candidate budget shared by every search (design §8.2).
 KNOWLEDGE_GLOBAL_PARENT_CANDIDATE_BUDGET = 400
+
+# Reranker input budget per (embedding, reranker) group: the Provider scores at
+# most ``min(this, 10 * top_k)`` passages per group, split evenly across the
+# bases that recalled candidates (never fewer than ``top_k`` per base, so one
+# base can still fill the result alone). Recall order — RRF for hybrid bases,
+# cosine otherwise — decides which candidates make the cut.
+KNOWLEDGE_RERANK_CANDIDATE_BUDGET = 100
 
 # At most this many really-recalled children are projected per hit.
 KNOWLEDGE_MAX_MATCHED_CHILDREN = 3
@@ -897,11 +956,16 @@ class KnowledgeCitation:
 class KnowledgeSearchHit:
     """One search hit: the single source for citations and projections.
 
-    ``passage`` is the complete parent segment text from the recall snapshot
-    (never the whole original file). ``local_score`` is the native score the
-    threshold acted on; ``ranking_method``/``ranking_score`` explain the
-    final order. ``document_version`` and ``content_digest`` let a detail
-    read detect that the same segment ID now carries different content.
+    ``passage`` is the complete parent segment Markdown from the recall
+    snapshot (never the whole original file) — the text users see and the
+    text ``content_digest`` describes. ``model_text`` is the persisted
+    ``index_text`` of the same segment: visible text only, without Markdown
+    escapes, link destinations, or attachment refs. It is what embedding and
+    reranking saw and what the Agent tool hands to the model. ``local_score``
+    is the native score the threshold acted on; ``ranking_method`` /
+    ``ranking_score`` explain the final order. ``document_version`` and
+    ``content_digest`` let a detail read detect that the same segment ID now
+    carries different content.
     """
 
     citation: KnowledgeCitation
@@ -914,6 +978,9 @@ class KnowledgeSearchHit:
     ranking_method: KnowledgeScoreKind
     ranking_score: float
     matched_children: tuple[KnowledgeMatchedChild, ...] = ()
+    # Empty only for hits built before this field existed; readers fall back
+    # to ``passage``.
+    model_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -941,6 +1008,12 @@ class KnowledgeRouteCounts:
     summary_candidates: int = 0
     parents_deduplicated: int = 0
     threshold_filtered: int = 0
+    # Candidates below the base's relative cutoff (fraction of its best
+    # native score) after the absolute threshold.
+    relative_filtered: int = 0
+    # Rerank-free candidates whose cosine sat below the base threshold but
+    # were kept because the lexical route recalled them (exact-match evidence).
+    lexical_threshold_exempt: int = 0
     stale_filtered: int = 0
     returned: int = 0
     query_embedding_cache_hits: int = 0
@@ -978,6 +1051,11 @@ class KnowledgeSearchDiagnostics:
     ranking_method: KnowledgeScoreKind | None = None
     empty_reason: KnowledgeEmptyReason | None = None
     heterogeneous_without_lexical_evidence: bool = False
+    # Deduplicated lexical tokens the hybrid query actually used, and whether
+    # a longer query was cut at ``KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS``. Zero and
+    # False for a pure semantic search, which never builds a lexical query.
+    lexical_query_token_count: int = 0
+    lexical_query_truncated: bool = False
     hit_diagnostics: tuple[KnowledgeHitDiagnostics, ...] = ()
 
 

@@ -2086,6 +2086,7 @@ def test_project_routes_declare_exactly_the_documented_capability_guards() -> No
         ("POST", f"{prefix}/search"): "read",
         ("GET", f"{prefix}/bases/{{base_id}}/queries"): "read",
         ("POST", f"{prefix}/bases/{{base_id}}/rebuild"): "edit",
+        ("POST", f"{prefix}/bases/{{base_id}}/relex"): "edit",
         ("GET", f"{prefix}/bases/{{base_id}}/metadata-fields"): "read",
         ("POST", f"{prefix}/bases/{{base_id}}/metadata-fields"): "edit",
         ("PATCH", f"{prefix}/metadata-fields/{{field_id}}"): "edit",

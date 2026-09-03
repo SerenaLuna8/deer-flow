@@ -338,6 +338,10 @@ class KnowledgeBaseUpdateRequest(_StrictModel):
     default_top_k: int | None = None
     # Integers (e.g. 0) are valid thresholds; strict float would reject them.
     default_score_threshold: Annotated[float, Field(strict=False)] | None = None
+    # Optional relative cutoff (fraction of the base's best native score):
+    # set a value in (0, 1], or clear it to switch the cut off.
+    default_relative_cutoff: Annotated[float, Field(strict=False)] | None = None
+    clear_relative_cutoff: bool = False
     # Only an empty, unconfigured base can receive its first embedding binding.
     embedding_model_id: Annotated[uuid.UUID, Field(strict=False)] | None = None
     # Optional reranker rebinding: set an ID, or clear the binding entirely.
@@ -367,6 +371,7 @@ class KnowledgeBaseItemResponse(_StrictModel):
     document_count: int
     default_top_k: int
     default_score_threshold: float
+    default_relative_cutoff: float | None
     delete_error: str | None
     created_at: datetime
     updated_at: datetime
@@ -405,11 +410,20 @@ class KnowledgeBaseRebuildResponse(_StrictModel):
     request_id: str
 
 
+class KnowledgeBaseRelexResponse(_StrictModel):
+    """Lexical re-derivation admission outcome; documents stay ready."""
+
+    accepted_document_count: int
+    up_to_date_document_count: int
+    skipped_document_ids: list[uuid.UUID]
+    request_id: str
+
+
 class KnowledgeTaskProgressResponse(_StrictModel):
     """Progress of the open indexing task bound to the document's current
     generation; ``total_units`` stays null while no verifiable total exists."""
 
-    kind: Literal["ingest_document", "reembed_document", "summarize_document"]
+    kind: Literal["ingest_document", "reembed_document", "summarize_document", "relex_document"]
     status: Literal["queued", "running", "retry_wait", "failed"]
     stage: Literal[
         "queued",
@@ -848,6 +862,9 @@ class KnowledgeSearchRequestBody(_StrictModel):
     # Per-call route override for the test panel; omit to follow each base's
     # configured retrieval_mode.
     retrieval_mode: Literal["semantic", "hybrid"] | None = None
+    # Per-call relative cutoff override (fraction of each base's best native
+    # score); omit to follow each base's default_relative_cutoff.
+    relative_score_cutoff: Annotated[float, Field(strict=False)] | None = None
     # Adds the bounded safe diagnostics to this one response; never persisted.
     debug: bool = False
 
@@ -897,6 +914,8 @@ class KnowledgeRouteCountsResponse(_StrictModel):
     query_embedding_cache_misses: int
     parents_deduplicated: int
     threshold_filtered: int
+    relative_filtered: int
+    lexical_threshold_exempt: int
     stale_filtered: int
     returned: int
 
@@ -921,6 +940,8 @@ class KnowledgeSearchDiagnosticsResponse(_StrictModel):
     ranking_method: Literal["cosine", "rerank", "rank_fusion"] | None
     empty_reason: Literal["not_ready", "no_candidates", "filtered_out", "stale_candidates"] | None
     heterogeneous_without_lexical_evidence: bool
+    lexical_query_token_count: int
+    lexical_query_truncated: bool
     hit_diagnostics: list[KnowledgeHitDiagnosticsResponse]
 
 
@@ -1017,6 +1038,7 @@ def _base_response(view: KnowledgeBaseView) -> KnowledgeBaseItemResponse:
         document_count=view.document_count,
         default_top_k=view.default_top_k,
         default_score_threshold=view.default_score_threshold,
+        default_relative_cutoff=view.default_relative_cutoff,
         delete_error=view.delete_error,
         created_at=view.created_at,
         updated_at=view.updated_at,
@@ -1237,6 +1259,8 @@ async def update_knowledge_base(
                 status=body.status,
                 default_top_k=body.default_top_k,
                 default_score_threshold=body.default_score_threshold,
+                default_relative_cutoff=body.default_relative_cutoff,
+                clear_relative_cutoff=body.clear_relative_cutoff,
                 embedding_model_id=body.embedding_model_id,
                 reranker_model_id=body.reranker_model_id,
                 clear_reranker_model=body.clear_reranker_model,
@@ -1280,6 +1304,30 @@ async def rebuild_knowledge_base(
     return KnowledgeBaseRebuildResponse(
         item=_base_response(result.base),
         accepted_document_count=result.accepted_document_count,
+        skipped_document_ids=list(result.skipped_document_ids),
+        request_id=context.request_id,
+    )
+
+
+@project_router.post("/bases/{base_id}/relex", response_model=KnowledgeBaseRelexResponse)
+async def relex_knowledge_base(
+    base_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+) -> KnowledgeBaseRelexResponse:
+    """Rebuild stale lexical derivations from stored text; no re-parse, no re-embed."""
+
+    try:
+        result = await module.relex_knowledge_base(
+            context.project_id,
+            base_id,
+            authority=_knowledge_edit_authority(context),
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
+    return KnowledgeBaseRelexResponse(
+        accepted_document_count=result.accepted_document_count,
+        up_to_date_document_count=result.up_to_date_document_count,
         skipped_document_ids=list(result.skipped_document_ids),
         request_id=context.request_id,
     )
@@ -2045,6 +2093,7 @@ async def search_knowledge(
                 top_k=body.top_k,
                 score_threshold=body.score_threshold,
                 retrieval_mode=body.retrieval_mode,
+                relative_score_cutoff=body.relative_score_cutoff,
                 source="retrieval_test",
                 metadata_filters=(tuple(KnowledgeMetadataFilter(name=item.name, operator=item.operator, value=item.value, field_kind=item.field_kind) for item in body.metadata_filters) if body.metadata_filters is not None else None),
                 debug=body.debug,
@@ -2207,6 +2256,8 @@ def _search_diagnostics_response(diagnostics: KnowledgeSearchDiagnostics) -> Kno
             query_embedding_cache_misses=diagnostics.counts.query_embedding_cache_misses,
             parents_deduplicated=diagnostics.counts.parents_deduplicated,
             threshold_filtered=diagnostics.counts.threshold_filtered,
+            relative_filtered=diagnostics.counts.relative_filtered,
+            lexical_threshold_exempt=diagnostics.counts.lexical_threshold_exempt,
             stale_filtered=diagnostics.counts.stale_filtered,
             returned=diagnostics.counts.returned,
         ),
@@ -2220,6 +2271,8 @@ def _search_diagnostics_response(diagnostics: KnowledgeSearchDiagnostics) -> Kno
         ranking_method=diagnostics.ranking_method,
         empty_reason=diagnostics.empty_reason,
         heterogeneous_without_lexical_evidence=diagnostics.heterogeneous_without_lexical_evidence,
+        lexical_query_token_count=diagnostics.lexical_query_token_count,
+        lexical_query_truncated=diagnostics.lexical_query_truncated,
         hit_diagnostics=[
             KnowledgeHitDiagnosticsResponse(
                 segment_id=entry.segment_id,

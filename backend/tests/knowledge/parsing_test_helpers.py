@@ -36,6 +36,8 @@ def make_parse_profile(extension: str, *, etl_type: str = "builtin", header_rule
 
 
 def make_chunk_profile(**overrides: object) -> ChunkProfile:
+    from actweave_knowledge.ingestion.profiles import CLEANER_VERSION, SPLITTER_VERSION
+
     fields: dict[str, object] = {
         "unit": "token",
         "mode": "general",
@@ -48,8 +50,8 @@ def make_chunk_profile(**overrides: object) -> ChunkProfile:
         "remove_urls_emails": False,
         "tokenizer_profile_id": "knowledge-cl100k-v1",
         "tokenizer_digest": None,
-        "cleaner_version": "cleaner-v1",
-        "splitter_version": "splitter-v1",
+        "cleaner_version": CLEANER_VERSION,
+        "splitter_version": SPLITTER_VERSION,
     }
     fields.update(overrides)
     if fields["unit"] == "token":

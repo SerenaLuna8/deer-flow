@@ -4281,6 +4281,7 @@ CREATE TABLE knowledge_bases (
     summary_index_enabled BOOLEAN DEFAULT false NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    default_relative_cutoff DOUBLE PRECISION,
     CONSTRAINT pk_knowledge_bases PRIMARY KEY (id),
     CONSTRAINT uq_knowledge_bases_project_id_id UNIQUE (project_id, id),
     CONSTRAINT ck_knowledge_bases_name CHECK (btrim(name) <> ''),
@@ -4289,6 +4290,9 @@ CREATE TABLE knowledge_bases (
     CONSTRAINT ck_knowledge_bases_default_top_k CHECK (default_top_k BETWEEN 1 AND 20),
     CONSTRAINT ck_knowledge_bases_default_score_threshold CHECK (
         default_score_threshold >= 0 AND default_score_threshold <= 1
+    ),
+    CONSTRAINT ck_knowledge_bases_default_relative_cutoff CHECK (
+        default_relative_cutoff IS NULL OR (default_relative_cutoff > 0 AND default_relative_cutoff <= 1)
     ),
     CONSTRAINT fk_knowledge_bases_project FOREIGN KEY (project_id)
         REFERENCES projects (id) ON DELETE RESTRICT,
@@ -4571,6 +4575,27 @@ CREATE INDEX ix_knowledge_segments_document
 CREATE INDEX ix_knowledge_segments_lexical
     ON knowledge_segments USING gin (lexical_tsv);
 
+-- Semantic route: the embedding column carries any dimension, so pgvector
+-- HNSW is built per common dimension as a partial expression index. Recall
+-- orders each base's lateral branch by ``embedding::vector(D) <=> query``
+-- under ``vector_dims(embedding) = D``; a dimension outside this list still
+-- works as a sorted scan. HNSW on ``vector`` supports at most 2000 dims.
+CREATE INDEX ix_knowledge_segments_embedding_hnsw_384
+    ON knowledge_segments USING hnsw ((embedding::public.vector(384)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 384;
+CREATE INDEX ix_knowledge_segments_embedding_hnsw_512
+    ON knowledge_segments USING hnsw ((embedding::public.vector(512)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 512;
+CREATE INDEX ix_knowledge_segments_embedding_hnsw_768
+    ON knowledge_segments USING hnsw ((embedding::public.vector(768)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 768;
+CREATE INDEX ix_knowledge_segments_embedding_hnsw_1024
+    ON knowledge_segments USING hnsw ((embedding::public.vector(1024)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 1024;
+CREATE INDEX ix_knowledge_segments_embedding_hnsw_1536
+    ON knowledge_segments USING hnsw ((embedding::public.vector(1536)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 1536;
+
 CREATE TABLE knowledge_segment_attachments (
     project_id UUID NOT NULL,
     knowledge_base_id UUID NOT NULL,
@@ -4636,6 +4661,24 @@ CREATE INDEX ix_knowledge_segment_children_document
 CREATE INDEX ix_knowledge_segment_children_lexical
     ON knowledge_segment_children USING gin (lexical_tsv);
 
+-- Per-dimension HNSW (see knowledge_segments): parent_child recall orders
+-- each base's nearest children through these before rolling up to parents.
+CREATE INDEX ix_knowledge_segment_children_embedding_hnsw_384
+    ON knowledge_segment_children USING hnsw ((embedding::public.vector(384)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 384;
+CREATE INDEX ix_knowledge_segment_children_embedding_hnsw_512
+    ON knowledge_segment_children USING hnsw ((embedding::public.vector(512)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 512;
+CREATE INDEX ix_knowledge_segment_children_embedding_hnsw_768
+    ON knowledge_segment_children USING hnsw ((embedding::public.vector(768)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 768;
+CREATE INDEX ix_knowledge_segment_children_embedding_hnsw_1024
+    ON knowledge_segment_children USING hnsw ((embedding::public.vector(1024)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 1024;
+CREATE INDEX ix_knowledge_segment_children_embedding_hnsw_1536
+    ON knowledge_segment_children USING hnsw ((embedding::public.vector(1536)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 1536;
+
 -- Segment summaries (M11 design §5): at most one complete, system-generated
 -- summary per segment, embedded into the base's vector space as a recall
 -- aid. Rows have no enabled switch of their own — visibility follows the
@@ -4667,6 +4710,23 @@ CREATE INDEX ix_knowledge_segment_summaries_scope
 
 CREATE INDEX ix_knowledge_segment_summaries_document
     ON knowledge_segment_summaries (knowledge_document_id);
+
+-- Per-dimension HNSW (see knowledge_segments) for the summary recall route.
+CREATE INDEX ix_knowledge_segment_summaries_embedding_hnsw_384
+    ON knowledge_segment_summaries USING hnsw ((embedding::public.vector(384)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 384;
+CREATE INDEX ix_knowledge_segment_summaries_embedding_hnsw_512
+    ON knowledge_segment_summaries USING hnsw ((embedding::public.vector(512)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 512;
+CREATE INDEX ix_knowledge_segment_summaries_embedding_hnsw_768
+    ON knowledge_segment_summaries USING hnsw ((embedding::public.vector(768)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 768;
+CREATE INDEX ix_knowledge_segment_summaries_embedding_hnsw_1024
+    ON knowledge_segment_summaries USING hnsw ((embedding::public.vector(1024)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 1024;
+CREATE INDEX ix_knowledge_segment_summaries_embedding_hnsw_1536
+    ON knowledge_segment_summaries USING hnsw ((embedding::public.vector(1536)) public.vector_cosine_ops)
+    WHERE public.vector_dims(embedding) = 1536;
 
 CREATE TABLE knowledge_queries (
     id UUID NOT NULL,
@@ -4726,11 +4786,11 @@ CREATE TABLE knowledge_tasks (
     extraction_id UUID,
     CONSTRAINT pk_knowledge_tasks PRIMARY KEY (id),
     CONSTRAINT ck_knowledge_tasks_kind CHECK (
-        kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base', 'delete_extraction')
+        kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'relex_document', 'delete_document', 'delete_document_object', 'delete_knowledge_base', 'delete_extraction')
     ),
     CONSTRAINT ck_knowledge_tasks_target_version CHECK (
-        (kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND target_version IS NOT NULL AND target_version >= 1)
-        OR (kind NOT IN ('ingest_document', 'reembed_document', 'summarize_document') AND target_version IS NULL)
+        (kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'relex_document') AND target_version IS NOT NULL AND target_version >= 1)
+        OR (kind NOT IN ('ingest_document', 'reembed_document', 'summarize_document', 'relex_document') AND target_version IS NULL)
     ),
     CONSTRAINT ck_knowledge_tasks_storage_key CHECK (
         (kind = 'delete_document_object' AND storage_key IS NOT NULL AND btrim(storage_key) <> '')
@@ -4778,11 +4838,11 @@ CREATE INDEX ix_knowledge_tasks_expired
     WHERE status = 'running';
 
 -- One open indexing operation per document/version regardless of kind:
--- ingest, reembed and summarize share the guard, so none can slip past the
--- slot another holds.
+-- ingest, reembed, summarize and relex share the guard, so none can slip
+-- past the slot another holds.
 CREATE UNIQUE INDEX uq_knowledge_tasks_open_indexing
     ON knowledge_tasks (resource_id, target_version)
-    WHERE kind IN ('ingest_document', 'reembed_document', 'summarize_document') AND status IN ('queued', 'running', 'retry_wait');
+    WHERE kind IN ('ingest_document', 'reembed_document', 'summarize_document', 'relex_document') AND status IN ('queued', 'running', 'retry_wait');
 
 CREATE UNIQUE INDEX uq_knowledge_tasks_open_document_delete
     ON knowledge_tasks (resource_id)

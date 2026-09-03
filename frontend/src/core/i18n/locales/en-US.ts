@@ -503,6 +503,7 @@ export const enUS: Translations = {
           ingest_document: "Ingest",
           reembed_document: "Re-embed",
           summarize_document: "Generate summaries",
+          relex_document: "Rebuild lexical index",
         },
         stages: {
           queued: "Queued",
@@ -711,6 +712,9 @@ export const enUS: Translations = {
         lexicalCandidates: "Lexical candidates",
         parentsDeduplicated: "Parents after dedup",
         thresholdFiltered: "Filtered by threshold",
+        relativeFiltered: "Filtered by relative cutoff",
+        lexicalThresholdExempt: "Kept by lexical evidence",
+        lexicalQueryTokens: "Lexical query tokens",
         staleFiltered: "Dropped as stale",
         returned: "Returned",
         embeddingMs: "Query embedding",
@@ -719,6 +723,8 @@ export const enUS: Translations = {
         finalValidationMs: "Final validation",
         heterogeneousWarning:
           "Heterogeneous score domains without lexical evidence: ordering merges per-domain ranks only.",
+        lexicalQueryTruncatedWarning: (kept) =>
+          `The query was long; the lexical route used only its first ${kept} distinct tokens. The vector route is unaffected.`,
       },
       hitDiagnosticsSummary: "Hit diagnostics",
       matchedVia: { segment: "Segment", child: "Child", summary: "Summary" },

@@ -1014,14 +1014,17 @@ class KnowledgeDocumentService:
                 if (row.version, row.original_name, row.parsing_profile, row.status) != (snapshot.version, snapshot.original_name, snapshot.parsing_profile, snapshot.status) or last_indexing != prior_indexing:
                     raise KnowledgeError(KNOWLEDGE_CONFLICT, "Document 已变更，请刷新后重试")
                 if row.status == "ready":
-                    if last_indexing is None or last_indexing.kind != "summarize_document" or last_indexing.status != "failed" or last_indexing.target_version != row.version:
-                        raise _invalid("仅失败的文档或摘要任务支持重试")
+                    # Summaries and lexical re-derivation never take a document
+                    # out of ready, so their failed tasks retry in place.
+                    if last_indexing is None or last_indexing.kind not in ("summarize_document", "relex_document") or last_indexing.status != "failed" or last_indexing.target_version != row.version:
+                        raise _invalid("仅失败的文档、摘要或词法索引任务支持重试")
                     if await session.scalar(select(KnowledgeTaskRow.id).where(KnowledgeTaskRow.resource_id == row.id, KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS), KnowledgeTaskRow.status.in_(TASK_OPEN_STATUSES)).limit(1)):
                         raise _invalid("文档存在未完成的索引任务，暂不能重试")
-                    summary_enabled = await session.scalar(select(KnowledgeBaseRow.summary_index_enabled).where(KnowledgeBaseRow.id == row.knowledge_base_id))
-                    if not summary_enabled:
-                        raise _invalid("请先启用知识库的摘要索引")
-                    session.add(KnowledgeTaskRow(id=uuid4(), project_id=project_id, resource_id=row.id, kind="summarize_document", target_version=row.version))
+                    if last_indexing.kind == "summarize_document":
+                        summary_enabled = await session.scalar(select(KnowledgeBaseRow.summary_index_enabled).where(KnowledgeBaseRow.id == row.knowledge_base_id))
+                        if not summary_enabled:
+                            raise _invalid("请先启用知识库的摘要索引")
+                    session.add(KnowledgeTaskRow(id=uuid4(), project_id=project_id, resource_id=row.id, kind=last_indexing.kind, target_version=row.version))
                     await session.flush()
                     progress = await indexing_task_progress(session, project_id, {row.id: row.version})
                     return document_view(row, delete_error=await self._derived_delete_error(session, row.id), task_progress=progress.get(row.id))
