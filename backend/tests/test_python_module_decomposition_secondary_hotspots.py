@@ -674,3 +674,21 @@ def test_jobs_contracts_retry_backoff_characterization() -> None:
     assert owner.retry_backoff_seconds(attempt_count=10, initial_seconds=5, max_seconds=60) == 60
     with pytest.raises(ValueError, match="invalid retry backoff inputs"):
         owner.retry_backoff_seconds(attempt_count=0, initial_seconds=5, max_seconds=60)
+
+
+def test_snapshot_owners_are_the_exact_legacy_exports() -> None:
+    contracts = importlib.import_module("app.private_work.snapshot_contracts")
+    rules = importlib.import_module("app.private_work.snapshot_admission_rules")
+    for name in SNAPSHOT_CONTRACT_NAMES:
+        assert getattr(snapshot_legacy, name) is getattr(contracts, name), name
+    for name in SNAPSHOT_RULE_MODULE_NAMES:
+        assert getattr(snapshot_legacy, name) is getattr(rules, name), name
+    for legacy_name, owner_name in SNAPSHOT_RULE_STATICMETHODS.items():
+        descriptor = snapshot_legacy.RunSnapshotRepository.__dict__[legacy_name]
+        assert isinstance(descriptor, staticmethod), legacy_name
+        assert descriptor.__func__ is getattr(rules, owner_name), legacy_name
+    assert rules.RunSnapshotAssetStale is contracts.RunSnapshotAssetStale
+    rules_imports = _module_imports(PRIVATE_WORK_ROOT / "snapshot_admission_rules.py")
+    assert "app.private_work.snapshot_contracts" in rules_imports
+    assert not {SNAPSHOT_MODULE, ".snapshot_repository"} & rules_imports
+    assert not {SNAPSHOT_MODULE, ".snapshot_repository", "app.private_work.snapshot_admission_rules"} & _module_imports(PRIVATE_WORK_ROOT / "snapshot_contracts.py")

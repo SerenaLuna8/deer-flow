@@ -113,6 +113,8 @@ def test_memory_app_services_use_neutral_contract_for_pure_memory_symbols() -> N
         "private_work/memory_dream_service.py",
         "private_work/memory_dream_prepare_service.py",
         "private_work/snapshot_repository.py",
+        "private_work/snapshot_contracts.py",
+        "private_work/snapshot_admission_rules.py",
     ):
         source = app_root / relative
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))

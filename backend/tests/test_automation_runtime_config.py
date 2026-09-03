@@ -5,7 +5,7 @@ import uuid
 from app.automations.dispatcher import AutomationDispatcher
 from app.private_work.context import PrivateWorkContext
 from app.private_work.run_repository import PrivateRunCreate
-from app.private_work.snapshot_repository import _apply_runtime_recursion_limit
+from app.private_work.snapshot_admission_rules import _apply_runtime_recursion_limit
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole

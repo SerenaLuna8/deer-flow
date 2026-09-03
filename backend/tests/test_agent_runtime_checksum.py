@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 
 import app.shared_assets.run_snapshot_codec as snapshot_codec
-from app.private_work import snapshot_repository as snapshot_repository_module
+from app.private_work import snapshot_admission_rules as snapshot_admission_rules_module
 from app.private_work.asset_runtime import _private_agent_manifest
 from app.private_work.errors import PrivateWorkTooLarge
 from app.private_work.snapshot_repository import RunSnapshotAssetStale
@@ -426,13 +426,13 @@ def test_snapshot_persistence_maps_codec_size_limit_to_public_too_large(
         raise RunAssetSnapshotTooLarge("internal persistence budget")
 
     monkeypatch.setattr(
-        snapshot_repository_module,
+        snapshot_admission_rules_module,
         "encode_run_asset_snapshot",
         reject_oversized,
     )
 
     with pytest.raises(PrivateWorkTooLarge) as caught:
-        snapshot_repository_module._RunAssetSnapshotAdmissionEncoder(
+        snapshot_admission_rules_module._RunAssetSnapshotAdmissionEncoder(
             request_id=request_id,
         ).encode(_snapshot())
 
@@ -446,12 +446,12 @@ def test_snapshot_persistence_maps_cumulative_size_limit_to_public_too_large(
     limit = snapshot_codec.MAX_RUN_ASSET_SNAPSHOT_JSON_BYTES
     encoded_sizes = iter((limit // 2, limit - (limit // 2) + 1))
     monkeypatch.setattr(
-        snapshot_repository_module,
+        snapshot_admission_rules_module,
         "encoded_run_asset_snapshot_json_size",
         lambda _value: next(encoded_sizes),
         raising=False,
     )
-    encoder = snapshot_repository_module._RunAssetSnapshotAdmissionEncoder(
+    encoder = snapshot_admission_rules_module._RunAssetSnapshotAdmissionEncoder(
         request_id=request_id,
     )
 
