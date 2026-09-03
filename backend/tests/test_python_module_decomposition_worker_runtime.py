@@ -398,8 +398,24 @@ def test_batch5_executor_public_shapes_are_frozen() -> None:
 
 
 def test_batch5_worker_compatibility_names_remain_exact_objects() -> None:
+    owner_by_name = {
+        name: f"deerflow.runtime.runs.{module}"
+        for module, names in (
+            ("checkpoint_rollback", CHECKPOINT_ROLLBACK_NAMES),
+            ("stream_delivery", STREAM_DELIVERY_NAMES),
+            ("runtime_binding", RUNTIME_BINDING_NAMES),
+            ("goal_continuation", GOAL_CONTINUATION_NAMES),
+        )
+        for name in names
+    }
     for name in sorted(WORKER_COMPATIBILITY_NAMES):
-        assert hasattr(worker_legacy, name), name
+        legacy_object = getattr(worker_legacy, name)
+        if name == "run_agent":
+            assert legacy_object.__module__ == WORKER_MODULE
+            continue
+        # get_sandbox_provider is a frozen seam imported from its Sandbox owner, not a Batch 5 owner.
+        owner_module = owner_by_name[name] if name in owner_by_name else legacy_object.__module__
+        assert legacy_object is getattr(importlib.import_module(owner_module), name), name
 
 
 def test_batch5_worker_test_consumers_stay_within_the_frozen_inventory() -> None:

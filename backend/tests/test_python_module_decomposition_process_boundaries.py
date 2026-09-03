@@ -322,8 +322,10 @@ def test_gateway_owns_agent_builder_construction() -> None:
 
 
 def test_execution_approval_production_consumers_use_owner_modules() -> None:
-    # The five former consumers must now import policy/service/worker/recovery owners;
-    # the façade keeps its exports for compatibility but has zero internal production importers.
+    # The five production consumers (four former façade importers plus the Batch 5
+    # preparation owner that inherited the executor's port construction) must import
+    # policy/service/worker/recovery owners; the façade keeps its exports for
+    # compatibility but has zero internal production importers.
     consumers = _module_consumers(EXECUTION_APPROVAL_LEGACY_MODULE, EXECUTION_APPROVAL_LEGACY_PATH, APP_ROOT)
     assert consumers == set(), _relative(consumers)
     for path in EXECUTION_APPROVAL_PRODUCTION_CONSUMERS:
