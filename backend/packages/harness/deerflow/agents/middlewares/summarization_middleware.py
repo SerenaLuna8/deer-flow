@@ -75,12 +75,16 @@ from deerflow.agents.middlewares.turn_compaction import (  # noqa: F401 - compat
     _ASK_CLARIFICATION_TOOL_NAME,
     _SUMMARY_TRIGGER_MESSAGE_NAME,
     _PreparedCompaction,
-    candidate_cutoffs,
     complete_turn_ranges,
     context_progress,
     messages_for_trigger_count,
-    snip_messages,
     summary_count_message,
+)
+from deerflow.agents.middlewares.turn_compaction import (
+    candidate_cutoffs as _turn_candidate_cutoffs,
+)
+from deerflow.agents.middlewares.turn_compaction import (
+    snip_messages as _turn_snip_messages,
 )
 from deerflow.agents.provider_request_contract import (
     PROVIDER_REQUEST_PROFILE_STATE_KEY,
@@ -493,8 +497,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     _messages_for_trigger_count = staticmethod(messages_for_trigger_count)
     _context_progress = staticmethod(context_progress)
     _complete_turn_ranges = staticmethod(complete_turn_ranges)
-    _candidate_cutoffs = staticmethod(candidate_cutoffs)
-    _snip_messages = staticmethod(snip_messages)
+    _candidate_cutoffs = staticmethod(_turn_candidate_cutoffs)
+    _snip_messages = staticmethod(_turn_snip_messages)
 
     def measure_context_usage(
         self,

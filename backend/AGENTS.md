@@ -97,15 +97,19 @@ Run full-stack commands from the repository root and backend targets from
   calls the repair functions on the same session;
   `packages/harness/deerflow/agents/middlewares/snip_planner.py` owns snip
   exceptions, constants, and `SnipPromptBudget`-parameterised prompt planning,
-  `turn_compaction.py` owns complete-turn boundaries and trigger-count helpers,
-  `compaction_receipts.py` owns receipts, estimator preconditions, and
-  compaction state updates, and `summarization_middleware.py` keeps the
-  LangChain hooks, model invocation, `_prepare_compaction`, retention
-  predicates, factories, and re-exports every legacy name. Tests patch
-  `_ensure_snip_summary_output_budget` on the middleware,
-  `encode_run_asset_snapshot` on `snapshot_admission_rules`, and
+  `turn_compaction.py` owns complete-turn boundaries, trigger-count helpers,
+  and `_PreparedCompaction`, `compaction_receipts.py` owns receipts, estimator
+  preconditions, and compaction state updates, and
+  `summarization_middleware.py` keeps the LangChain hooks, model invocation,
+  `_prepare_compaction`, retention predicates, factories, and re-exports every
+  legacy name. Tests patch `_ensure_snip_summary_output_budget` on the
+  middleware, `encode_run_asset_snapshot` on `snapshot_admission_rules`, and
   `ContextEvidenceRepository`/`ContextProjectionTransaction` on
-  `checkpoint_receipt_repair`.
+  `checkpoint_receipt_repair`. Seams whose caller stays in a façade keep being
+  patched on the façade: `snapshot_repository.{AsyncSession,
+  PrivateRunRepository, PrivateThreadRepository,
+  require_active_run_skill_writer_cohort}`, `jobs.sql.datetime`, and
+  `checkpointer.transition_output_delivery_obligation_for_approval_terminal`.
 - Builder `*_contracts.py`, `*_codec.py`, and `*_validation.py` modules own
   immutable payloads and pure transformations; the corresponding Service owns
   authorization, optimistic revisions, lifecycle transitions, and transactions.

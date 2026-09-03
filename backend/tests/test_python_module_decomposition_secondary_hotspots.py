@@ -226,8 +226,6 @@ SNAPSHOT_COMPATIBILITY_NAMES = frozenset(
         "PrivateRunRepository",
         "PrivateThreadRepository",
         "require_active_run_skill_writer_cohort",
-        "encode_run_asset_snapshot",
-        "encoded_run_asset_snapshot_json_size",
     }
 )
 SNAPSHOT_CONTRACT_NAMES = (
@@ -280,8 +278,6 @@ CHECKPOINTER_COMPATIBILITY_NAMES = frozenset(
         "ProjectScopedCheckpointer",
         "PRIVATE_SCOPE_MARKER",
         "_ScopedCheckpointSaver",
-        "ContextEvidenceRepository",
-        "ContextProjectionTransaction",
         "transition_output_delivery_obligation_for_approval_terminal",
         "PrivateWorkRevalidator",
         "PrivateThreadRepository",
@@ -638,6 +634,8 @@ def test_batch6_jobs_sql_test_consumers_stay_within_the_frozen_inventory() -> No
 def test_batch6_snapshot_test_consumers_stay_within_the_frozen_inventory() -> None:
     observed = _legacy_test_consumers(SNAPSHOT_MODULE)
     assert observed <= SNAPSHOT_COMPATIBILITY_NAMES, observed - SNAPSHOT_COMPATIBILITY_NAMES
+    for name in SNAPSHOT_COMPATIBILITY_NAMES:
+        assert hasattr(snapshot_legacy, name), name
     for name in SNAPSHOT_CONTRACT_NAMES + SNAPSHOT_RULE_MODULE_NAMES:
         assert hasattr(snapshot_legacy, name), name
     for name in SNAPSHOT_RULE_STATICMETHODS:
@@ -654,6 +652,8 @@ def test_batch6_snapshot_admission_await_order_is_frozen() -> None:
 def test_batch6_checkpointer_test_consumers_stay_within_the_frozen_inventory() -> None:
     observed = _legacy_test_consumers(CHECKPOINTER_MODULE)
     assert observed <= CHECKPOINTER_COMPATIBILITY_NAMES, observed - CHECKPOINTER_COMPATIBILITY_NAMES
+    for name in CHECKPOINTER_COMPATIBILITY_NAMES:
+        assert hasattr(checkpointer_legacy, name), name
     saver_names = _class_defined_names(CHECKPOINTER_PATH, "_ScopedCheckpointSaver")
     for name in tuple(CHECKPOINT_REPAIR_STATICMETHODS) + CHECKPOINT_REPAIR_DELEGATING_METHODS:
         assert name in saver_names, name
@@ -681,20 +681,16 @@ def test_batch6_summarization_seam_is_called_by_bare_name_in_the_factory() -> No
 def test_batch6_owner_modules_never_import_facades_or_forbidden_packages() -> None:
     for name in JOBS_OWNER_MODULES:
         path = JOBS_ROOT / f"{name}.py"
-        if path.exists():
-            _assert_owner_imports_are_clean(path, forbidden_modules=(JOBS_SQL_MODULE, ".sql"), forbidden_prefixes=("app", "sqlalchemy.orm", "sqlalchemy.dialects"))
+        _assert_owner_imports_are_clean(path, forbidden_modules=(JOBS_SQL_MODULE, ".sql"), forbidden_prefixes=("app", "sqlalchemy.orm", "sqlalchemy.dialects"))
     for name in SUMMARIZATION_OWNER_MODULES:
         path = MIDDLEWARES_ROOT / f"{name}.py"
-        if path.exists():
-            _assert_owner_imports_are_clean(path, forbidden_modules=(SUMMARIZATION_MODULE, ".summarization_middleware"), forbidden_prefixes=("app", "sqlalchemy"))
+        _assert_owner_imports_are_clean(path, forbidden_modules=(SUMMARIZATION_MODULE, ".summarization_middleware"), forbidden_prefixes=("app", "sqlalchemy"))
     for name in SNAPSHOT_OWNER_MODULES:
         path = PRIVATE_WORK_ROOT / f"{name}.py"
-        if path.exists():
-            _assert_owner_imports_are_clean(path, forbidden_modules=(SNAPSHOT_MODULE, ".snapshot_repository"), forbidden_prefixes=())
+        _assert_owner_imports_are_clean(path, forbidden_modules=(SNAPSHOT_MODULE, ".snapshot_repository"), forbidden_prefixes=())
     for name in CHECKPOINTER_OWNER_MODULES:
         path = PRIVATE_WORK_ROOT / f"{name}.py"
-        if path.exists():
-            _assert_owner_imports_are_clean(path, forbidden_modules=(CHECKPOINTER_MODULE, ".checkpointer"), forbidden_prefixes=())
+        _assert_owner_imports_are_clean(path, forbidden_modules=(CHECKPOINTER_MODULE, ".checkpointer"), forbidden_prefixes=())
 
 
 def test_jobs_contracts_owner_is_the_exact_legacy_export() -> None:
@@ -778,8 +774,20 @@ def test_checkpoint_receipt_repair_owner_is_the_exact_legacy_export() -> None:
         descriptor = saver.__dict__[legacy_name]
         assert isinstance(descriptor, staticmethod), legacy_name
         assert descriptor.__func__ is getattr(owner, owner_name), legacy_name
+    expected_delegate_parameters = {
+        "_memory_history_activation": ("self", "item", "thread_id"),
+        "_repair_memory_archive_receipt": ("self", "session", "item", "thread_id"),
+        "_context_compaction_activation": ("self", "item", "thread_id"),
+        "_repair_context_compaction_receipt": ("self", "session", "item", "thread_id"),
+        "_context_provider_checkpoint_activation": ("self", "item", "thread_id"),
+        "_repair_context_provider_checkpoint": ("self", "session", "item", "thread_id"),
+    }
     for name in CHECKPOINT_REPAIR_DELEGATING_METHODS:
-        assert callable(saver.__dict__[name]), name
+        member = saver.__dict__[name]
+        assert inspect.isfunction(member), name
+        assert tuple(inspect.signature(member).parameters) == expected_delegate_parameters[name], name
+    for name in ("_repair_memory_archive_receipt", "_repair_context_compaction_receipt", "_repair_context_provider_checkpoint"):
+        assert inspect.iscoroutinefunction(saver.__dict__[name]), name
     assert not hasattr(checkpointer_legacy, "_MEMORY_ARCHIVE_RECEIPT_FIELDS")
     owner_imports = _module_imports(PRIVATE_WORK_ROOT / "checkpoint_receipt_repair.py")
     assert not {CHECKPOINTER_MODULE, ".checkpointer"} & owner_imports
