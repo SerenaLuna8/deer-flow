@@ -470,6 +470,16 @@ TURN_COMPACTION_FUNCTIONS = (
     "messages_for_trigger_count",
     "context_progress",
 )
+COMPACTION_RECEIPT_FUNCTIONS = (
+    "read_archive_context",
+    "resolve_source_checkpoint_id",
+    "build_compaction_receipt",
+    "resolve_compaction_estimator",
+    "require_receipt_preconditions",
+    "context_compaction_update",
+    "acontext_compaction_update",
+    "context_state_digest",
+)
 
 
 def _parse(path: Path) -> ast.Module:
@@ -813,3 +823,21 @@ def test_turn_compaction_owner_is_the_exact_legacy_export() -> None:
     assert not {"_is_turn_user", "_turn_prefix_start", "_clarification_request_tool_call_id", "_is_clarification_continuation"} & class_names
     assert middleware._complete_turn_ranges([]) == ()
     _assert_owner_imports_are_clean(MIDDLEWARES_ROOT / "turn_compaction.py", forbidden_modules=(SUMMARIZATION_MODULE, ".summarization_middleware", ".snip_planner", ".compaction_receipts"), forbidden_prefixes=("app", "sqlalchemy"))
+
+
+def test_compaction_receipts_owner_is_the_exact_legacy_export() -> None:
+    owner = importlib.import_module("deerflow.agents.middlewares.compaction_receipts")
+    for name in COMPACTION_RECEIPT_NAMES:
+        assert getattr(summarization_legacy, name) is getattr(owner, name), name
+    for name in COMPACTION_RECEIPT_FUNCTIONS:
+        assert callable(getattr(owner, name)), name
+    assert tuple(inspect.signature(owner.require_receipt_preconditions).parameters) == ("observer", "state", "runtime", "asynchronous")
+    assert tuple(inspect.signature(owner.context_compaction_update).parameters) == ("observer", "state", "result", "runtime")
+    assert tuple(inspect.signature(owner.acontext_compaction_update).parameters) == ("observer", "token_counter", "state", "result", "runtime")
+    class_names = _class_defined_names(SUMMARIZATION_PATH, "DeerFlowSummarizationMiddleware")
+    assert not set(SUMMARIZATION_MOVED_INTERNALS) & class_names, set(SUMMARIZATION_MOVED_INTERNALS) & class_names
+    for name in ("_receipt", "_require_receipt_preconditions", "_context_compaction_update", "_acontext_compaction_update"):
+        assert name in class_names, name
+    owner_imports = _module_imports(MIDDLEWARES_ROOT / "compaction_receipts.py")
+    assert {"deerflow.agents.middlewares.snip_planner", "deerflow.agents.middlewares.turn_compaction"} <= owner_imports or {".snip_planner", ".turn_compaction"} <= owner_imports
+    _assert_owner_imports_are_clean(MIDDLEWARES_ROOT / "compaction_receipts.py", forbidden_modules=(SUMMARIZATION_MODULE, ".summarization_middleware"), forbidden_prefixes=("app", "sqlalchemy"))
