@@ -18,7 +18,8 @@ from app.private_work import snapshot_repository as snapshot_legacy
 from deerflow.agents.middlewares import summarization_middleware as summarization_legacy
 from deerflow.persistence.jobs import sql as jobs_sql_legacy
 
-BACKEND_ROOT = Path(__file__).resolve().parents[1]
+SELF_PATH = Path(__file__).resolve()
+BACKEND_ROOT = SELF_PATH.parents[1]
 TESTS_ROOT = BACKEND_ROOT / "tests"
 HARNESS_ROOT = BACKEND_ROOT / "packages" / "harness" / "deerflow"
 JOBS_ROOT = HARNESS_ROOT / "persistence" / "jobs"
@@ -162,7 +163,6 @@ JOBS_SQL_COMPATIBILITY_NAMES = frozenset(
         "consume_issued_dead_job_requeued_event",
         "_dead_error_code_for_failure",
         "datetime",
-        "__all__",
     }
 )
 JOBS_CONTRACT_NAMES = (
@@ -214,7 +214,6 @@ SNAPSHOT_COMPATIBILITY_NAMES = frozenset(
         "RunSnapshotRepository",
         "RunSnapshotAssetStale",
         "RunMcpSecretSnapshot",
-        "RunSkillSecretSnapshot",
         "RunModelSnapshotAdmissionPort",
         "RunRuntimePolicyAdmissionPort",
         "agent_model_snapshot_purpose",
@@ -325,9 +324,6 @@ SUMMARIZATION_COMPATIBILITY_NAMES = frozenset(
         "MIN_SNIP_SUMMARY_OUTPUT_TOKENS",
         "MAX_SNIP_HIERARCHICAL_MODEL_CALLS",
         "_ensure_snip_summary_output_budget",
-        "_PreparedCompaction",
-        "_SnipPromptPlan",
-        "_SnipSummary",
         "ModelRuntime",
         "ModelRuntimeProfile",
     }
@@ -435,10 +431,12 @@ def _parse(path: Path) -> ast.Module:
 
 
 def _legacy_test_consumers(module_name: str) -> frozenset[str]:
-    """Names imported from, patched on, or read as attributes of ``module_name`` across tests/."""
+    """Names imported from, patched on, or read as attributes of ``module_name`` across pre-existing tests/."""
 
     observed: set[str] = set()
     for path in TESTS_ROOT.rglob("*.py"):
+        if path.resolve() == SELF_PATH:
+            continue
         tree = _parse(path)
         aliases: set[str] = set()
         for node in ast.walk(tree):
