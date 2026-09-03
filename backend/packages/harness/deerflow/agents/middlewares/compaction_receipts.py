@@ -156,7 +156,6 @@ def require_receipt_preconditions(
     compaction cannot first consume its bounded SNIP model-call budget.
     """
 
-    observer = observer
     if observer is None:
         return
     prepare_receipt = getattr(
@@ -212,7 +211,6 @@ def context_compaction_update(
     result: ContextCompactionResult,
     runtime: Runtime,
 ) -> dict[str, object]:
-    observer = observer
     if observer is None:
         return {}
     prepare_receipt = getattr(
@@ -293,7 +291,6 @@ async def acontext_compaction_update(
     result: ContextCompactionResult,
     runtime: Runtime,
 ) -> dict[str, object]:
-    observer = observer
     if observer is None or callable(getattr(observer, "prepare_compaction_checkpoint_receipt", None)):
         return context_compaction_update(observer, state, result, runtime)
     record_ephemeral = getattr(
